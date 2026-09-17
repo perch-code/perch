@@ -121,6 +121,11 @@ fn section_card(state: AppState, section: Section, on_open: OpenThread) -> impl 
         )
         .style(|s| s.flex_col().width_full()),
     ))
+    // The sizing has to go on the stack itself. `clip` wraps it, so a style
+    // applied after that lands on the wrapper and leaves the stack to shrink
+    // to its content: a repository with short titles ended up narrower than
+    // its own card.
+    .style(|s| s.width_full().flex_col())
     .clip()
     .style(|s| {
         s.width_full()

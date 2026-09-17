@@ -79,12 +79,15 @@ pub fn diff_gutter(file: Arc<LoadedFile>, viewport: RwSignal<Rect>) -> impl Into
         });
 
     Container::new(column)
+        // This inner box is what the column positions against, so it needs
+        // the size and the relative position. Styling the clip wrapper
+        // instead would leave it shrinking to its content.
+        .style(|s| s.size_full().position(Position::Relative))
         .clip()
         .style(|s| {
             s.width(theme::GUTTER_WIDTH)
                 .height_full()
                 .flex_shrink(0.0_f32)
-                .position(Position::Relative)
                 .background(theme::GUTTER_BG)
                 .border_right(1.0)
                 .border_color(theme::BORDER_MUTED)
