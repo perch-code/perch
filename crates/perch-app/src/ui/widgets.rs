@@ -6,8 +6,6 @@ use floem::text::FontWeight;
 use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
 
 use crate::icons::{self, SidebarIcon};
-use floem::reactive::SignalUpdate;
-
 use crate::state::AppState;
 use floem::style::ObjectFit;
 
@@ -27,45 +25,6 @@ pub fn open_in_browser(url: &str) {
     if let Err(e) = std::process::Command::new("open").arg(url).spawn() {
         tracing::warn!(url, error = %e, "could not open link");
     }
-}
-
-/// Room for the traffic lights, and the button that shows or hides the
-/// drawer.
-///
-/// The window has no title bar, so whichever view sits at the top left has
-/// to leave the lights somewhere to go. That is the drawer when it is open
-/// and the body when it is not, so this goes in both.
-pub fn drawer_controls(state: AppState, reserve_lights: bool) -> impl IntoView {
-    use floem::views::drag_window_area;
-
-    drag_window_area(
-        Stack::horizontal((
-            Empty::new().style(move |s| {
-                s.width(if reserve_lights { theme::TRAFFIC_LIGHTS_WIDTH } else { 0.0 })
-                    .height_full()
-                    .flex_shrink(0.0_f32)
-            }),
-            drawer_toggle(state),
-        ))
-        .style(|s| s.height_full().items_center()),
-    )
-    .style(|s| s.height_full().flex_shrink(0.0_f32).items_center())
-}
-
-pub fn drawer_toggle(state: AppState) -> impl IntoView {
-    Container::new(sidebar_glyph(SidebarIcon::Sidebar, theme::FG_MUTED))
-        .on_event_stop(el::Click, move |_, _| {
-            state.sidebar_open.update(|open| *open = !*open);
-        })
-        .style(|s| {
-            clickable(s)
-                .size(26.0, 26.0)
-                .flex_shrink(0.0_f32)
-                .items_center()
-                .justify_center()
-                .border_radius(theme::RADIUS)
-                .hover(|s| s.background(theme::CANVAS_HOVER))
-        })
 }
 
 /// Style a row that behaves as a button.

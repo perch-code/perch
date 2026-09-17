@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, Store};
-use perch_github::{resolve_token, Cache, Config, GitHub, SubjectDetail, Thread};
+use perch_github::{resolve_token, Cache, Config, GitHub, Mark, SubjectDetail, Thread};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
@@ -38,6 +38,15 @@ pub enum Command {
     Hover { token: u64, path: String, line: u32, character: u32 },
     Definition { token: u64, path: String, line: u32, character: u32 },
     CloseReview,
+
+    /// Save or unsave every thread named, as one act.
+    ///
+    /// A single row is a batch of one. Bulk selection is the reason these
+    /// take a list: a hundred rows should cost one transaction and one
+    /// event, not a hundred of each.
+    SetSaved { thread_ids: Vec<String>, saved: bool },
+    /// Mark done, or restore, every thread named, as one act.
+    SetDone { thread_ids: Vec<String>, done: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +55,9 @@ pub enum Event {
     Threads { threads: Vec<Thread>, from_cache: bool },
     Detail { thread_id: String, detail: SubjectDetail },
     Avatar { url: String, bytes: Vec<u8> },
+    /// Every mark Perch holds. Sent whole rather than as a patch, because
+    /// the set is small and a replacement cannot drift.
+    Marks(Vec<Mark>),
     Status(Status),
 
     /// A step of preparing a checkout.
@@ -99,6 +111,20 @@ impl Backend {
 
     pub fn close_review(&self) {
         let _ = self.commands.send(Command::CloseReview);
+    }
+
+    pub fn set_saved(&self, thread_ids: Vec<String>, saved: bool) {
+        if thread_ids.is_empty() {
+            return;
+        }
+        let _ = self.commands.send(Command::SetSaved { thread_ids, saved });
+    }
+
+    pub fn set_done(&self, thread_ids: Vec<String>, done: bool) {
+        if thread_ids.is_empty() {
+            return;
+        }
+        let _ = self.commands.send(Command::SetDone { thread_ids, done });
     }
 
     pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
@@ -186,6 +212,12 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
     // details alone left every row showing a letter placeholder whenever the
     // poll came back unchanged, because nothing else ever loads an avatar.
     if let Some(cache) = cache.as_ref() {
+        // Marks go out before the list they narrow. Sent the other way
+        // round, a dismissed row would paint for a frame before vanishing.
+        if let Ok(guard) = cache.lock() {
+            send_marks(&guard, &events);
+        }
+
         let cached = cache.lock().ok().and_then(|guard| {
             let threads = guard.load_threads().ok()?;
             (!threads.is_empty()).then_some(threads)
@@ -339,6 +371,16 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     }
                 });
             }
+            Some(Command::SetSaved { thread_ids, saved }) => {
+                write_marks(&cache, &events, &thread_ids, |c, threads| {
+                    c.set_saved(threads, saved)
+                });
+            }
+            Some(Command::SetDone { thread_ids, done }) => {
+                write_marks(&cache, &events, &thread_ids, |c, threads| {
+                    c.set_done(threads, done)
+                });
+            }
             Some(Command::CloseReview) => {
                 if let Ok(mut guard) = checkout.lock() {
                     *guard = None;
@@ -351,6 +393,67 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 }
             }
         }
+    }
+}
+
+/// Write one flag across a batch of threads, then publish the new mark set.
+///
+/// The whole batch is one transaction inside the cache, so a bulk action
+/// either lands or does not, and the UI hears about it once.
+fn write_marks(
+    cache: &SharedCache,
+    events: &EventSender<Event>,
+    thread_ids: &[String],
+    write: impl FnOnce(&mut Cache, &[&Thread]) -> Result<(), perch_github::CacheError>,
+) {
+    let Some(cache) = cache.as_ref() else {
+        tracing::warn!("no cache, so nothing to mark");
+        return;
+    };
+    let Ok(mut guard) = cache.lock() else { return };
+
+    let threads = resolve_threads(&guard, thread_ids);
+    let refs: Vec<&Thread> = threads.iter().collect();
+    if let Err(e) = write(&mut guard, &refs) {
+        tracing::warn!(error = %e, "could not write marks");
+        return;
+    }
+    send_marks(&guard, events);
+}
+
+/// Thread ids to the threads they name.
+///
+/// The live inbox wins, and a mark's snapshot covers a thread the API has
+/// stopped returning. An id in neither is one the UI believes in and the
+/// cache does not, so skip it rather than invent a thread to mark.
+fn resolve_threads(cache: &Cache, ids: &[String]) -> Vec<Thread> {
+    let live = cache.load_threads().unwrap_or_default();
+    let marks = cache.load_marks().unwrap_or_default();
+
+    let mut by_id: std::collections::HashMap<&str, &Thread> = std::collections::HashMap::new();
+    for m in &marks {
+        by_id.insert(m.thread_id.as_str(), &m.snapshot);
+    }
+    for t in &live {
+        by_id.insert(t.id.as_str(), t);
+    }
+
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        match by_id.get(id.as_str()) {
+            Some(t) => out.push((*t).clone()),
+            None => tracing::warn!(thread_id = %id, "asked to mark a thread nothing knows about"),
+        }
+    }
+    out
+}
+
+fn send_marks(cache: &Cache, events: &EventSender<Event>) {
+    match cache.load_marks() {
+        Ok(marks) => {
+            let _ = events.send(Event::Marks(marks));
+        }
+        Err(e) => tracing::warn!(error = %e, "could not read marks"),
     }
 }
 
@@ -404,6 +507,18 @@ async fn refresh(
                             Ok(()) => {
                                 if let Some(lm) = result.last_modified.as_ref() {
                                     let _ = guard.set_meta(LAST_MODIFIED_KEY, lm);
+                                }
+                                // A thread with activity newer than the
+                                // moment it was dismissed stops being done.
+                                // This runs before the list goes out so the
+                                // UI never renders a new inbox against marks
+                                // that inbox has already invalidated.
+                                match guard.reconcile_marks(&threads) {
+                                    Ok(true) => send_marks(&guard, events),
+                                    Ok(false) => {}
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "could not reconcile marks")
+                                    }
                                 }
                             }
                             Err(e) => tracing::warn!(error = %e, "could not cache threads"),

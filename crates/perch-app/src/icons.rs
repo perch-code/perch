@@ -202,11 +202,6 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M3.6 6.2 L8 10.6 L12.4 6.2" fill="none" stroke="{c}"
                      stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
-        SidebarIcon::Sidebar => format!(
-            r#"<rect x="1.9" y="3.0" width="12.2" height="10.0" rx="2.2" fill="none"
-                     stroke="{c}" stroke-width="1.4"/>
-               <path d="M6.3 3.0 V13.0" stroke="{c}" stroke-width="1.4"/>"#
-        ),
         SidebarIcon::Warning => format!(
             r#"<path d="M8 2.2 L14.6 13.4 H1.4 Z" fill="none" stroke="{c}" stroke-width="1.4"
                      stroke-linejoin="round"/>
@@ -227,7 +222,6 @@ pub enum SidebarIcon {
     Mention,
     People,
     Eye,
-    Sidebar,
     ChevronRight,
     ChevronLeft,
     ChevronDown,

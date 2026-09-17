@@ -45,15 +45,16 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
 
     Stack::vertical((
         Stack::horizontal((
-            // The drawer slides away entirely rather than narrowing, so the
-            // list gets the whole window when it is closed.
+            // The rail is always on screen. The panel beside it is what
+            // comes and goes, and the rail's own entry is the control.
+            sidebar::activity_rail(state, review),
             dyn_container(
                 move || state.sidebar_open.get(),
                 move |open| {
                     if open {
-                        sidebar::sidebar(state, review).into_any()
+                        sidebar::nav_panel(state, review).into_any()
                     } else {
-                        sidebar::collapsed_rail(state, review).into_any()
+                        floem::views::Empty::new().into_any()
                     }
                 },
             ),

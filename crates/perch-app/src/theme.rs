@@ -10,6 +10,8 @@ use floem::peniko::Color;
 pub const CANVAS: Color = Color::from_rgb8(0xff, 0xff, 0xff);
 pub const CANVAS_SUBTLE: Color = Color::from_rgb8(0xf6, 0xf8, 0xfa);
 pub const CANVAS_SIDEBAR: Color = Color::from_rgb8(0xfa, 0xfb, 0xfc);
+/// The activity rail sits a shade deeper than the panel beside it.
+pub const CANVAS_RAIL: Color = Color::from_rgb8(0xf2, 0xf4, 0xf6);
 pub const CANVAS_HOVER: Color = Color::from_rgb8(0xf3, 0xf4, 0xf6);
 pub const CANVAS_UNREAD: Color = Color::from_rgb8(0xf7, 0xfb, 0xff);
 
@@ -68,12 +70,13 @@ pub const TEXT_SECTION: f32 = 11.0;
 pub const OPTICAL_TEXT_LIFT: f64 = 1.0;
 
 /// Layout constants.
-pub const SIDEBAR_WIDTH: f64 = 258.0;
-/// The icon-only rail the drawer collapses to.
+/// The navigation panel beside the activity rail.
+pub const SIDEBAR_WIDTH: f64 = 212.0;
+/// The always-present rail of destination icons.
 ///
 /// Wider than an editor's activity bar because the traffic lights sit at the
 /// top of it, and they need the room.
-pub const COLLAPSED_RAIL_WIDTH: f64 = 72.0;
+pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
 /// One entry in that rail.
 pub const RAIL_ENTRY_SIZE: f64 = 44.0;
 pub const ROW_HEIGHT: f64 = 66.0;
@@ -81,12 +84,6 @@ pub const TOOLBAR_HEIGHT: f64 = 60.0;
 pub const STATUS_HEIGHT: f64 = 34.0;
 /// Height of the strip that replaces the title bar.
 pub const TITLEBAR_HEIGHT: f64 = 40.0;
-/// Room the traffic lights need before anything else may sit beside them.
-///
-/// The three buttons end around x=71 given the offset they are placed at;
-/// the rest is breathing room so the drawer toggle does not crowd the green
-/// one.
-pub const TRAFFIC_LIGHTS_WIDTH: f64 = 88.0;
 pub const RADIUS: f64 = 6.0;
 /// Pills get a fixed height so their text can be centred by layout rather
 /// than by padding, which the font's uneven leading throws off.

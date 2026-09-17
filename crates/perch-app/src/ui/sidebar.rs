@@ -1,7 +1,7 @@
 //! Left rail: views, reason filters, and the repository list.
 
 use floem::prelude::*;
-use floem::reactive::{SignalGet, SignalWith};
+use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use floem::views::{Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack};
 
 use crate::filter::ReasonFilter;
@@ -11,12 +11,13 @@ use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{avatar, count_badge, section_heading, sidebar_row};
 
-pub fn sidebar(state: AppState, review: ReviewState) -> impl IntoView {
+/// The navigation panel: views, reason filters, and the repository list.
+///
+/// Sits beside the activity rail and hides when the rail's current entry is
+/// clicked, the way an editor's explorer does.
+pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
     Stack::vertical((
-        // The window has no title bar, so the drawer starts with the room
-        // the traffic lights need.
-        crate::ui::widgets::drawer_controls(state, true)
-            .style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().padding_left(6.0)),
+        Empty::new().style(|s| s.height(8.0).width_full().flex_shrink(0.0_f32)),
         views_section(state, review),
         section_heading("Filters"),
         filters_section(state),
@@ -181,46 +182,34 @@ fn repo_row(state: AppState, name: String, count: usize, avatar_url: String) -> 
 }
 
 
-/// The drawer, collapsed to icons.
+/// The activity rail.
 ///
-/// Modelled on an editor's activity bar: a narrow column of destinations,
-/// the current one marked with a stripe down its left edge. Only the inbox
-/// lives here so far.
+/// Modelled on an editor's: a narrow column of destinations that is always
+/// on screen, with the current one marked by a stripe down its left edge.
+/// Clicking the entry that is already showing hides the panel beside it, and
+/// clicking it again brings the panel back. There is no separate collapse
+/// button, because the rail itself is the control.
 ///
-/// It keeps the traffic lights, which is why it is wider than the 48 pixels
-/// an editor would use. Because this column is always present in one form or
-/// the other, nothing else in the window has to leave room for them.
-pub fn collapsed_rail(state: AppState, review: ReviewState) -> impl IntoView {
+/// It is wider than the 48 pixels an editor uses because the traffic lights
+/// sit at the top of it and need the room. Since the rail is never hidden,
+/// nothing else in the window has to leave space for them.
+pub fn activity_rail(state: AppState, review: ReviewState) -> impl IntoView {
     use floem::views::drag_window_area;
 
     Stack::vertical((
         // The lights sit over this.
         drag_window_area(Empty::new().style(|s| s.size_full()))
             .style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().flex_shrink(0.0_f32)),
-        Container::new(crate::ui::widgets::drawer_toggle(state)).style(|s| {
-            s.width_full()
-                .height(34.0)
-                .flex_shrink(0.0_f32)
-                .items_center()
-                .justify_center()
-        }),
-        Empty::new().style(|s| {
-            s.height(1.0)
-                .width(theme::RAIL_ENTRY_SIZE)
-                .margin_vert(6.0)
-                .flex_shrink(0.0_f32)
-                .background(theme::BORDER_MUTED)
-        }),
         rail_entry(state, review),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
     ))
     .style(|s| {
-        s.width(theme::COLLAPSED_RAIL_WIDTH)
+        s.width(theme::ACTIVITY_RAIL_WIDTH)
             .height_full()
             .flex_col()
             .flex_shrink(0.0_f32)
             .items_center()
-            .background(theme::CANVAS_SIDEBAR)
+            .background(theme::CANVAS_RAIL)
             .border_right(1.0)
             .border_color(theme::BORDER)
     })
@@ -264,8 +253,14 @@ fn rail_entry(state: AppState, review: ReviewState) -> impl IntoView {
         }),
     )
     .on_event_stop(el::Click, move |_, _| {
-        review.close();
-        state.clear_filters();
+        if review.is_showing() {
+            // Coming back from a pull request: show the inbox and its panel.
+            review.close();
+            state.sidebar_open.set(true);
+        } else {
+            // Already here, so this is the collapse control.
+            state.sidebar_open.update(|open| *open = !*open);
+        }
     })
     .style(move |s| {
         // The stripe is the container's own left border, so it runs the full

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use jiff::Timestamp;
-use perch_github::{SubjectDetail, Thread};
+use perch_github::{Mark, SubjectDetail, Thread};
 
 use crate::backend::{Event, Status};
 use crate::filter::{self, Counts, Filters, Group, ReasonFilter, Section, Sort};
@@ -20,6 +20,8 @@ pub struct AppState {
     pub details: RwSignal<HashMap<String, SubjectDetail>>,
     /// Encoded image bytes, shared so a clone is a refcount bump.
     pub avatars: RwSignal<HashMap<String, Arc<Vec<u8>>>>,
+    /// Perch's own saved and done flags, keyed by thread id.
+    pub marks: RwSignal<HashMap<String, Mark>>,
 
     pub reason_filter: RwSignal<Option<ReasonFilter>>,
     pub repo_filter: RwSignal<Option<String>>,
@@ -50,6 +52,7 @@ impl AppState {
             threads: RwSignal::new(Vec::new()),
             details: RwSignal::new(HashMap::new()),
             avatars: RwSignal::new(HashMap::new()),
+            marks: RwSignal::new(HashMap::new()),
             reason_filter: RwSignal::new(None),
             repo_filter: RwSignal::new(None),
             unread_only: RwSignal::new(false),
@@ -137,6 +140,15 @@ impl AppState {
                 self.avatars.update(|m| {
                     m.insert(url, Arc::new(bytes));
                 });
+            }
+            // The backend sends the whole set, so replace rather than merge.
+            Event::Marks(marks) => {
+                self.marks.set(
+                    marks
+                        .into_iter()
+                        .map(|m| (m.thread_id.clone(), m))
+                        .collect(),
+                );
             }
             Event::ReviewProgress { .. }
             | Event::ReviewReady { .. }
