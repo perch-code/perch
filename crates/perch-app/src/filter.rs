@@ -404,16 +404,55 @@ mod tests {
         "2026-09-17T20:00:00Z".parse().unwrap()
     }
 
+    fn no_marks() -> HashMap<String, Mark> {
+        HashMap::new()
+    }
+
+    /// (thread, saved, done) into the map `visible` and `counts` expect.
+    fn marks(entries: &[(&Thread, bool, bool)]) -> HashMap<String, Mark> {
+        entries
+            .iter()
+            .map(|(t, saved, done)| {
+                (
+                    t.id.clone(),
+                    Mark {
+                        thread_id: t.id.clone(),
+                        saved: *saved,
+                        done_at: done.then_some(t.updated_at),
+                        marked_at: t.updated_at,
+                        snapshot: (*t).clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The unmarked case, which is what most of these tests are about.
+    fn vis(all: &[Thread], f: &Filters, sort: Sort) -> Vec<Thread> {
+        visible(all, &no_marks(), f, sort)
+    }
+
+    fn ids(threads: &[Thread]) -> Vec<&str> {
+        threads.iter().map(|t| t.id.as_str()).collect()
+    }
+
+    fn in_view(all: &[Thread], m: &HashMap<String, Mark>, view: View) -> Vec<String> {
+        visible(all, m, &Filters { view, ..Default::default() }, Sort::Newest)
+            .iter()
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
     #[test]
     fn no_filters_keeps_everything() {
         let all = fixture();
-        assert_eq!(visible(&all, &Filters::default(), Sort::Newest).len(), 5);
+        assert_eq!(vis(&all, &Filters::default(), Sort::Newest).len(), 5);
     }
 
     #[test]
     fn newest_first_is_the_default_order() {
         let all = fixture();
-        let v = visible(&all, &Filters::default(), Sort::Newest);
+        let v = vis(&all, &Filters::default(), Sort::Newest);
         let ids: Vec<&str> = v.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["1", "2", "3", "4", "5"]);
     }
@@ -421,7 +460,7 @@ mod tests {
     #[test]
     fn oldest_first_reverses_the_order() {
         let all = fixture();
-        let v = visible(&all, &Filters::default(), Sort::Oldest);
+        let v = vis(&all, &Filters::default(), Sort::Oldest);
         let ids: Vec<&str> = v.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["5", "4", "3", "2", "1"]);
     }
@@ -430,7 +469,7 @@ mod tests {
     fn unread_is_a_filter_not_a_query() {
         let all = fixture();
         let f = Filters { unread_only: true, ..Default::default() };
-        let v = visible(&all, &f, Sort::Newest);
+        let v = vis(&all, &f, Sort::Newest);
         assert_eq!(v.len(), 3);
         assert!(v.iter().all(|t| t.unread));
     }
@@ -439,7 +478,7 @@ mod tests {
     fn participating_spans_several_reasons() {
         let all = fixture();
         let f = Filters { reason: Some(ReasonFilter::Participating), ..Default::default() };
-        let ids: Vec<String> = visible(&all, &f, Sort::Newest).iter().map(|t| t.id.clone()).collect();
+        let ids: Vec<String> = vis(&all, &f, Sort::Newest).iter().map(|t| t.id.clone()).collect();
         // Mention, team mention, review requested, assign. Not "subscribed".
         assert_eq!(ids, ["1", "3", "4", "5"]);
     }
@@ -454,7 +493,7 @@ mod tests {
             (ReasonFilter::Assigned, vec!["5"]),
         ] {
             let f = Filters { reason: Some(filter), ..Default::default() };
-            let ids: Vec<String> = visible(&all, &f, Sort::Newest).iter().map(|t| t.id.clone()).collect();
+            let ids: Vec<String> = vis(&all, &f, Sort::Newest).iter().map(|t| t.id.clone()).collect();
             assert_eq!(ids, want, "{filter:?}");
         }
     }
@@ -467,8 +506,9 @@ mod tests {
             repo: Some("apache/samza".into()),
             unread_only: true,
             search: String::new(),
+            view: View::Inbox,
         };
-        let ids: Vec<String> = visible(&all, &f, Sort::Newest).iter().map(|t| t.id.clone()).collect();
+        let ids: Vec<String> = vis(&all, &f, Sort::Newest).iter().map(|t| t.id.clone()).collect();
         assert_eq!(ids, ["3", "5"]);
     }
 
@@ -477,19 +517,19 @@ mod tests {
         let all = fixture();
 
         let by_title = Filters { search: "COMPACTION".into(), ..Default::default() };
-        assert_eq!(visible(&all, &by_title, Sort::Newest).len(), 1);
+        assert_eq!(vis(&all, &by_title, Sort::Newest).len(), 1);
 
         let by_repo = Filters { search: "samza".into(), ..Default::default() };
-        assert_eq!(visible(&all, &by_repo, Sort::Newest).len(), 2);
+        assert_eq!(vis(&all, &by_repo, Sort::Newest).len(), 2);
 
         let nothing = Filters { search: "   ".into(), ..Default::default() };
-        assert_eq!(visible(&all, &nothing, Sort::Newest).len(), 5);
+        assert_eq!(vis(&all, &nothing, Sort::Newest).len(), 5);
     }
 
     #[test]
     fn repository_sections_follow_the_sort_direction() {
         let all = fixture();
-        let v = visible(&all, &Filters::default(), Sort::Newest);
+        let v = vis(&all, &Filters::default(), Sort::Newest);
         let s = sections(&v, Group::Repository, Sort::Newest, now());
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].title, "slatedb/slatedb");
@@ -501,7 +541,7 @@ mod tests {
     #[test]
     fn oldest_sort_flips_which_repository_leads() {
         let all = fixture();
-        let v = visible(&all, &Filters::default(), Sort::Oldest);
+        let v = vis(&all, &Filters::default(), Sort::Oldest);
         let s = sections(&v, Group::Repository, Sort::Oldest, now());
         assert_eq!(s[0].title, "apache/samza");
     }
@@ -524,7 +564,7 @@ mod tests {
     fn date_sections_run_newest_bucket_first() {
         let now = Timestamp::now();
         let all = dated_fixture(now);
-        let v = visible(&all, &Filters::default(), Sort::Newest);
+        let v = vis(&all, &Filters::default(), Sort::Newest);
         let s = sections(&v, Group::Date, Sort::Newest, now);
         let titles: Vec<&str> = s.iter().map(|x| x.title.as_str()).collect();
         assert_eq!(titles, ["Today", "Yesterday", "This week", "Earlier"]);
@@ -534,7 +574,7 @@ mod tests {
     fn oldest_sort_flips_the_date_sections_too() {
         let now = Timestamp::now();
         let all = dated_fixture(now);
-        let v = visible(&all, &Filters::default(), Sort::Oldest);
+        let v = vis(&all, &Filters::default(), Sort::Oldest);
         let s = sections(&v, Group::Date, Sort::Oldest, now);
         let titles: Vec<&str> = s.iter().map(|x| x.title.as_str()).collect();
         assert_eq!(titles, ["Earlier", "This week", "Yesterday", "Today"]);
@@ -543,7 +583,7 @@ mod tests {
     #[test]
     fn grouping_by_none_yields_one_section() {
         let all = fixture();
-        let v = visible(&all, &Filters::default(), Sort::Newest);
+        let v = vis(&all, &Filters::default(), Sort::Newest);
         let s = sections(&v, Group::None, Sort::Newest, now());
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].threads.len(), 5);
@@ -559,7 +599,7 @@ mod tests {
     #[test]
     fn every_thread_survives_grouping() {
         let all = fixture();
-        let v = visible(&all, &Filters::default(), Sort::Newest);
+        let v = vis(&all, &Filters::default(), Sort::Newest);
         for g in Group::ALL {
             let total: usize = sections(&v, g, Sort::Newest, now())
                 .iter()
@@ -571,12 +611,142 @@ mod tests {
 
     #[test]
     fn counts_are_computed_over_the_whole_inbox() {
-        let c = counts(&fixture());
+        let c = counts(&fixture(), &no_marks(), View::Inbox);
         assert_eq!(c.unread, 3);
         assert_eq!(c.by_reason.get(&ReasonFilter::Participating), Some(&4));
         assert_eq!(c.by_reason.get(&ReasonFilter::Mentioned), Some(&1));
         assert_eq!(c.repos[0], ("slatedb/slatedb".into(), 3, "https://avatars/slatedb/slatedb".into()));
         assert_eq!(c.repos[1].0, "apache/samza");
+    }
+
+    #[test]
+    fn done_leaves_the_inbox_and_saved_does_not() {
+        let all = fixture();
+        let m = marks(&[(&all[0], false, true), (&all[1], true, false)]);
+
+        assert_eq!(in_view(&all, &m, View::Inbox), ["2", "3", "4", "5"]);
+        assert_eq!(in_view(&all, &m, View::Saved), ["2"]);
+        assert_eq!(in_view(&all, &m, View::Done), ["1"]);
+    }
+
+    #[test]
+    fn a_thread_can_be_both_saved_and_done() {
+        let all = fixture();
+        let m = marks(&[(&all[0], true, true)]);
+
+        assert!(in_view(&all, &m, View::Inbox).iter().all(|id| id != "1"));
+        assert_eq!(in_view(&all, &m, View::Saved), ["1"]);
+        assert_eq!(in_view(&all, &m, View::Done), ["1"]);
+    }
+
+    #[test]
+    fn filters_stack_on_top_of_a_view() {
+        let all = fixture();
+        // Everything done, so the Done view has something to narrow.
+        let m = marks(&all.iter().map(|t| (t, false, true)).collect::<Vec<_>>());
+
+        let f = Filters {
+            view: View::Done,
+            repo: Some("apache/samza".into()),
+            ..Default::default()
+        };
+        let got: Vec<String> = visible(&all, &m, &f, Sort::Newest)
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(got, ["3", "5"]);
+
+        let searched = Filters {
+            view: View::Done,
+            search: "compaction".into(),
+            ..Default::default()
+        };
+        assert_eq!(visible(&all, &m, &searched, Sort::Newest).len(), 1);
+    }
+
+    #[test]
+    fn an_unmarked_inbox_is_the_whole_inbox() {
+        let all = fixture();
+        assert_eq!(in_view(&all, &no_marks(), View::Inbox).len(), 5);
+        assert!(in_view(&all, &no_marks(), View::Saved).is_empty());
+        assert!(in_view(&all, &no_marks(), View::Done).is_empty());
+    }
+
+    #[test]
+    fn the_pool_adds_snapshots_the_api_forgot() {
+        let all = fixture();
+        let gone = t("9", "a/b", Reason::Mention, false, "2026-09-12T10:00:00Z", "Long gone");
+        let m = marks(&[(&all[0], true, false), (&gone, true, false)]);
+
+        // The live list never mentions thread 9; the snapshot carries it.
+        let pooled = pool(&all, &m);
+        assert_eq!(pooled.len(), 6);
+        assert_eq!(in_view(&pooled, &m, View::Saved), ["1", "9"]);
+    }
+
+    #[test]
+    fn the_pool_prefers_the_live_thread_over_its_snapshot() {
+        let all = fixture();
+        let mut stale = all[0].clone();
+        stale.subject.title = "Stale title".into();
+        let m = marks(&[(&stale, true, false)]);
+
+        let pooled = pool(&all, &m);
+        assert_eq!(pooled.len(), 5);
+        assert_eq!(pooled[0].subject.title, "Incremental compaction");
+    }
+
+    #[test]
+    fn the_pool_is_ordered_once_it_is_sorted() {
+        let all = fixture();
+        let gone = t("9", "a/b", Reason::Mention, false, "2026-09-12T10:00:00Z", "Long gone");
+        let other = t("8", "a/b", Reason::Mention, false, "2026-09-14T10:00:00Z", "Also gone");
+        let m = marks(&[(&gone, true, false), (&other, true, false)]);
+
+        // HashMap iteration is unordered; the sort is what makes it stable.
+        let pooled = pool(&all, &m);
+        let v = visible(&pooled, &m, &Filters::default(), Sort::Newest);
+        assert_eq!(ids(&v), ["1", "2", "3", "8", "9", "4", "5"]);
+    }
+
+    #[test]
+    fn done_threads_stop_counting_as_unread() {
+        let all = fixture();
+        // Thread 1 is unread; dismissing it should quiet the badge.
+        let m = marks(&[(&all[0], false, true)]);
+        assert_eq!(counts(&all, &m, View::Inbox).unread, 2);
+    }
+
+    #[test]
+    fn the_three_view_counts_read_the_same_from_anywhere() {
+        let all = fixture();
+        let m = marks(&[(&all[0], true, true), (&all[1], true, false)]);
+
+        for view in [View::Inbox, View::Saved, View::Done] {
+            let c = counts(&all, &m, view);
+            assert_eq!(c.saved, 2, "{view:?}");
+            assert_eq!(c.done, 1, "{view:?}");
+            assert_eq!(c.unread, 2, "{view:?}");
+        }
+    }
+
+    #[test]
+    fn reason_and_repository_counts_follow_the_open_view() {
+        let all = fixture();
+        // Two done, both on slatedb.
+        let m = marks(&[(&all[0], false, true), (&all[3], false, true)]);
+
+        let done = counts(&all, &m, View::Done);
+        assert_eq!(done.repos.len(), 1);
+        assert_eq!(done.repos[0].0, "slatedb/slatedb");
+        assert_eq!(done.repos[0].1, 2);
+        assert_eq!(done.by_reason.get(&ReasonFilter::Mentioned), Some(&1));
+        assert_eq!(done.by_reason.get(&ReasonFilter::TeamMentioned), None);
+
+        // The same marks, seen from the inbox, describe what is left there.
+        let inbox = counts(&all, &m, View::Inbox);
+        assert_eq!(inbox.repos[0].1, 2);
+        assert_eq!(inbox.by_reason.get(&ReasonFilter::Mentioned), None);
     }
 
     #[test]

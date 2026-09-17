@@ -12,7 +12,7 @@ use jiff::Timestamp;
 use perch_github::{Mark, SubjectDetail, Thread};
 
 use crate::backend::{Event, Status};
-use crate::filter::{self, Counts, Filters, Group, ReasonFilter, Section, Sort};
+use crate::filter::{self, Counts, Filters, Group, ReasonFilter, Section, Sort, View};
 
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -23,6 +23,8 @@ pub struct AppState {
     /// Perch's own saved and done flags, keyed by thread id.
     pub marks: RwSignal<HashMap<String, Mark>>,
 
+    /// Which of Inbox, Saved and Done is showing.
+    pub view: RwSignal<View>,
     pub reason_filter: RwSignal<Option<ReasonFilter>>,
     pub repo_filter: RwSignal<Option<String>>,
     pub unread_only: RwSignal<bool>,
@@ -53,6 +55,7 @@ impl AppState {
             details: RwSignal::new(HashMap::new()),
             avatars: RwSignal::new(HashMap::new()),
             marks: RwSignal::new(HashMap::new()),
+            view: RwSignal::new(View::default()),
             reason_filter: RwSignal::new(None),
             repo_filter: RwSignal::new(None),
             unread_only: RwSignal::new(false),
@@ -169,6 +172,7 @@ impl AppState {
 
     pub fn filters(&self) -> Filters {
         Filters {
+            view: self.view.get(),
             reason: self.reason_filter.get(),
             repo: self.repo_filter.get(),
             unread_only: self.unread_only.get(),
@@ -176,10 +180,18 @@ impl AppState {
         }
     }
 
+    /// Every thread the app can show: the live inbox, plus a snapshot for any
+    /// marked thread GitHub has stopped returning.
+    pub fn pool(&self) -> Vec<Thread> {
+        self.threads
+            .with(|live| self.marks.with(|marks| filter::pool(live, marks)))
+    }
+
     /// Filtered and sorted threads.
     pub fn visible(&self) -> Vec<Thread> {
-        self.threads
-            .with(|all| filter::visible(all, &self.filters(), self.sort.get()))
+        let pool = self.pool();
+        self.marks
+            .with(|marks| filter::visible(&pool, marks, &self.filters(), self.sort.get()))
     }
 
     /// The list as the view renders it.
@@ -192,7 +204,24 @@ impl AppState {
     }
 
     pub fn counts(&self) -> Counts {
-        self.threads.with(|all| filter::counts(all))
+        let pool = self.pool();
+        self.marks
+            .with(|marks| filter::counts(&pool, marks, self.view.get()))
+    }
+
+    pub fn is_saved(&self, thread_id: &str) -> bool {
+        self.marks.with(|m| m.get(thread_id).is_some_and(|m| m.saved))
+    }
+
+    pub fn is_done(&self, thread_id: &str) -> bool {
+        self.marks
+            .with(|m| m.get(thread_id).is_some_and(perch_github::Mark::is_done))
+    }
+
+    /// Switch views. Filters carry over, the way the web keeps a search when
+    /// you cross from the inbox into Done.
+    pub fn set_view(&self, view: View) {
+        self.view.set(view);
     }
 
     pub fn detail_for(&self, thread_id: &str) -> Option<SubjectDetail> {
@@ -224,6 +253,7 @@ impl AppState {
     }
 
     pub fn clear_filters(&self) {
+        self.view.set(View::Inbox);
         self.reason_filter.set(None);
         self.repo_filter.set(None);
         self.unread_only.set(false);
