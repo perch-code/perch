@@ -120,8 +120,8 @@ pub fn count_badge(count: impl Fn() -> usize + 'static, emphasis: bool) -> impl 
             s.font_size(theme::TEXT_BADGE)
                 .font_weight(FontWeight::MEDIUM)
                 .color(fg)
-                .line_height(1.0)
                 .selectable(false)
+                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
     )
     .style(move |s| {
@@ -199,8 +199,8 @@ pub fn reason_pill(text: impl Fn() -> String + 'static) -> impl IntoView {
     Container::new(Label::derived(text).style(|s| {
         s.font_size(theme::TEXT_BADGE)
             .color(theme::FG_MUTED)
-            .line_height(1.0)
             .selectable(false)
+            .margin_bottom(theme::OPTICAL_TEXT_LIFT)
     }))
     .style(|s| {
         s.height(theme::PILL_HEIGHT)
@@ -304,7 +304,7 @@ pub fn sidebar_row(
         // over a row. Only an enabled row offers a pointer.
         let base = if enabled { clickable(s) } else { s.selectable(false) }
             .width_full()
-            .height(30.0)
+            .height(32.0)
             .items_center()
             .padding_horiz(10.0)
             .border_radius(theme::RADIUS)

@@ -71,7 +71,7 @@ fn inbox_row(unread: impl Fn() -> usize + 'static + Copy) -> impl IntoView {
     Container::new(content).style(|s| {
         crate::ui::widgets::clickable(s)
             .width_full()
-            .height(30.0)
+            .height(32.0)
             .items_center()
             .padding_horiz(10.0)
             .margin_horiz(6.0)
@@ -164,7 +164,7 @@ fn repo_row(state: AppState, name: String, count: usize, avatar_url: String) -> 
     Container::new(content).style(move |s| {
         let base = crate::ui::widgets::clickable(s)
             .width_full()
-            .height(30.0)
+            .height(32.0)
             .items_center()
             .padding_horiz(10.0)
             .margin_horiz(6.0)
