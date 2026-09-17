@@ -4,7 +4,6 @@
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
-use floem::style::CursorStyle;
 use floem::text::FontWeight;
 use floem::views::{Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack};
 use perch_git::{ChangeStatus, ChangedFile, TreeEntry};
@@ -91,12 +90,12 @@ fn segment(
     ))
     .on_event_stop(el::Click, move |_, _| state.rail_mode.set(mode))
     .style(move |s| {
-        let base = s
+        let base = crate::ui::widgets::clickable(s)
             .height(26.0)
             .items_center()
             .padding_horiz(10.0)
             .border_radius(theme::RADIUS)
-            .hover(|s| s.cursor(CursorStyle::Pointer));
+            ;
         if active() {
             base.background(theme::CANVAS)
                 .border(1.0)
@@ -154,12 +153,12 @@ fn changed_row(state: ReviewState, file: ChangedFile, on_open: OpenFile) -> impl
     ))
     .on_event_stop(el::Click, move |_, _| on_open(&click_path))
     .style(move |s| {
-        let base = s
+        let base = crate::ui::widgets::clickable(s)
             .height(28.0)
             .width_full()
             .items_center()
             .padding_horiz(10.0)
-            .hover(|s| s.background(theme::CANVAS_HOVER).cursor(CursorStyle::Pointer));
+            .hover(|s| s.background(theme::CANVAS_HOVER));
         if active_row() {
             base.background(theme::ACCENT_SUBTLE)
         } else {
@@ -261,7 +260,7 @@ fn tree_row(state: ReviewState, entry: TreeEntry, on_open: OpenFile) -> impl Int
         }
     })
     .style(move |s| {
-        let base = s
+        let base = crate::ui::widgets::clickable(s)
             .height(24.0)
             .width_full()
             .items_center()
@@ -269,7 +268,7 @@ fn tree_row(state: ReviewState, entry: TreeEntry, on_open: OpenFile) -> impl Int
         let base = if is_dir {
             base
         } else {
-            base.hover(|s| s.background(theme::CANVAS_HOVER).cursor(CursorStyle::Pointer))
+            base.hover(|s| s.background(theme::CANVAS_HOVER))
         };
         if active_row() {
             base.background(theme::ACCENT_SUBTLE)

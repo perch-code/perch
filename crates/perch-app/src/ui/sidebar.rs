@@ -66,7 +66,8 @@ fn inbox_row(unread: impl Fn() -> usize + 'static + Copy) -> impl IntoView {
     .style(|s| s.items_center().width_full());
 
     Container::new(content).style(|s| {
-        s.width_full()
+        crate::ui::widgets::clickable(s)
+            .width_full()
             .height(30.0)
             .items_center()
             .padding_horiz(10.0)
@@ -75,7 +76,6 @@ fn inbox_row(unread: impl Fn() -> usize + 'static + Copy) -> impl IntoView {
             .background(theme::CANVAS)
             .border(1.0)
             .border_color(theme::BORDER)
-            .hover(|s| s.cursor(floem::style::CursorStyle::Pointer))
     })
 }
 
@@ -159,7 +159,7 @@ fn repo_row(state: AppState, name: String, count: usize, avatar_url: String) -> 
     .style(|s| s.items_center().width_full().min_width(0.0));
 
     Container::new(content).style(move |s| {
-        let base = s
+        let base = crate::ui::widgets::clickable(s)
             .width_full()
             .height(30.0)
             .items_center()

@@ -159,6 +159,7 @@ fn tab_view(state: ReviewState, path: String) -> impl IntoView {
             .padding_horiz(12.0)
             .border_right(1.0)
             .border_color(theme::BORDER_MUTED)
+            .selectable(false)
             .hover(|s| s.cursor(CursorStyle::Pointer));
         if is_active_style() {
             // The active tab reads as continuous with the code beneath it.

@@ -13,13 +13,19 @@ use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{avatar, icon, reason_pill};
 
-pub fn row(state: AppState, thread: Thread, _on_open: OpenThread) -> impl IntoView {
+pub fn row(state: AppState, thread: Thread, on_open: OpenThread) -> impl IntoView {
     let unread = thread.unread;
-    // Only pull requests lead anywhere yet; an issue row stays inert.
-    let _openable = thread.subject.kind == SubjectKind::PullRequest;
-    let _open_target = thread
-        .number_hint()
-        .map(|n| (thread.repository.full_name.clone(), n));
+
+    // A pull request opens the review view. Everything else has no view of
+    // its own yet, so it opens where it lives.
+    let review_target = if thread.subject.kind == SubjectKind::PullRequest {
+        thread
+            .number_hint()
+            .map(|n| (thread.repository.full_name.clone(), n))
+    } else {
+        None
+    };
+    let web_url = thread.html_url();
 
     Stack::horizontal((
         unread_dot(unread),
@@ -33,8 +39,13 @@ pub fn row(state: AppState, thread: Thread, _on_open: OpenThread) -> impl IntoVi
         author_avatar(state, thread.clone()),
         timestamp(state, thread),
     ))
+    .on_event_stop(el::Click, move |_, _| match &review_target {
+        Some((repo, number)) => on_open(repo, *number),
+        None => crate::ui::widgets::open_in_browser(&web_url),
+    })
     .style(move |s| {
-        let base = s
+        // The whole row is the button.
+        let base = crate::ui::widgets::clickable(s)
             .height(theme::ROW_HEIGHT)
             .width_full()
             .items_center()

@@ -65,9 +65,14 @@ impl Cache {
 
     /// Replace the cached inbox with exactly this set.
     ///
-    /// Threads absent from `threads` are deleted: GitHub drops a thread from
-    /// the list once it is done or unsubscribed, and the cache mirrors that
-    /// rather than accumulating ghosts.
+    /// Threads absent from `threads` are deleted, so the cache mirrors the
+    /// API rather than accumulating ghosts.
+    ///
+    /// Note what the API does *not* drop. Marking a thread Done on the web
+    /// removes it from github.com's inbox, but the REST list has no concept
+    /// of Done: the thread keeps coming back as an ordinary read
+    /// notification for months. Perch therefore shows a superset of the web
+    /// inbox, and no filter here can narrow it.
     pub fn store_threads(&mut self, threads: &[Thread]) -> Result<(), CacheError> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM threads", [])?;

@@ -68,6 +68,7 @@ fn segment(state: AppState, text: &'static str, unread_value: bool) -> impl Into
             .items_center()
             .justify_center()
             .border_radius(4.0)
+            .selectable(false)
             .hover(|s| s.cursor(CursorStyle::Pointer));
         if active() {
             base.background(theme::CANVAS)

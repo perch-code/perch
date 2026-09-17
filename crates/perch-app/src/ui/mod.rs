@@ -9,6 +9,7 @@ pub mod widgets;
 
 use std::rc::Rc;
 
+use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::SignalUpdate;
 use floem::views::{Decorators, Stack, dyn_container};
@@ -17,6 +18,13 @@ use crate::backend::Backend;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
+
+/// The platform's command modifier.
+const OS_MOD: Modifiers = if cfg!(target_os = "macos") {
+    Modifiers::META
+} else {
+    Modifiers::CONTROL
+};
 
 pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let review_backend = backend.clone();
@@ -61,6 +69,33 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
         status::status_bar(state, review, backend),
     ))
+    // Window-level shortcuts. Key events bubble from whatever has focus, so
+    // a handler on the root view catches them wherever the reader is.
+    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+        if !key.modifiers.contains(OS_MOD) {
+            return EventPropagation::Continue;
+        }
+        // Physical key codes, so the shortcuts hold on any keyboard layout.
+        match key.code {
+            // Close the open file, as in any editor.
+            Code::KeyW => {
+                if let Some(path) = review.active.get() {
+                    review.close_tab(&path);
+                    return EventPropagation::Stop;
+                }
+                EventPropagation::Continue
+            }
+            // Back to the inbox.
+            Code::BracketLeft => {
+                if review.is_showing() {
+                    review.close();
+                    return EventPropagation::Stop;
+                }
+                EventPropagation::Continue
+            }
+            _ => EventPropagation::Continue,
+        }
+    })
     .style(|s| {
         s.size_full()
             .flex_col()

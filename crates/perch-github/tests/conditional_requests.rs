@@ -3,8 +3,8 @@
 //!
 //! GitHub treats `If-Modified-Since` on `/notifications` as a *filter*, not a
 //! cache validator: a 200 carries only the threads updated since that
-//! instant. Acting on that partial list looks like the rest of the inbox was
-//! marked done, which once truncated the local cache from 31 threads to 1.
+//! instant. Acting on that partial list drops every thread that did not
+//! change, which once truncated the local cache from 31 threads to 1.
 //!
 //! These tests stand up a local server that mimics the real behaviour, so the
 //! client's handling is pinned without touching the network.

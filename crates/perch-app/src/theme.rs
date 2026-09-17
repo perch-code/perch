@@ -157,6 +157,8 @@ pub const CODE_FONT_SIZE: f32 = 12.0;
 pub const CODE_LINE_HEIGHT: f32 = 19.0;
 pub const CODE_FONT_STACK: &str = "SF Mono, Menlo, Monaco, Consolas, monospace";
 pub const GUTTER_WIDTH: f64 = 62.0;
+/// Gap between the gutter's change bar and the first character of code.
+pub const CODE_GUTTER_GAP: f64 = 12.0;
 pub const RAIL_WIDTH: f64 = 292.0;
 pub const REVIEW_HEADER_HEIGHT: f64 = 56.0;
 pub const TAB_HEIGHT: f64 = 34.0;

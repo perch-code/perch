@@ -11,6 +11,38 @@ use floem::style::ObjectFit;
 
 use crate::theme;
 
+/// Open a link in the user's default browser.
+///
+/// Spawned and forgotten: waiting on `open` would block the UI thread for as
+/// long as the browser takes to come to the front.
+pub fn open_in_browser(url: &str) {
+    // Only ever a github.com page derived from an API url, never anything a
+    // notification's contents could steer.
+    if !url.starts_with("https://github.com/") {
+        tracing::warn!(url, "refusing to open a non-GitHub link");
+        return;
+    }
+    if let Err(e) = std::process::Command::new("open").arg(url).spawn() {
+        tracing::warn!(url, error = %e, "could not open link");
+    }
+}
+
+/// Style a row that behaves as a button.
+///
+/// floem's theme turns a label's `Selectable` flag into a text cursor, and
+/// cursor resolution is deepest-hovered-wins, so a label inside a row
+/// overrides the row's own pointer cursor. `selectable` is inherited, so
+/// clearing it once on the row covers every label inside it.
+///
+/// Note this deliberately does not make children transparent to the pointer:
+/// a selectable label does not swallow clicks, and `pointer_events_none` on
+/// the view that owns the handler would stop it receiving them at all.
+pub fn clickable(style: floem::style::Style) -> floem::style::Style {
+    style
+        .selectable(false)
+        .hover(|s| s.cursor(floem::style::CursorStyle::Pointer))
+}
+
 /// A 16px icon.
 pub fn icon(source: impl Fn() -> String + 'static) -> impl IntoView {
     svg(source).style(|s| s.size(16.0, 16.0))
@@ -201,7 +233,9 @@ pub fn sidebar_row(
     .style(|s| s.items_center().width_full().min_width(0.0));
 
     Container::new(content).style(move |s| {
-        let base = s
+        // Selectable is cleared either way, so a label never shows an I-beam
+        // over a row. Only an enabled row offers a pointer.
+        let base = if enabled { clickable(s) } else { s.selectable(false) }
             .width_full()
             .height(30.0)
             .items_center()
@@ -216,9 +250,7 @@ pub fn sidebar_row(
             base.border(1.0).border_color(Color::TRANSPARENT)
         };
         if enabled && !selected() {
-            base.hover(|s| s.background(theme::CANVAS_HOVER).cursor(floem::style::CursorStyle::Pointer))
-        } else if enabled {
-            base.hover(|s| s.cursor(floem::style::CursorStyle::Pointer))
+            base.hover(|s| s.background(theme::CANVAS_HOVER))
         } else {
             base
         }

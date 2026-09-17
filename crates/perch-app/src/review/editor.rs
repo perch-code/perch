@@ -78,12 +78,24 @@ fn code_view(
     let editor = text_editor(file.buffer.text.clone())
         .read_only()
         .styling(PerchStyling::new(file.clone(), epoch))
-        .editor_style(|s| s.hide_gutter(true))
-        .style(|s| s.size_full().min_width(0.0).background(theme::CODE_BG));
+        .editor_style(|s| {
+            // Wrapping would put a long line on several visual rows, which
+            // breaks the gutter's one-row-per-line geometry and makes a diff
+            // hard to follow. Long lines scroll sideways instead.
+            s.hide_gutter(true)
+                .wrap_method(floem::views::editor::text::WrapMethod::None)
+        })
+        .style(|s| {
+            s.size_full()
+                .min_width(0.0)
+                // Breathing room between the change bars and the first
+                // character, so a bar never reads as part of the code.
+                .padding_left(theme::CODE_GUTTER_GAP)
+                .background(theme::CODE_BG)
+        });
 
     // The gutter tracks the same signals the editor lays out from, so the two
     // stay aligned without any scroll plumbing of their own.
-    let screen_lines = editor.editor().screen_lines;
     let viewport = editor.editor().viewport;
     let cursor = editor.editor().cursor;
 
@@ -135,7 +147,7 @@ fn code_view(
         });
     }
 
-    Stack::horizontal((diff_gutter(file, screen_lines, viewport), editor))
+    Stack::horizontal((diff_gutter(file, viewport), editor))
         .style(|s| s.size_full().min_height(0.0))
 }
 

@@ -31,6 +31,33 @@ impl Thread {
         url.rsplit('/').next()?.parse().ok()
     }
 
+    /// Where this notification lives on github.com.
+    ///
+    /// Derived from the API url rather than requested, so it costs nothing.
+    /// Falls back to the repository page for subjects that have no page of
+    /// their own, such as a failed workflow run.
+    pub fn html_url(&self) -> String {
+        let repo = format!("https://github.com/{}", self.repository.full_name);
+        let Some(api_url) = self.subject.url.as_deref() else {
+            return repo;
+        };
+
+        // "https://api.github.com/repos/o/r/issues/7" -> ["o", "r", "issues", "7"]
+        let Some(rest) = api_url.split_once("/repos/").map(|(_, rest)| rest) else {
+            return repo;
+        };
+        let parts: Vec<&str> = rest.splitn(4, '/').collect();
+        if parts.len() < 4 || parts.iter().any(|p| p.is_empty()) {
+            return repo;
+        }
+
+        // The web uses /pull/N where the API uses /pulls/N. Only the subject
+        // segment is rewritten: a repository may legitimately be named
+        // "pulls", and mangling it would produce a dead link.
+        let kind = if parts[2] == "pulls" { "pull" } else { parts[2] };
+        format!("https://github.com/{}/{}/{}/{}", parts[0], parts[1], kind, parts[3])
+    }
+
     /// True when this thread's subject supports a detail fetch.
     pub fn has_detail(&self) -> bool {
         matches!(
@@ -390,6 +417,40 @@ mod tests {
     fn number_is_parsed_from_subject_url() {
         let t = thread_with_url(Some("https://api.github.com/repos/slatedb/slatedb/issues/2097"));
         assert_eq!(t.number_hint(), Some(2097));
+    }
+
+    #[test]
+    fn a_pull_request_links_to_its_web_page() {
+        let mut t = thread_with_url(Some("https://api.github.com/repos/slatedb/slatedb/pulls/2091"));
+        t.subject.kind = SubjectKind::PullRequest;
+        // The web path is /pull/, singular, where the API says /pulls/.
+        assert_eq!(t.html_url(), "https://github.com/slatedb/slatedb/pull/2091");
+    }
+
+    #[test]
+    fn an_issue_links_to_its_web_page() {
+        let t = thread_with_url(Some("https://api.github.com/repos/slatedb/slatedb/issues/1147"));
+        assert_eq!(t.html_url(), "https://github.com/slatedb/slatedb/issues/1147");
+    }
+
+    #[test]
+    fn a_subject_without_a_page_falls_back_to_the_repository() {
+        // A failed workflow run has no url of its own.
+        let t = thread_with_url(None);
+        assert_eq!(t.html_url(), "https://github.com/a/b");
+    }
+
+    #[test]
+    fn an_unrecognised_url_shape_falls_back_rather_than_producing_nonsense() {
+        let t = thread_with_url(Some("https://example.com/whatever"));
+        assert_eq!(t.html_url(), "https://github.com/a/b");
+    }
+
+    #[test]
+    fn only_the_first_pulls_segment_is_rewritten() {
+        // A repository legitimately named "pulls" must not be mangled.
+        let t = thread_with_url(Some("https://api.github.com/repos/o/pulls/issues/3"));
+        assert_eq!(t.html_url(), "https://github.com/o/pulls/issues/3");
     }
 
     #[test]
