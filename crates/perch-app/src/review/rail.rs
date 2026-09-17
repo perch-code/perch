@@ -46,7 +46,7 @@ fn mode_toggle(state: ReviewState) -> impl IntoView {
         segment(state, RailMode::AllFiles, "All files", None::<fn() -> usize>),
     ))
     .style(|s| {
-        s.height(40.0)
+        s.height(42.0)
             .width_full()
             .flex_shrink(0.0_f32)
             .items_center()
@@ -94,7 +94,7 @@ fn segment(
     .on_event_stop(el::Click, move |_, _| state.rail_mode.set(mode))
     .style(move |s| {
         let base = crate::ui::widgets::clickable(s)
-            .height(28.0)
+            .height(30.0)
             .items_center()
             .padding_horiz(11.0)
             .border_radius(theme::RADIUS)
@@ -157,7 +157,7 @@ fn changed_row(state: ReviewState, file: ChangedFile, on_open: OpenFile) -> impl
     .on_event_stop(el::Click, move |_, _| on_open(&click_path))
     .style(move |s| {
         let base = crate::ui::widgets::clickable(s)
-            .height(30.0)
+            .height(32.0)
             .width_full()
             .items_center()
             .padding_horiz(10.0)
@@ -283,7 +283,7 @@ fn tree_row(state: ReviewState, entry: TreeEntry, on_open: OpenFile) -> impl Int
     })
     .style(move |s| {
         let base = crate::ui::widgets::clickable(s)
-            .height(26.0)
+            .height(28.0)
             .width_full()
             .items_center()
             .padding_horiz(10.0);

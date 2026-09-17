@@ -66,8 +66,8 @@ fn segment(state: AppState, text: &'static str, unread_value: bool) -> impl Into
     .on_event_stop(el::Click, move |_, _| state.unread_only.set(unread_value))
     .style(move |s| {
         let base = s
-            .height(26.0)
-            .padding_horiz(13.0)
+            .height(28.0)
+            .padding_horiz(14.0)
             .items_center()
             .justify_center()
             .border_radius(4.0)
@@ -104,7 +104,7 @@ fn search_box(state: AppState) -> impl IntoView {
         s.flex_grow(1.0_f32)
             .min_width(120.0)
             .max_width(460.0)
-            .height(32.0)
+            .height(34.0)
             .items_center()
             .padding_horiz(10.0)
             .background(theme::CANVAS)

@@ -52,10 +52,10 @@ pub const AVATAR_TINTS: [Color; 6] = [
 /// Type scale, in whole pixels. The renderer rounds the size in its glyph
 /// cache key, so fractional sizes that round together share bitmaps on a
 /// non-retina display.
-pub const TEXT_TITLE: f32 = 14.0;
-pub const TEXT_BODY: f32 = 13.0;
-pub const TEXT_META: f32 = 12.0;
-pub const TEXT_BADGE: f32 = 11.0;
+pub const TEXT_TITLE: f32 = 15.0;
+pub const TEXT_BODY: f32 = 14.0;
+pub const TEXT_META: f32 = 13.0;
+pub const TEXT_BADGE: f32 = 12.0;
 pub const TEXT_SECTION: f32 = 11.0;
 
 /// How far to lift text that is centred inside a pill or a button.
@@ -68,12 +68,12 @@ pub const TEXT_SECTION: f32 = 11.0;
 pub const OPTICAL_TEXT_LIFT: f64 = 1.0;
 
 /// Layout constants.
-pub const SIDEBAR_WIDTH: f64 = 244.0;
-pub const ROW_HEIGHT: f64 = 62.0;
-pub const TOOLBAR_HEIGHT: f64 = 58.0;
-pub const STATUS_HEIGHT: f64 = 32.0;
+pub const SIDEBAR_WIDTH: f64 = 258.0;
+pub const ROW_HEIGHT: f64 = 66.0;
+pub const TOOLBAR_HEIGHT: f64 = 60.0;
+pub const STATUS_HEIGHT: f64 = 34.0;
 /// Height of the strip that replaces the title bar.
-pub const TITLEBAR_HEIGHT: f64 = 38.0;
+pub const TITLEBAR_HEIGHT: f64 = 40.0;
 /// Room the traffic lights need before anything else may sit beside them.
 ///
 /// The three buttons end around x=71 given the offset they are placed at;
@@ -83,8 +83,8 @@ pub const TRAFFIC_LIGHTS_WIDTH: f64 = 88.0;
 pub const RADIUS: f64 = 6.0;
 /// Pills get a fixed height so their text can be centred by layout rather
 /// than by padding, which the font's uneven leading throws off.
-pub const BADGE_HEIGHT: f64 = 18.0;
-pub const PILL_HEIGHT: f64 = 20.0;
+pub const BADGE_HEIGHT: f64 = 20.0;
+pub const PILL_HEIGHT: f64 = 22.0;
 pub const RADIUS_LG: f64 = 10.0;
 
 /// The system UI font, by the one generic that reaches it.
@@ -183,21 +183,21 @@ pub fn syntax_color(capture: usize) -> Color {
 
 /// Code metrics. The editor needs a fixed line height to place the gutter.
 pub const CODE_FONT_SIZE: f32 = 13.0;
-pub const CODE_LINE_HEIGHT: f32 = 20.0;
+pub const CODE_LINE_HEIGHT: f32 = 21.0;
 /// Menlo by name, and nothing else.
 ///
 /// "SF Mono" and "Consolas" are not installed here, and the `monospace`
 /// generic resolves to Courier rather than to anything a reviewer wants to
 /// read code in.
 pub const CODE_FONT_STACK: &str = "Menlo";
-pub const GUTTER_WIDTH: f64 = 66.0;
+pub const GUTTER_WIDTH: f64 = 70.0;
 /// Gap between the gutter's change bar and the first character of code.
 pub const CODE_GUTTER_GAP: f64 = 12.0;
-pub const RAIL_WIDTH: f64 = 300.0;
-pub const REVIEW_HEADER_HEIGHT: f64 = 58.0;
-pub const TAB_HEIGHT: f64 = 37.0;
+pub const RAIL_WIDTH: f64 = 312.0;
+pub const REVIEW_HEADER_HEIGHT: f64 = 60.0;
+pub const TAB_HEIGHT: f64 = 38.0;
 /// Widest a tab grows before its name is ellipsized.
-pub const TAB_MAX_WIDTH: f64 = 190.0;
+pub const TAB_MAX_WIDTH: f64 = 210.0;
 
 /// A dot beside a tab name, coloured by language.
 pub fn language_color(language: Option<perch_syntax::Language>) -> Color {

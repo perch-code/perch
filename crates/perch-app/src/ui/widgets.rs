@@ -304,7 +304,7 @@ pub fn sidebar_row(
         // over a row. Only an enabled row offers a pointer.
         let base = if enabled { clickable(s) } else { s.selectable(false) }
             .width_full()
-            .height(32.0)
+            .height(34.0)
             .items_center()
             .padding_horiz(10.0)
             .border_radius(theme::RADIUS)
