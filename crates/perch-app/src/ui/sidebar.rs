@@ -4,7 +4,7 @@ use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use floem::views::{Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack};
 
-use crate::filter::ReasonFilter;
+use crate::filter::{ReasonFilter, View};
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
@@ -35,52 +35,99 @@ pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
 }
 
 fn views_section(state: AppState, review: ReviewState) -> impl IntoView {
-    let unread = move || state.counts().unread;
+    // The three views are one control: whichever is open wears the card.
+    let rows = [
+        (View::Inbox, SidebarIcon::Inbox),
+        (View::Saved, SidebarIcon::Bookmark),
+        (View::Done, SidebarIcon::Check),
+    ];
 
     Stack::vertical((
-        // Inbox is the only implemented view; it is always the active one.
-        Container::new(inbox_row(unread)).on_event_stop(el::Click, move |_, _| {
-            // Doubles as the way back from a pull request.
-            review.close();
-            state.clear_filters();
-        }),
-        // Saved and Done need endpoints the REST API does not expose. They
-        // are shown so the rail matches the web UI, and are inert.
-        sidebar_row(SidebarIcon::Bookmark, "Saved".into(), || false, false, None),
-        sidebar_row(SidebarIcon::Check, "Done".into(), || false, false, None),
+        view_row(state, review, rows[0].0, rows[0].1),
+        view_row(state, review, rows[1].0, rows[1].1),
+        view_row(state, review, rows[2].0, rows[2].1),
     ))
     .style(|s| s.width_full().gap(1.0))
 }
 
-fn inbox_row(unread: impl Fn() -> usize + 'static + Copy) -> impl IntoView {
+/// One of Inbox, Saved and Done.
+///
+/// Clicking any of them also leaves a pull request, so the rail is the way
+/// back from the review view as well as the way between lists.
+fn view_row(
+    state: AppState,
+    review: ReviewState,
+    view: View,
+    icon: SidebarIcon,
+) -> impl IntoView {
+    use floem::peniko::Color;
     use floem::text::FontWeight;
     use floem::views::{Label, Stack};
 
+    let selected = move || state.view.get() == view && !review.is_open();
+    let count = move || {
+        let c = state.counts();
+        match view {
+            // The inbox badge counts what is still asking for attention, so
+            // dismissing a thread quiets it.
+            View::Inbox => c.unread,
+            View::Saved => c.saved,
+            View::Done => c.done,
+        }
+    };
+
     let content = Stack::horizontal((
-        crate::ui::widgets::sidebar_glyph(SidebarIcon::Inbox, theme::FG),
-        Label::derived(|| "Inbox").style(|s| {
+        dyn_container(
+            move || if selected() { theme::FG } else { theme::FG_MUTED },
+            move |c| crate::ui::widgets::sidebar_glyph(icon, c).into_any(),
+        )
+        .style(|s| s.size(16.0, 16.0)),
+        Label::derived(move || view.label()).style(move |s| {
             s.font_size(theme::TEXT_BODY)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .color(theme::FG)
+                .font_weight(if selected() {
+                    FontWeight::SEMI_BOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .color(if selected() { theme::FG } else { theme::FG_MUTED })
                 .margin_left(9.0)
                 .flex_grow(1.0_f32)
         }),
-        count_badge(unread, true),
+        dyn_container(count, move |n| {
+            if n == 0 {
+                Empty::new().into_any()
+            } else {
+                count_badge(move || n, selected() && view == View::Inbox).into_any()
+            }
+        }),
     ))
     .style(|s| s.items_center().width_full());
 
-    Container::new(content).style(|s| {
-        crate::ui::widgets::clickable(s)
-            .width_full()
-            .height(34.0)
-            .items_center()
-            .padding_horiz(10.0)
-            .margin_horiz(6.0)
-            .border_radius(theme::RADIUS)
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER)
-    })
+    Container::new(content)
+        .on_event_stop(el::Click, move |_, _| {
+            // Doubles as the way back from a pull request.
+            review.close();
+            state.clear_filters();
+            state.set_view(view);
+        })
+        .style(move |s| {
+            let base = crate::ui::widgets::clickable(s)
+                .width_full()
+                .height(34.0)
+                .items_center()
+                .padding_horiz(10.0)
+                .margin_horiz(6.0)
+                .border_radius(theme::RADIUS);
+            if selected() {
+                base.background(theme::CANVAS)
+                    .border(1.0)
+                    .border_color(theme::BORDER)
+            } else {
+                base.border(1.0)
+                    .border_color(Color::TRANSPARENT)
+                    .hover(|s| s.background(theme::CANVAS_HOVER))
+            }
+        })
 }
 
 fn filters_section(state: AppState) -> impl IntoView {

@@ -209,6 +209,13 @@ impl AppState {
             .with(|marks| filter::counts(&pool, marks, self.view.get()))
     }
 
+    /// How many threads the open view holds, before the other filters.
+    pub fn view_total(&self) -> usize {
+        let pool = self.pool();
+        self.marks
+            .with(|marks| filter::view_total(&pool, marks, self.view.get()))
+    }
+
     pub fn is_saved(&self, thread_id: &str) -> bool {
         self.marks.with(|m| m.get(thread_id).is_some_and(|m| m.saved))
     }

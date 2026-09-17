@@ -199,6 +199,17 @@ pub fn pool(live: &[Thread], marks: &HashMap<String, Mark>) -> Vec<Thread> {
     out
 }
 
+/// How many of these threads the view holds, before any other filter.
+///
+/// What the empty state needs: an empty Saved is a different thing to say
+/// than a search that matched nothing inside it.
+pub fn view_total(threads: &[Thread], marks: &HashMap<String, Mark>, view: View) -> usize {
+    threads
+        .iter()
+        .filter(|t| view.accepts(marks.get(&t.id)))
+        .count()
+}
+
 /// Apply filters, then sort.
 pub fn visible(
     threads: &[Thread],

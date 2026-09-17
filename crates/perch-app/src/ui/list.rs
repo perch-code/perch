@@ -7,7 +7,7 @@ use floem::views::{
 };
 
 use crate::backend::Status;
-use crate::filter::{Group, Section};
+use crate::filter::{Group, Section, View};
 use crate::icons::SidebarIcon;
 use crate::state::AppState;
 use crate::theme;
@@ -28,12 +28,11 @@ pub fn list(state: AppState, on_open: OpenThread) -> impl IntoView {
                 || "Fetching your inbox from GitHub.".to_string(),
             )
             .into_any(),
-            ListMode::Empty => centered_message(
-                SidebarIcon::Inbox,
-                || "You are all caught up".to_string(),
-                || "No notifications in your inbox.".to_string(),
-            )
-            .into_any(),
+            ListMode::Empty(view) => {
+                let (icon, title, detail) = empty_state(view);
+                centered_message(icon, move || title.to_string(), move || detail.to_string())
+                    .into_any()
+            }
             ListMode::NoMatches => centered_message(
                 SidebarIcon::Search,
                 || "No notifications match".to_string(),
@@ -56,9 +55,31 @@ pub fn list(state: AppState, on_open: OpenThread) -> impl IntoView {
 enum ListMode {
     NoToken,
     Loading,
-    Empty,
+    /// The open view holds nothing at all, which each view says its own way.
+    Empty(View),
     NoMatches,
     Rows,
+}
+
+/// What an empty view says for itself.
+fn empty_state(view: View) -> (SidebarIcon, &'static str, &'static str) {
+    match view {
+        View::Inbox => (
+            SidebarIcon::Inbox,
+            "You are all caught up",
+            "No notifications in your inbox.",
+        ),
+        View::Saved => (
+            SidebarIcon::Bookmark,
+            "Nothing saved",
+            "Bookmark a notification to keep it here.",
+        ),
+        View::Done => (
+            SidebarIcon::Check,
+            "Nothing done yet",
+            "Notifications you finish with land here.",
+        ),
+    }
 }
 
 impl ListMode {
@@ -69,8 +90,8 @@ impl ListMode {
         if !state.loaded.get() {
             return ListMode::Loading;
         }
-        if state.threads.with(|t| t.is_empty()) {
-            return ListMode::Empty;
+        if state.view_total() == 0 {
+            return ListMode::Empty(state.view.get());
         }
         if state.visible().is_empty() {
             return ListMode::NoMatches;
