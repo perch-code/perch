@@ -15,7 +15,6 @@ use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
 
 pub fn toolbar(state: AppState) -> impl IntoView {
     Stack::horizontal((
-        closed_drawer_controls(state),
         segmented(state),
         search_box(state),
         menu_picker("Sort by", state.sort, Sort::ALL),
@@ -118,24 +117,6 @@ fn search_box(state: AppState) -> impl IntoView {
                     .box_shadow_color(theme::ACCENT_RING)
             })
     })
-}
-
-/// The lights and the toggle, but only while the drawer is hidden. When it
-/// is open they live there instead.
-fn closed_drawer_controls(state: AppState) -> impl IntoView {
-    floem::views::dyn_container(
-        move || state.sidebar_open.get(),
-        move |open| {
-            if open {
-                floem::views::Empty::new().into_any()
-            } else {
-                crate::ui::widgets::drawer_controls(state, true)
-                    .style(|s| s.margin_right(4.0))
-                    .into_any()
-            }
-        },
-    )
-    .style(|s| s.height_full().flex_shrink(0.0_f32).items_center())
 }
 
 /// A caption, the current value, and a native popup menu of the options.

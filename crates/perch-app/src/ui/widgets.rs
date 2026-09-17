@@ -52,7 +52,7 @@ pub fn drawer_controls(state: AppState, reserve_lights: bool) -> impl IntoView {
     .style(|s| s.height_full().flex_shrink(0.0_f32).items_center())
 }
 
-fn drawer_toggle(state: AppState) -> impl IntoView {
+pub fn drawer_toggle(state: AppState) -> impl IntoView {
     Container::new(sidebar_glyph(SidebarIcon::Sidebar, theme::FG_MUTED))
         .on_event_stop(el::Click, move |_, _| {
             state.sidebar_open.update(|open| *open = !*open);

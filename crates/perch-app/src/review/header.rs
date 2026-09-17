@@ -15,7 +15,6 @@ use crate::ui::widgets::{avatar, sidebar_glyph};
 
 pub fn header(app: AppState, state: ReviewState, on_back: impl Fn() + 'static) -> impl IntoView {
     Stack::horizontal((
-        closed_drawer_controls(app),
         back_button(on_back),
         icon_and_title(app, state),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
@@ -33,23 +32,6 @@ pub fn header(app: AppState, state: ReviewState, on_back: impl Fn() + 'static) -
             .border_bottom(1.0)
             .border_color(theme::BORDER)
     })
-}
-
-/// The lights and the toggle, but only while the drawer is hidden.
-fn closed_drawer_controls(app: AppState) -> impl IntoView {
-    dyn_container(
-        move || app.sidebar_open.get(),
-        move |open| {
-            if open {
-                Empty::new().into_any()
-            } else {
-                crate::ui::widgets::drawer_controls(app, true)
-                    .style(|s| s.margin_right(4.0))
-                    .into_any()
-            }
-        },
-    )
-    .style(|s| s.height_full().flex_shrink(0.0_f32).items_center())
 }
 
 fn back_button(on_back: impl Fn() + 'static) -> impl IntoView {

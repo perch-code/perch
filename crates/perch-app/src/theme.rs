@@ -69,6 +69,13 @@ pub const OPTICAL_TEXT_LIFT: f64 = 1.0;
 
 /// Layout constants.
 pub const SIDEBAR_WIDTH: f64 = 258.0;
+/// The icon-only rail the drawer collapses to.
+///
+/// Wider than an editor's activity bar because the traffic lights sit at the
+/// top of it, and they need the room.
+pub const COLLAPSED_RAIL_WIDTH: f64 = 72.0;
+/// One entry in that rail.
+pub const RAIL_ENTRY_SIZE: f64 = 44.0;
 pub const ROW_HEIGHT: f64 = 66.0;
 pub const TOOLBAR_HEIGHT: f64 = 60.0;
 pub const STATUS_HEIGHT: f64 = 34.0;

@@ -1,8 +1,8 @@
 //! Left rail: views, reason filters, and the repository list.
 
 use floem::prelude::*;
-use floem::reactive::SignalWith;
-use floem::views::{Container, Decorators, ScrollExt, Stack, dyn_stack};
+use floem::reactive::{SignalGet, SignalWith};
+use floem::views::{Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack};
 
 use crate::filter::ReasonFilter;
 use crate::icons::SidebarIcon;
@@ -180,3 +180,143 @@ fn repo_row(state: AppState, name: String, count: usize, avatar_url: String) -> 
     })
 }
 
+
+/// The drawer, collapsed to icons.
+///
+/// Modelled on an editor's activity bar: a narrow column of destinations,
+/// the current one marked with a stripe down its left edge. Only the inbox
+/// lives here so far.
+///
+/// It keeps the traffic lights, which is why it is wider than the 48 pixels
+/// an editor would use. Because this column is always present in one form or
+/// the other, nothing else in the window has to leave room for them.
+pub fn collapsed_rail(state: AppState, review: ReviewState) -> impl IntoView {
+    use floem::views::drag_window_area;
+
+    Stack::vertical((
+        // The lights sit over this.
+        drag_window_area(Empty::new().style(|s| s.size_full()))
+            .style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().flex_shrink(0.0_f32)),
+        Container::new(crate::ui::widgets::drawer_toggle(state)).style(|s| {
+            s.width_full()
+                .height(34.0)
+                .flex_shrink(0.0_f32)
+                .items_center()
+                .justify_center()
+        }),
+        Empty::new().style(|s| {
+            s.height(1.0)
+                .width(theme::RAIL_ENTRY_SIZE)
+                .margin_vert(6.0)
+                .flex_shrink(0.0_f32)
+                .background(theme::BORDER_MUTED)
+        }),
+        rail_entry(state, review),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+    ))
+    .style(|s| {
+        s.width(theme::COLLAPSED_RAIL_WIDTH)
+            .height_full()
+            .flex_col()
+            .flex_shrink(0.0_f32)
+            .items_center()
+            .background(theme::CANVAS_SIDEBAR)
+            .border_right(1.0)
+            .border_color(theme::BORDER)
+    })
+}
+
+/// The inbox entry: an icon, the unread count, and a stripe when it is the
+/// view on screen.
+fn rail_entry(state: AppState, review: ReviewState) -> impl IntoView {
+    use floem::peniko::Color;
+    use floem::style::Position;
+
+    let unread = move || state.counts().unread;
+    // The inbox is showing whenever a pull request is not.
+    let active = move || !review.is_showing();
+
+    Container::new(
+        Container::new(Stack::horizontal((
+            dyn_container(active, move |on| {
+                crate::ui::widgets::sidebar_glyph(
+                    SidebarIcon::Inbox,
+                    if on { theme::FG } else { theme::FG_SUBTLE },
+                )
+                .style(|s| s.size(20.0, 20.0))
+                .into_any()
+            })
+            .style(|s| s.size(20.0, 20.0)),
+            unread_badge(unread),
+        )))
+        .style(move |s| {
+            let base = crate::ui::widgets::clickable(s)
+                .size(theme::RAIL_ENTRY_SIZE, theme::RAIL_ENTRY_SIZE)
+                .items_center()
+                .justify_center()
+                .border_radius(theme::RADIUS)
+                .position(Position::Relative);
+            if active() {
+                base.background(theme::CANVAS)
+            } else {
+                base.hover(|s| s.background(theme::CANVAS_HOVER))
+            }
+        }),
+    )
+    .on_event_stop(el::Click, move |_, _| {
+        review.close();
+        state.clear_filters();
+    })
+    .style(move |s| {
+        // The stripe is the container's own left border, so it runs the full
+        // height of the entry rather than floating beside it.
+        let base = s
+            .width_full()
+            .height(theme::RAIL_ENTRY_SIZE)
+            .flex_shrink(0.0_f32)
+            .items_center()
+            .justify_center();
+        if active() {
+            base.border_left(2.0).border_color(theme::ACCENT)
+        } else {
+            base.border_left(2.0).border_color(Color::TRANSPARENT)
+        }
+    })
+}
+
+/// A small count over the corner of a rail icon.
+fn unread_badge(unread: impl Fn() -> usize + 'static + Copy) -> impl IntoView {
+    use floem::style::Position;
+
+    dyn_container(
+        unread,
+        move |n| {
+            if n == 0 {
+                Empty::new().into_any()
+            } else {
+                Container::new(
+                    Label::derived(move || if n > 99 { "99+".to_string() } else { n.to_string() })
+                        .style(|s| {
+                            s.font_size(9.0)
+                                .color(theme::CANVAS)
+                                .selectable(false)
+                                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
+                        }),
+                )
+                .style(|s| {
+                    s.position(Position::Absolute)
+                        .inset_right(-4.0)
+                        .inset_bottom(-3.0)
+                        .height(14.0)
+                        .min_width(14.0)
+                        .padding_horiz(3.0)
+                        .border_radius(7.0)
+                        .background(theme::ACCENT)
+                        .items_center()
+                        .justify_center()
+                })
+                .into_any()
+            }
+        },
+    )
+}

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::SignalUpdate;
-use floem::views::{Decorators, Empty, Stack, dyn_container};
+use floem::views::{Decorators, Stack, dyn_container};
 
 use crate::backend::Backend;
 use crate::review::model::ReviewState;
@@ -53,7 +53,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     if open {
                         sidebar::sidebar(state, review).into_any()
                     } else {
-                        Empty::new().into_any()
+                        sidebar::collapsed_rail(state, review).into_any()
                     }
                 },
             ),
