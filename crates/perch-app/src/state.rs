@@ -34,6 +34,8 @@ pub struct AppState {
     pub loaded: RwSignal<bool>,
     /// Ticks forward on refresh, to re-render relative timestamps.
     pub now: RwSignal<Timestamp>,
+    /// Whether the left drawer is showing.
+    pub sidebar_open: RwSignal<bool>,
 }
 
 impl Default for AppState {
@@ -57,6 +59,7 @@ impl AppState {
             status: RwSignal::new(Status::Refreshing),
             loaded: RwSignal::new(false),
             now: RwSignal::new(Timestamp::now()),
+            sidebar_open: RwSignal::new(true),
         }
     }
 

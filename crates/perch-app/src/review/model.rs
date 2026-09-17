@@ -107,6 +107,9 @@ pub struct ReviewState {
     /// The head position the last request was made about, so the definition
     /// button asks about the same symbol the panel is describing.
     pub last_position: RwSignal<Option<(usize, usize)>>,
+    /// Directories the reader has opened in the All files tree. A checkout
+    /// has thousands of entries, so everything starts collapsed.
+    pub expanded: RwSignal<std::collections::HashSet<String>>,
 }
 
 /// How many tabs stay open before the oldest is dropped.
@@ -140,6 +143,7 @@ impl ReviewState {
             pending_jump: RwSignal::new(None),
             jump_to_line: RwSignal::new(None),
             last_position: RwSignal::new(None),
+            expanded: RwSignal::new(std::collections::HashSet::new()),
         }
     }
 
@@ -165,6 +169,7 @@ impl ReviewState {
         self.loading.set(HashMap::new());
         self.rail_mode.set(RailMode::Changed);
         self.lsp_status.set(perch_lsp::Status::Absent);
+        self.expanded.set(std::collections::HashSet::new());
         self.dismiss_hover();
     }
 

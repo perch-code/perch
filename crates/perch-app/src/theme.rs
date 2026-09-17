@@ -61,6 +61,10 @@ pub const SIDEBAR_WIDTH: f64 = 236.0;
 pub const ROW_HEIGHT: f64 = 58.0;
 pub const TOOLBAR_HEIGHT: f64 = 56.0;
 pub const STATUS_HEIGHT: f64 = 30.0;
+/// Height of the strip that replaces the title bar.
+pub const TITLEBAR_HEIGHT: f64 = 38.0;
+/// Room the traffic lights need before anything else may sit in that strip.
+pub const TRAFFIC_LIGHTS_WIDTH: f64 = 72.0;
 pub const RADIUS: f64 = 6.0;
 pub const RADIUS_LG: f64 = 10.0;
 

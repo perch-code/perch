@@ -12,7 +12,7 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::SignalUpdate;
-use floem::views::{Decorators, Stack, dyn_container};
+use floem::views::{Decorators, Empty, Stack, dyn_container};
 
 use crate::backend::Backend;
 use crate::review::model::ReviewState;
@@ -25,6 +25,55 @@ const OS_MOD: Modifiers = if cfg!(target_os = "macos") {
 } else {
     Modifiers::CONTROL
 };
+
+/// The strip that stands in for the title bar.
+///
+/// The window is drawn without one, so this reserves room for the traffic
+/// lights, carries the drawer toggle, and is draggable everywhere else so
+/// the window can still be moved.
+fn titlebar(state: AppState) -> impl IntoView {
+    use floem::views::drag_window_area;
+
+    drag_window_area(
+        Stack::horizontal((
+            Empty::new().style(|s| {
+                s.width(theme::TRAFFIC_LIGHTS_WIDTH).height_full().flex_shrink(0.0_f32)
+            }),
+            drawer_toggle(state),
+            Empty::new().style(|s| s.flex_grow(1.0_f32).height_full()),
+        ))
+        .style(|s| s.size_full().items_center()),
+    )
+    .style(|s| {
+        s.height(theme::TITLEBAR_HEIGHT)
+            .width_full()
+            .flex_shrink(0.0_f32)
+            .items_center()
+            .background(theme::CANVAS_SIDEBAR)
+            .border_bottom(1.0)
+            .border_color(theme::BORDER)
+    })
+}
+
+fn drawer_toggle(state: AppState) -> impl IntoView {
+    use floem::views::Container;
+
+    Container::new(widgets::sidebar_glyph(
+        crate::icons::SidebarIcon::Sidebar,
+        theme::FG_MUTED,
+    ))
+    .on_event_stop(el::Click, move |_, _| {
+        state.sidebar_open.update(|open| *open = !*open);
+    })
+    .style(|s| {
+        widgets::clickable(s)
+            .size(26.0, 26.0)
+            .items_center()
+            .justify_center()
+            .border_radius(theme::RADIUS)
+            .hover(|s| s.background(theme::CANVAS_HOVER))
+    })
+}
 
 pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let review_backend = backend.clone();
@@ -44,8 +93,20 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     });
 
     Stack::vertical((
+        titlebar(state),
         Stack::horizontal((
-            sidebar::sidebar(state, review),
+            // The drawer slides away entirely rather than narrowing, so the
+            // list gets the whole window when it is closed.
+            dyn_container(
+                move || state.sidebar_open.get(),
+                move |open| {
+                    if open {
+                        sidebar::sidebar(state, review).into_any()
+                    } else {
+                        Empty::new().into_any()
+                    }
+                },
+            ),
             // The review view replaces the inbox in place, so the sidebar and
             // the status line stay where they were.
             dyn_container(
@@ -84,6 +145,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     return EventPropagation::Stop;
                 }
                 EventPropagation::Continue
+            }
+            // Show or hide the drawer.
+            Code::Backslash => {
+                state.sidebar_open.update(|open| *open = !*open);
+                EventPropagation::Stop
             }
             // Back to the inbox.
             Code::BracketLeft => {

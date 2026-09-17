@@ -8,11 +8,12 @@ pub mod model;
 pub mod rail;
 pub mod styling;
 pub mod tabs;
+pub mod tree;
 
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{SignalGet, SignalWith};
+use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use floem::views::{Decorators, Stack, dyn_container};
 
 use crate::backend::Backend;
@@ -33,6 +34,9 @@ pub fn review_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> i
     let open_file: OpenFile = Rc::new({
         let backend = backend.clone();
         move |path: &str| {
+            // Open the path to it in the tree, so a file reached from the
+            // changed list or from a definition can be found there too.
+            state.expanded.update(|expanded| tree::reveal(expanded, path));
             if state.open_tab(path) {
                 backend.open_file(path);
             }

@@ -9,7 +9,10 @@ use floem::views::{Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dy
 use perch_git::{ChangeStatus, ChangedFile, TreeEntry};
 
 use crate::review::model::{RailMode, ReviewState};
+use crate::review::tree;
 use crate::review::OpenFile;
+use crate::icons::SidebarIcon;
+use crate::ui::widgets::sidebar_glyph;
 use crate::theme;
 
 pub fn rail(state: ReviewState, on_open: OpenFile) -> impl IntoView {
@@ -205,7 +208,11 @@ fn counts(additions: u32, deletions: u32, binary: bool) -> impl IntoView {
 
 fn tree_list(state: ReviewState, on_open: OpenFile) -> impl IntoView {
     dyn_stack(
-        move || state.tree.get().as_ref().clone(),
+        move || {
+            state
+                .expanded
+                .with(|expanded| tree::visible_entries(state.tree.get().as_ref(), expanded))
+        },
         |e| e.path.clone(),
         move |e| tree_row(state, e, on_open.clone()),
     )
@@ -218,6 +225,8 @@ fn tree_row(state: ReviewState, entry: TreeEntry, on_open: OpenFile) -> impl Int
     let click_path = entry.path.clone();
     let status_path = entry.path.clone();
     let (name_path, row_path) = (entry.path.clone(), entry.path.clone());
+    let chevron_path = entry.path.clone();
+    let is_expanded = move || state.expanded.with(|e| e.contains(&chevron_path));
     let is_dir = entry.is_dir;
     let depth = entry.depth;
     let name = entry
@@ -235,11 +244,22 @@ fn tree_row(state: ReviewState, entry: TreeEntry, on_open: OpenFile) -> impl Int
 
     Stack::horizontal((
         Empty::new().style(move |s| s.width(depth as f64 * 12.0).flex_shrink(0.0_f32)),
-        Label::derived(move || if is_dir { "\u{25b8}" } else { " " }.to_string()).style(|s| {
-            s.font_size(9.0)
-                .color(theme::FG_SUBTLE)
-                .width(11.0)
+        // A chevron drawn rather than typed: the arrow characters are not in
+        // the UI font and rendered as missing-glyph boxes.
+        Container::new(dyn_container(
+            move || is_dir.then(&is_expanded),
+            move |open| match open {
+                Some(true) => sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE).into_any(),
+                Some(false) => sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE).into_any(),
+                None => Empty::new().into_any(),
+            },
+        ))
+        .style(|s| {
+            s.size(14.0, 14.0)
                 .flex_shrink(0.0_f32)
+                .items_center()
+                .justify_center()
+                .margin_right(3.0)
         }),
         Label::derived(move || name.clone()).style(move |s| {
             s.font_size(theme::TEXT_META)
@@ -255,7 +275,9 @@ fn tree_row(state: ReviewState, entry: TreeEntry, on_open: OpenFile) -> impl Int
         }),
     ))
     .on_event_stop(el::Click, move |_, _| {
-        if !is_dir {
+        if is_dir {
+            state.expanded.update(|expanded| tree::toggle(expanded, &click_path));
+        } else {
             on_open(&click_path);
         }
     })
@@ -265,11 +287,7 @@ fn tree_row(state: ReviewState, entry: TreeEntry, on_open: OpenFile) -> impl Int
             .width_full()
             .items_center()
             .padding_horiz(10.0);
-        let base = if is_dir {
-            base
-        } else {
-            base.hover(|s| s.background(theme::CANVAS_HOVER))
-        };
+        let base = base.hover(|s| s.background(theme::CANVAS_HOVER));
         if active_row() {
             base.background(theme::ACCENT_SUBTLE)
         } else {

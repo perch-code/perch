@@ -97,7 +97,16 @@ fn main() {
                 WindowConfig::default()
                     .size(Size::new(1280.0, 820.0))
                     .min_size(Size::new(900.0, 600.0))
-                    .title("Perch"),
+                    .title("Perch")
+                    .with_mac_os_config(|mac| {
+                        // No title bar: the content runs to the top of the
+                        // window and the app draws its own strip, with the
+                        // traffic lights sitting in it.
+                        mac.full_size_content_view(true)
+                            .transparent_title_bar(true)
+                            .hide_title(true)
+                            .traffic_lights_offset((19.0, 12.0))
+                    }),
             ),
         )
         .run();
