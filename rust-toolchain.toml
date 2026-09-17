@@ -1,0 +1,5 @@
+# floem's git main requires a recent compiler. Pinned so the build is
+# reproducible without changing the machine's default toolchain.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

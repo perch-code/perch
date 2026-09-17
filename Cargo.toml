@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/perch-github", "crates/perch-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+jiff = { version = "0.2", features = ["serde"] }
+directories = "6"
+toml = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
