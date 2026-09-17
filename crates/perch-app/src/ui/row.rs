@@ -11,7 +11,7 @@ use crate::icons;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
-use crate::ui::widgets::{avatar, icon, reason_pill};
+use crate::ui::widgets::{avatar, icon_in, reason_pill};
 
 pub fn row(state: AppState, thread: Thread, on_open: OpenThread) -> impl IntoView {
     let unread = thread.unread;
@@ -79,10 +79,17 @@ fn unread_dot(unread: bool) -> impl IntoView {
 fn state_icon(state: AppState, thread: Thread) -> impl IntoView {
     let id = thread.id.clone();
     let kind = thread.subject.kind.clone();
-    icon(move || match state.detail_for(&id) {
-        Some(d) => icons::state_icon(d.state),
-        None => icons::kind_icon(&kind),
-    })
+    let color_id = thread.id.clone();
+    icon_in(
+        move || match state.detail_for(&id) {
+            Some(d) => icons::state_icon(d.state),
+            None => icons::kind_icon(&kind),
+        },
+        move || match state.detail_for(&color_id) {
+            Some(d) => icons::state_color(d.state),
+            None => theme::FG_SUBTLE,
+        },
+    )
     .style(|s| s.margin_right(10.0).flex_shrink(0.0_f32))
 }
 

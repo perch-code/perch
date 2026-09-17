@@ -43,13 +43,17 @@ pub fn clickable(style: floem::style::Style) -> floem::style::Style {
         .hover(|s| s.cursor(floem::style::CursorStyle::Pointer))
 }
 
-/// A 16px icon.
-pub fn icon(source: impl Fn() -> String + 'static) -> impl IntoView {
-    svg(source).style(|s| s.size(16.0, 16.0))
+/// A 16px icon in a colour of its own.
+///
+/// floem draws an SVG in the view's text colour rather than the markup's
+/// fills, so the colour has to be set on the view or every icon comes out
+/// the same near-black as the body text.
+pub fn icon_in(source: impl Fn() -> String + 'static, color: impl Fn() -> Color + 'static) -> impl IntoView {
+    svg(source).style(move |s| s.size(16.0, 16.0).color(color()))
 }
 
 pub fn sidebar_glyph(name: SidebarIcon, color: Color) -> impl IntoView {
-    icon(move || icons::sidebar_icon(name, color))
+    icon_in(move || icons::sidebar_icon(name, color), move || color)
 }
 
 /// A rounded count pill, as used beside every sidebar row.

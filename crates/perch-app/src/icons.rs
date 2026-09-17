@@ -9,15 +9,18 @@ use perch_github::{SubjectKind, SubjectState};
 use crate::theme;
 
 /// Wrap a fragment in a 16x16 SVG envelope.
+/// Every icon is drawn in a single colour.
+///
+/// floem paints an SVG with the view's inherited text colour, overriding any
+/// `fill` in the markup, so a two-colour glyph collapses into one. The colour
+/// is still written into the markup here, because it is what the tests read
+/// and what a renderer without that override would use; the view sets the
+/// same colour on itself so the two agree.
 fn svg16(body: &str) -> String {
     format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">{body}</svg>"#
     )
 }
-
-/// White, as a variable rather than a literal: a `"#` sequence would close a
-/// `r#"..."#` raw string early.
-const WHITE: &str = "#ffffff";
 
 fn hex(c: Color) -> String {
     let [r, g, b, _] = c.to_rgba8().to_u8_array();
@@ -43,9 +46,9 @@ pub fn state_icon(state: SubjectState) -> String {
                <circle cx="8" cy="8" r="2" fill="{c}"/>"#
         ),
         SubjectState::IssueClosed => format!(
-            r#"<circle cx="8" cy="8" r="7" fill="{c}"/>
-               <path d="M4.9 8.3 L7 10.4 L11.2 5.9" fill="none" stroke="{WHITE}"
-                     stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>"#
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
+               <path d="M5.1 8.2 L7.1 10.2 L11 5.9" fill="none" stroke="{c}"
+                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SubjectState::IssueNotPlanned => format!(
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>

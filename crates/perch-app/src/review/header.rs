@@ -125,8 +125,8 @@ fn state_icon(state: ReviewState) -> impl IntoView {
     };
 
     dyn_container(subject_state, move |s| match s {
-        Some(s) => floem::views::svg(move || icons::state_icon(s))
-            .style(|s| s.size(18.0, 18.0))
+        Some(state) => floem::views::svg(move || icons::state_icon(state))
+            .style(move |s| s.size(18.0, 18.0).color(icons::state_color(state)))
             .into_any(),
         None => Empty::new().into_any(),
     })
