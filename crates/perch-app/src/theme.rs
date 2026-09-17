@@ -72,3 +72,91 @@ pub fn tint_for(seed: &str) -> Color {
     let sum: u32 = seed.bytes().map(u32::from).sum();
     AVATAR_TINTS[(sum as usize) % AVATAR_TINTS.len()]
 }
+
+// ---------------------------------------------------------------------------
+// Review view
+// ---------------------------------------------------------------------------
+
+/// Code surfaces.
+pub const CODE_BG: Color = Color::from_rgb8(0xff, 0xff, 0xff);
+pub const GUTTER_BG: Color = Color::from_rgb8(0xfc, 0xfd, 0xfd);
+pub const GUTTER_FG: Color = Color::from_rgb8(0x8c, 0x95, 0x9f);
+pub const RAIL_BG: Color = Color::from_rgb8(0xfa, 0xfb, 0xfc);
+
+/// Diff line backgrounds, from GitHub's light diff.
+pub const DIFF_ADDED_BG: Color = Color::from_rgb8(0xe6, 0xff, 0xec);
+pub const DIFF_MODIFIED_BG: Color = Color::from_rgb8(0xe6, 0xff, 0xec);
+pub const DIFF_DELETED_BG: Color = Color::from_rgb8(0xff, 0xeb, 0xe9);
+
+/// The bars drawn in the gutter beside a changed line.
+pub const DIFF_ADDED_BAR: Color = Color::from_rgb8(0x2d, 0xa4, 0x4e);
+pub const DIFF_MODIFIED_BAR: Color = Color::from_rgb8(0xbf, 0x87, 0x00);
+pub const DIFF_DELETED_BAR: Color = Color::from_rgb8(0xcf, 0x22, 0x2e);
+
+/// Deleted code is dimmed, since it is context rather than the thing under
+/// review.
+pub const DIFF_DELETED_FG: Color = Color::from_rgb8(0x82, 0x5a, 0x57);
+
+/// Status letters in the changed-files rail.
+pub const STATUS_ADDED: Color = Color::from_rgb8(0x1a, 0x7f, 0x37);
+pub const STATUS_MODIFIED: Color = Color::from_rgb8(0x9a, 0x67, 0x00);
+pub const STATUS_DELETED: Color = Color::from_rgb8(0xcf, 0x22, 0x2e);
+pub const STATUS_RENAMED: Color = Color::from_rgb8(0x82, 0x50, 0xdf);
+
+/// Syntax colours, indexed to match `perch_syntax::CAPTURES`.
+///
+/// GitHub's light theme, so code in Perch looks like code on the site the
+/// pull request came from.
+pub const SYNTAX_DEFAULT: Color = Color::from_rgb8(0x1f, 0x23, 0x28);
+const SYNTAX_KEYWORD: Color = Color::from_rgb8(0xcf, 0x22, 0x2e);
+const SYNTAX_STRING: Color = Color::from_rgb8(0x0a, 0x30, 0x69);
+const SYNTAX_COMMENT: Color = Color::from_rgb8(0x6e, 0x77, 0x81);
+const SYNTAX_FUNCTION: Color = Color::from_rgb8(0x82, 0x50, 0xdf);
+const SYNTAX_TYPE: Color = Color::from_rgb8(0x95, 0x38, 0x00);
+const SYNTAX_NUMBER: Color = Color::from_rgb8(0x05, 0x50, 0xae);
+const SYNTAX_VARIABLE: Color = Color::from_rgb8(0x1f, 0x23, 0x28);
+const SYNTAX_PUNCT: Color = Color::from_rgb8(0x57, 0x60, 0x6a);
+const SYNTAX_TAG: Color = Color::from_rgb8(0x11, 0x63, 0x29);
+
+/// Colour for a capture index from `perch_syntax::CAPTURES`.
+pub fn syntax_color(capture: usize) -> Color {
+    // The order here mirrors CAPTURES exactly.
+    const COLORS: &[Color] = &[
+        SYNTAX_FUNCTION, // attribute
+        SYNTAX_COMMENT,  // comment
+        SYNTAX_NUMBER,   // constant
+        SYNTAX_NUMBER,   // constant.builtin
+        SYNTAX_TYPE,     // constructor
+        SYNTAX_STRING,   // escape
+        SYNTAX_FUNCTION, // function
+        SYNTAX_FUNCTION, // function.builtin
+        SYNTAX_FUNCTION, // function.macro
+        SYNTAX_FUNCTION, // function.method
+        SYNTAX_KEYWORD,  // keyword
+        SYNTAX_TYPE,     // label
+        SYNTAX_NUMBER,   // number
+        SYNTAX_KEYWORD,  // operator
+        SYNTAX_VARIABLE, // property
+        SYNTAX_PUNCT,    // punctuation
+        SYNTAX_PUNCT,    // punctuation.bracket
+        SYNTAX_PUNCT,    // punctuation.delimiter
+        SYNTAX_STRING,   // string
+        SYNTAX_STRING,   // string.special
+        SYNTAX_TAG,      // tag
+        SYNTAX_TYPE,     // type
+        SYNTAX_TYPE,     // type.builtin
+        SYNTAX_VARIABLE, // variable
+        SYNTAX_KEYWORD,  // variable.builtin
+        SYNTAX_VARIABLE, // variable.parameter
+    ];
+    COLORS.get(capture).copied().unwrap_or(SYNTAX_DEFAULT)
+}
+
+/// Code metrics. The editor needs a fixed line height to place the gutter.
+pub const CODE_FONT_SIZE: f32 = 12.0;
+pub const CODE_LINE_HEIGHT: f32 = 19.0;
+pub const CODE_FONT_STACK: &str = "SF Mono, Menlo, Monaco, Consolas, monospace";
+pub const GUTTER_WIDTH: f64 = 62.0;
+pub const RAIL_WIDTH: f64 = 292.0;
+pub const REVIEW_HEADER_HEIGHT: f64 = 56.0;
+pub const TAB_HEIGHT: f64 = 34.0;

@@ -14,7 +14,10 @@ use crate::theme;
 use crate::ui::row::row;
 use crate::ui::widgets::{avatar, centered_message, count_badge, hairline};
 
-pub fn list(state: AppState) -> impl IntoView {
+/// Opening a notification. Shared by every row.
+pub type OpenThread = std::rc::Rc<dyn Fn(&str, u64)>;
+
+pub fn list(state: AppState, on_open: OpenThread) -> impl IntoView {
     dyn_container(
         move || ListMode::of(state),
         move |mode| match mode {
@@ -43,7 +46,7 @@ pub fn list(state: AppState) -> impl IntoView {
                 },
             )
             .into_any(),
-            ListMode::Rows => rows(state).into_any(),
+            ListMode::Rows => rows(state, on_open.clone()).into_any(),
         },
     )
     .style(|s| s.size_full().min_height(0.0).background(theme::CANVAS_SUBTLE))
@@ -76,11 +79,11 @@ impl ListMode {
     }
 }
 
-fn rows(state: AppState) -> impl IntoView {
+fn rows(state: AppState, on_open: OpenThread) -> impl IntoView {
     dyn_stack(
         move || state.sections(),
         |section| section.key.clone(),
-        move |section| section_card(state, section),
+        move |section| section_card(state, section, on_open.clone()),
     )
     .style(|s| s.flex_col().width_full().gap(16.0).padding(16.0))
     .scroll()
@@ -88,7 +91,7 @@ fn rows(state: AppState) -> impl IntoView {
 }
 
 /// One repository or date group, drawn as a bordered card.
-fn section_card(state: AppState, section: Section) -> impl IntoView {
+fn section_card(state: AppState, section: Section, on_open: OpenThread) -> impl IntoView {
     let grouped = state.group.get() != Group::None;
     let threads = section.threads.clone();
     let count = threads.len();
@@ -111,7 +114,7 @@ fn section_card(state: AppState, section: Section) -> impl IntoView {
                     } else {
                         hairline().into_any()
                     },
-                    row(state, thread),
+                    row(state, thread, on_open.clone()),
                 ))
                 .style(|s| s.width_full())
             },

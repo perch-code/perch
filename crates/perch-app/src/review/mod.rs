@@ -1,0 +1,132 @@
+//! The review view: a pull request, its files, and a read-only editor.
+
+pub mod editor;
+pub mod gutter;
+pub mod header;
+pub mod model;
+pub mod rail;
+pub mod styling;
+pub mod tabs;
+
+use std::rc::Rc;
+
+use floem::prelude::*;
+use floem::reactive::{SignalGet, SignalWith};
+use floem::views::{Decorators, Stack, dyn_container};
+
+use crate::backend::Backend;
+use crate::icons::SidebarIcon;
+use crate::review::model::{Preparing, ReviewState};
+use crate::state::AppState;
+use crate::theme;
+use crate::ui::widgets::centered_message;
+
+/// Opening a file, shared by every list that can request one.
+///
+/// An `Rc` rather than a plain closure because it threads through several
+/// views that each need their own copy, and it captures the backend handle.
+pub type OpenFile = Rc<dyn Fn(&str)>;
+
+/// The whole right-hand side while a pull request is open.
+pub fn review_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    let open_file: OpenFile = Rc::new({
+        let backend = backend.clone();
+        move |path: &str| {
+            if state.open_tab(path) {
+                backend.open_file(path);
+            }
+        }
+    });
+
+    let on_back = {
+        let backend = backend.clone();
+        move || {
+            state.close();
+            backend.close_review();
+        }
+    };
+
+    Stack::vertical((
+        header::header(app, state, on_back),
+        dyn_container(
+            move || match state.preparing.get() {
+                Preparing::Working { .. } => Phase::Preparing,
+                Preparing::Failed { .. } => Phase::Failed,
+                // Idle before the pull request lands still means preparing:
+                // the first event has simply not arrived yet.
+                Preparing::Idle if !state.is_open() => Phase::Preparing,
+                Preparing::Idle => Phase::Ready,
+            },
+            move |phase| match phase {
+                Phase::Preparing => header::preparing_card(
+                    move || match state.preparing.get() {
+                        Preparing::Working { message, .. } => message,
+                        _ => String::new(),
+                    },
+                    move || match state.preparing.get() {
+                        Preparing::Working { percent, .. } => percent,
+                        _ => None,
+                    },
+                )
+                .into_any(),
+                Phase::Failed => centered_message(
+                    SidebarIcon::Warning,
+                    || "Could not open this pull request".to_string(),
+                    move || match state.preparing.get() {
+                        Preparing::Failed { message } => message,
+                        _ => String::new(),
+                    },
+                )
+                .into_any(),
+                Phase::Ready => body(state, open_file.clone()).into_any(),
+            },
+        )
+        .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
+    ))
+    .style(|s| s.size_full().flex_col().min_height(0.0).background(theme::CANVAS))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Preparing,
+    Failed,
+    Ready,
+}
+
+fn body(state: ReviewState, open_file: OpenFile) -> impl IntoView {
+    Stack::horizontal((
+        rail::rail(state, open_file),
+        Stack::vertical((tabs::tab_bar(state), editor::editor_pane(state)))
+            .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().flex_col()),
+    ))
+    .style(|s| s.size_full().min_height(0.0))
+}
+
+/// One line under the review view, replacing the inbox's status bar content.
+pub fn review_status(state: ReviewState) -> impl IntoView {
+    use floem::views::Label;
+
+    Label::derived(move || {
+        let Some(file) = state.active_file() else {
+            let n = state.changed_files.with(|f| f.len());
+            return format!("{n} changed files");
+        };
+        if file.truncated {
+            return format!("{}  \u{00b7}  not shown as text", file.path);
+        }
+        let language = file.language.map(|l| l.name()).unwrap_or("Plain text");
+        let changes = file.change_count();
+        let line = state.cursor_line.get() + 1;
+        format!(
+            "{}  \u{00b7}  {language}  \u{00b7}  {} lines  \u{00b7}  {changes} changes  \u{00b7}  ln {line}",
+            file.path,
+            file.line_count()
+        )
+    })
+    .style(|s| {
+        s.font_size(theme::TEXT_META)
+            .color(theme::FG_MUTED)
+            .text_ellipsis()
+            .min_width(0.0)
+    })
+}

@@ -6,13 +6,14 @@ use floem::views::{Container, Decorators, ScrollExt, Stack, dyn_stack};
 
 use crate::filter::ReasonFilter;
 use crate::icons::SidebarIcon;
+use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{avatar, count_badge, section_heading, sidebar_row};
 
-pub fn sidebar(state: AppState) -> impl IntoView {
+pub fn sidebar(state: AppState, review: ReviewState) -> impl IntoView {
     Stack::vertical((
-        views_section(state),
+        views_section(state, review),
         section_heading("Filters"),
         filters_section(state),
         section_heading("Repositories"),
@@ -29,12 +30,16 @@ pub fn sidebar(state: AppState) -> impl IntoView {
     })
 }
 
-fn views_section(state: AppState) -> impl IntoView {
+fn views_section(state: AppState, review: ReviewState) -> impl IntoView {
     let unread = move || state.counts().unread;
 
     Stack::vertical((
         // Inbox is the only implemented view; it is always the active one.
-        Container::new(inbox_row(unread)).on_event_stop(el::Click, move |_, _| state.clear_filters()),
+        Container::new(inbox_row(unread)).on_event_stop(el::Click, move |_, _| {
+            // Doubles as the way back from a pull request.
+            review.close();
+            state.clear_filters();
+        }),
         // Saved and Done need endpoints the REST API does not expose. They
         // are shown so the rail matches the web UI, and are inert.
         sidebar_row(SidebarIcon::Bookmark, "Saved".into(), || false, false, None),

@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn numstat_reads_counts() {
-        let raw = "12\t3\tsrc/a.rs\0100\t0\tsrc/b.rs\0";
+        let raw = "12\t3\tsrc/a.rs\u{0}100\t0\tsrc/b.rs\u{0}";
         assert_eq!(
             parse_numstat(raw),
             vec![(12, 3, false, "src/a.rs".into()), (100, 0, false, "src/b.rs".into())]

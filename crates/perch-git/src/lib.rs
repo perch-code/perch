@@ -5,6 +5,7 @@
 
 pub mod cmd;
 pub mod diff;
+pub mod display;
 pub mod prepare;
 pub mod store;
 pub mod tree;
@@ -12,6 +13,7 @@ pub mod tree;
 pub use diff::{
     file_diff, ChangeStatus, ChangedFile, DeletedRun, FileDiff, Hunk, LineStatus,
 };
+pub use display::{DisplayBuffer, Row};
 pub use prepare::{Checkout, Preparer, Step};
 pub use store::{RepoId, Store};
 pub use tree::{list_tree, TreeEntry};

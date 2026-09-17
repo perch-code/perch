@@ -60,7 +60,33 @@ impl AppState {
         }
     }
 
-    /// Fold one backend event into the state.
+    /// Fold one backend event into the inbox or the review view.
+    pub fn apply_with_review(&self, event: Event, review: crate::review::model::ReviewState) {
+        use crate::review::model::Preparing;
+
+        match event {
+            Event::ReviewProgress { message, percent } => {
+                review.preparing.set(Preparing::Working { message, percent });
+            }
+            Event::ReviewReady { pull_request, files, tree } => {
+                review.preparing.set(Preparing::Idle);
+                review.changed_files.set(files);
+                review.tree.set(tree);
+                review.pull_request.set(Some(pull_request));
+            }
+            Event::ReviewFailed { message } => {
+                review.preparing.set(Preparing::Failed { message });
+            }
+            Event::FileLoaded { path, file } => review.finish_load(&path, file),
+            Event::FileFailed { path, message } => {
+                tracing::warn!(path, message, "could not open file");
+                review.fail_load(&path);
+            }
+            other => self.apply(other),
+        }
+    }
+
+    /// Fold one inbox event into the state.
     pub fn apply(&self, event: Event) {
         match event {
             Event::Threads { threads, from_cache } => {
@@ -95,6 +121,11 @@ impl AppState {
                     m.insert(url, Arc::new(bytes));
                 });
             }
+            Event::ReviewProgress { .. }
+            | Event::ReviewReady { .. }
+            | Event::ReviewFailed { .. }
+            | Event::FileLoaded { .. }
+            | Event::FileFailed { .. } => {}
             Event::Status(status) => {
                 if let Status::Idle { at, .. } = &status {
                     self.now.set(*at);

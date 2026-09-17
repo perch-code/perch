@@ -3,17 +3,23 @@
 use floem::prelude::*;
 use floem::views::{Container, Decorators, Empty, Label, Stack, dyn_container};
 use floem::text::{Alignment, FontWeight};
-use perch_github::Thread;
+use perch_github::{SubjectKind, Thread};
 
 use crate::filter::Group;
+use crate::ui::list::OpenThread;
 use crate::icons;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{avatar, icon, reason_pill};
 
-pub fn row(state: AppState, thread: Thread) -> impl IntoView {
+pub fn row(state: AppState, thread: Thread, _on_open: OpenThread) -> impl IntoView {
     let unread = thread.unread;
+    // Only pull requests lead anywhere yet; an issue row stays inert.
+    let _openable = thread.subject.kind == SubjectKind::PullRequest;
+    let _open_target = thread
+        .number_hint()
+        .map(|n| (thread.repository.full_name.clone(), n));
 
     Stack::horizontal((
         unread_dot(unread),

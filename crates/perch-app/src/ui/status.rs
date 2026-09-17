@@ -3,16 +3,21 @@
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::style::CursorStyle;
-use floem::views::{Container, Decorators, Label, Stack};
+use floem::views::{Container, Decorators, Label, Stack, dyn_container};
 
 use crate::backend::{Backend, Status};
 use crate::icons::SidebarIcon;
+use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{sidebar_glyph, spacer};
 
-pub fn status_bar(state: AppState, backend: std::rc::Rc<Backend>) -> impl IntoView {
+pub fn status_bar(
+    state: AppState,
+    review: ReviewState,
+    backend: std::rc::Rc<Backend>,
+) -> impl IntoView {
     Stack::horizontal((
         dot(state),
         Label::derived(move || message(state)).style(move |s| {
@@ -22,16 +27,27 @@ pub fn status_bar(state: AppState, backend: std::rc::Rc<Backend>) -> impl IntoVi
                 .min_width(0.0)
         }),
         spacer(),
-        Label::derived(move || {
-            let n = state.visible().len();
-            let total = state.threads.with(|t| t.len());
-            if n == total {
-                format!("{total} notifications")
-            } else {
-                format!("{n} of {total} notifications")
-            }
-        })
-        .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE).margin_right(12.0)),
+        dyn_container(
+            move || review.pull_request.with(|p| p.is_some()),
+            move |open| {
+                if open {
+                    crate::review::review_status(review).into_any()
+                } else {
+                    Label::derived(move || {
+                        let n = state.visible().len();
+                        let total = state.threads.with(|t| t.len());
+                        if n == total {
+                            format!("{total} notifications")
+                        } else {
+                            format!("{n} of {total} notifications")
+                        }
+                    })
+                    .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE))
+                    .into_any()
+                }
+            },
+        )
+        .style(|s| s.min_width(0.0).margin_right(12.0)),
         refresh_button(backend),
     ))
     .style(|s| {
