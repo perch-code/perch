@@ -2,6 +2,7 @@
 
 pub mod editor;
 pub mod gutter;
+pub mod hover;
 pub mod header;
 pub mod model;
 pub mod rail;
@@ -38,6 +39,7 @@ pub fn review_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> i
         }
     });
 
+    let body_backend = backend.clone();
     let on_back = {
         let backend = backend.clone();
         move || {
@@ -78,7 +80,9 @@ pub fn review_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> i
                     },
                 )
                 .into_any(),
-                Phase::Ready => body(state, open_file.clone()).into_any(),
+                Phase::Ready => {
+                    body(state, open_file.clone(), body_backend.clone()).into_any()
+                }
             },
         )
         .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
@@ -93,10 +97,13 @@ enum Phase {
     Ready,
 }
 
-fn body(state: ReviewState, open_file: OpenFile) -> impl IntoView {
+fn body(state: ReviewState, open_file: OpenFile, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
-        rail::rail(state, open_file),
-        Stack::vertical((tabs::tab_bar(state), editor::editor_pane(state)))
+        rail::rail(state, open_file.clone()),
+        Stack::vertical((
+            tabs::tab_bar(state),
+            editor::editor_pane(state, backend, open_file),
+        ))
             .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().flex_col()),
     ))
     .style(|s| s.size_full().min_height(0.0))
@@ -107,18 +114,25 @@ pub fn review_status(state: ReviewState) -> impl IntoView {
     use floem::views::Label;
 
     Label::derived(move || {
+        let server = state.lsp_status.get();
+        let server = if matches!(server, perch_lsp::Status::Absent) {
+            String::new()
+        } else {
+            format!("  \u{00b7}  {}", server.describe())
+        };
+
         let Some(file) = state.active_file() else {
             let n = state.changed_files.with(|f| f.len());
-            return format!("{n} changed files");
+            return format!("{n} changed files{server}");
         };
         if file.truncated {
-            return format!("{}  \u{00b7}  not shown as text", file.path);
+            return format!("{}  \u{00b7}  not shown as text{server}", file.path);
         }
         let language = file.language.map(|l| l.name()).unwrap_or("Plain text");
         let changes = file.change_count();
         let line = state.cursor_line.get() + 1;
         format!(
-            "{}  \u{00b7}  {language}  \u{00b7}  {} lines  \u{00b7}  {changes} changes  \u{00b7}  ln {line}",
+            "{}  \u{00b7}  {language}  \u{00b7}  {} lines  \u{00b7}  {changes} changes  \u{00b7}  ln {line}{server}",
             file.path,
             file.line_count()
         )

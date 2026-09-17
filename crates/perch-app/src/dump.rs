@@ -144,7 +144,7 @@ async fn dump(target: &str, path: &str) -> Result<(), String> {
             continue;
         }
 
-        let spans = match row {
+        let spans = match &row {
             Row::Head { head_line, .. } => file.head_spans.line(*head_line),
             Row::Deleted { base_line } => file.base_spans.line(*base_line),
         };

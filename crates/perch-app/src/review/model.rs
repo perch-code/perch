@@ -92,6 +92,21 @@ pub struct ReviewState {
     /// Bumped whenever the active file's content changes, to rebuild the
     /// editor view rather than mutate a read-only document in place.
     pub editor_epoch: RwSignal<u64>,
+
+    pub lsp_status: RwSignal<perch_lsp::Status>,
+    /// Rises with every hover and jump request. An answer carrying an older
+    /// token is stale, because the pointer has moved on since it was asked.
+    pub request_token: RwSignal<u64>,
+    /// Where the popup should appear, in editor-local coordinates.
+    pub hover_at: RwSignal<Option<(f64, f64)>>,
+    pub hover_text: RwSignal<Option<String>>,
+    /// A go-to-definition result waiting to be opened, as (path, head line).
+    pub pending_jump: RwSignal<Option<(String, usize)>>,
+    /// A head line to scroll to once the file it belongs to is loaded.
+    pub jump_to_line: RwSignal<Option<usize>>,
+    /// The head position the last request was made about, so the definition
+    /// button asks about the same symbol the panel is describing.
+    pub last_position: RwSignal<Option<(usize, usize)>>,
 }
 
 /// How many tabs stay open before the oldest is dropped.
@@ -118,6 +133,13 @@ impl ReviewState {
             loading: RwSignal::new(HashMap::new()),
             cursor_line: RwSignal::new(0),
             editor_epoch: RwSignal::new(0),
+            lsp_status: RwSignal::new(perch_lsp::Status::Absent),
+            request_token: RwSignal::new(0),
+            hover_at: RwSignal::new(None),
+            hover_text: RwSignal::new(None),
+            pending_jump: RwSignal::new(None),
+            jump_to_line: RwSignal::new(None),
+            last_position: RwSignal::new(None),
         }
     }
 
@@ -142,6 +164,19 @@ impl ReviewState {
         self.files.set(HashMap::new());
         self.loading.set(HashMap::new());
         self.rail_mode.set(RailMode::Changed);
+        self.lsp_status.set(perch_lsp::Status::Absent);
+        self.dismiss_hover();
+    }
+
+    /// Start a new request, invalidating any answer still in flight.
+    pub fn next_token(&self) -> u64 {
+        self.request_token.update(|t| *t += 1);
+        self.request_token.get()
+    }
+
+    pub fn dismiss_hover(&self) {
+        self.hover_at.set(None);
+        self.hover_text.set(None);
     }
 
     pub fn file(&self, path: &str) -> Option<Arc<LoadedFile>> {

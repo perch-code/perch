@@ -9,6 +9,8 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
 
 ## What it does
 
+**The inbox**
+
 - Lists your notification inbox, grouped by repository or date.
 - Sidebar filters: Assigned, Participating, Mentioned, Team mentioned,
   Review requested, plus a per-repository filter with counts.
@@ -21,6 +23,21 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
 - Polls on GitHub's own `X-Poll-Interval`, with conditional requests so an
   unchanged inbox costs one cheap 304.
 
+**The review view**
+
+- Click a pull request and Perch clones the repository, checks the head out
+  into a worktree, and shows what changed. A second pull request from the
+  same repository costs a fetch rather than a clone.
+- A rail of changed files, or the whole worktree, with change markers on
+  files the pull request touched.
+- A read-only editor with tree-sitter highlighting for Rust, TOML, Markdown,
+  YAML, and JSON.
+- The unified diff in place: added and modified lines tinted, removed lines
+  shown above the code that replaced them, and a gutter carrying real file
+  line numbers with change bars.
+- Click a symbol and rust-analyzer says what it is, with go-to-definition
+  from the same panel.
+
 ## What it deliberately does not do
 
 Nothing in Perch writes to GitHub. There is no mark as read, no mark as done,
@@ -32,6 +49,9 @@ inert: the REST API does not expose them.
 
 - macOS
 - Rust 1.97 (pinned in `rust-toolchain.toml`)
+- `git` on PATH
+- `rust-analyzer` on PATH for Rust intelligence (optional; the editor works
+  without it)
 - A GitHub token with the `notifications` scope, or `Notifications: read` on
   a fine-grained token
 
@@ -75,8 +95,13 @@ costs a cold start.
 
 | Crate | Contents |
 |---|---|
-| `perch-github` | Model, REST client, SQLite cache. No UI dependencies. |
+| `perch-github` | Model, REST client, SQLite cache. |
+| `perch-git` | Clone, fetch, worktree, diff, tree listing. |
+| `perch-syntax` | tree-sitter highlighting. |
+| `perch-lsp` | Language server client. |
 | `perch-app` | Floem UI and the background worker. Binary target `perch`. |
+
+None of the first four depends on floem, or on each other.
 
 The split is deliberate: data and IO stay testable without a window, and stay
 reusable when the review features land.
@@ -88,9 +113,23 @@ cargo test
 cargo clippy --all-targets
 ```
 
-`cargo run -p perch-github --example dump` prints the inbox to the terminal,
-which is the quickest way to check the client and your token independently of
-the UI.
+Three example binaries check the layers below the window:
+
+```bash
+cargo run -p perch-github --example dump
+cargo run -p perch-git --example checkout -- slatedb/slatedb#2091
+cargo run -p perch-lsp --example hover -- <worktree> src/lib.rs 10 4
+```
+
+`perch --dump-file owner/repo#N path` renders a file the way the editor would,
+gutter numbers and change bars included, as text.
+
+Two environment variables open a pull request at launch instead of by
+clicking, which is useful when iterating on the review view:
+
+```bash
+PERCH_OPEN_PR=slatedb/slatedb#2092 PERCH_OPEN_FILE=slatedb/src/ops.rs cargo run --release
+```
 
 `scripts/screenshot.sh out.png` captures the running window. It needs the
 screen unlocked; macOS will not composite an app window behind the login

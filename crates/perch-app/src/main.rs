@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use floem::ext_event::update_signal_from_channel;
 use floem::kurbo::Size;
-use floem::reactive::{RwSignal, SignalGet};
+use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
 use floem::window::WindowConfig;
 use floem::Application;
 
@@ -45,6 +45,15 @@ fn main() {
     let (backend, events) = backend::spawn();
     let backend = Rc::new(backend);
 
+    // A development hook: open a pull request at launch rather than by
+    // clicking, so the whole chain can be exercised from a terminal.
+    //   PERCH_OPEN_PR=slatedb/slatedb#2092 perch
+    let open_at_launch = std::env::var("PERCH_OPEN_PR").ok().and_then(|spec| {
+        let (repo, number) = spec.split_once('#')?;
+        Some((repo.to_string(), number.parse::<u64>().ok()?))
+    });
+    tracing::info!(hook = ?open_at_launch, "launch hook");
+
     Application::new()
         .window(
             move |_| {
@@ -61,6 +70,26 @@ fn main() {
                         state.apply_with_review(event, review);
                     }
                 });
+
+                if let Some((repo, number)) = open_at_launch.clone() {
+                    review.opening.set(true);
+                    backend.open_pull_request(&repo, number);
+
+                    // Optionally open a file once the checkout lands, so the
+                    // whole path can be exercised without a pointer.
+                    if let Ok(path) = std::env::var("PERCH_OPEN_FILE") {
+                        let backend = backend.clone();
+                        floem::reactive::Effect::new(move |opened: Option<bool>| {
+                            if opened == Some(true) || !review.is_open() {
+                                return opened.unwrap_or(false);
+                            }
+                            if review.open_tab(&path) {
+                                backend.open_file(&path);
+                            }
+                            true
+                        });
+                    }
+                }
 
                 ui::app_view(state, review, backend.clone())
             },

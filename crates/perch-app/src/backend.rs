@@ -33,6 +33,10 @@ pub enum Command {
     OpenPullRequest { repo_full_name: String, number: u64 },
     /// Read, diff, and highlight one file of the open checkout.
     OpenFile { path: String },
+    /// Ask the language server about a position. `token` lets the UI drop an
+    /// answer that arrives after the pointer has moved on.
+    Hover { token: u64, path: String, line: u32, character: u32 },
+    Definition { token: u64, path: String, line: u32, character: u32 },
     CloseReview,
 }
 
@@ -54,6 +58,11 @@ pub enum Event {
     ReviewFailed { message: String },
     FileLoaded { path: String, file: Arc<crate::review::model::LoadedFile> },
     FileFailed { path: String, message: String },
+
+    LspStatus(perch_lsp::Status),
+    LspHover { token: u64, text: String },
+    /// A definition inside the worktree, or `None` when it lands outside it.
+    LspDefinition { token: u64, path: Option<String>, line: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +99,24 @@ impl Backend {
 
     pub fn close_review(&self) {
         let _ = self.commands.send(Command::CloseReview);
+    }
+
+    pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
+        let _ = self.commands.send(Command::Hover {
+            token,
+            path: path.to_string(),
+            line,
+            character,
+        });
+    }
+
+    pub fn definition(&self, token: u64, path: &str, line: u32, character: u32) {
+        let _ = self.commands.send(Command::Definition {
+            token,
+            path: path.to_string(),
+            line,
+            character,
+        });
     }
 }
 
@@ -182,6 +209,8 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
     ));
     let checkout: Arc<std::sync::Mutex<Option<ReviewContext>>> =
         Arc::new(std::sync::Mutex::new(None));
+    let language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
 
     {
         // Reclaim disk from pull requests nobody has looked at in a fortnight.
@@ -226,22 +255,89 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 let preparer = preparer.clone();
                 let checkout = checkout.clone();
                 let events = events.clone();
+                let language_server = language_server.clone();
                 tokio::spawn(async move {
-                    open_pull_request(github, preparer, checkout, events, repo_full_name, number)
-                        .await;
+                    open_pull_request(
+                        github,
+                        preparer,
+                        checkout.clone(),
+                        events.clone(),
+                        repo_full_name,
+                        number,
+                    )
+                    .await;
+                    start_language_server(checkout, language_server, events).await;
                 });
             }
             Some(Command::OpenFile { path }) => {
                 let preparer = preparer.clone();
                 let checkout = checkout.clone();
                 let events = events.clone();
+                let language_server = language_server.clone();
                 tokio::spawn(async move {
-                    open_file(preparer, checkout, events, path).await;
+                    open_file(preparer, checkout.clone(), events, path.clone()).await;
+                    announce_file(checkout, language_server, path).await;
+                });
+            }
+            Some(Command::Hover { token, path, line, character }) => {
+                let checkout = checkout.clone();
+                let language_server = language_server.clone();
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let Some((client, full)) =
+                        resolve(&checkout, &language_server, &path).await
+                    else {
+                        return;
+                    };
+                    if let Some(hover) = client.hover(&full, line, character).await {
+                        let text = render_hover(&hover);
+                        if !text.trim().is_empty() {
+                            let _ = events.send(Event::LspHover { token, text });
+                        }
+                    }
+                });
+            }
+            Some(Command::Definition { token, path, line, character }) => {
+                let checkout = checkout.clone();
+                let language_server = language_server.clone();
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let Some((client, full)) =
+                        resolve(&checkout, &language_server, &path).await
+                    else {
+                        return;
+                    };
+                    let worktree = checkout
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
+                    let Some(worktree) = worktree else { return };
+
+                    if let Some(location) = client.definition(&full, line, character).await.first()
+                    {
+                        // A definition inside the worktree opens as a tab; one
+                        // in a dependency has no path the rail can show.
+                        let target = perch_lsp::client::uri_to_path(&location.uri.to_string());
+                        let relative = target
+                            .and_then(|p| p.strip_prefix(&worktree).ok().map(|r| r.to_path_buf()))
+                            .map(|r| r.to_string_lossy().into_owned());
+                        let _ = events.send(Event::LspDefinition {
+                            token,
+                            path: relative,
+                            line: location.range.start.line,
+                        });
+                    }
                 });
             }
             Some(Command::CloseReview) => {
                 if let Ok(mut guard) = checkout.lock() {
                     *guard = None;
+                }
+                let mut guard = language_server.lock().await;
+                if let Some(client) = guard.take() {
+                    // Let the server exit cleanly rather than leaving it
+                    // indexing a worktree nobody is looking at.
+                    tokio::spawn(async move { client.shutdown().await });
                 }
             }
         }
@@ -416,10 +512,19 @@ async fn open_pull_request(
     .await
     .unwrap_or_default();
 
+    let worktree_label = checkout.worktree.display().to_string();
     if let Ok(mut guard) = slot.lock() {
         *guard = Some(ReviewContext { checkout, files: files.clone() });
     }
 
+    tracing::info!(
+        repo = %pull_request.repo_full_name,
+        number,
+        files = files.len(),
+        tree = tree.len(),
+        worktree = %worktree_label,
+        "review ready"
+    );
     let _ = events.send(Event::ReviewReady {
         pull_request: Arc::new(pull_request),
         files,
@@ -533,9 +638,111 @@ async fn open_file(
 
     match loaded {
         Ok(file) => {
+            tracing::info!(
+                path = %file.path,
+                lines = file.buffer.len(),
+                changes = file.buffer.change_starts.len(),
+                "file loaded"
+            );
             let _ = events.send(Event::FileLoaded { path: file.path.clone(), file: Arc::new(file) });
         }
         Err(e) => tracing::warn!(error = %e, "file load panicked"),
+    }
+}
+
+/// Start a language server for the open checkout, if one is installed.
+async fn start_language_server(
+    checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    slot: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    events: EventSender<Event>,
+) {
+    let Some(worktree) = checkout
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()))
+    else {
+        return;
+    };
+
+    let Some(spec) = perch_lsp::find_server("rust") else {
+        let _ = events.send(Event::LspStatus(perch_lsp::Status::Absent));
+        return;
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let events = events.clone();
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    perch_lsp::client::ServerEvent::Status(status) => {
+                        tracing::debug!(status = %status.describe(), "language server");
+                        let _ = events.send(Event::LspStatus(status));
+                    }
+                    // Diagnostics are collected but not yet drawn; the editor
+                    // needs a decoration pass this milestone does not have.
+                    perch_lsp::client::ServerEvent::Diagnostics { .. } => {}
+                }
+            }
+        });
+    }
+
+    match perch_lsp::Client::start(spec, &worktree, tx).await {
+        Ok(client) => {
+            tracing::info!("language server started");
+            *slot.lock().await = Some(client);
+        }
+        Err(e) => {
+            let _ = events.send(Event::LspStatus(perch_lsp::Status::Failed {
+                reason: e.to_string(),
+            }));
+        }
+    }
+}
+
+/// Tell the language server about a file the user just opened.
+async fn announce_file(
+    checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    slot: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    path: String,
+) {
+    let Some((client, full)) = resolve(&checkout, &slot, &path).await else {
+        return;
+    };
+    if let Ok(text) = tokio::fs::read_to_string(&full).await {
+        client.did_open(&full, &text).await;
+    }
+}
+
+/// The server and the absolute path for a file of the open checkout.
+async fn resolve(
+    checkout: &Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    slot: &Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    path: &str,
+) -> Option<(Arc<perch_lsp::Client>, std::path::PathBuf)> {
+    let client = slot.lock().await.clone()?;
+    let worktree = checkout
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()))?;
+    Some((client, worktree.join(path)))
+}
+
+/// Flatten a hover reply into the plain text the popup shows.
+fn render_hover(hover: &perch_lsp::lsp_types::Hover) -> String {
+    use perch_lsp::lsp_types::{HoverContents, MarkedString};
+    match &hover.contents {
+        HoverContents::Scalar(MarkedString::String(s)) => s.clone(),
+        HoverContents::Scalar(MarkedString::LanguageString(s)) => s.value.clone(),
+        HoverContents::Markup(m) => m.value.clone(),
+        HoverContents::Array(items) => items
+            .iter()
+            .map(|i| match i {
+                MarkedString::String(s) => s.clone(),
+                MarkedString::LanguageString(s) => s.value.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 

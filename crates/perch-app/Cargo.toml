@@ -13,6 +13,7 @@ path = "src/main.rs"
 perch-github = { path = "../perch-github" }
 perch-git = { path = "../perch-git" }
 perch-syntax = { path = "../perch-syntax" }
+perch-lsp = { path = "../perch-lsp" }
 anyhow.workspace = true
 serde.workspace = true
 tokio.workspace = true

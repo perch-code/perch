@@ -3656,6 +3656,7 @@ dependencies = [
  "jiff",
  "perch-git",
  "perch-github",
+ "perch-lsp",
  "perch-syntax",
  "serde",
  "tokio",

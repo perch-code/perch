@@ -77,6 +77,20 @@ impl AppState {
             Event::ReviewFailed { message } => {
                 review.preparing.set(Preparing::Failed { message });
             }
+            Event::LspStatus(status) => review.lsp_status.set(status),
+            Event::LspHover { token, text } => {
+                // Drop an answer the pointer has already moved past.
+                if review.request_token.get() == token {
+                    review.hover_text.set(Some(text));
+                }
+            }
+            Event::LspDefinition { token, path, line } => {
+                if review.request_token.get() == token {
+                    if let Some(path) = path {
+                        review.pending_jump.set(Some((path, line as usize)));
+                    }
+                }
+            }
             Event::FileLoaded { path, file } => review.finish_load(&path, file),
             Event::FileFailed { path, message } => {
                 tracing::warn!(path, message, "could not open file");
@@ -125,7 +139,10 @@ impl AppState {
             | Event::ReviewReady { .. }
             | Event::ReviewFailed { .. }
             | Event::FileLoaded { .. }
-            | Event::FileFailed { .. } => {}
+            | Event::FileFailed { .. }
+            | Event::LspStatus(_)
+            | Event::LspHover { .. }
+            | Event::LspDefinition { .. } => {}
             Event::Status(status) => {
                 if let Status::Idle { at, .. } = &status {
                     self.now.set(*at);
