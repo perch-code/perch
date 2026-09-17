@@ -229,9 +229,10 @@ fn definition_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView 
 }
 
 fn dismiss_button(state: ReviewState) -> impl IntoView {
-    Container::new(Label::derived(|| "\u{00d7}".to_string()).style(|s| {
-        s.font_size(13.0).color(theme::FG_SUBTLE)
-    }))
+    Container::new(
+        crate::ui::widgets::sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE)
+            .style(|s| s.size(11.0, 11.0)),
+    )
     .on_event_stop(el::Click, move |_, _| state.dismiss_hover())
     .style(|s| {
         s.size(18.0, 18.0)

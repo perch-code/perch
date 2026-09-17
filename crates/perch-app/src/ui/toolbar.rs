@@ -3,7 +3,6 @@
 use floem::prelude::*;
 use floem::style::CursorStyle;
 use floem::text::FontWeight;
-use floem::views::dropdown::Dropdown;
 use floem::views::{Container, Decorators, Label, Stack, TextInput};
 
 use crate::filter::{Group, Sort};
@@ -11,13 +10,16 @@ use crate::icons::SidebarIcon;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::sidebar_glyph;
+use floem::menu::Menu;
+use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
 
 pub fn toolbar(state: AppState) -> impl IntoView {
     Stack::horizontal((
+        closed_drawer_controls(state),
         segmented(state),
         search_box(state),
-        labelled_dropdown("Sort by", Dropdown::new_rw(state.sort, Sort::ALL)),
-        labelled_dropdown("Group by", Dropdown::new_rw(state.group, Group::ALL)),
+        menu_picker("Sort by", state.sort, Sort::ALL),
+        menu_picker("Group by", state.group, Group::ALL),
     ))
     .style(|s| {
         s.height(theme::TOOLBAR_HEIGHT)
@@ -117,26 +119,75 @@ fn search_box(state: AppState) -> impl IntoView {
     })
 }
 
-fn labelled_dropdown<T>(caption: &'static str, dropdown: Dropdown<T>) -> impl IntoView
+/// The lights and the toggle, but only while the drawer is hidden. When it
+/// is open they live there instead.
+fn closed_drawer_controls(state: AppState) -> impl IntoView {
+    floem::views::dyn_container(
+        move || state.sidebar_open.get(),
+        move |open| {
+            if open {
+                floem::views::Empty::new().into_any()
+            } else {
+                crate::ui::widgets::drawer_controls(state, true)
+                    .style(|s| s.margin_right(4.0))
+                    .into_any()
+            }
+        },
+    )
+    .style(|s| s.height_full().flex_shrink(0.0_f32).items_center())
+}
+
+/// A caption, the current value, and a native popup menu of the options.
+///
+/// floem's own Dropdown renders its label and its popup list outside this
+/// app's styling, so its text never quite matched the rest of the window.
+/// The button here is an ordinary label, and the menu is the platform's, so
+/// both look like they belong.
+fn menu_picker<T, const N: usize>(
+    caption: &'static str,
+    selected: RwSignal<T>,
+    options: [T; N],
+) -> impl IntoView
 where
-    T: Clone + PartialEq + std::fmt::Debug + std::fmt::Display + 'static,
+    T: Copy + PartialEq + std::fmt::Display + 'static,
 {
     Stack::horizontal((
         Label::derived(move || caption).style(|s| {
             s.font_size(theme::TEXT_META)
                 .color(theme::FG_SUBTLE)
+                .selectable(false)
                 .margin_right(6.0)
         }),
-        dropdown.style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .color(theme::FG)
+        Stack::horizontal((
+            Label::derived(move || selected.get().to_string()).style(|s| {
+                s.font_size(theme::TEXT_BODY)
+                    .color(theme::FG)
+                    .selectable(false)
+                    .margin_right(6.0)
+            }),
+            sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
+                .style(|s| s.size(11.0, 11.0)),
+        ))
+        .popout_menu(move || {
+            let mut menu = Menu::new();
+            for option in options {
+                let label = option.to_string();
+                menu = menu.item(label, |item| {
+                    item.checked(selected.get_untracked() == option)
+                        .action(move || selected.set(option))
+                });
+            }
+            menu
+        })
+        .style(|s| {
+            s.items_center()
+                .height(28.0)
+                .padding_horiz(9.0)
                 .background(theme::CANVAS)
                 .border(1.0)
                 .border_color(theme::BORDER)
                 .border_radius(theme::RADIUS)
-                .padding_horiz(9.0)
-                .height(30.0)
-                .items_center()
+                .selectable(false)
                 .hover(|s| s.background(theme::CANVAS_SUBTLE).cursor(CursorStyle::Pointer))
         }),
     ))

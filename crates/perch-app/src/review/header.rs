@@ -15,6 +15,7 @@ use crate::ui::widgets::{avatar, sidebar_glyph};
 
 pub fn header(app: AppState, state: ReviewState, on_back: impl Fn() + 'static) -> impl IntoView {
     Stack::horizontal((
+        closed_drawer_controls(app),
         back_button(on_back),
         icon_and_title(app, state),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
@@ -34,10 +35,30 @@ pub fn header(app: AppState, state: ReviewState, on_back: impl Fn() + 'static) -
     })
 }
 
+/// The lights and the toggle, but only while the drawer is hidden.
+fn closed_drawer_controls(app: AppState) -> impl IntoView {
+    dyn_container(
+        move || app.sidebar_open.get(),
+        move |open| {
+            if open {
+                Empty::new().into_any()
+            } else {
+                crate::ui::widgets::drawer_controls(app, true)
+                    .style(|s| s.margin_right(4.0))
+                    .into_any()
+            }
+        },
+    )
+    .style(|s| s.height_full().flex_shrink(0.0_f32).items_center())
+}
+
 fn back_button(on_back: impl Fn() + 'static) -> impl IntoView {
-    Container::new(Label::derived(|| "\u{2039}".to_string()).style(|s| {
-        s.font_size(19.0).color(theme::FG_MUTED)
-    }))
+    // A drawn chevron rather than a typed one: a glyph is centred by its
+    // line box, not by its own shape, so it never sits square in a button.
+    Container::new(
+        sidebar_glyph(SidebarIcon::ChevronLeft, theme::FG_MUTED)
+            .style(|s| s.size(14.0, 14.0)),
+    )
     .on_event_stop(el::Click, move |_, _| on_back())
     .style(|s| {
         s.size(28.0, 28.0)

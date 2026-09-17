@@ -175,27 +175,37 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
     let cache = open_cache();
     tracing::info!(cache = cache.is_some(), "cache opened");
 
-    // Paint from the cache first. A cold launch with no network still shows
-    // the inbox as it was.
-    if let Some(cache) = cache.as_ref() {
-        if let Ok(guard) = cache.lock() {
-            if let Ok(threads) = guard.load_threads() {
-                if !threads.is_empty() {
-                    let _ = events.send(Event::Threads { threads, from_cache: true });
-                }
-            }
-            if let Ok(details) = guard.load_all_details() {
-                for (thread_id, detail) in details {
-                    let _ = events.send(Event::Detail { thread_id, detail });
-                }
-            }
-            // Touch the guard so clippy sees the mutable borrow is intended.
-            let _ = guard.meta(LAST_MODIFIED_KEY);
-        }
-    }
-
     let detail_limit = Arc::new(Semaphore::new(DETAIL_CONCURRENCY));
     let avatar_limit = Arc::new(Semaphore::new(AVATAR_CONCURRENCY));
+
+    // Paint from the cache first. A cold launch with no network still shows
+    // the inbox as it was.
+    //
+    // This goes through the same path a network response does, which is the
+    // point: it reads the details AND the avatars back off disk. Sending the
+    // details alone left every row showing a letter placeholder whenever the
+    // poll came back unchanged, because nothing else ever loads an avatar.
+    if let Some(cache) = cache.as_ref() {
+        let cached = cache.lock().ok().and_then(|guard| {
+            let threads = guard.load_threads().ok()?;
+            (!threads.is_empty()).then_some(threads)
+        });
+
+        if let Some(threads) = cached {
+            let _ = events.send(Event::Threads {
+                threads: threads.clone(),
+                from_cache: true,
+            });
+            fetch_details(
+                github.clone(),
+                Some(cache.clone()),
+                events.clone(),
+                detail_limit.clone(),
+                avatar_limit.clone(),
+                threads,
+            );
+        }
+    }
     let source = token.source.describe().to_string();
 
     // The review side of the app. Long operations run as their own tasks so a
@@ -848,26 +858,33 @@ fn fetch_details(
 
         // A thread whose `updated_at` has not moved keeps its cached detail,
         // so a restart costs no requests at all.
-        if let Some(handle) = cache.as_ref() {
-            if let Ok(guard) = handle.lock() {
-                if let Ok(Some(detail)) = guard.load_detail(&thread.id, &updated_at) {
-                    let avatar = detail.author_avatar_url.clone();
-                    let _ = events.send(Event::Detail {
-                        thread_id: thread.id.clone(),
-                        detail,
-                    });
-                    if !avatar.is_empty() && seen_avatars.insert(avatar.clone()) {
-                        spawn_avatar(
-                            github.clone(),
-                            cache.clone(),
-                            events.clone(),
-                            avatar_limit.clone(),
-                            avatar,
-                        );
-                    }
-                    continue;
-                }
+        //
+        // The lock is released before anything else runs. `spawn_avatar`
+        // takes the same mutex to look on disk, and a std Mutex is not
+        // reentrant, so calling it while still holding the guard deadlocked
+        // the whole pipeline on the first cached thread. That is why avatars
+        // stopped after the handful loaded before this loop.
+        let cached_detail = cache
+            .as_ref()
+            .and_then(|handle| handle.lock().ok())
+            .and_then(|guard| guard.load_detail(&thread.id, &updated_at).ok().flatten());
+
+        if let Some(detail) = cached_detail {
+            let avatar = detail.author_avatar_url.clone();
+            let _ = events.send(Event::Detail {
+                thread_id: thread.id.clone(),
+                detail,
+            });
+            if !avatar.is_empty() && seen_avatars.insert(avatar.clone()) {
+                spawn_avatar(
+                    github.clone(),
+                    cache.clone(),
+                    events.clone(),
+                    avatar_limit.clone(),
+                    avatar,
+                );
             }
+            continue;
         }
 
         let github = github.clone();
@@ -913,6 +930,7 @@ fn spawn_avatar(
     if let Some(cache) = cache.as_ref() {
         if let Ok(guard) = cache.lock() {
             if let Some(bytes) = guard.load_avatar(&url) {
+                tracing::debug!(url, bytes = bytes.len(), "avatar from disk");
                 let _ = events.send(Event::Avatar { url, bytes });
                 return;
             }

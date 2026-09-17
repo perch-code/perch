@@ -13,6 +13,10 @@ use crate::ui::widgets::{avatar, count_badge, section_heading, sidebar_row};
 
 pub fn sidebar(state: AppState, review: ReviewState) -> impl IntoView {
     Stack::vertical((
+        // The window has no title bar, so the drawer starts with the room
+        // the traffic lights need.
+        crate::ui::widgets::drawer_controls(state, true)
+            .style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().padding_left(6.0)),
         views_section(state, review),
         section_heading("Filters"),
         filters_section(state),
@@ -26,7 +30,6 @@ pub fn sidebar(state: AppState, review: ReviewState) -> impl IntoView {
             .background(theme::CANVAS_SIDEBAR)
             .border_right(1.0)
             .border_color(theme::BORDER)
-            .padding_top(6.0)
     })
 }
 

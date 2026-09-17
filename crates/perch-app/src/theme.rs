@@ -65,9 +65,17 @@ pub const TOOLBAR_HEIGHT: f64 = 56.0;
 pub const STATUS_HEIGHT: f64 = 30.0;
 /// Height of the strip that replaces the title bar.
 pub const TITLEBAR_HEIGHT: f64 = 38.0;
-/// Room the traffic lights need before anything else may sit in that strip.
-pub const TRAFFIC_LIGHTS_WIDTH: f64 = 72.0;
+/// Room the traffic lights need before anything else may sit beside them.
+///
+/// The three buttons end around x=71 given the offset they are placed at;
+/// the rest is breathing room so the drawer toggle does not crowd the green
+/// one.
+pub const TRAFFIC_LIGHTS_WIDTH: f64 = 88.0;
 pub const RADIUS: f64 = 6.0;
+/// Pills get a fixed height so their text can be centred by layout rather
+/// than by padding, which the font's uneven leading throws off.
+pub const BADGE_HEIGHT: f64 = 16.0;
+pub const PILL_HEIGHT: f64 = 18.0;
 pub const RADIUS_LG: f64 = 10.0;
 
 /// The system UI font, by the one generic that reaches it.

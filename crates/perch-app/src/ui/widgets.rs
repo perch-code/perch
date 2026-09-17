@@ -2,10 +2,12 @@
 
 use floem::peniko::Color;
 use floem::prelude::*;
-use floem::text::{Alignment, FontWeight};
+use floem::text::FontWeight;
 use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
 
 use crate::icons::{self, SidebarIcon};
+use floem::reactive::SignalUpdate;
+
 use crate::state::AppState;
 use floem::style::ObjectFit;
 
@@ -25,6 +27,45 @@ pub fn open_in_browser(url: &str) {
     if let Err(e) = std::process::Command::new("open").arg(url).spawn() {
         tracing::warn!(url, error = %e, "could not open link");
     }
+}
+
+/// Room for the traffic lights, and the button that shows or hides the
+/// drawer.
+///
+/// The window has no title bar, so whichever view sits at the top left has
+/// to leave the lights somewhere to go. That is the drawer when it is open
+/// and the body when it is not, so this goes in both.
+pub fn drawer_controls(state: AppState, reserve_lights: bool) -> impl IntoView {
+    use floem::views::drag_window_area;
+
+    drag_window_area(
+        Stack::horizontal((
+            Empty::new().style(move |s| {
+                s.width(if reserve_lights { theme::TRAFFIC_LIGHTS_WIDTH } else { 0.0 })
+                    .height_full()
+                    .flex_shrink(0.0_f32)
+            }),
+            drawer_toggle(state),
+        ))
+        .style(|s| s.height_full().items_center()),
+    )
+    .style(|s| s.height_full().flex_shrink(0.0_f32).items_center())
+}
+
+fn drawer_toggle(state: AppState) -> impl IntoView {
+    Container::new(sidebar_glyph(SidebarIcon::Sidebar, theme::FG_MUTED))
+        .on_event_stop(el::Click, move |_, _| {
+            state.sidebar_open.update(|open| *open = !*open);
+        })
+        .style(|s| {
+            clickable(s)
+                .size(26.0, 26.0)
+                .flex_shrink(0.0_f32)
+                .items_center()
+                .justify_center()
+                .border_radius(theme::RADIUS)
+                .hover(|s| s.background(theme::CANVAS_HOVER))
+        })
 }
 
 /// Style a row that behaves as a button.
@@ -57,26 +98,41 @@ pub fn sidebar_glyph(name: SidebarIcon, color: Color) -> impl IntoView {
 }
 
 /// A rounded count pill, as used beside every sidebar row.
+/// A rounded count pill.
+///
+/// The pill has a fixed height and centres the label inside it, rather than
+/// growing from the label's own padding. A label's box carries the font's
+/// leading, which is not shared evenly above and below the glyph, so padding
+/// alone leaves the number sitting low in the pill.
 pub fn count_badge(count: impl Fn() -> usize + 'static, emphasis: bool) -> impl IntoView {
     let (bg, fg) = if emphasis {
         (theme::ACCENT, theme::CANVAS)
     } else {
         (theme::BADGE_BG, theme::BADGE_FG)
     };
-    Label::derived(move || {
-        let n = count();
-        if n > 999 { "999+".to_string() } else { n.to_string() }
-    })
+
+    Container::new(
+        Label::derived(move || {
+            let n = count();
+            if n > 999 { "999+".to_string() } else { n.to_string() }
+        })
+        .style(move |s| {
+            s.font_size(theme::TEXT_BADGE)
+                .font_weight(FontWeight::MEDIUM)
+                .color(fg)
+                .line_height(1.0)
+                .selectable(false)
+        }),
+    )
     .style(move |s| {
-        s.font_size(theme::TEXT_BADGE)
-            .font_weight(FontWeight::MEDIUM)
-            .color(fg)
-            .background(bg)
-            .border_radius(9.0)
+        s.height(theme::BADGE_HEIGHT)
+            .min_width(theme::BADGE_HEIGHT + 2.0)
             .padding_horiz(6.0)
-            .padding_vert(1.0)
-            .min_width(18.0)
-            .text_align(Alignment::Center)
+            .border_radius(theme::BADGE_HEIGHT / 2.0)
+            .background(bg)
+            .items_center()
+            .justify_center()
+            .flex_shrink(0.0_f32)
     })
 }
 
@@ -140,15 +196,22 @@ pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, se
 
 /// A muted pill, used for the reason badge on a row.
 pub fn reason_pill(text: impl Fn() -> String + 'static) -> impl IntoView {
-    Label::derived(text).style(|s| {
+    Container::new(Label::derived(text).style(|s| {
         s.font_size(theme::TEXT_BADGE)
             .color(theme::FG_MUTED)
+            .line_height(1.0)
+            .selectable(false)
+    }))
+    .style(|s| {
+        s.height(theme::PILL_HEIGHT)
+            .padding_horiz(8.0)
             .background(theme::CANVAS_SUBTLE)
             .border(1.0)
             .border_color(theme::BORDER_MUTED)
-            .border_radius(10.0)
-            .padding_horiz(8.0)
-            .padding_vert(2.0)
+            .border_radius(theme::PILL_HEIGHT / 2.0)
+            .items_center()
+            .justify_center()
+            .flex_shrink(0.0_f32)
     })
 }
 

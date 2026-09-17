@@ -150,8 +150,8 @@ fn change_count(state: ReviewState, path: String) -> impl IntoView {
 
 fn close_button(state: ReviewState, path: String) -> impl IntoView {
     Container::new(
-        Label::derived(|| "\u{00d7}".to_string())
-            .style(|s| s.font_size(13.0).color(theme::FG_SUBTLE).selectable(false)),
+        crate::ui::widgets::sidebar_glyph(crate::icons::SidebarIcon::Close, theme::FG_SUBTLE)
+            .style(|s| s.size(11.0, 11.0)),
     )
     .on_event_stop(el::Click, move |_, _| state.close_tab(&path))
     .style(|s| {
