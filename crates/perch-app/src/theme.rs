@@ -178,4 +178,19 @@ pub const GUTTER_WIDTH: f64 = 62.0;
 pub const CODE_GUTTER_GAP: f64 = 12.0;
 pub const RAIL_WIDTH: f64 = 292.0;
 pub const REVIEW_HEADER_HEIGHT: f64 = 56.0;
-pub const TAB_HEIGHT: f64 = 34.0;
+pub const TAB_HEIGHT: f64 = 35.0;
+/// Widest a tab grows before its name is ellipsized.
+pub const TAB_MAX_WIDTH: f64 = 190.0;
+
+/// A dot beside a tab name, coloured by language.
+pub fn language_color(language: Option<perch_syntax::Language>) -> Color {
+    use perch_syntax::Language;
+    match language {
+        Some(Language::Rust) => Color::from_rgb8(0xce, 0x69, 0x3a),
+        Some(Language::Toml) => Color::from_rgb8(0x9c, 0x7a, 0x4f),
+        Some(Language::Json) => Color::from_rgb8(0xc6, 0xa1, 0x00),
+        Some(Language::Markdown) => Color::from_rgb8(0x51, 0x7f, 0xbf),
+        Some(Language::Yaml) => Color::from_rgb8(0x8a, 0x6d, 0xbd),
+        None => Color::from_rgb8(0xa8, 0xb0, 0xb8),
+    }
+}
