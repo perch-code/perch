@@ -49,12 +49,14 @@ pub const AVATAR_TINTS: [Color; 6] = [
     Color::from_rgb8(0xe7, 0xeb, 0xff),
 ];
 
-/// Type scale.
-pub const TEXT_TITLE: f32 = 13.5;
-pub const TEXT_BODY: f32 = 12.5;
-pub const TEXT_META: f32 = 11.5;
-pub const TEXT_BADGE: f32 = 11.0;
-pub const TEXT_SECTION: f32 = 10.5;
+/// Type scale, in whole pixels. The renderer rounds the size in its glyph
+/// cache key, so fractional sizes that round together share bitmaps on a
+/// non-retina display.
+pub const TEXT_TITLE: f32 = 13.0;
+pub const TEXT_BODY: f32 = 12.0;
+pub const TEXT_META: f32 = 11.0;
+pub const TEXT_BADGE: f32 = 10.0;
+pub const TEXT_SECTION: f32 = 10.0;
 
 /// Layout constants.
 pub const SIDEBAR_WIDTH: f64 = 236.0;
@@ -68,8 +70,14 @@ pub const TRAFFIC_LIGHTS_WIDTH: f64 = 72.0;
 pub const RADIUS: f64 = 6.0;
 pub const RADIUS_LG: f64 = 10.0;
 
-/// macOS first, with fallbacks that exist on any machine cosmic-text can see.
-pub const FONT_STACK: &str = "SF Pro Text, SF Pro Display, Helvetica Neue, Helvetica, Arial";
+/// The system UI font, by the one generic that reaches it.
+///
+/// It has to be a single entry: floem hands a lone family straight to
+/// parley, which understands `system-ui`, but a comma-separated list takes a
+/// different path where the generic is never resolved. "SF Pro Text" and
+/// "SF Pro Display", which this used to name, are not installed families at
+/// all and resolved to nothing.
+pub const FONT_STACK: &str = "system-ui";
 
 /// A stable tint for a login, so the same person keeps the same placeholder.
 pub fn tint_for(seed: &str) -> Color {
@@ -159,7 +167,12 @@ pub fn syntax_color(capture: usize) -> Color {
 /// Code metrics. The editor needs a fixed line height to place the gutter.
 pub const CODE_FONT_SIZE: f32 = 12.0;
 pub const CODE_LINE_HEIGHT: f32 = 19.0;
-pub const CODE_FONT_STACK: &str = "SF Mono, Menlo, Monaco, Consolas, monospace";
+/// Menlo by name, and nothing else.
+///
+/// "SF Mono" and "Consolas" are not installed here, and the `monospace`
+/// generic resolves to Courier rather than to anything a reviewer wants to
+/// read code in.
+pub const CODE_FONT_STACK: &str = "Menlo";
 pub const GUTTER_WIDTH: f64 = 62.0;
 /// Gap between the gutter's change bar and the first character of code.
 pub const CODE_GUTTER_GAP: f64 = 12.0;

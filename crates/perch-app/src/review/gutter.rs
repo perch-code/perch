@@ -123,7 +123,7 @@ fn gutter_row(file: Arc<LoadedFile>, line: usize) -> impl IntoView {
                 s.flex_grow(1.0_f32)
                     .selectable(false)
                     .font_family(theme::CODE_FONT_STACK.to_string())
-                    .font_size(theme::CODE_FONT_SIZE - 0.5)
+                    .font_size(theme::CODE_FONT_SIZE - 1.0)
                     .color(if dimmed { theme::DIFF_DELETED_BAR } else { theme::GUTTER_FG })
                     .text_align(floem::text::Alignment::End)
                     .padding_right(9.0)

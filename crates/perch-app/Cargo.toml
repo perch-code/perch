@@ -20,5 +20,16 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 jiff.workspace = true
-floem = { git = "https://github.com/lapce/floem", branch = "main" }
+# vello rather than the default vger renderer. vger's glyph atlas keys on
+# (font file, glyph, rounded size, subpixel bin) without the face index or a
+# variable font's coordinates, so Regular and Bold from one .ttc collapse
+# into a single cached bitmap and whichever drew first wins. That showed up
+# as text changing weight mid-word and as bold glyphs drawn on regular
+# spacing. vello's cache keys on the blob, the index and the coordinates.
+floem = { git = "https://github.com/lapce/floem", branch = "main", default-features = false, features = [
+    "vello",
+    "editor",
+    "serde",
+    "default-image-formats",
+] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
