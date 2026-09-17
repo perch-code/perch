@@ -171,22 +171,26 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     config.poll_interval_secs.max(1),
                 ));
 
-                if let Some(cache) = cache.as_ref() {
-                    if let (Some(lm), Ok(guard)) = (result.last_modified.as_ref(), cache.lock()) {
-                        let _ = guard.set_meta(LAST_MODIFIED_KEY, lm);
-                    }
-                }
-
                 if result.threads.is_none() {
-                    tracing::info!("inbox unchanged (304), keeping the cached list");
+                    tracing::info!("inbox unchanged, keeping the cached list");
                 }
 
                 if let Some(threads) = result.threads {
                     tracing::info!(count = threads.len(), "inbox refreshed");
                     if let Some(cache) = cache.as_ref() {
                         if let Ok(mut guard) = cache.lock() {
-                            if let Err(e) = guard.store_threads(&threads) {
-                                tracing::warn!(error = %e, "could not cache threads");
+                            match guard.store_threads(&threads) {
+                                // The stored timestamp must describe the
+                                // stored list. Writing it on any other path
+                                // would let a later probe answer "unchanged"
+                                // for a list we never actually saved, and the
+                                // cache could never heal itself.
+                                Ok(()) => {
+                                    if let Some(lm) = result.last_modified.as_ref() {
+                                        let _ = guard.set_meta(LAST_MODIFIED_KEY, lm);
+                                    }
+                                }
+                                Err(e) => tracing::warn!(error = %e, "could not cache threads"),
                             }
                         }
                     }

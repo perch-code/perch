@@ -45,6 +45,14 @@ pub struct ListResult {
     pub poll_interval: Duration,
 }
 
+/// One raw page response, before it is parsed.
+struct Page {
+    status: StatusCode,
+    last_modified: Option<String>,
+    poll_interval: Duration,
+    body: String,
+}
+
 #[derive(Clone)]
 pub struct GitHub {
     octo: Octocrab,
@@ -53,8 +61,23 @@ pub struct GitHub {
 
 impl GitHub {
     pub fn new(token: &str) -> Result<Self, Error> {
-        let octo = Octocrab::builder()
-            .personal_token(token.to_string())
+        Self::build(token, None)
+    }
+
+    /// Point the client at a different API root. Used by tests to stand up a
+    /// local server in place of api.github.com.
+    pub fn with_base_uri(token: &str, base_uri: &str) -> Result<Self, Error> {
+        Self::build(token, Some(base_uri))
+    }
+
+    fn build(token: &str, base_uri: Option<&str>) -> Result<Self, Error> {
+        let mut builder = Octocrab::builder().personal_token(token.to_string());
+        if let Some(base) = base_uri {
+            builder = builder
+                .base_uri(base)
+                .map_err(|e| Error::Network(e.to_string()))?;
+        }
+        let octo = builder
             .build()
             .map_err(|e| Error::Network(e.to_string()))?;
 
@@ -70,67 +93,43 @@ impl GitHub {
     /// Fetch the inbox.
     ///
     /// Always asks for read and unread threads: the web UI's Unread tab is a
-    /// filter over one list, not a separate query. `since` is the previous
-    /// response's `Last-Modified`, which lets the server answer 304.
+    /// filter over one list, not a separate query.
+    ///
+    /// `since` is the previous response's `Last-Modified`, used only as a
+    /// cheap "has anything changed?" probe. It is deliberately *not* used to
+    /// build the returned list, because GitHub treats `If-Modified-Since` on
+    /// this endpoint as a filter rather than a cache validator: a 200 carries
+    /// only the threads updated since that instant. A partial list cannot
+    /// show which threads were marked done or unsubscribed, so acting on one
+    /// would silently drop the rest of the inbox. When the probe says
+    /// something moved, we pay one extra request for the whole list.
     pub async fn list_threads(&self, since: Option<&str>) -> Result<ListResult, Error> {
+        if let Some(since) = since {
+            let probe = self.fetch_page(1, Some(since)).await?;
+            if probe.status == StatusCode::NOT_MODIFIED {
+                return Ok(ListResult {
+                    threads: None,
+                    last_modified: probe.last_modified,
+                    poll_interval: probe.poll_interval,
+                });
+            }
+            // Something changed. Fall through and re-read the full inbox.
+        }
+
         let mut all = Vec::new();
         let mut last_modified = None;
         let mut poll_interval = Duration::from_secs(DEFAULT_POLL_SECS);
 
         for page in 1..=MAX_PAGES {
-            let uri = format!(
-                "/notifications?all=true&participating=false&per_page={PER_PAGE}&page={page}"
-            );
-
-            // Conditional requests only make sense for the first page. A 304
-            // there means the whole inbox is unchanged.
-            let mut headers = HeaderMap::new();
-            if page == 1 {
-                if let Some(since) = since.and_then(|s| HeaderValue::from_str(s).ok()) {
-                    headers.insert(IF_MODIFIED_SINCE, since);
-                }
-            }
-
-            let response = self
-                .octo
-                ._get_with_headers(&uri, Some(headers))
-                .await
-                .map_err(map_octocrab_error)?;
-
-            let status = response.status();
+            let response = self.fetch_page(page, None).await?;
 
             if page == 1 {
-                if let Some(v) = header_str(response.headers(), LAST_MODIFIED.as_str()) {
-                    last_modified = Some(v);
-                }
-                if let Some(secs) = header_str(response.headers(), "x-poll-interval")
-                    .and_then(|v| v.parse::<u64>().ok())
-                {
-                    poll_interval = Duration::from_secs(secs.max(1));
-                }
+                last_modified = response.last_modified.clone();
+                poll_interval = response.poll_interval;
             }
 
-            if status == StatusCode::NOT_MODIFIED {
-                return Ok(ListResult {
-                    threads: None,
-                    last_modified,
-                    poll_interval,
-                });
-            }
-
-            let rate_reset = header_str(response.headers(), "x-ratelimit-reset")
-                .and_then(|v| v.parse::<i64>().ok());
-            let rate_remaining = header_str(response.headers(), "x-ratelimit-remaining")
-                .and_then(|v| v.parse::<i64>().ok());
-
-            if !status.is_success() {
-                let body = body_text(response).await;
-                return Err(classify(status, rate_remaining, rate_reset, body));
-            }
-
-            let body = body_text(response).await;
-            let page_threads: Vec<Thread> =
-                serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+            let page_threads: Vec<Thread> = serde_json::from_str(&response.body)
+                .map_err(|e| Error::Decode(e.to_string()))?;
 
             let short_page = page_threads.len() < PER_PAGE;
             all.extend(page_threads);
@@ -143,6 +142,55 @@ impl GitHub {
             threads: Some(all),
             last_modified,
             poll_interval,
+        })
+    }
+
+    /// One page of `/notifications`, with the headers the poll loop needs.
+    async fn fetch_page(&self, page: usize, since: Option<&str>) -> Result<Page, Error> {
+        let uri =
+            format!("/notifications?all=true&participating=false&per_page={PER_PAGE}&page={page}");
+
+        let mut headers = HeaderMap::new();
+        if let Some(since) = since.and_then(|s| HeaderValue::from_str(s).ok()) {
+            headers.insert(IF_MODIFIED_SINCE, since);
+        }
+
+        let response = self
+            .octo
+            ._get_with_headers(&uri, Some(headers))
+            .await
+            .map_err(map_octocrab_error)?;
+
+        let status = response.status();
+        let last_modified = header_str(response.headers(), LAST_MODIFIED.as_str());
+        let poll_interval = header_str(response.headers(), "x-poll-interval")
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|s| Duration::from_secs(s.max(1)))
+            .unwrap_or_else(|| Duration::from_secs(DEFAULT_POLL_SECS));
+        let rate_reset =
+            header_str(response.headers(), "x-ratelimit-reset").and_then(|v| v.parse::<i64>().ok());
+        let rate_remaining = header_str(response.headers(), "x-ratelimit-remaining")
+            .and_then(|v| v.parse::<i64>().ok());
+
+        if status == StatusCode::NOT_MODIFIED {
+            return Ok(Page {
+                status,
+                last_modified,
+                poll_interval,
+                body: String::new(),
+            });
+        }
+
+        let body = body_text(response).await;
+        if !status.is_success() {
+            return Err(classify(status, rate_remaining, rate_reset, body));
+        }
+
+        Ok(Page {
+            status,
+            last_modified,
+            poll_interval,
+            body,
         })
     }
 
