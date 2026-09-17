@@ -2,7 +2,7 @@
 
 use floem::prelude::*;
 use floem::views::{Container, Decorators, Empty, Label, Stack, dyn_container};
-use floem::text::FontWeight;
+use floem::text::{Alignment, FontWeight};
 use perch_github::Thread;
 
 use crate::filter::Group;
@@ -162,7 +162,9 @@ fn timestamp(state: AppState, thread: Thread) -> impl IntoView {
             .color(theme::FG_SUBTLE)
             .width(96.0)
             .flex_shrink(0.0_f32)
-            .justify_end()
+            // justify_content lays out flex children; a label places its
+            // own text with text_align.
+            .text_align(Alignment::End)
             .text_ellipsis()
     })
 }

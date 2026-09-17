@@ -2,11 +2,13 @@
 
 use floem::peniko::Color;
 use floem::prelude::*;
-use floem::text::FontWeight;
-use floem::views::{Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
+use floem::text::{Alignment, FontWeight};
+use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
 
 use crate::icons::{self, SidebarIcon};
 use crate::state::AppState;
+use floem::style::ObjectFit;
+
 use crate::theme;
 
 /// A 16px icon.
@@ -38,7 +40,7 @@ pub fn count_badge(count: impl Fn() -> usize + 'static, emphasis: bool) -> impl 
             .padding_horiz(6.0)
             .padding_vert(1.0)
             .min_width(18.0)
-            .justify_center()
+            .text_align(Alignment::Center)
     })
 }
 
@@ -66,7 +68,12 @@ pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, se
     dyn_container(
         move || state.avatar_for(&url()),
         move |bytes| match bytes {
+            // An Img draws its bitmap square: border_radius alone would only
+            // round the border, not the picture. Clipping is what actually
+            // makes the avatar circular.
             Some(bytes) => img(move || bytes.as_ref().clone())
+                .style(move |s| s.size(size, size).object_fit(ObjectFit::Cover))
+                .clip()
                 .style(move |s| s.size(size, size).border_radius(radius))
                 .into_any(),
             None => {
