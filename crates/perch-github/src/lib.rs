@@ -11,7 +11,7 @@ pub mod model;
 pub mod pulls;
 
 pub use auth::{resolve_token, Token, TokenSource};
-pub use cache::{Cache, CacheError};
+pub use cache::{Cache, CacheError, Mark};
 pub use client::{Error, GitHub, ListResult};
 pub use config::Config;
 pub use pulls::PullRequest;
