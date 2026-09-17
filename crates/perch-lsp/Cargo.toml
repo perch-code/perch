@@ -1,0 +1,6 @@
+[package]
+name = "perch-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]

@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/perch-github", "crates/perch-app"]
+members = [
+    "crates/perch-github",
+    "crates/perch-git",
+    "crates/perch-lsp",
+    "crates/perch-syntax",
+    "crates/perch-app",
+]
 
 [workspace.package]
 version = "0.1.0"

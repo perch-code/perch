@@ -228,6 +228,40 @@ impl GitHub {
         Ok(payload.into_detail(kind))
     }
 
+    /// Fetch the pull request behind a notification.
+    ///
+    /// `repo_full_name` is the repository the notification came from, used
+    /// only when the payload omits its own base repository.
+    pub async fn fetch_pull_request(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<crate::pulls::PullRequest, Error> {
+        let path = format!("/repos/{repo_full_name}/pulls/{number}");
+        let response = self
+            .octo
+            ._get_with_headers(&path, None)
+            .await
+            .map_err(map_octocrab_error)?;
+
+        let status = response.status();
+        let rate_reset =
+            header_str(response.headers(), "x-ratelimit-reset").and_then(|v| v.parse::<i64>().ok());
+        let rate_remaining = header_str(response.headers(), "x-ratelimit-remaining")
+            .and_then(|v| v.parse::<i64>().ok());
+
+        if !status.is_success() {
+            let body = body_text(response).await;
+            return Err(classify(status, rate_remaining, rate_reset, body));
+        }
+
+        let body = body_text(response).await;
+        let payload: crate::pulls::PullPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+
+        Ok(payload.into_pull_request(repo_full_name))
+    }
+
     /// Download an avatar at display size. Returns raw encoded bytes.
     pub async fn fetch_avatar(&self, url: &str) -> Result<Vec<u8>, Error> {
         let sized = with_size_param(url, 64);
