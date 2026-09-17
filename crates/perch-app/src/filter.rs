@@ -3,10 +3,42 @@
 //! All of it runs in memory. Changing a filter never refetches, which is what
 //! makes the sidebar feel instant.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use jiff::Timestamp;
-use perch_github::{Reason, Thread};
+use perch_github::{Mark, Reason, Thread};
+
+/// Which of the three lists the inbox is showing.
+///
+/// Mutually exclusive, and orthogonal to every other filter: a search or a
+/// repository narrows whichever view is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    #[default]
+    Inbox,
+    Saved,
+    Done,
+}
+
+impl View {
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Inbox => "Inbox",
+            View::Saved => "Saved",
+            View::Done => "Done",
+        }
+    }
+
+    /// Whether this view shows a thread, given what Perch has marked it.
+    fn accepts(self, mark: Option<&Mark>) -> bool {
+        match self {
+            // Done hides a thread from the inbox. Saved does not.
+            View::Inbox => !mark.is_some_and(Mark::is_done),
+            View::Saved => mark.is_some_and(|m| m.saved),
+            View::Done => mark.is_some_and(Mark::is_done),
+        }
+    }
+}
 
 use crate::timefmt::{bucket, DateBucket};
 
@@ -93,6 +125,7 @@ impl std::fmt::Display for Group {
 /// Everything narrowing the list right now. Filters combine with AND.
 #[derive(Debug, Clone, Default)]
 pub struct Filters {
+    pub view: View,
     pub reason: Option<ReasonFilter>,
     pub repo: Option<String>,
     pub unread_only: bool,
@@ -107,7 +140,10 @@ impl Filters {
             || !self.search.trim().is_empty()
     }
 
-    fn accepts(&self, t: &Thread) -> bool {
+    fn accepts(&self, t: &Thread, mark: Option<&Mark>) -> bool {
+        if !self.view.accepts(mark) {
+            return false;
+        }
         if self.unread_only && !t.unread {
             return false;
         }
@@ -144,9 +180,37 @@ pub struct Section {
     pub threads: Vec<Thread>,
 }
 
+/// Every thread the app can show.
+///
+/// The live inbox, plus a snapshot for any marked thread GitHub has stopped
+/// returning. Saved and Done have to keep listing a thread months after the
+/// API forgets it, and this is where that copy comes back in.
+///
+/// Order is not meaningful here; `visible` sorts.
+pub fn pool(live: &[Thread], marks: &HashMap<String, Mark>) -> Vec<Thread> {
+    let present: HashSet<&str> = live.iter().map(|t| t.id.as_str()).collect();
+    let mut out = live.to_vec();
+    out.extend(
+        marks
+            .values()
+            .filter(|m| !present.contains(m.thread_id.as_str()))
+            .map(|m| m.snapshot.clone()),
+    );
+    out
+}
+
 /// Apply filters, then sort.
-pub fn visible(threads: &[Thread], filters: &Filters, sort: Sort) -> Vec<Thread> {
-    let mut out: Vec<Thread> = threads.iter().filter(|t| filters.accepts(t)).cloned().collect();
+pub fn visible(
+    threads: &[Thread],
+    marks: &HashMap<String, Mark>,
+    filters: &Filters,
+    sort: Sort,
+) -> Vec<Thread> {
+    let mut out: Vec<Thread> = threads
+        .iter()
+        .filter(|t| filters.accepts(t, marks.get(&t.id)))
+        .cloned()
+        .collect();
     sort_threads(&mut out, sort);
     out
 }
@@ -234,20 +298,46 @@ pub fn sections(threads: &[Thread], group: Group, sort: Sort, now: Timestamp) ->
     }
 }
 
-/// Counts for the sidebar badges, computed over the unfiltered inbox.
+/// Counts for the sidebar badges.
+///
+/// Two kinds live here. `unread`, `saved` and `done` name the three views and
+/// mean the same thing wherever you are standing. `by_reason` and `repos`
+/// describe the view that is open, so switching to Done renumbers them
+/// against done threads. Neither kind is narrowed by the reason, repository
+/// or search filters: a badge has to be able to say what selecting it would
+/// show.
 #[derive(Debug, Clone, Default)]
 pub struct Counts {
+    /// Unread and not done. A dismissed thread stops nagging.
     pub unread: usize,
+    pub saved: usize,
+    pub done: usize,
     pub by_reason: HashMap<ReasonFilter, usize>,
     /// Repository, thread count, owner avatar. Ordered by count, then name.
     pub repos: Vec<(String, usize, String)>,
 }
 
-pub fn counts(threads: &[Thread]) -> Counts {
+pub fn counts(threads: &[Thread], marks: &HashMap<String, Mark>, view: View) -> Counts {
     let mut by_reason: HashMap<ReasonFilter, usize> = HashMap::new();
     let mut repos: HashMap<String, (usize, String)> = HashMap::new();
+    let (mut unread, mut saved, mut done) = (0, 0, 0);
 
     for t in threads {
+        let mark = marks.get(&t.id);
+        let is_done = mark.is_some_and(Mark::is_done);
+        if mark.is_some_and(|m| m.saved) {
+            saved += 1;
+        }
+        if is_done {
+            done += 1;
+        }
+        if t.unread && !is_done {
+            unread += 1;
+        }
+
+        if !view.accepts(mark) {
+            continue;
+        }
         for f in ReasonFilter::ALL {
             if f.matches(&t.reason) {
                 *by_reason.entry(f).or_default() += 1;
@@ -267,7 +357,9 @@ pub fn counts(threads: &[Thread]) -> Counts {
     repos.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     Counts {
-        unread: threads.iter().filter(|t| t.unread).count(),
+        unread,
+        saved,
+        done,
         by_reason,
         repos,
     }
