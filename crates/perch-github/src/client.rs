@@ -37,6 +37,15 @@ pub enum Error {
     Decode(String),
 }
 
+/// What asking after a branch's pull request gave back.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PullLookup {
+    /// A 304: whatever was known still holds.
+    Unchanged,
+    /// A fresh answer, and the tag to ask with next time.
+    Answer { pull: Option<Box<crate::pulls::PullRequest>>, etag: Option<String> },
+}
+
 /// Outcome of a notifications poll.
 #[derive(Debug)]
 pub struct ListResult {
@@ -331,6 +340,57 @@ impl GitHub {
     ) -> Result<Vec<crate::discussion::IssueComment>, Error> {
         self.list_all(&format!("/repos/{repo_full_name}/issues/{number}/comments"))
             .await
+    }
+
+    /// The pull request whose head is `owner:branch` on `repo_full_name`,
+    /// open or closed, with a conditional request: an unchanged answer
+    /// costs a 304 and returns `Unchanged`.
+    pub async fn find_pull_for_branch(
+        &self,
+        repo_full_name: &str,
+        head_owner: &str,
+        branch: &str,
+        etag: Option<&str>,
+    ) -> Result<PullLookup, Error> {
+        let head_raw = format!("{head_owner}:{branch}");
+        let head = percent_encoding::utf8_percent_encode(&head_raw, percent_encoding::NON_ALPHANUMERIC);
+        let path = format!("/repos/{repo_full_name}/pulls?head={head}&state=all&per_page=5");
+
+        let mut headers = HeaderMap::new();
+        if let Some(etag) = etag.and_then(|e| HeaderValue::from_str(e).ok()) {
+            headers.insert(http::header::IF_NONE_MATCH, etag);
+        }
+        let response = self
+            .octo
+            ._get_with_headers(&path, Some(headers))
+            .await
+            .map_err(map_octocrab_error)?;
+        let status = response.status();
+        if status == StatusCode::NOT_MODIFIED {
+            return Ok(PullLookup::Unchanged);
+        }
+        let new_etag = header_str(response.headers(), "etag");
+        let rate_reset =
+            header_str(response.headers(), "x-ratelimit-reset").and_then(|v| v.parse::<i64>().ok());
+        let rate_remaining = header_str(response.headers(), "x-ratelimit-remaining")
+            .and_then(|v| v.parse::<i64>().ok());
+        let body = body_text(response).await;
+        if !status.is_success() {
+            return Err(classify(status, rate_remaining, rate_reset, body));
+        }
+        let payloads: Vec<crate::pulls::PullPayload> =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        // Open first, else the newest: a branch that had a pull request
+        // closed and reopened as another should show the live one.
+        let pick = payloads
+            .iter()
+            .position(|p| p.state.eq_ignore_ascii_case("open"))
+            .or(if payloads.is_empty() { None } else { Some(0) });
+        let pull = pick.map(|i| {
+            let mut all = payloads;
+            Box::new(all.swap_remove(i).into_pull_request(repo_full_name))
+        });
+        Ok(PullLookup::Answer { pull, etag: new_etag })
     }
 
     /// Every page of a list endpoint, concatenated.

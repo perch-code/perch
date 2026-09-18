@@ -583,6 +583,7 @@ mod tests {
             path: format!("/w/{branch}").into(),
             owned: true,
             on_disk: true,
+            churn: None,
         }
     }
 

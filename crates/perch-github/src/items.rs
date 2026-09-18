@@ -248,6 +248,9 @@ pub struct Checkout {
     pub owned: bool,
     /// False while archived, or when a root's worktree has gone.
     pub on_disk: bool,
+    /// Lines added and removed against the base, for the row. Filled by
+    /// the root scan; `None` until then.
+    pub churn: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -421,6 +424,7 @@ mod tests {
             path: "/x".into(),
             owned: true,
             on_disk: true,
+            churn: None,
         });
         assert_eq!(i.title(), "perch/issue-42");
         i.subject = Some(Subject::Issue(Issue {
@@ -467,7 +471,7 @@ mod tests {
         assert!(i.is_closed());
         assert!(!i.is_active());
         let mut j = item();
-        j.checkout = Some(Checkout { branch: "b".into(), base_ref: "main".into(), head_sha: "h".into(), path: "/x".into(), owned: false, on_disk: true });
+        j.checkout = Some(Checkout { branch: "b".into(), base_ref: "main".into(), head_sha: "h".into(), path: "/x".into(), owned: false, on_disk: true, churn: None });
         assert!(j.is_active());
         j.attention_at = Some(at("2026-09-18T11:00:00Z"));
         j.done_at = Some(at("2026-09-18T11:00:00Z"));

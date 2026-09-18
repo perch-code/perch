@@ -199,6 +199,7 @@ mod tests {
             path: "/w/issue-42".into(),
             owned: true,
             on_disk: true,
+            churn: None,
         });
         branch.pinned_at = Some(at("2026-09-18T10:00:00Z"));
 

@@ -92,6 +92,11 @@ pub enum Command {
     /// `project_id` of `None` with `new_project` set makes an implicit
     /// project of that name first.
     MoveItem { id: String, project_id: Option<String>, new_project: Option<String> },
+    /// Cut `perch/issue-<n>` from the default branch and make a
+    /// checkout-only item pointing back at the issue.
+    StartWork { issue_item_id: String },
+    /// Cut a branch from the item's head into a new checkout-only item.
+    ForkItem { id: String },
     /// Rescan roots and re-ask GitHub about subject-less branches.
     RefreshItems,
     /// Remember a setting across launches.
@@ -260,6 +265,14 @@ impl Backend {
 
     pub fn refresh_items(&self) {
         let _ = self.commands.send(Command::RefreshItems);
+    }
+
+    pub fn start_work(&self, issue_item_id: &str) {
+        let _ = self.commands.send(Command::StartWork { issue_item_id: issue_item_id.to_string() });
+    }
+
+    pub fn fork_item(&self, id: &str) {
+        let _ = self.commands.send(Command::ForkItem { id: id.to_string() });
     }
 
     pub fn set_meta(&self, key: &str, value: &str) {
@@ -520,6 +533,13 @@ async fn run(
         tokio::spawn(async move { sweep_items(&ctx).await });
     }
 
+    {
+        // Roots and the pull requests behind subject-less branches, after
+        // the cache has painted and off the loop.
+        let ctx = ctx.clone();
+        tokio::spawn(async move { refresh_items(&ctx).await });
+    }
+
     // A refresh happens immediately, then on whatever cadence the server asks
     // for. A command from the UI short-circuits the wait.
     let mut poll_after = Duration::from_secs(0);
@@ -537,6 +557,8 @@ async fn run(
         match command {
             Some(Command::Refresh) | None => {
                 poll_after = refresh(&ctx, &source, &fetches).await;
+                let ctx = ctx.clone();
+                tokio::spawn(async move { refresh_items(&ctx).await });
             }
             Some(Command::OpenSubject { repo_full_name, kind, number }) => {
                 let ctx = ctx.clone();
@@ -608,6 +630,36 @@ async fn run(
             Some(Command::RefreshItems) => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { refresh_items(&ctx).await });
+            }
+            Some(Command::StartWork { issue_item_id }) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    match start_work(&ctx, &issue_item_id).await {
+                        Ok(id) => {
+                            if open_item(&ctx, &id).await {
+                                start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                            }
+                        }
+                        Err(message) => {
+                            let _ = ctx.events.send(Event::ReviewFailed { message });
+                        }
+                    }
+                });
+            }
+            Some(Command::ForkItem { id }) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    match fork_item(&ctx, &id).await {
+                        Ok(id) => {
+                            if open_item(&ctx, &id).await {
+                                start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                            }
+                        }
+                        Err(message) => {
+                            let _ = ctx.events.send(Event::ReviewFailed { message });
+                        }
+                    }
+                });
             }
             Some(Command::SetMeta { key, value }) => {
                 ctx.with_cache(|c| c.set_meta(&key, &value));
@@ -1222,12 +1274,269 @@ async fn open_item(ctx: &Ctx, id: &str) -> bool {
     }
 }
 
-/// A branch of the reader's own: not yet.
+/// A branch of the reader's own, with no pull request: the review view over
+/// the diff against its base, wherever the checkout is.
 async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
-    let _ = ctx.events.send(Event::ReviewFailed {
-        message: format!("Opening a branch ({}) is not built yet", item.branch().unwrap_or("")),
+    let events = &ctx.events;
+    let Some(checkout) = item.checkout.clone() else {
+        let _ = events.send(Event::ReviewFailed { message: "That item has no checkout".into() });
+        return false;
+    };
+    let Some(repo) = RepoId::parse(&item.repo_full_name) else {
+        let _ = events.send(Event::ReviewFailed { message: format!("{} is not a repository name", item.repo_full_name) });
+        return false;
+    };
+    let _ = events.send(Event::ReviewProgress { message: "Checking out the files".into(), percent: None });
+
+    let git_checkout = if checkout.owned {
+        match open_owned_branch(ctx, &repo, &checkout).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = events.send(Event::ReviewFailed { message: e.to_string() });
+                return false;
+            }
+        }
+    } else {
+        match open_own_checkout(ctx, &repo, &checkout, &checkout.base_ref).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = events.send(Event::ReviewFailed { message: e.to_string() });
+                return false;
+            }
+        }
+    };
+
+    let mut item = item;
+    if let Some(c) = item.checkout.as_mut() {
+        c.head_sha = git_checkout.head_sha.clone();
+        c.on_disk = true;
+    }
+    item.archived_at = None;
+    item.last_opened_at = Timestamp::now();
+    ctx.with_cache(|c| c.update_item(&item));
+    ctx.send_items();
+
+    finish_open(ctx, item, None, git_checkout, false).await
+}
+
+/// A checkout under the store on a branch Perch cut: back on disk if it
+/// was archived, then read as it is.
+async fn open_owned_branch(
+    ctx: &Ctx,
+    repo: &RepoId,
+    checkout: &ItemCheckout,
+) -> Result<perch_git::Checkout, perch_git::Error> {
+    let bare = ctx.preparer.ensure_bare(repo, |_| {}).await?;
+    if !checkout.path.join(".git").exists() {
+        // Archived: the branch is still in the bare clone.
+        let path = checkout.path.to_string_lossy().into_owned();
+        let _ = ctx.preparer.git().run(Some(&bare), ["worktree", "prune"], Duration::from_secs(30)).await;
+        ctx.preparer
+            .git()
+            .run(Some(&bare), ["worktree", "add", &path, &checkout.branch], Duration::from_secs(60))
+            .await?;
+    }
+    let git = ctx.preparer.git();
+    let head_sha = git.run(Some(&checkout.path), ["rev-parse", "HEAD"], Duration::from_secs(30)).await?.trim().to_string();
+    // The base: a branch name resolves through the home ref the last
+    // ensure_home fetched; a fork's base is the source's commit itself.
+    let base = if checkout.base_ref.len() == 40 && checkout.base_ref.chars().all(|c| c.is_ascii_hexdigit()) {
+        checkout.base_ref.clone()
+    } else {
+        perch_git::home_ref(&checkout.base_ref)
+    };
+    let merge_base = git
+        .run(Some(&bare), ["merge-base", &base, &head_sha], Duration::from_secs(30))
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| head_sha.clone());
+    Ok(perch_git::Checkout {
+        worktree: checkout.path.clone(),
+        bare,
+        branch: checkout.branch.clone(),
+        head_sha,
+        merge_base,
+        stale: None,
+    })
+}
+
+/// Everything after a checkout is in hand: the file list, the tree, the
+/// review context, `ReviewReady`, and the threads.
+async fn finish_open(
+    ctx: &Ctx,
+    item: Item,
+    pull_request: Option<Arc<PullRequest>>,
+    checkout: perch_git::Checkout,
+    offline: bool,
+) -> bool {
+    let events = &ctx.events;
+    let _ = events.send(Event::ReviewProgress { message: "Computing the diff".into(), percent: None });
+
+    let files = match changed_files(&ctx.preparer, &checkout).await {
+        Ok(f) => Arc::new(f),
+        Err(e) => {
+            let _ = events.send(Event::ReviewFailed { message: e.to_string() });
+            return false;
+        }
+    };
+    let worktree = checkout.worktree.clone();
+    let tree = tokio::task::spawn_blocking(move || perch_git::list_tree(&worktree, 50_000).unwrap_or_default())
+        .await
+        .unwrap_or_default();
+
+    let stale_head = checkout.stale.clone();
+    let head_for_threads = checkout.head_sha.clone();
+    let worktree_for_threads = checkout.worktree.clone();
+    let item = Arc::new(item);
+    if let Ok(mut guard) = ctx.slot.lock() {
+        *guard = Some(ReviewContext {
+            checkout,
+            files: files.clone(),
+            item_id: item.id.clone(),
+            pull_request: pull_request.clone(),
+            body: None,
+            issue: None,
+        });
+    }
+    tracing::info!(item = %item.id, files = files.len(), tree = tree.len(), "review ready");
+    let _ = events.send(Event::ReviewReady {
+        item: item.clone(),
+        pull_request,
+        files,
+        tree: Arc::new(tree),
+        stale_head,
+        offline,
     });
-    false
+    {
+        let ctx = ctx.clone();
+        let item_id = item.id.clone();
+        tokio::spawn(async move {
+            mark_outdated_threads(&ctx, &item_id, &head_for_threads, &worktree_for_threads).await;
+            ctx.send_threads(&item_id);
+        });
+    }
+    true
+}
+
+/// Cut `perch/issue-<n>` from the default branch and make the item for it,
+/// or find the one that already has that branch.
+async fn start_work(ctx: &Ctx, issue_item_id: &str) -> Result<String, String> {
+    let Some(issue_item) = ctx.item(issue_item_id) else {
+        return Err("That item is gone".into());
+    };
+    let Some(issue) = issue_item.issue() else {
+        return Err("Start work needs an issue".into());
+    };
+    let Some(repo) = RepoId::parse(&issue_item.repo_full_name) else {
+        return Err(format!("{} is not a repository name", issue_item.repo_full_name));
+    };
+    let wanted = format!("perch/issue-{}", issue.number);
+    if let Some(existing) = ctx
+        .with_cache(|c| c.find_item_by_branch(&issue_item.repo_full_name, &wanted).ok().flatten())
+        .flatten()
+    {
+        return Ok(existing.id);
+    }
+
+    let _ = ctx.events.send(Event::ReviewProgress { message: "Fetching the default branch".into(), percent: None });
+    let progress = ctx.events.clone();
+    let label = repo.full_name();
+    ctx.preparer
+        .ensure_bare(&repo, move |step| {
+            if let perch_git::Step::Cloning { phase, percent } = step {
+                let _ = progress.send(Event::ReviewProgress { message: format!("Cloning {label}: {phase}"), percent });
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let default = ctx.preparer.default_branch(&repo).await.map_err(|e| e.to_string())?;
+    ctx.preparer.ensure_home(&repo, &default).await.map_err(|e| e.to_string())?;
+    let cut = ctx
+        .preparer
+        .cut_branch(&repo, &wanted, &perch_git::home_ref(&default))
+        .await
+        .map_err(|e| e.to_string())?;
+    let head_sha = ctx
+        .preparer
+        .git()
+        .run(Some(&cut.worktree), ["rev-parse", "HEAD"], Duration::from_secs(30))
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    let now = Timestamp::now();
+    let mut item = Item::new(&issue_item.project_id, &issue_item.repo_full_name, now);
+    item.checkout = Some(ItemCheckout {
+        branch: cut.branch,
+        base_ref: default,
+        head_sha,
+        path: cut.worktree,
+        owned: true,
+        on_disk: true,
+        churn: Some((0, 0)),
+    });
+    item.from_item_id = Some(issue_item.id.clone());
+    ctx.with_cache(|c| c.insert_item(&item)).transpose().map_err(|e| e.to_string())?;
+    ctx.send_items();
+    Ok(item.id)
+}
+
+/// Cut a new branch from an item's head into a new checkout-only item.
+async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
+    let Some(source) = ctx.item(id) else {
+        return Err("That item is gone".into());
+    };
+    if source.is_archived() {
+        return Err("Restore the item before forking it".into());
+    }
+    let Some(checkout) = source.checkout.as_ref() else {
+        return Err("Fork needs a checkout; open the pull request first".into());
+    };
+    let Some(repo) = RepoId::parse(&source.repo_full_name) else {
+        return Err(format!("{} is not a repository name", source.repo_full_name));
+    };
+    ctx.preparer.ensure_bare(&repo, |_| {}).await.map_err(|e| e.to_string())?;
+    // A root's branch may not be in the store's clone; fetch its head
+    // there by commit so the cut has something to start from.
+    let head = if checkout.owned {
+        checkout.head_sha.clone()
+    } else {
+        let git = ctx.preparer.git();
+        let sha = git
+            .run(Some(&checkout.path), ["rev-parse", "HEAD"], Duration::from_secs(30))
+            .await
+            .map_err(|e| e.to_string())?
+            .trim()
+            .to_string();
+        let bare = ctx.preparer.store().bare_path(&repo);
+        let from = checkout.path.to_string_lossy().into_owned();
+        git.run(Some(&bare), ["fetch", "--no-tags", &from, &sha], Duration::from_secs(120))
+            .await
+            .map_err(|e| e.to_string())?;
+        sha
+    };
+    let cut = ctx
+        .preparer
+        .cut_branch(&repo, &checkout.branch, &head)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let now = Timestamp::now();
+    let mut item = Item::new(&source.project_id, &source.repo_full_name, now);
+    item.checkout = Some(ItemCheckout {
+        branch: cut.branch,
+        // The source's head, so what is shown is what has been done on top.
+        base_ref: head.clone(),
+        head_sha: head,
+        path: cut.worktree,
+        owned: true,
+        on_disk: true,
+        churn: Some((0, 0)),
+    });
+    item.from_item_id = Some(source.id.clone());
+    ctx.with_cache(|c| c.insert_item(&item)).transpose().map_err(|e| e.to_string())?;
+    ctx.send_items();
+    Ok(item.id)
 }
 
 /// A file larger than this opens as a notice rather than as text.
@@ -1242,6 +1551,8 @@ struct ReviewContext {
     pull_request: Option<Arc<PullRequest>>,
     /// The description, once the discussion has been fetched.
     body: Option<String>,
+    /// The issue and its comments, for a question about an issue.
+    issue: Option<Arc<(perch_github::Issue, Vec<perch_github::IssueComment>)>>,
 }
 
 /// One poll of the notifications API. Returns how long to wait before the next.
@@ -1396,9 +1707,178 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
     }
 }
 
-/// Rescan roots and re-ask GitHub about subject-less branches: not yet.
+/// Rescan roots, then ask GitHub about subject-less branches.
 async fn refresh_items(ctx: &Ctx) {
-    ctx.send_items();
+    if scan_roots(ctx).await {
+        ctx.send_items();
+    }
+    if attach_pull_requests(ctx).await {
+        ctx.send_items();
+    }
+}
+
+/// Every worktree under a project's roots is an item, and one whose
+/// directory has gone is deleted, or archived when it has threads. Returns
+/// whether anything changed.
+async fn scan_roots(ctx: &Ctx) -> bool {
+    let projects = ctx.with_cache(|c| c.load_projects().unwrap_or_default()).unwrap_or_default();
+    let git = ctx.preparer.git();
+    let mut changed = false;
+    // Which unowned items were seen, so the rest can be judged gone.
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut scanned_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for project in &projects {
+        for root in &project.roots {
+            let scan = match perch_git::scan_root(git, root).await {
+                Ok(s) => s,
+                Err(e) => {
+                    ctx.notice(format!("{}: {e}", root.display()));
+                    continue;
+                }
+            };
+            let Some(repo) = scan.repo_full_name.clone() else {
+                ctx.notice(format!("{}: origin is not a GitHub repository", root.display()));
+                continue;
+            };
+            if !project.claims(&repo) {
+                ctx.notice(format!("{}: {repo} is not one of {}'s repositories", root.display(), project.name));
+                continue;
+            }
+            scanned_repos.insert(repo.to_lowercase());
+            for entry in &scan.entries {
+                let Some(branch) = entry.branch.clone() else { continue };
+                if branch == scan.default_branch {
+                    continue;
+                }
+                let path = entry.path.canonicalize().unwrap_or_else(|_| entry.path.clone());
+                seen.insert(path.clone());
+                let churn = perch_git::branch_churn(git, &entry.path, &format!("origin/{}", scan.default_branch))
+                    .await
+                    .ok();
+                let existing = ctx.with_cache(|c| c.find_item_by_branch(&repo, &branch).ok().flatten()).flatten();
+                match existing {
+                    Some(mut item) => {
+                        let Some(c) = item.checkout.as_mut() else { continue };
+                        let moved = c.head_sha != entry.head_sha || !c.on_disk || c.churn != churn || c.path != path;
+                        if moved && !c.owned {
+                            c.head_sha = entry.head_sha.clone();
+                            c.on_disk = true;
+                            c.churn = churn;
+                            c.path = path;
+                            ctx.with_cache(|cache| cache.update_item(&item));
+                            changed = true;
+                        }
+                    }
+                    None => {
+                        let mut item = Item::new(&project.id, &repo, Timestamp::now());
+                        item.checkout = Some(ItemCheckout {
+                            branch,
+                            base_ref: scan.default_branch.clone(),
+                            head_sha: entry.head_sha.clone(),
+                            path,
+                            owned: false,
+                            on_disk: true,
+                            churn,
+                        });
+                        if let Some(Err(e)) = ctx.with_cache(|c| c.insert_item(&item)) {
+                            tracing::warn!(error = %e, "could not record a root worktree");
+                        } else {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Unowned items in scanned repositories whose directory was not seen.
+    let items = ctx.with_cache(|c| c.load_items().unwrap_or_default()).unwrap_or_default();
+    for item in items {
+        let Some(c) = item.checkout.as_ref() else { continue };
+        if c.owned || !scanned_repos.contains(&item.repo_full_name.to_lowercase()) {
+            continue;
+        }
+        let path = c.path.canonicalize().unwrap_or_else(|_| c.path.clone());
+        if seen.contains(&path) || (item.is_archived() && !c.on_disk) {
+            continue;
+        }
+        if c.path.join(".git").exists() {
+            // Still there, on some other branch than we knew; the scan will
+            // have made a row for that branch. Leave this one for the rule.
+        }
+        let has_threads = ctx
+            .with_cache(|cache| cache.load_comment_threads(&item.id).map(|t| !t.is_empty()).unwrap_or(false))
+            .unwrap_or(false);
+        if has_threads {
+            let mut item = item;
+            if let Some(c) = item.checkout.as_mut() {
+                c.on_disk = false;
+            }
+            item.archived_at = Some(Timestamp::now());
+            ctx.with_cache(|cache| cache.update_item(&item));
+        } else {
+            ctx.with_cache(|cache| cache.delete_item(&item.id));
+        }
+        changed = true;
+    }
+    changed
+}
+
+/// For each item with a branch and no subject, ask GitHub whether a pull
+/// request has been opened on it, conditionally. When one has, the item
+/// becomes that pull request's, in the same row.
+async fn attach_pull_requests(ctx: &Ctx) -> bool {
+    let items = ctx.with_cache(|c| c.load_items().unwrap_or_default()).unwrap_or_default();
+    let projects = ctx.with_cache(|c| c.load_projects().unwrap_or_default()).unwrap_or_default();
+    let mut changed = false;
+    for item in items {
+        if item.subject.is_some() || item.is_archived() {
+            continue;
+        }
+        let Some(checkout) = item.checkout.as_ref() else { continue };
+        let Some((head_owner, _)) = item.repo_full_name.split_once('/') else { continue };
+        // The pull request may be against any of the project's repositories
+        // when the checkout is a fork.
+        let mut candidates: Vec<String> = vec![item.repo_full_name.clone()];
+        if let Some(p) = projects.iter().find(|p| p.id == item.project_id) {
+            for r in &p.repos {
+                if !candidates.iter().any(|c| c.eq_ignore_ascii_case(r)) {
+                    candidates.push(r.clone());
+                }
+            }
+        }
+        for repo in candidates {
+            let key = format!("pull_lookup_etag:{}:{}:{}", repo.to_lowercase(), head_owner, checkout.branch);
+            let etag = ctx.with_cache(|c| c.meta(&key).ok().flatten()).flatten();
+            match ctx.github.find_pull_for_branch(&repo, head_owner, &checkout.branch, etag.as_deref()).await {
+                Ok(perch_github::PullLookup::Unchanged) => {}
+                Ok(perch_github::PullLookup::Answer { pull, etag }) => {
+                    if let Some(etag) = etag {
+                        ctx.with_cache(|c| c.set_meta(&key, &etag));
+                    }
+                    if let Some(pr) = pull {
+                        tracing::info!(item = %item.id, number = pr.number, "branch gained a pull request");
+                        let mut item = item.clone();
+                        if let Some(c) = item.checkout.as_mut() {
+                            c.base_ref = pr.base_ref.clone();
+                        }
+                        item.subject = Some(ItemSubject::PullRequest(*pr));
+                        match ctx.with_cache(|c| c.update_item(&item)) {
+                            Some(Err(e)) => tracing::warn!(error = %e, "could not attach the pull request"),
+                            _ => changed = true,
+                        }
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::info!(item = %item.id, repo, error = %e, "pull request lookup failed");
+                    break;
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// Find or make the item for a pull request or issue, and open it.
@@ -1486,6 +1966,7 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         .and_then(|i| i.checkout.as_ref())
         .filter(|c| !c.owned)
         .cloned();
+    let existing_churn = existing.as_ref().and_then(|i| i.checkout.as_ref()).and_then(|c| c.churn);
     let branch = match &own_checkout {
         Some(c) => c.branch.clone(),
         None => format!("perch/pr-{number}"),
@@ -1548,6 +2029,7 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         path: checkout.worktree.clone(),
         owned: own_checkout.is_none(),
         on_disk: true,
+        churn: existing_churn,
     });
     item.archived_at = None;
     item.last_opened_at = now;
@@ -1591,6 +2073,7 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
             item_id: item.id.clone(),
             pull_request: Some(pull_request.clone()),
             body: None,
+            issue: None,
         });
     }
 
@@ -1633,17 +2116,42 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     true
 }
 
-/// A checkout under one of the reader's roots, opened where it is: not yet.
+/// A checkout under one of the reader's roots, opened where it is.
+///
+/// Nothing is fetched into it and nothing is reset. The diff is against
+/// the base as the checkout's own `origin` last saw it, and every git
+/// command runs in the directory itself, which works in a worktree as it
+/// does in a bare clone.
 async fn open_own_checkout(
-    _ctx: &Ctx,
+    ctx: &Ctx,
     _repo: &RepoId,
     own: &ItemCheckout,
-    _base_ref: &str,
+    base_ref: &str,
 ) -> Result<perch_git::Checkout, perch_git::Error> {
-    Err(perch_git::Error::Io(format!(
-        "opening a checkout of your own ({}) is not built yet",
-        own.path.display()
-    )))
+    let git = ctx.preparer.git();
+    let timeout = Duration::from_secs(30);
+    if !own.path.join(".git").exists() {
+        return Err(perch_git::Error::Io(format!("{} is not there any more", own.path.display())));
+    }
+    let head_sha = git.run(Some(&own.path), ["rev-parse", "HEAD"], timeout).await?.trim().to_string();
+    let remote_base = format!("origin/{base_ref}");
+    let base = match git.run(Some(&own.path), ["rev-parse", "--verify", "--quiet", &remote_base], timeout).await {
+        Ok(sha) if !sha.trim().is_empty() => sha.trim().to_string(),
+        _ => git.run(Some(&own.path), ["rev-parse", "--verify", "--quiet", base_ref], timeout).await?.trim().to_string(),
+    };
+    let merge_base = git
+        .run(Some(&own.path), ["merge-base", &base, &head_sha], timeout)
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| head_sha.clone());
+    Ok(perch_git::Checkout {
+        worktree: own.path.clone(),
+        bare: own.path.clone(),
+        branch: own.branch.clone(),
+        head_sha,
+        merge_base,
+        stale: None,
+    })
 }
 
 /// Fetch what was said on a pull request and file it under the knowledge

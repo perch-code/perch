@@ -965,6 +965,7 @@ mod column {
             path: std::path::PathBuf::from("/tmp/wt"),
             owned: true,
             on_disk: true,
+            churn: None,
         });
         state.item.set(Some(Arc::new(item)));
         state.ready.set(true);

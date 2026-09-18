@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use floem::ext_event::update_signal_from_channel;
 use floem::kurbo::Size;
-use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
+use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::window::WindowConfig;
 use floem::Application;
 
@@ -100,6 +100,33 @@ fn main() {
                         });
                     }
                 });
+
+                // PERCH_OPEN_BRANCH=owner/repo:branch opens a branch item once
+                // the cache has painted it. Its id is not known until then.
+                if let Ok(spec) = std::env::var("PERCH_OPEN_BRANCH") {
+                    if let Some((repo, branch)) = spec.split_once(':') {
+                        let (repo, branch) = (repo.to_string(), branch.to_string());
+                        let backend = backend.clone();
+                        floem::reactive::Effect::new(move |opened: Option<bool>| {
+                            if opened == Some(true) {
+                                return true;
+                            }
+                            let found = state.items.with(|all| {
+                                all.iter()
+                                    .find(|i| i.repo_full_name.eq_ignore_ascii_case(&repo) && i.branch() == Some(branch.as_str()))
+                                    .map(|i| i.id.clone())
+                            });
+                            match found {
+                                Some(id) => {
+                                    review.opening.set(true);
+                                    backend.open_item(&id);
+                                    true
+                                }
+                                None => false,
+                            }
+                        });
+                    }
+                }
 
                 if let Some((repo, number)) = open_at_launch.clone() {
                     review.opening.set(true);

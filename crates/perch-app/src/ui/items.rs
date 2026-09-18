@@ -93,6 +93,12 @@ pub fn item_row(
         _ => ItemGroup::Project,
     };
     let mut reference_text = reference(&item, project.as_ref(), group);
+    // A branch of the reader's own says how far it has gone from its base.
+    if item.subject.is_none() {
+        if let Some((a, d)) = item.checkout.as_ref().and_then(|c| c.churn) {
+            reference_text = format!("{reference_text}  +{a} \u{2212}{d}");
+        }
+    }
     if placement == Placement::Priority {
         if let Some(reason) = item.attention_reason.as_deref() {
             reference_text = format!("{reference_text} \u{00b7} {}", attention_label(reason));
@@ -464,9 +470,22 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         });
     }
     {
-        // Cutting a branch is a later step; the entry keeps its place.
+        // Start work cuts from the default branch; Fork from the item's
+        // head. Neither applies to an archived item or one with nothing
+        // to cut from.
         let label = if is_issue { "Start Work" } else { "Fork" };
-        menu = menu.item(label, move |m| m.enabled(false).accelerator(key(KeyCode::KeyF)).action(|| {}));
+        let can = !archived && (is_issue || item.checkout.is_some());
+        let (b, i) = (backend.clone(), id.clone());
+        menu = menu.item(label, move |m| {
+            let (b, i) = (b.clone(), i.clone());
+            m.enabled(can).accelerator(key(KeyCode::KeyF)).action(move || {
+                if is_issue {
+                    b.start_work(&i)
+                } else {
+                    b.fork_item(&i)
+                }
+            })
+        });
     }
     menu = menu.separator();
 

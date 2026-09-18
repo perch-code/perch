@@ -19,7 +19,7 @@ use crate::pulls::PullRequest;
 /// The shape of the tables. A database with an older number, or none, is
 /// deleted and recreated: there is no migration, and nothing before the
 /// number was written has shipped to anyone.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Perch's own opinion about a thread: bookmarked, dismissed, or both.
 ///
@@ -226,6 +226,8 @@ impl Cache {
                 archived_at      TEXT,
                 created_at       TEXT NOT NULL,
                 last_opened_at   TEXT NOT NULL,
+                additions        INTEGER,
+                deletions        INTEGER,
                 CHECK (subject_kind IS NOT NULL OR branch IS NOT NULL)
             );
             CREATE UNIQUE INDEX IF NOT EXISTS items_subject
@@ -1109,8 +1111,8 @@ impl Cache {
              (id, project_id, repo_full_name, subject_kind, subject_number, subject_json,
               branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name,
               saved, pinned_at, done_at, attention_at, attention_reason, archived_at,
-              created_at, last_opened_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+              created_at, last_opened_at, additions, deletions)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             params![
                 item.id, item.project_id, item.repo_full_name,
                 c.subject_kind, c.subject_number, c.subject_json,
@@ -1124,6 +1126,8 @@ impl Cache {
                 item.archived_at.map(|t| t.to_string()),
                 item.created_at.to_string(),
                 item.last_opened_at.to_string(),
+                c.additions,
+                c.deletions,
             ],
         )?;
         Ok(())
@@ -1141,7 +1145,7 @@ impl Cache {
                 subject_json = ?6, branch = ?7, base_ref = ?8, head_sha = ?9, checkout_path = ?10,
                 owned = ?11, on_disk = ?12, from_item_id = ?13, name = ?14, saved = ?15,
                 pinned_at = ?16, done_at = ?17, attention_at = ?18, attention_reason = ?19,
-                archived_at = ?20, last_opened_at = ?21
+                archived_at = ?20, last_opened_at = ?21, additions = ?22, deletions = ?23
              WHERE id = ?1",
             params![
                 item.id, item.project_id, item.repo_full_name,
@@ -1155,6 +1159,8 @@ impl Cache {
                 item.attention_reason,
                 item.archived_at.map(|t| t.to_string()),
                 item.last_opened_at.to_string(),
+                c.additions,
+                c.deletions,
             ],
         )?;
         Ok(())
@@ -1251,7 +1257,8 @@ fn hash(s: &str) -> String {
 
 const ITEM_COLUMNS: &str = "id, project_id, repo_full_name, subject_kind, subject_number, subject_json,
     branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name, saved,
-    pinned_at, done_at, attention_at, attention_reason, archived_at, created_at, last_opened_at";
+    pinned_at, done_at, attention_at, attention_reason, archived_at, created_at, last_opened_at,
+    additions, deletions";
 
 /// An item's optional parts as columns.
 struct ItemColumns {
@@ -1264,6 +1271,8 @@ struct ItemColumns {
     checkout_path: Option<String>,
     owned: i64,
     on_disk: i64,
+    additions: Option<i64>,
+    deletions: Option<i64>,
 }
 
 impl ItemColumns {
@@ -1283,6 +1292,8 @@ impl ItemColumns {
             checkout_path: c.map(|c| c.path.to_string_lossy().into_owned()),
             owned: c.map(|c| c.owned as i64).unwrap_or(1),
             on_disk: c.map(|c| c.on_disk as i64).unwrap_or(1),
+            additions: c.and_then(|c| c.churn).map(|(a, _)| a as i64),
+            deletions: c.and_then(|c| c.churn).map(|(_, d)| d as i64),
         })
     }
 }
@@ -1304,6 +1315,10 @@ fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         path: PathBuf::from(r.get::<_, Option<String>>(9).ok().flatten().unwrap_or_default()),
         owned: r.get::<_, i64>(10).unwrap_or(1) != 0,
         on_disk: r.get::<_, i64>(11).unwrap_or(1) != 0,
+        churn: match (r.get::<_, Option<i64>>(22).ok().flatten(), r.get::<_, Option<i64>>(23).ok().flatten()) {
+            (Some(a), Some(d)) => Some((a as u32, d as u32)),
+            _ => None,
+        },
     });
     let created: String = r.get(20)?;
     let opened: String = r.get(21)?;
@@ -1937,6 +1952,7 @@ mod tests {
             path: PathBuf::from(format!("/tmp/wt/{branch}")),
             owned: true,
             on_disk: true,
+            churn: None,
         });
         i
     }
@@ -2024,6 +2040,7 @@ mod tests {
             path: PathBuf::from("/tmp/wt/pr-7"),
             owned: true,
             on_disk: false,
+            churn: None,
         });
         i.name = Some("the fence".into());
         i.saved = true;

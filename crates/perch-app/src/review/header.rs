@@ -96,10 +96,13 @@ fn done_button(state: ReviewState, on_done: impl Fn(String) + 'static) -> impl I
 }
 
 fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
+    // A branch of the reader's own has no title but its name, and the
+    // subtitle names where it is.
     let title = move || {
         state
             .pull_request
             .with(|p| p.as_ref().map(|p| p.title.clone()))
+            .or_else(|| state.item.with(|i| i.as_ref().map(|i| i.title().to_string())))
             .unwrap_or_default()
     };
     let subtitle = move || {
@@ -108,6 +111,14 @@ fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
             .with(|p| {
                 p.as_ref()
                     .map(|p| format!("{}  #{}", p.repo_full_name, p.number))
+            })
+            .or_else(|| {
+                state.item.with(|i| {
+                    i.as_ref().map(|i| match &i.checkout {
+                        Some(c) => format!("{}  \u{00b7}  against {}", i.repo_full_name, short_ref(&c.base_ref)),
+                        None => i.repo_full_name.clone(),
+                    })
+                })
             })
             .unwrap_or_default()
     };
@@ -143,9 +154,13 @@ fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
         ))
         .style(|s| s.flex_col().min_width(0.0).justify_center().margin_right(10.0)),
         dyn_container(author, move |login| {
-            avatar(app, author_avatar, 20.0, login).into_any()
+            if login.is_empty() {
+                Empty::new().into_any()
+            } else {
+                avatar(app, author_avatar, 20.0, login).into_any()
+            }
         })
-        .style(|s| s.size(20.0, 20.0).flex_shrink(0.0_f32)),
+        .style(|s| s.flex_shrink(0.0_f32)),
     ))
     .style(|s| {
         s.items_center()
@@ -154,6 +169,15 @@ fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
             .flex_shrink(1.0_f32)
             .pointer_events_none()
     })
+}
+
+/// A commit as a base reads as its short hash; a branch as its name.
+fn short_ref(base: &str) -> String {
+    if base.len() == 40 && base.chars().all(|c| c.is_ascii_hexdigit()) {
+        base[..7].to_string()
+    } else {
+        base.to_string()
+    }
 }
 
 fn state_icon(state: ReviewState) -> impl IntoView {
@@ -177,7 +201,8 @@ fn state_icon(state: ReviewState) -> impl IntoView {
         Some(state) => floem::views::svg(move || icons::state_icon(state))
             .style(move |s| s.size(18.0, 18.0).color(icons::state_color(state)))
             .into_any(),
-        None => Empty::new().into_any(),
+        // A branch, when there is no pull request to have a state.
+        None => sidebar_glyph(SidebarIcon::Branch, theme::FG_MUTED).style(|s| s.size(18.0, 18.0)).into_any(),
     })
     .style(|s| s.size(18.0, 18.0).flex_shrink(0.0_f32))
 }
@@ -189,6 +214,13 @@ fn branches(state: ReviewState) -> impl IntoView {
             .with(|p| {
                 p.as_ref()
                     .map(|p| format!("{}  \u{2190}  {}", p.base_ref, p.head_ref))
+            })
+            .or_else(|| {
+                state.item.with(|i| {
+                    i.as_ref()
+                        .and_then(|i| i.checkout.as_ref())
+                        .map(|c| format!("{}  \u{2190}  {}", short_ref(&c.base_ref), c.branch))
+                })
             })
             .unwrap_or_default()
     };
@@ -332,7 +364,12 @@ fn churn(state: ReviewState) -> impl IntoView {
             .pull_request
             .with(|p| p.as_ref().map(|p| p.deletions).unwrap_or(0))
     };
+    let has_pr = move || state.pull_request.with(|p| p.is_some());
 
+    dyn_container(has_pr, move |has| if has { churn_labels(additions, deletions).into_any() } else { Empty::new().into_any() })
+}
+
+fn churn_labels(additions: impl Fn() -> u32 + 'static, deletions: impl Fn() -> u32 + 'static) -> impl IntoView {
     Stack::horizontal((
         Label::derived(move || format!("+{}", additions())).style(|s| {
             s.font_size(theme::TEXT_META)
