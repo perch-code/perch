@@ -55,9 +55,23 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     // backend one write and the UI one event.
     let on_mark: list::OnMark = Rc::new({
         let backend = backend.clone();
-        move |ids: Vec<String>, action: list::MarkAction| match action {
-            list::MarkAction::Saved(saved) => backend.set_saved(ids, saved),
-            list::MarkAction::Done(done) => backend.set_done(ids, done),
+        move |ids: Vec<String>, action: list::MarkAction| {
+            // Floem generates enter and leave from pointer movement, so
+            // dismissing the row under a still pointer would leave `hovered`
+            // naming a thread that has left the screen. Pressing the same key
+            // again would then act on it: e, e would dismiss and quietly undo.
+            if matches!(action, list::MarkAction::Done(_)) {
+                let hovered_is_going = state
+                    .hovered
+                    .with(|h| h.as_ref().is_some_and(|id| ids.contains(id)));
+                if hovered_is_going {
+                    state.hovered.set(None);
+                }
+            }
+            match action {
+                list::MarkAction::Saved(saved) => backend.set_saved(ids, saved),
+                list::MarkAction::Done(done) => backend.set_done(ids, done),
+            }
         }
     });
     let key_mark = on_mark.clone();

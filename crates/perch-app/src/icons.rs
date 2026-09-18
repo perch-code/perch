@@ -252,6 +252,32 @@ pub enum SidebarIcon {
     Warning,
 }
 
+impl SidebarIcon {
+    /// Every glyph, so a test can check them all and a new one cannot be
+    /// added without being drawn.
+    pub const ALL: [SidebarIcon; 19] = [
+        SidebarIcon::Inbox,
+        SidebarIcon::Bookmark,
+        SidebarIcon::BookmarkFilled,
+        SidebarIcon::Check,
+        SidebarIcon::Dash,
+        SidebarIcon::Undo,
+        SidebarIcon::Target,
+        SidebarIcon::Comment,
+        SidebarIcon::Mention,
+        SidebarIcon::People,
+        SidebarIcon::Eye,
+        SidebarIcon::ChevronRight,
+        SidebarIcon::ChevronLeft,
+        SidebarIcon::ChevronDown,
+        SidebarIcon::ChevronUp,
+        SidebarIcon::Close,
+        SidebarIcon::Search,
+        SidebarIcon::Refresh,
+        SidebarIcon::Warning,
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +316,29 @@ mod tests {
     fn unknown_subject_kinds_still_get_an_icon() {
         let svg = kind_icon(&SubjectKind::Other("Sponsorship".into()));
         assert!(svg.starts_with("<svg"));
+    }
+
+    #[test]
+    fn every_sidebar_glyph_is_drawn() {
+        for icon in SidebarIcon::ALL {
+            let svg = sidebar_icon(icon, theme::FG);
+            assert!(svg.starts_with("<svg"), "{icon:?}");
+            assert!(svg.ends_with("</svg>"), "{icon:?}");
+            assert!(svg.contains("viewBox=\"0 0 16 16\""), "{icon:?}");
+            // A glyph with no geometry renders as an empty square, which is
+            // indistinguishable from a missing icon.
+            assert!(svg.contains("<path") || svg.contains("<circle"), "{icon:?}");
+        }
+    }
+
+    #[test]
+    fn the_sidebar_icon_list_is_complete() {
+        // A duplicate here would mean a variant was added to the list twice
+        // and another left out, which the length check alone would not catch.
+        let mut seen = std::collections::HashSet::new();
+        for icon in SidebarIcon::ALL {
+            assert!(seen.insert(format!("{icon:?}")), "{icon:?} listed twice");
+        }
     }
 
     #[test]

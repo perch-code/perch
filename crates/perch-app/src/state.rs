@@ -149,11 +149,13 @@ impl AppState {
                 self.now.set(Timestamp::now());
                 // A repository filter pointing at a repo that left the inbox
                 // would show an empty list with no way to tell why.
+                // Against the pool, not the live list: a repository can
+                // survive in Saved and Done on snapshots alone, and dropping
+                // the filter would empty the view with no explanation.
+                let pool = self.pool();
                 let still_present = self.repo_filter.with(|f| {
-                    f.as_ref().map(|name| {
-                        self.threads
-                            .with(|ts| ts.iter().any(|t| &t.repository.full_name == name))
-                    })
+                    f.as_ref()
+                        .map(|name| pool.iter().any(|t| &t.repository.full_name == name))
                 });
                 if still_present == Some(false) {
                     self.repo_filter.set(None);
@@ -272,7 +274,10 @@ impl AppState {
             state.repo_filter.track();
             state.unread_only.track();
             state.search.track();
-            state.clear_selection();
+            // Untracked: clear_selection reads the signals it writes, and
+            // subscribing to those would make this effect depend on its own
+            // output and run a second time for nothing.
+            floem::reactive::untrack(|| state.clear_selection());
         });
     }
 
