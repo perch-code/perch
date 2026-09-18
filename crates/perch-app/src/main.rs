@@ -110,10 +110,19 @@ fn main() {
                         // No title bar: the content runs to the top of the
                         // window and the app draws its own strip, with the
                         // traffic lights sitting in it.
+                        //
+                        // The offset is absolute. floem pins the red button's
+                        // left edge here and places each next one 6px after
+                        // the previous, at macOS's 14pt width, so the green
+                        // ends at x + 54. At 12 that is 66, clear of the
+                        // activity rail's border at 72; at the 19 used before,
+                        // it was 73 and the border cut through it. 12 is also
+                        // where macOS puts these buttons in an ordinary
+                        // window.
                         mac.full_size_content_view(true)
                             .transparent_title_bar(true)
                             .hide_title(true)
-                            .traffic_lights_offset((19.0, 12.0))
+                            .traffic_lights_offset((12.0, 12.0))
                     }),
             ),
         )
