@@ -10,9 +10,9 @@ use std::time::Duration;
 use lsp_types::{
     ClientCapabilities, GotoDefinitionResponse, Hover, HoverClientCapabilities,
     HoverParams, InitializeParams, InitializedParams, Location, MarkupKind, Position,
-    PublishDiagnosticsParams, TextDocumentClientCapabilities, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, Uri, WindowClientCapabilities,
-    WorkDoneProgressParams,
+    PublishDiagnosticsParams, ReferenceContext, ReferenceParams,
+    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, Uri, WindowClientCapabilities, WorkDoneProgressParams,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -41,6 +41,7 @@ pub enum ServerEvent {
 pub enum Request {
     Hover,
     Definition,
+    References,
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
@@ -199,6 +200,29 @@ impl Client {
         }
     }
 
+    /// Every use of the symbol under the cursor, its declaration among them.
+    ///
+    /// The declaration is asked for so the list reads whole: a reader looking
+    /// for a symbol's uses wants the line that introduces it in the same list.
+    pub async fn references(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
+        let Some(position) = self.position(path, line, character) else {
+            return Vec::new();
+        };
+        let params = ReferenceParams {
+            text_document_position: position,
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: Default::default(),
+            context: ReferenceContext { include_declaration: true },
+        };
+        let Ok(params) = serde_json::to_value(params) else {
+            return Vec::new();
+        };
+        let Ok(value) = self.request("textDocument/references", params).await else {
+            return Vec::new();
+        };
+        reference_locations(value)
+    }
+
     fn position(&self, path: &Path, line: u32, character: u32) -> Option<TextDocumentPositionParams> {
         Some(TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: path_to_uri(path)? },
@@ -331,6 +355,15 @@ fn handle_notification(method: &str, params: Value, events: &mpsc::UnboundedSend
     }
 }
 
+/// The locations in a `textDocument/references` reply.
+///
+/// The protocol answers null when there are none, and a symbol with no
+/// references is an ordinary thing to ask about, so null is an empty list
+/// rather than a failure.
+fn reference_locations(value: Value) -> Vec<Location> {
+    decode_result::<Vec<Location>>(value).unwrap_or_default()
+}
+
 /// Turn a `$/progress` notification into something the status line can show.
 fn progress_status(params: &Value) -> Option<Status> {
     let value = params.get("value")?;
@@ -434,5 +467,30 @@ mod tests {
     fn an_unrecognised_progress_shape_is_ignored() {
         assert_eq!(progress_status(&json!({})), None);
         assert_eq!(progress_status(&json!({"value":{"kind":"other"}})), None);
+    }
+
+    #[test]
+    fn a_null_references_reply_is_an_empty_list() {
+        assert!(reference_locations(Value::Null).is_empty());
+    }
+
+    #[test]
+    fn a_references_reply_lists_each_location() {
+        let reply = json!([
+            {"uri":"file:///a/src/lib.rs","range":{"start":{"line":3,"character":4},"end":{"line":3,"character":9}}},
+            {"uri":"file:///a/src/main.rs","range":{"start":{"line":10,"character":0},"end":{"line":10,"character":5}}}
+        ]);
+        let locations = reference_locations(reply);
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].uri.to_string(), "file:///a/src/lib.rs");
+        assert_eq!(locations[0].range.start.line, 3);
+        assert_eq!(locations[1].uri.to_string(), "file:///a/src/main.rs");
+        assert_eq!(locations[1].range.start.character, 0);
+    }
+
+    #[test]
+    fn a_malformed_references_reply_is_empty_rather_than_fatal() {
+        assert!(reference_locations(json!({"not":"a list"})).is_empty());
+        assert!(reference_locations(json!([{"uri":"file:///a"}])).is_empty());
     }
 }
