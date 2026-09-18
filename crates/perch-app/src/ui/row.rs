@@ -84,7 +84,7 @@ fn row_checkbox(state: AppState, thread: Thread) -> impl IntoView {
     let id = thread.id.clone();
     let toggle_id = thread.id.clone();
 
-    Container::new(checkbox(
+    checkbox(
         move || {
             if state.is_selected(&id) {
                 Checked::Full
@@ -93,8 +93,8 @@ fn row_checkbox(state: AppState, thread: Thread) -> impl IntoView {
             }
         },
         move |extend| state.toggle_selected(&toggle_id, extend),
-    ))
-    .style(|s| s.width(26.0).items_center().justify_center().flex_shrink(0.0_f32))
+    )
+    .style(|s| s.flex_shrink(0.0_f32))
 }
 
 /// Save and dismiss, at the end of the row.

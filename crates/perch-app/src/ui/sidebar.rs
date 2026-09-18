@@ -107,7 +107,9 @@ fn view_row(
         .on_event_stop(el::Click, move |_, _| {
             // Doubles as the way back from a pull request.
             review.close();
-            state.clear_filters();
+            // Filters carry over, the way the web keeps a search when you
+            // cross from the inbox into Done. Clearing them here made the
+            // rail a reset button nobody asked for.
             state.set_view(view);
         })
         .style(move |s| {
@@ -163,7 +165,10 @@ fn icon_for(f: ReasonFilter) -> SidebarIcon {
 fn repos_section(state: AppState) -> impl IntoView {
     dyn_stack(
         move || state.counts().repos,
-        |(name, _, _)| name.clone(),
+        // Keyed on the count as well as the name: the row draws the number it
+        // was built with, so a repository whose count moved has to be rebuilt
+        // or it keeps the old one.
+        |(name, count, _)| (name.clone(), *count),
         move |(name, count, avatar_url)| {
             let click_name = name.clone();
             Container::new(repo_row(state, name, count, avatar_url))

@@ -162,7 +162,7 @@ fn selection_bar(state: AppState, on_mark: OnMark) -> impl IntoView {
             s.font_size(theme::TEXT_META)
                 .color(theme::FG_MUTED)
                 .selectable(false)
-                .margin_left(10.0)
+                .margin_left(6.0)
                 .flex_grow(1.0_f32)
         }),
         dyn_container(

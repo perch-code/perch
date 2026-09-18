@@ -71,7 +71,7 @@ pub fn checkbox(
     let checked = std::rc::Rc::new(checked);
     let for_glyph = checked.clone();
 
-    Container::new(
+    let box_ = Container::new(
         dyn_container(move || for_glyph(), |checked| match checked {
             Checked::Empty => Empty::new().into_any(),
             Checked::Partial => sidebar_glyph(SidebarIcon::Dash, theme::CANVAS).into_any(),
@@ -79,29 +79,41 @@ pub fn checkbox(
         })
         .style(|s| s.size(12.0, 12.0).items_center().justify_center()),
     )
-    .on_event_stop(
-        floem::event::listener::PointerDown,
-        move |_, e: &PointerButtonEvent| {
-            on_toggle(e.state.modifiers.contains(Modifiers::SHIFT));
-        },
-    )
-    // Belt and braces: the row around this one is itself a button.
-    .on_event_stop(floem::event::listener::Click, |_, _| {})
     .style(move |s| {
-        let base = clickable(s)
+        let base = s
             .size(16.0, 16.0)
             .items_center()
             .justify_center()
             .border_radius(4.0)
             .border(1.5);
         if checked() == Checked::Empty {
-            base.background(theme::CANVAS)
-                .border_color(theme::BORDER)
-                .hover(|s| s.border_color(theme::FG_SUBTLE))
+            base.background(theme::CANVAS).border_color(theme::BORDER)
         } else {
             base.background(theme::ACCENT).border_color(theme::ACCENT)
         }
-    })
+    });
+
+    // The listeners sit on a box half again as wide as the one that is drawn.
+    // A click is the view that both the press and the release land in, so a
+    // press on a 16px target that drifts a few pixels before release counts
+    // as a click on the row, which opens the pull request.
+    Container::new(box_)
+        .on_event_stop(
+            floem::event::listener::PointerDown,
+            move |_, e: &PointerButtonEvent| {
+                on_toggle(e.state.modifiers.contains(Modifiers::SHIFT));
+            },
+        )
+        // Belt and braces: the row around this one is itself a button.
+        .on_event_stop(floem::event::listener::Click, |_, _| {})
+        .style(|s| {
+            clickable(s)
+                .size(26.0, 26.0)
+                .items_center()
+                .justify_center()
+                .hover(|s| s.background(theme::BADGE_BG))
+                .border_radius(6.0)
+        })
 }
 
 /// A small bordered text button, as used by the selection bar and the group

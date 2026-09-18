@@ -281,6 +281,16 @@ impl AppState {
         });
     }
 
+    /// Whether the list is showing this thread right now.
+    ///
+    /// The hover follows pointer movement, so a row that leaves the screen
+    /// under a still pointer stays named by it. Anything acting on the hover
+    /// asks this first, rather than every path that can remove a row having
+    /// to remember to clear it.
+    pub fn is_visible(&self, thread_id: &str) -> bool {
+        self.visible().iter().any(|t| t.id == thread_id)
+    }
+
     pub fn is_selected(&self, thread_id: &str) -> bool {
         self.selected.with(|s| s.contains(thread_id))
     }
@@ -438,11 +448,4 @@ impl AppState {
         });
     }
 
-    pub fn clear_filters(&self) {
-        self.view.set(View::Inbox);
-        self.reason_filter.set(None);
-        self.repo_filter.set(None);
-        self.unread_only.set(false);
-        self.search.set(String::new());
-    }
 }
