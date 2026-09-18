@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use jiff::Timestamp;
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::comments::{self, Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStep};
 use crate::model::{SubjectDetail, Thread};
 use crate::pulls::PullRequest;
 
@@ -108,6 +109,8 @@ pub enum CacheError {
     Serde(#[from] serde_json::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("corrupt row: {0}")]
+    Corrupt(String),
 }
 
 pub struct Cache {
@@ -159,6 +162,49 @@ impl Cache {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS comment_threads (
+                id             TEXT PRIMARY KEY,
+                worktree_id    TEXT NOT NULL,
+                origin         TEXT NOT NULL,
+                github_id      TEXT,
+                path           TEXT,
+                start_line     INTEGER,
+                line           INTEGER,
+                side           TEXT,
+                commit_sha     TEXT,
+                outdated       INTEGER NOT NULL DEFAULT 0,
+                resolved       INTEGER NOT NULL DEFAULT 0,
+                created_at     TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS comment_threads_worktree ON comment_threads(worktree_id);
+            CREATE TABLE IF NOT EXISTS runs (
+                id             TEXT PRIMARY KEY,
+                thread_id      TEXT NOT NULL,
+                backend        TEXT NOT NULL,
+                model          TEXT NOT NULL,
+                effort         TEXT NOT NULL,
+                session_id     TEXT,
+                status         TEXT NOT NULL,
+                cost_usd       REAL,
+                duration_ms    INTEGER,
+                steps_json     TEXT NOT NULL DEFAULT '[]',
+                error          TEXT,
+                started_at     TEXT NOT NULL,
+                ended_at       TEXT
+            );
+            CREATE TABLE IF NOT EXISTS comment_messages (
+                id             TEXT PRIMARY KEY,
+                thread_id      TEXT NOT NULL REFERENCES comment_threads(id) ON DELETE CASCADE,
+                origin         TEXT NOT NULL,
+                github_id      TEXT,
+                author_kind    TEXT NOT NULL,
+                author         TEXT,
+                author_model   TEXT,
+                body           TEXT NOT NULL,
+                run_id         TEXT REFERENCES runs(id),
+                created_at     TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS comment_messages_thread ON comment_messages(thread_id);
             CREATE TABLE IF NOT EXISTS marks (
                 thread_id  TEXT PRIMARY KEY,
                 saved      INTEGER NOT NULL DEFAULT 0,
@@ -565,10 +611,299 @@ impl Cache {
         Ok(())
     }
 
+    /// Forget a worktree and everything said in it. Archiving keeps the
+    /// threads; they are the point of keeping the record.
     pub fn forget_worktree(&self, id: &str) -> Result<(), CacheError> {
-        self.conn
-            .execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        // Messages point at runs, so they go first.
+        tx.execute(
+            "DELETE FROM comment_messages WHERE thread_id IN (SELECT id FROM comment_threads WHERE worktree_id = ?1)",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM runs WHERE thread_id IN (SELECT id FROM comment_threads WHERE worktree_id = ?1)",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM comment_threads WHERE worktree_id = ?1", params![id])?;
+        tx.execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Comment threads
+    // -----------------------------------------------------------------
+
+    /// Every thread in a worktree, with its messages and their runs.
+    pub fn load_comment_threads(&self, worktree_id: &str) -> Result<Vec<CommentThread>, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, origin, path, start_line, line, side, commit_sha, outdated, resolved, created_at
+             FROM comment_threads WHERE worktree_id = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map(params![worktree_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, String>(9)?,
+            ))
+        })?;
+
+        let mut threads = Vec::new();
+        for row in rows {
+            let (id, origin, path, start, line, side, sha, outdated, resolved, created) = row?;
+            let Ok(created_at) = created.parse::<Timestamp>() else { continue };
+            let anchor = match (path, start, line) {
+                (Some(path), Some(start), Some(line)) => Some(Anchor {
+                    path,
+                    start_line: start as u32,
+                    line: line as u32,
+                    side: comments::sql::side(side.as_deref().unwrap_or("right")),
+                    commit_sha: sha.unwrap_or_default(),
+                }),
+                _ => None,
+            };
+            let messages = self.load_messages(&id)?;
+            threads.push(CommentThread {
+                id,
+                worktree_id: worktree_id.to_string(),
+                origin: comments::sql::origin(&origin),
+                anchor,
+                outdated: outdated != 0,
+                resolved: resolved != 0,
+                created_at,
+                messages,
+            });
+        }
+        Ok(threads)
+    }
+
+    fn load_messages(&self, thread_id: &str) -> Result<Vec<CommentMessage>, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, origin, author_kind, author, author_model, body, run_id, created_at
+             FROM comment_messages WHERE thread_id = ?1 ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map(params![thread_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, String>(7)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, origin, kind, author, model, body, run_id, created) = row?;
+            let Ok(created_at) = created.parse::<Timestamp>() else { continue };
+            let run = match run_id {
+                Some(run_id) => self.load_run(&run_id)?,
+                None => None,
+            };
+            out.push(CommentMessage {
+                id,
+                thread_id: thread_id.to_string(),
+                origin: comments::sql::origin(&origin),
+                author: comments::sql::author(&kind, author, model),
+                body,
+                created_at,
+                run,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn load_run(&self, id: &str) -> Result<Option<RunRecord>, CacheError> {
+        self.conn
+            .query_row(
+                "SELECT id, thread_id, backend, model, effort, session_id, status, cost_usd,
+                        duration_ms, steps_json, error, started_at, ended_at
+                 FROM runs WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, Option<f64>>(7)?,
+                        r.get::<_, Option<i64>>(8)?,
+                        r.get::<_, String>(9)?,
+                        r.get::<_, Option<String>>(10)?,
+                        r.get::<_, String>(11)?,
+                        r.get::<_, Option<String>>(12)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(id, thread_id, backend, model, effort, session, status, cost, duration, steps, error, started, ended)| {
+                let steps: Vec<RunStep> = serde_json::from_str(&steps).unwrap_or_default();
+                Ok(RunRecord {
+                    id,
+                    thread_id,
+                    backend,
+                    model,
+                    effort,
+                    session_id: session,
+                    status: comments::sql::status(&status),
+                    cost_usd: cost,
+                    duration_ms: duration.map(|d| d as u64),
+                    steps,
+                    error,
+                    started_at: started.parse().map_err(|_| CacheError::Corrupt("run started_at".into()))?,
+                    ended_at: ended.and_then(|e| e.parse().ok()),
+                })
+            })
+            .transpose()
+    }
+
+    pub fn insert_comment_thread(&self, t: &CommentThread) -> Result<(), CacheError> {
+        self.conn.execute(
+            "INSERT INTO comment_threads
+             (id, worktree_id, origin, path, start_line, line, side, commit_sha, outdated, resolved, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                t.id,
+                t.worktree_id,
+                t.origin.name(),
+                t.anchor.as_ref().map(|a| a.path.clone()),
+                t.anchor.as_ref().map(|a| a.start_line as i64),
+                t.anchor.as_ref().map(|a| a.line as i64),
+                t.anchor.as_ref().map(|a| a.side.name()),
+                t.anchor.as_ref().map(|a| a.commit_sha.clone()),
+                t.outdated as i64,
+                t.resolved as i64,
+                t.created_at.to_string(),
+            ],
+        )?;
+        for m in &t.messages {
+            self.insert_comment_message(m)?;
+        }
+        Ok(())
+    }
+
+    /// Insert a message. A run it carries is inserted too if it is new.
+    pub fn insert_comment_message(&self, m: &CommentMessage) -> Result<(), CacheError> {
+        if let Some(run) = &m.run {
+            if self.load_run(&run.id)?.is_none() {
+                self.insert_run(run)?;
+            }
+        }
+        let (kind, author) = comments::sql::author_columns(&m.author);
+        let model = match &m.author {
+            Author::Agent { model, .. } => Some(model.clone()),
+            _ => None,
+        };
+        self.conn.execute(
+            "INSERT INTO comment_messages
+             (id, thread_id, origin, author_kind, author, author_model, body, run_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                m.id,
+                m.thread_id,
+                m.origin.name(),
+                kind,
+                author,
+                model,
+                m.body,
+                m.run.as_ref().map(|r| r.id.clone()),
+                m.created_at.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_run(&self, r: &RunRecord) -> Result<(), CacheError> {
+        self.conn.execute(
+            "INSERT INTO runs
+             (id, thread_id, backend, model, effort, session_id, status, cost_usd, duration_ms,
+              steps_json, error, started_at, ended_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                r.id,
+                r.thread_id,
+                r.backend,
+                r.model,
+                r.effort,
+                r.session_id,
+                r.status.name(),
+                r.cost_usd,
+                r.duration_ms.map(|d| d as i64),
+                serde_json::to_string(&r.steps)?,
+                r.error,
+                r.started_at.to_string(),
+                r.ended_at.map(|t| t.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Rewrite every column of a run that can move.
+    pub fn update_run(&self, r: &RunRecord) -> Result<(), CacheError> {
+        self.conn.execute(
+            "UPDATE runs SET session_id = ?2, status = ?3, cost_usd = ?4, duration_ms = ?5,
+                             steps_json = ?6, error = ?7, ended_at = ?8
+             WHERE id = ?1",
+            params![
+                r.id,
+                r.session_id,
+                r.status.name(),
+                r.cost_usd,
+                r.duration_ms.map(|d| d as i64),
+                serde_json::to_string(&r.steps)?,
+                r.error,
+                r.ended_at.map(|t| t.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Point a message at the run that answered it, or clear it.
+    pub fn set_message_run(&self, message_id: &str, run_id: Option<&str>) -> Result<(), CacheError> {
+        self.conn.execute(
+            "UPDATE comment_messages SET run_id = ?2 WHERE id = ?1",
+            params![message_id, run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_thread_outdated(&self, id: &str, outdated: bool) -> Result<(), CacheError> {
+        self.conn.execute(
+            "UPDATE comment_threads SET outdated = ?2 WHERE id = ?1",
+            params![id, outdated as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_comment_thread(&self, id: &str) -> Result<(), CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM comment_messages WHERE thread_id = ?1", params![id])?;
+        tx.execute("DELETE FROM runs WHERE thread_id = ?1", params![id])?;
+        tx.execute("DELETE FROM comment_threads WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Mark every run still `running` as failed. For startup: such a row is
+    /// a run Perch died in the middle of, and nothing reattaches.
+    pub fn fail_running_runs(&self, reason: &str) -> Result<usize, CacheError> {
+        let n = self.conn.execute(
+            "UPDATE runs SET status = 'failed', error = ?1, ended_at = ?2 WHERE status = 'running'",
+            params![reason, Timestamp::now().to_string()],
+        )?;
+        Ok(n)
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<(), CacheError> {
@@ -617,6 +952,7 @@ fn hash(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::comments::{RunStatus, Side, ThreadOrigin};
     use crate::model::{Reason, Repository, Subject, SubjectKind, SubjectState};
 
     fn thread(id: &str, updated: &str) -> Thread {
@@ -1033,6 +1369,161 @@ mod tests {
         c.upsert_worktree(&worktree(7)).unwrap();
         c.store_threads(&[]).unwrap();
         assert_eq!(c.load_worktrees().unwrap().len(), 1);
+    }
+
+    fn stamp(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    fn run(id: &str, thread: &str, status: RunStatus) -> RunRecord {
+        RunRecord {
+            id: id.into(),
+            thread_id: thread.into(),
+            backend: "claude-code".into(),
+            model: "sonnet".into(),
+            effort: "medium".into(),
+            session_id: Some("sess".into()),
+            status,
+            cost_usd: Some(0.03),
+            duration_ms: Some(14_000),
+            steps: vec![
+                RunStep { summary: "Read src/x.rs".into(), ok: true },
+                RunStep { summary: "Asked to edit src/x.rs".into(), ok: false },
+            ],
+            error: None,
+            started_at: stamp("2026-09-18T10:00:00Z"),
+            ended_at: Some(stamp("2026-09-18T10:00:14Z")),
+        }
+    }
+
+    fn comment_thread(id: &str, worktree: &str) -> CommentThread {
+        CommentThread {
+            id: id.into(),
+            worktree_id: worktree.into(),
+            origin: ThreadOrigin::Local,
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: 41,
+                line: 58,
+                side: Side::Right,
+                commit_sha: "abc".into(),
+            }),
+            outdated: false,
+            resolved: false,
+            created_at: stamp("2026-09-18T09:59:00Z"),
+            messages: vec![
+                CommentMessage {
+                    id: format!("{id}-m1"),
+                    thread_id: id.into(),
+                    origin: ThreadOrigin::Local,
+                    author: Author::User,
+                    body: "why?".into(),
+                    created_at: stamp("2026-09-18T09:59:00Z"),
+                    run: None,
+                },
+                CommentMessage {
+                    id: format!("{id}-m2"),
+                    thread_id: id.into(),
+                    origin: ThreadOrigin::Local,
+                    author: Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                    body: "because".into(),
+                    created_at: stamp("2026-09-18T10:00:14Z"),
+                    run: Some(run(&format!("{id}-r1"), id, RunStatus::Finished)),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_thread_with_messages_and_a_run_loads_back_whole() {
+        let c = Cache::open_in_memory().unwrap();
+        let t = comment_thread("t1", "acme/widgets#perch/pr-7");
+        c.insert_comment_thread(&t).unwrap();
+        let loaded = c.load_comment_threads("acme/widgets#perch/pr-7").unwrap();
+        assert_eq!(loaded, vec![t]);
+        assert!(c.load_comment_threads("other").unwrap().is_empty());
+    }
+
+    #[test]
+    fn steps_round_trip_through_update() {
+        let c = Cache::open_in_memory().unwrap();
+        let t = comment_thread("t1", "w");
+        c.insert_comment_thread(&t).unwrap();
+        let mut r = run("t1-r1", "t1", RunStatus::Finished);
+        r.steps.push(RunStep { summary: "Ran git log".into(), ok: true });
+        r.cost_usd = Some(0.05);
+        c.update_run(&r).unwrap();
+        let loaded = c.load_run("t1-r1").unwrap().unwrap();
+        assert_eq!(loaded.steps.len(), 3);
+        assert_eq!(loaded, r);
+    }
+
+    #[test]
+    fn a_thread_without_an_anchor_is_allowed() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut t = comment_thread("t1", "w");
+        t.anchor = None;
+        t.messages.clear();
+        c.insert_comment_thread(&t).unwrap();
+        assert_eq!(c.load_comment_threads("w").unwrap()[0].anchor, None);
+    }
+
+    #[test]
+    fn fail_running_runs_touches_only_running_rows() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut t = comment_thread("t1", "w");
+        t.messages[1].run = Some(run("r-running", "t1", RunStatus::Running));
+        c.insert_comment_thread(&t).unwrap();
+        c.insert_run(&run("r-done", "t1", RunStatus::Finished)).unwrap();
+
+        assert_eq!(c.fail_running_runs("Perch quit").unwrap(), 1);
+        let failed = c.load_run("r-running").unwrap().unwrap();
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("Perch quit"));
+        assert!(failed.ended_at.is_some());
+        assert_eq!(c.load_run("r-done").unwrap().unwrap().status, RunStatus::Finished);
+    }
+
+    #[test]
+    fn forgetting_a_worktree_removes_its_threads_and_runs() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_worktree(&worktree(7)).unwrap();
+        c.insert_comment_thread(&comment_thread("t1", &worktree(7).id)).unwrap();
+        c.insert_comment_thread(&comment_thread("t2", "elsewhere")).unwrap();
+
+        c.forget_worktree(&worktree(7).id).unwrap();
+        assert!(c.load_comment_threads(&worktree(7).id).unwrap().is_empty());
+        assert!(c.load_run("t1-r1").unwrap().is_none());
+        assert_eq!(c.load_comment_threads("elsewhere").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn archiving_keeps_threads() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_worktree(&worktree(7)).unwrap();
+        c.insert_comment_thread(&comment_thread("t1", &worktree(7).id)).unwrap();
+        c.set_worktree_archived(&worktree(7).id, Some(stamp("2026-09-19T00:00:00Z"))).unwrap();
+        assert_eq!(c.load_comment_threads(&worktree(7).id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_thread_takes_its_messages_and_runs() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_comment_thread(&comment_thread("t1", "w")).unwrap();
+        c.set_thread_outdated("t1", true).unwrap();
+        assert!(c.load_comment_threads("w").unwrap()[0].outdated);
+        c.delete_comment_thread("t1").unwrap();
+        assert!(c.load_comment_threads("w").unwrap().is_empty());
+        assert!(c.load_run("t1-r1").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_follow_up_resumes_the_last_finished_run() {
+        let t = comment_thread("t1", "w");
+        assert_eq!(t.resumable_session().as_deref(), Some("sess"));
+        let mut failed = t.clone();
+        failed.messages[1].run.as_mut().unwrap().status = RunStatus::Failed;
+        assert_eq!(failed.resumable_session(), None);
     }
 
     #[test]
