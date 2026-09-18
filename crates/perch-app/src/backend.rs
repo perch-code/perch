@@ -30,6 +30,8 @@ use tokio::sync::Semaphore;
 const DETAIL_CONCURRENCY: usize = 8;
 const AVATAR_CONCURRENCY: usize = 6;
 const LAST_MODIFIED_KEY: &str = "notifications_last_modified";
+/// Settings the UI keeps between launches. Sent back at startup.
+pub const UI_META_KEYS: [&str; 2] = ["item_filters", "collapsed_projects"];
 
 /// What the per-thread fetches share.
 #[derive(Clone)]
@@ -92,6 +94,8 @@ pub enum Command {
     MoveItem { id: String, project_id: Option<String>, new_project: Option<String> },
     /// Rescan roots and re-ask GitHub about subject-less branches.
     RefreshItems,
+    /// Remember a setting across launches.
+    SetMeta { key: String, value: String },
 
     /// Ask the agent a question in an item's checkout. `thread_id` of `None`
     /// starts a thread; the anchor is ignored on a follow-up.
@@ -137,6 +141,9 @@ pub enum Event {
     Projects(Vec<Project>),
     /// Every item, active and archived. Whole, for the same reason.
     Items(Vec<Item>),
+    /// A remembered setting, sent once at startup for each key the UI
+    /// asked to keep.
+    Meta { key: String, value: String },
     /// A pull request's discussion was archived under the knowledge root.
     /// `added` counts records that were new or changed.
     Archived { repo_full_name: String, number: u64, added: usize },
@@ -253,6 +260,10 @@ impl Backend {
 
     pub fn refresh_items(&self) {
         let _ = self.commands.send(Command::RefreshItems);
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) {
+        let _ = self.commands.send(Command::SetMeta { key: key.to_string(), value: value.to_string() });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -437,6 +448,11 @@ async fn run(
             sync_projects(&guard, &config);
             send_projects(&guard, &events);
             send_items(&guard, &events);
+            for key in UI_META_KEYS {
+                if let Ok(Some(value)) = guard.meta(key) {
+                    let _ = events.send(Event::Meta { key: key.to_string(), value });
+                }
+            }
         }
 
         let cached = cache.lock().ok().and_then(|guard| {
@@ -592,6 +608,9 @@ async fn run(
             Some(Command::RefreshItems) => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { refresh_items(&ctx).await });
+            }
+            Some(Command::SetMeta { key, value }) => {
+                ctx.with_cache(|c| c.set_meta(&key, &value));
             }
             Some(Command::Ask { item_id, thread_id, anchor, question, model, effort }) => {
                 let ctx = ctx.clone();

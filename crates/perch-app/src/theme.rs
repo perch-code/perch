@@ -37,6 +37,8 @@ pub const OPEN: Color = Color::from_rgb8(0x1a, 0x7f, 0x37);
 pub const MERGED: Color = Color::from_rgb8(0x82, 0x50, 0xdf);
 pub const CLOSED: Color = Color::from_rgb8(0xd1, 0x24, 0x2f);
 pub const DRAFT: Color = Color::from_rgb8(0x59, 0x63, 0x6e);
+/// A check still running: GitHub's pending yellow.
+pub const DRAFT_YELLOW: Color = Color::from_rgb8(0xbf, 0x87, 0x00);
 /// A workflow run still going: GitHub's attention amber.
 pub const PENDING: Color = Color::from_rgb8(0x9a, 0x67, 0x00);
 

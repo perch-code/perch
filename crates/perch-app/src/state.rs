@@ -64,6 +64,23 @@ pub struct AppState {
     /// The item the pointer is over, so a row can show its buttons and a
     /// bare keystroke knows what it means.
     pub hovered_item: RwSignal<Option<String>>,
+    /// The sidebar's filter menu settings and search.
+    pub item_filters: RwSignal<crate::items::ItemFilters>,
+    /// Project sections folded shut, by project id.
+    pub collapsed: RwSignal<HashSet<String>>,
+    /// The item whose title is a text box right now.
+    pub renaming: RwSignal<Option<String>>,
+    /// The item with a Delete confirmation open under it.
+    pub confirm_delete: RwSignal<Option<String>>,
+    /// The item with a "New project" box open under it.
+    pub new_project_for: RwSignal<Option<String>>,
+    /// The sidebar's search box, so Cmd-1 can focus it.
+    pub search_box: RwSignal<Option<floem::ViewId>>,
+    /// What is typed in the sidebar's search box.
+    pub item_query: RwSignal<String>,
+    /// A setting the sidebar wants remembered, picked up by the root view
+    /// which has the backend handle.
+    pub pending_meta: RwSignal<Option<(String, String)>>,
     /// Which of Inbox, Saved and Done is showing.
     pub view: RwSignal<View>,
     pub reason_filter: RwSignal<Option<ReasonFilter>>,
@@ -121,6 +138,14 @@ impl AppState {
             screen: RwSignal::new(Screen::Sidebar),
             return_to: RwSignal::new(Screen::Sidebar),
             hovered_item: RwSignal::new(None),
+            item_filters: RwSignal::new(crate::items::ItemFilters::default()),
+            collapsed: RwSignal::new(HashSet::new()),
+            renaming: RwSignal::new(None),
+            confirm_delete: RwSignal::new(None),
+            new_project_for: RwSignal::new(None),
+            search_box: RwSignal::new(None),
+            item_query: RwSignal::new(String::new()),
+            pending_meta: RwSignal::new(None),
             view: RwSignal::new(View::default()),
             reason_filter: RwSignal::new(None),
             repo_filter: RwSignal::new(None),
@@ -287,6 +312,16 @@ impl AppState {
                 self.prune_selection();
             }
             Event::Projects(projects) => self.projects.set(projects),
+            Event::Meta { key, value } => match key.as_str() {
+                "item_filters" => match crate::items::ItemFilters::parse(&value) {
+                    Ok(f) => self.item_filters.set(f),
+                    Err(e) => tracing::warn!(error = %e, "ignoring saved item filters"),
+                },
+                "collapsed_projects" => {
+                    self.collapsed.set(value.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect())
+                }
+                _ => {}
+            },
             Event::Notice(message) => self.notice.set(Some(message)),
             Event::AgentConfig(agent) => self.agent.set(agent),
             Event::Archived { .. } | Event::CommentThreads { .. } | Event::AgentStep { .. } => {}
@@ -578,22 +613,19 @@ impl AppState {
         self.projects.with(|all| all.iter().find(|p| p.id == id).cloned())
     }
 
-    /// Items with attention newer than their Done, newest attention first.
-    pub fn priority_items(&self) -> Vec<Item> {
-        let mut out: Vec<Item> = self
-            .items
-            .with(|all| all.iter().filter(|i| i.needs_attention() && !i.is_archived()).cloned().collect());
-        out.sort_by_key(|i| std::cmp::Reverse(i.attention_at));
-        out
+    /// The sidebar as the filters cut it: Priority, Pinned, and the groups.
+    pub fn item_sections(&self) -> crate::items::Sections {
+        let mut filters = self.item_filters.get();
+        filters.query = self.item_query.get();
+        self.projects.with(|projects| {
+            self.items.with(|items| crate::items::sections(projects, items, &filters, self.now.get()))
+        })
     }
 
-    /// A project's active items, most recent activity first.
-    pub fn project_items(&self, project_id: &str) -> Vec<Item> {
-        let mut out: Vec<Item> = self
-            .items
-            .with(|all| all.iter().filter(|i| i.project_id == project_id && i.is_active()).cloned().collect());
-        out.sort_by_key(|i| std::cmp::Reverse(i.last_activity()));
-        out
+    /// Every project that has at least one item, or all of them when the
+    /// sidebar is asked to show empty ones.
+    pub fn project_name(&self, id: &str) -> String {
+        self.project(id).map(|p| p.name).unwrap_or_else(|| id.to_string())
     }
 
     /// The owner avatar the inbox already holds for a repository, if any.

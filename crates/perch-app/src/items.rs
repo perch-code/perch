@@ -569,6 +569,7 @@ mod tests {
             labels: vec![],
             assignees: vec![],
             comments: 0,
+            created_at: None,
             updated_at: at(updated),
             repo_full_name: "criccomini/perch".into(),
         })

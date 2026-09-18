@@ -281,6 +281,14 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="{c}"
                      stroke="{c}" stroke-width="1.2" stroke-linejoin="round"/>"#
         ),
+        SidebarIcon::Pin => format!(
+            r#"<path d="M6 2.5 H10 L9.3 6.2 L11.6 8.6 V9.6 H8.6 V13.8 L8 14.4 L7.4 13.8 V9.6 H4.4 V8.6
+                       L6.7 6.2 Z" fill="none" stroke="{c}" stroke-width="1.3" stroke-linejoin="round"/>"#
+        ),
+        SidebarIcon::Filter => format!(
+            r#"<path d="M2.5 4 H13.5 M4.5 8 H11.5 M6.5 12 H9.5" stroke="{c}" stroke-width="1.6"
+                     stroke-linecap="round"/>"#
+        ),
         SidebarIcon::Warning => format!(
             r#"<path d="M8 2.2 L14.6 13.4 H1.4 Z" fill="none" stroke="{c}" stroke-width="1.4"
                      stroke-linejoin="round"/>
@@ -326,13 +334,18 @@ pub enum SidebarIcon {
     Stop,
     /// A speech bubble with a dot: a thread anchored here.
     Thread,
+    Pin,
+    /// Three lines of decreasing length: the filter menu.
+    Filter,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 28] = [
+    pub const ALL: [SidebarIcon; 30] = [
+        SidebarIcon::Pin,
+        SidebarIcon::Filter,
         SidebarIcon::Plus,
         SidebarIcon::Stop,
         SidebarIcon::Thread,

@@ -89,20 +89,30 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     });
     let key_mark = on_mark.clone();
     let review_mark = on_mark.clone();
+    let key_backend = backend.clone();
+
+    // Settings the sidebar asks to be remembered go through here, which is
+    // where the backend handle is.
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            if let Some((key, value)) = state.pending_meta.get() {
+                state.pending_meta.set(None);
+                backend.set_meta(&key, &value);
+            }
+        });
+    }
 
     Stack::vertical((
         Stack::horizontal((
-            // The rail is always on screen. The panel beside it is what
-            // comes and goes, and the rail's own entry is the control.
-            sidebar::activity_rail(state, review),
             dyn_container(
                 move || state.sidebar_open.get(),
                 move |open| {
                     if open {
-                        // The handle is absolutely placed over the panel's
-                        // right edge, so the panel is its positioning box.
+                        // The handle is absolutely placed over the drawer's
+                        // right edge, so the drawer is its positioning box.
                         floem::views::Container::new(Stack::horizontal((
-                            sidebar::nav_panel(state, review, panel_backend.clone(), panel_open.clone()),
+                            sidebar::sidebar(state, review, panel_backend.clone(), panel_open.clone()),
                             sidebar::resize_handle(state),
                         )))
                         .style(|s| {
@@ -112,7 +122,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         })
                         .into_any()
                     } else {
-                        floem::views::Empty::new().into_any()
+                        sidebar::collapsed_sidebar(state).into_any()
                     }
                 },
             ),
@@ -156,6 +166,34 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     // Window-level shortcuts. Key events bubble from whatever has focus, so
     // a handler on the root view catches them wherever the reader is.
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+        // Escape puts away whatever the sidebar has open under a row.
+        if key.code == Code::Escape && key.modifiers.is_empty() {
+            let had = state.renaming.with(Option::is_some)
+                || state.confirm_delete.with(Option::is_some)
+                || state.new_project_for.with(Option::is_some);
+            if had {
+                state.renaming.set(None);
+                state.confirm_delete.set(None);
+                state.new_project_for.set(None);
+                return EventPropagation::Stop;
+            }
+        }
+
+        // `e` and `s` on the sidebar row under the pointer, as on inbox rows.
+        if key.modifiers.is_empty()
+            && !state.search_focused.get()
+            && !review.composer_focused.get()
+            && matches!(key.code, Code::KeyE | Code::KeyS)
+        {
+            if let Some(item) = state.hovered_item.get().and_then(|id| state.item(&id)) {
+                match key.code {
+                    Code::KeyE => key_backend.mark_item(&item.id, None, Some(!item.is_done())),
+                    _ => key_backend.mark_item(&item.id, Some(!item.saved), None),
+                }
+                return EventPropagation::Stop;
+            }
+        }
+
         // Bare letters act on the inbox, the way they do on the web. They are
         // only shortcuts when nothing is being typed into and the inbox is
         // what is on screen; the root handler cannot see focus, so the search
@@ -269,10 +307,16 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 EventPropagation::Continue
             }
-            // The two sections, numbered the way an editor numbers its
-            // panels.
+            // Cmd-1 is the sidebar's search; Cmd-2 is the inbox.
             Code::Digit1 => {
-                state.show_screen(review, Screen::Sidebar);
+                if state.sidebar_open.get() && (review.is_showing() || state.screen.get() == Screen::Sidebar) {
+                    if let Some(id) = state.search_box.get() {
+                        id.request_focus();
+                    }
+                } else {
+                    state.show_screen(review, Screen::Sidebar);
+                    state.sidebar_open.set(true);
+                }
                 EventPropagation::Stop
             }
             Code::Digit2 => {
