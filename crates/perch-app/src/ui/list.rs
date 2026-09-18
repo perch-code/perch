@@ -262,8 +262,10 @@ fn section_card(
     let count = threads.len();
 
     let header = if grouped {
-        section_header(state, &section, count).into_any()
+        section_header(state, &section, count, on_mark.clone()).into_any()
     } else {
+        // Group: None is one section holding everything, which the selection
+        // bar above the list already speaks for.
         Empty::new().into_any()
     };
 
@@ -304,7 +306,12 @@ fn section_card(
     })
 }
 
-fn section_header(state: AppState, section: &Section, count: usize) -> impl IntoView {
+fn section_header(
+    state: AppState,
+    section: &Section,
+    count: usize,
+    on_mark: OnMark,
+) -> impl IntoView {
     let title = section.title.clone();
     let seed = section.title.clone();
     let avatar_url = section.avatar_url.clone().unwrap_or_default();
@@ -332,6 +339,9 @@ fn section_header(state: AppState, section: &Section, count: usize) -> impl Into
                 .margin_right(8.0)
         }),
         count_badge(move || count, false),
+        // Everything in this group, whatever is checked elsewhere.
+        Container::new(section_action(state, section, on_mark))
+            .style(|s| s.flex_grow(1.0_f32).justify_end()),
     ))
     .style(|s| {
         s.height(40.0)
@@ -342,6 +352,38 @@ fn section_header(state: AppState, section: &Section, count: usize) -> impl Into
             .border_bottom(1.0)
             .border_color(theme::BORDER)
     })
+}
+
+/// Dismiss a whole repository, or a whole day, in one go.
+///
+/// Deliberately ignores the selection: this button says what it acts on, and
+/// it is the rows underneath it.
+fn section_action(state: AppState, section: &Section, on_mark: OnMark) -> impl IntoView {
+    let ids: Vec<String> = section.threads.iter().map(|t| t.id.clone()).collect();
+    let restoring = state.would_restore(&ids);
+
+    let act = move || {
+        on_mark(ids.clone(), MarkAction::Done(!restoring));
+        // The rows are about to leave, and with them any check on one.
+        state.clear_selection();
+    };
+
+    text_button(
+        move || {
+            if restoring {
+                "Restore".to_string()
+            } else {
+                "Mark as done".to_string()
+            }
+        },
+        if restoring {
+            SidebarIcon::Undo
+        } else {
+            SidebarIcon::Check
+        },
+        act,
+    )
+    .style(|s| s.height(24.0).padding_horiz(8.0))
 }
 
 /// Shown when no token resolved, in place of the list.
