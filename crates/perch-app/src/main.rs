@@ -113,16 +113,14 @@ fn main() {
                         //
                         // The offset is absolute. floem pins the red button's
                         // left edge here and places each next one 6px after
-                        // the previous, at macOS's 14pt width, so the green
-                        // ends at x + 54. At 12 that is 66, clear of the
-                        // activity rail's border at 72; at the 19 used before,
-                        // it was 73 and the border cut through it. 12 is also
-                        // where macOS puts these buttons in an ordinary
-                        // window.
+                        // the previous, at macOS's 14pt width, so the three
+                        // span 54px. Centred in the 72px activity rail that
+                        // leaves 9px on each side, and the same 9px above so
+                        // the group sits square in its corner.
                         mac.full_size_content_view(true)
                             .transparent_title_bar(true)
                             .hide_title(true)
-                            .traffic_lights_offset((12.0, 12.0))
+                            .traffic_lights_offset((9.0, 9.0))
                     }),
             ),
         )
