@@ -142,6 +142,13 @@ pub struct ReviewState {
     /// True while the composer's text box has the keyboard, so `a` stands
     /// down.
     pub composer_focused: RwSignal<bool>,
+    /// What is in the composer's box, so Escape can tell an empty one
+    /// from one with a question in it.
+    pub composer_draft: RwSignal<String>,
+    /// Whether a composer takes the keyboard when it opens. On, except in
+    /// the headless tests: a focused editor asks the window for IME, and
+    /// floem's headless window cannot give it and panics.
+    pub composer_autofocus: RwSignal<bool>,
     pub lsp_status: RwSignal<perch_lsp::Status>,
     /// Rises with every hover and jump request. An answer carrying an older
     /// token is stale, because the pointer has moved on since it was asked.
@@ -200,6 +207,8 @@ impl ReviewState {
             agent_last: RwSignal::new(None),
             hovered_line: RwSignal::new(None),
             composer_focused: RwSignal::new(false),
+            composer_draft: RwSignal::new(String::new()),
+            composer_autofocus: RwSignal::new(true),
             lsp_status: RwSignal::new(perch_lsp::Status::Absent),
             request_token: RwSignal::new(0),
             hover_at: RwSignal::new(None),
@@ -244,6 +253,7 @@ impl ReviewState {
         self.focus_thread.set(None);
         self.hovered_line.set(None);
         self.composer_focused.set(false);
+        self.composer_draft.set(String::new());
         self.expanded.set(std::collections::HashSet::new());
         self.dismiss_hover();
     }
@@ -383,6 +393,7 @@ impl ReviewState {
     /// Open a composer, for a new thread on `anchor` or the worktree.
     pub fn open_composer(&self, thread_id: Option<String>, anchor: Option<Anchor>, draft: String, defaults: (String, perch_agent::Effort)) {
         let (model, effort) = self.agent_last.get().unwrap_or(defaults);
+        self.composer_draft.set(draft.clone());
         self.composer.set(Some(Composer { thread_id, anchor, model, effort, draft }));
         self.show_threads();
     }
@@ -398,10 +409,21 @@ impl ReviewState {
     /// message runs the editor has been torn down with the old column.
     /// floem then registers the dead view anyway, and the next box tree
     /// commit asks it for a window origin it no longer has.
+    ///
+    /// The read is untracked. Two of the callers are effects, and a tracked
+    /// read would subscribe them to the very signal the close button
+    /// writes: closing the column would re-run the effect that opens it
+    /// for a file with threads, and the column would come straight back.
     pub fn show_threads(&self) {
-        if !self.threads_open.get() {
+        if !self.threads_open.get_untracked() {
             self.threads_open.set(true);
         }
+    }
+
+    /// Close the composer and forget its draft.
+    pub fn close_composer(&self) {
+        self.composer.set(None);
+        self.composer_draft.set(String::new());
     }
 
     /// The thread whose anchor starts on a display line of the open file.

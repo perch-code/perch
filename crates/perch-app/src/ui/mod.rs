@@ -221,10 +221,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     review.open_composer(None, anchor, String::new(), crate::review::threads::defaults(state));
                     return EventPropagation::Stop;
                 }
-                // Close a composer. Whether it is empty is the composer's
-                // own business; a draft is kept nowhere.
-                Code::Escape if review.composer.with(Option::is_some) => {
-                    review.composer.set(None);
+                // Close an empty composer. One with a question in it stays,
+                // so an Escape meant for the selection cannot throw the
+                // question away; the composer's own close button does that.
+                Code::Escape
+                    if review.composer.with(Option::is_some)
+                        && review.composer_draft.with(|d| d.trim().is_empty()) =>
+                {
+                    review.close_composer();
                     return EventPropagation::Stop;
                 }
                 _ => {}

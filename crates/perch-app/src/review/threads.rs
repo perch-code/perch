@@ -232,10 +232,11 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
                 composer.effort,
             );
             state.agent_last.set(Some((composer.model.clone(), composer.effort)));
-            state.composer.set(None);
+            state.close_composer();
         })
     };
     let key_send = send.clone();
+    let escape_text = read_text.clone();
 
     let editor = editor
         // Cmd-Enter sends. The editor would otherwise take Enter for a new
@@ -247,8 +248,31 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
             }
             CommandExecuted::No
         })
+        // The draft, for Escape and for the root key handler, neither of
+        // which can reach into the document.
+        .update(move |update| {
+            if let Some(editor) = update.editor {
+                state.composer_draft.set(editor.doc().text().to_string());
+            }
+        })
         .on_event_cont(el::FocusGained, move |_, _| state.composer_focused.set(true))
         .on_event_cont(el::FocusLost, move |_, _| state.composer_focused.set(false))
+        // Escape closes an empty composer. In the capture phase, because
+        // the editor stops every key once it has focus and this has to
+        // run first.
+        .on_event_with_config(
+            el::KeyDown,
+            floem::context::EventCallbackConfig { phases: floem::context::Phases::CAPTURE },
+            move |_, key: &KeyboardEvent| {
+                if key.code == Code::Escape && key.modifiers.is_empty() {
+                    if escape_text().trim().is_empty() {
+                        state.close_composer();
+                    }
+                    return floem::event::EventPropagation::Stop;
+                }
+                floem::event::EventPropagation::Continue
+            },
+        )
         .style(|s| {
             s.width_full()
                 .min_height(72.0)
@@ -262,10 +286,22 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
                 .border_radius(theme::RADIUS)
                 .focus(|s| s.border_color(theme::ACCENT))
         });
-    let editor_id = editor.view_id();
     // Take the keyboard as soon as the composer appears.
-    Effect::new(move |_| {
-        editor_id.request_focus();
+    //
+    // Two things have to be right for that. Focus is asked of the editor's
+    // inner view, the one that is focusable and owns the key handler;
+    // asking the wrapper finds no focusable ancestor and does nothing. And
+    // it is asked from the first layout pass rather than at construction:
+    // a request queued while the view is being built is processed before
+    // the view is in the box tree, where it is invisible and dropped.
+    let inner = editor.editor().editor_view_id;
+    let asked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let editor = editor.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+        if !asked.replace(true) && state.composer_autofocus.get_untracked() {
+            if let Some(id) = inner.get_untracked() {
+                id.request_focus();
+            }
+        }
     });
 
     Stack::vertical((
@@ -280,6 +316,10 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
                     .selectable(false)
             }),
             outdated_pill(outdated),
+            Empty::new().style(|s| s.flex_grow(1.0_f32)),
+            // Put the box away. Nothing typed into it is kept.
+            icon_button(|| SidebarIcon::Close, || theme::FG_SUBTLE, move || state.close_composer())
+                .style(|s| s.size(22.0, 22.0).margin_right(-4.0)),
         ))
         .style(|s| s.items_center().width_full().margin_bottom(8.0)),
         editor,
@@ -817,6 +857,7 @@ mod column {
     use std::sync::Arc;
 
     use floem::headless::{HeadlessHarness, TestRoot};
+    use floem::prelude::{Code, KeyboardEvent, Modifiers};
     use floem::reactive::{SignalGet, SignalUpdate};
     use perch_github::{
         Anchor, Author, CommentMessage, CommentThread, PullRequest, RunRecord, RunStatus, RunStep, Side,
@@ -926,12 +967,160 @@ mod column {
         state.pull_request.set(Some(Arc::new(pr)));
         state.comment_threads.set(Arc::new(vec![thread()]));
         state.threads_open.set(true);
+        // See the field: a focused editor cannot be driven headlessly.
+        state.composer_autofocus.set(false);
         let (backend, _events) = crate::backend::spawn();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
         harness.rebuild();
         harness.paint();
         (harness, state)
+    }
+
+    /// Where the header's close button sits: the last child of a header
+    /// that is `TAB_HEIGHT` tall, `padding_right` 8, button 26 square, in
+    /// a column `THREADS_WIDTH` wide against the window's right edge under
+    /// the review header.
+    fn close_button_center() -> (f64, f64) {
+        let x = 1400.0 - 8.0 - 13.0;
+        let y = crate::theme::REVIEW_HEADER_HEIGHT + crate::theme::TAB_HEIGHT / 2.0;
+        (x, y)
+    }
+
+    #[test]
+    fn the_close_button_hides_the_column() {
+        let (mut harness, state) = app_harness();
+        assert!(state.threads_open.get());
+        let (x, y) = close_button_center();
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.threads_open.get(), "click at ({x}, {y}) over {under:?} did not close the column");
+    }
+
+    #[test]
+    fn the_close_button_hides_the_column_with_a_composer_open() {
+        let (mut harness, state) = app_harness();
+        // The state in the report: an unanchored composer, its box focused.
+        state.comment_threads.set(Arc::new(vec![]));
+        state.open_composer(None, None, String::new(), ("sonnet".into(), perch_agent::Effort::Medium));
+        harness.rebuild();
+        harness.paint();
+        assert!(state.composer.get().is_some());
+        let (x, y) = close_button_center();
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.threads_open.get(), "click at ({x}, {y}) over {under:?} did not close the column");
+    }
+
+    #[test]
+    fn the_close_button_works_at_retina_scale_after_a_hover() {
+        let (mut harness, state) = app_harness();
+        harness.set_scale(2.0);
+        harness.rebuild();
+        harness.paint();
+        let (x, y) = close_button_center();
+        harness.pointer_move(x, y);
+        harness.rebuild();
+        harness.paint();
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.threads_open.get(), "did not close at 2x");
+    }
+
+    #[test]
+    fn the_close_button_hides_the_column_when_the_open_file_has_threads() {
+        let (mut harness, state) = app_harness();
+        // The thread is anchored in src/x.rs; make that the open file, as
+        // the effect that opens the column for a file with threads sees it.
+        let file = Arc::new(crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "fn a() {}\n".repeat(80),
+            String::new(),
+            None,
+            false,
+        ));
+        // One rebuild per write, as the window gets: the tab opens on a
+        // click and the file lands from the backend a frame later.
+        state.open_tab("src/x.rs");
+        harness.rebuild();
+        harness.paint();
+        state.finish_load("src/x.rs", file);
+        harness.rebuild();
+        harness.paint();
+        assert!(state.threads_open.get());
+        let (x, y) = close_button_center();
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.threads_open.get(), "the column reopened itself");
+    }
+
+    fn escape() -> floem::event::Event {
+        floem::event::Event::Key(KeyboardEvent {
+            state: floem::prelude::KeyState::Down,
+            key: floem::prelude::Key::Named(floem::prelude::NamedKey::Escape),
+            code: Code::Escape,
+            location: Default::default(),
+            modifiers: Modifiers::empty(),
+            repeat: false,
+            is_composing: false,
+        })
+    }
+
+    /// With the box unfocused, as it is here, Escape reaches the root
+    /// handler. Focused, the composer's own capture-phase listener does the
+    /// same thing before the editor can swallow the key; that path needs a
+    /// real window.
+    #[test]
+    fn escape_in_an_empty_box_closes_the_composer() {
+        let (mut harness, state) = app_harness();
+        state.comment_threads.set(Arc::new(vec![]));
+        state.open_composer(None, None, String::new(), ("sonnet".into(), perch_agent::Effort::Medium));
+        harness.rebuild();
+        harness.paint();
+        harness.dispatch_event(escape());
+        harness.rebuild();
+        harness.paint();
+        assert!(state.composer.get().is_none(), "escape did not close the empty composer");
+        assert!(state.threads_open.get(), "the column stays");
+    }
+
+    #[test]
+    fn escape_keeps_a_composer_with_a_question_in_it() {
+        let (mut harness, state) = app_harness();
+        state.comment_threads.set(Arc::new(vec![]));
+        state.open_composer(None, None, "why is this here?".into(), ("sonnet".into(), perch_agent::Effort::Medium));
+        harness.rebuild();
+        harness.paint();
+        harness.dispatch_event(escape());
+        harness.rebuild();
+        harness.paint();
+        assert!(state.composer.get().is_some(), "escape threw the question away");
+    }
+
+    #[test]
+    fn the_composers_close_button_dismisses_it() {
+        let (mut harness, state) = app_harness();
+        state.comment_threads.set(Arc::new(vec![]));
+        state.open_composer(None, None, "half a thought".into(), ("sonnet".into(), perch_agent::Effort::Medium));
+        harness.rebuild();
+        harness.paint();
+        // The anchor row is the card's first row; its close button is the
+        // last thing on it. Card: 12 margin + 12 padding from the column's
+        // right edge; button 22 wide with a -4 margin.
+        let x = 1400.0 - 12.0 - 12.0 + 4.0 - 11.0;
+        let y = crate::theme::REVIEW_HEADER_HEIGHT + crate::theme::TAB_HEIGHT + 12.0 + 12.0 + 11.0;
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(state.composer.get().is_none(), "click at ({x}, {y}) over {under:?} did not close the composer");
+        assert!(state.composer_draft.get().is_empty());
     }
 
     /// Opening a composer used to write `threads_open` whether or not the
