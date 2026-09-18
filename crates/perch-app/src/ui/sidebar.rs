@@ -87,6 +87,9 @@ pub fn resize_handle(state: AppState) -> impl IntoView {
                 false,
             );
         })
+        .on_event_stop(el::DragStart, move |_, _: &floem::event::DragStartEvent| {
+            state.sidebar_resizing.set(true);
+        })
         .on_event_stop(el::DragMove, move |cx, e: &floem::event::DragMoveEvent| {
             // The event arrives in the handle's own coordinates, and the
             // handle moves with the edge it drags, so measured from there
@@ -95,6 +98,12 @@ pub fn resize_handle(state: AppState) -> impl IntoView {
             let width = (point.x - theme::ACTIVITY_RAIL_WIDTH)
                 .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
             state.sidebar_width.set(width);
+        })
+        .on_event_stop(el::DragEnd, move |_, _: &floem::event::DragEndEvent| {
+            state.sidebar_resizing.set(false);
+        })
+        .on_event_stop(el::DragCancel, move |_, _: &floem::event::DragCancelEvent| {
+            state.sidebar_resizing.set(false);
         })
         .style(|s| {
             s.position(Position::Absolute)
@@ -105,6 +114,26 @@ pub fn resize_handle(state: AppState) -> impl IntoView {
                 .z_index(10)
                 .hover(|s| s.cursor(CursorStyle::ColResize))
         })
+}
+
+/// A sheet over the whole window while the handle is being dragged, so the
+/// cursor stays the column-resize one.
+///
+/// The cursor belongs to whatever is under the pointer, and the handle is
+/// only there once layout has caught up with the last move. On a fast drag,
+/// or past either width limit, the pointer is over a row instead, and the
+/// cursor becomes the row's. Pointer events still go to the handle, which
+/// holds capture; the sheet only takes the hover.
+pub fn resize_cursor_sheet(state: AppState) -> impl IntoView {
+    use floem::style::{CursorStyle, Position};
+
+    Empty::new().style(move |s| {
+        s.position(Position::Absolute)
+            .inset(0.0)
+            .z_index(100)
+            .cursor(CursorStyle::ColResize)
+            .apply_if(!state.sidebar_resizing.get(), |s| s.hide())
+    })
 }
 
 /// Inbox, Saved and Done, as three rows.
@@ -663,12 +692,19 @@ mod tests {
     use super::*;
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::style::Position;
+    use floem::{ElementId, ViewId};
 
-    /// The window's left side as `app_view` lays it out: the rail, then the
-    /// panel with the handle over its right edge. A blank rail and a blank
-    /// panel are enough; the handle only needs the positioning box.
-    fn harness(state: AppState) -> HeadlessHarness {
+    /// The window as `app_view` lays it out: the rail, then the panel with
+    /// the handle over its right edge, then the rest, with the cursor sheet
+    /// over all of it. Blank stand-ins are enough; the handle only needs
+    /// the positioning box, and the sheet only needs something to cover.
+    ///
+    /// Returns the sheet's id too, so a test can ask what is under the
+    /// pointer.
+    fn harness(state: AppState) -> (HeadlessHarness, ViewId) {
         let root = TestRoot::new();
+        let sheet = resize_cursor_sheet(state).into_any();
+        let sheet_id = sheet.id();
         let view = Stack::horizontal((
             Empty::new().style(|s| s.width(theme::ACTIVITY_RAIL_WIDTH).height_full()),
             Container::new(Stack::horizontal((
@@ -680,11 +716,13 @@ mod tests {
                     .flex_shrink(0.0_f32)
                     .position(Position::Relative)
             }),
+            Empty::new().style(|s| s.flex_grow(1.0_f32).height_full()),
+            sheet,
         ))
         .style(|s| s.size_full());
         let mut harness = HeadlessHarness::new_with_size(root, view, 1280.0, 820.0);
         harness.rebuild();
-        harness
+        (harness, sheet_id)
     }
 
     /// Where the handle is: over the panel's right edge.
@@ -695,7 +733,7 @@ mod tests {
     #[test]
     fn dragging_the_handle_puts_the_edge_under_the_pointer() {
         let state = AppState::new();
-        let mut harness = harness(state);
+        let (mut harness, _) = harness(state);
         let start = edge(state);
 
         harness.pointer_down(start - 1.0, 300.0);
@@ -714,7 +752,7 @@ mod tests {
     #[test]
     fn the_width_stays_between_the_limits() {
         let state = AppState::new();
-        let mut harness = harness(state);
+        let (mut harness, _) = harness(state);
         let start = edge(state);
 
         harness.pointer_down(start - 1.0, 300.0);
@@ -723,5 +761,36 @@ mod tests {
         harness.pointer_move(10.0, 300.0);
         assert_eq!(state.sidebar_width.get(), theme::SIDEBAR_MIN_WIDTH);
         harness.pointer_up(10.0, 300.0);
+    }
+
+    #[test]
+    fn the_sheet_holds_the_hover_for_the_length_of_the_drag() {
+        let state = AppState::new();
+        let (mut harness, sheet) = harness(state);
+        let start = edge(state);
+        let sheet: ElementId = sheet.into();
+
+        // Not there until a drag begins: the pointer over the far side
+        // finds the far side.
+        assert!(!state.sidebar_resizing.get());
+        assert_ne!(harness.element_id_at(900.0, 300.0), Some(sheet));
+
+        // Pressing is not dragging.
+        harness.pointer_down(start - 1.0, 300.0);
+        assert!(!state.sidebar_resizing.get());
+
+        // Past the limit the handle stops and the pointer carries on, which
+        // is where the cursor used to change. The sheet is under it instead.
+        harness.pointer_move(900.0, 300.0);
+        assert!(state.sidebar_resizing.get());
+        assert_eq!(harness.element_id_at(900.0, 300.0), Some(sheet));
+        assert!(harness.is_hovered(sheet));
+
+        // Gone with the release, and the far side is under the pointer again.
+        harness.pointer_up(900.0, 300.0);
+        assert!(!state.sidebar_resizing.get());
+        assert_ne!(harness.element_id_at(900.0, 300.0), Some(sheet));
+        harness.pointer_move(901.0, 300.0);
+        assert!(!harness.is_hovered(sheet));
     }
 }

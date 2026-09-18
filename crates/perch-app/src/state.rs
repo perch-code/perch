@@ -95,6 +95,10 @@ pub struct AppState {
     pub sidebar_open: RwSignal<bool>,
     /// How wide the drawer is. Dragged, so a signal rather than a constant.
     pub sidebar_width: RwSignal<f64>,
+    /// Whether the drawer's edge is being dragged. The cursor follows what
+    /// is under the pointer, and a drag runs over rows that each want their
+    /// own, so the window keeps the resize cursor up itself for the duration.
+    pub sidebar_resizing: RwSignal<bool>,
     /// The thread the pointer is over, which is what a bare keystroke acts on.
     pub hovered: RwSignal<Option<String>>,
     /// Checked rows, by thread id. Bulk actions act on exactly this set.
@@ -140,6 +144,7 @@ impl AppState {
             now: RwSignal::new(Timestamp::now()),
             sidebar_open: RwSignal::new(true),
             sidebar_width: RwSignal::new(crate::theme::SIDEBAR_WIDTH),
+            sidebar_resizing: RwSignal::new(false),
             hovered: RwSignal::new(None),
             selected: RwSignal::new(HashSet::new()),
             last_toggled: RwSignal::new(None),

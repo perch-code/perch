@@ -148,6 +148,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         ))
         .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
         status::status_bar(state, review, backend),
+        // Over everything, and only while the drawer's edge is being dragged.
+        sidebar::resize_cursor_sheet(state),
     ))
     // Window-level shortcuts. Key events bubble from whatever has focus, so
     // a handler on the root view catches them wherever the reader is.
