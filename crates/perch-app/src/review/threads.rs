@@ -203,6 +203,11 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
     let editor = text_editor(composer.draft.clone())
         .placeholder(if composer.thread_id.is_some() { "Follow up…" } else { "Ask about these lines…" })
         .editor_style(|s| s.hide_gutter(true));
+    // Markdown as it is typed: bold, italics, code and links take their
+    // styles in the box, the way they will in the thread.
+    let styling_doc = editor.editor().doc();
+    let styling_id = state.next_token();
+    let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(styling_doc, styling_id));
     let doc_editor = editor.editor().clone();
     let read_text = Rc::new(move || doc_editor.doc().text().to_string());
 
@@ -549,14 +554,10 @@ fn message_view(
     let is_agent = matches!(message.author, Author::Agent { .. });
     let body = message.body.clone();
 
+    // Questions and answers are both markdown; the reader writes it too.
+    let _ = is_agent;
     Stack::vertical((
-        if is_agent {
-            crate::review::markdown::render(&body).into_any()
-        } else {
-            Label::derived(move || body.clone())
-                .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG).line_height(1.4).width_full().text_wrap())
-                .into_any()
-        },
+        crate::review::markdown::render(&body),
         match message.run.clone() {
             Some(run) => run_block(app, state, backend, thread, message.body.clone(), run).into_any(),
             None => Empty::new().into_any(),

@@ -2,6 +2,7 @@
 
 pub mod editor;
 pub mod gutter;
+pub mod composer_styling;
 pub mod hover;
 pub mod header;
 pub mod markdown;

@@ -159,7 +159,7 @@ pub const STATUS_RENAMED: Color = Color::from_rgb8(0x82, 0x50, 0xdf);
 /// pull request came from.
 pub const SYNTAX_DEFAULT: Color = Color::from_rgb8(0x1f, 0x23, 0x28);
 const SYNTAX_KEYWORD: Color = Color::from_rgb8(0xcf, 0x22, 0x2e);
-const SYNTAX_STRING: Color = Color::from_rgb8(0x0a, 0x30, 0x69);
+pub const SYNTAX_STRING: Color = Color::from_rgb8(0x0a, 0x30, 0x69);
 const SYNTAX_COMMENT: Color = Color::from_rgb8(0x6e, 0x77, 0x81);
 const SYNTAX_FUNCTION: Color = Color::from_rgb8(0x82, 0x50, 0xdf);
 const SYNTAX_TYPE: Color = Color::from_rgb8(0x95, 0x38, 0x00);
@@ -198,6 +198,13 @@ pub fn syntax_color(capture: usize) -> Color {
         SYNTAX_VARIABLE, // variable
         SYNTAX_KEYWORD,  // variable.builtin
         SYNTAX_VARIABLE, // variable.parameter
+        SYNTAX_PUNCT,    // punctuation.special
+        SYNTAX_DEFAULT,  // text.emphasis
+        SYNTAX_STRING,   // text.literal
+        ACCENT,          // text.reference
+        SYNTAX_DEFAULT,  // text.strong
+        SYNTAX_DEFAULT,  // text.title
+        ACCENT,          // text.uri
     ];
     COLORS.get(capture).copied().unwrap_or(SYNTAX_DEFAULT)
 }

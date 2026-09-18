@@ -39,7 +39,22 @@ pub const CAPTURES: &[&str] = &[
     "variable",
     "variable.builtin",
     "variable.parameter",
+    // Markdown, from both the block and the inline grammar. Appended, so
+    // every earlier index keeps its colour.
+    "punctuation.special",
+    "text.emphasis",
+    "text.literal",
+    "text.reference",
+    "text.strong",
+    "text.title",
+    "text.uri",
 ];
+
+/// The name of a capture index, for a styling that cares about more than
+/// colour.
+pub fn capture_name(index: usize) -> &'static str {
+    CAPTURES.get(index).copied().unwrap_or("")
+}
 
 /// A highlighted run of bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +168,26 @@ impl Language {
     }
 }
 
+/// The inline half of the markdown grammar.
+fn markdown_inline() -> Option<&'static HighlightConfiguration> {
+    static INLINE: OnceLock<Option<HighlightConfiguration>> = OnceLock::new();
+    INLINE
+        .get_or_init(|| {
+            let mut config = HighlightConfiguration::new(
+                tree_sitter_md::INLINE_LANGUAGE.into(),
+                "markdown_inline",
+                tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+                tree_sitter_md::INJECTION_QUERY_INLINE,
+                "",
+            )
+            .map_err(|e| tracing::warn!(error = %e, "markdown inline grammar failed to load"))
+            .ok()?;
+            config.configure(CAPTURES);
+            Some(config)
+        })
+        .as_ref()
+}
+
 /// Highlight a whole file into byte-range spans.
 ///
 /// Returns an empty vector for an unknown language or a grammar error, which
@@ -163,7 +198,11 @@ pub fn highlight(language: Language, source: &str) -> Vec<Span> {
     };
 
     let mut highlighter = Highlighter::new();
-    let events = match highlighter.highlight(config, source.as_bytes(), None, None, |_| None) {
+    // Markdown's emphasis, code spans and links live in a second grammar
+    // the block grammar injects; everything else injects nothing.
+    let events = match highlighter.highlight(config, source.as_bytes(), None, None, |name| {
+        if name == "markdown_inline" { markdown_inline() } else { None }
+    }) {
         Ok(events) => events,
         Err(e) => {
             tracing::warn!(language = language.name(), error = %e, "highlight failed");
@@ -196,6 +235,65 @@ pub fn highlight(language: Language, source: &str) -> Vec<Span> {
     }
 
     spans
+}
+
+/// Markdown, with inline styles.
+///
+/// The block grammar injects an inline grammar for emphasis, code spans and
+/// links, but tree-sitter-highlight emits nothing from that layer here, so
+/// the inline grammar is run over the text directly and its spans dropped
+/// inside fenced code. For a question in a text box, that is the whole job.
+pub fn highlight_markdown(source: &str) -> Vec<Span> {
+    let mut spans = highlight(Language::Markdown, source);
+
+    let Some(inline) = markdown_inline() else {
+        return spans;
+    };
+    let fences = fenced_ranges(source);
+    let mut highlighter = Highlighter::new();
+    let events = match highlighter.highlight(inline, source.as_bytes(), None, None, |_| None) {
+        Ok(events) => events,
+        Err(_) => return spans,
+    };
+    let mut stack: Vec<usize> = Vec::new();
+    for event in events.flatten() {
+        match event {
+            HighlightEvent::HighlightStart(Highlight(index)) => stack.push(index),
+            HighlightEvent::HighlightEnd => {
+                stack.pop();
+            }
+            HighlightEvent::Source { start, end } => {
+                if let Some(&capture) = stack.last() {
+                    let in_fence = fences.iter().any(|f| f.contains(&start));
+                    if start < end && !in_fence {
+                        spans.push(Span { start, end, capture });
+                    }
+                }
+            }
+        }
+    }
+    spans.sort_by_key(|s| (s.start, s.end));
+    spans
+}
+
+/// Byte ranges of the content of fenced code blocks, fences included.
+fn fenced_ranges(source: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut open: Option<usize> = None;
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            match open.take() {
+                Some(start) => out.push(start..offset + line.len()),
+                None => open = Some(offset),
+            }
+        }
+        offset += line.len();
+    }
+    if let Some(start) = open {
+        out.push(start..source.len());
+    }
+    out
 }
 
 /// Spans grouped per line, with byte offsets relative to the line start.
@@ -275,6 +373,22 @@ impl LineSpans {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_highlighting_covers_headings_inline_styles_and_skips_fences() {
+        let src = "# Title\n\nplain **bold** and `code` and *em*\n\n```\n**not bold**\n```\n";
+        let spans = highlight_markdown(src);
+        let names: Vec<(&str, &str)> =
+            spans.iter().map(|s| (super::capture_name(s.capture), &src[s.start..s.end])).collect();
+        assert!(names.contains(&("text.title", "Title")), "{names:?}");
+        assert!(names.contains(&("text.strong", "bold")), "{names:?}");
+        assert!(names.contains(&("text.literal", "code")), "{names:?}");
+        assert!(names.contains(&("text.emphasis", "em")), "{names:?}");
+        // Inside a fence the block grammar's literal wins; nothing there is
+        // strong.
+        assert!(names.contains(&("text.literal", "**not bold**\n")), "{names:?}");
+        assert!(!names.iter().any(|(n, t)| *n == "text.strong" && t.contains("not bold")), "{names:?}");
+    }
 
     fn capture_name(span: &Span) -> &'static str {
         CAPTURES[span.capture]
