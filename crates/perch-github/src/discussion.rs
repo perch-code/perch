@@ -25,18 +25,47 @@ pub struct Discussion {
     pub review_comments: Vec<ReviewComment>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IssueComment {
     pub id: u64,
-    #[serde(default, deserialize_with = "login")]
     pub user: String,
-    #[serde(default)]
+    /// The author's avatar, for the issue view.
+    pub user_avatar_url: String,
     pub body: String,
     pub created_at: Timestamp,
-    #[serde(default)]
     pub updated_at: Option<Timestamp>,
-    #[serde(default)]
     pub html_url: String,
+}
+
+/// The wire shape: the author is one nested object, read into two fields.
+#[derive(Deserialize)]
+struct IssueCommentPayload {
+    id: u64,
+    #[serde(default)]
+    user: Option<UserRef>,
+    #[serde(default)]
+    body: String,
+    created_at: Timestamp,
+    #[serde(default)]
+    updated_at: Option<Timestamp>,
+    #[serde(default)]
+    html_url: String,
+}
+
+impl<'de> serde::Deserialize<'de> for IssueComment {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let p = IssueCommentPayload::deserialize(d)?;
+        let (user, user_avatar_url) = p.user.map(|u| (u.login, u.avatar_url)).unwrap_or_default();
+        Ok(IssueComment {
+            id: p.id,
+            user,
+            user_avatar_url,
+            body: p.body,
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+            html_url: p.html_url,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

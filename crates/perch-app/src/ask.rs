@@ -594,6 +594,7 @@ mod tests {
         let comments = vec![perch_github::IssueComment {
             id: 1,
             user: "chris".into(),
+            user_avatar_url: String::new(),
             body: "Only on compaction.".into(),
             created_at: "2026-09-18T11:00:00Z".parse().unwrap(),
             updated_at: None,

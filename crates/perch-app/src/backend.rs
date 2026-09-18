@@ -518,6 +518,7 @@ async fn run(
         language_server: language_server.clone(),
         events: events.clone(),
         runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        avatars: fetches.avatars.clone(),
     };
 
     // Bring the table and the disk into agreement before any command can
@@ -556,6 +557,11 @@ async fn run(
             },
         };
 
+        if let Some(c) = &command {
+            if !matches!(c, Command::Refresh | Command::Hover { .. }) {
+                tracing::debug!(command = ?c, "command");
+            }
+        }
         match command {
             Some(Command::Refresh) | None => {
                 poll_after = refresh(&ctx, &source, &fetches).await;
@@ -862,9 +868,22 @@ struct Ctx {
     events: EventSender<Event>,
     /// Running agents by run id, so a cancel can find its child.
     runs: Arc<std::sync::Mutex<std::collections::HashMap<String, (perch_agent::Run, String)>>>,
+    /// The avatar download limit, shared with the inbox's fetches.
+    avatars: Arc<Semaphore>,
 }
 
 impl Ctx {
+    /// Have these faces on hand, from disk or the network.
+    fn want_avatars(&self, urls: impl IntoIterator<Item = String>) {
+        let mut seen = std::collections::HashSet::new();
+        for url in urls {
+            if url.is_empty() || !seen.insert(url.clone()) {
+                continue;
+            }
+            spawn_avatar(self.github.clone(), self.cache.clone(), self.events.clone(), self.avatars.clone(), url);
+        }
+    }
+
     fn send_threads(&self, item_id: &str) {
         let threads = self.with_cache(|c| c.load_comment_threads(item_id));
         match threads {
@@ -2022,6 +2041,10 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
     }
     tracing::info!(repo = %issue.repo_full_name, number, comments = comments.len(), offline, "issue ready");
     let _ = events.send(Event::IssueReady { item: item.clone(), issue: issue.clone(), comments: comments.clone(), offline });
+    ctx.want_avatars(
+        std::iter::once(issue.author_avatar_url.clone())
+            .chain(comments.iter().map(|c| c.user_avatar_url.clone())),
+    );
     ctx.send_threads(&item.id);
 
     if !offline {

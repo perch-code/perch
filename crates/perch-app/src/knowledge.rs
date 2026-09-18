@@ -211,6 +211,7 @@ mod tests {
             comments: vec![IssueComment {
                 id: 1,
                 user: "chris".into(),
+                user_avatar_url: String::new(),
                 body: "q".into(),
                 created_at: at("2026-09-15T09:14:00Z"),
                 updated_at: Some(at("2026-09-15T09:30:00Z")),
@@ -337,6 +338,7 @@ mod tests {
             IssueComment {
                 id: 7,
                 user: "chris".into(),
+                user_avatar_url: String::new(),
                 body: "Repro attached.".into(),
                 created_at: at("2026-09-13T09:00:00Z"),
                 updated_at: Some(at("2026-09-13T09:30:00Z")),
@@ -345,6 +347,7 @@ mod tests {
             IssueComment {
                 id: 8,
                 user: "rohan".into(),
+                user_avatar_url: String::new(),
                 body: "Thanks.".into(),
                 created_at: at("2026-09-13T09:10:00Z"),
                 updated_at: None,

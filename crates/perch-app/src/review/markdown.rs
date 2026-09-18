@@ -117,7 +117,9 @@ pub fn parse(text: &str) -> Vec<Block> {
                 s.code = true;
                 push_text(&mut spans, &s, &t);
             }
-            Event::SoftBreak => push_text(&mut spans, &style, " "),
+            // A newline in an issue or a comment is a line break on GitHub,
+            // not a space: people write "**Steps**\n1. do this" and mean it.
+            Event::SoftBreak => push_text(&mut spans, &style, "\n"),
             Event::HardBreak => push_text(&mut spans, &style, "\n"),
             Event::Rule => flush(&mut spans, &mut kind, &mut out),
             _ => {}
@@ -268,8 +270,8 @@ mod tests {
     }
 
     #[test]
-    fn soft_breaks_join_a_paragraph() {
-        assert_eq!(parse("one\ntwo"), vec![Block::Paragraph(vec![plain("one two")])]);
+    fn a_newline_inside_a_paragraph_is_kept_as_a_line_break() {
+        assert_eq!(parse("one\ntwo"), vec![Block::Paragraph(vec![plain("one\ntwo")])]);
     }
 
     #[test]
