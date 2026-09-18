@@ -7,6 +7,7 @@ pub mod auth;
 pub mod cache;
 pub mod client;
 pub mod config;
+pub mod discussion;
 pub mod model;
 pub mod pulls;
 
@@ -14,6 +15,7 @@ pub use auth::{resolve_token, Token, TokenSource};
 pub use cache::{Cache, CacheError, Mark, Worktree};
 pub use client::{Error, GitHub, ListResult};
 pub use config::Config;
+pub use discussion::{Discussion, IssueComment, Review, ReviewComment};
 pub use pulls::PullRequest;
 pub use model::{
     Reason, Repository, Subject, SubjectDetail, SubjectKind, SubjectState, Thread,

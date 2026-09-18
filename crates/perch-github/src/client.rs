@@ -266,6 +266,72 @@ impl GitHub {
         Ok(payload.into_pull_request(repo_full_name))
     }
 
+    /// Everything said on a pull request: description, conversation,
+    /// reviews, and line comments. Three lists, each read to the end.
+    pub async fn fetch_discussion(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<crate::discussion::Discussion, Error> {
+        let base = format!("/repos/{repo_full_name}");
+        let body = self.get_text(&format!("{base}/pulls/{number}")).await?;
+        let body: crate::discussion::BodyOnly =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+
+        Ok(crate::discussion::Discussion {
+            body: body.body.unwrap_or_default(),
+            comments: self.list_all(&format!("{base}/issues/{number}/comments")).await?,
+            reviews: self.list_all(&format!("{base}/pulls/{number}/reviews")).await?,
+            review_comments: self.list_all(&format!("{base}/pulls/{number}/comments")).await?,
+        })
+    }
+
+    /// Every page of a list endpoint, concatenated.
+    ///
+    /// Stops at the first short page rather than following `Link` headers,
+    /// which is what `list_threads` does too. A hundred a page and a
+    /// hundred pages is more discussion than any pull request has.
+    async fn list_all<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, Error> {
+        const PER_PAGE: usize = 100;
+        const MAX_PAGES: usize = 100;
+        let mut all = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let joiner = if path.contains('?') { '&' } else { '?' };
+            let body = self
+                .get_text(&format!("{path}{joiner}per_page={PER_PAGE}&page={page}"))
+                .await?;
+            let items: Vec<T> =
+                serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+            let short = items.len() < PER_PAGE;
+            all.extend(items);
+            if short {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
+    /// One GET, classified the way every other request is.
+    async fn get_text(&self, path: &str) -> Result<String, Error> {
+        let response = self
+            .octo
+            ._get_with_headers(path, None)
+            .await
+            .map_err(map_octocrab_error)?;
+
+        let status = response.status();
+        let rate_reset =
+            header_str(response.headers(), "x-ratelimit-reset").and_then(|v| v.parse::<i64>().ok());
+        let rate_remaining = header_str(response.headers(), "x-ratelimit-remaining")
+            .and_then(|v| v.parse::<i64>().ok());
+
+        let body = body_text(response).await;
+        if !status.is_success() {
+            return Err(classify(status, rate_remaining, rate_reset, body));
+        }
+        Ok(body)
+    }
+
     /// Download an avatar at display size. Returns raw encoded bytes.
     pub async fn fetch_avatar(&self, url: &str) -> Result<Vec<u8>, Error> {
         let sized = with_size_param(url, 64);
