@@ -248,7 +248,10 @@ impl AppState {
                 self.worktrees.set(worktrees);
                 self.notice.set(None);
             }
-            Event::WorktreeFailed { message, .. } => self.notice.set(Some(message)),
+            Event::WorktreeFailed { id, message } => {
+                tracing::warn!(id, message, "worktree action refused");
+                self.notice.set(Some(message));
+            }
             Event::ReviewProgress { .. }
             | Event::ReviewReady { .. }
             | Event::ReviewFailed { .. }
@@ -518,10 +521,6 @@ impl AppState {
         review.close();
         self.screen.set(screen);
         self.notice.set(None);
-    }
-
-    pub fn worktree(&self, id: &str) -> Option<Worktree> {
-        self.worktrees.with(|w| w.iter().find(|w| w.id == id).cloned())
     }
 
     /// The rows of one segment, most recently touched first.

@@ -52,7 +52,7 @@ pub fn review_view(
     let on_back = {
         let backend = backend.clone();
         move || {
-            state.close();
+            app.leave_review(state);
             backend.close_review();
         }
     };
@@ -62,13 +62,21 @@ pub fn review_view(
         move |thread_id: String| {
             on_mark(vec![thread_id], crate::ui::list::MarkAction::Done(true));
             // Dismissing is also leaving: the next notification is the point.
-            state.close();
+            app.leave_review(state);
             backend.close_review();
         }
     };
 
+    // The backend closes the review itself when the archive goes through,
+    // and the Worktrees event that follows closes the view. A refusal
+    // leaves everything as it was, with the reason in the status line.
+    let on_archive = {
+        let backend = backend.clone();
+        move |id: String| backend.archive_worktree(&id)
+    };
+
     Stack::vertical((
-        header::header(app, state, on_back, on_done),
+        header::header(app, state, on_back, on_done, on_archive),
         dyn_container(
             move || match state.preparing.get() {
                 Preparing::Working { .. } => Phase::Preparing,

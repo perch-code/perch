@@ -36,6 +36,11 @@ pub const CLOSED: Color = Color::from_rgb8(0xd1, 0x24, 0x2f);
 pub const DRAFT: Color = Color::from_rgb8(0x59, 0x63, 0x6e);
 
 /// Badges.
+/// A caution pill: the amber GitHub uses for an attention banner.
+pub const NOTICE_BG: Color = Color::from_rgb8(0xff, 0xf8, 0xc5);
+pub const NOTICE_BORDER: Color = Color::from_rgb8(0xd4, 0xa7, 0x2c);
+pub const NOTICE_FG: Color = Color::from_rgb8(0x7d, 0x4e, 0x00);
+
 pub const BADGE_BG: Color = Color::from_rgb8(0xea, 0xee, 0xf2);
 pub const BADGE_FG: Color = Color::from_rgb8(0x59, 0x63, 0x6e);
 pub const SHADOW: Color = Color::from_rgba8(0x1f, 0x23, 0x28, 0x14);

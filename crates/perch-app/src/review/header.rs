@@ -11,19 +11,22 @@ use crate::icons::{self, SidebarIcon};
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{avatar, sidebar_glyph, text_button};
+use crate::ui::widgets::{avatar, sidebar_glyph, text_button, worktree_menu};
 
 pub fn header(
     app: AppState,
     state: ReviewState,
     on_back: impl Fn() + 'static,
     on_done: impl Fn(String) + 'static,
+    on_archive: impl Fn(String) + 'static,
 ) -> impl IntoView {
     Stack::horizontal((
         back_button(on_back),
         icon_and_title(app, state),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        notice(state),
         branches(state),
+        directory(state, on_archive),
         churn(state),
         done_button(state, on_done),
     ))
@@ -194,6 +197,113 @@ fn branches(state: ReviewState) -> impl IntoView {
             .text_ellipsis()
             .max_width(320.0)
     })
+}
+
+/// The worktree's directory name, and a menu of ways to get there.
+///
+/// This is what makes the checkout a place rather than a cache: the name
+/// on screen is the name in the Finder and in a shell.
+fn directory(state: ReviewState, on_archive: impl Fn(String) + 'static) -> impl IntoView {
+    let on_archive = std::rc::Rc::new(on_archive);
+    dyn_container(
+        move || state.worktree.get(),
+        move |worktree| {
+            let Some(worktree) = worktree else {
+                return Empty::new().into_any();
+            };
+            let name = worktree
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let path = worktree.path.clone();
+            let id = worktree.id.clone();
+            let on_archive = on_archive.clone();
+
+            Stack::horizontal((
+                sidebar_glyph(SidebarIcon::Folder, theme::FG_MUTED)
+                    .style(|s| s.size(13.0, 13.0).margin_right(6.0).pointer_events_none()),
+                Label::derived(move || name.clone()).style(|s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .font_family(theme::CODE_FONT_STACK.to_string())
+                        .color(theme::FG_MUTED)
+                        .text_ellipsis()
+                        .max_width(240.0)
+                        .pointer_events_none()
+                }),
+                sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
+                    .style(|s| s.size(10.0, 10.0).margin_left(5.0).pointer_events_none()),
+            ))
+            .popout_menu(move || {
+                let on_archive = on_archive.clone();
+                let id = id.clone();
+                worktree_menu(path.clone(), Some(std::rc::Rc::new(move || on_archive(id.clone()))))
+            })
+            .style(|s| {
+                s.items_center()
+                    .height(24.0)
+                    .padding_horiz(8.0)
+                    .background(theme::CANVAS_SUBTLE)
+                    .border(1.0)
+                    .border_color(theme::BORDER_MUTED)
+                    .border_radius(theme::RADIUS)
+                    .flex_shrink(0.0_f32)
+                    .selectable(false)
+                    .hover(|s| s.background(theme::CANVAS_HOVER).cursor(CursorStyle::Pointer))
+            })
+            .into_any()
+        },
+    )
+    .style(|s| s.flex_shrink(0.0_f32))
+}
+
+/// Why the files on screen may not be the pull request's latest.
+///
+/// Two cases, one shape: the pull request moved while the worktree had work
+/// in it, or the pull request could not be fetched at all. Neither offers a
+/// button. Reading what is on disk is the right answer today.
+fn notice(state: ReviewState) -> impl IntoView {
+    let text = move || {
+        if let Some(head) = state.stale_head.get() {
+            let short: String = head.chars().take(7).collect();
+            return Some(format!("Pull request moved to {short}; showing the worktree as it is"));
+        }
+        if state.offline.get() {
+            return Some("Offline; showing the checkout as it was last left".to_string());
+        }
+        None
+    };
+
+    dyn_container(text, move |text| {
+        let Some(text) = text else {
+            return Empty::new().into_any();
+        };
+        Stack::horizontal((
+            sidebar_glyph(SidebarIcon::Warning, theme::NOTICE_FG)
+                .style(|s| s.size(13.0, 13.0).margin_right(6.0).flex_shrink(0.0_f32)),
+            Label::derived(move || text.clone()).style(|s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .color(theme::NOTICE_FG)
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
+            }),
+        ))
+        .style(|s| {
+            s.items_center()
+                .height(24.0)
+                .padding_horiz(9.0)
+                .max_width(380.0)
+                .min_width(0.0)
+                .background(theme::NOTICE_BG)
+                .border(1.0)
+                .border_color(theme::NOTICE_BORDER)
+                .border_radius(theme::RADIUS)
+                .selectable(false)
+        })
+        .into_any()
+    })
+    .style(|s| s.min_width(0.0).flex_shrink(1.0_f32))
 }
 
 fn churn(state: ReviewState) -> impl IntoView {
