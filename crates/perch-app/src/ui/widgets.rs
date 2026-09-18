@@ -215,38 +215,31 @@ pub fn icon_button(
 }
 
 /// A rounded count pill, as used beside every sidebar row.
-/// A rounded count pill.
 ///
 /// The pill has a fixed height and centres the label inside it, rather than
 /// growing from the label's own padding. A label's box carries the font's
 /// leading, which is not shared evenly above and below the glyph, so padding
 /// alone leaves the number sitting low in the pill.
-pub fn count_badge(count: impl Fn() -> usize + 'static, emphasis: bool) -> impl IntoView {
-    let (bg, fg) = if emphasis {
-        (theme::ACCENT, theme::CANVAS)
-    } else {
-        (theme::BADGE_BG, theme::BADGE_FG)
-    };
-
+pub fn count_badge(count: impl Fn() -> usize + 'static) -> impl IntoView {
     Container::new(
         Label::derived(move || {
             let n = count();
             if n > 999 { "999+".to_string() } else { n.to_string() }
         })
-        .style(move |s| {
+        .style(|s| {
             s.font_size(theme::TEXT_BADGE)
                 .font_weight(FontWeight::MEDIUM)
-                .color(fg)
+                .color(theme::BADGE_FG)
                 .selectable(false)
                 .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
     )
-    .style(move |s| {
+    .style(|s| {
         s.height(theme::BADGE_HEIGHT)
             .min_width(theme::BADGE_HEIGHT + 2.0)
             .padding_horiz(6.0)
             .border_radius(theme::BADGE_HEIGHT / 2.0)
-            .background(bg)
+            .background(theme::BADGE_BG)
             .items_center()
             .justify_center()
             .flex_shrink(0.0_f32)
@@ -370,7 +363,7 @@ pub fn spacer() -> impl IntoView {
     Empty::new().style(|s| s.flex_grow(1.0_f32))
 }
 
-/// Row used by both the views list and the filter list in the sidebar.
+/// Row used by the reason filters in the sidebar.
 pub fn sidebar_row(
     glyph: SidebarIcon,
     text: String,
@@ -409,7 +402,7 @@ pub fn sidebar_row(
                 if n == 0 {
                     Empty::new().into_any()
                 } else {
-                    count_badge(move || n, false).into_any()
+                    count_badge(move || n).into_any()
                 }
             },
         ),

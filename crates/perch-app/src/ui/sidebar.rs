@@ -21,7 +21,7 @@ pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
         move |screen| match screen {
             Screen::Threads => Stack::vertical((
                 Empty::new().style(|s| s.height(8.0).width_full().flex_shrink(0.0_f32)),
-                views_section(state, review),
+                view_picker(state, review),
                 section_heading("Filters"),
                 filters_section(state),
                 section_heading("Repositories"),
@@ -37,8 +37,7 @@ pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
             .style(|s| s.size_full().flex_col().gap(1.0))
             .into_any(),
         },
-    )
-    .style(|s| {
+    )    .style(|s| {
         s.width(theme::SIDEBAR_WIDTH)
             .height_full()
             .flex_col()
@@ -48,99 +47,91 @@ pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
     })
 }
 
-fn views_section(state: AppState, review: ReviewState) -> impl IntoView {
-    // The three views are one control: whichever is open wears the card.
-    // The rail's bell stands for all of them, so the way between them lives
-    // here.
-    Stack::vertical((
-        view_row(state, review, View::Inbox, SidebarIcon::Inbox),
-        view_row(state, review, View::Saved, SidebarIcon::Bookmark),
-        view_row(state, review, View::Done, SidebarIcon::Check),
-    ))
-    .style(|s| s.width_full().gap(1.0))
-}
-
-/// One of Inbox, Saved and Done.
+/// The open view, and a menu to change it.
 ///
-/// Clicking any of them also leaves a pull request, so the rail is the way
-/// back from the review view as well as the way between lists.
-fn view_row(
-    state: AppState,
-    review: ReviewState,
-    view: View,
-    icon: SidebarIcon,
-) -> impl IntoView {
-    use floem::peniko::Color;
+/// This was three stacked rows. The panel only ever needs to name one list,
+/// and the unread count those rows carried now lives on the rail's bell
+/// alone, where it answers "is anything asking for me?" without a click.
+///
+/// Choosing a view also leaves an open pull request, so this is the way back
+/// out of the review as well as the way between lists. It stays a way out
+/// when you pick the view you are already in, which is why there is no
+/// "same view, do nothing" guard on the action.
+///
+/// floem hands a popout menu to the deepest view under the pointer and never
+/// walks up, so all three children are transparent to the pointer and this
+/// stack stays the deepest hit wherever the click lands. The flag is
+/// inherited, so it cannot go on the stack itself: that would make the stack
+/// unpickable too and the menu would never open at all.
+fn view_picker(state: AppState, review: ReviewState) -> impl IntoView {
+    use floem::menu::Menu;
     use floem::text::FontWeight;
-    use floem::views::{Label, Stack};
 
-    let selected = move || state.view.get() == view && !review.is_open();
-    let count = move || {
-        let c = state.counts();
-        match view {
-            // The inbox badge counts what is still asking for attention, so
-            // dismissing a thread quiets it.
-            View::Inbox => c.unread,
-            View::Saved => c.saved,
-            View::Done => c.done,
-        }
-    };
+    // The rail's bell goes subtle the moment a pull request starts opening,
+    // and this sits an inch from it. `is_open` would leave the panel claiming
+    // a list is up while the review's progress card fills the window.
+    let active = move || !review.is_showing();
+    let fg = move || if active() { theme::FG } else { theme::FG_MUTED };
 
-    let content = Stack::horizontal((
-        dyn_container(
-            move || if selected() { theme::FG } else { theme::FG_MUTED },
-            move |c| crate::ui::widgets::sidebar_glyph(icon, c).into_any(),
+    Stack::horizontal((
+        crate::ui::widgets::icon_in(
+            move || crate::icons::sidebar_icon(glyph_for(state.view.get()), fg()),
+            fg,
         )
-        .style(|s| s.size(16.0, 16.0)),
-        Label::derived(move || view.label()).style(move |s| {
+        .style(|s| s.margin_right(9.0).pointer_events_none()),
+        Label::derived(move || state.view.get().label()).style(move |s| {
             s.font_size(theme::TEXT_BODY)
-                .font_weight(if selected() {
+                .font_weight(if active() {
                     FontWeight::SEMI_BOLD
                 } else {
                     FontWeight::NORMAL
                 })
-                .color(if selected() { theme::FG } else { theme::FG_MUTED })
-                .margin_left(9.0)
+                .color(fg())
+                .text_ellipsis()
                 .flex_grow(1.0_f32)
+                .min_width(0.0)
+                .pointer_events_none()
         }),
-        dyn_container(count, move |n| {
-            if n == 0 {
-                Empty::new().into_any()
-            } else {
-                count_badge(move || n, selected() && view == View::Inbox).into_any()
-            }
-        }),
+        crate::ui::widgets::sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
+            .style(|s| s.size(11.0, 11.0).pointer_events_none()),
     ))
-    .style(|s| s.items_center().width_full());
-
-    Container::new(content)
-        .on_event_stop(el::Click, move |_, _| {
-            // Doubles as the way back from a pull request.
-            state.show_screen(review, Screen::Threads);
-            // Filters carry over, the way the web keeps a search when you
-            // cross from the inbox into Done. Clearing them here made the
-            // rail a reset button nobody asked for.
-            state.set_view(view);
-        })
-        .style(move |s| {
-            let base = crate::ui::widgets::clickable(s)
-                .width_full()
-                .height(34.0)
-                .items_center()
-                .padding_horiz(10.0)
-                .margin_horiz(6.0)
-                .border_radius(theme::RADIUS);
-            if selected() {
-                base.background(theme::CANVAS)
-                    .border(1.0)
-                    .border_color(theme::BORDER)
-            } else {
-                base.border(1.0)
-                    .border_color(Color::TRANSPARENT)
-                    .hover(|s| s.background(theme::CANVAS_HOVER))
-            }
-        })
-}
+    .popout_menu(move || {
+        let mut menu = Menu::new();
+        for view in View::ALL {
+            menu = menu.item(view.label(), |item| {
+                // Untracked: the builder runs from event dispatch, outside
+                // any reactive scope, and again on every open, which is
+                // exactly when the tick has to be recomputed.
+                item.checked(state.view.get_untracked() == view).action(move || {
+                    // Doubles as the way back from a pull request, and from
+                    // the worktrees screen.
+                    state.show_screen(review, Screen::Threads);
+                    // Filters carry over, the way the web keeps a search when
+                    // you cross from the inbox into Done. Clearing them here
+                    // made this a reset button nobody asked for.
+                    state.set_view(view);
+                })
+            });
+        }
+        menu
+    })
+    // The box does not change while a pull request is open. This is still the
+    // control that gets you out of one, and a control that sheds its chrome
+    // reads as disabled; the muted glyph and label carry that instead.
+    .style(|s| {
+        crate::ui::widgets::clickable(s)
+            .width_full()
+            .height(34.0)
+            .flex_shrink(0.0_f32)
+            .items_center()
+            .padding_horiz(10.0)
+            .margin_horiz(6.0)
+            .background(theme::CANVAS)
+            .border(1.0)
+            .border_color(theme::BORDER)
+            .border_radius(theme::RADIUS)
+            .hover(|s| s.background(theme::CANVAS_HOVER))
+    })}
 
 /// Active or Archived, in the worktrees panel. Same card as a view row, so
 /// the two sections of the app read as one control.
@@ -172,7 +163,7 @@ fn segment_row(state: AppState, review: ReviewState, segment: WorktreeSegment) -
             if n == 0 {
                 Empty::new().into_any()
             } else {
-                count_badge(move || n, false).into_any()
+                count_badge(move || n).into_any()
             }
         }),
     ))
@@ -219,6 +210,14 @@ fn filters_section(state: AppState) -> impl IntoView {
         },
     )
     .style(|s| s.flex_col().width_full().gap(1.0))
+}
+
+fn glyph_for(view: View) -> SidebarIcon {
+    match view {
+        View::Inbox => SidebarIcon::Inbox,
+        View::Saved => SidebarIcon::Bookmark,
+        View::Done => SidebarIcon::Check,
+    }
 }
 
 fn icon_for(f: ReasonFilter) -> SidebarIcon {
@@ -279,7 +278,7 @@ fn repo_row(state: AppState, name: String, count: usize, avatar_url: String) -> 
                 .flex_grow(1.0_f32)
                 .min_width(0.0)
         }),
-        count_badge(move || count, false),
+        count_badge(move || count),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0));
 

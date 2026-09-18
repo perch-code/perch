@@ -21,6 +21,8 @@ pub enum View {
 }
 
 impl View {
+    pub const ALL: [View; 3] = [View::Inbox, View::Saved, View::Done];
+
     pub fn label(self) -> &'static str {
         match self {
             View::Inbox => "Inbox",
@@ -351,7 +353,14 @@ pub fn sections(threads: &[Thread], group: Group, sort: Sort, now: Timestamp) ->
 pub struct Counts {
     /// Unread and not done. A dismissed thread stops nagging.
     pub unread: usize,
+    /// Nothing draws these two any more: the panel names the view it is
+    /// showing rather than counting the other two, and the only number left
+    /// on screen is the rail's unread badge. They stay because one pass
+    /// computes all three anyway, and because the test that pins down what
+    /// the three views mean reads them.
+    #[allow(dead_code)]
     pub saved: usize,
+    #[allow(dead_code)]
     pub done: usize,
     pub by_reason: HashMap<ReasonFilter, usize>,
     /// Repository, thread count, owner avatar. Ordered by count, then name.

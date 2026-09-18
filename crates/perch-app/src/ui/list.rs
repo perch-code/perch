@@ -346,7 +346,7 @@ fn section_header(
                 .min_width(0.0)
                 .margin_right(8.0)
         }),
-        count_badge(move || count, false),
+        count_badge(move || count),
         // Everything in this group, whatever is checked elsewhere.
         Container::new(section_action(state, section, on_mark))
             .style(|s| s.flex_grow(1.0_f32).justify_end()),

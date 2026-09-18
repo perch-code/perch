@@ -144,7 +144,7 @@ fn card_header(state: AppState, repo: String, count: usize) -> impl IntoView {
                 .min_width(0.0)
                 .margin_right(8.0)
         }),
-        count_badge(move || count, false),
+        count_badge(move || count),
     ))
     .style(|s| {
         s.height(44.0)
