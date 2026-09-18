@@ -302,6 +302,37 @@ impl GitHub {
         })
     }
 
+    /// Fetch an issue by number.
+    ///
+    /// The issues endpoint answers for pull requests too, because GitHub
+    /// numbers the two together. One is refused here, so nothing that calls
+    /// this can store a pull request as an issue.
+    pub async fn fetch_issue(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<crate::items::Issue, Error> {
+        let body = self
+            .get_text(&format!("/repos/{repo_full_name}/issues/{number}"))
+            .await?;
+        let payload: crate::items::IssuePayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        if payload.is_pull_request() {
+            return Err(Error::Decode(format!("{repo_full_name}#{number} is a pull request")));
+        }
+        Ok(payload.into_issue(repo_full_name))
+    }
+
+    /// The conversation on an issue, read to the end.
+    pub async fn fetch_issue_comments(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<Vec<crate::discussion::IssueComment>, Error> {
+        self.list_all(&format!("/repos/{repo_full_name}/issues/{number}/comments"))
+            .await
+    }
+
     /// Every page of a list endpoint, concatenated.
     ///
     /// Stops at the first short page rather than following `Link` headers,

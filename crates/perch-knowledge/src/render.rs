@@ -164,7 +164,8 @@ pub fn project_index(project: &str, sections: &[(Source, Vec<Message>)]) -> Stri
             let newest = of.iter().map(|m| m.at).max().map(stamp).unwrap_or_default();
             let file = crate::Knowledge::rendered_relative(*source, c);
             out.push_str(&format!(
-                "| {c} | {} | {} | {newest} |\n",
+                "| {} | {} | {} | {newest} |\n",
+                crate::Knowledge::container_label(c),
                 file.display(),
                 of.len()
             ));
@@ -187,6 +188,8 @@ pub fn root_index(projects: &[(String, Vec<Message>)]) -> String {
     out
 }
 
+/// The repositories named by GitHub containers, pull requests and issues
+/// alike, each once.
 fn repos_of<'a>(messages: impl Iterator<Item = &'a Message>) -> Vec<String> {
     let mut repos: Vec<String> = messages
         .filter(|m| m.source == Source::GitHub)
