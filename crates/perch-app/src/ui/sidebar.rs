@@ -16,8 +16,17 @@ use crate::ui::widgets::{avatar, count_badge, section_heading, sidebar_row};
 /// Sits beside the activity rail and hides when the rail's current entry is
 /// clicked, the way an editor's explorer does.
 pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
+    // A review belongs to the worktrees section, whichever screen it was
+    // opened from, so the panel beside it lists worktrees. The rail entry
+    // follows the same rule, and the two must agree.
     dyn_container(
-        move || state.screen.get(),
+        move || {
+            if review.is_showing() {
+                Screen::Worktrees
+            } else {
+                state.screen.get()
+            }
+        },
         move |screen| match screen {
             Screen::Threads => Stack::vertical((
                 Empty::new().style(|s| s.height(8.0).width_full().flex_shrink(0.0_f32)),
