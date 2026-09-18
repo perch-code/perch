@@ -12,10 +12,16 @@
 //! version gave every row an absolute `inset_top` captured when the row was
 //! built; rows survive scrolling, so those positions went stale and the
 //! numbers piled up on each other.
+//!
+//! A split has a gutter on each side, over that side's rows: base numbers
+//! on the left, head numbers on the right, and nothing on a filler. Only
+//! the right one carries thread markers and the `+`, because only the head
+//! can be anchored on.
 
 use std::sync::Arc;
 
-use floem::kurbo::Rect;
+use floem::event::PointerScrollEventExt;
+use floem::kurbo::{Rect, Size, Vec2};
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
@@ -24,6 +30,7 @@ use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_cont
 use perch_git::{LineStatus, Row};
 
 use crate::icons::SidebarIcon;
+use crate::review::editor::{Side, SideDoc, Tint};
 use crate::review::model::{LoadedFile, ReviewState};
 use crate::state::AppState;
 use crate::theme;
@@ -58,17 +65,47 @@ fn column_offset(scroll_top: f64, line_height: f64) -> f64 {
     -(scroll_top.rem_euclid(line_height))
 }
 
-pub fn diff_gutter(state: ReviewState, app: AppState, file: Arc<LoadedFile>, viewport: RwSignal<Rect>) -> impl IntoView {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+pub fn diff_gutter(
+    state: ReviewState,
+    app: AppState,
+    file: Arc<LoadedFile>,
+    viewport: RwSignal<Rect>,
+    scroll_delta: RwSignal<Vec2>,
+) -> impl IntoView {
     let total = file.buffer.len();
-    let rows = file.clone();
+    column(viewport, scroll_delta, total, move |line| gutter_row(state, app, file.clone(), line))
+}
+
+/// One side of a split. `scroll_delta` is the editor a wheel over the
+/// gutter should move, which for the left is the right's: one scroll.
+pub fn side_gutter(
+    state: ReviewState,
+    app: AppState,
+    file: Arc<LoadedFile>,
+    side: Side,
+    doc: Arc<SideDoc>,
+    viewport: RwSignal<Rect>,
+    scroll_delta: RwSignal<Vec2>,
+) -> impl IntoView {
+    let total = doc.rows.len();
+    column(viewport, scroll_delta, total, move |line| side_row(state, app, file.clone(), side, doc.clone(), line))
+}
+
+/// The rows in view, slid to the scroll, in a column beside the editor.
+fn column<V: IntoView + 'static>(
+    viewport: RwSignal<Rect>,
+    scroll_delta: RwSignal<Vec2>,
+    total: usize,
+    row: impl Fn(usize) -> V + 'static,
+) -> impl IntoView {
+    let line_height = theme::CODE_LINE_HEIGHT as f64;
 
     let visible = move || {
         let vp = viewport.get();
         visible_lines(vp.y0, vp.height(), line_height, total)
     };
 
-    let column = dyn_stack(visible, |line| *line, move |line| gutter_row(state, app, rows.clone(), line))
+    let column = dyn_stack(visible, |line| *line, row)
         .style(move |s| {
             // The whole column slides by the sub-line remainder of the
             // scroll. Reading the viewport here, in a style closure, is what
@@ -87,6 +124,13 @@ pub fn diff_gutter(state: ReviewState, app: AppState, file: Arc<LoadedFile>, vie
         // instead would leave it shrinking to its content.
         .style(|s| s.size_full().position(Position::Relative))
         .clip()
+        // The wheel over the numbers scrolls the code, as it does over the
+        // code itself. Down the file only: nothing here goes sideways.
+        .on_event_stop(el::PointerWheel, move |_, wheel| {
+            let size = viewport.get_untracked().size();
+            let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
+            scroll_delta.set(Vec2::new(0.0, -delta.y));
+        })
         .style(|s| {
             s.width(theme::GUTTER_WIDTH)
                 .height_full()
@@ -97,10 +141,16 @@ pub fn diff_gutter(state: ReviewState, app: AppState, file: Arc<LoadedFile>, vie
         })
 }
 
+/// What a row's left slot can hold: a thread marker or a `+` for a row
+/// that is a display line of the file, or nothing at all.
+#[derive(Clone, Copy)]
+enum Slot {
+    Anchor(usize),
+    Blank,
+}
+
 fn gutter_row(state: ReviewState, app: AppState, file: Arc<LoadedFile>, line: usize) -> impl IntoView {
     let row = file.buffer.row(line);
-    let marker_file = file.clone();
-    let plus_file = file.clone();
 
     // A ghost line shows the base file's number; a real line shows its own.
     // Both are one-based, as every other tool displays them.
@@ -122,56 +172,65 @@ fn gutter_row(state: ReviewState, app: AppState, file: Arc<LoadedFile>, line: us
 
     let dimmed = matches!(row, Some(Row::Deleted { .. }));
 
-    Stack::horizontal((
+    row_view(state, app, file, line, number, dimmed, bar, Slot::Anchor(line))
+}
+
+fn side_row(
+    state: ReviewState,
+    app: AppState,
+    file: Arc<LoadedFile>,
+    side: Side,
+    doc: Arc<SideDoc>,
+    line: usize,
+) -> impl IntoView {
+    let row = doc.rows.get(line).copied();
+    let number = row.and_then(|r| r.line).map(|n| n + 1);
+
+    let bar = match row.map(|r| r.tint) {
+        Some(Tint::Added) => Some(theme::DIFF_ADDED_BAR),
+        Some(Tint::Modified) => Some(theme::DIFF_MODIFIED_BAR),
+        Some(Tint::Deleted) => Some(theme::DIFF_DELETED_BAR),
+        Some(Tint::Plain | Tint::Filler) | None => None,
+    };
+
+    // Anchors are on the head, so the marker and the `+` live on the right,
+    // keyed by the display line the row's head line is in the buffer.
+    let slot = match side {
+        Side::Head => row
+            .and_then(|r| r.line)
+            .and_then(|head| file.buffer.display_line(head))
+            .map_or(Slot::Blank, Slot::Anchor),
+        Side::Base => Slot::Blank,
+    };
+
+    row_view(state, app, file, line, number, false, bar, slot)
+}
+
+/// One row: the slot, the number, the change bar. `key` is what the
+/// pointer's row is recorded as while it is here, in this gutter's own
+/// numbering, and the slot shows its `+` when that matches. A row with a
+/// blank slot records nothing: the two gutters of a split share the
+/// signal, and a row on the left must not light a `+` on the right.
+#[allow(clippy::too_many_arguments)]
+fn row_view(
+    state: ReviewState,
+    app: AppState,
+    file: Arc<LoadedFile>,
+    key: usize,
+    number: Option<usize>,
+    dimmed: bool,
+    bar: Option<Color>,
+    slot: Slot,
+) -> impl IntoView {
+    let slot_view = match slot {
+        Slot::Anchor(display_line) => anchor_slot(state, app, file, key, display_line).into_any(),
+        Slot::Blank => Empty::new().into_any(),
+    };
+
+    let row = Stack::horizontal((
         // The left slot: a marker where a thread starts, a `+` under the
         // pointer, nothing otherwise. Fixed width, so numbers never shift.
-        dyn_container(
-            move || {
-                let thread = state.thread_starting_at(&marker_file, line).map(|t| (t.id, t.outdated));
-                let hovered = state.hovered_line.get() == Some(line);
-                (thread, hovered)
-            },
-            move |(thread, hovered)| match thread {
-                Some((id, outdated)) => Container::new(
-                    sidebar_glyph(
-                        SidebarIcon::Thread,
-                        if outdated { theme::FG_SUBTLE } else { theme::ACCENT },
-                    )
-                    .style(|s| s.size(12.0, 12.0)),
-                )
-                .on_event_stop(el::Click, move |_, _| state.focus_thread.set(Some(id.clone())))
-                .style(|s| {
-                    crate::ui::widgets::clickable(s).size(16.0, 16.0).items_center().justify_center()
-                })
-                .into_any(),
-                None if hovered && plus_file.buffer.head_line(line).is_some() => {
-                    let plus_file = plus_file.clone();
-                    Container::new(
-                        sidebar_glyph(SidebarIcon::Plus, theme::CANVAS).style(|s| s.size(11.0, 11.0)),
-                    )
-                    .on_event_stop(el::Click, move |_, _| {
-                        // The selection if this line is inside it, else this line.
-                        let (first, last) = match state.selection.get() {
-                            Some((a, b)) if (a.min(b)..=a.max(b)).contains(&line) => (a, b),
-                            _ => (line, line),
-                        };
-                        let anchor = state.anchor_for_display_range(&plus_file, first, last);
-                        state.open_composer(None, anchor, String::new(), crate::review::threads::defaults(app));
-                    })
-                    .style(|s| {
-                        crate::ui::widgets::clickable(s)
-                            .size(16.0, 16.0)
-                            .items_center()
-                            .justify_center()
-                            .border_radius(3.0)
-                            .background(theme::ACCENT)
-                    })
-                    .into_any()
-                }
-                None => Empty::new().into_any(),
-            },
-        )
-        .style(|s| s.size(16.0, 16.0).margin_left(3.0).flex_shrink(0.0_f32)),
+        slot_view.style(|s| s.size(16.0, 16.0).margin_left(3.0).flex_shrink(0.0_f32)),
         Label::derived(move || number.map(|n| n.to_string()).unwrap_or_default()).style(
             move |s| {
                 s.flex_grow(1.0_f32)
@@ -185,20 +244,86 @@ fn gutter_row(state: ReviewState, app: AppState, file: Arc<LoadedFile>, line: us
         ),
         change_bar(bar),
     ))
-    .on_event_cont(el::PointerEnter, move |_, _| state.hovered_line.set(Some(line)))
-    .on_event_cont(el::PointerLeave, move |_, _| {
-        state.hovered_line.update(|h| {
-            if *h == Some(line) {
-                *h = None;
-            }
-        })
-    })
     .style(move |s| {
         s.width_full()
             .height(theme::CODE_LINE_HEIGHT as f64)
             .flex_shrink(0.0_f32)
             .items_center()
-    })
+    });
+
+    match slot {
+        Slot::Anchor(_) => row
+            .on_event_cont(el::PointerEnter, move |_, _| state.hovered_line.set(Some(key)))
+            .on_event_cont(el::PointerLeave, move |_, _| {
+                state.hovered_line.update(|h| {
+                    if *h == Some(key) {
+                        *h = None;
+                    }
+                })
+            })
+            .into_any(),
+        Slot::Blank => row.into_any(),
+    }
+}
+
+/// The marker for a thread starting on a display line, or the `+` that
+/// starts one while the pointer is on the row.
+fn anchor_slot(
+    state: ReviewState,
+    app: AppState,
+    file: Arc<LoadedFile>,
+    key: usize,
+    display_line: usize,
+) -> impl IntoView {
+    let marker_file = file.clone();
+    let plus_file = file;
+
+    dyn_container(
+        move || {
+            let thread = state.thread_starting_at(&marker_file, display_line).map(|t| (t.id, t.outdated));
+            let hovered = state.hovered_line.get() == Some(key);
+            (thread, hovered)
+        },
+        move |(thread, hovered)| match thread {
+            Some((id, outdated)) => Container::new(
+                sidebar_glyph(
+                    SidebarIcon::Thread,
+                    if outdated { theme::FG_SUBTLE } else { theme::ACCENT },
+                )
+                .style(|s| s.size(12.0, 12.0)),
+            )
+            .on_event_stop(el::Click, move |_, _| state.focus_thread.set(Some(id.clone())))
+            .style(|s| {
+                crate::ui::widgets::clickable(s).size(16.0, 16.0).items_center().justify_center()
+            })
+            .into_any(),
+            None if hovered && plus_file.buffer.head_line(display_line).is_some() => {
+                let plus_file = plus_file.clone();
+                Container::new(
+                    sidebar_glyph(SidebarIcon::Plus, theme::CANVAS).style(|s| s.size(11.0, 11.0)),
+                )
+                .on_event_stop(el::Click, move |_, _| {
+                    // The selection if this line is inside it, else this line.
+                    let (first, last) = match state.selection.get() {
+                        Some((a, b)) if (a.min(b)..=a.max(b)).contains(&display_line) => (a, b),
+                        _ => (display_line, display_line),
+                    };
+                    let anchor = state.anchor_for_display_range(&plus_file, first, last);
+                    state.open_composer(None, anchor, String::new(), crate::review::threads::defaults(app));
+                })
+                .style(|s| {
+                    crate::ui::widgets::clickable(s)
+                        .size(16.0, 16.0)
+                        .items_center()
+                        .justify_center()
+                        .border_radius(3.0)
+                        .background(theme::ACCENT)
+                })
+                .into_any()
+            }
+            None => Empty::new().into_any(),
+        },
+    )
 }
 
 fn change_bar(color: Option<Color>) -> impl IntoView {

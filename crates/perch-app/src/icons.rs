@@ -309,6 +309,18 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M2.4 4.4 H11.2 L13.8 7 L11.2 9.6 H2.4 Z" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linejoin="round"/>
                <path d="M6.6 2 V4.4 M6.6 9.6 V14" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+        // The two layouts are the same frame, cut across or cut down.
+        SidebarIcon::Stacked => format!(
+            r#"<path d="M3.7 2.7 H12.3 a1.5 1.5 0 0 1 1.5 1.5 V11.8 a1.5 1.5 0 0 1 -1.5 1.5 H3.7
+                       a1.5 1.5 0 0 1 -1.5 -1.5 V4.2 a1.5 1.5 0 0 1 1.5 -1.5 Z" fill="none"
+                     stroke="{c}" stroke-width="1.4"/>
+               <path d="M2.2 8 H13.8" stroke="{c}" stroke-width="1.4"/>"#
+        ),
+        SidebarIcon::Split => format!(
+            r#"<path d="M3.7 2.7 H12.3 a1.5 1.5 0 0 1 1.5 1.5 V11.8 a1.5 1.5 0 0 1 -1.5 1.5 H3.7
+                       a1.5 1.5 0 0 1 -1.5 -1.5 V4.2 a1.5 1.5 0 0 1 1.5 -1.5 Z" fill="none"
+                     stroke="{c}" stroke-width="1.4"/>
+               <path d="M8 2.7 V13.3" stroke="{c}" stroke-width="1.4"/>"#
         ),
     };
     svg16(&body)
@@ -356,16 +368,22 @@ pub enum SidebarIcon {
     ChangesRequested,
     /// A signpost: a milestone.
     Milestone,
+    /// A frame cut across: the head with the removed lines spliced in.
+    Stacked,
+    /// A frame cut down: base beside head.
+    Split,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 32] = [
+    pub const ALL: [SidebarIcon; 34] = [
         SidebarIcon::Link,
         SidebarIcon::ChangesRequested,
         SidebarIcon::Milestone,
+        SidebarIcon::Stacked,
+        SidebarIcon::Split,
         SidebarIcon::Pin,
         SidebarIcon::Filter,
         SidebarIcon::Plus,

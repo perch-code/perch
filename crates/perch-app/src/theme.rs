@@ -295,3 +295,8 @@ pub const ASK_BOX_HEIGHT: f64 = 48.0;
 /// between the mode toggle and the changed list.
 pub const SCOPE_BUTTON_HEIGHT: f64 = 34.0;
 pub const VIEWED_ROW_HEIGHT: f64 = 28.0;
+/// A split's filler row: a blank on the side that has no line where the
+/// other side does. Grey rather than a diff tint, because nothing is there.
+pub const DIFF_FILLER_BG: Color = Color::from_rgb8(0xf1, 0xf3, 0xf5);
+/// The Stacked and Split tiles at the right end of the file tab bar.
+pub const LAYOUT_TILE: f64 = 22.0;

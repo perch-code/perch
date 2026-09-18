@@ -197,7 +197,7 @@ fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Back
     Stack::horizontal((
         rail::rail(state, open_file.clone(), backend.clone()),
         Stack::vertical((
-            tabs::tab_bar(state),
+            tabs::tab_bar(app, state),
             editor::editor_pane(app, state, backend, open_file),
         ))
             .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().flex_col()),
