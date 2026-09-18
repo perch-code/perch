@@ -10,6 +10,7 @@ thiserror.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+jiff.workspace = true
 imara-diff = "0.1"
 ignore = "0.4"
 
