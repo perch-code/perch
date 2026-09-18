@@ -15,10 +15,13 @@ use floem::views::{
     Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack,
 };
 
-use crate::review::model::ReviewState;
+use crate::icons::SidebarIcon;
+use crate::review::model::{Layout, ReviewState};
+use crate::state::AppState;
 use crate::theme;
+use crate::ui::widgets::icon_in;
 
-pub fn tab_bar(state: ReviewState) -> impl IntoView {
+pub fn tab_bar(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
         dyn_container(
             move || state.tabs.with(|t| t.is_empty()),
@@ -32,6 +35,7 @@ pub fn tab_bar(state: ReviewState) -> impl IntoView {
         )
         .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full()),
         change_nav(state),
+        layout_toggle(app, state),
     ))
     .style(|s| {
         s.height(theme::TAB_HEIGHT)
@@ -206,7 +210,6 @@ fn change_nav(state: ReviewState) -> impl IntoView {
 }
 
 fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
-    use crate::icons::SidebarIcon;
     use crate::ui::widgets::sidebar_glyph;
 
     let glyph = if forward { SidebarIcon::ChevronDown } else { SidebarIcon::ChevronUp };
@@ -240,5 +243,53 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
                 .justify_center()
                 .border_radius(4.0)
                 .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
+        })
+}
+
+/// Stacked or Split, as two tiles at the strip's right end. The chosen one
+/// is filled; the other is only a glyph until the pointer is over it.
+///
+/// The choice outlives the item: it is a way of reading, not a fact about
+/// a file, so it goes to `meta` and comes back at the next launch.
+fn layout_toggle(app: AppState, state: ReviewState) -> impl IntoView {
+    Stack::horizontal((
+        layout_tile(app, state, Layout::Stacked, SidebarIcon::Stacked),
+        layout_tile(app, state, Layout::Split, SidebarIcon::Split),
+    ))
+    .style(|s| {
+        s.flex_shrink(0.0_f32)
+            .height_full()
+            .items_center()
+            .gap(2.0)
+            .padding_horiz(8.0)
+            .border_bottom(1.0)
+            .border_color(theme::BORDER)
+    })
+}
+
+fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: SidebarIcon) -> impl IntoView {
+    let active = move || state.layout.get() == layout;
+    let color = move || if active() { theme::FG } else { theme::FG_MUTED };
+
+    Container::new(icon_in(move || crate::icons::sidebar_icon(glyph, color()), color))
+        .on_event_stop(el::Click, move |_, _| {
+            // A write of the same value would still rebuild the editor.
+            if state.layout.get_untracked() == layout {
+                return;
+            }
+            state.layout.set(layout);
+            app.pending_meta.set(Some(("review.layout".into(), layout.name().into())));
+        })
+        .style(move |s| {
+            let base = crate::ui::widgets::clickable(s)
+                .size(theme::LAYOUT_TILE, theme::LAYOUT_TILE)
+                .items_center()
+                .justify_center()
+                .border_radius(4.0);
+            if active() {
+                base.background(theme::BADGE_BG)
+            } else {
+                base.hover(|s| s.background(theme::CANVAS_HOVER))
+            }
         })
 }

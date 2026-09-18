@@ -245,3 +245,9 @@ pub fn language_color(language: Option<perch_syntax::Language>) -> Color {
         None => Color::from_rgb8(0xa8, 0xb0, 0xb8),
     }
 }
+
+/// A split's filler row: a blank on the side that has no line where the
+/// other side does. Grey rather than a diff tint, because nothing is there.
+pub const DIFF_FILLER_BG: Color = Color::from_rgb8(0xf1, 0xf3, 0xf5);
+/// The Stacked and Split tiles at the right end of the file tab bar.
+pub const LAYOUT_TILE: f64 = 22.0;
