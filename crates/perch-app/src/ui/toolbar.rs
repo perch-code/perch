@@ -88,6 +88,10 @@ fn search_box(state: AppState) -> impl IntoView {
         sidebar_glyph(SidebarIcon::Search, theme::FG_SUBTLE),
         TextInput::new(state.search)
             .placeholder("Search notifications")
+            // The window's bare-letter shortcuts have to stand down while
+            // somebody is typing a search, and only this view knows.
+            .on_event_cont(el::FocusGained, move |_, _| state.search_focused.set(true))
+            .on_event_cont(el::FocusLost, move |_, _| state.search_focused.set(false))
             .style(|s| {
                 s.flex_grow(1.0_f32)
                     .min_width(0.0)

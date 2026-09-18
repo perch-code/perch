@@ -56,6 +56,30 @@ pub fn sidebar_glyph(name: SidebarIcon, color: Color) -> impl IntoView {
     icon_in(move || icons::sidebar_icon(name, color), move || color)
 }
 
+/// A small round icon button, as sits at the end of a notification row.
+///
+/// Its own hover background, so it reads as a target inside a row that is
+/// itself a button.
+pub fn icon_button(
+    glyph: impl Fn() -> SidebarIcon + 'static + Copy,
+    color: impl Fn() -> Color + 'static + Copy,
+    on_click: impl Fn() + 'static,
+) -> impl IntoView {
+    Container::new(icon_in(
+        move || icons::sidebar_icon(glyph(), color()),
+        color,
+    ))
+    .on_event_stop(floem::event::listener::Click, move |_, _| on_click())
+    .style(|s| {
+        clickable(s)
+            .size(26.0, 26.0)
+            .items_center()
+            .justify_center()
+            .border_radius(13.0)
+            .hover(|s| s.background(theme::BADGE_BG))
+    })
+}
+
 /// A rounded count pill, as used beside every sidebar row.
 /// A rounded count pill.
 ///

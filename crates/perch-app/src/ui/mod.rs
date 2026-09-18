@@ -43,6 +43,17 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         }
     });
 
+    // Every way of marking a thread lands here, so each of them costs the
+    // backend one write and the UI one event.
+    let on_mark: list::OnMark = Rc::new({
+        let backend = backend.clone();
+        move |ids: Vec<String>, action: list::MarkAction| match action {
+            list::MarkAction::Saved(saved) => backend.set_saved(ids, saved),
+            list::MarkAction::Done(done) => backend.set_done(ids, done),
+        }
+    });
+    let key_mark = on_mark.clone();
+
     Stack::vertical((
         Stack::horizontal((
             // The rail is always on screen. The panel beside it is what
@@ -69,7 +80,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     } else {
                         Stack::vertical((
                             toolbar::toolbar(state),
-                            list::list(state, open_thread.clone()),
+                            list::list(state, open_thread.clone(), on_mark.clone()),
                         ))
                             .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().flex_col())
                             .into_any()
@@ -84,6 +95,31 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     // Window-level shortcuts. Key events bubble from whatever has focus, so
     // a handler on the root view catches them wherever the reader is.
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+        // Bare letters act on the inbox, the way they do on the web. They are
+        // only shortcuts when nothing is being typed into and the inbox is
+        // what is on screen; the root handler cannot see focus, so the search
+        // box reports its own.
+        if key.modifiers.is_empty()
+            && !review.is_showing()
+            && !state.search_focused.get()
+            && matches!(key.code, Code::KeyE | Code::KeyS)
+        {
+            let Some(id) = state.hovered.get() else {
+                return EventPropagation::Continue;
+            };
+            match key.code {
+                Code::KeyE => {
+                    let restoring = state.view.get() == crate::filter::View::Done;
+                    key_mark(vec![id], list::MarkAction::Done(!restoring));
+                }
+                _ => {
+                    let saved = state.is_saved(&id);
+                    key_mark(vec![id], list::MarkAction::Saved(!saved));
+                }
+            }
+            return EventPropagation::Stop;
+        }
+
         if !key.modifiers.contains(OS_MOD) {
             return EventPropagation::Continue;
         }

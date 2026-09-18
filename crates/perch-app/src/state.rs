@@ -40,6 +40,13 @@ pub struct AppState {
     pub now: RwSignal<Timestamp>,
     /// Whether the left drawer is showing.
     pub sidebar_open: RwSignal<bool>,
+    /// The thread the pointer is over, which is what a bare keystroke acts on.
+    pub hovered: RwSignal<Option<String>>,
+    /// True while the search box has the keyboard.
+    ///
+    /// Bare letters are shortcuts everywhere except inside a text field, and
+    /// the root handler cannot see focus on its own.
+    pub search_focused: RwSignal<bool>,
 }
 
 impl Default for AppState {
@@ -66,6 +73,8 @@ impl AppState {
             loaded: RwSignal::new(false),
             now: RwSignal::new(Timestamp::now()),
             sidebar_open: RwSignal::new(true),
+            hovered: RwSignal::new(None),
+            search_focused: RwSignal::new(false),
         }
     }
 
@@ -223,6 +232,14 @@ impl AppState {
     pub fn is_done(&self, thread_id: &str) -> bool {
         self.marks
             .with(|m| m.get(thread_id).is_some_and(perch_github::Mark::is_done))
+    }
+
+    /// Whether a save across these threads should save or unsave.
+    ///
+    /// Unsave only when every one of them is already saved, so a mixed
+    /// selection saves the rest rather than clearing the lot.
+    pub fn would_unsave(&self, ids: &[String]) -> bool {
+        !ids.is_empty() && ids.iter().all(|id| self.is_saved(id))
     }
 
     /// Switch views. Filters carry over, the way the web keeps a search when

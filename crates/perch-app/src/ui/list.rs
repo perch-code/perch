@@ -17,7 +17,20 @@ use crate::ui::widgets::{avatar, centered_message, count_badge, hairline};
 /// Opening a notification. Shared by every row.
 pub type OpenThread = std::rc::Rc<dyn Fn(&str, u64)>;
 
-pub fn list(state: AppState, on_open: OpenThread) -> impl IntoView {
+/// Which flag an action sets, and to what.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkAction {
+    Saved(bool),
+    Done(bool),
+}
+
+/// Setting one flag across a batch of threads.
+///
+/// Shared by the row buttons, the keyboard, the selection bar and the group
+/// headers, so every one of them costs the backend a single write.
+pub type OnMark = std::rc::Rc<dyn Fn(Vec<String>, MarkAction)>;
+
+pub fn list(state: AppState, on_open: OpenThread, on_mark: OnMark) -> impl IntoView {
     dyn_container(
         move || ListMode::of(state),
         move |mode| match mode {
@@ -45,7 +58,7 @@ pub fn list(state: AppState, on_open: OpenThread) -> impl IntoView {
                 },
             )
             .into_any(),
-            ListMode::Rows => rows(state, on_open.clone()).into_any(),
+            ListMode::Rows => rows(state, on_open.clone(), on_mark.clone()).into_any(),
         },
     )
     .style(|s| s.size_full().min_height(0.0).background(theme::CANVAS_SUBTLE))
@@ -100,11 +113,11 @@ impl ListMode {
     }
 }
 
-fn rows(state: AppState, on_open: OpenThread) -> impl IntoView {
+fn rows(state: AppState, on_open: OpenThread, on_mark: OnMark) -> impl IntoView {
     dyn_stack(
         move || state.sections(),
         |section| section.key.clone(),
-        move |section| section_card(state, section, on_open.clone()),
+        move |section| section_card(state, section, on_open.clone(), on_mark.clone()),
     )
     .style(|s| s.flex_col().width_full().gap(16.0).padding(16.0))
     .scroll()
@@ -112,7 +125,12 @@ fn rows(state: AppState, on_open: OpenThread) -> impl IntoView {
 }
 
 /// One repository or date group, drawn as a bordered card.
-fn section_card(state: AppState, section: Section, on_open: OpenThread) -> impl IntoView {
+fn section_card(
+    state: AppState,
+    section: Section,
+    on_open: OpenThread,
+    on_mark: OnMark,
+) -> impl IntoView {
     let grouped = state.group.get() != Group::None;
     let threads = section.threads.clone();
     let count = threads.len();
@@ -135,7 +153,7 @@ fn section_card(state: AppState, section: Section, on_open: OpenThread) -> impl 
                     } else {
                         hairline().into_any()
                     },
-                    row(state, thread, on_open.clone()),
+                    row(state, thread, on_open.clone(), on_mark.clone()),
                 ))
                 .style(|s| s.width_full())
             },

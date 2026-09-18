@@ -139,6 +139,18 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M4 2.2 h8 v11.6 l-4-3.1 -4 3.1 z" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linejoin="round"/>"#
         ),
+        // The saved state of a row, as opposed to the Saved destination.
+        SidebarIcon::BookmarkFilled => format!(
+            r#"<path d="M4 2.2 h8 v11.6 l-4-3.1 -4 3.1 z" fill="{c}" stroke="{c}"
+                     stroke-width="1.4" stroke-linejoin="round"/>"#
+        ),
+        // Refresh, mirrored: the same gesture running the other way.
+        SidebarIcon::Undo => format!(
+            r#"<path d="M2.8 8 a5.2 5.2 0 1 0 1.6 -3.7" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round"/>
+               <path d="M2.6 1.8 v3.1 h3.1" fill="none" stroke="{c}" stroke-width="1.5"
+                     stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
         SidebarIcon::Check => format!(
             r#"<path d="M3.2 8.4 L6.4 11.6 L12.8 4.6" fill="none" stroke="{c}"
                      stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>"#
@@ -216,7 +228,9 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
 pub enum SidebarIcon {
     Inbox,
     Bookmark,
+    BookmarkFilled,
     Check,
+    Undo,
     Target,
     Comment,
     Mention,

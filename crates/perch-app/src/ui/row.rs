@@ -5,16 +5,18 @@ use floem::views::{Container, Decorators, Empty, Label, Stack, dyn_container};
 use floem::text::{Alignment, FontWeight};
 use perch_github::{SubjectKind, Thread};
 
-use crate::filter::Group;
-use crate::ui::list::OpenThread;
-use crate::icons;
+use crate::filter::{Group, View};
+use crate::ui::list::{MarkAction, OnMark, OpenThread};
+use crate::icons::{self, SidebarIcon};
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
-use crate::ui::widgets::{avatar, icon_in, reason_pill};
+use crate::ui::widgets::{avatar, icon_button, icon_in, reason_pill};
 
-pub fn row(state: AppState, thread: Thread, on_open: OpenThread) -> impl IntoView {
+pub fn row(state: AppState, thread: Thread, on_open: OpenThread, on_mark: OnMark) -> impl IntoView {
     let unread = thread.unread;
+    let hover_id = thread.id.clone();
+    let leave_id = thread.id.clone();
 
     // A pull request opens the review view. Everything else has no view of
     // its own yet, so it opens where it lives.
@@ -31,6 +33,7 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread) -> impl IntoVie
         unread_dot(unread),
         state_icon(state, thread.clone()),
         text_column(state, thread.clone()),
+        row_actions(state, thread.clone(), on_mark),
         reason_pill({
             let reason = thread.reason.clone();
             move || reason.label().to_string()
@@ -42,6 +45,18 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread) -> impl IntoVie
     .on_event_stop(el::Click, move |_, _| match &review_target {
         Some((repo, number)) => on_open(repo, *number),
         None => crate::ui::widgets::open_in_browser(&web_url),
+    })
+    // A bare keystroke acts on the row under the pointer, so the row has to
+    // say when it is under it.
+    .on_event_cont(el::PointerEnter, move |_, _| {
+        state.hovered.set(Some(hover_id.clone()));
+    })
+    .on_event_cont(el::PointerLeave, move |_, _| {
+        state.hovered.update(|h| {
+            if h.as_deref() == Some(leave_id.as_str()) {
+                *h = None;
+            }
+        });
     })
     .style(move |s| {
         // The whole row is the button.
@@ -58,6 +73,87 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread) -> impl IntoVie
             base.hover(|s| s.background(theme::CANVAS_SUBTLE))
         }
     })
+}
+
+/// Save and dismiss, at the end of the row.
+///
+/// The space is reserved whether or not the buttons are showing, so a row
+/// does not reflow under the pointer. The bookmark stays visible on a saved
+/// thread: that is the only thing in the inbox that says it is saved.
+fn row_actions(state: AppState, thread: Thread, on_mark: OnMark) -> impl IntoView {
+    // Two closures, two clones: a closure capturing a String is not Copy, and
+    // both halves of the pair need to ask the same question.
+    let over_save = thread.id.clone();
+    let hovering_save = move || state.hovered.with(|h| h.as_deref() == Some(over_save.as_str()));
+    let over_done = thread.id.clone();
+    let hovering_done = move || state.hovered.with(|h| h.as_deref() == Some(over_done.as_str()));
+
+    let saved_id = thread.id.clone();
+    let saved = move || state.is_saved(&saved_id);
+
+    let save_id = thread.id.clone();
+    let save_mark = on_mark.clone();
+    let save = move || {
+        let want = !state.is_saved(&save_id);
+        save_mark(vec![save_id.clone()], MarkAction::Saved(want));
+    };
+
+    let done_id = thread.id.clone();
+    let done_mark = on_mark;
+    // In Done the check becomes a way back out, which is the only undo there
+    // is for a dismissal.
+    let restoring = move || state.view.get() == View::Done;
+    let dismiss = move || {
+        done_mark(vec![done_id.clone()], MarkAction::Done(!restoring()));
+    };
+
+    Stack::horizontal((
+        dyn_container(
+            move || (hovering_save(), saved()),
+            move |(hovered, saved)| {
+                if !hovered && !saved {
+                    return Empty::new().into_any();
+                }
+                let save = save.clone();
+                icon_button(
+                    move || {
+                        if saved {
+                            SidebarIcon::BookmarkFilled
+                        } else {
+                            SidebarIcon::Bookmark
+                        }
+                    },
+                    move || if saved { theme::ACCENT } else { theme::FG_SUBTLE },
+                    move || save(),
+                )
+                .into_any()
+            },
+        )
+        .style(|s| s.size(26.0, 26.0)),
+        dyn_container(
+            move || (hovering_done(), restoring()),
+            move |(hovered, restoring)| {
+                if !hovered {
+                    return Empty::new().into_any();
+                }
+                let dismiss = dismiss.clone();
+                icon_button(
+                    move || {
+                        if restoring {
+                            SidebarIcon::Undo
+                        } else {
+                            SidebarIcon::Check
+                        }
+                    },
+                    || theme::FG_SUBTLE,
+                    move || dismiss(),
+                )
+                .into_any()
+            },
+        )
+        .style(|s| s.size(26.0, 26.0)),
+    ))
+    .style(|s| s.items_center().gap(2.0).margin_right(8.0).flex_shrink(0.0_f32))
 }
 
 /// The blue dot. Its space is reserved when read, so titles stay aligned.
