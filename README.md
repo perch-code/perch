@@ -63,35 +63,60 @@ GitHub.
   the way it does on the web. A bookmark does not expire.
 - Both flags are Perch's own and stay on this machine. See below.
 
-**The review view**
+**The item view**
 
+Every item opens the same way: a header, then two tabs, Conversation and
+Files, shaped like a pull request's page on GitHub.
+
+- The header has the state as a pill (Open, Draft, Merged, Closed; Not
+  planned for an issue), the branches, the checkout's directory (click it
+  to reveal it in the Finder, open a Terminal there, or copy the path),
+  the lines added and removed, and a checks pill when the head has
+  workflow runs: green, red, or a dot while they run, hover for the
+  workflow that failed, click to open the run. Under the bar, a strip
+  with the reviewers and their verdicts, the labels, the assignees, the
+  milestone, the issues the pull request closes, and the branches and
+  pull requests started from an issue. Every part is absent when empty.
+- **Conversation** is one column of cards in time order: the description,
+  each comment, each review with its line comments nested under it (the
+  lines it was about, tinted as the diff tints them; click the path and
+  Files opens there), the events (opened, merged, closed), and every
+  thread you have had with an agent about the item. A GitHub card has a
+  permalink and, on hover, Ask about this, which opens the composer with
+  the comment quoted. The composer for asking about the item as a whole
+  sits at the end of the column.
+- A thread of your own never looks like a comment from GitHub: the card is
+  on the page colour with a dashed border and a Local chip, and says which
+  model and effort answered.
+- **Files** is the review: a rail of changed files or the whole worktree, a
+  read-only editor with tree-sitter highlighting for Rust, TOML, Markdown,
+  YAML and JSON, the diff in place with real line numbers and change bars,
+  and the thread column. At the top of the rail a scope menu narrows the
+  diff to one commit, to the uncommitted work (staged, unstaged, or both),
+  or to what changed since you last looked; the rail, the tints, the
+  churn and the tab's count all follow it. Each changed file has a Viewed
+  check, keyed on the file's content, so a push that changes the file
+  clears it and one that leaves it alone does not; `}` and `{` step
+  through the unviewed files. A toggle in the file tab bar switches
+  between the stacked diff and a split one, base beside head, scrolling
+  as one. Click a symbol and rust-analyzer says what it is; go-to-definition
+  and find references are in the same panel, and references open in a
+  panel under the editor.
+- An issue has Conversation alone, until Start work gives it a checkout. A
+  branch of your own has a Conversation of its threads and a Files of its
+  diff against its base.
 - Click a pull request and Perch clones the repository, checks the head out
   on a branch of its own (`perch/pr-<n>`) in a worktree, and shows what
   changed. A second pull request from the same repository costs a fetch
   rather than a clone. Opening the same one again finds the same directory.
   A pull request whose head branch you already have checked out under a
-  project root opens in that directory instead.
-- A branch of your own opens the same way, diffed against the default
-  branch, with the branch and the directory in the header and no pull
-  request block. When the branch has nothing past its base the diff is
-  empty and the rail shows the whole tree.
-- The header names the checkout's directory. Click it to reveal it in the
-  Finder, open a Terminal there, or copy the path.
-- A rail of changed files, or the whole worktree, with change markers on
-  files the pull request touched.
-- A read-only editor with tree-sitter highlighting for Rust, TOML, Markdown,
-  YAML, and JSON.
-- The unified diff in place: added and modified lines tinted, removed lines
-  shown above the code that replaced them, and a gutter carrying real file
-  line numbers with change bars.
-- Click a symbol and rust-analyzer says what it is, with go-to-definition
-  from the same panel.
+  project root, or on a branch Perch cut, opens in that checkout instead.
 
 **Issues**
 
-- Open an issue and Perch shows its body and comments, the labels and
-  assignees, and under a divider the branches and pull requests it has
-  started from it.
+- Open an issue and Perch shows its body and comments as Conversation,
+  with the labels, assignees, and the branches and pull requests started
+  from it in the strip.
 - Ask about it the way you ask about a pull request. The question runs in
   the repository's *home checkout*, a worktree on the default branch that
   Perch keeps up to date and never lists, so "where does this live" gets
@@ -159,6 +184,10 @@ GitHub.
 - Threads belong to the item. Archiving keeps them; deleting removes them.
   When the pull request moves on and the anchored file changes, the thread
   says Outdated.
+- A thread shows in the column on Files and as a card on Conversation.
+  They are one thread; a follow-up from either shows in both. An answered
+  thread is filed under knowledge beside the item's discussion, marked as
+  yours and not GitHub's.
 
 ## What it deliberately does not do
 
@@ -181,15 +210,20 @@ the same inbox you see in a browser.
 | `s` | Save or unsave, the same way. |
 | `Escape` | Drop the selection, or put away a rename or a confirmation. |
 | `Cmd-\` | Show or hide the sidebar. |
-| `Cmd-[` | Back from a review to wherever it was opened from. |
+| `Cmd-[` | Back from an item to wherever it was opened from. |
 | `Cmd-1` | The sidebar's search box. |
 | `Cmd-2` | The inbox. |
+| `Cmd-Shift-1` `Cmd-Shift-2` | Conversation, Files. |
 | `Cmd-W` | Close the open file. |
 | `P` `U` `R` `F` `A` `D` | Inside an open row menu: Pin, Mark unread, Rename, Fork, Archive, Delete. |
-| `a` | Ask about the selected lines, or the pull request. |
+| `a` | Ask about the selected lines on Files, or about the item on Conversation. |
 | `Cmd-Enter` | Send the question. |
 | `Cmd-Shift-\` | Show or hide the thread column. |
-| `Escape` | Close the composer. |
+| `v` | Mark the open file viewed, or not. |
+| `}` `{` | The next and previous unviewed file. |
+| `]` `[` | The next and previous change in the open file. |
+| `Shift-F12` | Find references to the symbol at the cursor. |
+| `Escape` | Close the composer, or the references panel. |
 
 `e` and `s` stand down while the search box has focus.
 
@@ -360,9 +394,17 @@ The layout, per project:
   slatedb/
     index.md                        this project's containers and how current
     raw/github/slatedb-slatedb.jsonl  one record per line; the truth
+    raw/perch/slatedb-slatedb.jsonl   your own threads, the same way
     github/slatedb/slatedb/pulls/812.md   rendered from raw
     github/slatedb/slatedb/issues/42.md   an issue, the same way
+    perch/slatedb/slatedb/pulls/812.md    what you asked an agent about 812
 ```
+
+The `perch/` files are your own threads: each question, its answer, the
+lines it was about and the model that answered, with front matter that
+says `source: perch`. They are kept apart from the `github/` files so
+nothing you asked on this machine can be taken for something said in
+public, and the skill tells the agent which is which.
 
 Everything outside `raw/` can be deleted and comes back the next time a
 pull request is opened. Deleting `raw/` too only loses what has not been
@@ -411,7 +453,11 @@ cargo run -p perch-lsp --example hover -- <worktree> src/lib.rs 10 4
 ```
 
 `perch --dump-file owner/repo#N path` renders a file the way the editor would,
-gutter numbers and change bars included, as text.
+gutter numbers and change bars included, as text. `perch --timeline
+<item-id>` prints an item's Conversation one card per line, and `perch
+--scope <item-id> <scope>` prints the changed list under a scope
+(`branch`, `commit:<sha>`, `since:<sha>`, `uncommitted`, `staged`,
+`unstaged`) with each file's viewed mark; `perch --items` names the ids.
 
 Two environment variables open a pull request at launch instead of by
 clicking, which is useful when iterating on the review view:
