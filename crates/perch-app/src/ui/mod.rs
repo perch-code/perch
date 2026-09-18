@@ -34,7 +34,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let review_backend = backend.clone();
     let open_thread: list::OpenThread = Rc::new({
         let backend = backend.clone();
-        move |repo: &str, number: u64| {
+        move |repo: &str, number: u64, thread_id: &str| {
             review.preparing.set(crate::review::model::Preparing::Working {
                 message: "Reading the pull request".into(),
                 percent: None,
@@ -42,6 +42,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             // Showing the review view immediately, with its progress card,
             // beats leaving the inbox looking like the click did nothing.
             review.pull_request.set(None);
+            // Which notification this came from, so finishing the review can
+            // dismiss it. The backend never needs to know; the click already
+            // has it, and a round trip would only be a way of forgetting.
+            review.thread_id.set(Some(thread_id.to_string()).filter(|id| !id.is_empty()));
             review.opening.set(true);
             backend.open_pull_request(repo, number);
         }
@@ -57,6 +61,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         }
     });
     let key_mark = on_mark.clone();
+    let review_mark = on_mark.clone();
 
     Stack::vertical((
         Stack::horizontal((
@@ -79,8 +84,13 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 move || review.is_showing(),
                 move |open| {
                     if open {
-                        crate::review::review_view(state, review, review_backend.clone())
-                            .into_any()
+                        crate::review::review_view(
+                            state,
+                            review,
+                            review_backend.clone(),
+                            review_mark.clone(),
+                        )
+                        .into_any()
                     } else {
                         Stack::vertical((
                             toolbar::toolbar(state),

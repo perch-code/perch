@@ -1,7 +1,7 @@
 //! The bar above the review view: which pull request this is.
 
 use floem::prelude::*;
-use floem::reactive::SignalWith;
+use floem::reactive::{SignalGet, SignalWith};
 use floem::style::CursorStyle;
 use floem::text::FontWeight;
 use floem::views::{Container, Decorators, Empty, Label, Stack, dyn_container};
@@ -11,15 +11,21 @@ use crate::icons::{self, SidebarIcon};
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{avatar, sidebar_glyph};
+use crate::ui::widgets::{avatar, sidebar_glyph, text_button};
 
-pub fn header(app: AppState, state: ReviewState, on_back: impl Fn() + 'static) -> impl IntoView {
+pub fn header(
+    app: AppState,
+    state: ReviewState,
+    on_back: impl Fn() + 'static,
+    on_done: impl Fn(String) + 'static,
+) -> impl IntoView {
     Stack::horizontal((
         back_button(on_back),
         icon_and_title(app, state),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         branches(state),
         churn(state),
+        done_button(state, on_done),
     ))
     .style(|s| {
         s.height(theme::REVIEW_HEADER_HEIGHT)
@@ -53,6 +59,33 @@ fn back_button(on_back: impl Fn() + 'static) -> impl IntoView {
             .background(theme::CANVAS)
             .hover(|s| s.background(theme::CANVAS_SUBTLE).cursor(CursorStyle::Pointer))
     })
+}
+
+/// Finish with a pull request and dismiss the notification behind it.
+///
+/// The whole point of the feature: read a review, be done with it, land on
+/// the next one. Absent when the pull request was opened by some route that
+/// had no notification, such as the launch hook.
+fn done_button(state: ReviewState, on_done: impl Fn(String) + 'static) -> impl IntoView {
+    // The container rebuilds the button whenever the thread changes, and each
+    // rebuild needs its own handle on the callback.
+    let on_done = std::rc::Rc::new(on_done);
+    dyn_container(
+        move || state.thread_id.get(),
+        move |thread_id| {
+            let Some(thread_id) = thread_id else {
+                return Empty::new().into_any();
+            };
+            let on_done = on_done.clone();
+            text_button(
+                || "Done".to_string(),
+                SidebarIcon::Check,
+                move || on_done(thread_id.clone()),
+            )
+            .into_any()
+        },
+    )
+    .style(|s| s.flex_shrink(0.0_f32))
 }
 
 fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {

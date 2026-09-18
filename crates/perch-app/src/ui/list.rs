@@ -15,7 +15,7 @@ use crate::ui::row::row;
 use crate::ui::widgets::{avatar, centered_message, checkbox, count_badge, hairline, text_button};
 
 /// Opening a notification. Shared by every row.
-pub type OpenThread = std::rc::Rc<dyn Fn(&str, u64)>;
+pub type OpenThread = std::rc::Rc<dyn Fn(&str, u64, &str)>;
 
 /// Which flag an action sets, and to what.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

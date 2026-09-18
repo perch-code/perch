@@ -30,7 +30,12 @@ use crate::ui::widgets::centered_message;
 pub type OpenFile = Rc<dyn Fn(&str)>;
 
 /// The whole right-hand side while a pull request is open.
-pub fn review_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+pub fn review_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    on_mark: crate::ui::list::OnMark,
+) -> impl IntoView {
     let open_file: OpenFile = Rc::new({
         let backend = backend.clone();
         move |path: &str| {
@@ -52,8 +57,18 @@ pub fn review_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> i
         }
     };
 
+    let on_done = {
+        let backend = backend.clone();
+        move |thread_id: String| {
+            on_mark(vec![thread_id], crate::ui::list::MarkAction::Done(true));
+            // Dismissing is also leaving: the next notification is the point.
+            state.close();
+            backend.close_review();
+        }
+    };
+
     Stack::vertical((
-        header::header(app, state, on_back),
+        header::header(app, state, on_back, on_done),
         dyn_container(
             move || match state.preparing.get() {
                 Preparing::Working { .. } => Phase::Preparing,

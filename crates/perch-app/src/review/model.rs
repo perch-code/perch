@@ -74,6 +74,10 @@ pub struct Tab {
 pub struct ReviewState {
     /// `None` when the inbox is showing.
     pub pull_request: RwSignal<Option<Arc<PullRequest>>>,
+    /// The notification this was opened from, so finishing a review can
+    /// dismiss it. `None` when a pull request was opened by any other route,
+    /// such as the launch hook, and there is no notification to mark.
+    pub thread_id: RwSignal<Option<String>>,
     /// True from the click until the review view is left, so the progress
     /// card can show before the pull request itself has resolved.
     pub opening: RwSignal<bool>,
@@ -125,6 +129,7 @@ impl ReviewState {
     pub fn new() -> Self {
         Self {
             pull_request: RwSignal::new(None),
+            thread_id: RwSignal::new(None),
             opening: RwSignal::new(false),
             preparing: RwSignal::new(Preparing::Idle),
             changed_files: RwSignal::new(Arc::new(Vec::new())),
@@ -160,6 +165,7 @@ impl ReviewState {
     pub fn close(&self) {
         self.opening.set(false);
         self.pull_request.set(None);
+        self.thread_id.set(None);
         self.preparing.set(Preparing::Idle);
         self.changed_files.set(Arc::new(Vec::new()));
         self.tree.set(Arc::new(Vec::new()));

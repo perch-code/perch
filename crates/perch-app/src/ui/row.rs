@@ -23,7 +23,7 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread, on_mark: OnMark
     let review_target = if thread.subject.kind == SubjectKind::PullRequest {
         thread
             .number_hint()
-            .map(|n| (thread.repository.full_name.clone(), n))
+            .map(|n| (thread.repository.full_name.clone(), n, thread.id.clone()))
     } else {
         None
     };
@@ -44,7 +44,7 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread, on_mark: OnMark
         timestamp(state, thread),
     ))
     .on_event_stop(el::Click, move |_, _| match &review_target {
-        Some((repo, number)) => on_open(repo, *number),
+        Some((repo, number, thread_id)) => on_open(repo, *number, thread_id),
         None => crate::ui::widgets::open_in_browser(&web_url),
     })
     // A bare keystroke acts on the row under the pointer, so the row has to
