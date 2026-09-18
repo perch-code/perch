@@ -97,7 +97,18 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 move || state.sidebar_open.get(),
                 move |open| {
                     if open {
-                        sidebar::nav_panel(state, review, panel_open.clone()).into_any()
+                        // The handle is absolutely placed over the panel's
+                        // right edge, so the panel is its positioning box.
+                        floem::views::Container::new(Stack::horizontal((
+                            sidebar::nav_panel(state, review, panel_open.clone()),
+                            sidebar::resize_handle(state),
+                        )))
+                        .style(|s| {
+                            s.height_full()
+                                .flex_shrink(0.0_f32)
+                                .position(floem::style::Position::Relative)
+                        })
+                        .into_any()
                     } else {
                         floem::views::Empty::new().into_any()
                     }

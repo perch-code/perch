@@ -43,14 +43,64 @@ pub fn nav_panel(state: AppState, review: ReviewState, on_open: OpenWorktree) ->
             Screen::Worktrees => worktrees_panel(state, review, on_open.clone()).into_any(),
         },
     )
-    .style(|s| {
-        s.width(theme::SIDEBAR_WIDTH)
+    .style(move |s| {
+        s.width(state.sidebar_width.get())
             .height_full()
+            .flex_shrink(0.0_f32)
             .flex_col()
             .background(theme::CANVAS_SIDEBAR)
             .border_right(1.0)
             .border_color(theme::BORDER)
     })
+}
+
+/// The strip along the panel's right edge that drags it wider or narrower.
+///
+/// Sits over the panel's border rather than beside it, so the layout does
+/// not gain a gap. The new width is the pointer's distance from the panel's
+/// left edge, which is the rail's right edge; no delta bookkeeping, so a
+/// fast drag cannot drift.
+pub fn resize_handle(state: AppState) -> impl IntoView {
+    use floem::event::DragConfig;
+    use floem::style::{CursorStyle, Position};
+
+    Empty::new()
+        .on_event_stop(el::PointerDown, |cx, e: &PointerButtonEvent| {
+            if let Some(pointer) = e.pointer.pointer_id {
+                if pointer.is_primary_pointer() {
+                    cx.request_pointer_capture(pointer);
+                }
+            }
+        })
+        .on_event_stop(el::GainedPointerCapture, |cx, token| {
+            // No ghost and no snap-back animation: this is a divider, not
+            // a card being carried somewhere.
+            cx.start_drag(
+                *token,
+                DragConfig {
+                    threshold: 1.0,
+                    animation_duration: std::time::Duration::ZERO,
+                    easing: std::rc::Rc::new(floem::easing::Linear),
+                    custom_data: None,
+                    track_targets: false,
+                },
+                false,
+            );
+        })
+        .on_event_stop(el::DragMove, move |_, e: &floem::event::DragMoveEvent| {
+            let x = e.current_state.logical_point().x;
+            let width = (x - theme::ACTIVITY_RAIL_WIDTH).clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
+            state.sidebar_width.set(width);
+        })
+        .style(|s| {
+            s.position(Position::Absolute)
+                .inset_top(0.0)
+                .inset_bottom(0.0)
+                .inset_right(-3.0)
+                .width(7.0)
+                .z_index(10)
+                .hover(|s| s.cursor(CursorStyle::ColResize))
+        })
 }
 
 /// Inbox, Saved and Done, as three rows.
