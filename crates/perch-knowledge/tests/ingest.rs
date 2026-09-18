@@ -1,7 +1,7 @@
 //! Ingest against a temporary root.
 
 use jiff::Timestamp;
-use perch_knowledge::{Knowledge, Message, SkillConfig, Source};
+use perch_knowledge::{Error, Knowledge, Message, SkillConfig, Source};
 
 fn at(s: &str) -> Timestamp {
     s.parse().unwrap()
@@ -10,7 +10,7 @@ fn at(s: &str) -> Timestamp {
 fn msg(id: &str, at_: &str, body: &str) -> Message {
     Message {
         source: Source::GitHub,
-        project: "slatedb".into(),
+        repo: "slatedb/slatedb".into(),
         container: "slatedb/slatedb#812".into(),
         thread: None,
         id: id.into(),
@@ -75,12 +75,12 @@ fn the_rendered_file_matches_the_fixture() {
     assert_eq!(n.added, 5);
     assert_eq!(n.changed, 0);
 
-    let file = tmp.path().join("slatedb/github/slatedb/slatedb/pulls/812.md");
+    let file = tmp.path().join("slatedb/slatedb/github/pulls/812.md");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), RENDERED);
-    assert!(tmp.path().join("slatedb/raw/github/slatedb-slatedb.jsonl").is_file());
-    assert!(tmp.path().join("slatedb/index.md").is_file());
+    assert!(tmp.path().join("slatedb/slatedb/raw/github.jsonl").is_file());
+    assert!(tmp.path().join("slatedb/slatedb/index.md").is_file());
     let root = std::fs::read_to_string(tmp.path().join("index.md")).unwrap();
-    assert!(root.contains("| slatedb | slatedb/slatedb | 5 |"), "{root}");
+    assert!(root.contains("| slatedb/slatedb | slatedb/slatedb/ | 5 |"), "{root}");
 }
 
 #[test]
@@ -88,8 +88,8 @@ fn ingesting_again_is_a_no_op() {
     let tmp = tempfile::tempdir().unwrap();
     let k = Knowledge::open(tmp.path());
     k.ingest(&discussion()).unwrap();
-    let raw = tmp.path().join("slatedb/raw/github/slatedb-slatedb.jsonl");
-    let md = tmp.path().join("slatedb/github/slatedb/slatedb/pulls/812.md");
+    let raw = tmp.path().join("slatedb/slatedb/raw/github.jsonl");
+    let md = tmp.path().join("slatedb/slatedb/github/pulls/812.md");
     let (raw_before, md_before) =
         (std::fs::read_to_string(&raw).unwrap(), std::fs::read_to_string(&md).unwrap());
 
@@ -111,9 +111,9 @@ fn an_edited_body_replaces_the_old_one() {
     let n = k.ingest(&edited).unwrap();
     assert_eq!(n, perch_knowledge::Ingested { added: 0, changed: 1 });
 
-    let raw = std::fs::read_to_string(tmp.path().join("slatedb/raw/github/slatedb-slatedb.jsonl")).unwrap();
+    let raw = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/raw/github.jsonl")).unwrap();
     assert_eq!(raw.lines().count(), 5, "a replaced record does not add a line");
-    let md = std::fs::read_to_string(tmp.path().join("slatedb/github/slatedb/slatedb/pulls/812.md")).unwrap();
+    let md = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/github/pulls/812.md")).unwrap();
     assert!(md.contains("Should this fence only compactions?"));
     assert!(!md.contains("every write"));
     assert!(md.contains("(edited)"));
@@ -126,7 +126,7 @@ fn an_unclosed_fence_is_closed() {
     let mut d = discussion();
     d[1].body = "Look:\n```rust\nlet x = 1;".into();
     k.ingest(&d).unwrap();
-    let md = std::fs::read_to_string(tmp.path().join("slatedb/github/slatedb/slatedb/pulls/812.md")).unwrap();
+    let md = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/github/pulls/812.md")).unwrap();
     let fences = md.lines().filter(|l| l.trim_start().starts_with("```")).count();
     assert_eq!(fences % 2, 0, "{md}");
     // The message after it is still its own paragraph, not code.
@@ -138,18 +138,19 @@ fn rerender_rebuilds_everything_outside_raw() {
     let tmp = tempfile::tempdir().unwrap();
     let k = Knowledge::open(tmp.path());
     k.ingest(&discussion()).unwrap();
-    let md = tmp.path().join("slatedb/github/slatedb/slatedb/pulls/812.md");
+    let md = tmp.path().join("slatedb/slatedb/github/pulls/812.md");
     let before = std::fs::read_to_string(&md).unwrap();
-    let index_before = std::fs::read_to_string(tmp.path().join("slatedb/index.md")).unwrap();
+    let index_before = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/index.md")).unwrap();
+    let root_before = std::fs::read_to_string(tmp.path().join("index.md")).unwrap();
 
-    std::fs::remove_dir_all(tmp.path().join("slatedb/github")).unwrap();
-    std::fs::remove_file(tmp.path().join("slatedb/index.md")).unwrap();
+    std::fs::remove_dir_all(tmp.path().join("slatedb/slatedb/github")).unwrap();
+    std::fs::remove_file(tmp.path().join("slatedb/slatedb/index.md")).unwrap();
     std::fs::remove_file(tmp.path().join("index.md")).unwrap();
 
     k.rerender().unwrap();
     assert_eq!(std::fs::read_to_string(&md).unwrap(), before);
-    assert_eq!(std::fs::read_to_string(tmp.path().join("slatedb/index.md")).unwrap(), index_before);
-    assert!(tmp.path().join("index.md").is_file());
+    assert_eq!(std::fs::read_to_string(tmp.path().join("slatedb/slatedb/index.md")).unwrap(), index_before);
+    assert_eq!(std::fs::read_to_string(tmp.path().join("index.md")).unwrap(), root_before);
 }
 
 #[test]
@@ -190,24 +191,102 @@ fn an_issue_renders_beside_the_repository_pulls() {
     let n = k.ingest(&issue()).unwrap();
     assert_eq!(n.added, 2);
 
-    let md = std::fs::read_to_string(tmp.path().join("slatedb/github/slatedb/slatedb/issues/42.md")).unwrap();
+    let md = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/github/issues/42.md")).unwrap();
     assert!(md.starts_with("# slatedb/slatedb#42: Manifest races with compaction\n"), "{md}");
     assert!(md.contains("**chris** opened 2026-09-13 08:00 [↗](https://github.com/slatedb/slatedb/issues/42)"));
     assert!(md.contains("Repro attached."));
     assert!(!md.contains("issue-42"), "the heading names the issue as GitHub does");
 
-    // One raw file per repository, with both in it.
-    let raw = std::fs::read_to_string(tmp.path().join("slatedb/raw/github/slatedb-slatedb.jsonl")).unwrap();
+    // One raw file per repository and source, with both in it.
+    let raw = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/raw/github.jsonl")).unwrap();
     assert_eq!(raw.lines().count(), 7);
-    assert!(tmp.path().join("slatedb/github/slatedb/slatedb/pulls/812.md").is_file());
+    assert!(tmp.path().join("slatedb/slatedb/github/pulls/812.md").is_file());
 
-    // The project index knows one repository and lists both files under it.
-    let index = std::fs::read_to_string(tmp.path().join("slatedb/index.md")).unwrap();
-    assert!(index.contains("Repositories: slatedb/slatedb\n"), "{index}");
-    assert!(index.contains("| slatedb/slatedb#812 | github/slatedb/slatedb/pulls/812.md | 5 |"), "{index}");
-    assert!(index.contains("| slatedb/slatedb#42 | github/slatedb/slatedb/issues/42.md | 2 |"), "{index}");
+    // The repository index is headed by the repository and lists both
+    // files under it.
+    let index = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/index.md")).unwrap();
+    assert!(index.starts_with("# slatedb/slatedb\n"), "{index}");
+    assert!(index.contains("| slatedb/slatedb#812 | github/pulls/812.md | 5 |"), "{index}");
+    assert!(index.contains("| slatedb/slatedb#42 | github/issues/42.md | 2 |"), "{index}");
     let root = std::fs::read_to_string(tmp.path().join("index.md")).unwrap();
-    assert!(root.contains("| slatedb | slatedb/slatedb | 7 |"), "{root}");
+    assert!(root.contains("| slatedb/slatedb | slatedb/slatedb/ | 7 |"), "{root}");
+}
+
+/// One message on pull request 3 of a second repository.
+fn other_repository() -> Message {
+    let mut m = msg("pr-3", "2026-09-17T12:00:00Z", "# Group by owner\n\nThe description.");
+    m.repo = "criccomini/perch".into();
+    m.container = "criccomini/perch#3".into();
+    m.url = "https://github.com/criccomini/perch/pull/3".into();
+    m
+}
+
+#[test]
+fn the_root_index_lists_every_repository_and_its_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let k = Knowledge::open(tmp.path());
+    k.ingest(&discussion()).unwrap();
+    k.ingest(&[other_repository()]).unwrap();
+
+    assert!(tmp.path().join("criccomini/perch/github/pulls/3.md").is_file());
+    assert!(tmp.path().join("criccomini/perch/raw/github.jsonl").is_file());
+    assert_eq!(k.repos().unwrap(), ["criccomini/perch", "slatedb/slatedb"]);
+
+    let root = std::fs::read_to_string(tmp.path().join("index.md")).unwrap();
+    assert!(root.contains("| repository | directory | messages | updated |\n"), "{root}");
+    assert!(root.contains("| criccomini/perch | criccomini/perch/ | 1 | 2026-09-17 12:00 |\n"), "{root}");
+    assert!(root.contains("| slatedb/slatedb | slatedb/slatedb/ | 5 | 2026-09-16 11:40 |\n"), "{root}");
+    // Each repository's own index knows only itself.
+    let index = std::fs::read_to_string(tmp.path().join("criccomini/perch/index.md")).unwrap();
+    assert!(index.contains("criccomini/perch#3"), "{index}");
+    assert!(!index.contains("slatedb"), "{index}");
+}
+
+#[test]
+fn an_old_layout_directory_beside_the_root_is_not_a_repository() {
+    let tmp = tempfile::tempdir().unwrap();
+    let k = Knowledge::open(tmp.path());
+    // The layout before this one filed a project at the top level, with
+    // `raw/` one level down. Left alone, it must not be read, listed, or
+    // rendered over.
+    let old = tmp.path().join("slatedb");
+    std::fs::create_dir_all(old.join("raw/github")).unwrap();
+    std::fs::write(old.join("raw/github/slatedb-slatedb.jsonl"), "{\"project\":\"slatedb\"}\n").unwrap();
+    std::fs::create_dir_all(old.join("github/slatedb/slatedb/pulls")).unwrap();
+    std::fs::write(old.join("github/slatedb/slatedb/pulls/1.md"), "# old\n").unwrap();
+    std::fs::write(old.join("index.md"), "# slatedb\n").unwrap();
+
+    assert!(k.repos().unwrap().is_empty());
+    k.ingest(&discussion()).unwrap();
+    assert_eq!(k.repos().unwrap(), ["slatedb/slatedb"]);
+    k.rerender().unwrap();
+
+    let root = std::fs::read_to_string(tmp.path().join("index.md")).unwrap();
+    assert!(root.contains("| slatedb/slatedb | slatedb/slatedb/ | 5 |"), "{root}");
+    assert_eq!(root.lines().filter(|l| l.starts_with("| slatedb")).count(), 1, "{root}");
+    assert_eq!(std::fs::read_to_string(old.join("index.md")).unwrap(), "# slatedb\n");
+    assert_eq!(std::fs::read_to_string(old.join("github/slatedb/slatedb/pulls/1.md")).unwrap(), "# old\n");
+}
+
+#[test]
+fn a_repository_that_is_not_owner_and_repo_is_refused_before_anything_is_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let k = Knowledge::open(tmp.path());
+    for repo in ["../x/../y", "../../etc", "slatedb", ""] {
+        let mut d = discussion();
+        d[1].repo = repo.into();
+        let err = k.ingest(&d).unwrap_err();
+        assert!(matches!(err, Error::Repo(ref r) if r == repo), "{repo:?}: {err}");
+        assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none(), "{repo:?} wrote something");
+    }
+
+    // Two segments that are each hostile are made safe and stay inside.
+    let mut m = other_repository();
+    m.repo = "../x".into();
+    k.ingest(&[m]).unwrap();
+    assert!(tmp.path().join("-/x/raw/github.jsonl").is_file());
+    assert_eq!(k.repos().unwrap(), ["-/x"]);
+    assert!(!tmp.path().parent().unwrap().join("x").exists());
 }
 
 #[test]
@@ -215,10 +294,10 @@ fn the_skill_lands_in_every_directory_named() {
     let tmp = tempfile::tempdir().unwrap();
     let k = Knowledge::open(tmp.path().join("knowledge"));
     let dirs = vec![tmp.path().join("claude/skills/perch"), tmp.path().join("agents/skills/perch")];
-    k.write_skill(&SkillConfig { projects: vec!["slatedb".into()], dirs: dirs.clone() }).unwrap();
+    k.write_skill(&SkillConfig { repos: vec!["slatedb/slatedb".into()], dirs: dirs.clone() }).unwrap();
     for dir in dirs {
         let text = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
-        assert!(text.contains("slatedb"));
+        assert!(text.contains("slatedb/slatedb"));
         assert!(text.contains(&tmp.path().join("knowledge").display().to_string()));
         assert!(text.contains("issues/<n>.md"));
     }
@@ -244,9 +323,10 @@ fn the_reader_s_own_threads_land_beside_the_discussion_and_say_what_they_are() {
 
     // A file of its own, under perch/, in the same pull request's shape as
     // the GitHub file, with front matter that says what it is.
-    let local = tmp.path().join("slatedb/perch/slatedb/slatedb/pulls/812.md");
-    let github = tmp.path().join("slatedb/github/slatedb/slatedb/pulls/812.md");
+    let local = tmp.path().join("slatedb/slatedb/perch/pulls/812.md");
+    let github = tmp.path().join("slatedb/slatedb/github/pulls/812.md");
     assert!(github.is_file());
+    assert!(tmp.path().join("slatedb/slatedb/raw/perch.jsonl").is_file());
     let text = std::fs::read_to_string(&local).unwrap();
     assert!(text.starts_with("---\nsource: perch\nkind: local threads\n"), "{text}");
     assert!(text.contains("## Asked: reader Why is the fence here?"), "{text}");
@@ -256,7 +336,32 @@ fn the_reader_s_own_threads_land_beside_the_discussion_and_say_what_they_are() {
     let public = std::fs::read_to_string(&github).unwrap();
     assert!(!public.starts_with("---"));
     assert!(!public.contains("fence here"));
-    // The project index lists both sources.
-    let index = std::fs::read_to_string(tmp.path().join("slatedb/index.md")).unwrap();
+    // The repository index lists both sources.
+    let index = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/index.md")).unwrap();
     assert!(index.contains("## perch"), "{index}");
+    assert!(index.contains("| slatedb/slatedb#812 | perch/pulls/812.md | 2 |"), "{index}");
+}
+
+#[test]
+fn a_branch_with_nothing_on_github_files_its_threads_under_branches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let k = Knowledge::open(tmp.path());
+    let mut asked = msg("asked-q2", "2026-09-17T10:00:00Z", "Is the fence right?");
+    asked.source = Source::Perch;
+    asked.container = "slatedb/slatedb@chris/fence".into();
+    asked.thread = Some("t2".into());
+    asked.author = "reader".into();
+    let mut answered = msg("answered-a2", "2026-09-17T10:01:00Z", "Yes.");
+    answered.source = Source::Perch;
+    answered.container = "slatedb/slatedb@chris/fence".into();
+    answered.thread = Some("t2".into());
+    answered.reply_to = Some("asked-q2".into());
+    answered.author = "sonnet (claude-code, high)".into();
+    k.ingest(&[asked, answered]).unwrap();
+
+    let file = tmp.path().join("slatedb/slatedb/perch/branches/chris-fence.md");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("# slatedb/slatedb@chris/fence\n"), "{text}");
+    let index = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/index.md")).unwrap();
+    assert!(index.contains("| slatedb/slatedb@chris/fence | perch/branches/chris-fence.md | 2 |"), "{index}");
 }

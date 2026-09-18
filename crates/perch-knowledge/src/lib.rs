@@ -1,9 +1,10 @@
 //! Discussion, archived as files an agent can grep.
 //!
 //! One record type, `Message`, for every source. Raw records go to JSONL
-//! under `<root>/<project>/raw/`, which is the truth; the markdown beside
-//! it is rendered from the raw files and can be deleted and rebuilt. There
-//! is no database and no search: `rg` over the markdown is the search.
+//! under `<root>/<owner>/<repo>/raw/<source>.jsonl`, which is the truth;
+//! the markdown beside it is rendered from the raw files and can be
+//! deleted and rebuilt. There is no database and no search: `rg` over the
+//! markdown is the search.
 //!
 //! This crate knows about records and files. It does not know where a
 //! record came from beyond the `Source` tag, and it never touches the
@@ -54,10 +55,11 @@ impl Source {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub source: Source,
-    /// The project the container belongs to, such as `slatedb`.
-    pub project: String,
+    /// The repository the container belongs to, `owner/repo`.
+    pub repo: String,
     /// Where the message was said: `owner/repo#812` for a pull request,
-    /// `owner/repo#issue-42` for an issue, later a channel.
+    /// `owner/repo#issue-42` for an issue, `owner/repo@branch` for a
+    /// branch with neither, later a channel.
     pub container: String,
     /// A review, later a Discord thread. `None` for the main conversation.
     pub thread: Option<String>,
@@ -96,6 +98,10 @@ pub enum Error {
     Decode { path: PathBuf, line: usize, source: serde_json::Error },
     #[error("could not encode a record: {0}")]
     Encode(#[from] serde_json::Error),
+    /// A message's `repo` is not `owner/repo`, so there is no directory it
+    /// could go under.
+    #[error("{0:?} is not owner/repo")]
+    Repo(String),
 }
 
 fn io(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
@@ -108,13 +114,13 @@ pub struct Knowledge {
     root: PathBuf,
 }
 
-/// Which raw file a message lands in.
+/// Which raw file a message lands in: one per repository and source. A
+/// pull request and an issue in one repository share a file, and their
+/// record ids (`pr-812`, `issue-42`) keep them apart in it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct RawKey {
-    project: String,
+    repo: String,
     source: Source,
-    /// The container group: the repository for GitHub, the channel later.
-    group: String,
 }
 
 impl Knowledge {
@@ -128,17 +134,21 @@ impl Knowledge {
 
     /// Append what is new, replace what changed, and re-render the files
     /// those records land in.
+    ///
+    /// A message whose `repo` is not `owner/repo` fails the whole call
+    /// before anything is written, since nothing could be filed under it.
     pub fn ingest(&self, messages: &[Message]) -> Result<Ingested, Error> {
         let mut by_file: BTreeMap<RawKey, Vec<&Message>> = BTreeMap::new();
         for m in messages {
+            split_repo(&m.repo)?;
             by_file.entry(raw_key(m)).or_default().push(m);
         }
 
         let mut result = Ingested::default();
-        let mut touched_projects = std::collections::BTreeSet::new();
+        let mut touched_repos = std::collections::BTreeSet::new();
 
         for (key, incoming) in by_file {
-            let path = self.raw_path(&key);
+            let path = self.raw_path(&key)?;
             let mut records: BTreeMap<String, Message> = read_raw(&path)?
                 .into_iter()
                 .map(|m| (m.id.clone(), m))
@@ -161,13 +171,13 @@ impl Knowledge {
             let all: Vec<Message> = sorted(records.into_values().collect());
             write_raw(&path, &all)?;
             for container in containers {
-                self.render_container(&key.project, key.source, &container, &all)?;
+                self.render_container(&key.repo, key.source, &container, &all)?;
             }
-            touched_projects.insert(key.project.clone());
+            touched_repos.insert(key.repo.clone());
         }
 
-        for project in touched_projects {
-            self.render_project_index(&project)?;
+        for repo in touched_repos {
+            self.render_repo_index(&repo)?;
         }
         if result.total() > 0 {
             self.render_root_index()?;
@@ -177,23 +187,23 @@ impl Knowledge {
 
     /// Rebuild every rendered file and index from the raw files.
     pub fn rerender(&self) -> Result<(), Error> {
-        for project in self.projects()? {
-            for (key, path) in self.raw_files(&project)? {
+        for repo in self.repos()? {
+            for (key, path) in self.raw_files(&repo)? {
                 let all = sorted(read_raw(&path)?);
                 let containers: std::collections::BTreeSet<&str> =
                     all.iter().map(|m| m.container.as_str()).collect();
                 for container in containers {
-                    self.render_container(&key.project, key.source, container, &all)?;
+                    self.render_container(&key.repo, key.source, container, &all)?;
                 }
             }
-            self.render_project_index(&project)?;
+            self.render_repo_index(&repo)?;
         }
         self.render_root_index()
     }
 
     /// Write the skill that tells an agent where the files are.
     pub fn write_skill(&self, config: &SkillConfig) -> Result<(), Error> {
-        let text = skill::render(&self.root, &config.projects);
+        let text = skill::render(&self.root, &config.repos);
         for dir in &config.dirs {
             std::fs::create_dir_all(dir).map_err(io(dir))?;
             write_atomic(&dir.join("SKILL.md"), &text)?;
@@ -201,59 +211,72 @@ impl Knowledge {
         Ok(())
     }
 
-    /// Every project with a raw directory.
-    pub fn projects(&self) -> Result<Vec<String>, Error> {
-        let Ok(entries) = std::fs::read_dir(&self.root) else {
+    /// Every repository with a raw directory, as `owner/repo`.
+    ///
+    /// Only `<owner>/<repo>/raw` counts, two levels down, so a directory
+    /// left from the layout before this one, which had `raw/` one level
+    /// down, is never taken for a repository.
+    pub fn repos(&self) -> Result<Vec<String>, Error> {
+        let Ok(owners) = std::fs::read_dir(&self.root) else {
             return Ok(Vec::new());
         };
-        let mut out: Vec<String> = entries
-            .flatten()
-            .filter(|e| e.path().join("raw").is_dir())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        out.sort();
-        Ok(out)
-    }
-
-    fn raw_path(&self, key: &RawKey) -> PathBuf {
-        self.root
-            .join(&key.project)
-            .join("raw")
-            .join(key.source.dir_name())
-            .join(format!("{}.jsonl", key.group))
-    }
-
-    fn raw_files(&self, project: &str) -> Result<Vec<(RawKey, PathBuf)>, Error> {
         let mut out = Vec::new();
-        for source in Source::ALL {
-            let dir = self.root.join(project).join("raw").join(source.dir_name());
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "jsonl") {
-                    let group = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
-                    out.push((RawKey { project: project.to_string(), source, group }, path));
-                }
+        for owner in owners.flatten().filter(|e| e.path().is_dir()) {
+            let Ok(repos) = std::fs::read_dir(owner.path()) else { continue };
+            for repo in repos.flatten().filter(|e| e.path().join("raw").is_dir()) {
+                out.push(format!(
+                    "{}/{}",
+                    owner.file_name().to_string_lossy(),
+                    repo.file_name().to_string_lossy()
+                ));
             }
         }
         out.sort();
         Ok(out)
     }
 
-    /// Where a container's markdown lives, relative to the project.
+    /// The directory a repository's files live under: `<root>/<owner>/<repo>`,
+    /// each segment made safe, so nothing in a name can climb out of the root.
+    fn repo_dir(&self, repo: &str) -> Result<PathBuf, Error> {
+        let (owner, name) = split_repo(repo)?;
+        Ok(self.root.join(owner).join(name))
+    }
+
+    fn raw_path(&self, key: &RawKey) -> Result<PathBuf, Error> {
+        Ok(self
+            .repo_dir(&key.repo)?
+            .join("raw")
+            .join(format!("{}.jsonl", key.source.dir_name())))
+    }
+
+    fn raw_files(&self, repo: &str) -> Result<Vec<(RawKey, PathBuf)>, Error> {
+        let mut out = Vec::new();
+        for source in Source::ALL {
+            let key = RawKey { repo: repo.to_string(), source };
+            let path = self.raw_path(&key)?;
+            if path.is_file() {
+                out.push((key, path));
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Where a container's markdown lives, relative to the repository's
+    /// directory.
     pub fn rendered_relative(source: Source, container: &str) -> PathBuf {
         let mut path = PathBuf::from(source.dir_name());
-        match numbered(container) {
-            // `owner/repo#812` → `owner/repo/pulls/812.md`,
-            // `owner/repo#issue-42` → `owner/repo/issues/42.md`
-            Some(n) => {
-                for part in n.repo.split('/') {
-                    path.push(safe(part));
-                }
-                path.push(if n.issue { "issues" } else { "pulls" });
-                path.push(format!("{}.md", safe(n.number)));
-            }
-            None => path.push(format!("{}.md", safe(container))),
+        if let Some(n) = numbered(container) {
+            // `owner/repo#812` → `pulls/812.md`,
+            // `owner/repo#issue-42` → `issues/42.md`
+            path.push(if n.issue { "issues" } else { "pulls" });
+            path.push(format!("{}.md", safe(n.number)));
+        } else if let Some(branch) = branched(container) {
+            // `owner/repo@chris/fence` → `branches/chris-fence.md`
+            path.push("branches");
+            path.push(format!("{}.md", safe(branch)));
+        } else {
+            path.push(format!("{}.md", safe(container)));
         }
         path
     }
@@ -273,46 +296,54 @@ impl Knowledge {
 
     fn render_container(
         &self,
-        project: &str,
+        repo: &str,
         source: Source,
         container: &str,
         all: &[Message],
     ) -> Result<(), Error> {
         let messages: Vec<&Message> = all.iter().filter(|m| m.container == container).collect();
         let text = render::container(&Self::container_label(container), &messages);
-        let path = self.root.join(project).join(Self::rendered_relative(source, container));
+        let path = self.repo_dir(repo)?.join(Self::rendered_relative(source, container));
         write_atomic(&path, &text)
     }
 
-    fn render_project_index(&self, project: &str) -> Result<(), Error> {
+    fn render_repo_index(&self, repo: &str) -> Result<(), Error> {
         let mut sections = Vec::new();
-        for (key, path) in self.raw_files(project)? {
+        for (key, path) in self.raw_files(repo)? {
             let all = read_raw(&path)?;
             sections.push((key.source, all));
         }
-        let text = render::project_index(project, &sections);
-        write_atomic(&self.root.join(project).join("index.md"), &text)
+        let text = render::repo_index(repo, &sections);
+        write_atomic(&self.repo_dir(repo)?.join("index.md"), &text)
     }
 
     fn render_root_index(&self) -> Result<(), Error> {
-        let mut projects = Vec::new();
-        for project in self.projects()? {
+        let mut repos = Vec::new();
+        for repo in self.repos()? {
             let mut all = Vec::new();
-            for (_, path) in self.raw_files(&project)? {
+            for (_, path) in self.raw_files(&repo)? {
                 all.extend(read_raw(&path)?);
             }
-            projects.push((project, all));
+            repos.push((repo, all));
         }
-        let text = render::root_index(&projects);
+        let text = render::root_index(&repos);
         write_atomic(&self.root.join("index.md"), &text)
     }
 }
 
 fn raw_key(m: &Message) -> RawKey {
-    RawKey {
-        project: m.project.clone(),
-        source: m.source,
-        group: container_group(&m.container),
+    RawKey { repo: m.repo.clone(), source: m.source }
+}
+
+/// `owner/repo` as two path segments, each made safe. Anything else, from
+/// a bare name to `a/b/c`, is refused rather than guessed at, since the two
+/// segments are what keeps a name inside the root.
+fn split_repo(repo: &str) -> Result<(String, String), Error> {
+    match repo.split_once('/') {
+        Some((owner, name)) if !owner.is_empty() && !name.is_empty() && !name.contains('/') => {
+            Ok((safe(owner), safe(name)))
+        }
+        _ => Err(Error::Repo(repo.to_string())),
     }
 }
 
@@ -326,6 +357,10 @@ struct Numbered<'a> {
 
 fn numbered(container: &str) -> Option<Numbered<'_>> {
     let (repo, rest) = container.split_once('#')?;
+    // A `#` after the `@` of a branch container is part of the branch.
+    if repo.contains('@') {
+        return None;
+    }
     let (issue, number) = match rest.strip_prefix("issue-") {
         Some(number) => (true, number),
         None => (false, rest),
@@ -333,14 +368,10 @@ fn numbered(container: &str) -> Option<Numbered<'_>> {
     Some(Numbered { repo, number, issue })
 }
 
-/// The part of a container that names its raw file: the repository of
-/// `owner/repo#812` or `owner/repo#issue-42`, the whole name otherwise.
-/// Slashes become dashes so the group is one path segment. A pull request
-/// and an issue in one repository share a file, and their record ids
-/// (`pr-812`, `issue-42`) keep them apart in it.
-fn container_group(container: &str) -> String {
-    let group = numbered(container).map(|n| n.repo).unwrap_or(container);
-    safe(&group.replace('/', "-"))
+/// The branch of a container that names one, `owner/repo@branch`: a
+/// checkout with no pull request or issue on GitHub.
+fn branched(container: &str) -> Option<&str> {
+    container.split_once('@').map(|(_, branch)| branch)
 }
 
 /// Keep a path segment to characters safe everywhere, and never `..`.
@@ -410,29 +441,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn containers_map_to_raw_groups_and_rendered_paths() {
-        assert_eq!(container_group("slatedb/slatedb#812"), "slatedb-slatedb");
-        assert_eq!(container_group("general"), "general");
+    fn containers_map_to_rendered_paths_under_the_repository() {
         assert_eq!(
             Knowledge::rendered_relative(Source::GitHub, "slatedb/slatedb#812"),
-            PathBuf::from("github/slatedb/slatedb/pulls/812.md")
+            PathBuf::from("github/pulls/812.md")
+        );
+        assert_eq!(
+            Knowledge::rendered_relative(Source::Perch, "slatedb/slatedb@chris/fence"),
+            PathBuf::from("perch/branches/chris-fence.md")
         );
         assert_eq!(
             Knowledge::rendered_relative(Source::Discord, "general"),
             PathBuf::from("discord/general.md")
         );
+        let k = Knowledge::open("/k");
+        assert_eq!(k.repo_dir("slatedb/slatedb").unwrap(), PathBuf::from("/k/slatedb/slatedb"));
+        assert_eq!(
+            k.raw_path(&RawKey { repo: "slatedb/slatedb".into(), source: Source::GitHub }).unwrap(),
+            PathBuf::from("/k/slatedb/slatedb/raw/github.jsonl")
+        );
     }
 
     #[test]
     fn an_issue_shares_the_repository_raw_file_and_renders_beside_pulls() {
-        assert_eq!(container_group("slatedb/slatedb#issue-42"), "slatedb-slatedb");
         assert_eq!(
             Knowledge::rendered_relative(Source::GitHub, "slatedb/slatedb#issue-42"),
-            PathBuf::from("github/slatedb/slatedb/issues/42.md")
+            PathBuf::from("github/issues/42.md")
         );
         assert_eq!(Knowledge::container_label("slatedb/slatedb#issue-42"), "slatedb/slatedb#42");
         assert_eq!(Knowledge::container_label("slatedb/slatedb#812"), "slatedb/slatedb#812");
         assert_eq!(Knowledge::container_label("general"), "general");
+    }
+
+    #[test]
+    fn a_hash_in_a_branch_name_does_not_make_it_a_pull_request() {
+        assert_eq!(
+            Knowledge::rendered_relative(Source::Perch, "slatedb/slatedb@fix#12"),
+            PathBuf::from("perch/branches/fix-12.md")
+        );
+        assert_eq!(Knowledge::container_label("slatedb/slatedb@fix#12"), "slatedb/slatedb@fix#12");
     }
 
     #[test]
@@ -441,7 +488,19 @@ mod tests {
         // segment would climb. Neither can come out as a component.
         let rel = Knowledge::rendered_relative(Source::GitHub, "../x#..");
         assert!(rel.components().all(|c| c.as_os_str() != ".."), "{rel:?}");
+        let rel = Knowledge::rendered_relative(Source::Perch, "../x@../..");
+        assert!(rel.components().all(|c| c.as_os_str() != ".."), "{rel:?}");
         assert_eq!(safe(".."), "-");
-        assert!(!container_group("../../etc#1").contains('/'));
+
+        // A repository is two segments and no more; each is made safe, and
+        // a third segment is refused rather than joined.
+        let k = Knowledge::open("/k");
+        let dir = k.repo_dir("../x").unwrap();
+        assert!(dir.starts_with("/k"), "{dir:?}");
+        assert!(dir.components().all(|c| c.as_os_str() != ".."), "{dir:?}");
+        assert_eq!(dir, PathBuf::from("/k/-/x"));
+        for repo in ["../x/../y", "../../etc", "slatedb", "/slatedb", "slatedb/", ""] {
+            assert!(matches!(k.repo_dir(repo), Err(Error::Repo(_))), "{repo:?}");
+        }
     }
 }

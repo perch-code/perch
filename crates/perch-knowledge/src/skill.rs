@@ -1,23 +1,25 @@
 //! The skill file that tells an agent where the files are.
 //!
 //! The description decides whether the skill loads, so it names every
-//! project and the phrases a person uses when they want history. The body
-//! is prescriptive: every `ls` an agent has to do is a chance to wander.
+//! repository and the phrases a person uses when they want history. The
+//! body is prescriptive: every `ls` an agent has to do is a chance to
+//! wander.
 
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default)]
 pub struct SkillConfig {
-    /// Every project the store holds, for the description.
-    pub projects: Vec<String>,
+    /// Every repository the store holds, as `owner/repo`, for the
+    /// description.
+    pub repos: Vec<String>,
     /// The directories to write `SKILL.md` into.
     pub dirs: Vec<PathBuf>,
 }
 
-pub fn render(root: &Path, projects: &[String]) -> String {
+pub fn render(root: &Path, repos: &[String]) -> String {
     let root = root.display();
-    let names = if projects.is_empty() { "your projects".to_string() } else { projects.join(", ") };
-    let example = projects.first().map(String::as_str).unwrap_or("<project>");
+    let names = if repos.is_empty() { "your repositories".to_string() } else { repos.join(", ") };
+    let example = repos.first().map(String::as_str).unwrap_or("<owner>/<repo>");
 
     format!(
         "---
@@ -25,22 +27,21 @@ name: perch
 description: Discussion history for {names} from GitHub pull requests and issues, and the questions the reader asked an agent about them in Perch. Use when asked why something was decided, what was discussed, what was asked before, or for the context behind a change, a pull request or an issue.
 ---
 
-Perch archives discussion about these projects as markdown under
+Perch archives discussion about these repositories as markdown under
 `{root}`. Start with `{root}/index.md`, which maps
-each project to its git repositories; match `git remote get-url origin`
-against it to find the project for the repository you are in.
+each repository to its directory; match `git remote get-url origin`
+against `owner/repo` to find the directory for the repository you are in.
 
-Layout, per project:
+Layout, per repository:
 
-    <project>/index.md                   what is here and how current it is
-    <project>/github/<owner>/<repo>/pulls/<n>.md
-                                         description, comments, reviews
-    <project>/github/<owner>/<repo>/issues/<n>.md
-                                         issue, comments
-    <project>/perch/<owner>/<repo>/pulls/<n>.md
-    <project>/perch/<owner>/<repo>/issues/<n>.md
+    <owner>/<repo>/index.md              what is here and how current it is
+    <owner>/<repo>/github/pulls/<n>.md   description, comments, reviews
+    <owner>/<repo>/github/issues/<n>.md  issue, comments
+    <owner>/<repo>/perch/pulls/<n>.md
+    <owner>/<repo>/perch/issues/<n>.md
+    <owner>/<repo>/perch/branches/<branch>.md
                                          the reader's own threads with an agent
-    <project>/raw/                       machine records; read the markdown instead
+    <owner>/<repo>/raw/                  machine records; read the markdown instead
 
 Two kinds of file, and they are not the same thing. Under `github/` is
 what was said on GitHub, in public, by the people named. Under `perch/`
@@ -76,27 +77,34 @@ mod tests {
     }
 
     #[test]
-    fn the_description_names_every_project_and_no_other() {
-        let text = render(Path::new("/k"), &["slatedb".into(), "perch".into()]);
+    fn the_description_names_every_repository_and_no_other() {
+        let text = render(Path::new("/k"), &["slatedb/slatedb".into(), "criccomini/perch".into()]);
         let d = description(&text);
-        assert!(d.contains("slatedb, perch"), "{d}");
-        assert!(!d.contains("<project>"));
-        assert!(!text.contains("your projects"));
+        assert!(d.contains("slatedb/slatedb, criccomini/perch"), "{d}");
+        assert!(!d.contains("<owner>/<repo>"));
+        assert!(!text.contains("your repositories"));
     }
 
     #[test]
     fn the_root_is_the_one_configured() {
-        let text = render(Path::new("/somewhere/else"), &["perch".into()]);
+        let text = render(Path::new("/somewhere/else"), &["criccomini/perch".into()]);
         assert!(text.contains("`/somewhere/else/index.md`"));
-        assert!(text.contains("rg -n \"manifest fence\" /somewhere/else/perch"));
+        assert!(text.contains("rg -n \"manifest fence\" /somewhere/else/criccomini/perch"));
     }
 
     #[test]
     fn issues_are_named_beside_pull_requests() {
-        let text = render(Path::new("/k"), &["perch".into()]);
+        let text = render(Path::new("/k"), &["criccomini/perch".into()]);
         assert!(description(&text).contains("from GitHub pull requests and issues"));
-        assert!(text.contains("<project>/github/<owner>/<repo>/issues/<n>.md"));
-        assert!(text.contains("<project>/github/<owner>/<repo>/pulls/<n>.md"));
+        assert!(text.contains("<owner>/<repo>/github/issues/<n>.md"));
+        assert!(text.contains("<owner>/<repo>/github/pulls/<n>.md"));
+    }
+
+    #[test]
+    fn the_remote_is_matched_against_the_repository_name() {
+        let text = render(Path::new("/k"), &[]);
+        assert!(text.contains("match `git remote get-url origin`\nagainst `owner/repo`"), "{text}");
+        assert!(text.contains("<owner>/<repo>/perch/branches/<branch>.md"));
     }
 
     #[test]

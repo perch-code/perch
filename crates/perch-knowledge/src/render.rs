@@ -157,16 +157,10 @@ fn push_message(out: &mut String, m: &Message, by_id: &HashMap<&str, &Message>) 
     }
 }
 
-/// A project's index: each source, its containers, how many messages and
-/// how recent.
-pub fn project_index(project: &str, sections: &[(Source, Vec<Message>)]) -> String {
-    let mut out = format!("# {project}\n\n");
-    let repos = repos_of(sections.iter().flat_map(|(_, m)| m.iter()));
-    if !repos.is_empty() {
-        out.push_str("Repositories: ");
-        out.push_str(&repos.join(", "));
-        out.push_str("\n\n");
-    }
+/// A repository's index: each source, its containers, how many messages
+/// and how recent.
+pub fn repo_index(repo: &str, sections: &[(Source, Vec<Message>)]) -> String {
+    let mut out = format!("# {repo}\n\n");
     for (source, messages) in sections {
         out.push_str(&format!("## {}\n\n", source.dir_name()));
         let mut containers: Vec<&str> = messages.iter().map(|m| m.container.as_str()).collect();
@@ -189,27 +183,15 @@ pub fn project_index(project: &str, sections: &[(Source, Vec<Message>)]) -> Stri
     out.trim_end().to_string() + "\n"
 }
 
-/// The root index: every project, its repositories, and when it last moved,
-/// so an agent can match a git remote to a project.
-pub fn root_index(projects: &[(String, Vec<Message>)]) -> String {
+/// The root index: every repository, the directory it is under, and when
+/// it last moved, so an agent can match `git remote get-url origin` to a
+/// directory.
+pub fn root_index(repos: &[(String, Vec<Message>)]) -> String {
     let mut out = String::from("# Perch knowledge\n\n");
-    out.push_str("| project | repositories | messages | updated |\n|---|---|---|---|\n");
-    for (name, messages) in projects {
-        let repos = repos_of(messages.iter()).join(", ");
+    out.push_str("| repository | directory | messages | updated |\n|---|---|---|---|\n");
+    for (repo, messages) in repos {
         let updated = messages.iter().map(|m| m.at).max().map(stamp).unwrap_or_default();
-        out.push_str(&format!("| {name} | {repos} | {} | {updated} |\n", messages.len()));
+        out.push_str(&format!("| {repo} | {repo}/ | {} | {updated} |\n", messages.len()));
     }
     out
-}
-
-/// The repositories named by GitHub containers, pull requests and issues
-/// alike, each once.
-fn repos_of<'a>(messages: impl Iterator<Item = &'a Message>) -> Vec<String> {
-    let mut repos: Vec<String> = messages
-        .filter(|m| m.source == Source::GitHub)
-        .filter_map(|m| m.container.split_once('#').map(|(r, _)| r.to_string()))
-        .collect();
-    repos.sort();
-    repos.dedup();
-    repos
 }

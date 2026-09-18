@@ -12,12 +12,12 @@ use perch_github::{Author, CommentMessage, CommentThread, Discussion, Issue, Iss
 use perch_knowledge::{Message, Source};
 
 /// Every message on one pull request.
-pub fn to_messages(pr: &PullRequest, discussion: &Discussion, project: &str) -> Vec<Message> {
+pub fn to_messages(pr: &PullRequest, discussion: &Discussion) -> Vec<Message> {
     let container = format!("{}#{}", pr.repo_full_name, pr.number);
     let pr_url = format!("https://github.com/{}/pull/{}", pr.repo_full_name, pr.number);
     let base = |id: String, author: &str, at, body: String, url: String| Message {
         source: Source::GitHub,
-        project: project.to_string(),
+        repo: pr.repo_full_name.clone(),
         container: container.clone(),
         thread: None,
         id,
@@ -110,12 +110,12 @@ pub fn to_messages(pr: &PullRequest, discussion: &Discussion, project: &str) -> 
 /// files under `issues/` beside the repository's pull requests.
 // Nothing opens an issue yet; the backend's OpenItem for an issue item is
 // the caller, and the allow goes when it lands.
-pub fn issue_to_messages(issue: &Issue, comments: &[IssueComment], project: &str) -> Vec<Message> {
+pub fn issue_to_messages(issue: &Issue, comments: &[IssueComment]) -> Vec<Message> {
     let container = format!("{}#issue-{}", issue.repo_full_name, issue.number);
     let issue_url = format!("https://github.com/{}/issues/{}", issue.repo_full_name, issue.number);
     let base = |id: String, author: &str, at, body: String, url: String| Message {
         source: Source::GitHub,
-        project: project.to_string(),
+        repo: issue.repo_full_name.clone(),
         container: container.clone(),
         thread: None,
         id,
@@ -171,12 +171,16 @@ pub fn issue_to_messages(issue: &Issue, comments: &[IssueComment], project: &str
 /// its threads are filed under `owner/repo@branch`. Only answered
 /// questions are written: a run still going, or one that failed, has
 /// nothing an agent could be told later.
-pub fn threads_to_messages(item: &Item, threads: &[CommentThread], project: &str) -> Vec<Message> {
-    let container = match &item.subject {
-        Some(ItemSubject::PullRequest(pr)) => format!("{}#{}", pr.repo_full_name, pr.number),
-        Some(ItemSubject::Issue(i)) => format!("{}#issue-{}", i.repo_full_name, i.number),
+///
+/// The repository is the subject's when there is one, so the threads
+/// land beside the GitHub discussion even when the checkout is on a fork,
+/// and the item's own for a bare branch.
+pub fn threads_to_messages(item: &Item, threads: &[CommentThread]) -> Vec<Message> {
+    let (repo, container) = match &item.subject {
+        Some(ItemSubject::PullRequest(pr)) => (&pr.repo_full_name, format!("{}#{}", pr.repo_full_name, pr.number)),
+        Some(ItemSubject::Issue(i)) => (&i.repo_full_name, format!("{}#issue-{}", i.repo_full_name, i.number)),
         None => match item.branch() {
-            Some(branch) => format!("{}@{branch}", item.repo_full_name),
+            Some(branch) => (&item.repo_full_name, format!("{}@{branch}", item.repo_full_name)),
             None => return Vec::new(),
         },
     };
@@ -195,7 +199,7 @@ pub fn threads_to_messages(item: &Item, threads: &[CommentThread], project: &str
                     question = Some(m);
                     out.push(Message {
                         source: Source::Perch,
-                        project: project.to_string(),
+                        repo: repo.clone(),
                         container: container.clone(),
                         thread: Some(thread.id.clone()),
                         id: format!("asked-{}", m.id),
@@ -213,7 +217,7 @@ pub fn threads_to_messages(item: &Item, threads: &[CommentThread], project: &str
                     let effort = run.effort.clone();
                     out.push(Message {
                         source: Source::Perch,
-                        project: project.to_string(),
+                        repo: repo.clone(),
                         container: container.clone(),
                         thread: Some(thread.id.clone()),
                         id: format!("answered-{}", m.id),
@@ -359,17 +363,17 @@ mod tests {
 
     #[test]
     fn ids_carry_their_kind_and_the_container_is_the_pull_request() {
-        let ms = to_messages(&pr(), &discussion(), "slatedb");
+        let ms = to_messages(&pr(), &discussion());
         let ids: Vec<&str> = ms.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["pr-812", "comment-1", "review-9", "review-comment-3", "review-comment-4"]);
         assert!(ms.iter().all(|m| m.container == "slatedb/slatedb#812"));
-        assert!(ms.iter().all(|m| m.project == "slatedb"));
+        assert!(ms.iter().all(|m| m.repo == "slatedb/slatedb"));
         assert!(ms.iter().all(|m| m.source == Source::GitHub));
     }
 
     #[test]
     fn the_description_opens_with_the_title_as_a_heading_and_sorts_first() {
-        let ms = to_messages(&pr(), &discussion(), "slatedb");
+        let ms = to_messages(&pr(), &discussion());
         assert_eq!(ms[0].body, "# Fence the manifest\n\nThe description.");
         assert_eq!(ms[0].author, "rohan");
         assert_eq!(ms[0].at, at("2026-09-14T14:02:00Z"));
@@ -379,7 +383,7 @@ mod tests {
 
     #[test]
     fn reviews_are_threads_and_line_comments_hang_under_them() {
-        let ms = to_messages(&pr(), &discussion(), "slatedb");
+        let ms = to_messages(&pr(), &discussion());
         let review = ms.iter().find(|m| m.id == "review-9").unwrap();
         assert_eq!(review.thread.as_deref(), Some("review-9"));
         assert_eq!(review.body, "approved\n\nnice");
@@ -395,13 +399,13 @@ mod tests {
 
     #[test]
     fn a_pending_review_is_left_out() {
-        let ms = to_messages(&pr(), &discussion(), "slatedb");
+        let ms = to_messages(&pr(), &discussion());
         assert!(!ms.iter().any(|m| m.id == "review-10"));
     }
 
     #[test]
     fn edited_means_updated_after_created() {
-        let ms = to_messages(&pr(), &discussion(), "slatedb");
+        let ms = to_messages(&pr(), &discussion());
         assert!(ms.iter().find(|m| m.id == "comment-1").unwrap().edited_at.is_some());
         assert!(ms.iter().find(|m| m.id == "review-comment-3").unwrap().edited_at.is_none());
     }
@@ -449,18 +453,18 @@ mod tests {
 
     #[test]
     fn an_issue_is_its_own_container_and_its_ids_say_so() {
-        let ms = issue_to_messages(&issue(), &issue_comments(), "slatedb");
+        let ms = issue_to_messages(&issue(), &issue_comments());
         let ids: Vec<&str> = ms.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["issue-42", "comment-7", "comment-8"]);
         assert!(ms.iter().all(|m| m.container == "slatedb/slatedb#issue-42"));
-        assert!(ms.iter().all(|m| m.project == "slatedb"));
+        assert!(ms.iter().all(|m| m.repo == "slatedb/slatedb"));
         assert!(ms.iter().all(|m| m.source == Source::GitHub));
         assert!(ms.iter().all(|m| m.thread.is_none() && m.location.is_none()));
     }
 
     #[test]
     fn the_issue_opens_with_its_title_at_its_creation_time() {
-        let ms = issue_to_messages(&issue(), &issue_comments(), "slatedb");
+        let ms = issue_to_messages(&issue(), &issue_comments());
         assert_eq!(ms[0].body, "# Manifest races with compaction\n\nSeen twice.");
         assert_eq!(ms[0].author, "rohan");
         assert_eq!(ms[0].at, at("2026-09-13T08:00:00Z"));
@@ -473,7 +477,7 @@ mod tests {
     fn without_a_creation_time_the_first_comment_dates_the_opener() {
         let mut i = issue();
         i.created_at = None;
-        let ms = issue_to_messages(&i, &issue_comments(), "slatedb");
+        let ms = issue_to_messages(&i, &issue_comments());
         assert_eq!(ms[0].at, at("2026-09-13T09:00:00Z"));
         assert!(ms[0].at <= ms[1].at);
     }
@@ -525,15 +529,16 @@ mod tests {
 
     #[test]
     fn an_answered_thread_is_filed_as_perch_s_own_beside_the_pull_request() {
-        let mut item = Item::new("slatedb", "slatedb/slatedb", at("2026-09-18T09:00:00Z"));
+        let mut item = Item::new("slatedb/slatedb", at("2026-09-18T09:00:00Z"));
         item.subject = Some(ItemSubject::PullRequest(pr()));
-        let ms = threads_to_messages(&item, &[local_thread("t1", true), local_thread("t2", false)], "slatedb");
+        let ms = threads_to_messages(&item, &[local_thread("t1", true), local_thread("t2", false)]);
         // The unanswered thread is left out whole; the answered one is a
         // question and its reply, both in the pull request's container.
         let ids: Vec<&str> = ms.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["asked-t1-q", "answered-t1-a"]);
         assert!(ms.iter().all(|m| m.source == Source::Perch));
         assert!(ms.iter().all(|m| m.container == format!("slatedb/slatedb#{}", pr().number)));
+        assert!(ms.iter().all(|m| m.repo == "slatedb/slatedb"));
         assert!(ms.iter().all(|m| m.thread.as_deref() == Some("t1")));
         assert_eq!(ms[0].author, "reader");
         assert_eq!(ms[0].location.as_deref(), Some("src/x.rs:41\u{2013}58"));
@@ -543,7 +548,7 @@ mod tests {
 
     #[test]
     fn a_branch_with_nothing_on_github_files_its_threads_by_branch() {
-        let mut item = Item::new("slatedb", "slatedb/slatedb", at("2026-09-18T09:00:00Z"));
+        let mut item = Item::new("slatedb/slatedb", at("2026-09-18T09:00:00Z"));
         item.checkout = Some(perch_github::ItemCheckout {
             branch: "chris/fence".into(),
             base_ref: "main".into(),
@@ -554,8 +559,18 @@ mod tests {
             churn: None,
             last_seen_head: None,
         });
-        let ms = threads_to_messages(&item, &[local_thread("t1", true)], "slatedb");
+        let ms = threads_to_messages(&item, &[local_thread("t1", true)]);
         assert_eq!(ms[0].container, "slatedb/slatedb@chris/fence");
+        assert_eq!(ms[0].repo, "slatedb/slatedb");
         assert!(ms[0].url.is_empty());
+    }
+
+    #[test]
+    fn a_checkout_on_a_fork_files_its_threads_under_the_pull_request_s_repository() {
+        let mut item = Item::new("chris/slatedb", at("2026-09-18T09:00:00Z"));
+        item.subject = Some(ItemSubject::PullRequest(pr()));
+        let ms = threads_to_messages(&item, &[local_thread("t1", true)]);
+        assert!(ms.iter().all(|m| m.repo == "slatedb/slatedb"), "beside the GitHub discussion, not under the fork");
+        assert!(ms.iter().all(|m| m.container == "slatedb/slatedb#812"));
     }
 }
