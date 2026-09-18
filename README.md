@@ -23,6 +23,17 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
 - Polls on GitHub's own `X-Poll-Interval`, with conditional requests so an
   unchanged inbox costs one cheap 304.
 
+**Saved and Done**
+
+- Bookmark a notification into Saved, or dismiss it into Done, from the row,
+  from the keyboard, or from the header of a pull request you have finished
+  reading.
+- Check rows and act on them together, or dismiss a whole repository from its
+  group header.
+- A dismissed thread comes back to the inbox when somebody comments on it,
+  the way it does on the web. A bookmark does not expire.
+- Both flags are Perch's own and stay on this machine. See below.
+
 **The review view**
 
 - Click a pull request and Perch clones the repository, checks the head out
@@ -40,10 +51,29 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
 
 ## What it deliberately does not do
 
-Nothing in Perch writes to GitHub. There is no mark as read, no mark as done,
-no save, no unsubscribe. Rows are not clickable and there is no detail pane.
-The Saved and Done views appear in the sidebar to match the web UI, and are
-inert: the REST API does not expose them.
+Nothing in Perch writes to GitHub. There is no mark as read and no
+unsubscribe.
+
+Saved and Done do not sync, in either direction. Dismissing a thread in Perch
+leaves it in your inbox on github.com, and dismissing one on github.com does
+not dismiss it here. This is not an oversight. The REST API can mark a thread
+done, but nothing lists done threads back, and Saved has no endpoint at all,
+so a Done view built on the API could only ever show what this copy of Perch
+put there. It shows exactly that, and says so, rather than pretending to be
+the same inbox you see in a browser.
+
+## Keys
+
+| Key | What it does |
+|---|---|
+| `e` | Mark done, or restore. The selection, or the row under the pointer. |
+| `s` | Save or unsave, the same way. |
+| `Escape` | Drop the selection. |
+| `Cmd-\` | Show or hide the drawer. |
+| `Cmd-[` | Back to the inbox from a pull request. |
+| `Cmd-W` | Close the open file. |
+
+`e` and `s` stand down while the search box has focus.
 
 ## Requirements
 
@@ -88,8 +118,10 @@ token = "ghp_..."        # only when env vars and gh are unavailable
 poll_interval_secs = 60  # a floor; X-Poll-Interval may raise it
 ```
 
-Cache and avatars live beside it. Deleting that directory is safe and only
-costs a cold start.
+Cache and avatars live beside it, and so do your Saved and Done marks.
+Deleting that directory costs a cold start and every mark you have made;
+nothing else in Perch is worth keeping, and marks are the one thing GitHub
+cannot give back.
 
 ## Layout
 

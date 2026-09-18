@@ -100,9 +100,13 @@ impl GitHub {
     /// build the returned list, because GitHub treats `If-Modified-Since` on
     /// this endpoint as a filter rather than a cache validator: a 200 carries
     /// only the threads updated since that instant. A partial list cannot
-    /// show which threads were marked done or unsubscribed, so acting on one
-    /// would silently drop the rest of the inbox. When the probe says
-    /// something moved, we pay one extra request for the whole list.
+    /// show which threads were dismissed on github.com or unsubscribed from,
+    /// so acting on one would silently drop the rest of the inbox. When the
+    /// probe says something moved, we pay one extra request for the whole
+    /// list.
+    ///
+    /// Perch's own Done is a separate thing entirely, and local: see
+    /// `cache::Mark`.
     pub async fn list_threads(&self, since: Option<&str>) -> Result<ListResult, Error> {
         if let Some(since) = since {
             let probe = self.fetch_page(1, Some(since)).await?;
