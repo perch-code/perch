@@ -159,6 +159,7 @@ fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: Open
                             .color(theme::FG_SUBTLE)
                             .padding(20.0)
                             .width_full()
+                            .text_wrap()
                     })
                     .into_any()
                 } else {
@@ -553,7 +554,7 @@ fn message_view(
             markdown(&body).into_any()
         } else {
             Label::derived(move || body.clone())
-                .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG).width_full())
+                .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG).line_height(1.4).width_full().text_wrap())
                 .into_any()
         },
         match message.run.clone() {
@@ -606,7 +607,7 @@ fn run_block(
                 Label::derived(move || error.clone()).style(|s| {
                     s.font_size(theme::TEXT_BADGE)
                         .color(theme::CLOSED)
-                        .text_ellipsis()
+                        .text_wrap()
                         .min_width(0.0)
                         .flex_grow(1.0_f32)
                 }),
@@ -749,6 +750,7 @@ pub fn markdown(text: &str) -> impl IntoView {
                         .line_height(1.45)
                         .padding(8.0)
                         .width_full()
+                        .text_wrap()
                         .background(theme::CANVAS_SUBTLE)
                         .border(1.0)
                         .border_color(theme::BORDER_MUTED)
@@ -760,12 +762,12 @@ pub fn markdown(text: &str) -> impl IntoView {
                     s.font_size(theme::TEXT_BODY).color(theme::FG_MUTED).margin_right(8.0).flex_shrink(0.0_f32)
                 }),
                 Label::derived(move || item.clone())
-                    .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG).line_height(1.4).min_width(0.0).flex_grow(1.0_f32)),
+                    .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG).line_height(1.4).min_width(0.0).flex_grow(1.0_f32).text_wrap()),
             ))
             .style(|s| s.width_full().items_start())
             .into_any(),
             Block::Paragraph(p) => Label::derived(move || p.clone())
-                .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG).line_height(1.4).width_full())
+                .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG).line_height(1.4).width_full().text_wrap())
                 .into_any(),
         },
     )
