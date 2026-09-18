@@ -2320,8 +2320,11 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     let mut item = match existing {
         Some(item) => ctx.item(&item.id).unwrap_or(item),
         None => {
+            // A fresh item's checkout is of the pull request's own
+            // repository, whichever fork the head is on: that is the clone
+            // it is cut in.
             let project = ctx.project_for(&pull_request.repo_full_name);
-            Item::new(&project, &head_repo, now)
+            Item::new(&project, &pull_request.repo_full_name, now)
         }
     };
     // CI turning red is attention. Nothing else about the snapshot is.
