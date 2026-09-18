@@ -261,6 +261,10 @@ pub struct Checkout {
     /// Lines added and removed against the base, for the row. Filled by
     /// the root scan; `None` until then.
     pub churn: Option<(u32, u32)>,
+    /// The head at the previous open, which "Since you last looked" diffs
+    /// from. Set from `head_sha` when the item is opened, before `head_sha`
+    /// is refreshed; `None` until the item has been opened once.
+    pub last_seen_head: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -435,6 +439,7 @@ mod tests {
             owned: true,
             on_disk: true,
             churn: None,
+            last_seen_head: None,
         });
         assert_eq!(i.title(), "perch/issue-42");
         i.subject = Some(Subject::Issue(Issue {
@@ -481,7 +486,7 @@ mod tests {
         assert!(i.is_closed());
         assert!(!i.is_active());
         let mut j = item();
-        j.checkout = Some(Checkout { branch: "b".into(), base_ref: "main".into(), head_sha: "h".into(), path: "/x".into(), owned: false, on_disk: true, churn: None });
+        j.checkout = Some(Checkout { branch: "b".into(), base_ref: "main".into(), head_sha: "h".into(), path: "/x".into(), owned: false, on_disk: true, churn: None, last_seen_head: None });
         assert!(j.is_active());
         j.attention_at = Some(at("2026-09-18T11:00:00Z"));
         j.done_at = Some(at("2026-09-18T11:00:00Z"));

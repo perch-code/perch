@@ -22,10 +22,10 @@ pub use comments::{
 };
 pub use client::{Error, GitHub, ListResult, PullLookup};
 pub use config::{AgentConfig, CodexConfig, Config, KnowledgeConfig, CLAUDE_CODE, CODEX};
-pub use discussion::{Discussion, IssueComment, Review, ReviewComment};
+pub use discussion::{Discussion, IssueComment, PullEvent, PullEventKind, Review, ReviewComment};
 pub use items::{Checkout as ItemCheckout, Issue, Item, Label, Project, Subject as ItemSubject, SubjectKind as ItemKind};
-pub use pulls::{CheckStatus, PullRequest, ReviewDecision};
-pub use workflow_runs::WorkflowRunQuery;
+pub use pulls::{CheckStatus, PullRequest, ReviewDecision, Reviewer};
+pub use workflow_runs::{worst, CheckState, Checks, WorkflowRunPayload, WorkflowRunQuery};
 pub use model::{
     DetailSource, Reason, Repository, Subject, SubjectDetail, SubjectKind, SubjectState, Thread,
 };

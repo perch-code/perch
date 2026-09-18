@@ -347,8 +347,10 @@ pub(crate) struct SubjectPayload {
     pub user: Option<UserPayload>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct UserPayload {
+/// A user as GitHub nests one. Public because a workflow run carries its
+/// actor and the run is stored as it came.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPayload {
     #[serde(default)]
     pub login: String,
     #[serde(default)]

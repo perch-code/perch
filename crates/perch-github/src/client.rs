@@ -13,8 +13,12 @@ use http::StatusCode;
 use http_body_util::BodyExt;
 use octocrab::Octocrab;
 
+use crate::discussion::{
+    Discussion, IssueComment, IssueCommentPayload, PullSummary, Review, ReviewComment,
+    ReviewCommentPayload, ReviewPayload,
+};
 use crate::model::{SubjectDetail, SubjectKind, SubjectPayload, Thread};
-use crate::workflow_runs::{WorkflowRunQuery, WorkflowRunsPayload};
+use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunQuery, WorkflowRunsPayload};
 
 /// Page size for the notifications list. GitHub caps `per_page` at 50 here.
 const PER_PAGE: usize = 50;
@@ -290,24 +294,49 @@ impl GitHub {
         Ok(payload.into_pull_request(repo_full_name))
     }
 
+    /// The workflow runs for one commit, newest first. What the checks
+    /// pill is set from. One page: a head with more than a hundred runs is
+    /// not a head anyone is reviewing.
+    pub async fn list_workflow_runs_for_sha(
+        &self,
+        repo_full_name: &str,
+        head_sha: &str,
+    ) -> Result<Vec<WorkflowRunPayload>, Error> {
+        let body = self
+            .get_text(&format!("/repos/{repo_full_name}/actions/runs?head_sha={head_sha}&per_page=100"))
+            .await?;
+        let payload: WorkflowRunsPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(payload.workflow_runs)
+    }
+
     /// Everything said on a pull request: description, conversation,
-    /// reviews, and line comments. Three lists, each read to the end.
+    /// reviews, and line comments. Three lists, each read to the end, and
+    /// the events the pull request's own payload carries.
     pub async fn fetch_discussion(
         &self,
         repo_full_name: &str,
         number: u64,
-    ) -> Result<crate::discussion::Discussion, Error> {
+    ) -> Result<Discussion, Error> {
         let base = format!("/repos/{repo_full_name}");
         let body = self.get_text(&format!("{base}/pulls/{number}")).await?;
-        let body: crate::discussion::BodyOnly =
+        let pull: PullSummary =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
 
-        Ok(crate::discussion::Discussion {
-            opened_at: body.created_at,
-            body: body.body.unwrap_or_default(),
-            comments: self.list_all(&format!("{base}/issues/{number}/comments")).await?,
-            reviews: self.list_all(&format!("{base}/pulls/{number}/reviews")).await?,
-            review_comments: self.list_all(&format!("{base}/pulls/{number}/comments")).await?,
+        let comments: Vec<IssueCommentPayload> =
+            self.list_all(&format!("{base}/issues/{number}/comments")).await?;
+        let reviews: Vec<ReviewPayload> =
+            self.list_all(&format!("{base}/pulls/{number}/reviews")).await?;
+        let review_comments: Vec<ReviewCommentPayload> =
+            self.list_all(&format!("{base}/pulls/{number}/comments")).await?;
+
+        Ok(Discussion {
+            opened_at: pull.created_at,
+            events: pull.events(),
+            body: pull.body.unwrap_or_default(),
+            comments: comments.into_iter().map(IssueComment::from).collect(),
+            reviews: reviews.into_iter().map(Review::from).collect(),
+            review_comments: review_comments.into_iter().map(ReviewComment::from).collect(),
         })
     }
 
@@ -337,9 +366,11 @@ impl GitHub {
         &self,
         repo_full_name: &str,
         number: u64,
-    ) -> Result<Vec<crate::discussion::IssueComment>, Error> {
-        self.list_all(&format!("/repos/{repo_full_name}/issues/{number}/comments"))
-            .await
+    ) -> Result<Vec<IssueComment>, Error> {
+        let comments: Vec<IssueCommentPayload> = self
+            .list_all(&format!("/repos/{repo_full_name}/issues/{number}/comments"))
+            .await?;
+        Ok(comments.into_iter().map(IssueComment::from).collect())
     }
 
     /// The pull request whose head is `owner:branch` on `repo_full_name`,
