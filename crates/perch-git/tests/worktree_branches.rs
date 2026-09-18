@@ -8,7 +8,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use perch_git::{Preparer, RepoId, Store};
 
@@ -214,31 +213,6 @@ async fn forgetting_deletes_the_branch() {
 
     f.preparer.delete_branch(&f.bare(), "perch/pr-7").await.unwrap();
     assert!(!f.branches().contains("perch/pr-7"));
-}
-
-#[tokio::test]
-async fn stale_worktrees_reports_only_old_directories() {
-    let f = Fixture::new();
-    let head = f.push_commit("pr");
-    let checkout = f.prepare(&head).await;
-
-    assert!(
-        f.preparer.stale_worktrees(Duration::from_secs(60)).is_empty(),
-        "a directory made just now is not stale"
-    );
-
-    let long_ago = std::time::SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
-    std::fs::File::open(&checkout.worktree)
-        .unwrap()
-        .set_modified(long_ago)
-        .unwrap();
-
-    let stale = f.preparer.stale_worktrees(Duration::from_secs(14 * 24 * 60 * 60));
-    assert_eq!(stale, vec![checkout.worktree.clone()]);
-    assert!(
-        checkout.worktree.exists(),
-        "reporting a stale directory must not remove it"
-    );
 }
 
 #[tokio::test]

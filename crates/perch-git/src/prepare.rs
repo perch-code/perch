@@ -105,24 +105,8 @@ impl Preparer {
         let bare = self.ensure_bare(id, &mut on_step).await?;
 
         on_step(Step::Fetching);
-
-        // The pull request head and the base branch, in a namespace of our
-        // own so these refs can never collide with the user's.
-        let head_ref = format!("refs/perch/pull/{number}/head");
+        self.fetch_pull(&bare, number, base_ref).await?;
         let base_local = format!("refs/perch/base/{number}");
-        self.git
-            .run(
-                Some(&bare),
-                [
-                    "fetch".to_string(),
-                    "--no-tags".to_string(),
-                    "origin".to_string(),
-                    format!("+refs/pull/{number}/head:{head_ref}"),
-                    format!("+refs/heads/{base_ref}:{base_local}"),
-                ],
-                FETCH_TIMEOUT,
-            )
-            .await?;
 
         let merge_base = self
             .git
@@ -405,6 +389,26 @@ impl Preparer {
             .is_ok()
     }
 
+    /// Fetch a pull request's head and its base branch into the bare clone,
+    /// in a namespace of our own so these refs can never collide with the
+    /// user's: `refs/perch/pull/N/head` and `refs/perch/base/N`.
+    pub async fn fetch_pull(&self, bare: &Path, number: u64, base_ref: &str) -> Result<(), Error> {
+        self.git
+            .run(
+                Some(bare),
+                [
+                    "fetch".to_string(),
+                    "--no-tags".to_string(),
+                    "origin".to_string(),
+                    format!("+refs/pull/{number}/head:refs/perch/pull/{number}/head"),
+                    format!("+refs/heads/{base_ref}:refs/perch/base/{number}"),
+                ],
+                FETCH_TIMEOUT,
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Whether a worktree has uncommitted changes, untracked files included.
     ///
     /// This is the check that makes it safe for anything to write into a
@@ -440,29 +444,6 @@ impl Preparer {
             .run(Some(bare), ["branch", "-D", branch], WORKTREE_TIMEOUT)
             .await?;
         Ok(())
-    }
-
-    /// Worktree directories not modified for `max_age`.
-    ///
-    /// Reports and does nothing else. Only the caller holds the records
-    /// that say which of these to archive and which are unknown to it.
-    pub fn stale_worktrees(&self, max_age: Duration) -> Vec<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(self.store.worktrees_dir()) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .filter(|p| {
-                std::fs::metadata(p)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .map(|age| age > max_age)
-                    .unwrap_or(false)
-            })
-            .collect()
     }
 
     /// Every directory under the worktrees root, whether or not a record

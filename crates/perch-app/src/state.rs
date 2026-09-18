@@ -669,8 +669,11 @@ impl AppState {
 
 }
 
-/// Whether a notification is about an item: same repository, same kind,
-/// same number.
+/// Whether a notification is about an item in service: same repository as
+/// the subject's own, which for a pull request from a fork is the
+/// upstream, same kind, same number. An archived item does not claim its
+/// notifications; they show in the inbox, where the reader can still see
+/// what happened to a thing they put away.
 pub fn resolves_to_item(thread: &Thread, items: &[Item]) -> bool {
     let kind = match thread.subject.kind {
         SubjectKind::PullRequest => ItemKind::PullRequest,
@@ -679,7 +682,78 @@ pub fn resolves_to_item(thread: &Thread, items: &[Item]) -> bool {
     };
     let Some(number) = thread.number_hint() else { return false };
     items.iter().any(|i| {
-        i.repo_full_name.eq_ignore_ascii_case(&thread.repository.full_name)
-            && i.subject.as_ref().is_some_and(|s| s.kind() == kind && s.number() == number)
+        !i.is_archived()
+            && i.subject.as_ref().is_some_and(|s| {
+                s.repo_full_name().eq_ignore_ascii_case(&thread.repository.full_name)
+                    && s.kind() == kind
+                    && s.number() == number
+            })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use perch_github::{Reason, Repository, Subject, SubjectKind};
+
+    fn thread(repo: &str, number: u64) -> Thread {
+        Thread {
+            id: number.to_string(),
+            unread: true,
+            reason: Reason::Subscribed,
+            updated_at: "2026-09-17T18:00:00Z".parse().unwrap(),
+            last_read_at: None,
+            subject: Subject {
+                title: "t".into(),
+                kind: SubjectKind::PullRequest,
+                url: Some(format!("https://api.github.com/repos/{repo}/pulls/{number}")),
+                latest_comment_url: None,
+            },
+            repository: Repository { full_name: repo.into(), owner_avatar_url: String::new() },
+        }
+    }
+
+    fn item(checkout_repo: &str, pr_repo: &str, number: u64) -> Item {
+        let mut item = Item::new("p", checkout_repo, jiff::Timestamp::UNIX_EPOCH);
+        item.subject = Some(perch_github::ItemSubject::PullRequest(perch_github::PullRequest {
+            number,
+            title: "t".into(),
+            author_login: "a".into(),
+            author_avatar_url: String::new(),
+            head_sha: "h".into(),
+            head_ref: "feature".into(),
+            base_sha: "b".into(),
+            base_ref: "main".into(),
+            draft: false,
+            merged: false,
+            state: "open".into(),
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            repo_full_name: pr_repo.into(),
+            head_repo_full_name: Some(checkout_repo.into()),
+            updated_at: None,
+            review_requested: false,
+            checks: None,
+            review_decision: None,
+        }));
+        item
+    }
+
+    #[test]
+    fn a_notification_resolves_by_the_subject_s_repository() {
+        // The checkout is of a fork; the pull request, and the
+        // notification, are upstream's.
+        let items = vec![item("chris/widgets", "acme/widgets", 7)];
+        assert!(resolves_to_item(&thread("acme/widgets", 7), &items));
+        assert!(!resolves_to_item(&thread("chris/widgets", 7), &items));
+        assert!(!resolves_to_item(&thread("acme/widgets", 8), &items));
+    }
+
+    #[test]
+    fn an_archived_item_does_not_claim_its_notifications() {
+        let mut archived = item("acme/widgets", "acme/widgets", 7);
+        archived.archived_at = Some(jiff::Timestamp::UNIX_EPOCH);
+        assert!(!resolves_to_item(&thread("acme/widgets", 7), &[archived]));
+    }
 }

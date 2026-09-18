@@ -486,6 +486,27 @@ async fn cutting_the_same_name_twice_numbers_the_second() {
 }
 
 #[tokio::test]
+async fn a_cut_never_removes_a_checkout_at_its_path() {
+    // Two branch names map to one directory once slashes become dashes.
+    // A worktree already there, with work in it, is someone's; the cut
+    // takes the next name rather than clearing the path.
+    let f = StoreFixture::new("main");
+    f.preparer.ensure_home(&f.id, "main").await.unwrap();
+    let from = home_ref("main");
+
+    let first = f.preparer.cut_branch(&f.id, "perch/issue-42", &from).await.unwrap();
+    std::fs::write(first.worktree.join("draft.txt"), "keep me").unwrap();
+    assert_eq!(first.worktree, f.store.worktree_path(&f.id, "perch-issue-42"));
+
+    let second = f.preparer.cut_branch(&f.id, "perch-issue-42", &from).await.unwrap();
+
+    assert_eq!(second.branch, "perch-issue-42-2");
+    assert_ne!(second.worktree, first.worktree);
+    assert_eq!(std::fs::read_to_string(first.worktree.join("draft.txt")).unwrap(), "keep me");
+    assert_eq!(git(&first.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]), "perch/issue-42");
+}
+
+#[tokio::test]
 async fn a_fork_can_be_cut_from_a_pull_request_s_head() {
     let f = StoreFixture::new("main");
     // A pull request head the way `prepare` fetches it.

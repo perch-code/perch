@@ -25,6 +25,8 @@ pub struct WorktreeEntry {
     /// The repository's own working directory, the one `git clone` made,
     /// as opposed to a linked worktree.
     pub is_main: bool,
+    /// Git still has a record of it but the directory is gone.
+    pub prunable: bool,
 }
 
 /// What a root has.
@@ -42,7 +44,7 @@ pub struct RootScan {
 ///
 /// Entries are blank-line separated stanzas of `worktree <path>`, `HEAD
 /// <sha>`, and one of `branch <ref>`, `detached` or `bare`; `locked` and
-/// `prunable` lines may follow and are ignored. The first stanza is the
+/// `prunable` lines may follow; only `prunable` matters. The first stanza is the
 /// main worktree. A `bare` stanza is the repository itself and has no
 /// working directory, so it is not an entry.
 pub fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeEntry> {
@@ -54,6 +56,7 @@ pub fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeEntry> {
         let mut head = None;
         let mut branch = None;
         let mut bare = false;
+        let mut prunable = false;
 
         for line in stanza.lines() {
             if let Some(p) = line.strip_prefix("worktree ") {
@@ -65,6 +68,8 @@ pub fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeEntry> {
                 branch = Some(r.strip_prefix("refs/heads/").unwrap_or(r).to_string());
             } else if line == "bare" {
                 bare = true;
+            } else if line == "prunable" || line.starts_with("prunable ") {
+                prunable = true;
             }
         }
 
@@ -79,6 +84,7 @@ pub fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeEntry> {
             branch,
             head_sha: head.unwrap_or_default(),
             is_main,
+            prunable,
         });
     }
 
@@ -262,6 +268,11 @@ worktree /Users/t/Code/widgets-feature
 HEAD 004b0093ac55cb81de58e4859227dd657a01ca14
 branch refs/heads/feature/x
 locked
+
+worktree /Users/t/Code/widgets-gone
+HEAD 004b0093ac55cb81de58e4859227dd657a01ca14
+branch refs/heads/feature/gone
+prunable gitdir file points to non-existent location
 ";
 
     const BARE_LISTING: &str = "\
@@ -277,7 +288,7 @@ branch refs/heads/topic
     #[test]
     fn the_first_stanza_is_the_main_worktree() {
         let entries = parse_worktree_list(LISTING);
-        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].path, PathBuf::from("/Users/t/Code/widgets"));
         assert!(entries[0].is_main);
         assert_eq!(entries[0].branch.as_deref(), Some("main"));
@@ -296,6 +307,14 @@ branch refs/heads/topic
             entries[2].head_sha,
             "004b0093ac55cb81de58e4859227dd657a01ca14"
         );
+    }
+
+    #[test]
+    fn a_prunable_entry_says_so() {
+        let entries = parse_worktree_list(LISTING);
+        assert!(entries[3].prunable);
+        assert_eq!(entries[3].branch.as_deref(), Some("feature/gone"));
+        assert!(entries[..3].iter().all(|e| !e.prunable));
     }
 
     #[test]

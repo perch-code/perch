@@ -529,7 +529,7 @@ async fn run(
     // hook while this ran would have no row yet, and would be taken for a
     // stray and removed from under it. It is a directory listing and at
     // most a prune, so the inbox is not kept waiting.
-    reconcile_checkouts(&ctx).await;
+    reconcile_checkouts(&ctx, reset).await;
     {
         // Then put away whatever nobody has opened in a fortnight. Archived,
         // not deleted: the branch and the row stay, so restoring is a
@@ -1041,10 +1041,17 @@ fn move_item(ctx: &Ctx, id: &str, project_id: Option<String>, new_project: Optio
     let target = match (project_id, new_project) {
         (Some(id), _) => id,
         (None, Some(name)) if !name.trim().is_empty() => {
+            // A name that is a project already, in any case, is that
+            // project; upserting over it would lose its repositories.
             let project = Project::implicit(&name);
-            if let Some(Err(e)) = ctx.with_cache(|c| c.upsert_project(&project)) {
-                ctx.notice(format!("Could not make the project: {e}"));
-                return;
+            let exists = ctx
+                .with_cache(|c| c.load_projects().ok().is_some_and(|ps| ps.iter().any(|p| p.id == project.id)))
+                .unwrap_or(false);
+            if !exists {
+                if let Some(Err(e)) = ctx.with_cache(|c| c.upsert_project(&project)) {
+                    ctx.notice(format!("Could not make the project: {e}"));
+                    return;
+                }
             }
             project.id
         }
@@ -1083,7 +1090,7 @@ fn drop_empty_implicit(cache: &Cache, project_id: &str) {
 /// deleted it by hand. A directory under the store's worktrees that no
 /// item claims is removed and pruned: nothing can open it, and it is how
 /// what an older schema left behind gets retired.
-async fn reconcile_checkouts(ctx: &Ctx) {
+async fn reconcile_checkouts(ctx: &Ctx, reset: bool) {
     let Some(items) = ctx.with_cache(|c| c.load_items().ok()).flatten() else {
         return;
     };
@@ -1106,6 +1113,17 @@ async fn reconcile_checkouts(ctx: &Ctx) {
         }
     }
 
+    // Directories no row claims. After a reset they are every checkout
+    // there was, and they stay: opening the pull request again finds its
+    // directory where it left it. Otherwise a clean one is a leftover and
+    // goes; one with uncommitted work in it is somebody's, whatever the
+    // table says, and is left alone.
+    if reset {
+        if changed {
+            ctx.send_items();
+        }
+        return;
+    }
     let known: std::collections::HashSet<std::path::PathBuf> = items
         .iter()
         .filter_map(|i| i.checkout.as_ref().map(|c| c.path.clone()))
@@ -1114,6 +1132,19 @@ async fn reconcile_checkouts(ctx: &Ctx) {
     for dir in ctx.preparer.worktree_dirs() {
         if known.contains(&dir) {
             continue;
+        }
+        if dir.join(".git").exists() {
+            match ctx.preparer.is_dirty(&dir).await {
+                Ok(false) => {}
+                Ok(true) => {
+                    tracing::info!(path = %dir.display(), "leaving an unclaimed worktree with changes in it");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(path = %dir.display(), error = %e, "could not tell if an unclaimed worktree is dirty; leaving it");
+                    continue;
+                }
+            }
         }
         tracing::info!(path = %dir.display(), "removing a worktree directory no item claims");
         if let Err(e) = std::fs::remove_dir_all(&dir) {
@@ -1152,30 +1183,23 @@ async fn prune_every_clone(ctx: &Ctx) {
 
 /// Archive items whose owned checkout has sat unopened for too long. An
 /// issue, or a checkout under a root, is archived only by hand.
+///
+/// Age is the row's `last_opened_at`, which is what the rule is about. A
+/// directory's mtime is not: an agent reading it, or a fetch touching
+/// `.git`, would keep a forgotten checkout young for ever.
 async fn sweep_items(ctx: &Ctx) {
-    let stale = ctx.preparer.stale_worktrees(CHECKOUT_MAX_AGE);
-    if stale.is_empty() {
-        return;
-    }
     let items = ctx.with_cache(|c| c.load_items().ok()).flatten().unwrap_or_default();
+    let cutoff = Timestamp::now() - jiff::SignedDuration::try_from(CHECKOUT_MAX_AGE).unwrap_or_default();
 
-    for path in stale {
-        let owner = items
-            .iter()
-            .find(|i| i.checkout.as_ref().is_some_and(|c| c.path == path && c.owned));
-        match owner {
-            Some(item) if !item.is_archived() => match archive_item(ctx, &item.id).await {
-                Ok(()) => tracing::info!(id = %item.id, "archived a stale checkout"),
-                // Dirty, most likely. It stays; the reader has work in it.
-                Err(message) => tracing::info!(id = %item.id, %message, "left a stale checkout alone"),
-            },
-            Some(_) => {}
-            None => {
-                // Reconciliation runs first, so this is a directory that
-                // appeared in between. Same treatment.
-                tracing::info!(path = %path.display(), "removing a stale worktree directory no item claims");
-                let _ = std::fs::remove_dir_all(&path);
-            }
+    for item in &items {
+        let owned = item.checkout.as_ref().is_some_and(|c| c.owned && c.on_disk);
+        if !owned || item.is_archived() || item.last_opened_at > cutoff {
+            continue;
+        }
+        match archive_item(ctx, &item.id).await {
+            Ok(()) => tracing::info!(id = %item.id, "archived a stale checkout"),
+            // Dirty, most likely. It stays; the reader has work in it.
+            Err(message) => tracing::info!(id = %item.id, %message, "left a stale checkout alone"),
         }
     }
 }
@@ -1692,12 +1716,29 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
             None if thread.reason == Reason::ReviewRequested && kind == ItemKind::PullRequest => {
                 match ctx.github.fetch_pull_request(repo, number).await {
                     Ok(pr) => {
-                        let project = ctx.project_for(&pr.repo_full_name);
-                        let mut item = Item::new(&project, &pr.repo_full_name, Timestamp::now());
+                        // A checkout of the reader's own on the head branch
+                        // is this pull request's item already; it takes
+                        // the subject rather than a second row being made.
+                        let head_repo = pr.head_repo_full_name.clone().unwrap_or_else(|| pr.repo_full_name.clone());
+                        let on_branch = ctx
+                            .with_cache(|c| c.find_item_by_branch(&head_repo, &pr.head_ref).ok().flatten())
+                            .flatten()
+                            .filter(|i| i.subject.is_none());
+                        let (mut item, is_new) = match on_branch {
+                            Some(item) => (item, false),
+                            None => {
+                                let project = ctx.project_for(&pr.repo_full_name);
+                                (Item::new(&project, &pr.repo_full_name, Timestamp::now()), true)
+                            }
+                        };
+                        if let Some(c) = item.checkout.as_mut() {
+                            c.base_ref = pr.base_ref.clone();
+                        }
                         item.subject = Some(ItemSubject::PullRequest(pr));
-                        match ctx.with_cache(|c| c.insert_item(&item)) {
+                        let written = ctx.with_cache(|c| if is_new { c.insert_item(&item) } else { c.update_item(&item) });
+                        match written {
                             Some(Ok(())) => {
-                                tracing::info!(repo, number, "review request made an item");
+                                tracing::info!(repo, number, is_new, "review request made an item");
                                 changed = true;
                                 item
                             }
@@ -1744,9 +1785,14 @@ async fn scan_roots(ctx: &Ctx) -> bool {
     let projects = ctx.with_cache(|c| c.load_projects().unwrap_or_default()).unwrap_or_default();
     let git = ctx.preparer.git();
     let mut changed = false;
-    // Which unowned items were seen, so the rest can be judged gone.
+    // Which unowned items were seen, so the rest can be judged gone. A
+    // root that could not be scanned means the rest cannot be: its
+    // worktrees are not in any other root's listing when it is a clone of
+    // its own, and which repository it was for is exactly what the scan
+    // would have said.
     let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     let mut scanned_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut every_root_scanned = true;
 
     for project in &projects {
         for root in &project.roots {
@@ -1754,6 +1800,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                 Ok(s) => s,
                 Err(e) => {
                     ctx.notice(format!("{}: {e}", root.display()));
+                    every_root_scanned = false;
                     continue;
                 }
             };
@@ -1768,7 +1815,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
             scanned_repos.insert(repo.to_lowercase());
             for entry in &scan.entries {
                 let Some(branch) = entry.branch.clone() else { continue };
-                if branch == scan.default_branch {
+                if branch == scan.default_branch || entry.prunable || !entry.path.join(".git").exists() {
                     continue;
                 }
                 let path = entry.path.canonicalize().unwrap_or_else(|_| entry.path.clone());
@@ -1780,12 +1827,23 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                 match existing {
                     Some(mut item) => {
                         let Some(c) = item.checkout.as_mut() else { continue };
+                        if c.owned {
+                            continue;
+                        }
                         let moved = c.head_sha != entry.head_sha || !c.on_disk || c.churn != churn || c.path != path;
-                        if moved && !c.owned {
+                        // A row the scan put away, because the branch was
+                        // not checked out anywhere, comes back when it is.
+                        // One the reader archived keeps its directory in
+                        // the row and stays put.
+                        let returned = item.archived_at.is_some() && !c.on_disk;
+                        if moved {
                             c.head_sha = entry.head_sha.clone();
                             c.on_disk = true;
                             c.churn = churn;
                             c.path = path;
+                            if returned {
+                                item.archived_at = None;
+                            }
                             ctx.with_cache(|cache| cache.update_item(&item));
                             changed = true;
                         }
@@ -1812,7 +1870,16 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         }
     }
 
-    // Unowned items in scanned repositories whose directory was not seen.
+    if !every_root_scanned {
+        return changed;
+    }
+
+    // Unowned items in scanned repositories whose branch no worktree has.
+    // A directory that is gone takes its row with it, unless the row has
+    // threads, which are worth an archived row. A directory still there on
+    // another branch is the reader switching; the row is put away with its
+    // directory marked gone, and the scan brings it back when the branch
+    // is checked out again.
     let items = ctx.with_cache(|c| c.load_items().unwrap_or_default()).unwrap_or_default();
     for item in items {
         let Some(c) = item.checkout.as_ref() else { continue };
@@ -1823,14 +1890,11 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         if seen.contains(&path) || (item.is_archived() && !c.on_disk) {
             continue;
         }
-        if c.path.join(".git").exists() {
-            // Still there, on some other branch than we knew; the scan will
-            // have made a row for that branch. Leave this one for the rule.
-        }
+        let still_there = c.path.join(".git").exists();
         let has_threads = ctx
             .with_cache(|cache| cache.load_comment_threads(&item.id).map(|t| !t.is_empty()).unwrap_or(false))
             .unwrap_or(false);
-        if has_threads {
+        if still_there || has_threads {
             let mut item = item;
             if let Some(c) = item.checkout.as_mut() {
                 c.on_disk = false;
@@ -1874,22 +1938,42 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
             match ctx.github.find_pull_for_branch(&repo, head_owner, &checkout.branch, etag.as_deref()).await {
                 Ok(perch_github::PullLookup::Unchanged) => {}
                 Ok(perch_github::PullLookup::Answer { pull, etag }) => {
-                    if let Some(etag) = etag {
-                        ctx.with_cache(|c| c.set_meta(&key, &etag));
-                    }
-                    if let Some(pr) = pull {
-                        tracing::info!(item = %item.id, number = pr.number, "branch gained a pull request");
-                        let mut item = item.clone();
-                        if let Some(c) = item.checkout.as_mut() {
-                            c.base_ref = pr.base_ref.clone();
+                    // `head=owner:branch` matches a branch of that name on
+                    // any of the owner's repositories with a pull request
+                    // here; only one on this item's repository is this
+                    // branch.
+                    let pull = pull.filter(|pr| {
+                        pr.head_repo_full_name
+                            .as_deref()
+                            .is_none_or(|h| h.eq_ignore_ascii_case(&item.repo_full_name))
+                    });
+                    let Some(pr) = pull else {
+                        if let Some(etag) = etag {
+                            ctx.with_cache(|c| c.set_meta(&key, &etag));
                         }
-                        item.subject = Some(ItemSubject::PullRequest(*pr));
-                        match ctx.with_cache(|c| c.update_item(&item)) {
-                            Some(Err(e)) => tracing::warn!(error = %e, "could not attach the pull request"),
-                            _ => changed = true,
-                        }
+                        continue;
+                    };
+                    tracing::info!(item = %item.id, number = pr.number, "branch gained a pull request");
+                    // The row as it is now, not as it was when the loop
+                    // began: a click may have opened it since.
+                    let Some(mut item) = ctx.item(&item.id) else { break };
+                    if item.subject.is_some() {
                         break;
                     }
+                    if let Some(c) = item.checkout.as_mut() {
+                        c.base_ref = pr.base_ref.clone();
+                    }
+                    item.subject = Some(ItemSubject::PullRequest(*pr));
+                    match ctx.with_cache(|c| c.update_item(&item)) {
+                        Some(Err(e)) => tracing::warn!(error = %e, "could not attach the pull request"),
+                        _ => {
+                            if let Some(etag) = etag {
+                                ctx.with_cache(|c| c.set_meta(&key, &etag));
+                            }
+                            changed = true;
+                        }
+                    }
+                    break;
                 }
                 Err(e) => {
                     tracing::info!(item = %item.id, repo, error = %e, "pull request lookup failed");
@@ -2098,8 +2182,14 @@ async fn ingest(ctx: &Ctx, messages: Vec<perch_knowledge::Message>) -> Result<us
 ///
 /// The item is found or made on the way, and every open refreshes what
 /// its row knows. A pull request whose head branch matches a checkout of
-/// the reader's own in the same repository attaches to that item rather
+/// the reader's own on the head repository attaches to that item rather
 /// than making a second one.
+///
+/// An item that has a checkout keeps it, wherever it is and whatever
+/// branch it is on: a root checkout is read where it stands, a branch
+/// Perch cut for an issue is read as it is, and only the branch Perch cut
+/// for the pull request itself is brought up to its head. A fresh item
+/// gets `perch/pr-N`.
 async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
     let events = &ctx.events;
     macro_rules! fail {
@@ -2148,57 +2238,59 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     };
 
     // The item: the one for this pull request, else a checkout of the
-    // reader's own on its head branch, else a new one.
+    // reader's own on its head branch in the head repository, else a new
+    // one. The head repository is the fork when there is one; a branch of
+    // the same name on the upstream is someone else's.
+    let head_repo = pull_request
+        .head_repo_full_name
+        .clone()
+        .unwrap_or_else(|| pull_request.repo_full_name.clone());
     let existing = match existing {
         Some(item) => Some(item),
         None => ctx
-            .with_cache(|c| {
-                c.find_item_by_branch(&pull_request.repo_full_name, &pull_request.head_ref)
-                    .ok()
-                    .flatten()
-            })
+            .with_cache(|c| c.find_item_by_branch(&head_repo, &pull_request.head_ref).ok().flatten())
             .flatten()
             .filter(|i| i.subject.is_none()),
     };
-    let own_checkout = existing
-        .as_ref()
-        .and_then(|i| i.checkout.as_ref())
-        .filter(|c| !c.owned)
-        .cloned();
-    let existing_churn = existing.as_ref().and_then(|i| i.checkout.as_ref()).and_then(|c| c.churn);
-    let branch = match &own_checkout {
-        Some(c) => c.branch.clone(),
-        None => format!("perch/pr-{number}"),
-    };
+    let kept = existing.as_ref().and_then(|i| i.checkout.clone());
+    let pr_branch = format!("perch/pr-{number}");
+    let branch = kept.as_ref().map(|c| c.branch.clone()).unwrap_or_else(|| pr_branch.clone());
 
-    let checkout = if let Some(own) = &own_checkout {
-        open_own_checkout(ctx, &repo, own, &pull_request.base_ref).await
-    } else if offline {
-        let path = existing.as_ref().and_then(|i| i.checkout.as_ref()).map(|c| c.path.clone());
-        reopen_from_disk(ctx, &repo, number, &branch, path).await
-    } else {
-        let progress = events.clone();
-        let label = repo.full_name();
-        ctx.preparer
-            .prepare(
-                &repo,
-                number,
-                &pull_request.head_sha,
-                &pull_request.base_ref,
-                &branch,
-                move |step| {
-                    let (message, percent) = match step {
-                        perch_git::Step::Cloning { phase, percent } => {
-                            (format!("Cloning {label}: {phase}"), percent)
-                        }
-                        perch_git::Step::Fetching => ("Fetching the pull request".into(), None),
-                        perch_git::Step::CreatingWorktree => ("Checking out the files".into(), None),
-                        perch_git::Step::ComputingDiff => ("Computing the diff".into(), None),
-                    };
-                    let _ = progress.send(Event::ReviewProgress { message, percent });
-                },
-            )
-            .await
+    let checkout = match &kept {
+        Some(own) if !own.owned => open_own_checkout(ctx, &repo, own, &pull_request.base_ref).await,
+        _ if offline => {
+            let path = kept.as_ref().map(|c| c.path.clone());
+            reopen_from_disk(ctx, &repo, number, &branch, path).await
+        }
+        // Cut for something else, an issue most likely, and since pushed
+        // as this pull request. Read as it is: its commits are the reader's.
+        Some(owned) if owned.branch != pr_branch => {
+            open_owned_branch_for_pull(ctx, &repo, owned, number, &pull_request.head_sha, &pull_request.base_ref).await
+        }
+        _ => {
+            let progress = events.clone();
+            let label = repo.full_name();
+            ctx.preparer
+                .prepare(
+                    &repo,
+                    number,
+                    &pull_request.head_sha,
+                    &pull_request.base_ref,
+                    &branch,
+                    move |step| {
+                        let (message, percent) = match step {
+                            perch_git::Step::Cloning { phase, percent } => {
+                                (format!("Cloning {label}: {phase}"), percent)
+                            }
+                            perch_git::Step::Fetching => ("Fetching the pull request".into(), None),
+                            perch_git::Step::CreatingWorktree => ("Checking out the files".into(), None),
+                            perch_git::Step::ComputingDiff => ("Computing the diff".into(), None),
+                        };
+                        let _ = progress.send(Event::ReviewProgress { message, percent });
+                    },
+                )
+                .await
+        }
     };
 
     let checkout = match checkout {
@@ -2207,14 +2299,16 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     };
 
     // The row. Every column that can move is rewritten from what just
-    // happened, and an archived row is back in service.
+    // happened, and an archived row is back in service. The row is read
+    // again first: the network and git took a while, and a poll may have
+    // marked it in the meantime.
     let now = Timestamp::now();
     let is_new = existing.is_none();
     let mut item = match existing {
-        Some(item) => item,
+        Some(item) => ctx.item(&item.id).unwrap_or(item),
         None => {
             let project = ctx.project_for(&pull_request.repo_full_name);
-            Item::new(&project, &pull_request.repo_full_name, now)
+            Item::new(&project, &head_repo, now)
         }
     };
     // CI turning red is attention. Nothing else about the snapshot is.
@@ -2226,9 +2320,9 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         base_ref: pull_request.base_ref.clone(),
         head_sha: checkout.head_sha.clone(),
         path: checkout.worktree.clone(),
-        owned: own_checkout.is_none(),
+        owned: kept.as_ref().is_none_or(|c| c.owned),
         on_disk: true,
-        churn: existing_churn,
+        churn: kept.as_ref().and_then(|c| c.churn),
     });
     item.archived_at = None;
     item.last_opened_at = now;
@@ -2315,6 +2409,39 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     true
 }
 
+/// A branch Perch cut, read against a pull request that was opened from
+/// it. The pull request's refs are fetched so the base is known, the
+/// directory comes back if it was archived, and nothing is reset: the
+/// commits on it are the reader's, pushed or not. When the pull request
+/// has moved past what is here, the review says so.
+async fn open_owned_branch_for_pull(
+    ctx: &Ctx,
+    repo: &RepoId,
+    owned: &ItemCheckout,
+    number: u64,
+    pr_head_sha: &str,
+    base_ref: &str,
+) -> Result<perch_git::Checkout, perch_git::Error> {
+    let events = &ctx.events;
+    let _ = events.send(Event::ReviewProgress { message: "Fetching the pull request".into(), percent: None });
+    let bare = ctx.preparer.ensure_bare(repo, |_| {}).await?;
+    ctx.preparer.fetch_pull(&bare, number, base_ref).await?;
+    let _ = events.send(Event::ReviewProgress { message: "Checking out the files".into(), percent: None });
+    let mut checkout = open_owned_branch(ctx, repo, owned).await?;
+    let base = format!("refs/perch/base/{number}");
+    checkout.merge_base = ctx
+        .preparer
+        .git()
+        .run(Some(&bare), ["merge-base", &base, &checkout.head_sha], Duration::from_secs(30))
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or(checkout.merge_base);
+    if checkout.head_sha != pr_head_sha {
+        checkout.stale = Some(pr_head_sha.to_string());
+    }
+    Ok(checkout)
+}
+
 /// A checkout under one of the reader's roots, opened where it is.
 ///
 /// Nothing is fetched into it and nothing is reset. The diff is against
@@ -2331,6 +2458,17 @@ async fn open_own_checkout(
     let timeout = Duration::from_secs(30);
     if !own.path.join(".git").exists() {
         return Err(perch_git::Error::Io(format!("{} is not there any more", own.path.display())));
+    }
+    // The directory is the reader's to switch branches in, and the item
+    // is about one branch. Showing another's files under its name would
+    // be worse than saying so.
+    let on_branch = git.run(Some(&own.path), ["rev-parse", "--abbrev-ref", "HEAD"], timeout).await?.trim().to_string();
+    if on_branch != own.branch {
+        return Err(perch_git::Error::Io(format!(
+            "{} has {on_branch} checked out now, not {}",
+            own.path.display(),
+            own.branch
+        )));
     }
     let head_sha = git.run(Some(&own.path), ["rev-parse", "HEAD"], timeout).await?.trim().to_string();
     let remote_base = format!("origin/{base_ref}");
