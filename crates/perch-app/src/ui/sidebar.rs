@@ -10,12 +10,14 @@ use crate::review::model::ReviewState;
 use crate::state::{AppState, Screen, WorktreeSegment};
 use crate::theme;
 use crate::ui::widgets::{avatar, count_badge, section_heading, sidebar_row};
+use crate::ui::worktrees::OpenWorktree;
+use perch_github::Worktree;
 
 /// The navigation panel: views, reason filters, and the repository list.
 ///
 /// Sits beside the activity rail and hides when the rail's current entry is
 /// clicked, the way an editor's explorer does.
-pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
+pub fn nav_panel(state: AppState, review: ReviewState, on_open: OpenWorktree) -> impl IntoView {
     // A review belongs to the worktrees section, whichever screen it was
     // opened from, so the panel beside it lists worktrees. The rail entry
     // follows the same rule, and the two must agree.
@@ -38,13 +40,7 @@ pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
             ))
             .style(|s| s.size_full().flex_col())
             .into_any(),
-            Screen::Worktrees => Stack::vertical((
-                Empty::new().style(|s| s.height(8.0).width_full().flex_shrink(0.0_f32)),
-                segment_row(state, review, WorktreeSegment::Active),
-                segment_row(state, review, WorktreeSegment::Archived),
-            ))
-            .style(|s| s.size_full().flex_col().gap(1.0))
-            .into_any(),
+            Screen::Worktrees => worktrees_panel(state, review, on_open.clone()).into_any(),
         },
     )
     .style(|s| {
@@ -88,6 +84,146 @@ fn view_picker(state: AppState, review: ReviewState) -> impl IntoView {
     // The panel's rows carry their own 6px side margin; this lines the button
     // up with them rather than with the panel's edge.
     .style(|s| s.width_full().items_center().padding_horiz(6.0))
+}
+
+/// The worktrees panel: every active checkout under its repository, the way
+/// an editor lists open projects, with Archived as one row at the bottom.
+///
+/// The worktree being read is lifted to the top of its repository and wears
+/// the card, so the panel always says where the reader is.
+fn worktrees_panel(state: AppState, review: ReviewState, on_open: OpenWorktree) -> impl IntoView {
+    let open_id = move || review.worktree.with(|w| w.as_ref().map(|w| w.id.clone()));
+
+    let groups = move || {
+        let open = open_id();
+        let mut groups = state.worktree_groups(WorktreeSegment::Active);
+        for (_, rows) in &mut groups {
+            if let Some(i) = rows.iter().position(|w| Some(&w.id) == open.as_ref()) {
+                let row = rows.remove(i);
+                rows.insert(0, row);
+            }
+        }
+        groups
+    };
+
+    Stack::vertical((
+        Empty::new().style(|s| s.height(4.0).width_full().flex_shrink(0.0_f32)),
+        dyn_stack(
+            groups,
+            |(repo, rows)| (repo.clone(), rows.iter().map(|w| w.id.clone()).collect::<Vec<_>>()),
+            move |(repo, rows)| repo_group(state, review, repo, rows, on_open.clone()),
+        )
+        .style(|s| s.flex_col().width_full().padding_bottom(10.0))
+        .scroll()
+        .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
+        Empty::new().style(|s| s.height(1.0).width_full().background(theme::BORDER_MUTED)),
+        Empty::new().style(|s| s.height(6.0).width_full().flex_shrink(0.0_f32)),
+        segment_row(state, review, WorktreeSegment::Archived),
+        Empty::new().style(|s| s.height(6.0).width_full().flex_shrink(0.0_f32)),
+    ))
+    .style(|s| s.size_full().flex_col())
+}
+
+fn repo_group(
+    state: AppState,
+    review: ReviewState,
+    repo: String,
+    rows: Vec<Worktree>,
+    on_open: OpenWorktree,
+) -> impl IntoView {
+    // The owner is in every row's branch and in the card on the screen
+    // beside this; the heading only needs the name.
+    let name = repo.rsplit('/').next().unwrap_or(&repo).to_string();
+
+    Stack::vertical((
+        Label::derived(move || name.clone()).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::FG_SUBTLE)
+                .padding_horiz(16.0)
+                .padding_top(14.0)
+                .padding_bottom(5.0)
+                .text_ellipsis()
+                .selectable(false)
+        }),
+        dyn_stack(
+            move || rows.clone(),
+            |w| w.id.clone(),
+            move |w| worktree_row(state, review, w, on_open.clone()),
+        )
+        .style(|s| s.flex_col().width_full().gap(1.0)),
+    ))
+    .style(|s| s.flex_col().width_full())
+}
+
+/// One checkout: a dot in the pull request's colour, and its title.
+fn worktree_row(
+    state: AppState,
+    review: ReviewState,
+    worktree: Worktree,
+    on_open: OpenWorktree,
+) -> impl IntoView {
+    use floem::peniko::Color;
+    use floem::text::FontWeight;
+
+    // One closure per use: each captures a String, so none of them is Copy.
+    let (id_a, id_b, id_c, id_d) =
+        (worktree.id.clone(), worktree.id.clone(), worktree.id.clone(), worktree.id.clone());
+    let is = |id: String| move || review.worktree.with(|w| w.as_ref().is_some_and(|w| w.id == id));
+    let (selected_dot, selected_text, selected_click, selected_box) =
+        (is(id_a), is(id_b), is(id_c), is(id_d));
+    let title = worktree
+        .pull_request
+        .as_ref()
+        .map(|pr| pr.title.clone())
+        .unwrap_or_else(|| worktree.branch.clone());
+    let color = crate::ui::worktrees::state_color_of(&worktree);
+    let open_target = worktree.clone();
+
+    let content = Stack::horizontal((
+        Empty::new().style(move |s| {
+            let base = s.size(8.0, 8.0).border_radius(4.0).flex_shrink(0.0_f32);
+            // Filled while it is the one being read; a ring otherwise.
+            if selected_dot() {
+                base.background(color)
+            } else {
+                base.border(1.5).border_color(color)
+            }
+        }),
+        Label::derived(move || title.clone()).style(move |s| {
+            s.font_size(theme::TEXT_BODY)
+                .font_weight(if selected_text() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
+                .color(if selected_text() { theme::FG } else { theme::FG_MUTED })
+                .margin_left(10.0)
+                .text_ellipsis()
+                .min_width(0.0)
+                .flex_grow(1.0_f32)
+        }),
+    ))
+    .style(|s| s.items_center().width_full().min_width(0.0));
+
+    Container::new(content)
+        .on_event_stop(el::Click, move |_, _| {
+            if !selected_click() {
+                state.show_screen(review, Screen::Worktrees);
+                on_open(&open_target);
+            }
+        })
+        .style(move |s| {
+            let base = crate::ui::widgets::clickable(s)
+                .width_full()
+                .height(30.0)
+                .items_center()
+                .padding_horiz(10.0)
+                .margin_horiz(6.0)
+                .border_radius(theme::RADIUS);
+            if selected_box() {
+                base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER)
+            } else {
+                base.border(1.0)
+                    .border_color(Color::TRANSPARENT)
+                    .hover(|s| s.background(theme::CANVAS_HOVER))
+            }
+        })
 }
 
 /// Active or Archived, in the worktrees panel. Same card as a view row, so

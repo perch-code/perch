@@ -228,6 +228,14 @@ fn subject_state(worktree: &Worktree) -> Option<SubjectState> {
     })
 }
 
+/// The colour of the pull request's state, for anything drawn in it.
+pub fn state_color_of(worktree: &Worktree) -> floem::peniko::Color {
+    match subject_state(worktree) {
+        Some(state) => icons::state_color(state),
+        None => theme::FG_SUBTLE,
+    }
+}
+
 fn state_icon(worktree: &Worktree) -> impl IntoView {
     let state = subject_state(worktree);
     Container::new(match state {

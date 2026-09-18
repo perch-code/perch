@@ -74,6 +74,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         }
     });
     let list_backend = backend.clone();
+    let panel_open = open_worktree.clone();
 
     // Every way of marking a thread lands here, so each of them costs the
     // backend one write and the UI one event.
@@ -96,7 +97,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 move || state.sidebar_open.get(),
                 move |open| {
                     if open {
-                        sidebar::nav_panel(state, review).into_any()
+                        sidebar::nav_panel(state, review, panel_open.clone()).into_any()
                     } else {
                         floem::views::Empty::new().into_any()
                     }
