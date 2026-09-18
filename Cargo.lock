@@ -3665,6 +3665,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "perch-git",
  "perch-github",
+ "perch-knowledge",
  "perch-lsp",
  "perch-syntax",
  "serde",
@@ -3709,6 +3710,17 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+]
+
+[[package]]
+name = "perch-knowledge"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

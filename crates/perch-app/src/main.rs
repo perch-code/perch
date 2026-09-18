@@ -4,6 +4,7 @@ mod app_icon;
 mod backend;
 mod filter;
 mod icons;
+mod knowledge;
 mod review;
 mod state;
 mod theme;
