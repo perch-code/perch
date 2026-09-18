@@ -32,22 +32,22 @@ pub fn to_messages(pr: &PullRequest, discussion: &Discussion, project: &str) -> 
 
     // The description opens the container. Its first line is the title, as
     // a heading, which is the convention the renderer lifts into the file's
-    // own heading.
-    let earliest = discussion
-        .comments
-        .iter()
-        .map(|c| c.created_at)
-        .chain(discussion.reviews.iter().filter_map(|r| r.submitted_at))
-        .chain(discussion.review_comments.iter().map(|c| c.created_at))
-        .min()
-        .unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+    // own heading. Without an opening time, anything no later than the
+    // first comment keeps it first.
+    let opened_at = discussion.opened_at.unwrap_or_else(|| {
+        discussion
+            .comments
+            .iter()
+            .map(|c| c.created_at)
+            .chain(discussion.reviews.iter().filter_map(|r| r.submitted_at))
+            .chain(discussion.review_comments.iter().map(|c| c.created_at))
+            .min()
+            .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+    });
     out.push(base(
         format!("pr-{}", pr.number),
         &pr.author_login,
-        // GitHub's pull request payload carries its opening time, but the
-        // subset Perch keeps does not; anything before the first comment
-        // orders it first, which is all the opener needs.
-        earliest,
+        opened_at,
         format!("# {}\n\n{}", pr.title, discussion.body),
         pr_url.clone(),
     ));
@@ -142,6 +142,7 @@ mod tests {
 
     fn discussion() -> Discussion {
         Discussion {
+            opened_at: Some(at("2026-09-14T14:02:00Z")),
             body: "The description.".into(),
             comments: vec![IssueComment {
                 id: 1,
@@ -215,6 +216,7 @@ mod tests {
         let ms = to_messages(&pr(), &discussion(), "slatedb");
         assert_eq!(ms[0].body, "# Fence the manifest\n\nThe description.");
         assert_eq!(ms[0].author, "rohan");
+        assert_eq!(ms[0].at, at("2026-09-14T14:02:00Z"));
         assert!(ms[0].at <= ms[1].at);
         assert_eq!(ms[0].url, "https://github.com/slatedb/slatedb/pull/812");
     }

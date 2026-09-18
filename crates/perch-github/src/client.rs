@@ -279,6 +279,7 @@ impl GitHub {
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
 
         Ok(crate::discussion::Discussion {
+            opened_at: body.created_at,
             body: body.body.unwrap_or_default(),
             comments: self.list_all(&format!("{base}/issues/{number}/comments")).await?,
             reviews: self.list_all(&format!("{base}/pulls/{number}/reviews")).await?,

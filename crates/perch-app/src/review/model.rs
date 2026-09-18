@@ -105,6 +105,8 @@ pub struct ReviewState {
     /// editor view rather than mutate a read-only document in place.
     pub editor_epoch: RwSignal<u64>,
 
+    /// How many discussion records the archive took in, once it has.
+    pub archived: RwSignal<Option<usize>>,
     pub lsp_status: RwSignal<perch_lsp::Status>,
     /// Rises with every hover and jump request. An answer carrying an older
     /// token is stale, because the pointer has moved on since it was asked.
@@ -152,6 +154,7 @@ impl ReviewState {
             loading: RwSignal::new(HashMap::new()),
             cursor_line: RwSignal::new(0),
             editor_epoch: RwSignal::new(0),
+            archived: RwSignal::new(None),
             lsp_status: RwSignal::new(perch_lsp::Status::Absent),
             request_token: RwSignal::new(0),
             hover_at: RwSignal::new(None),
@@ -189,6 +192,7 @@ impl ReviewState {
         self.loading.set(HashMap::new());
         self.rail_mode.set(RailMode::Changed);
         self.lsp_status.set(perch_lsp::Status::Absent);
+        self.archived.set(None);
         self.expanded.set(std::collections::HashSet::new());
         self.dismiss_hover();
     }

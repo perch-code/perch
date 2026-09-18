@@ -83,6 +83,11 @@ pub enum Event {
     /// Something asked of a worktree could not be done. The message is for
     /// the status line: "has uncommitted changes" is the usual one.
     WorktreeFailed { id: String, message: String },
+    /// A pull request's discussion was archived under the knowledge root.
+    /// `added` counts records that were new or changed.
+    Archived { repo_full_name: String, number: u64, added: usize },
+    /// Something worth a line in the status bar and nothing more.
+    Notice(String),
     Status(Status),
 
     /// A step of preparing a checkout.
@@ -320,10 +325,15 @@ async fn run(
     let language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    let knowledge = Arc::new(perch_knowledge::Knowledge::open(config.knowledge.root_path()));
+    tracing::info!(root = %knowledge.root().display(), "knowledge root");
+    let config = Arc::new(config);
     let ctx = Ctx {
         github: github.clone(),
         preparer: preparer.clone(),
         cache: cache.clone(),
+        config: config.clone(),
+        knowledge,
         slot: checkout.clone(),
         language_server: language_server.clone(),
         events: events.clone(),
@@ -364,7 +374,7 @@ async fn run(
                     &github,
                     &cache,
                     &events,
-                    &config,
+                    config.as_ref(),
                     &source,
                     &detail_limit,
                     &avatar_limit,
@@ -584,6 +594,8 @@ struct Ctx {
     github: Arc<GitHub>,
     preparer: Arc<Preparer>,
     cache: SharedCache,
+    config: Arc<Config>,
+    knowledge: Arc<perch_knowledge::Knowledge>,
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
     events: EventSender<Event>,
@@ -1026,15 +1038,73 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         offline,
         "review ready"
     );
+    let pull_request = Arc::new(pull_request);
     let _ = events.send(Event::ReviewReady {
-        pull_request: Arc::new(pull_request),
+        pull_request: pull_request.clone(),
         worktree: Arc::new(row),
         files,
         tree: Arc::new(tree),
         stale_head,
         offline,
     });
+
+    // The discussion arrives after the checkout, on its own task, so the
+    // review paints first. Offline there is nothing to fetch.
+    if !offline {
+        let ctx = ctx.clone();
+        tokio::spawn(async move { archive_discussion(&ctx, &pull_request).await });
+    }
     true
+}
+
+/// Fetch what was said on a pull request and file it under the knowledge
+/// root. A fetch error is a line in the status bar, not a failed review.
+async fn archive_discussion(ctx: &Ctx, pr: &perch_github::PullRequest) {
+    let discussion = match ctx.github.fetch_discussion(&pr.repo_full_name, pr.number).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(repo = %pr.repo_full_name, number = pr.number, error = %e, "could not fetch the discussion");
+            let _ = ctx.events.send(Event::Notice(format!("Could not archive the discussion: {e}")));
+            return;
+        }
+    };
+
+    let project = ctx.config.knowledge.project_for(&pr.repo_full_name);
+    let messages = crate::knowledge::to_messages(pr, &discussion, &project);
+    let knowledge = ctx.knowledge.clone();
+    let write_skill = ctx.config.knowledge.skills;
+
+    // File writes, off the runtime's threads.
+    let outcome = tokio::task::spawn_blocking(move || {
+        let before = knowledge.projects()?;
+        let ingested = knowledge.ingest(&messages)?;
+        let after = knowledge.projects()?;
+        // The skill names every project, so it is rewritten when the set
+        // changes, and written the first time anything is here at all.
+        let dirs = crate::knowledge::skill_dirs();
+        let missing = dirs.iter().any(|d| !d.join("SKILL.md").is_file());
+        if write_skill && (before != after || missing) {
+            knowledge.write_skill(&perch_knowledge::SkillConfig { projects: after, dirs })?;
+        }
+        Ok::<_, perch_knowledge::Error>(ingested)
+    })
+    .await;
+
+    match outcome {
+        Ok(Ok(ingested)) => {
+            tracing::info!(repo = %pr.repo_full_name, number = pr.number, added = ingested.added, changed = ingested.changed, "discussion archived");
+            let _ = ctx.events.send(Event::Archived {
+                repo_full_name: pr.repo_full_name.clone(),
+                number: pr.number,
+                added: ingested.total(),
+            });
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "could not archive the discussion");
+            let _ = ctx.events.send(Event::Notice(format!("Could not archive the discussion: {e}")));
+        }
+        Err(e) => tracing::warn!(error = %e, "archive task panicked"),
+    }
 }
 
 /// A checkout for a worktree already on disk, without touching the network.

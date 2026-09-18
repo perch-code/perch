@@ -147,6 +147,13 @@ pub fn review_status(state: ReviewState) -> impl IntoView {
         } else {
             format!("  \u{00b7}  {}", server.describe())
         };
+        let archived = match state.archived.get() {
+            Some(0) => "  \u{00b7}  discussion up to date".to_string(),
+            Some(1) => "  \u{00b7}  1 message archived".to_string(),
+            Some(n) => format!("  \u{00b7}  {n} messages archived"),
+            None => String::new(),
+        };
+        let server = format!("{server}{archived}");
 
         let Some(file) = state.active_file() else {
             let n = state.changed_files.with(|f| f.len());

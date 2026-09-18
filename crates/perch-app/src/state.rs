@@ -160,6 +160,17 @@ impl AppState {
                 review.offline.set(offline);
                 review.pull_request.set(Some(pull_request));
             }
+            Event::Archived { repo_full_name, number, added } => {
+                // Only for the review that is still open; a slow archive of
+                // a pull request since left has nothing to say.
+                let same = review.pull_request.with(|p| {
+                    p.as_ref()
+                        .is_some_and(|p| p.repo_full_name == repo_full_name && p.number == number)
+                });
+                if same {
+                    review.archived.set(Some(added));
+                }
+            }
             Event::Worktrees(worktrees) => {
                 // The open review can be archived from the list, or by the
                 // sweep. Its files are gone, so the view goes with them.
@@ -251,6 +262,8 @@ impl AppState {
                 self.worktrees.set(worktrees);
                 self.notice.set(None);
             }
+            Event::Notice(message) => self.notice.set(Some(message)),
+            Event::Archived { .. } => {}
             Event::WorktreeFailed { id, message } => {
                 tracing::warn!(id, message, "worktree action refused");
                 self.notice.set(Some(message));

@@ -13,6 +13,8 @@ use crate::pulls::UserRef;
 /// Everything said on one pull request, as GitHub lists it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Discussion {
+    /// When the pull request was opened.
+    pub opened_at: Option<Timestamp>,
     /// The pull request's description, as written.
     pub body: String,
     /// The conversation tab, in time order.
@@ -101,6 +103,8 @@ fn login<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
 pub(crate) struct BodyOnly {
     #[serde(default)]
     pub body: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<Timestamp>,
 }
 
 #[cfg(test)]

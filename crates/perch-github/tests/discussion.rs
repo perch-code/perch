@@ -71,7 +71,7 @@ fn spawn(comments: usize) -> (String, Arc<AtomicUsize>) {
                     r#"{"id":4,"pull_request_review_id":9,"in_reply_to_id":3,"user":{"login":"a"},"body":"ok","path":"src/x.rs","line":41,"created_at":"2026-09-16T11:39:00Z","html_url":"https://github.com/a/b/pull/1#discussion_r4"}"#.into(),
                 ])
             } else if path.contains("/pulls/1") {
-                r#"{"number":1,"body":"The description.","head":{"sha":"h"},"base":{"sha":"b"}}"#.into()
+                r#"{"number":1,"body":"The description.","created_at":"2026-09-14T14:02:00Z","head":{"sha":"h"},"base":{"sha":"b"}}"#.into()
             } else {
                 "[]".into()
             };
@@ -89,6 +89,7 @@ async fn every_page_of_the_conversation_is_read() {
     let d = gh.fetch_discussion("a/b", 1).await.unwrap();
 
     assert_eq!(d.body, "The description.");
+    assert_eq!(d.opened_at, Some("2026-09-14T14:02:00Z".parse().unwrap()));
     assert_eq!(d.comments.len(), 150, "two pages, the second short");
     assert_eq!(d.comments[149].body, "comment 150");
     assert_eq!(d.reviews.len(), 1);
