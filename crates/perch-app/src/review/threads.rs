@@ -4,6 +4,11 @@
 //! answers, tied to lines. The column lists the open file's threads first,
 //! then the worktree's others under a divider. A composer sits at the top
 //! for a new thread, or under a thread for a follow-up.
+//!
+//! The same thread is also a card on Conversation. The message, the run's
+//! steps and footer, the follow-up line and the composer are one set of
+//! views here, taking a [`ThreadFace`] for the sizes that differ, so the
+//! two places cannot drift apart.
 
 use std::rc::Rc;
 
@@ -99,6 +104,25 @@ pub fn defaults(app: AppState) -> AgentChoice {
     })
 }
 
+/// Where a thread is drawn: in the column beside the editor, or as a card
+/// on Conversation. The views are the same; the face picks the room they
+/// take and the surface they sit on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadFace {
+    Column,
+    Card,
+}
+
+impl ThreadFace {
+    /// Room between a thread's messages.
+    fn message_gap(self) -> f64 {
+        match self {
+            ThreadFace::Column => 10.0,
+            ThreadFace::Card => theme::CARD_GAP,
+        }
+    }
+}
+
 fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: OpenFile) -> impl IntoView {
     let composer_backend = backend.clone();
     let here_backend = backend.clone();
@@ -110,7 +134,7 @@ fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: Open
         dyn_container(
             move || state.composer.with(|c| c.as_ref().filter(|c| c.thread_id.is_none()).cloned()),
             move |composer| match composer {
-                Some(c) => composer_view(app, state, composer_backend.clone(), c).into_any(),
+                Some(c) => composer_view(app, state, composer_backend.clone(), c, ThreadFace::Column).into_any(),
                 None => Empty::new().into_any(),
             },
         )
@@ -184,9 +208,20 @@ enum Row {
 // Composer
 // ---------------------------------------------------------------------
 
-fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, composer: Composer) -> impl IntoView {
+/// The box a question is typed into, with where it is anchored above and
+/// the model, the effort and Send below. In the column it sits in a
+/// margin of its own; as a card it fills its place.
+pub fn composer_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    composer: Composer,
+    face: ThreadFace,
+) -> impl IntoView {
     use floem::views::editor::command::{Command, CommandExecuted};
     use floem::views::editor::core::command::EditCommand;
+    use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
+    use floem::views::editor::core::selection::Selection;
 
     let anchor_label = match &composer.anchor {
         Some(a) => a.label(),
@@ -200,9 +235,20 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
         .as_ref()
         .and_then(|id| state.comment_threads.with(|t| t.iter().find(|t| &t.id == id).map(|t| t.outdated)))
         .unwrap_or(false);
+    let placeholder = if composer.thread_id.is_some() {
+        "Follow up…".to_string()
+    } else if composer.anchor.is_some() {
+        "Ask about these lines…".to_string()
+    } else {
+        format!("Ask about this {}…", subject_word(state))
+    };
 
-    let editor = text_editor(composer.draft.clone())
-        .placeholder(if composer.thread_id.is_some() { "Follow up…" } else { "Ask about these lines…" })
+    // The box starts on what has been typed so far, not on the draft the
+    // composer opened with: the view is rebuilt when the tab changes, and
+    // the question must not go with it.
+    let draft = state.composer_draft.get_untracked();
+    let editor = text_editor(draft.clone())
+        .placeholder(placeholder)
         .editor_style(|s| s.hide_gutter(true));
     // Markdown as it is typed: bold, italics, code and links take their
     // styles in the box, the way they will in the thread.
@@ -211,6 +257,15 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
     let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(styling_doc, styling_id));
     let doc_editor = editor.editor().clone();
     let read_text = Rc::new(move || doc_editor.doc().text().to_string());
+    // A draft the box starts with, a retried question or a quoted comment,
+    // is typed under, not into.
+    if !draft.is_empty() {
+        let end = editor.editor().doc().text().len();
+        editor
+            .editor()
+            .cursor
+            .set(Cursor::new(CursorMode::Insert(Selection::caret(end, CursorAffinity::Backward)), None, None));
+    }
 
     let send: Rc<dyn Fn()> = {
         let read_text = read_text.clone();
@@ -296,15 +351,36 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
     // it is asked from the first layout pass rather than at construction:
     // a request queued while the view is being built is processed before
     // the view is in the box tree, where it is invisible and dropped.
+    //
+    // A composer laid in place on Conversation also leaves its box where
+    // `a` can find it, and scrolls the column to itself: it sits at the end
+    // of the column, or under a thread, and may have opened off screen.
     let inner = editor.editor().editor_view_id;
     let asked = std::rc::Rc::new(std::cell::Cell::new(false));
-    let editor = editor.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
-        if !asked.replace(true) && state.composer_autofocus.get_untracked() {
-            if let Some(id) = inner.get_untracked() {
+    let registered = std::rc::Rc::new(std::cell::Cell::new(None));
+    let unregister = registered.clone();
+    let editor = editor
+        .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+            if asked.replace(true) {
+                return;
+            }
+            let Some(id) = inner.get_untracked() else { return };
+            if face == ThreadFace::Card {
+                registered.set(Some(id));
+                state.composer_box.set(Some(id));
+                id.scroll_to(None);
+            }
+            if state.composer_autofocus.get_untracked() {
                 id.request_focus();
             }
-        }
-    });
+        })
+        .on_cleanup(move || {
+            if let Some(id) = unregister.get() {
+                if state.composer_box.get_untracked() == Some(id) {
+                    state.composer_box.set(None);
+                }
+            }
+        });
 
     Stack::vertical((
         Stack::horizontal((
@@ -333,17 +409,32 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
         ))
         .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0)),
     ))
-    .style(|s| {
-        s.flex_col()
+    .style(move |s| {
+        let base = s
+            .flex_col()
             .width_full()
             .padding(12.0)
-            .margin(12.0)
-            .margin_bottom(0.0)
             .background(theme::CANVAS)
             .border(1.0)
             .border_color(theme::ACCENT_RING)
-            .border_radius(theme::RADIUS_LG)
+            .border_radius(theme::RADIUS_LG);
+        match face {
+            ThreadFace::Column => base.margin(12.0).margin_bottom(0.0),
+            ThreadFace::Card => base,
+        }
     })
+}
+
+/// What the item is, for a placeholder: "pull request", "issue" or
+/// "branch".
+pub fn subject_word(state: ReviewState) -> &'static str {
+    if state.pull_request.with(Option::is_some) {
+        "pull request"
+    } else if state.issue.with(Option::is_some) {
+        "issue"
+    } else {
+        "branch"
+    }
 }
 
 /// The model to run with, from what config offers: Claude Code's models,
@@ -442,7 +533,8 @@ fn menu_button(label: impl Fn() -> String + 'static, menu: impl Fn() -> floem::m
     })
 }
 
-fn outdated_pill(outdated: bool) -> impl IntoView {
+/// The Outdated mark beside an anchor whose lines have moved.
+pub fn outdated_pill(outdated: bool) -> impl IntoView {
     if !outdated {
         return Empty::new().into_any();
     }
@@ -477,29 +569,10 @@ fn thread_card(
     let flash_id = thread.id.clone();
     let flashing = RwSignal::new(false);
 
-    let messages = thread.messages.clone();
-    let follow_backend = backend.clone();
-    let follow_thread = thread.clone();
-    let composer_thread = thread.id.clone();
-    let retry_thread = thread.clone();
-
     let card = Stack::vertical((
         anchor_line(state, backend.clone(), open_file, thread.clone()),
-        dyn_stack(
-            move || messages.clone(),
-            |m| (m.id.clone(), m.run.as_ref().map(|r| (r.status.name(), r.steps.len(), r.error.clone()))),
-            move |m| message_view(app, state, follow_backend.clone(), retry_thread.clone(), m),
-        )
-        .style(|s| s.flex_col().width_full().gap(10.0)),
-        // A follow-up composer under the thread, or a line inviting one.
-        dyn_container(
-            move || state.composer.with(|c| c.as_ref().filter(|c| c.thread_id.as_deref() == Some(composer_thread.as_str())).cloned()),
-            move |composer| match composer {
-                Some(c) => composer_view(app, state, backend.clone(), c).into_any(),
-                None => reply_line(app, state, follow_thread.clone()).into_any(),
-            },
-        )
-        .style(|s| s.width_full()),
+        messages_view(app, state, backend.clone(), thread.id.clone(), ThreadFace::Column),
+        follow_up(app, state, backend, thread.id.clone(), ThreadFace::Column),
     ))
     .style(move |s| {
         let base = s
@@ -544,8 +617,6 @@ fn anchor_line(
     open_file: OpenFile,
     thread: CommentThread,
 ) -> impl IntoView {
-    use floem::menu::Menu;
-
     let label = thread.anchor.as_ref().map(|a| a.label()).unwrap_or_else(|| "Worktree".to_string());
     let anchor = thread.anchor.clone();
     let delete_id = thread.id.clone();
@@ -580,36 +651,102 @@ fn anchor_line(
             }),
         outdated_pill(thread.outdated),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        Container::new(
-            sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE).style(|s| s.pointer_events_none()),
-        )
-        .popout_menu(move || {
-            let backend = backend.clone();
-            let id = delete_id.clone();
-            Menu::new().item("Delete Thread", move |item| {
-                let backend = backend.clone();
-                let id = id.clone();
-                item.action(move || backend.delete_comment_thread(&id))
-            })
-        })
-        .style(|s| {
-            clickable(s)
-                .size(22.0, 22.0)
-                .items_center()
-                .justify_center()
-                .border_radius(11.0)
-                .hover(|s| s.background(theme::BADGE_BG))
-        }),
+        thread_menu(backend, delete_id),
     ))
     .style(|s| s.items_center().width_full())
 }
 
-fn message_view(
+/// The `...` at the end of a thread's first row, and the menu under it.
+pub fn thread_menu(backend: Rc<Backend>, thread_id: String) -> impl IntoView {
+    use floem::menu::Menu;
+
+    Container::new(
+        sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE).style(|s| s.pointer_events_none()),
+    )
+    .popout_menu(move || {
+        let backend = backend.clone();
+        let id = thread_id.clone();
+        Menu::new().item("Delete Thread", move |item| {
+            let backend = backend.clone();
+            let id = id.clone();
+            item.action(move || backend.delete_comment_thread(&id))
+        })
+    })
+    .style(|s| {
+        clickable(s)
+            .size(22.0, 22.0)
+            .items_center()
+            .justify_center()
+            .border_radius(11.0)
+            .hover(|s| s.background(theme::BADGE_BG))
+    })
+}
+
+/// A thread's messages, read from the state rather than from the thread
+/// the caller was built with, so a run's steps and its answer show as they
+/// arrive: the row that holds the thread keeps its key through a run, and
+/// a kept row is not rebuilt.
+pub fn messages_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread_id: String,
+    face: ThreadFace,
+) -> impl IntoView {
+    let list_id = thread_id.clone();
+    dyn_stack(
+        move || {
+            state
+                .comment_threads
+                .with(|t| t.iter().find(|t| t.id == list_id).map(|t| t.messages.clone()).unwrap_or_default())
+        },
+        |m| (m.id.clone(), m.body.len(), m.run.as_ref().map(|r| (r.status.name(), r.steps.len(), r.error.clone()))),
+        move |m| {
+            let thread = state.comment_threads.with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
+            match thread {
+                Some(thread) => message_view(app, state, backend.clone(), thread, m, face).into_any(),
+                None => Empty::new().into_any(),
+            }
+        },
+    )
+    .style(move |s| s.flex_col().width_full().gap(face.message_gap()))
+}
+
+/// The follow-up composer under a thread when one is open for it, else the
+/// line that opens one.
+pub fn follow_up(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread_id: String,
+    face: ThreadFace,
+) -> impl IntoView {
+    let composer_thread = thread_id.clone();
+    dyn_container(
+        move || state.composer.with(|c| c.as_ref().filter(|c| c.thread_id.as_deref() == Some(composer_thread.as_str())).cloned()),
+        move |composer| match composer {
+            Some(c) => composer_view(app, state, backend.clone(), c, face).into_any(),
+            None => {
+                let thread = state.comment_threads.with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
+                match thread {
+                    Some(thread) => reply_line(app, state, thread, face).into_any(),
+                    None => Empty::new().into_any(),
+                }
+            }
+        },
+    )
+    .style(|s| s.width_full())
+}
+
+/// One message: the text as markdown, and under an answer the run that
+/// produced it, or under a question the run that is answering it.
+pub fn message_view(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     thread: CommentThread,
     message: CommentMessage,
+    face: ThreadFace,
 ) -> impl IntoView {
     let is_agent = matches!(message.author, Author::Agent { .. });
     let body = message.body.clone();
@@ -619,7 +756,7 @@ fn message_view(
     Stack::vertical((
         crate::review::markdown::render(&body),
         match message.run.clone() {
-            Some(run) => run_block(app, state, backend, thread, message.body.clone(), run).into_any(),
+            Some(run) => run_block(app, state, backend, thread, message.body.clone(), run, face).into_any(),
             None => Empty::new().into_any(),
         },
     ))
@@ -627,14 +764,16 @@ fn message_view(
 }
 
 /// What the agent did, under its answer or under the question while it
-/// works: the steps, and the footer or the Stop button.
-fn run_block(
+/// works: the steps, folded to one line until it is clicked, and the
+/// footer or the Stop button.
+pub fn run_block(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     thread: CommentThread,
     question: String,
     run: RunRecord,
+    face: ThreadFace,
 ) -> impl IntoView {
     let running = run.status == RunStatus::Running;
     let run_id = run.id.clone();
@@ -655,7 +794,11 @@ fn run_block(
             let secs = run.duration_ms.unwrap_or(0) as f64 / 1000.0;
             let cost = run.cost_usd.map(|c| format!(" \u{00b7} ${c:.2}")).unwrap_or_default();
             let effort = perch_agent::Effort::parse(&run.effort).map(|e| e.label().to_string()).unwrap_or_else(|| run.effort.clone());
-            format!("{} \u{00b7} {effort} \u{00b7} {secs:.0}s{cost}", model_label(&run.model))
+            // A card's byline already names the model and the effort.
+            match face {
+                ThreadFace::Column => format!("{} \u{00b7} {effort} \u{00b7} {secs:.0}s{cost}", model_label(&run.model)),
+                ThreadFace::Card => format!("{secs:.0}s{cost}"),
+            }
         })
         .style(|s| s.font_size(theme::TEXT_SECTION).color(theme::FG_SUBTLE).selectable(false))
         .into_any(),
@@ -729,18 +872,19 @@ fn run_block(
         }),
         footer,
     ))
-    .style(|s| {
-        s.flex_col()
-            .width_full()
-            .gap(6.0)
-            .padding(8.0)
-            .background(theme::CANVAS_SUBTLE)
-            .border_radius(theme::RADIUS)
+    .style(move |s| {
+        let base = s.flex_col().width_full().gap(6.0).padding(8.0).border_radius(theme::RADIUS);
+        // The column's cards are white, so the run sits on the page grey;
+        // a thread card is the page grey, so the run sits on white.
+        match face {
+            ThreadFace::Column => base.background(theme::CANVAS_SUBTLE),
+            ThreadFace::Card => base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER_MUTED),
+        }
     })
 }
 
 /// "Read 3 files, ran 1 command", from the step lines.
-fn steps_summary(steps: &[perch_github::RunStep]) -> String {
+pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
     let count = |prefix: &str| steps.iter().filter(|s| s.summary.starts_with(prefix)).count();
     let mut parts = Vec::new();
     let reads = count("Read ");
@@ -770,7 +914,7 @@ fn steps_summary(steps: &[perch_github::RunStep]) -> String {
 }
 
 /// The one-line invitation at the bottom of a thread.
-fn reply_line(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
+pub fn reply_line(app: AppState, state: ReviewState, thread: CommentThread, face: ThreadFace) -> impl IntoView {
     let running = thread.running_run().is_some();
     if running {
         return Empty::new().into_any();
@@ -781,13 +925,27 @@ fn reply_line(app: AppState, state: ReviewState, thread: CommentThread) -> impl 
         .on_event_stop(el::Click, move |_, _| {
             state.open_composer(Some(id.clone()), anchor.clone(), String::new(), defaults(app));
         })
-        .style(|s| {
-            clickable(s)
+        .style(move |s| {
+            let base = clickable(s)
                 .font_size(theme::TEXT_META)
                 .color(theme::FG_SUBTLE)
                 .width_full()
                 .padding_vert(4.0)
-                .hover(|s| s.color(theme::ACCENT))
+                .hover(|s| s.color(theme::ACCENT));
+            // On a card the line stands where the composer's box will be,
+            // and takes the box's shape.
+            match face {
+                ThreadFace::Column => base,
+                ThreadFace::Card => base
+                    .padding_horiz(12.0)
+                    .height(theme::ASK_BOX_HEIGHT - 12.0)
+                    .items_center()
+                    .background(theme::CANVAS)
+                    .border(1.0)
+                    .border_color(theme::BORDER_MUTED)
+                    .border_radius(theme::RADIUS)
+                    .hover(|s| s.color(theme::ACCENT).border_color(theme::BORDER)),
+            }
         })
         .into_any()
 }

@@ -284,6 +284,19 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         {
             match key.code {
                 Code::KeyA => {
+                    // On Conversation the composer is laid in place at the
+                    // end of the column, about the item as a whole: `a`
+                    // opens it, or takes the keyboard back to it.
+                    if review.tab.get() == crate::review::model::ItemTab::Conversation {
+                        match review.composer_box.get().filter(|_| review.composer.with(Option::is_some)) {
+                            Some(id) => {
+                                id.scroll_to(None);
+                                id.request_focus();
+                            }
+                            None => review.open_composer(None, None, String::new(), crate::review::threads::defaults(state)),
+                        }
+                        return EventPropagation::Stop;
+                    }
                     let anchor = review.anchor_from_selection();
                     review.open_composer(None, anchor, String::new(), crate::review::threads::defaults(state));
                     return EventPropagation::Stop;

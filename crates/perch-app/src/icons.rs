@@ -288,6 +288,28 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M8 6.2 V9.3" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
                <circle cx="8" cy="11.3" r="0.95" fill="{c}"/>"#
         ),
+        // Two links of a chain, on the diagonal: a permalink.
+        SidebarIcon::Link => format!(
+            r#"<path d="M6.3 5.5 L8.4 3.4 a3 3 0 0 1 4.2 4.2 L10.5 9.7" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M9.7 10.5 L7.6 12.6 a3 3 0 0 1 -4.2 -4.2 L5.5 6.3" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M6.2 9.8 L9.8 6.2" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>"#
+        ),
+        // A page with a plus and a minus on it: a review that asked for
+        // changes.
+        SidebarIcon::ChangesRequested => format!(
+            r#"<path d="M3.8 2.4 H9.6 L12.2 5 V13.6 H3.8 Z" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M8 5.6 V8.4 M6.6 7 H9.4" stroke="{c}" stroke-width="1.3" stroke-linecap="round"/>
+               <path d="M6.6 10.9 H9.4" stroke="{c}" stroke-width="1.3" stroke-linecap="round"/>"#
+        ),
+        // A signpost: a milestone.
+        SidebarIcon::Milestone => format!(
+            r#"<path d="M2.4 4.4 H11.2 L13.8 7 L11.2 9.6 H2.4 Z" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M6.6 2 V4.4 M6.6 9.6 V14" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
     };
     svg16(&body)
 }
@@ -328,13 +350,22 @@ pub enum SidebarIcon {
     Pin,
     /// Three lines of decreasing length: the filter menu.
     Filter,
+    /// Two links of a chain: a permalink.
+    Link,
+    /// A page with a plus and a minus: a review that requested changes.
+    ChangesRequested,
+    /// A signpost: a milestone.
+    Milestone,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 29] = [
+    pub const ALL: [SidebarIcon; 32] = [
+        SidebarIcon::Link,
+        SidebarIcon::ChangesRequested,
+        SidebarIcon::Milestone,
         SidebarIcon::Pin,
         SidebarIcon::Filter,
         SidebarIcon::Plus,
