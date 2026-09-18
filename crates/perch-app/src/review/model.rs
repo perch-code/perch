@@ -58,13 +58,6 @@ impl LoadedFile {
     }
 }
 
-/// Which list the rail is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RailMode {
-    Changed,
-    AllFiles,
-}
-
 /// The item view's two tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ItemTab {
@@ -241,7 +234,10 @@ pub struct ReviewState {
     pub references_height: RwSignal<f64>,
     pub changed_files: RwSignal<Arc<Vec<ChangedFile>>>,
     pub tree: RwSignal<Arc<Vec<TreeEntry>>>,
-    pub rail_mode: RwSignal<RailMode>,
+    /// Whether the rail's tree is cut down to the changed files. On by
+    /// default: the review is of the changes, and the whole worktree is
+    /// a click away.
+    pub changed_only: RwSignal<bool>,
     pub tabs: RwSignal<Vec<Tab>>,
     pub active: RwSignal<Option<String>>,
     pub files: RwSignal<HashMap<String, Arc<LoadedFile>>>,
@@ -307,8 +303,8 @@ pub struct ReviewState {
     /// The head position the last request was made about, so the definition
     /// button asks about the same symbol the panel is describing.
     pub last_position: RwSignal<Option<(usize, usize)>>,
-    /// Directories the reader has opened in the All files tree. A checkout
-    /// has thousands of entries, so everything starts collapsed.
+    /// Directories open in the rail's tree. A checkout has thousands of
+    /// entries, so only the way to each changed file starts open.
     pub expanded: RwSignal<std::collections::HashSet<String>>,
 }
 
@@ -349,7 +345,7 @@ impl ReviewState {
             references_height: RwSignal::new(crate::theme::REFERENCES_HEIGHT),
             changed_files: RwSignal::new(Arc::new(Vec::new())),
             tree: RwSignal::new(Arc::new(Vec::new())),
-            rail_mode: RwSignal::new(RailMode::Changed),
+            changed_only: RwSignal::new(true),
             tabs: RwSignal::new(Vec::new()),
             active: RwSignal::new(None),
             files: RwSignal::new(HashMap::new()),
@@ -434,7 +430,7 @@ impl ReviewState {
         self.active.set(None);
         self.files.set(HashMap::new());
         self.loading.set(HashMap::new());
-        self.rail_mode.set(RailMode::Changed);
+        self.changed_only.set(true);
         self.lsp_status.set(perch_lsp::Status::Absent);
         self.archived.set(None);
         self.comment_threads.set(Arc::new(Vec::new()));
@@ -579,13 +575,43 @@ impl ReviewState {
         }
     }
 
+    /// A new changed list, from an open, a scope change, or the poll
+    /// finding the head moved.
+    ///
+    /// Kept in the tree's order rather than git's, which puts a file
+    /// beside a directory before the directory's contents: `}` and `{`
+    /// walk this list, and the rail shows the tree, so the two have to
+    /// agree on what comes next.
+    ///
+    /// The path to each file the list did not have before is opened in
+    /// the tree, so the filtered rail shows every changed file rather
+    /// than a row of shut directories, and the whole tree, when the
+    /// reader turns to it, is open at the changes. Only the new ones: a
+    /// poll that rereads the same list must not spring open what the
+    /// reader shut.
+    pub fn set_changed_files(&self, files: Arc<Vec<ChangedFile>>) {
+        let mut sorted = files.as_ref().clone();
+        sorted.sort_by(|a, b| perch_git::compare_paths(&a.path, false, &b.path, false));
+        let known: std::collections::HashSet<String> =
+            self.changed_files.with_untracked(|old| old.iter().map(|f| f.path.clone()).collect());
+        let new: Vec<&str> = sorted.iter().map(|f| f.path.as_str()).filter(|p| !known.contains(*p)).collect();
+        if !new.is_empty() {
+            self.expanded.update(|expanded| {
+                for path in new {
+                    crate::review::tree::reveal(expanded, path);
+                }
+            });
+        }
+        self.changed_files.set(Arc::new(sorted));
+    }
+
     /// The scope changed: every loaded file was diffed under the old one.
     /// Forget them all and reload the open tabs, active one first, so the
     /// editor repaints from the new sides rather than the stale ones.
     /// Returns the paths to ask the backend for.
     pub fn change_scope(&self, scope: Scope, files: Arc<Vec<ChangedFile>>) -> Vec<String> {
         self.scope.set(scope);
-        self.changed_files.set(files);
+        self.set_changed_files(files);
         // Every loaded file, not only the tabs: a thread card on
         // Conversation shows lines from a file no tab has, and would go
         // blank until something loaded it again.
@@ -867,6 +893,37 @@ mod tests {
         assert_eq!(state.next_unviewed(None, false).as_deref(), Some("c.rs"));
         // A file outside the list counts as none open.
         assert_eq!(state.next_unviewed(Some("elsewhere.rs"), true).as_deref(), Some("a.rs"));
+    }
+
+    #[test]
+    fn a_new_changed_list_is_in_tree_order_and_opens_the_way_to_what_is_new() {
+        let state = ReviewState::new();
+        // Git's order: bytewise, so src/main.rs comes before src/ui/.
+        state.set_changed_files(Arc::new(vec![
+            changed("src/main.rs", Some("blob-m")),
+            changed("src/ui/row.rs", Some("blob-r")),
+            changed("README.md", Some("blob-d")),
+        ]));
+        let order: Vec<String> = state.changed_files.with(|f| f.iter().map(|f| f.path.clone()).collect());
+        assert_eq!(order, ["src/ui/row.rs", "src/main.rs", "README.md"], "the tree's order: ui/ before main.rs");
+        assert_eq!(state.next_unviewed(None, true).as_deref(), Some("src/ui/row.rs"), "the next key starts at the top row");
+        let expanded = state.expanded.get();
+        assert!(expanded.contains("src") && expanded.contains("src/ui"));
+
+        // The reader shuts src/ui, and the poll rereads the same list.
+        state.expanded.update(|e| crate::review::tree::toggle(e, "src/ui"));
+        state.set_changed_files(state.changed_files.get());
+        assert!(!state.expanded.get().contains("src/ui"), "nothing new, nothing reopened");
+
+        // A file in a new directory opens the way to it, and only it.
+        state.set_changed_files(Arc::new(vec![
+            changed("src/main.rs", Some("blob-m")),
+            changed("src/ui/row.rs", Some("blob-r")),
+            changed("docs/guide.md", Some("blob-g")),
+        ]));
+        let expanded = state.expanded.get();
+        assert!(expanded.contains("docs"));
+        assert!(!expanded.contains("src/ui"));
     }
 
     #[test]

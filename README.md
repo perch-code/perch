@@ -88,20 +88,25 @@ Files, shaped like a pull request's page on GitHub.
 - A thread of your own never looks like a comment from GitHub: the card is
   on the page colour with a dashed border and a Local chip, and says which
   model and effort answered.
-- **Files** is the review: a rail of changed files or the whole worktree, a
+- **Files** is the review: a rail with the worktree as a tree, a
   read-only editor with tree-sitter highlighting for Rust, TOML, Markdown,
   YAML and JSON, the diff in place with real line numbers and change bars,
-  and the thread column. At the top of the rail a scope menu narrows the
-  diff to one commit, to the uncommitted work (staged, unstaged, or both),
-  or to what changed since you last looked; the rail, the tints, the
-  churn and the tab's count all follow it. Each changed file has a Viewed
-  check, keyed on the file's content, so a push that changes the file
-  clears it and one that leaves it alone does not; `}` and `{` step
-  through the unviewed files. A toggle in the file tab bar switches
-  between the stacked diff and a split one, base beside head, scrolling
-  as one. Click a symbol and rust-analyzer says what it is; go-to-definition
-  and find references are in the same panel, and references open in a
-  panel under the editor.
+  and the thread column. The tree starts cut down to the changed files
+  and the directories on the way to them, a run of lone directories
+  folded into one row; the filter button at the right of the Viewed row
+  turns that off and shows the whole worktree, with the changed files
+  still marked. At the top of the rail a scope menu narrows the diff to
+  one commit, to the uncommitted work (staged, unstaged, or both), or to
+  what changed since you last looked; the rail, the tints, the churn and
+  the tab's count all follow it. Each changed file has its status and
+  churn at the end of its row, and a Viewed check, keyed on the file's
+  content, so a push that changes the file clears it and one that leaves
+  it alone does not; `}` and `{` step through the unviewed files. A
+  toggle in the file tab bar switches between the stacked diff and a
+  split one, base beside head, scrolling as one. Click a symbol and
+  rust-analyzer says what it is; go-to-definition and find references
+  are in the same panel, and references open in a panel under the
+  editor.
 - An issue has Conversation alone, until Start work gives it a checkout. A
   branch of your own has a Conversation of its threads and a Files of its
   diff against its base.

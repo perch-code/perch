@@ -1,36 +1,43 @@
-//! The file rail: the scope, then the changed files or the whole worktree.
+//! The file rail: the scope, then the worktree as a tree, cut down to the
+//! changed files until the filter is turned off.
 
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use floem::peniko::Color;
+use floem::event::EventPropagation;
 use floem::prelude::*;
-use floem::reactive::{Memo, SignalGet, SignalWith};
+use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::text::FontWeight;
 use floem::views::{Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack};
 use perch_git::{ChangeStatus, ChangedFile, TreeEntry};
 
 use crate::backend::Backend;
-use crate::review::model::{RailMode, ReviewState};
-use crate::review::{scope, tree};
+use crate::review::model::ReviewState;
+use crate::review::tree::{self, Row};
+use crate::review::{cards, scope};
 use crate::review::OpenFile;
 use crate::icons::SidebarIcon;
 use crate::state::Checked;
-use crate::ui::widgets::{checkbox, sidebar_glyph};
+use crate::ui::widgets::{checkbox, icon_button, sidebar_glyph};
 use crate::theme;
 
+/// The changed files by path, for the tree, which lists every file and
+/// knows the changed ones only by path.
+type ChangedByPath = Memo<Arc<HashMap<String, ChangedFile>>>;
+
 pub fn rail(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl IntoView {
+    let changed: ChangedByPath = Memo::new(move |_| {
+        state
+            .changed_files
+            .with(|files| Arc::new(files.iter().map(|f| (f.path.clone(), f.clone())).collect()))
+    });
+
     Stack::vertical((
         scope::button(state, backend.clone()),
-        mode_toggle(state),
-        dyn_container(
-            move || state.rail_mode.get(),
-            move |mode| match mode {
-                RailMode::Changed => changed_pane(state, on_open.clone(), backend.clone()).into_any(),
-                RailMode::AllFiles => tree_list(state, on_open.clone()).into_any(),
-            },
-        )
-        .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
+        viewed_row(state, backend.clone()),
+        tree_list(state, changed, on_open, backend),
     ))
     .style(|s| {
         s.width(theme::RAIL_WIDTH)
@@ -43,87 +50,9 @@ pub fn rail(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl
     })
 }
 
-fn mode_toggle(state: ReviewState) -> impl IntoView {
-    let changed_count = move || state.changed_files.with(|f| f.len());
-
-    Stack::horizontal((
-        segment(state, RailMode::Changed, "Changed", Some(changed_count)),
-        segment(state, RailMode::AllFiles, "All files", None::<fn() -> usize>),
-    ))
-    .style(|s| {
-        s.height(42.0)
-            .width_full()
-            .flex_shrink(0.0_f32)
-            .items_center()
-            .padding_horiz(8.0)
-            .gap(4.0)
-            .border_bottom(1.0)
-            .border_color(theme::BORDER)
-    })
-}
-
-fn segment(
-    state: ReviewState,
-    mode: RailMode,
-    text: &'static str,
-    count: Option<impl Fn() -> usize + 'static + Copy>,
-) -> impl IntoView {
-    let active = move || state.rail_mode.get() == mode;
-
-    Stack::horizontal((
-        Label::derived(move || text).style(move |s| {
-            s.font_size(theme::TEXT_META)
-                .font_weight(if active() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
-                .color(if active() { theme::FG } else { theme::FG_MUTED })
-        }),
-        dyn_container(
-            move || count.map(|c| c()).unwrap_or(0),
-            move |n| {
-                if n == 0 {
-                    Empty::new().into_any()
-                } else {
-                    Label::derived(move || n.to_string())
-                        .style(|s| {
-                            s.font_size(theme::TEXT_BADGE)
-                                .color(theme::BADGE_FG)
-                                .background(theme::BADGE_BG)
-                                .border_radius(8.0)
-                                .padding_horiz(5.0)
-                                .margin_left(6.0)
-                        })
-                        .into_any()
-                }
-            },
-        ),
-    ))
-    .on_event_stop(el::Click, move |_, _| state.rail_mode.set(mode))
-    .style(move |s| {
-        let base = crate::ui::widgets::clickable(s)
-            .height(30.0)
-            .items_center()
-            .padding_horiz(11.0)
-            .border_radius(theme::RADIUS)
-            ;
-        if active() {
-            base.background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::BORDER)
-        } else {
-            base.border(1.0).border_color(Color::TRANSPARENT)
-        }
-    })
-}
-
-fn changed_pane(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl IntoView {
-    Stack::vertical((
-        viewed_row(state, backend.clone()),
-        changed_list(state, on_open, backend),
-    ))
-    .style(|s| s.flex_col().size_full().min_height(0.0))
-}
-
-/// How many of the changed files are viewed, and a button for the rest.
-/// Absent when there is nothing to view.
+/// How many of the changed files are viewed, a button for the rest, and
+/// the filter. With nothing changed there is nothing to count or to
+/// filter, so the row says so and the tree below is the whole worktree.
 fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // A memo, so the row is only rebuilt when the list empties or fills,
     // not on every toggle and scope change.
@@ -140,7 +69,20 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
         move || empty.get(),
         move |empty| {
             if empty {
-                return Empty::new().into_any();
+                return Container::new(
+                    Label::derived(move || "No changes")
+                        .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).selectable(false)),
+                )
+                .style(|s| {
+                    s.height(theme::VIEWED_ROW_HEIGHT)
+                        .width_full()
+                        .flex_shrink(0.0_f32)
+                        .items_center()
+                        .padding_left(10.0)
+                        .border_bottom(1.0)
+                        .border_color(theme::BORDER)
+                })
+                .into_any();
             }
             let backend = backend.clone();
             Stack::horizontal((
@@ -162,9 +104,11 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                             .selectable(false)
                             .padding_horiz(6.0)
                             .padding_vert(2.0)
+                            .margin_right(2.0)
                             .border_radius(4.0)
                             .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
                     }),
+                filter_button(state),
             ))
             .style(|s| {
                 s.height(theme::VIEWED_ROW_HEIGHT)
@@ -174,11 +118,34 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                     .padding_left(10.0)
                     .padding_right(4.0)
                     .border_bottom(1.0)
-                    .border_color(theme::BORDER_MUTED)
+                    .border_color(theme::BORDER)
             })
             .into_any()
         },
     )
+}
+
+/// The filter: lit in the accent while the tree is cut down to the
+/// changed files, grey while it is the whole worktree. The same glyph the
+/// sidebar's filter uses, so it reads as one.
+fn filter_button(state: ReviewState) -> impl IntoView {
+    dyn_container(
+        move || state.changed_only.get(),
+        move |on| {
+            let button = icon_button(
+                || SidebarIcon::Filter,
+                move || if on { theme::ACCENT } else { theme::FG_MUTED },
+                move || state.changed_only.set(!on),
+            );
+            let text = if on {
+                "Showing the changed files. Click for the whole worktree."
+            } else {
+                "Showing the whole worktree. Click for the changed files."
+            };
+            cards::tip(button, text.into()).into_any()
+        },
+    )
+    .style(|s| s.flex_shrink(0.0_f32))
 }
 
 /// Mark or clear every changed file that has content to mark. One write
@@ -197,75 +164,157 @@ fn set_all_viewed(state: ReviewState, backend: &Backend, viewed: bool) {
     }
 }
 
-fn changed_list(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl IntoView {
-    // Keyed on the whole row, not the path: a scope change keeps the path
-    // and changes the churn, the status and the blob Viewed is keyed on,
-    // and a row kept by its key would show the old ones.
+/// The tree. Three steps, each remembered so a click on a chevron redoes
+/// only the last: the worktree with the deleted files put back, the rows
+/// for it whole or cut down to the changes, then the rows that are open.
+fn tree_list(state: ReviewState, changed: ChangedByPath, on_open: OpenFile, backend: Rc<Backend>) -> impl IntoView {
+    // A deleted file is gone from the worktree but is in the changed list,
+    // and needs a row to be opened and marked from.
+    let full: Memo<Arc<Vec<TreeEntry>>> = Memo::new(move |_| {
+        let tree = state.tree.get();
+        let missing = changed.with(|c| tree::with_paths(&tree, c.keys().map(String::as_str)));
+        match missing {
+            Some(merged) => Arc::new(merged),
+            None => tree,
+        }
+    });
+    let rows: Memo<Arc<Vec<Row>>> = Memo::new(move |_| {
+        let full = full.get();
+        let filtered = state.changed_only.get() && changed.with(|c| !c.is_empty());
+        if filtered {
+            let pruned = changed.with(|c| tree::changed_only(&full, c.keys().map(String::as_str)));
+            Arc::new(tree::rows(&pruned, true))
+        } else {
+            Arc::new(tree::rows(&full, false))
+        }
+    });
+
+    // Keyed on the whole row, not the path: the same directory is one
+    // row folded with the filter on and another on its own with it off,
+    // and a row kept by its path would show the old label at the old
+    // depth.
     dyn_stack(
-        move || state.changed_files.get().as_ref().clone(),
-        |f| f.clone(),
-        move |f| changed_row(state, f, on_open.clone(), backend.clone()),
+        move || state.expanded.with(|expanded| tree::visible(rows.get().as_ref(), expanded)),
+        |row| row.clone(),
+        move |row| tree_row(state, row, changed, on_open.clone(), backend.clone()),
     )
     .style(|s| s.flex_col().width_full().padding_vert(4.0))
     .scroll()
     .style(|s| s.size_full().min_height(0.0))
 }
 
-fn changed_row(state: ReviewState, file: ChangedFile, on_open: OpenFile, backend: Rc<Backend>) -> impl IntoView {
-    let click_path = file.path.clone();
+fn tree_row(
+    state: ReviewState,
+    row: Row,
+    changed: ChangedByPath,
+    on_open: OpenFile,
+    backend: Rc<Backend>,
+) -> impl IntoView {
+    let is_dir = row.is_dir;
+    let depth = row.depth;
+    let label = row.label.clone();
+    let click_row = row.clone();
+    let chevron_row = row.clone();
+    let chevron_click_row = row.clone();
+    let is_expanded = move || state.expanded.with(|e| tree::is_expanded(&chevron_row, e));
     // One closure per use: each captures a String, so none of them is Copy.
-    let (name_path, row_path) = (file.path.clone(), file.path.clone());
+    let (name_path, row_path, file_path, viewed_path) =
+        (row.path.clone(), row.path.clone(), row.path.clone(), row.path);
+
     let active_name = move || state.active.with(|a| a.as_deref() == Some(name_path.as_str()));
     let active_row = move || state.active.with(|a| a.as_deref() == Some(row_path.as_str()));
-    // A viewed row drops to the subtle colour, name and counts alike, so
+    // A file the pull request touched carries its status, churn and Viewed
+    // check, so the changes are marked while browsing the whole tree.
+    let file = move || changed.with(|c| c.get(&file_path).cloned());
+    // A viewed file drops to the subtle colour, name and counts alike, so
     // what is left to read stands out from what is done.
-    let (name_file, counts_file) = (file.clone(), file.clone());
-    let viewed_name = move || state.is_viewed(&name_file);
-    let viewed_counts = move || state.is_viewed(&counts_file);
-
-    let directory = file.directory().to_string();
-    let name = file.file_name().to_string();
-    let status = file.status;
-    let additions = file.additions;
-    let deletions = file.deletions;
-    let binary = file.binary;
+    let viewed = move || changed.with(|c| c.get(&viewed_path).is_some_and(|f| state.is_viewed(f)));
 
     Stack::horizontal((
-        status_letter(status),
-        // The directory is muted so the eye lands on the file name.
-        Stack::horizontal((
-            Label::derived(move || directory.clone()).style(|s| {
-                s.font_size(theme::TEXT_META)
-                    .color(theme::FG_SUBTLE)
-                    .text_ellipsis()
-                    .min_width(0.0)
-            }),
-            Label::derived(move || name.clone()).style(move |s| {
-                s.font_size(theme::TEXT_META)
-                    .color(if viewed_name() { theme::FG_SUBTLE } else { theme::FG })
-                    .font_weight(if active_name() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
-                    .flex_shrink(0.0_f32)
-            }),
+        Empty::new().style(move |s| s.width(depth as f64 * 12.0).flex_shrink(0.0_f32)),
+        // A chevron drawn rather than typed: the arrow characters are not in
+        // the UI font and rendered as missing-glyph boxes. On a directory
+        // it is a button of its own, so a directory that is itself a
+        // change, a submodule, can be opened by its row and still shut.
+        Container::new(dyn_container(
+            move || is_dir.then(&is_expanded),
+            move |open| match open {
+                Some(true) => sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE).into_any(),
+                Some(false) => sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE).into_any(),
+                None => Empty::new().into_any(),
+            },
         ))
-        .style(|s| s.flex_grow(1.0_f32).min_width(0.0).items_center()),
-        counts(additions, deletions, binary, viewed_counts),
-        viewed_box(state, file, backend),
+        .on_event(el::Click, move |_, _| {
+            if is_dir {
+                state.expanded.update(|expanded| tree::toggle_row(expanded, &chevron_click_row));
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
+        })
+        .style(|s| {
+            s.size(14.0, 14.0)
+                .flex_shrink(0.0_f32)
+                .items_center()
+                .justify_center()
+                .margin_right(3.0)
+        }),
+        Label::derived(move || label.clone()).style(move |s| {
+            s.font_size(theme::TEXT_META)
+                .color(if viewed() {
+                    theme::FG_SUBTLE
+                } else if is_dir {
+                    theme::FG_MUTED
+                } else {
+                    theme::FG
+                })
+                .font_weight(if active_name() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
+                .flex_grow(1.0_f32)
+                .min_width(0.0)
+                .text_ellipsis()
+        }),
+        dyn_container(file, move |file| match file {
+            Some(file) => change_marks(state, file, backend.clone()).into_any(),
+            None => Empty::new().into_any(),
+        })
+        .style(|s| s.flex_shrink(0.0_f32)),
     ))
-    .on_event_stop(el::Click, move |_, _| on_open(&click_path))
+    .on_event_stop(el::Click, move |_, _| {
+        // A directory that is itself a change, a submodule, opens like a
+        // file: the diff is what the reader came for. The chevron shuts it.
+        if is_dir && !changed.with(|c| c.contains_key(&click_row.path)) {
+            state.expanded.update(|expanded| tree::toggle_row(expanded, &click_row));
+        } else {
+            on_open(&click_row.path);
+        }
+    })
     .style(move |s| {
         let base = crate::ui::widgets::clickable(s)
-            .height(32.0)
+            .height(theme::TREE_ROW_HEIGHT)
             .width_full()
             .items_center()
             .padding_left(10.0)
-            .padding_right(4.0)
-            .hover(|s| s.background(theme::CANVAS_HOVER));
+            .padding_right(4.0);
+        let base = base.hover(|s| s.background(theme::CANVAS_HOVER));
         if active_row() {
             base.background(theme::ACCENT_SUBTLE)
         } else {
             base
         }
     })
+}
+
+/// The right end of a changed file's row: its status, its churn, and the
+/// Viewed check.
+fn change_marks(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> impl IntoView {
+    let counts_file = file.clone();
+    let viewed_counts = move || state.is_viewed(&counts_file);
+    Stack::horizontal((
+        status_letter(file.status),
+        counts(file.additions, file.deletions, file.binary, viewed_counts),
+        viewed_box(state, file, backend),
+    ))
+    .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(8.0))
 }
 
 /// The Viewed check at the row's right edge. A deletion has no head
@@ -304,7 +353,6 @@ fn status_letter(status: ChangeStatus) -> impl IntoView {
             .width(14.0)
             .flex_shrink(0.0_f32)
             .text_align(floem::text::Alignment::Center)
-            .margin_right(6.0)
     })
 }
 
@@ -326,114 +374,7 @@ fn counts(additions: u32, deletions: u32, binary: bool, muted: impl Fn() -> bool
             },
         ),
     ))
-    .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(8.0))
-}
-
-/// Whether the changed file at a path is viewed, for the tree, which
-/// lists every file and knows the changed ones only by path.
-fn viewed_at(state: ReviewState, path: &str) -> bool {
-    state
-        .changed_files
-        .with(|files| files.iter().find(|f| f.path == path).is_some_and(|f| state.is_viewed(f)))
-}
-
-fn tree_list(state: ReviewState, on_open: OpenFile) -> impl IntoView {
-    dyn_stack(
-        move || {
-            state
-                .expanded
-                .with(|expanded| tree::visible_entries(state.tree.get().as_ref(), expanded))
-        },
-        |e| e.path.clone(),
-        move |e| tree_row(state, e, on_open.clone()),
-    )
-    .style(|s| s.flex_col().width_full().padding_vert(4.0))
-    .scroll()
-    .style(|s| s.size_full().min_height(0.0))
-}
-
-fn tree_row(state: ReviewState, entry: TreeEntry, on_open: OpenFile) -> impl IntoView {
-    let click_path = entry.path.clone();
-    let status_path = entry.path.clone();
-    let (name_path, row_path) = (entry.path.clone(), entry.path.clone());
-    let chevron_path = entry.path.clone();
-    let is_expanded = move || state.expanded.with(|e| e.contains(&chevron_path));
-    let is_dir = entry.is_dir;
-    let depth = entry.depth;
-    let name = entry
-        .path
-        .rsplit('/')
-        .next()
-        .unwrap_or(&entry.path)
-        .to_string();
-
-    let active_name = move || state.active.with(|a| a.as_deref() == Some(name_path.as_str()));
-    let active_row = move || state.active.with(|a| a.as_deref() == Some(row_path.as_str()));
-    // A file the pull request touched carries the same letter here as in the
-    // changed list, so the diff is visible while browsing the whole tree.
-    let status = move || state.status_of(&status_path);
-    // And the same grey once it is viewed.
-    let viewed_path = entry.path.clone();
-    let viewed = move || !is_dir && viewed_at(state, &viewed_path);
-
-    Stack::horizontal((
-        Empty::new().style(move |s| s.width(depth as f64 * 12.0).flex_shrink(0.0_f32)),
-        // A chevron drawn rather than typed: the arrow characters are not in
-        // the UI font and rendered as missing-glyph boxes.
-        Container::new(dyn_container(
-            move || is_dir.then(&is_expanded),
-            move |open| match open {
-                Some(true) => sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE).into_any(),
-                Some(false) => sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE).into_any(),
-                None => Empty::new().into_any(),
-            },
-        ))
-        .style(|s| {
-            s.size(14.0, 14.0)
-                .flex_shrink(0.0_f32)
-                .items_center()
-                .justify_center()
-                .margin_right(3.0)
-        }),
-        Label::derived(move || name.clone()).style(move |s| {
-            s.font_size(theme::TEXT_META)
-                .color(if viewed() {
-                    theme::FG_SUBTLE
-                } else if is_dir {
-                    theme::FG_MUTED
-                } else {
-                    theme::FG
-                })
-                .font_weight(if active_name() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
-                .flex_grow(1.0_f32)
-                .min_width(0.0)
-                .text_ellipsis()
-        }),
-        dyn_container(status, move |s| match s {
-            Some(status) => status_letter(status).into_any(),
-            None => Empty::new().into_any(),
-        }),
-    ))
-    .on_event_stop(el::Click, move |_, _| {
-        if is_dir {
-            state.expanded.update(|expanded| tree::toggle(expanded, &click_path));
-        } else {
-            on_open(&click_path);
-        }
-    })
-    .style(move |s| {
-        let base = crate::ui::widgets::clickable(s)
-            .height(28.0)
-            .width_full()
-            .items_center()
-            .padding_horiz(10.0);
-        let base = base.hover(|s| s.background(theme::CANVAS_HOVER));
-        if active_row() {
-            base.background(theme::ACCENT_SUBTLE)
-        } else {
-            base
-        }
-    })
+    .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(6.0))
 }
 
 /// The rail in a headless window, driven by clicks.
@@ -444,7 +385,7 @@ mod tests {
 
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::reactive::{SignalGet, SignalUpdate};
-    use perch_git::{ChangeStatus, ChangedFile};
+    use perch_git::{ChangeStatus, ChangedFile, TreeEntry};
     use perch_github::{Item, ItemCheckout};
 
     use crate::review::model::{ItemTab, Phase, ReviewState};
@@ -463,9 +404,11 @@ mod tests {
         }
     }
 
-    /// The whole window on Files with a branch of three changed files,
-    /// the second of them viewed, and the drawer shut so the rail starts
-    /// at the activity rail's edge.
+    /// The whole window on Files with a worktree of `src` and a README,
+    /// a branch that changed three of the files in `src`, the second of
+    /// them viewed, and the drawer shut so the rail starts at the
+    /// activity rail's edge. The filter is on, so the rows are `src`
+    /// and the three changed files.
     fn app_harness() -> (HeadlessHarness, ReviewState) {
         let root = TestRoot::new();
         let app = AppState::new();
@@ -487,7 +430,13 @@ mod tests {
         state.ready.set(true);
         state.set_phase(Phase::Ready);
         state.tab.set(ItemTab::Files);
-        state.changed_files.set(Arc::new(vec![
+        state.tree.set(Arc::new(
+            ["src", "src/a.rs", "src/b.rs", "src/c.rs", "src/untouched.rs", "README.md"]
+                .into_iter()
+                .map(|path| TreeEntry::new(path, path == "src"))
+                .collect(),
+        ));
+        state.set_changed_files(Arc::new(vec![
             changed("src/a.rs", Some("blob-a")),
             changed("src/b.rs", Some("blob-b")),
             changed("src/c.rs", Some("blob-c")),
@@ -503,18 +452,38 @@ mod tests {
         (harness, state)
     }
 
-    /// The top of the changed list: header, tab strip, scope button, mode
-    /// toggle, viewed row, then the list's 4px of padding.
+    /// The top of the tree: header, tab strip, scope button, viewed row,
+    /// then the list's 4px of padding.
     fn list_top() -> f64 {
-        theme::REVIEW_HEADER_HEIGHT + theme::TAB_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + 42.0 + theme::VIEWED_ROW_HEIGHT + 4.0
+        theme::REVIEW_HEADER_HEIGHT + theme::TAB_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT + 4.0
+    }
+
+    /// The centre of a row's name, `row` rows down the tree.
+    fn name_center(row: usize) -> (f64, f64) {
+        let x = theme::ACTIVITY_RAIL_WIDTH + 60.0;
+        let y = list_top() + row as f64 * theme::TREE_ROW_HEIGHT + theme::TREE_ROW_HEIGHT / 2.0;
+        (x, y)
     }
 
     /// The centre of a row's checkbox: 26 square against the row's 4px
     /// right padding, in a rail `RAIL_WIDTH` wide from the activity rail.
     fn checkbox_center(row: usize) -> (f64, f64) {
         let x = theme::ACTIVITY_RAIL_WIDTH + theme::RAIL_WIDTH - 4.0 - 13.0;
-        let y = list_top() + row as f64 * 32.0 + 16.0;
+        (x, name_center(row).1)
+    }
+
+    /// The centre of the filter button, at the right end of the viewed
+    /// row, the same 26 square against the same 4px.
+    fn filter_center() -> (f64, f64) {
+        let x = theme::ACTIVITY_RAIL_WIDTH + theme::RAIL_WIDTH - 4.0 - 13.0;
+        let y = theme::REVIEW_HEADER_HEIGHT + theme::TAB_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT / 2.0;
         (x, y)
+    }
+
+    fn click(harness: &mut HeadlessHarness, (x, y): (f64, f64)) {
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
     }
 
     /// The check is inside a row that is itself a button, and a click on
@@ -524,34 +493,174 @@ mod tests {
     #[test]
     fn the_viewed_check_does_not_open_the_file() {
         let (mut harness, state) = app_harness();
-        let (x, y) = checkbox_center(0);
+        // Row 0 is `src`; a.rs is under it.
+        let (x, y) = checkbox_center(1);
         let under = harness.element_id_at(x, y);
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
+        click(&mut harness, (x, y));
         assert_eq!(state.active.get(), None, "click at ({x}, {y}) over {under:?} opened the file");
 
         // The same row, on its name, does open it.
-        let x = theme::ACTIVITY_RAIL_WIDTH + 60.0;
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
+        click(&mut harness, name_center(1));
         assert_eq!(state.active.get().as_deref(), Some("src/a.rs"));
     }
 
     /// A deletion has nothing to view; its row keeps the check's space so
     /// the counts line up, and a click there opens the file as the rest
-    /// of the row does.
+    /// of the row does. The deleted file is not in the worktree, and has
+    /// a row all the same.
     #[test]
     fn a_deletion_has_no_check() {
         let (mut harness, state) = app_harness();
-        state.changed_files.set(Arc::new(vec![changed("src/gone.rs", None), changed("src/a.rs", Some("blob-a"))]));
+        state.set_changed_files(Arc::new(vec![changed("src/gone.rs", None), changed("src/a.rs", Some("blob-a"))]));
         harness.rebuild();
         harness.paint();
-        let (x, y) = checkbox_center(0);
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
+        // src, a.rs, gone.rs: the tree's order, not the list's.
+        click(&mut harness, checkbox_center(2));
         assert_eq!(state.active.get().as_deref(), Some("src/gone.rs"));
+    }
+
+    /// The filter cuts the tree to the changed files; off, the whole
+    /// worktree is there, with the changed files still marked.
+    #[test]
+    fn the_filter_button_shows_the_whole_worktree_and_back() {
+        let (mut harness, state) = app_harness();
+        assert!(state.changed_only.get(), "the filter starts on");
+        // Row 4 would be untouched.rs in the whole tree. Filtered, there
+        // is nothing there.
+        click(&mut harness, name_center(4));
+        assert_eq!(state.active.get(), None, "the filtered tree has four rows");
+
+        click(&mut harness, filter_center());
+        assert!(!state.changed_only.get(), "the filter button turns it off");
+        click(&mut harness, name_center(4));
+        assert_eq!(state.active.get().as_deref(), Some("src/untouched.rs"));
+        // The changed files keep their check in the whole tree.
+        click(&mut harness, checkbox_center(3));
+        assert_eq!(state.active.get().as_deref(), Some("src/untouched.rs"), "the check did not open c.rs");
+
+        click(&mut harness, filter_center());
+        assert!(state.changed_only.get());
+        click(&mut harness, name_center(1));
+        assert_eq!(state.active.get().as_deref(), Some("src/a.rs"));
+        click(&mut harness, name_center(4));
+        assert_eq!(state.active.get().as_deref(), Some("src/a.rs"), "row 4 is gone again");
+    }
+
+    /// A run of lone directories is one row, and that row opens and
+    /// shuts the run. Here the branch changed one file deep in `lib`,
+    /// so the filtered tree is `lib/inner/deep` and the file under it.
+    #[test]
+    fn a_folded_run_is_one_row_that_toggles() {
+        let (mut harness, state) = app_harness();
+        state.tree.set(Arc::new(
+            ["lib", "lib/inner", "lib/inner/deep", "lib/inner/deep/x.rs", "lib/inner/other.rs", "README.md"]
+                .into_iter()
+                .map(|path| TreeEntry::new(path, !path.ends_with(".rs") && !path.ends_with(".md")))
+                .collect(),
+        ));
+        state.set_changed_files(Arc::new(vec![changed("lib/inner/deep/x.rs", Some("blob-x"))]));
+        harness.rebuild();
+        harness.paint();
+        // Row 0 is the run, row 1 the file.
+        click(&mut harness, name_center(1));
+        assert_eq!(state.active.get().as_deref(), Some("lib/inner/deep/x.rs"));
+
+        state.active.set(None);
+        click(&mut harness, name_center(0));
+        assert!(!state.expanded.get().contains("lib/inner/deep"), "the run shut at its innermost");
+        click(&mut harness, name_center(1));
+        assert_eq!(state.active.get(), None, "the file is hidden");
+
+        click(&mut harness, name_center(0));
+        let expanded = state.expanded.get();
+        assert!(expanded.contains("lib") && expanded.contains("lib/inner") && expanded.contains("lib/inner/deep"));
+        click(&mut harness, name_center(1));
+        assert_eq!(state.active.get().as_deref(), Some("lib/inner/deep/x.rs"));
+
+        // Off, the run comes apart into its directories, all still open:
+        // lib, inner, deep, x.rs, other.rs, README.md.
+        click(&mut harness, filter_center());
+        state.active.set(None);
+        click(&mut harness, name_center(4));
+        assert_eq!(state.active.get().as_deref(), Some("lib/inner/other.rs"));
+    }
+
+    /// A directory that is itself a change, a submodule, has the marks
+    /// and opens on a click, as the flat list opened it; its chevron is
+    /// what shuts it.
+    #[test]
+    fn a_changed_directory_opens_and_its_chevron_toggles() {
+        let (mut harness, state) = app_harness();
+        state.tree.set(Arc::new(
+            ["vendor", "vendor/lib", "vendor/lib/lib.c", "README.md"]
+                .into_iter()
+                .map(|path| TreeEntry::new(path, !path.contains('.')))
+                .collect(),
+        ));
+        state.set_changed_files(Arc::new(vec![changed("vendor/lib", Some("commit-sha"))]));
+        harness.rebuild();
+        harness.paint();
+        // One folded row, `vendor/lib`.
+        click(&mut harness, name_center(0));
+        assert_eq!(state.active.get().as_deref(), Some("vendor/lib"));
+        // Its check checks rather than opens.
+        state.active.set(None);
+        click(&mut harness, checkbox_center(0));
+        assert_eq!(state.active.get(), None);
+        // The chevron, at the row's left edge after the 10px padding,
+        // opens the run: the change is the directory itself, so only the
+        // way to it started open.
+        let x = theme::ACTIVITY_RAIL_WIDTH + 10.0 + 7.0;
+        let y = name_center(0).1;
+        assert!(state.expanded.get().contains("vendor"));
+        assert!(!state.expanded.get().contains("vendor/lib"));
+        click(&mut harness, (x, y));
+        assert_eq!(state.active.get(), None, "the chevron did not open it");
+        assert!(state.expanded.get().contains("vendor/lib"));
+        click(&mut harness, (x, y));
+        assert!(!state.expanded.get().contains("vendor/lib"), "and shuts it again");
+        assert_eq!(state.active.get(), None);
+    }
+
+    /// A directory row shuts and opens on a click, in either mode.
+    #[test]
+    fn a_directory_row_toggles() {
+        let (mut harness, state) = app_harness();
+        assert!(state.expanded.get().contains("src"), "the changed files' directory starts open");
+        click(&mut harness, name_center(0));
+        assert!(!state.expanded.get().contains("src"));
+        // Shut, its files are gone: row 1 is empty rail.
+        click(&mut harness, name_center(1));
+        assert_eq!(state.active.get(), None);
+        click(&mut harness, name_center(0));
+        assert!(state.expanded.get().contains("src"));
+        click(&mut harness, name_center(1));
+        assert_eq!(state.active.get().as_deref(), Some("src/a.rs"));
+    }
+
+    /// With nothing changed there is no filter to speak of: the row says
+    /// so and the tree is the whole worktree.
+    #[test]
+    fn nothing_changed_shows_the_whole_worktree() {
+        let (mut harness, state) = app_harness();
+        state.set_changed_files(Arc::new(Vec::new()));
+        harness.rebuild();
+        harness.paint();
+        assert!(state.changed_only.get(), "the flag is untouched");
+        click(&mut harness, name_center(4));
+        assert_eq!(state.active.get().as_deref(), Some("src/untouched.rs"));
+        // No filter button either: a click where it was is nothing.
+        click(&mut harness, filter_center());
+        assert!(state.changed_only.get());
+
+        // Changes back, the row and its button come back with them.
+        state.set_changed_files(Arc::new(vec![changed("src/a.rs", Some("blob-a"))]));
+        harness.rebuild();
+        harness.paint();
+        state.active.set(None);
+        click(&mut harness, name_center(4));
+        assert_eq!(state.active.get(), None, "filtered again: src and a.rs only");
+        click(&mut harness, filter_center());
+        assert!(!state.changed_only.get());
     }
 }

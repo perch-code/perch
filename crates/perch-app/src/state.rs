@@ -191,7 +191,7 @@ impl AppState {
             // The phase goes last, after every field the view will read.
             Event::ReviewReady { item, pull_request, files, tree, stale_head, offline } => {
                 review.preparing.set(Preparing::Idle);
-                review.changed_files.set(files);
+                review.set_changed_files(files);
                 review.tree.set(tree);
                 self.open_item.set(Some(item.id.clone()));
                 review.item.set(Some(item));

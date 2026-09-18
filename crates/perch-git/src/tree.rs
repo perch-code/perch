@@ -1,4 +1,4 @@
-//! Listing the files in a worktree, for the All files rail.
+//! Listing the files in a worktree, for the file rail.
 
 use std::path::Path;
 
@@ -12,6 +12,20 @@ pub struct TreeEntry {
     pub is_dir: bool,
     /// How deep the entry sits, for indenting without re-splitting the path.
     pub depth: usize,
+}
+
+impl TreeEntry {
+    pub fn new(path: impl Into<String>, is_dir: bool) -> Self {
+        let path = path.into();
+        let depth = path.matches('/').count();
+        TreeEntry { path, is_dir, depth }
+    }
+}
+
+/// The order `list_tree` returns entries in, for putting one in among
+/// them without listing again.
+pub fn compare_entries(a: &TreeEntry, b: &TreeEntry) -> std::cmp::Ordering {
+    compare_paths(&a.path, a.is_dir, &b.path, b.is_dir)
 }
 
 /// Walk a worktree, honouring `.gitignore` and skipping `.git`.
@@ -53,16 +67,14 @@ pub fn list_tree(worktree: &Path, max_entries: usize) -> Result<Vec<TreeEntry>, 
     // adjacent to its own contents.
     paths.sort_by(|a, b| compare_paths(&a.0, a.1, &b.0, b.1));
 
-    Ok(paths
-        .into_iter()
-        .map(|(path, is_dir)| {
-            let depth = path.matches('/').count();
-            TreeEntry { path, is_dir, depth }
-        })
-        .collect())
+    Ok(paths.into_iter().map(|(path, is_dir)| TreeEntry::new(path, is_dir)).collect())
 }
 
-fn compare_paths(a: &str, a_dir: bool, b: &str, b_dir: bool) -> std::cmp::Ordering {
+/// The order two paths take in the tree: a directory before a file
+/// beside it, otherwise by name, component by component. `a_dir` and
+/// `b_dir` say whether the last component is a directory; every earlier
+/// one is.
+pub fn compare_paths(a: &str, a_dir: bool, b: &str, b_dir: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     let mut ap = a.split('/').peekable();
@@ -129,8 +141,19 @@ mod tests {
 
     #[test]
     fn depth_comes_from_the_path() {
-        let e = TreeEntry { path: "a/b/c.rs".into(), is_dir: false, depth: "a/b/c.rs".matches('/').count() };
-        assert_eq!(e.depth, 2);
+        assert_eq!(TreeEntry::new("a/b/c.rs", false).depth, 2);
+        assert_eq!(TreeEntry::new("README.md", false).depth, 0);
+    }
+
+    #[test]
+    fn entries_compare_in_listing_order() {
+        use std::cmp::Ordering;
+        let dir = TreeEntry::new("src", true);
+        let file = TreeEntry::new("src/main.rs", false);
+        let readme = TreeEntry::new("README.md", false);
+        assert_eq!(compare_entries(&dir, &file), Ordering::Less, "a directory comes before its contents");
+        assert_eq!(compare_entries(&file, &readme), Ordering::Less, "a directory's contents come before a file beside it");
+        assert_eq!(compare_entries(&readme, &readme), Ordering::Equal);
     }
 
     #[test]

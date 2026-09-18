@@ -292,9 +292,11 @@ pub const THREAD_DASH: [f64; 2] = [4.0, 3.0];
 /// The box that opens the composer, and the composer in its place.
 pub const ASK_BOX_HEIGHT: f64 = 48.0;
 /// The scope button at the top of the rail, and the Viewed count row
-/// between the mode toggle and the changed list.
+/// between it and the tree.
 pub const SCOPE_BUTTON_HEIGHT: f64 = 34.0;
 pub const VIEWED_ROW_HEIGHT: f64 = 28.0;
+/// A row of the rail's tree. The Viewed check is 26 high and sits inside it.
+pub const TREE_ROW_HEIGHT: f64 = 28.0;
 /// A split's filler row: a blank on the side that has no line where the
 /// other side does. Grey rather than a diff tint, because nothing is there.
 pub const DIFF_FILLER_BG: Color = Color::from_rgb8(0xf1, 0xf3, 0xf5);

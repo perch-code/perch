@@ -23,7 +23,7 @@ pub use scan::{
 };
 pub use scope::{alignment, changed_files, dirt, log, read_side, Commit, Dirt, Rev, Scope};
 pub use store::{RepoId, Store};
-pub use tree::{list_tree, TreeEntry};
+pub use tree::{compare_entries, compare_paths, list_tree, TreeEntry};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
