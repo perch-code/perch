@@ -29,11 +29,17 @@ impl View {
         }
     }
 
-    /// Whether this view shows a thread, given what Perch has marked it.
-    fn accepts(self, mark: Option<&Mark>) -> bool {
+    /// Whether this view shows a thread, given its mark and whether the API
+    /// still returns it.
+    ///
+    /// Only Saved and Done fall back on a snapshot. The inbox mirrors GitHub,
+    /// so a bookmarked thread that has aged out of the API belongs in Saved
+    /// and nowhere else; leaving it in the inbox would pin a notification
+    /// there forever, with whatever unread flag it happened to be frozen at.
+    fn accepts(self, mark: Option<&Mark>, live: bool) -> bool {
         match self {
             // Done hides a thread from the inbox. Saved does not.
-            View::Inbox => !mark.is_some_and(Mark::is_done),
+            View::Inbox => live && !mark.is_some_and(Mark::is_done),
             View::Saved => mark.is_some_and(|m| m.saved),
             View::Done => mark.is_some_and(Mark::is_done),
         }
@@ -140,8 +146,8 @@ impl Filters {
             || !self.search.trim().is_empty()
     }
 
-    fn accepts(&self, t: &Thread, mark: Option<&Mark>) -> bool {
-        if !self.view.accepts(mark) {
+    fn accepts(&self, t: &Thread, mark: Option<&Mark>, live: bool) -> bool {
+        if !self.view.accepts(mark, live) {
             return false;
         }
         if self.unread_only && !t.unread {
@@ -188,15 +194,21 @@ pub struct Section {
 ///
 /// Order is not meaningful here; `visible` sorts.
 pub fn pool(live: &[Thread], marks: &HashMap<String, Mark>) -> Vec<Thread> {
-    let present: HashSet<&str> = live.iter().map(|t| t.id.as_str()).collect();
+    let present = live_ids(live);
     let mut out = live.to_vec();
     out.extend(
         marks
             .values()
-            .filter(|m| !present.contains(m.thread_id.as_str()))
+            .filter(|m| !present.contains(&m.thread_id))
             .map(|m| m.snapshot.clone()),
     );
     out
+}
+
+/// The ids the API still returns, which is what separates a real inbox row
+/// from a snapshot kept alive by a bookmark.
+pub fn live_ids(live: &[Thread]) -> HashSet<String> {
+    live.iter().map(|t| t.id.clone()).collect()
 }
 
 /// The run of rows between two ids, inclusive, in the order the list shows.
@@ -215,23 +227,29 @@ pub fn range_between<'a>(order: &'a [String], from: &str, to: &str) -> Option<&'
 ///
 /// What the empty state needs: an empty Saved is a different thing to say
 /// than a search that matched nothing inside it.
-pub fn view_total(threads: &[Thread], marks: &HashMap<String, Mark>, view: View) -> usize {
+pub fn view_total(
+    threads: &[Thread],
+    live: &HashSet<String>,
+    marks: &HashMap<String, Mark>,
+    view: View,
+) -> usize {
     threads
         .iter()
-        .filter(|t| view.accepts(marks.get(&t.id)))
+        .filter(|t| view.accepts(marks.get(&t.id), live.contains(&t.id)))
         .count()
 }
 
 /// Apply filters, then sort.
 pub fn visible(
     threads: &[Thread],
+    live: &HashSet<String>,
     marks: &HashMap<String, Mark>,
     filters: &Filters,
     sort: Sort,
 ) -> Vec<Thread> {
     let mut out: Vec<Thread> = threads
         .iter()
-        .filter(|t| filters.accepts(t, marks.get(&t.id)))
+        .filter(|t| filters.accepts(t, marks.get(&t.id), live.contains(&t.id)))
         .cloned()
         .collect();
     sort_threads(&mut out, sort);
@@ -340,7 +358,12 @@ pub struct Counts {
     pub repos: Vec<(String, usize, String)>,
 }
 
-pub fn counts(threads: &[Thread], marks: &HashMap<String, Mark>, view: View) -> Counts {
+pub fn counts(
+    threads: &[Thread],
+    live: &HashSet<String>,
+    marks: &HashMap<String, Mark>,
+    view: View,
+) -> Counts {
     let mut by_reason: HashMap<ReasonFilter, usize> = HashMap::new();
     let mut repos: HashMap<String, (usize, String)> = HashMap::new();
     let (mut unread, mut saved, mut done) = (0, 0, 0);
@@ -354,11 +377,13 @@ pub fn counts(threads: &[Thread], marks: &HashMap<String, Mark>, view: View) -> 
         if is_done {
             done += 1;
         }
-        if t.unread && !is_done {
+        // Only a live thread can be unread: a snapshot's flag is frozen at
+        // whatever it was when the API last mentioned it.
+        if t.unread && !is_done && live.contains(&t.id) {
             unread += 1;
         }
 
-        if !view.accepts(mark) {
+        if !view.accepts(mark, live.contains(&t.id)) {
             continue;
         }
         for f in ReasonFilter::ALL {
@@ -450,20 +475,33 @@ mod tests {
             .collect()
     }
 
-    /// The unmarked case, which is what most of these tests are about.
+    /// The unmarked case, where every thread is one the API still returns.
     fn vis(all: &[Thread], f: &Filters, sort: Sort) -> Vec<Thread> {
-        visible(all, &no_marks(), f, sort)
+        visible(all, &live_ids(all), &no_marks(), f, sort)
     }
 
     fn ids(threads: &[Thread]) -> Vec<&str> {
         threads.iter().map(|t| t.id.as_str()).collect()
     }
 
-    fn in_view(all: &[Thread], m: &HashMap<String, Mark>, view: View) -> Vec<String> {
-        visible(all, m, &Filters { view, ..Default::default() }, Sort::Newest)
-            .iter()
-            .map(|t| t.id.clone())
-            .collect()
+    /// `threads` is what the app can draw on; `live` is what the API still
+    /// returns, which is only different once a snapshot is in play.
+    fn in_view(
+        threads: &[Thread],
+        live: &[Thread],
+        m: &HashMap<String, Mark>,
+        view: View,
+    ) -> Vec<String> {
+        visible(
+            threads,
+            &live_ids(live),
+            m,
+            &Filters { view, ..Default::default() },
+            Sort::Newest,
+        )
+        .iter()
+        .map(|t| t.id.clone())
+        .collect()
     }
 
     #[test]
@@ -634,7 +672,8 @@ mod tests {
 
     #[test]
     fn counts_are_computed_over_the_whole_inbox() {
-        let c = counts(&fixture(), &no_marks(), View::Inbox);
+        let all = fixture();
+        let c = counts(&all, &live_ids(&all), &no_marks(), View::Inbox);
         assert_eq!(c.unread, 3);
         assert_eq!(c.by_reason.get(&ReasonFilter::Participating), Some(&4));
         assert_eq!(c.by_reason.get(&ReasonFilter::Mentioned), Some(&1));
@@ -647,9 +686,9 @@ mod tests {
         let all = fixture();
         let m = marks(&[(&all[0], false, true), (&all[1], true, false)]);
 
-        assert_eq!(in_view(&all, &m, View::Inbox), ["2", "3", "4", "5"]);
-        assert_eq!(in_view(&all, &m, View::Saved), ["2"]);
-        assert_eq!(in_view(&all, &m, View::Done), ["1"]);
+        assert_eq!(in_view(&all, &all, &m, View::Inbox), ["2", "3", "4", "5"]);
+        assert_eq!(in_view(&all, &all, &m, View::Saved), ["2"]);
+        assert_eq!(in_view(&all, &all, &m, View::Done), ["1"]);
     }
 
     #[test]
@@ -657,9 +696,9 @@ mod tests {
         let all = fixture();
         let m = marks(&[(&all[0], true, true)]);
 
-        assert!(in_view(&all, &m, View::Inbox).iter().all(|id| id != "1"));
-        assert_eq!(in_view(&all, &m, View::Saved), ["1"]);
-        assert_eq!(in_view(&all, &m, View::Done), ["1"]);
+        assert!(in_view(&all, &all, &m, View::Inbox).iter().all(|id| id != "1"));
+        assert_eq!(in_view(&all, &all, &m, View::Saved), ["1"]);
+        assert_eq!(in_view(&all, &all, &m, View::Done), ["1"]);
     }
 
     #[test]
@@ -673,7 +712,7 @@ mod tests {
             repo: Some("apache/samza".into()),
             ..Default::default()
         };
-        let got: Vec<String> = visible(&all, &m, &f, Sort::Newest)
+        let got: Vec<String> = visible(&all, &live_ids(&all), &m, &f, Sort::Newest)
             .iter()
             .map(|t| t.id.clone())
             .collect();
@@ -684,15 +723,15 @@ mod tests {
             search: "compaction".into(),
             ..Default::default()
         };
-        assert_eq!(visible(&all, &m, &searched, Sort::Newest).len(), 1);
+        assert_eq!(visible(&all, &live_ids(&all), &m, &searched, Sort::Newest).len(), 1);
     }
 
     #[test]
     fn an_unmarked_inbox_is_the_whole_inbox() {
         let all = fixture();
-        assert_eq!(in_view(&all, &no_marks(), View::Inbox).len(), 5);
-        assert!(in_view(&all, &no_marks(), View::Saved).is_empty());
-        assert!(in_view(&all, &no_marks(), View::Done).is_empty());
+        assert_eq!(in_view(&all, &all, &no_marks(), View::Inbox).len(), 5);
+        assert!(in_view(&all, &all, &no_marks(), View::Saved).is_empty());
+        assert!(in_view(&all, &all, &no_marks(), View::Done).is_empty());
     }
 
     #[test]
@@ -704,7 +743,7 @@ mod tests {
         // The live list never mentions thread 9; the snapshot carries it.
         let pooled = pool(&all, &m);
         assert_eq!(pooled.len(), 6);
-        assert_eq!(in_view(&pooled, &m, View::Saved), ["1", "9"]);
+        assert_eq!(in_view(&pooled, &all, &m, View::Saved), ["1", "9"]);
     }
 
     #[test]
@@ -724,12 +763,41 @@ mod tests {
         let all = fixture();
         let gone = t("9", "a/b", Reason::Mention, false, "2026-09-12T10:00:00Z", "Long gone");
         let other = t("8", "a/b", Reason::Mention, false, "2026-09-14T10:00:00Z", "Also gone");
-        let m = marks(&[(&gone, true, false), (&other, true, false)]);
+        let m = marks(&[
+            (&all[0], true, false),
+            (&all[2], true, false),
+            (&other, true, false),
+            (&gone, true, false),
+        ]);
 
-        // HashMap iteration is unordered; the sort is what makes it stable.
+        // Saved is where live threads and snapshots sit side by side. HashMap
+        // iteration is unordered, so the sort is the only thing making this
+        // list the same on two runs.
         let pooled = pool(&all, &m);
-        let v = visible(&pooled, &m, &Filters::default(), Sort::Newest);
-        assert_eq!(ids(&v), ["1", "2", "3", "8", "9", "4", "5"]);
+        let v = visible(
+            &pooled,
+            &live_ids(&all),
+            &m,
+            &Filters { view: View::Saved, ..Default::default() },
+            Sort::Newest,
+        );
+        assert_eq!(ids(&v), ["1", "3", "8", "9"]);
+    }
+
+    #[test]
+    fn a_saved_thread_the_api_forgot_leaves_the_inbox() {
+        let all = fixture();
+        let gone = t("9", "a/b", Reason::Mention, true, "2026-09-12T10:00:00Z", "Long gone");
+        let m = marks(&[(&gone, true, false)]);
+        let pooled = pool(&all, &m);
+
+        // It is still bookmarked, so Saved keeps it.
+        assert_eq!(in_view(&pooled, &all, &m, View::Saved), ["9"]);
+        // The inbox mirrors the API, which has not mentioned it in months.
+        assert!(!in_view(&pooled, &all, &m, View::Inbox).contains(&"9".to_string()));
+        // And its frozen unread flag does not nag from the badge.
+        assert_eq!(counts(&pooled, &live_ids(&all), &m, View::Inbox).unread, 3);
+        assert_eq!(counts(&pooled, &live_ids(&all), &m, View::Inbox).saved, 1);
     }
 
     #[test]
@@ -737,7 +805,7 @@ mod tests {
         let all = fixture();
         // Thread 1 is unread; dismissing it should quiet the badge.
         let m = marks(&[(&all[0], false, true)]);
-        assert_eq!(counts(&all, &m, View::Inbox).unread, 2);
+        assert_eq!(counts(&all, &live_ids(&all), &m, View::Inbox).unread, 2);
     }
 
     #[test]
@@ -746,7 +814,7 @@ mod tests {
         let m = marks(&[(&all[0], true, true), (&all[1], true, false)]);
 
         for view in [View::Inbox, View::Saved, View::Done] {
-            let c = counts(&all, &m, view);
+            let c = counts(&all, &live_ids(&all), &m, view);
             assert_eq!(c.saved, 2, "{view:?}");
             assert_eq!(c.done, 1, "{view:?}");
             assert_eq!(c.unread, 2, "{view:?}");
@@ -759,7 +827,7 @@ mod tests {
         // Two done, both on slatedb.
         let m = marks(&[(&all[0], false, true), (&all[3], false, true)]);
 
-        let done = counts(&all, &m, View::Done);
+        let done = counts(&all, &live_ids(&all), &m, View::Done);
         assert_eq!(done.repos.len(), 1);
         assert_eq!(done.repos[0].0, "slatedb/slatedb");
         assert_eq!(done.repos[0].1, 2);
@@ -767,7 +835,7 @@ mod tests {
         assert_eq!(done.by_reason.get(&ReasonFilter::TeamMentioned), None);
 
         // The same marks, seen from the inbox, describe what is left there.
-        let inbox = counts(&all, &m, View::Inbox);
+        let inbox = counts(&all, &live_ids(&all), &m, View::Inbox);
         assert_eq!(inbox.repos[0].1, 2);
         assert_eq!(inbox.by_reason.get(&ReasonFilter::Mentioned), None);
     }

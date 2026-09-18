@@ -217,11 +217,17 @@ impl AppState {
             .with(|live| self.marks.with(|marks| filter::pool(live, marks)))
     }
 
+    /// The ids the API still returns.
+    fn live_ids(&self) -> HashSet<String> {
+        self.threads.with(|live| filter::live_ids(live))
+    }
+
     /// Filtered and sorted threads.
     pub fn visible(&self) -> Vec<Thread> {
         let pool = self.pool();
+        let live = self.live_ids();
         self.marks
-            .with(|marks| filter::visible(&pool, marks, &self.filters(), self.sort.get()))
+            .with(|marks| filter::visible(&pool, &live, marks, &self.filters(), self.sort.get()))
     }
 
     /// The list as the view renders it.
@@ -235,15 +241,17 @@ impl AppState {
 
     pub fn counts(&self) -> Counts {
         let pool = self.pool();
+        let live = self.live_ids();
         self.marks
-            .with(|marks| filter::counts(&pool, marks, self.view.get()))
+            .with(|marks| filter::counts(&pool, &live, marks, self.view.get()))
     }
 
     /// How many threads the open view holds, before the other filters.
     pub fn view_total(&self) -> usize {
         let pool = self.pool();
+        let live = self.live_ids();
         self.marks
-            .with(|marks| filter::view_total(&pool, marks, self.view.get()))
+            .with(|marks| filter::view_total(&pool, &live, marks, self.view.get()))
     }
 
     pub fn is_saved(&self, thread_id: &str) -> bool {
