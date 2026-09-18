@@ -1186,4 +1186,79 @@ mod tests {
             other => panic!("expected a rate limit status, got {other:?}"),
         }
     }
+
+    use perch_github::{Reason, Repository, Subject, SubjectKind};
+
+    fn thread(id: &str, title: &str) -> Thread {
+        Thread {
+            id: id.into(),
+            unread: true,
+            reason: Reason::Subscribed,
+            updated_at: "2026-09-17T18:00:00Z".parse().unwrap(),
+            last_read_at: None,
+            subject: Subject {
+                title: title.into(),
+                kind: SubjectKind::PullRequest,
+                url: Some(format!("https://api.github.com/repos/a/b/pulls/{id}")),
+                latest_comment_url: None,
+            },
+            repository: Repository {
+                full_name: "a/b".into(),
+                owner_avatar_url: String::new(),
+            },
+        }
+    }
+
+    fn ids(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn ids_resolve_against_the_live_inbox() {
+        let mut cache = Cache::open_in_memory().unwrap();
+        cache.store_threads(&[thread("1", "one"), thread("2", "two")]).unwrap();
+
+        let got = resolve_threads(&cache, &ids(&["2", "1"]));
+        // In the order asked for, so a batch marks exactly what it named.
+        assert_eq!(
+            got.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["2", "1"]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_covers_a_thread_the_api_has_dropped() {
+        let mut cache = Cache::open_in_memory().unwrap();
+        let t = thread("1", "one");
+        cache.store_threads(std::slice::from_ref(&t)).unwrap();
+        cache.set_saved(&[&t], true).unwrap();
+        // GitHub stops returning it, but the bookmark keeps a copy.
+        cache.store_threads(&[]).unwrap();
+
+        let got = resolve_threads(&cache, &ids(&["1"]));
+        assert_eq!(got, vec![t]);
+    }
+
+    #[test]
+    fn the_live_thread_wins_over_a_stale_snapshot() {
+        let mut cache = Cache::open_in_memory().unwrap();
+        let old = thread("1", "old title");
+        cache.set_saved(&[&old], true).unwrap();
+
+        let fresh = thread("1", "new title");
+        cache.store_threads(std::slice::from_ref(&fresh)).unwrap();
+
+        let got = resolve_threads(&cache, &ids(&["1"]));
+        assert_eq!(got[0].subject.title, "new title");
+    }
+
+    #[test]
+    fn an_id_nothing_knows_about_is_skipped_rather_than_invented() {
+        let mut cache = Cache::open_in_memory().unwrap();
+        cache.store_threads(&[thread("1", "one")]).unwrap();
+
+        let got = resolve_threads(&cache, &ids(&["1", "ghost"]));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "1");
+    }
 }
