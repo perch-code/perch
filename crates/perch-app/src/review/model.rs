@@ -272,6 +272,9 @@ pub struct ReviewState {
     /// the headless tests: a focused editor asks the window for IME, and
     /// floem's headless window cannot give it and panics.
     pub composer_autofocus: RwSignal<bool>,
+    /// The text box of a composer laid in place on Conversation, while one
+    /// is open, so `a` can focus it and scroll to it.
+    pub composer_box: RwSignal<Option<floem::ViewId>>,
     pub lsp_status: RwSignal<perch_lsp::Status>,
     /// Rises with every hover and jump request. An answer carrying an older
     /// token is stale, because the pointer has moved on since it was asked.
@@ -347,6 +350,7 @@ impl ReviewState {
             composer_focused: RwSignal::new(false),
             composer_draft: RwSignal::new(String::new()),
             composer_autofocus: RwSignal::new(true),
+            composer_box: RwSignal::new(None),
             lsp_status: RwSignal::new(perch_lsp::Status::Absent),
             request_token: RwSignal::new(0),
             hover_at: RwSignal::new(None),

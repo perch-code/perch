@@ -1,5 +1,6 @@
 //! The review view: a pull request, its files, and a read-only editor.
 
+pub mod cards;
 pub mod composer_styling;
 pub mod conversation;
 pub mod editor;
@@ -57,6 +58,7 @@ pub fn review_view(
     });
 
     let body_backend = backend.clone();
+    let header_open_item = open_item.clone();
     let body_open_item = open_item;
     let on_back: Rc<dyn Fn()> = Rc::new({
         let backend = backend.clone();
@@ -93,12 +95,14 @@ pub fn review_view(
             move || is_issue.get(),
             move |is_issue| {
                 if is_issue {
-                    header::issue_header(app, state, header_backend.clone()).into_any()
+                    header::issue_header(app, state, header_backend.clone(), header_open_item.clone()).into_any()
                 } else {
                     let (back, done, archive) = (on_back.clone(), on_done.clone(), on_archive.clone());
                     header::header(
                         app,
                         state,
+                        header_backend.clone(),
+                        header_open_item.clone(),
                         move || back(),
                         move |id| done(id),
                         move |id| archive(id),

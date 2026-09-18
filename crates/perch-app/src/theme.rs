@@ -245,3 +245,49 @@ pub fn language_color(language: Option<perch_syntax::Language>) -> Color {
         None => Color::from_rgb8(0xa8, 0xb0, 0xb8),
     }
 }
+
+// ---------------------------------------------------------------------------
+// The item view: the header's pills and strip, and Conversation's cards
+// ---------------------------------------------------------------------------
+
+/// The state pill before the title: the state's colour as text on a wash
+/// of the same colour.
+pub const STATE_PILL_HEIGHT: f64 = 20.0;
+pub const STATE_WASH: f32 = 0.12;
+/// The strip under the header bar: reviewers, labels, assignees, milestone.
+pub const METADATA_HEIGHT: f64 = 30.0;
+pub const METADATA_GAP: f64 = 16.0;
+pub const METADATA_AVATAR: f64 = 16.0;
+/// A small chip: a label, a linked issue, the Local mark on a thread.
+pub const CHIP_HEIGHT: f64 = 18.0;
+
+/// How wide the reading column is. Prose past this is hard to follow.
+pub const CONVERSATION_WIDTH: f64 = 820.0;
+pub const CONVERSATION_PADDING: f64 = 20.0;
+/// Room between cards, and between an event line and its neighbours.
+pub const CARD_GAP: f64 = 12.0;
+pub const EVENT_GAP: f64 = 4.0;
+/// The byline strip across the top of a card, and the text under it.
+pub const BYLINE_HEIGHT: f64 = 40.0;
+pub const CARD_PADDING: f64 = 16.0;
+/// A card's byline avatar, and the smaller one on a line comment nested
+/// inside a review.
+pub const CARD_AVATAR: f64 = 22.0;
+pub const NESTED_AVATAR: f64 = 18.0;
+/// An event is one line with a dot where the avatars sit.
+pub const EVENT_HEIGHT: f64 = 32.0;
+pub const EVENT_DOT: f64 = 8.0;
+/// A line of code shown under a review comment or a thread's anchor.
+pub const CODE_ROW_HEIGHT: f64 = 22.0;
+pub const CODE_ROW_NUMBER_WIDTH: f64 = 40.0;
+/// How many lines of a review comment's hunk are shown above it, and how
+/// many of a thread's anchor before the rest are counted instead.
+pub const HUNK_LINES: usize = 4;
+pub const ANCHOR_LINES: usize = 8;
+/// The rule down the left of a reply under a line comment.
+pub const REPLY_RULE: f64 = 2.0;
+/// A local thread's border is dashed, so it cannot be taken for a
+/// GitHub comment's.
+pub const THREAD_DASH: [f64; 2] = [4.0, 3.0];
+/// The box that opens the composer, and the composer in its place.
+pub const ASK_BOX_HEIGHT: f64 = 48.0;

@@ -462,6 +462,26 @@ fn fenced(path: &str, text: &str) -> String {
     format!("```{lang}\n{text}\n```\n")
 }
 
+/// A GitHub comment quoted above a question, as "Ask about this" starts
+/// the draft: the author and a permalink on the first line, then the body
+/// line by line, then a blank line for the reader to type under. The quote
+/// is the only link the thread keeps to the comment; nothing else points
+/// back at it.
+pub fn quote_for(author: &str, url: &str, body: &str) -> String {
+    let mut out = format!("> **{author}** [commented]({url}):\n");
+    for line in body.trim_end().lines() {
+        if line.is_empty() {
+            out.push_str(">\n");
+        } else {
+            out.push_str("> ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,6 +695,16 @@ mod tests {
         let p = follow_up_prompt(&input(Some(&a), None, "and then?"));
         assert_eq!(p.system, None);
         assert_eq!(p.user, "(About src/manifest.rs:2–3)\n\nQuestion: and then?");
+    }
+
+    #[test]
+    fn a_quoted_comment_prefixes_every_line_and_leaves_room_below() {
+        let q = quote_for("rohan", "https://github.com/a/b/pull/1#discussion_r9", "Why the fence?\n\nIt was fine before.\n");
+        assert_eq!(
+            q,
+            "> **rohan** [commented](https://github.com/a/b/pull/1#discussion_r9):\n> Why the fence?\n>\n> It was fine before.\n\n"
+        );
+        assert_eq!(quote_for("a", "u", ""), "> **a** [commented](u):\n\n", "an empty body is only the header");
     }
 
     #[test]
