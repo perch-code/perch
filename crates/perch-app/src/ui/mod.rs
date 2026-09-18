@@ -77,6 +77,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     });
     let panel_backend = backend.clone();
     let panel_open = open_item.clone();
+    let review_open_item = open_item.clone();
 
     // Every way of marking a thread lands here, so each of them costs the
     // backend one write and the UI one event.
@@ -137,6 +138,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                             review,
                             review_backend.clone(),
                             review_mark.clone(),
+                            review_open_item.clone(),
                         )
                         .into_any()
                     } else if screen == Screen::Sidebar {

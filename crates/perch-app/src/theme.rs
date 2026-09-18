@@ -91,10 +91,6 @@ pub const SIDEBAR_MAX_WIDTH: f64 = 520.0;
 /// Wider than an editor's activity bar because the traffic lights sit at the
 /// top of it, and they need the room.
 pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
-/// One entry in that rail.
-pub const RAIL_ENTRY_SIZE: f64 = 44.0;
-/// The accent stripe down the left of the current rail entry.
-pub const RAIL_STRIPE: f64 = 3.0;
 pub const ROW_HEIGHT: f64 = 66.0;
 pub const TOOLBAR_HEIGHT: f64 = 60.0;
 pub const STATUS_HEIGHT: f64 = 34.0;

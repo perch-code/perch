@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use perch_git::{ChangeStatus, ChangedFile, DisplayBuffer, TreeEntry};
-use perch_github::{Anchor, CommentThread, Item, PullRequest};
+use perch_github::{Anchor, CommentThread, Issue, IssueComment, Item, PullRequest};
 use perch_syntax::{Language, LineSpans};
 
 /// A file prepared for the editor: text to render, and everything needed to
@@ -93,6 +93,9 @@ pub struct ReviewState {
     /// True once the checkout is ready, whether or not there is a pull
     /// request to show.
     pub ready: RwSignal<bool>,
+    /// The issue, when the item is one; the view is the issue view then.
+    pub issue: RwSignal<Option<Arc<Issue>>>,
+    pub issue_comments: RwSignal<Arc<Vec<IssueComment>>>,
     /// The head the pull request moved to while the worktree had work in
     /// it. The files on screen are the older ones.
     pub stale_head: RwSignal<Option<String>>,
@@ -187,6 +190,8 @@ impl ReviewState {
             pull_request: RwSignal::new(None),
             item: RwSignal::new(None),
             ready: RwSignal::new(false),
+            issue: RwSignal::new(None),
+            issue_comments: RwSignal::new(Arc::new(Vec::new())),
             stale_head: RwSignal::new(None),
             offline: RwSignal::new(false),
             thread_id: RwSignal::new(None),
@@ -240,6 +245,8 @@ impl ReviewState {
         self.pull_request.set(None);
         self.item.set(None);
         self.ready.set(false);
+        self.issue.set(None);
+        self.issue_comments.set(Arc::new(Vec::new()));
         self.stale_head.set(None);
         self.offline.set(false);
         self.thread_id.set(None);

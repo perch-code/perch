@@ -97,8 +97,6 @@ pub enum Command {
     StartWork { issue_item_id: String },
     /// Cut a branch from the item's head into a new checkout-only item.
     ForkItem { id: String },
-    /// Rescan roots and re-ask GitHub about subject-less branches.
-    RefreshItems,
     /// Remember a setting across launches.
     SetMeta { key: String, value: String },
 
@@ -149,6 +147,14 @@ pub enum Event {
     /// A remembered setting, sent once at startup for each key the UI
     /// asked to keep.
     Meta { key: String, value: String },
+    /// An issue is open: its snapshot, its comments, and the item.
+    IssueReady {
+        item: Arc<Item>,
+        issue: Arc<perch_github::Issue>,
+        comments: Arc<Vec<perch_github::IssueComment>>,
+        /// True when the fetch failed and this is the snapshot alone.
+        offline: bool,
+    },
     /// A pull request's discussion was archived under the knowledge root.
     /// `added` counts records that were new or changed.
     Archived { repo_full_name: String, number: u64, added: usize },
@@ -261,10 +267,6 @@ impl Backend {
 
     pub fn move_item(&self, id: &str, project_id: Option<String>, new_project: Option<String>) {
         let _ = self.commands.send(Command::MoveItem { id: id.to_string(), project_id, new_project });
-    }
-
-    pub fn refresh_items(&self) {
-        let _ = self.commands.send(Command::RefreshItems);
     }
 
     pub fn start_work(&self, issue_item_id: &str) {
@@ -626,10 +628,6 @@ async fn run(
             }
             Some(Command::MoveItem { id, project_id, new_project }) => {
                 move_item(&ctx, &id, project_id, new_project);
-            }
-            Some(Command::RefreshItems) => {
-                let ctx = ctx.clone();
-                tokio::spawn(async move { refresh_items(&ctx).await });
             }
             Some(Command::StartWork { issue_item_id }) => {
                 let ctx = ctx.clone();
@@ -1885,12 +1883,187 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
 async fn open_subject(ctx: &Ctx, repo_full_name: String, kind: ItemKind, number: u64) -> bool {
     match kind {
         ItemKind::PullRequest => open_pull_request(ctx, repo_full_name, number).await,
-        ItemKind::Issue => {
-            let _ = ctx.events.send(Event::ReviewFailed {
-                message: format!("Opening an issue (#{number}) is not built yet"),
-            });
-            false
+        ItemKind::Issue => open_issue(ctx, repo_full_name, number).await,
+    }
+}
+
+/// Fetch an issue and its comments, store the snapshot on its item, archive
+/// the discussion, and show the issue view. The agent's questions about it
+/// run in the repository's home checkout. Returns false always: there is
+/// no language server to start for an issue.
+async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
+    let events = &ctx.events;
+    let _ = events.send(Event::ReviewProgress { message: "Reading the issue".into(), percent: None });
+
+    let existing = ctx
+        .with_cache(|c| c.find_item_by_subject(&repo_full_name, ItemKind::Issue, number).ok().flatten())
+        .flatten();
+
+    let (issue, comments, offline) = match ctx.github.fetch_issue(&repo_full_name, number).await {
+        Ok(issue) => {
+            let comments = match ctx.github.fetch_issue_comments(&repo_full_name, number).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(repo = %repo_full_name, number, error = %e, "could not fetch the comments");
+                    Vec::new()
+                }
+            };
+            (issue, comments, false)
         }
+        Err(e) => match existing.as_ref().and_then(|i| i.issue().cloned()) {
+            Some(snapshot) => {
+                tracing::info!(repo = %repo_full_name, number, error = %e, "showing the issue from its snapshot");
+                ctx.notice("Offline; showing the issue as it was last fetched");
+                (snapshot, Vec::new(), true)
+            }
+            None => {
+                let _ = events.send(Event::ReviewFailed { message: e.to_string() });
+                return false;
+            }
+        },
+    };
+
+    let now = Timestamp::now();
+    let is_new = existing.is_none();
+    let mut item = match existing {
+        Some(item) => item,
+        None => {
+            let project = ctx.project_for(&issue.repo_full_name);
+            Item::new(&project, &issue.repo_full_name, now)
+        }
+    };
+    item.subject = Some(ItemSubject::Issue(issue.clone()));
+    item.archived_at = None;
+    item.last_opened_at = now;
+    let written = ctx.with_cache(|c| if is_new { c.insert_item(&item) } else { c.update_item(&item) });
+    if let Some(Err(e)) = written {
+        tracing::warn!(id = %item.id, error = %e, "could not record the item");
+    }
+    ctx.send_items();
+
+    // Where a question about it runs: the home checkout, made if needed.
+    let home = match RepoId::parse(&issue.repo_full_name) {
+        Some(repo) if !offline => {
+            let progress = events.clone();
+            let label = repo.full_name();
+            let cloned = ctx
+                .preparer
+                .ensure_bare(&repo, move |step| {
+                    if let perch_git::Step::Cloning { phase, percent } = step {
+                        let _ = progress.send(Event::ReviewProgress { message: format!("Cloning {label}: {phase}"), percent });
+                    }
+                })
+                .await;
+            match cloned {
+                Ok(bare) => match ctx.preparer.default_branch(&repo).await {
+                    Ok(default) => match ctx.preparer.ensure_home(&repo, &default).await {
+                        Ok(path) => Some((bare, path, default)),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "no home checkout");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "no default branch");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "no clone for the issue's repository");
+                    None
+                }
+            }
+        }
+        Some(repo) => {
+            let bare = ctx.preparer.store().bare_path(&repo);
+            let home = ctx.preparer.store().home_path(&repo);
+            home.join(".git").exists().then(|| (bare, home, String::from("HEAD")))
+        }
+        None => None,
+    };
+    let checkout = match home {
+        Some((bare, worktree, branch)) => {
+            let head_sha = ctx
+                .preparer
+                .git()
+                .run(Some(&worktree), ["rev-parse", "HEAD"], Duration::from_secs(30))
+                .await
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            perch_git::Checkout { worktree, bare, branch, merge_base: head_sha.clone(), head_sha, stale: None }
+        }
+        None => {
+            // No checkout at all: questions cannot run, but the issue can
+            // be read. A directory that does not exist keeps `ask` honest.
+            let missing = ctx.preparer.store().root().join("homes").join("missing");
+            perch_git::Checkout {
+                worktree: missing.clone(),
+                bare: missing,
+                branch: String::new(),
+                head_sha: String::new(),
+                merge_base: String::new(),
+                stale: None,
+            }
+        }
+    };
+
+    let item = Arc::new(item);
+    let issue = Arc::new(issue);
+    let comments = Arc::new(comments);
+    if let Ok(mut guard) = ctx.slot.lock() {
+        *guard = Some(ReviewContext {
+            checkout,
+            files: Arc::new(Vec::new()),
+            item_id: item.id.clone(),
+            pull_request: None,
+            body: None,
+            issue: Some(Arc::new(((*issue).clone(), (*comments).clone()))),
+        });
+    }
+    tracing::info!(repo = %issue.repo_full_name, number, comments = comments.len(), offline, "issue ready");
+    let _ = events.send(Event::IssueReady { item: item.clone(), issue: issue.clone(), comments: comments.clone(), offline });
+    ctx.send_threads(&item.id);
+
+    if !offline {
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let project = ctx.config.project_for(&issue.repo_full_name);
+            let messages = crate::knowledge::issue_to_messages(&issue, &comments, &project);
+            match ingest(&ctx, messages).await {
+                Ok(n) => {
+                    let _ = ctx.events.send(Event::Archived { repo_full_name: issue.repo_full_name.clone(), number, added: n });
+                }
+                Err(e) => ctx.notice(format!("Could not archive the discussion: {e}")),
+            }
+        });
+    }
+    false
+}
+
+/// File records under the knowledge root and keep the skill current.
+/// Returns how many records were new or changed.
+async fn ingest(ctx: &Ctx, messages: Vec<perch_knowledge::Message>) -> Result<usize, String> {
+    let knowledge = ctx.knowledge.clone();
+    let write_skill = ctx.config.knowledge.skills;
+    // File writes, off the runtime's threads.
+    let outcome = tokio::task::spawn_blocking(move || {
+        let before = knowledge.projects()?;
+        let ingested = knowledge.ingest(&messages)?;
+        let after = knowledge.projects()?;
+        // The skill names every project, so it is rewritten when the set
+        // changes, and written the first time anything is here at all.
+        let dirs = crate::knowledge::skill_dirs();
+        let missing = dirs.iter().any(|d| !d.join("SKILL.md").is_file());
+        if write_skill && (before != after || missing) {
+            knowledge.write_skill(&perch_knowledge::SkillConfig { projects: after, dirs })?;
+        }
+        Ok::<_, perch_knowledge::Error>(ingested)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(ingested)) => Ok(ingested.total()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(format!("archive task panicked: {e}")),
     }
 }
 
@@ -2177,39 +2350,19 @@ async fn archive_discussion(ctx: &Ctx, pr: &perch_github::PullRequest) {
 
     let project = ctx.config.project_for(&pr.repo_full_name);
     let messages = crate::knowledge::to_messages(pr, &discussion, &project);
-    let knowledge = ctx.knowledge.clone();
-    let write_skill = ctx.config.knowledge.skills;
-
-    // File writes, off the runtime's threads.
-    let outcome = tokio::task::spawn_blocking(move || {
-        let before = knowledge.projects()?;
-        let ingested = knowledge.ingest(&messages)?;
-        let after = knowledge.projects()?;
-        // The skill names every project, so it is rewritten when the set
-        // changes, and written the first time anything is here at all.
-        let dirs = crate::knowledge::skill_dirs();
-        let missing = dirs.iter().any(|d| !d.join("SKILL.md").is_file());
-        if write_skill && (before != after || missing) {
-            knowledge.write_skill(&perch_knowledge::SkillConfig { projects: after, dirs })?;
-        }
-        Ok::<_, perch_knowledge::Error>(ingested)
-    })
-    .await;
-
-    match outcome {
-        Ok(Ok(ingested)) => {
-            tracing::info!(repo = %pr.repo_full_name, number = pr.number, added = ingested.added, changed = ingested.changed, "discussion archived");
+    match ingest(ctx, messages).await {
+        Ok(added) => {
+            tracing::info!(repo = %pr.repo_full_name, number = pr.number, added, "discussion archived");
             let _ = ctx.events.send(Event::Archived {
                 repo_full_name: pr.repo_full_name.clone(),
                 number: pr.number,
-                added: ingested.total(),
+                added,
             });
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             tracing::warn!(error = %e, "could not archive the discussion");
             let _ = ctx.events.send(Event::Notice(format!("Could not archive the discussion: {e}")));
         }
-        Err(e) => tracing::warn!(error = %e, "archive task panicked"),
     }
 }
 
@@ -2256,13 +2409,17 @@ async fn ask(
 ) {
     let open = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref().filter(|c| c.item_id == item_id).map(|c| {
-            (c.checkout.clone(), c.pull_request.clone(), c.body.clone())
+            (c.checkout.clone(), c.pull_request.clone(), c.body.clone(), c.issue.clone())
         })
     });
-    let Some((checkout, pull_request, body)) = open else {
+    let Some((checkout, pull_request, body, issue)) = open else {
         let _ = ctx.events.send(Event::Notice("That item is no longer open".into()));
         return;
     };
+    if !checkout.worktree.join(".git").exists() {
+        let _ = ctx.events.send(Event::Notice("There is no checkout to ask in".into()));
+        return;
+    }
     let now = Timestamp::now();
 
     // The thread: found, or made with the question as its first message.
@@ -2337,6 +2494,7 @@ async fn ask(
     let resume = thread.resumable_session();
     let input = crate::ask::PromptInput {
         pull_request: pull_request.as_deref(),
+        issue: issue.as_ref().map(|i| (&i.0, i.1.as_slice())),
         body: body.as_deref(),
         anchor: thread.anchor.as_ref(),
         file: file.as_ref(),

@@ -5,6 +5,7 @@ pub mod gutter;
 pub mod composer_styling;
 pub mod hover;
 pub mod header;
+pub mod issue;
 pub mod markdown;
 pub mod model;
 pub mod rail;
@@ -38,6 +39,7 @@ pub fn review_view(
     state: ReviewState,
     backend: Rc<Backend>,
     on_mark: crate::ui::list::OnMark,
+    open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
     let open_file: OpenFile = Rc::new({
         let backend = backend.clone();
@@ -52,15 +54,16 @@ pub fn review_view(
     });
 
     let body_backend = backend.clone();
-    let on_back = {
+    let body_open_item = open_item;
+    let on_back: Rc<dyn Fn()> = Rc::new({
         let backend = backend.clone();
         move || {
             app.leave_review(state);
             backend.close_review();
         }
-    };
+    });
 
-    let on_done = {
+    let on_done: Rc<dyn Fn(String)> = Rc::new({
         let backend = backend.clone();
         move |thread_id: String| {
             on_mark(vec![thread_id], crate::ui::list::MarkAction::Done(true));
@@ -68,18 +71,37 @@ pub fn review_view(
             app.leave_review(state);
             backend.close_review();
         }
-    };
+    });
 
     // The backend closes the review itself when the archive goes through,
-    // and the Worktrees event that follows closes the view. A refusal
-    // leaves everything as it was, with the reason in the status line.
-    let on_archive = {
+    // and the Items event that follows closes the view. A refusal leaves
+    // everything as it was, with the reason in the status line.
+    let on_archive: Rc<dyn Fn(String)> = Rc::new({
         let backend = backend.clone();
         move |id: String| backend.archive_item(&id)
-    };
+    });
 
+    let header_backend = backend.clone();
     Stack::vertical((
-        header::header(app, state, on_back, on_done, on_archive),
+        dyn_container(
+            move || state.issue.with(|i| i.is_some()),
+            move |is_issue| {
+                if is_issue {
+                    header::issue_header(app, state, header_backend.clone()).into_any()
+                } else {
+                    let (back, done, archive) = (on_back.clone(), on_done.clone(), on_archive.clone());
+                    header::header(
+                        app,
+                        state,
+                        move || back(),
+                        move |id| done(id),
+                        move |id| archive(id),
+                    )
+                    .into_any()
+                }
+            },
+        )
+        .style(|s| s.width_full().flex_shrink(0.0_f32)),
         dyn_container(
             move || match state.preparing.get() {
                 Preparing::Working { .. } => Phase::Preparing,
@@ -110,6 +132,9 @@ pub fn review_view(
                     },
                 )
                 .into_any(),
+                Phase::Ready if state.issue.with(|i| i.is_some()) => {
+                    issue_body_with_threads(app, state, body_backend.clone(), body_open_item.clone()).into_any()
+                }
                 Phase::Ready => {
                     body(app, state, open_file.clone(), body_backend.clone()).into_any()
                 }
@@ -118,6 +143,36 @@ pub fn review_view(
         .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0).background(theme::CANVAS))
+}
+
+/// The issue view's body beside the thread column.
+fn issue_body_with_threads(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_item: crate::ui::items::OpenItem,
+) -> impl IntoView {
+    let column_backend = backend.clone();
+    let open_file: OpenFile = Rc::new(|_| {});
+    Stack::horizontal((
+        issue::issue_body(app, state, backend, open_item),
+        dyn_container(
+            move || state.threads_open.get(),
+            move |open| {
+                if open {
+                    floem::views::Container::new(Stack::horizontal((
+                        threads::resize_handle(state),
+                        threads::thread_column(app, state, column_backend.clone(), open_file.clone()),
+                    )))
+                    .style(|s| s.height_full().flex_shrink(0.0_f32).position(floem::style::Position::Relative))
+                    .into_any()
+                } else {
+                    floem::views::Empty::new().into_any()
+                }
+            },
+        ),
+    ))
+    .style(|s| s.size_full().min_height(0.0))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +244,9 @@ pub fn review_status(state: ReviewState) -> impl IntoView {
         };
         let server = format!("{server}{archived}");
 
+        if let Some(issue) = state.issue.get() {
+            return format!("{}{server}", issue::describe(&issue));
+        }
         let Some(file) = state.active_file() else {
             let n = state.changed_files.with(|f| f.len());
             return format!("{n} changed files{server}");

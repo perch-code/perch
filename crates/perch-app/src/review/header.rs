@@ -47,6 +47,63 @@ pub fn header(
     })
 }
 
+/// The bar above the issue view: back, the issue, Save and Done. The same
+/// bar as a review's, so the window drags from it the same way.
+pub fn issue_header(app: AppState, state: ReviewState, backend: std::rc::Rc<crate::backend::Backend>) -> impl IntoView {
+    let back_backend = backend.clone();
+    let on_back = move || {
+        app.leave_review(state);
+        back_backend.close_review();
+    };
+    let mark_backend = backend.clone();
+    title_bar(Stack::horizontal((
+        back_button(on_back),
+        crate::review::issue::issue_header(app, state, backend),
+        item_marks(state, mark_backend),
+    )))
+    .style(|s| {
+        s.height(theme::REVIEW_HEADER_HEIGHT)
+            .width_full()
+            .flex_shrink(0.0_f32)
+            .items_center()
+            .padding_horiz(14.0)
+            .gap(12.0)
+            .background(theme::CANVAS)
+            .border_bottom(1.0)
+            .border_color(theme::BORDER)
+    })
+}
+
+
+/// Save and Done for the open item, as the sidebar rows have.
+fn item_marks(state: ReviewState, backend: std::rc::Rc<crate::backend::Backend>) -> impl IntoView {
+    dyn_container(
+        move || state.item.with(|i| i.as_ref().map(|i| (i.id.clone(), i.saved, i.is_done()))),
+        move |item| {
+            let Some((id, saved, done)) = item else {
+                return Empty::new().into_any();
+            };
+            let (save_id, done_id) = (id.clone(), id);
+            let (b1, b2) = (backend.clone(), backend.clone());
+            Stack::horizontal((
+                crate::ui::widgets::icon_button(
+                    move || if saved { SidebarIcon::BookmarkFilled } else { SidebarIcon::Bookmark },
+                    move || if saved { theme::ACCENT } else { theme::FG_MUTED },
+                    move || b1.mark_item(&save_id, Some(!saved), None),
+                ),
+                crate::ui::widgets::icon_button(
+                    move || if done { SidebarIcon::Undo } else { SidebarIcon::Check },
+                    || theme::FG_MUTED,
+                    move || b2.mark_item(&done_id, None, Some(!done)),
+                ),
+            ))
+            .style(|s| s.items_center().gap(2.0))
+            .into_any()
+        },
+    )
+    .style(|s| s.flex_shrink(0.0_f32))
+}
+
 fn back_button(on_back: impl Fn() + 'static) -> impl IntoView {
     // A drawn chevron rather than a typed one: a glyph is centred by its
     // line box, not by its own shape, so it never sits square in a button.

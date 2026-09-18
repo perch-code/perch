@@ -110,7 +110,6 @@ pub fn to_messages(pr: &PullRequest, discussion: &Discussion, project: &str) -> 
 /// files under `issues/` beside the repository's pull requests.
 // Nothing opens an issue yet; the backend's OpenItem for an issue item is
 // the caller, and the allow goes when it lands.
-#[allow(dead_code)]
 pub fn issue_to_messages(issue: &Issue, comments: &[IssueComment], project: &str) -> Vec<Message> {
     let container = format!("{}#issue-{}", issue.repo_full_name, issue.number);
     let issue_url = format!("https://github.com/{}/issues/{}", issue.repo_full_name, issue.number);

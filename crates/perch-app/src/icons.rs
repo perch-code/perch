@@ -243,13 +243,6 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M11.5 6.7 C11.5 9.6 4.5 8.3 4.5 10.8" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linecap="round"/>"#
         ),
-        SidebarIcon::Archive => format!(
-            r#"<rect x="2" y="2.8" width="12" height="3.2" rx="0.8" fill="none" stroke="{c}"
-                     stroke-width="1.4"/>
-               <path d="M3.2 6 V12.4 a1 1 0 0 0 1 1 H11.8 a1 1 0 0 0 1 -1 V6" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>
-               <path d="M6.6 9 H9.4" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
-        ),
         SidebarIcon::Trash => format!(
             r#"<path d="M2.8 4.3 H13.2" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>
                <path d="M6.2 4.3 V2.9 a0.7 0.7 0 0 1 0.7 -0.7 H9.1 a0.7 0.7 0 0 1 0.7 0.7 V4.3"
@@ -323,8 +316,6 @@ pub enum SidebarIcon {
     Warning,
     /// A branch forking off a line: the worktrees section.
     Branch,
-    /// A box with a lid: put away, keep.
-    Archive,
     Trash,
     /// Three dots: more actions.
     Ellipsis,
@@ -343,7 +334,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 30] = [
+    pub const ALL: [SidebarIcon; 29] = [
         SidebarIcon::Pin,
         SidebarIcon::Filter,
         SidebarIcon::Plus,
@@ -352,7 +343,6 @@ impl SidebarIcon {
         SidebarIcon::Inbox,
         SidebarIcon::Bell,
         SidebarIcon::Branch,
-        SidebarIcon::Archive,
         SidebarIcon::Trash,
         SidebarIcon::Ellipsis,
         SidebarIcon::Folder,

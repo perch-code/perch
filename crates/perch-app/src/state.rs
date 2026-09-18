@@ -185,6 +185,18 @@ impl AppState {
                 review.pull_request.set(pull_request);
                 review.ready.set(true);
             }
+            Event::IssueReady { item, issue, comments, offline } => {
+                review.preparing.set(Preparing::Idle);
+                review.changed_files.set(Arc::new(Vec::new()));
+                review.tree.set(Arc::new(Vec::new()));
+                self.open_item.set(Some(item.id.clone()));
+                review.item.set(Some(item));
+                review.pull_request.set(None);
+                review.offline.set(offline);
+                review.issue.set(Some(issue));
+                review.issue_comments.set(comments);
+                review.ready.set(true);
+            }
             Event::CommentThreads { item_id, threads } => {
                 let open = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
                 if open.as_deref() == Some(item_id.as_str()) {
@@ -324,7 +336,10 @@ impl AppState {
             },
             Event::Notice(message) => self.notice.set(Some(message)),
             Event::AgentConfig(agent) => self.agent.set(agent),
-            Event::Archived { .. } | Event::CommentThreads { .. } | Event::AgentStep { .. } => {}
+            Event::Archived { .. }
+            | Event::CommentThreads { .. }
+            | Event::AgentStep { .. }
+            | Event::IssueReady { .. } => {}
             Event::ReviewProgress { .. }
             | Event::ReviewReady { .. }
             | Event::ReviewFailed { .. }
@@ -622,21 +637,7 @@ impl AppState {
         })
     }
 
-    /// Every project that has at least one item, or all of them when the
-    /// sidebar is asked to show empty ones.
-    pub fn project_name(&self, id: &str) -> String {
-        self.project(id).map(|p| p.name).unwrap_or_else(|| id.to_string())
-    }
 
-    /// The owner avatar the inbox already holds for a repository, if any.
-    pub fn repo_avatar_url(&self, repo_full_name: &str) -> Option<String> {
-        self.threads.with(|t| {
-            t.iter()
-                .find(|t| t.repository.full_name == repo_full_name)
-                .map(|t| t.repository.owner_avatar_url.clone())
-                .filter(|u| !u.is_empty())
-        })
-    }
 
     pub fn detail_for(&self, thread_id: &str) -> Option<SubjectDetail> {
         self.details.with(|m| m.get(thread_id).cloned())

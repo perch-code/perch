@@ -108,19 +108,50 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
     let config = Config::load();
     let token = resolve_token(&config).ok_or("no token")?;
     let gh = GitHub::new(&token.value).map_err(|e| e.to_string())?;
-    let pr = gh.fetch_pull_request(full_name, number).await.map_err(|e| e.to_string())?;
-    let body = gh.fetch_discussion(full_name, number).await.map(|d| d.body).unwrap_or_default();
-
     let root = perch_github::config::data_dir().ok_or("no data dir")?;
     let preparer = Preparer::new(Store::new(root), Some(token.value.clone()));
-    let checkout = preparer
-        .prepare(&id, number, &pr.head_sha, &pr.base_ref, &format!("perch/pr-{number}"), |_| {})
-        .await
-        .map_err(|e| e.to_string())?;
+
+    // A number is a pull request or an issue; GitHub says which. An issue
+    // is asked about from the repository's home checkout, with no anchor.
+    let (pr, issue, checkout) = match gh.fetch_pull_request(full_name, number).await {
+        Ok(pr) => {
+            let checkout = preparer
+                .prepare(&id, number, &pr.head_sha, &pr.base_ref, &format!("perch/pr-{number}"), |_| {})
+                .await
+                .map_err(|e| e.to_string())?;
+            (Some(pr), None, checkout)
+        }
+        Err(_) => {
+            let issue = gh.fetch_issue(full_name, number).await.map_err(|e| e.to_string())?;
+            let comments = gh.fetch_issue_comments(full_name, number).await.unwrap_or_default();
+            let bare = preparer.ensure_bare(&id, |_| {}).await.map_err(|e| e.to_string())?;
+            let default = preparer.default_branch(&id).await.map_err(|e| e.to_string())?;
+            let home = preparer.ensure_home(&id, &default).await.map_err(|e| e.to_string())?;
+            let head = preparer
+                .git()
+                .run(Some(&home), ["rev-parse", "HEAD"], std::time::Duration::from_secs(30))
+                .await
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let checkout = perch_git::Checkout {
+                worktree: home,
+                bare,
+                branch: default,
+                merge_base: head.clone(),
+                head_sha: head,
+                stale: None,
+            };
+            (None, Some((issue, comments)), checkout)
+        }
+    };
+    let body = match &pr {
+        Some(_) => gh.fetch_discussion(full_name, number).await.map(|d| d.body).unwrap_or_default(),
+        None => String::new(),
+    };
 
     // The anchor, and the file as the editor would show it.
     let (anchor, file) = match anchor {
-        Some(spec) => {
+        Some(spec) if pr.is_some() => {
             let (path, range) = spec.rsplit_once(':').ok_or("anchor is path:start-end")?;
             let (start, end) = match range.split_once('-') {
                 Some((a, b)) => (a.parse::<u32>().map_err(|_| "bad line")?, b.parse::<u32>().map_err(|_| "bad line")?),
@@ -139,11 +170,13 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
             let file = load_display(&preparer, &checkout, path).await?;
             (Some(anchor), Some(file))
         }
+        Some(_) => return Err("an anchor needs a pull request".into()),
         None => (None, None),
     };
 
     let prompt = first_prompt(&PromptInput {
-        pull_request: Some(&pr),
+        pull_request: pr.as_ref(),
+        issue: issue.as_ref().map(|(i, c)| (i, c.as_slice())),
         body: Some(&body),
         anchor: anchor.as_ref(),
         file: file.as_ref(),
@@ -197,10 +230,16 @@ brief. Do not change any file.";
 
 /// How much of a pull request body goes into the prompt.
 const MAX_BODY_LINES: usize = 40;
+/// How many of an issue's comments, and how much of each.
+const MAX_COMMENTS: usize = 12;
+const MAX_COMMENT_LINES: usize = 12;
 
 /// Everything a prompt is built from.
 pub struct PromptInput<'a> {
     pub pull_request: Option<&'a PullRequest>,
+    /// An issue and its comments, in place of the pull request block, for
+    /// a question asked from the issue view.
+    pub issue: Option<(&'a perch_github::Issue, &'a [perch_github::IssueComment])>,
     /// The description, kept separately because `PullRequest` does not
     /// carry it. Trimmed to `MAX_BODY_LINES`.
     pub body: Option<&'a str>,
@@ -258,6 +297,33 @@ fn user_message(input: &PromptInput<'_>, with_context: bool) -> String {
                     out.push_str("\n[…]");
                 }
                 out.push('\n');
+            }
+            out.push('\n');
+        } else if let Some((issue, comments)) = input.issue {
+            out.push_str(&format!("Issue: {}#{}: {}\n", issue.repo_full_name, issue.number, issue.title));
+            let body = issue.body.trim();
+            if !body.is_empty() {
+                let lines: Vec<&str> = body.lines().collect();
+                let shown = &lines[..lines.len().min(MAX_BODY_LINES)];
+                out.push_str(&shown.join("\n"));
+                if lines.len() > MAX_BODY_LINES {
+                    out.push_str("\n[…]");
+                }
+                out.push('\n');
+            }
+            // The last few comments, each cut short: what was said is the
+            // context, not every word of it.
+            let recent: Vec<&perch_github::IssueComment> = comments.iter().rev().take(MAX_COMMENTS).collect();
+            if !recent.is_empty() {
+                out.push_str("\nComments:\n");
+                for c in recent.into_iter().rev() {
+                    let lines: Vec<&str> = c.body.trim().lines().collect();
+                    let shown = &lines[..lines.len().min(MAX_COMMENT_LINES)];
+                    out.push_str(&format!("{}: {}\n", c.user, shown.join("\n")));
+                    if lines.len() > MAX_COMMENT_LINES {
+                        out.push_str("[…]\n");
+                    }
+                }
             }
             out.push('\n');
         }
@@ -417,7 +483,7 @@ mod tests {
     }
 
     fn input<'a>(anchor: Option<&'a Anchor>, file: Option<&'a DisplayBuffer>, question: &'a str) -> PromptInput<'a> {
-        PromptInput { pull_request: None, body: None, anchor, file, outdated: false, question, history: &[] }
+        PromptInput { pull_request: None, issue: None, body: None, anchor, file, outdated: false, question, history: &[] }
     }
 
     #[test]
@@ -506,6 +572,37 @@ mod tests {
         apply_run_event(&mut failed, &RunEvent::Failed { message: "boom".into() });
         assert_eq!(failed.status, RunStatus::Failed);
         assert_eq!(failed.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn an_issue_takes_the_pull_request_block_s_place() {
+        let issue = perch_github::Issue {
+            number: 42,
+            title: "Fence the manifest".into(),
+            body: "It races.".into(),
+            state: "open".into(),
+            state_reason: None,
+            author_login: "rohan".into(),
+            author_avatar_url: String::new(),
+            labels: vec![],
+            assignees: vec![],
+            comments: 1,
+            created_at: None,
+            updated_at: "2026-09-18T10:00:00Z".parse().unwrap(),
+            repo_full_name: "slatedb/slatedb".into(),
+        };
+        let comments = vec![perch_github::IssueComment {
+            id: 1,
+            user: "chris".into(),
+            body: "Only on compaction.".into(),
+            created_at: "2026-09-18T11:00:00Z".parse().unwrap(),
+            updated_at: None,
+            html_url: String::new(),
+        }];
+        let p = first_prompt(&PromptInput { issue: Some((&issue, &comments)), ..input(None, None, "where?") });
+        assert!(p.user.starts_with("Issue: slatedb/slatedb#42: Fence the manifest\nIt races.\n\nComments:\nchris: Only on compaction.\n"), "{}", p.user);
+        assert!(!p.user.contains("Pull request:"));
+        assert!(p.user.ends_with("Question: where?"));
     }
 
     #[test]
