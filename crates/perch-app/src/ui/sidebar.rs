@@ -32,7 +32,7 @@ pub fn nav_panel(state: AppState, review: ReviewState, on_open: OpenWorktree) ->
         move |screen| match screen {
             Screen::Threads => Stack::vertical((
                 Empty::new().style(|s| s.height(8.0).width_full().flex_shrink(0.0_f32)),
-                view_picker(state, review),
+                views_section(state, review),
                 section_heading("Filters"),
                 filters_section(state),
                 section_heading("Repositories"),
@@ -53,37 +53,89 @@ pub fn nav_panel(state: AppState, review: ReviewState, on_open: OpenWorktree) ->
     })
 }
 
-/// The open view, and a menu to change it.
+/// Inbox, Saved and Done, as three rows.
 ///
-/// This was three stacked rows. The panel only ever needs to name one list,
-/// and the unread count those rows carried now lives on the rail's bell
-/// alone, where it answers "is anything asking for me?" without a click.
-///
-/// The same pop-up button the toolbar uses for Sort by and Group by, rather
-/// than one dressed to match: a dropdown that is a little taller and a little
-/// bolder than the other two reads as a special case, and there is nothing
-/// special about it.
-///
-/// Picking a view goes through `show_screen` rather than writing the signal
-/// on its own, the way every other route into a list does. Today that costs
-/// nothing, because the panel only builds this picker when the threads screen
-/// is up and no review is showing, so there is never anything to leave. It is
-/// the rule that survives the next change to when the panel is on screen.
-fn view_picker(state: AppState, review: ReviewState) -> impl IntoView {
-    Container::new(crate::ui::widgets::picker(
-        state.view,
-        View::ALL,
-        move |view| {
+/// Whichever is open wears the card, in the accent, with a bold label: the
+/// same treatment the worktree rows give the checkout being read, so the two
+/// panels say "you are here" the same way.
+fn views_section(state: AppState, review: ReviewState) -> impl IntoView {
+    Stack::vertical((
+        view_row(state, review, View::Inbox, SidebarIcon::Inbox),
+        view_row(state, review, View::Saved, SidebarIcon::Bookmark),
+        view_row(state, review, View::Done, SidebarIcon::Check),
+    ))
+    .style(|s| s.width_full().flex_col().gap(1.0))
+}
+
+fn view_row(
+    state: AppState,
+    review: ReviewState,
+    view: View,
+    icon: SidebarIcon,
+) -> impl IntoView {
+    use floem::peniko::Color;
+    use floem::text::FontWeight;
+
+    let selected = move || state.view.get() == view && !review.is_showing();
+    let count = move || {
+        let c = state.counts();
+        match view {
+            // The inbox badge counts what is still asking for attention, so
+            // dismissing a thread quiets it.
+            View::Inbox => c.unread,
+            View::Saved => c.saved,
+            View::Done => c.done,
+        }
+    };
+
+    let content = Stack::horizontal((
+        dyn_container(
+            move || if selected() { theme::ACCENT } else { theme::FG_MUTED },
+            move |c| crate::ui::widgets::sidebar_glyph(icon, c).into_any(),
+        )
+        .style(|s| s.size(16.0, 16.0)),
+        Label::derived(move || view.label()).style(move |s| {
+            s.font_size(theme::TEXT_BODY)
+                .font_weight(if selected() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
+                .color(if selected() { theme::FG } else { theme::FG_MUTED })
+                .margin_left(9.0)
+                .flex_grow(1.0_f32)
+        }),
+        dyn_container(count, move |n| {
+            if n == 0 {
+                Empty::new().into_any()
+            } else {
+                count_badge(move || n).into_any()
+            }
+        }),
+    ))
+    .style(|s| s.items_center().width_full());
+
+    Container::new(content)
+        .on_event_stop(el::Click, move |_, _| {
+            // Doubles as the way back from a pull request.
             state.show_screen(review, Screen::Threads);
             // Filters carry over, the way the web keeps a search when you
             // cross from the inbox into Done. Clearing them here made this a
             // reset button nobody asked for.
             state.set_view(view);
-        },
-    ))
-    // The panel's rows carry their own 6px side margin; this lines the button
-    // up with them rather than with the panel's edge.
-    .style(|s| s.width_full().items_center().padding_horiz(6.0))
+        })
+        .style(move |s| {
+            let base = crate::ui::widgets::clickable(s)
+                .width_full()
+                .height(34.0)
+                .items_center()
+                .padding_horiz(10.0)
+                .margin_horiz(6.0)
+                .border_radius(theme::RADIUS);
+            if selected() {
+                base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER)
+            } else {
+                base.border(1.0)
+                    .border_color(Color::TRANSPARENT)
+                    .hover(|s| s.background(theme::CANVAS_HOVER))
+            }
+        })
 }
 
 /// The worktrees panel: every active checkout under its repository, the way

@@ -21,8 +21,6 @@ pub enum View {
 }
 
 impl View {
-    pub const ALL: [View; 3] = [View::Inbox, View::Saved, View::Done];
-
     pub fn label(self) -> &'static str {
         match self {
             View::Inbox => "Inbox",
