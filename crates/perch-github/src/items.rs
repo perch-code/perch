@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::pulls::PullRequest;
+use crate::pulls::{PullRequest, UserRef};
 
 /// A place work belongs to: some repositories, and some directories where
 /// you already work on them.
@@ -78,6 +78,10 @@ pub struct Issue {
     pub assignees: Vec<String>,
     #[serde(default)]
     pub comments: u32,
+    /// When it was opened. Optional because a snapshot stored before this
+    /// field existed has none.
+    #[serde(default)]
+    pub created_at: Option<Timestamp>,
     pub updated_at: Timestamp,
     pub repo_full_name: String,
 }
@@ -85,6 +89,79 @@ pub struct Issue {
 impl Issue {
     pub fn is_open(&self) -> bool {
         self.state.eq_ignore_ascii_case("open")
+    }
+}
+
+/// The subset of GitHub's issue payload we read.
+///
+/// The issues endpoint answers for pull requests too, since GitHub numbers
+/// them together; such a payload carries a `pull_request` key, and a caller
+/// must refuse it rather than file a pull request as an issue.
+#[derive(Debug, Deserialize)]
+pub(crate) struct IssuePayload {
+    pub number: u64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub state_reason: Option<String>,
+    #[serde(default)]
+    pub user: Option<UserRef>,
+    #[serde(default)]
+    pub labels: Vec<LabelRef>,
+    #[serde(default)]
+    pub assignees: Vec<UserRef>,
+    #[serde(default)]
+    pub comments: u32,
+    #[serde(default)]
+    pub created_at: Option<Timestamp>,
+    pub updated_at: Timestamp,
+    #[serde(default)]
+    pub pull_request: Option<serde::de::IgnoredAny>,
+}
+
+/// A label as GitHub sends it. `color` is nullable there, which `Label`
+/// does not allow.
+#[derive(Debug, Deserialize)]
+pub(crate) struct LabelRef {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+impl IssuePayload {
+    pub(crate) fn is_pull_request(&self) -> bool {
+        self.pull_request.is_some()
+    }
+
+    pub(crate) fn into_issue(self, repo_full_name: &str) -> Issue {
+        let (author_login, author_avatar_url) = self
+            .user
+            .map(|u| (u.login, u.avatar_url))
+            .unwrap_or_default();
+        Issue {
+            number: self.number,
+            title: self.title,
+            body: self.body.unwrap_or_default(),
+            state: self.state,
+            state_reason: self.state_reason,
+            author_login,
+            author_avatar_url,
+            labels: self
+                .labels
+                .into_iter()
+                .map(|l| Label { name: l.name, color: l.color.unwrap_or_default() })
+                .collect(),
+            assignees: self.assignees.into_iter().map(|u| u.login).collect(),
+            comments: self.comments,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            repo_full_name: repo_full_name.to_string(),
+        }
     }
 }
 
@@ -357,6 +434,7 @@ mod tests {
             labels: vec![],
             assignees: vec![],
             comments: 0,
+            created_at: None,
             updated_at: at("2026-09-18T10:00:00Z"),
             repo_full_name: "criccomini/perch".into(),
         }));
@@ -382,6 +460,7 @@ mod tests {
             labels: vec![],
             assignees: vec![],
             comments: 0,
+            created_at: None,
             updated_at: at("2026-09-18T10:00:00Z"),
             repo_full_name: "r".into(),
         }));
@@ -407,6 +486,57 @@ mod tests {
         assert!(!p.claims("criccomini/perch"));
     }
 
+    const ISSUE_PAYLOAD: &str = r#"{
+        "number": 42,
+        "title": "Fence the manifest",
+        "body": null,
+        "state": "closed",
+        "state_reason": "completed",
+        "user": { "login": "rohan", "avatar_url": "https://avatars/2" },
+        "labels": [
+            { "name": "bug", "color": "d73a4a" },
+            { "name": "storage", "color": null }
+        ],
+        "assignees": [ { "login": "chris" }, { "login": "rohan" } ],
+        "comments": 3,
+        "created_at": "2026-09-14T14:02:00Z",
+        "updated_at": "2026-09-16T11:40:00Z"
+    }"#;
+
+    #[test]
+    fn an_issue_payload_maps_to_what_perch_keeps() {
+        let payload: IssuePayload = serde_json::from_str(ISSUE_PAYLOAD).unwrap();
+        assert!(!payload.is_pull_request());
+        let issue = payload.into_issue("slatedb/slatedb");
+        assert_eq!(issue.number, 42);
+        assert_eq!(issue.body, "", "a null body is an empty one");
+        assert_eq!(issue.state_reason.as_deref(), Some("completed"));
+        assert!(!issue.is_open());
+        assert_eq!(issue.author_login, "rohan");
+        assert_eq!(issue.author_avatar_url, "https://avatars/2");
+        assert_eq!(
+            issue.labels,
+            vec![
+                Label { name: "bug".into(), color: "d73a4a".into() },
+                Label { name: "storage".into(), color: String::new() },
+            ]
+        );
+        assert_eq!(issue.assignees, vec!["chris", "rohan"]);
+        assert_eq!(issue.comments, 3);
+        assert_eq!(issue.created_at, Some(at("2026-09-14T14:02:00Z")));
+        assert_eq!(issue.repo_full_name, "slatedb/slatedb");
+    }
+
+    #[test]
+    fn a_pull_request_shows_in_the_issue_payload() {
+        let json = ISSUE_PAYLOAD.replace(
+            r#""comments": 3,"#,
+            r#""comments": 3, "pull_request": { "url": "https://api.github.com/repos/slatedb/slatedb/pulls/42" },"#,
+        );
+        let payload: IssuePayload = serde_json::from_str(&json).unwrap();
+        assert!(payload.is_pull_request());
+    }
+
     #[test]
     fn a_subject_serialises_with_its_kind() {
         let s = Subject::Issue(Issue {
@@ -420,6 +550,7 @@ mod tests {
             labels: vec![Label { name: "bug".into(), color: "d73a4a".into() }],
             assignees: vec!["chris".into()],
             comments: 2,
+            created_at: None,
             updated_at: at("2026-09-18T10:00:00Z"),
             repo_full_name: "r".into(),
         });
