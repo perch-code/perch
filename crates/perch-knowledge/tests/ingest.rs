@@ -223,3 +223,40 @@ fn the_skill_lands_in_every_directory_named() {
         assert!(text.contains("issues/<n>.md"));
     }
 }
+
+#[test]
+fn the_reader_s_own_threads_land_beside_the_discussion_and_say_what_they_are() {
+    let tmp = tempfile::tempdir().unwrap();
+    let k = Knowledge::open(tmp.path());
+    k.ingest(&discussion()).unwrap();
+
+    let mut asked = msg("asked-q1", "2026-09-17T10:00:00Z", "Why is the fence here?");
+    asked.source = Source::Perch;
+    asked.thread = Some("t1".into());
+    asked.author = "reader".into();
+    asked.location = Some("src/manifest.rs:41".into());
+    let mut answered = msg("answered-a1", "2026-09-17T10:01:00Z", "Because compaction can race the manifest.");
+    answered.source = Source::Perch;
+    answered.thread = Some("t1".into());
+    answered.reply_to = Some("asked-q1".into());
+    answered.author = "sonnet (claude-code, high)".into();
+    k.ingest(&[asked, answered]).unwrap();
+
+    // A file of its own, under perch/, in the same pull request's shape as
+    // the GitHub file, with front matter that says what it is.
+    let local = tmp.path().join("slatedb/perch/slatedb/slatedb/pulls/812.md");
+    let github = tmp.path().join("slatedb/github/slatedb/slatedb/pulls/812.md");
+    assert!(github.is_file());
+    let text = std::fs::read_to_string(&local).unwrap();
+    assert!(text.starts_with("---\nsource: perch\nkind: local threads\n"), "{text}");
+    assert!(text.contains("## Asked: reader Why is the fence here?"), "{text}");
+    assert!(text.contains("**sonnet (claude-code, high)**"), "{text}");
+    assert!(text.contains("on `src/manifest.rs:41`"), "{text}");
+    // The GitHub file stays as it was: no front matter, nothing local in it.
+    let public = std::fs::read_to_string(&github).unwrap();
+    assert!(!public.starts_with("---"));
+    assert!(!public.contains("fence here"));
+    // The project index lists both sources.
+    let index = std::fs::read_to_string(tmp.path().join("slatedb/index.md")).unwrap();
+    assert!(index.contains("## perch"), "{index}");
+}

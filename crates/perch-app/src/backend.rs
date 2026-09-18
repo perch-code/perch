@@ -2987,6 +2987,20 @@ async fn ask(
     }
     tracing::info!(thread = %thread.id, run = %run.id, status = run.status.name(), steps = run.steps.len(), "run ended");
     ctx.send_threads(&item_id);
+
+    // An answered question goes under knowledge beside the item's GitHub
+    // discussion, marked as the reader's own, so an agent asked about the
+    // same lines later can find it.
+    if run.status == perch_github::RunStatus::Finished {
+        let threads = ctx.with_cache(|c| c.load_comment_threads(&item_id).unwrap_or_default()).unwrap_or_default();
+        if let Some(item) = ctx.item(&item_id) {
+            let project = ctx.config.project_for(&item.repo_full_name);
+            let messages = crate::knowledge::threads_to_messages(&item, &threads, &project);
+            if let Err(e) = ingest(ctx, messages).await {
+                tracing::warn!(error = %e, "could not archive the thread");
+            }
+        }
+    }
 }
 
 async fn delete_comment_thread(ctx: &Ctx, id: &str) {

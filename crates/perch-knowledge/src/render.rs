@@ -36,8 +36,13 @@ pub fn close_fences(body: &str) -> String {
 }
 
 /// One container: the opener, the conversation, then each thread.
+///
+/// A file of the reader's own threads says so in front matter before
+/// anything else, so an agent that reads it knows these were questions
+/// asked here, not comments on GitHub.
 pub fn container(name: &str, messages: &[&Message]) -> String {
     let by_id: HashMap<&str, &Message> = messages.iter().map(|m| (m.id.as_str(), *m)).collect();
+    let local = messages.iter().all(|m| m.source == Source::Perch) && !messages.is_empty();
 
     // Everything arrives sorted by time; the opener is the first message
     // that belongs to no thread and answers nobody.
@@ -57,6 +62,11 @@ pub fn container(name: &str, messages: &[&Message]) -> String {
         }
         None => (None, ""),
     };
+    if local {
+        out.push_str(
+            "---\nsource: perch\nkind: local threads\nnote: Questions the reader asked an agent about this on their own machine, with the answers. Not on GitHub; nobody else has seen them.\n---\n\n",
+        );
+    }
     match title {
         Some(title) => out.push_str(&format!("# {name}: {title}\n\n")),
         None => out.push_str(&format!("# {name}\n\n")),
@@ -95,8 +105,11 @@ pub fn container(name: &str, messages: &[&Message]) -> String {
         out.push_str("---\n\n");
         let Some(h) = head else { continue };
         let (first, rest) = headline(&h.body);
+        // A question asked about lines names them in its heading, where a
+        // grep for the path finds it.
+        let location = h.location.as_deref().map(|l| format!(" on `{l}`")).unwrap_or_default();
         out.push_str(&format!(
-            "## {}: {} {} {} [↗]({})\n\n",
+            "## {}: {} {} {}{location} [↗]({})\n\n",
             h.source.thread_noun(),
             h.author,
             first,
@@ -120,6 +133,7 @@ impl Source {
         match self {
             Source::GitHub => "Review",
             Source::Discord => "Thread",
+            Source::Perch => "Asked",
         }
     }
 }

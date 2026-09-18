@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use perch_github::{Discussion, Issue, IssueComment, PullRequest};
+use perch_github::{Author, CommentMessage, CommentThread, Discussion, Issue, IssueComment, Item, ItemSubject, PullRequest, RunStatus};
 use perch_knowledge::{Message, Source};
 
 /// Every message on one pull request.
@@ -159,6 +159,84 @@ pub fn issue_to_messages(issue: &Issue, comments: &[IssueComment], project: &str
         out.push(m);
     }
 
+    out
+}
+
+/// The reader's own threads on an item, as records under the `perch`
+/// source: the same container the item's GitHub discussion uses, so the
+/// two files sit side by side, and a thread per thread, its question as
+/// the head and each answer a reply to the question it answers.
+///
+/// A branch with no pull request or issue has no container on GitHub;
+/// its threads are filed under `owner/repo@branch`. Only answered
+/// questions are written: a run still going, or one that failed, has
+/// nothing an agent could be told later.
+pub fn threads_to_messages(item: &Item, threads: &[CommentThread], project: &str) -> Vec<Message> {
+    let container = match &item.subject {
+        Some(ItemSubject::PullRequest(pr)) => format!("{}#{}", pr.repo_full_name, pr.number),
+        Some(ItemSubject::Issue(i)) => format!("{}#issue-{}", i.repo_full_name, i.number),
+        None => match item.branch() {
+            Some(branch) => format!("{}@{branch}", item.repo_full_name),
+            None => return Vec::new(),
+        },
+    };
+    let url = match &item.subject {
+        Some(ItemSubject::PullRequest(pr)) => format!("https://github.com/{}/pull/{}", pr.repo_full_name, pr.number),
+        Some(ItemSubject::Issue(i)) => format!("https://github.com/{}/issues/{}", i.repo_full_name, i.number),
+        None => String::new(),
+    };
+
+    let mut out = Vec::new();
+    for thread in threads {
+        let mut question: Option<&CommentMessage> = None;
+        for m in &thread.messages {
+            match &m.author {
+                Author::User => {
+                    question = Some(m);
+                    out.push(Message {
+                        source: Source::Perch,
+                        project: project.to_string(),
+                        container: container.clone(),
+                        thread: Some(thread.id.clone()),
+                        id: format!("asked-{}", m.id),
+                        reply_to: None,
+                        author: "reader".into(),
+                        at: m.created_at,
+                        edited_at: None,
+                        body: m.body.clone(),
+                        url: url.clone(),
+                        location: thread.anchor.as_ref().map(|a| a.label()),
+                    });
+                }
+                Author::Agent { backend, model } => {
+                    let Some(run) = m.run.as_ref().filter(|r| r.status == RunStatus::Finished) else { continue };
+                    let effort = run.effort.clone();
+                    out.push(Message {
+                        source: Source::Perch,
+                        project: project.to_string(),
+                        container: container.clone(),
+                        thread: Some(thread.id.clone()),
+                        id: format!("answered-{}", m.id),
+                        reply_to: question.map(|q| format!("asked-{}", q.id)),
+                        author: format!("{model} ({backend}, {effort})"),
+                        at: m.created_at,
+                        edited_at: None,
+                        body: m.body.clone(),
+                        url: url.clone(),
+                        location: None,
+                    });
+                }
+                Author::GitHubUser(_) => {}
+            }
+        }
+    }
+    // A thread nobody has answered yet is not written at all.
+    let answered: std::collections::HashSet<String> = out
+        .iter()
+        .filter(|m| m.id.starts_with("answered-"))
+        .filter_map(|m| m.thread.clone())
+        .collect();
+    out.retain(|m| m.thread.as_ref().is_some_and(|t| answered.contains(t)));
     out
 }
 
@@ -396,5 +474,86 @@ mod tests {
         let ms = issue_to_messages(&i, &issue_comments(), "slatedb");
         assert_eq!(ms[0].at, at("2026-09-13T09:00:00Z"));
         assert!(ms[0].at <= ms[1].at);
+    }
+
+    fn local_thread(id: &str, answered: bool) -> CommentThread {
+        use perch_github::{Anchor, RunRecord, Side, ThreadOrigin};
+        let message = |mid: &str, author: Author, body: &str, run: Option<RunRecord>| CommentMessage {
+            id: mid.into(),
+            thread_id: id.into(),
+            origin: ThreadOrigin::Local,
+            author,
+            body: body.into(),
+            created_at: at("2026-09-18T10:00:00Z"),
+            run,
+        };
+        let run = RunRecord {
+            id: format!("run-{id}"),
+            thread_id: id.into(),
+            backend: "claude-code".into(),
+            model: "sonnet".into(),
+            effort: "high".into(),
+            session_id: None,
+            status: if answered { RunStatus::Finished } else { RunStatus::Failed },
+            cost_usd: None,
+            duration_ms: None,
+            steps: vec![],
+            error: None,
+            started_at: at("2026-09-18T10:00:00Z"),
+            ended_at: None,
+        };
+        let mut messages = vec![message(&format!("{id}-q"), Author::User, "Why is the fence here?", None)];
+        messages.push(message(
+            &format!("{id}-a"),
+            Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+            "Because the manifest can race.",
+            Some(run),
+        ));
+        CommentThread {
+            id: id.into(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::Local,
+            anchor: Some(Anchor { path: "src/x.rs".into(), start_line: 41, line: 58, side: Side::Right, commit_sha: "abc".into() }),
+            outdated: false,
+            resolved: false,
+            created_at: at("2026-09-18T10:00:00Z"),
+            messages,
+        }
+    }
+
+    #[test]
+    fn an_answered_thread_is_filed_as_perch_s_own_beside_the_pull_request() {
+        let mut item = Item::new("slatedb", "slatedb/slatedb", at("2026-09-18T09:00:00Z"));
+        item.subject = Some(ItemSubject::PullRequest(pr()));
+        let ms = threads_to_messages(&item, &[local_thread("t1", true), local_thread("t2", false)], "slatedb");
+        // The unanswered thread is left out whole; the answered one is a
+        // question and its reply, both in the pull request's container.
+        let ids: Vec<&str> = ms.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["asked-t1-q", "answered-t1-a"]);
+        assert!(ms.iter().all(|m| m.source == Source::Perch));
+        assert!(ms.iter().all(|m| m.container == format!("slatedb/slatedb#{}", pr().number)));
+        assert!(ms.iter().all(|m| m.thread.as_deref() == Some("t1")));
+        assert_eq!(ms[0].author, "reader");
+        assert_eq!(ms[0].location.as_deref(), Some("src/x.rs:41\u{2013}58"));
+        assert_eq!(ms[1].reply_to.as_deref(), Some("asked-t1-q"));
+        assert_eq!(ms[1].author, "sonnet (claude-code, high)");
+    }
+
+    #[test]
+    fn a_branch_with_nothing_on_github_files_its_threads_by_branch() {
+        let mut item = Item::new("slatedb", "slatedb/slatedb", at("2026-09-18T09:00:00Z"));
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: "chris/fence".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: "/x".into(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+        });
+        let ms = threads_to_messages(&item, &[local_thread("t1", true)], "slatedb");
+        assert_eq!(ms[0].container, "slatedb/slatedb@chris/fence");
+        assert!(ms[0].url.is_empty());
     }
 }

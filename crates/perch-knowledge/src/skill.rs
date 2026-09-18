@@ -22,7 +22,7 @@ pub fn render(root: &Path, projects: &[String]) -> String {
     format!(
         "---
 name: perch
-description: Discussion history for {names} from GitHub pull requests and issues. Use when asked why something was decided, what was discussed, or for the context behind a change, a pull request or an issue.
+description: Discussion history for {names} from GitHub pull requests and issues, and the questions the reader asked an agent about them in Perch. Use when asked why something was decided, what was discussed, what was asked before, or for the context behind a change, a pull request or an issue.
 ---
 
 Perch archives discussion about these projects as markdown under
@@ -37,13 +37,25 @@ Layout, per project:
                                          description, comments, reviews
     <project>/github/<owner>/<repo>/issues/<n>.md
                                          issue, comments
+    <project>/perch/<owner>/<repo>/pulls/<n>.md
+    <project>/perch/<owner>/<repo>/issues/<n>.md
+                                         the reader's own threads with an agent
     <project>/raw/                       machine records; read the markdown instead
+
+Two kinds of file, and they are not the same thing. Under `github/` is
+what was said on GitHub, in public, by the people named. Under `perch/`
+are questions the reader asked an agent on their own machine, with the
+answers; the file's front matter says `source: perch`. Nobody on GitHub
+has seen those, and they are not anyone's position but the reader's own
+curiosity. Quote the first as what was decided; treat the second as
+what the reader already looked into, and say which is which.
 
 Search with `rg` before reading anything whole:
 
     rg -n \"manifest fence\" {root}/{example}
     rg -n --glob 'pulls/8*.md' epoch {root}/{example}
     rg -n --glob 'issues/*.md' epoch {root}/{example}
+    rg -n --glob 'perch/**' epoch {root}/{example}
 
 Every message carries its author, time and a permalink. Cite the permalink
 when you rely on one. The files are updated while Perch runs, so read again

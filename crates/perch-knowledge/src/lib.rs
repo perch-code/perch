@@ -25,14 +25,21 @@ pub use skill::SkillConfig;
 pub enum Source {
     GitHub,
     Discord,
+    /// The reader's own threads with an agent, on this machine and nowhere
+    /// else. Kept apart from GitHub's files so nothing local can be taken
+    /// for something said in public.
+    Perch,
 }
 
 impl Source {
+    pub const ALL: [Source; 3] = [Source::GitHub, Source::Discord, Source::Perch];
+
     /// The directory the source's rendered files live under.
     pub fn dir_name(self) -> &'static str {
         match self {
             Source::GitHub => "github",
             Source::Discord => "discord",
+            Source::Perch => "perch",
         }
     }
 }
@@ -218,7 +225,7 @@ impl Knowledge {
 
     fn raw_files(&self, project: &str) -> Result<Vec<(RawKey, PathBuf)>, Error> {
         let mut out = Vec::new();
-        for source in [Source::GitHub, Source::Discord] {
+        for source in Source::ALL {
             let dir = self.root.join(project).join("raw").join(source.dir_name());
             let Ok(entries) = std::fs::read_dir(&dir) else { continue };
             for entry in entries.flatten() {
