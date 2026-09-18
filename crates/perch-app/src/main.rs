@@ -1,6 +1,7 @@
 //! Perch: a read-only GitHub notifications inbox for the desktop.
 
 mod app_icon;
+mod ask;
 mod backend;
 mod filter;
 mod icons;
