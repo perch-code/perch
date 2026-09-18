@@ -277,7 +277,7 @@ impl AppState {
             // Untracked: clear_selection reads the signals it writes, and
             // subscribing to those would make this effect depend on its own
             // output and run a second time for nothing.
-            floem::reactive::untrack(|| state.clear_selection());
+            Effect::untrack(|| state.clear_selection());
         });
     }
 

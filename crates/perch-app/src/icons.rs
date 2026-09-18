@@ -255,6 +255,7 @@ pub enum SidebarIcon {
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
+    #[cfg(test)]
     pub const ALL: [SidebarIcon; 19] = [
         SidebarIcon::Inbox,
         SidebarIcon::Bookmark,

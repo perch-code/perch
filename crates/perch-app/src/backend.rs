@@ -38,7 +38,15 @@ pub enum Command {
     Hover { token: u64, path: String, line: u32, character: u32 },
     Definition { token: u64, path: String, line: u32, character: u32 },
     CloseReview,
+}
 
+/// A mark write.
+///
+/// On its own channel, drained by its own task, because the main loop awaits
+/// the network inline. Holding a click behind a poll is fine for the poll and
+/// not fine for the click.
+#[derive(Debug, Clone)]
+pub enum MarkCommand {
     /// Save or unsave every thread named, as one act.
     ///
     /// A single row is a batch of one. Bulk selection is the reason these
@@ -91,6 +99,7 @@ pub enum Status {
 /// Handle the UI keeps. Dropping it ends the worker.
 pub struct Backend {
     commands: UnboundedSender<Command>,
+    marks: UnboundedSender<MarkCommand>,
 }
 
 impl Backend {
@@ -117,14 +126,14 @@ impl Backend {
         if thread_ids.is_empty() {
             return;
         }
-        let _ = self.commands.send(Command::SetSaved { thread_ids, saved });
+        let _ = self.marks.send(MarkCommand::SetSaved { thread_ids, saved });
     }
 
     pub fn set_done(&self, thread_ids: Vec<String>, done: bool) {
         if thread_ids.is_empty() {
             return;
         }
-        let _ = self.commands.send(Command::SetDone { thread_ids, done });
+        let _ = self.marks.send(MarkCommand::SetDone { thread_ids, done });
     }
 
     pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
@@ -149,6 +158,7 @@ impl Backend {
 /// Start the worker thread. Returns the command handle and the event receiver.
 pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (mark_tx, mark_rx) = tokio::sync::mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = std::sync::mpsc::channel();
 
     std::thread::Builder::new()
@@ -167,14 +177,24 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
                     return;
                 }
             };
-            runtime.block_on(run(cmd_rx, evt_tx));
+            runtime.block_on(run(cmd_rx, mark_rx, evt_tx));
         })
         .expect("spawn backend thread");
 
-    (Backend { commands: cmd_tx }, evt_rx)
+    (
+        Backend {
+            commands: cmd_tx,
+            marks: mark_tx,
+        },
+        evt_rx,
+    )
 }
 
-async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event>) {
+async fn run(
+    mut commands: UnboundedReceiver<Command>,
+    marks: UnboundedReceiver<MarkCommand>,
+    events: EventSender<Event>,
+) {
     tracing::info!("backend started");
     let config = Config::load();
     tracing::info!(poll = config.poll_interval_secs, "config loaded");
@@ -200,6 +220,11 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
     tracing::info!("github client ready");
     let cache = open_cache();
     tracing::info!(cache = cache.is_some(), "cache opened");
+
+    // Marks run beside the loop rather than in it. A poll can hold the loop
+    // for as long as the network takes, and a reader who presses Done should
+    // not find out how long that is.
+    spawn_mark_writer(marks, cache.clone(), events.clone());
 
     let detail_limit = Arc::new(Semaphore::new(DETAIL_CONCURRENCY));
     let avatar_limit = Arc::new(Semaphore::new(AVATAR_CONCURRENCY));
@@ -371,16 +396,6 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     }
                 });
             }
-            Some(Command::SetSaved { thread_ids, saved }) => {
-                write_marks(&cache, &events, &thread_ids, |c, threads| {
-                    c.set_saved(threads, saved)
-                });
-            }
-            Some(Command::SetDone { thread_ids, done }) => {
-                write_marks(&cache, &events, &thread_ids, |c, threads| {
-                    c.set_done(threads, done)
-                });
-            }
             Some(Command::CloseReview) => {
                 if let Ok(mut guard) = checkout.lock() {
                     *guard = None;
@@ -396,10 +411,39 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
     }
 }
 
+/// Drain mark writes on their own task.
+///
+/// Ends when the UI drops its handle, which is also when the loop ends.
+fn spawn_mark_writer(
+    mut marks: UnboundedReceiver<MarkCommand>,
+    cache: SharedCache,
+    events: EventSender<Event>,
+) {
+    tokio::spawn(async move {
+        while let Some(command) = marks.recv().await {
+            match command {
+                MarkCommand::SetSaved { thread_ids, saved } => {
+                    write_marks(&cache, &events, &thread_ids, |c, threads| {
+                        c.set_saved(threads, saved)
+                    });
+                }
+                MarkCommand::SetDone { thread_ids, done } => {
+                    write_marks(&cache, &events, &thread_ids, |c, threads| {
+                        c.set_done(threads, done)
+                    });
+                }
+            }
+        }
+    });
+}
+
 /// Write one flag across a batch of threads, then publish the new mark set.
 ///
 /// The whole batch is one transaction inside the cache, so a bulk action
 /// either lands or does not, and the UI hears about it once.
+///
+/// Resolving and writing happen under one lock, so a poll landing in the
+/// middle cannot leave a mark describing a thread the write never saw.
 fn write_marks(
     cache: &SharedCache,
     events: &EventSender<Event>,
