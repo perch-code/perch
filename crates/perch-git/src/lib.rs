@@ -7,6 +7,7 @@ pub mod cmd;
 pub mod diff;
 pub mod display;
 pub mod prepare;
+pub mod scan;
 pub mod store;
 pub mod tree;
 
@@ -14,7 +15,11 @@ pub use diff::{
     file_diff, ChangeStatus, ChangedFile, DeletedRun, FileDiff, Hunk, LineStatus,
 };
 pub use display::{DisplayBuffer, Row};
-pub use prepare::{Checkout, Preparer, Step};
+pub use prepare::{home_ref, Checkout, Cut, Preparer, Step};
+pub use scan::{
+    branch_churn, head_commit_time, parse_worktree_list, repo_from_remote, scan_root, RootScan,
+    WorktreeEntry,
+};
 pub use store::{RepoId, Store};
 pub use tree::{list_tree, TreeEntry};
 
@@ -30,4 +35,6 @@ pub enum Error {
     Io(String),
     #[error("the pull request and its base branch share no history")]
     NoMergeBase,
+    #[error("unexpected git output: {0}")]
+    Parse(String),
 }

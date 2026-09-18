@@ -25,6 +25,7 @@ use floem::Application;
 use crate::state::AppState;
 
 mod dump;
+mod scan_cli;
 
 fn main() {
     // A debugging mode that renders a file the way the editor would, without
@@ -45,6 +46,11 @@ fn main() {
     // section and its rows.
     if args.get(1).map(String::as_str) == Some("--items") {
         items_cli::run(&args[2..]);
+        return;
+    }
+    // What the root scan finds under each project's roots, without writing.
+    if args.get(1).map(String::as_str) == Some("--scan") {
+        scan_cli::run(&args[2..]);
         return;
     }
 
