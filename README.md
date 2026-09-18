@@ -82,6 +82,24 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
 - Ripgrep is the search. There is no index and no database: `raw/` holds one
   JSON record per line, and everything else is rendered from it.
 
+**Threads**
+
+- Select lines in the editor and press `a`, or click the `+` in the gutter,
+  to ask Claude Code about them. The answer appears beside the code as a
+  thread anchored to those lines, with a marker in the gutter, and takes
+  follow-ups. Press `a` with no file open, or the `+` at the top of the
+  column, to ask about the pull request as a whole.
+- Each question picks its model and effort. The thread shows what the
+  agent did, one line per file read or command run, then its answer, then
+  what it cost and how long it took. A run can be stopped.
+- The agent is read-only by construction: it may read files, search, and
+  run `git diff`, `git log`, `git show`, `git blame` and `rg`. Edits are
+  denied, and a denial shows as a step line. It runs in the worktree, as a
+  child process of Perch, on your own Claude Code login.
+- Threads live in `perch.db` beside the worktree record. Archiving a
+  worktree keeps them; forgetting it removes them. When the pull request
+  moves on and the anchored file changes, the thread says Outdated.
+
 ## What it deliberately does not do
 
 Nothing in Perch writes to GitHub. There is no mark as read and no
@@ -107,6 +125,10 @@ the same inbox you see in a browser.
 | `Cmd-1` | Notifications. |
 | `Cmd-2` | Worktrees. |
 | `Cmd-W` | Close the open file. |
+| `a` | Ask about the selected lines, or the pull request. |
+| `Cmd-Enter` | Send the question. |
+| `Cmd-Shift-\` | Show or hide the thread column. |
+| `Escape` | Close the composer. |
 
 `e` and `s` stand down while the search box has focus.
 
@@ -179,6 +201,26 @@ Perch is the safe way to reclaim the space, since it checks for uncommitted
 work first and keeps the branch; a directory removed by hand simply shows
 as archived on the next launch.
 
+## Threads
+
+A question runs `claude -p` in the worktree with `--output-format
+stream-json`, an allowed-tool list that permits only reading and a few
+git commands, and the writing tools explicitly denied. Nothing is passed
+that skips permissions. A follow-up resumes the agent's own session with
+`--resume`, so Perch never resends the conversation.
+
+```toml
+[agent]
+binary = "claude"              # optional; found on PATH by default
+model = "sonnet"               # optional; what the picker starts on
+effort = "medium"              # optional; low | medium | high | xhigh | max
+models = ["sonnet", "opus"]    # optional; what the picker offers
+```
+
+`perch --ask owner/repo#N path:start-end "question"` runs one question
+from a terminal and prints the prompt, every event, and the answer. Leave
+the path out to ask about the pull request as a whole.
+
 ## Knowledge
 
 Discussion lands under `~/.perch/knowledge`, outside the app's own data
@@ -228,6 +270,7 @@ no timer.
 | `perch-github` | Model, REST client, SQLite cache. |
 | `perch-git` | Clone, fetch, worktree, diff, tree listing. |
 | `perch-knowledge` | Discussion records, raw JSONL, rendered markdown, the skill. |
+| `perch-agent` | Claude Code as a child process: the command line, the event parser, spawn and cancel. |
 | `perch-syntax` | tree-sitter highlighting. |
 | `perch-lsp` | Language server client. |
 | `perch-app` | Floem UI and the background worker. Binary target `perch`. |
