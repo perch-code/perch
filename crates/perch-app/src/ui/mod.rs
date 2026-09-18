@@ -27,6 +27,10 @@ const OS_MOD: Modifiers = if cfg!(target_os = "macos") {
 };
 
 pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    // Narrowing the list drops the selection. This is the reactive scope, so
+    // it is where that watch belongs.
+    state.watch_filters();
+
     let review_backend = backend.clone();
     let open_thread: list::OpenThread = Rc::new({
         let backend = backend.clone();
@@ -102,21 +106,37 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         if key.modifiers.is_empty()
             && !review.is_showing()
             && !state.search_focused.get()
-            && matches!(key.code, Code::KeyE | Code::KeyS)
+            && matches!(key.code, Code::KeyE | Code::KeyS | Code::Escape)
         {
-            let Some(id) = state.hovered.get() else {
-                return EventPropagation::Continue;
+            if key.code == Code::Escape {
+                if state.selection_len() == 0 {
+                    return EventPropagation::Continue;
+                }
+                state.clear_selection();
+                return EventPropagation::Stop;
+            }
+
+            // A selection is what the reader last said they meant. Without
+            // one, the row under the pointer is.
+            let targets = match state.selection_len() {
+                0 => state.hovered.get().map(|id| vec![id]).unwrap_or_default(),
+                _ => state.selection(),
             };
+            if targets.is_empty() {
+                return EventPropagation::Continue;
+            }
+
             match key.code {
                 Code::KeyE => {
-                    let restoring = state.view.get() == crate::filter::View::Done;
-                    key_mark(vec![id], list::MarkAction::Done(!restoring));
+                    let restoring = state.would_restore(&targets);
+                    key_mark(targets, list::MarkAction::Done(!restoring));
                 }
                 _ => {
-                    let saved = state.is_saved(&id);
-                    key_mark(vec![id], list::MarkAction::Saved(!saved));
+                    let unsaving = state.would_unsave(&targets);
+                    key_mark(targets, list::MarkAction::Saved(!unsaving));
                 }
             }
+            state.clear_selection();
             return EventPropagation::Stop;
         }
 

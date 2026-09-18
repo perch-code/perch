@@ -151,6 +151,11 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M2.6 1.8 v3.1 h3.1" fill="none" stroke="{c}" stroke-width="1.5"
                      stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
+        // The partial state of a checkbox: some of these, not all.
+        SidebarIcon::Dash => format!(
+            r#"<path d="M4.2 8 h7.6" fill="none" stroke="{c}" stroke-width="1.8"
+                     stroke-linecap="round"/>"#
+        ),
         SidebarIcon::Check => format!(
             r#"<path d="M3.2 8.4 L6.4 11.6 L12.8 4.6" fill="none" stroke="{c}"
                      stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>"#
@@ -230,6 +235,7 @@ pub enum SidebarIcon {
     Bookmark,
     BookmarkFilled,
     Check,
+    Dash,
     Undo,
     Target,
     Comment,

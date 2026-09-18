@@ -4,15 +4,24 @@
 //! view closure without lifetime plumbing. Derived lists are plain functions
 //! over these signals, recomputed by whichever effect reads them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Effect, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use jiff::Timestamp;
 use perch_github::{Mark, SubjectDetail, Thread};
 
 use crate::backend::{Event, Status};
 use crate::filter::{self, Counts, Filters, Group, ReasonFilter, Section, Sort, View};
+
+/// How much of a set is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checked {
+    Empty,
+    /// Some but not all, which the box draws as a dash.
+    Partial,
+    Full,
+}
 
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -42,6 +51,10 @@ pub struct AppState {
     pub sidebar_open: RwSignal<bool>,
     /// The thread the pointer is over, which is what a bare keystroke acts on.
     pub hovered: RwSignal<Option<String>>,
+    /// Checked rows, by thread id. Bulk actions act on exactly this set.
+    pub selected: RwSignal<HashSet<String>>,
+    /// The last row checked, which is the anchor a shift-click extends from.
+    pub last_toggled: RwSignal<Option<String>>,
     /// True while the search box has the keyboard.
     ///
     /// Bare letters are shortcuts everywhere except inside a text field, and
@@ -74,6 +87,8 @@ impl AppState {
             now: RwSignal::new(Timestamp::now()),
             sidebar_open: RwSignal::new(true),
             hovered: RwSignal::new(None),
+            selected: RwSignal::new(HashSet::new()),
+            last_toggled: RwSignal::new(None),
             search_focused: RwSignal::new(false),
         }
     }
@@ -122,6 +137,7 @@ impl AppState {
     pub fn apply(&self, event: Event) {
         match event {
             Event::Threads { threads, from_cache } => {
+                let had_selection = self.selected.with(|s| !s.is_empty());
                 // The cache read races the first network response. If the
                 // network won, its list is authoritative and the cached one
                 // is stale by definition.
@@ -141,6 +157,9 @@ impl AppState {
                 });
                 if still_present == Some(false) {
                     self.repo_filter.set(None);
+                }
+                if had_selection {
+                    self.prune_selection();
                 }
             }
             Event::Detail { thread_id, detail } => {
@@ -232,6 +251,122 @@ impl AppState {
     pub fn is_done(&self, thread_id: &str) -> bool {
         self.marks
             .with(|m| m.get(thread_id).is_some_and(perch_github::Mark::is_done))
+    }
+
+    // -----------------------------------------------------------------
+    // Selection
+    // -----------------------------------------------------------------
+
+    /// Forget the selection whenever the list underneath it changes shape.
+    ///
+    /// Checking rows and then narrowing the list would leave a selection the
+    /// reader can no longer see, and acting on it would be a nasty surprise.
+    /// Sort and group are deliberately absent: they reorder the same rows.
+    ///
+    /// Called once from the root view, which is where the reactive scope is.
+    pub fn watch_filters(&self) {
+        let state = *self;
+        Effect::new(move |_| {
+            state.view.track();
+            state.reason_filter.track();
+            state.repo_filter.track();
+            state.unread_only.track();
+            state.search.track();
+            state.clear_selection();
+        });
+    }
+
+    pub fn is_selected(&self, thread_id: &str) -> bool {
+        self.selected.with(|s| s.contains(thread_id))
+    }
+
+    pub fn selection(&self) -> Vec<String> {
+        self.selected.with(|s| s.iter().cloned().collect())
+    }
+
+    pub fn selection_len(&self) -> usize {
+        self.selected.with(HashSet::len)
+    }
+
+    /// Check or uncheck one row, or extend from the last one checked.
+    ///
+    /// Extending adds the whole run rather than toggling it, which is what a
+    /// shift-click means everywhere else.
+    pub fn toggle_selected(&self, thread_id: &str, extend: bool) {
+        if extend {
+            if let Some(anchor) = self.last_toggled.get() {
+                let order: Vec<String> = self.visible().into_iter().map(|t| t.id).collect();
+                // No run means the anchor has left the list, so fall through
+                // and treat this as an ordinary click.
+                if let Some(run) = filter::range_between(&order, &anchor, thread_id) {
+                    let run: Vec<String> = run.to_vec();
+                    self.selected.update(|s| s.extend(run));
+                    self.last_toggled.set(Some(thread_id.to_string()));
+                    return;
+                }
+            }
+        }
+        self.selected.update(|s| {
+            if !s.remove(thread_id) {
+                s.insert(thread_id.to_string());
+            }
+        });
+        self.last_toggled.set(Some(thread_id.to_string()));
+    }
+
+    /// Check every row the filters currently show, scrolled into view or not.
+    pub fn select_all_visible(&self) {
+        let ids: HashSet<String> = self.visible().into_iter().map(|t| t.id).collect();
+        self.selected.set(ids);
+        self.last_toggled.set(None);
+    }
+
+    pub fn clear_selection(&self) {
+        if self.selected.with(|s| !s.is_empty()) {
+            self.selected.update(HashSet::clear);
+        }
+        if self.last_toggled.with(Option::is_some) {
+            self.last_toggled.set(None);
+        }
+    }
+
+    /// Drop checked rows the inbox no longer holds.
+    ///
+    /// A poll must never quietly empty the selection, so this removes only
+    /// ids that are genuinely gone, and writes nothing when none are.
+    fn prune_selection(&self) {
+        let live: HashSet<String> = self.pool().into_iter().map(|t| t.id).collect();
+        let stale = self
+            .selected
+            .with(|s| s.iter().any(|id| !live.contains(id)));
+        if stale {
+            self.selected.update(|s| s.retain(|id| live.contains(id)));
+        }
+    }
+
+    /// How the Select all box should draw itself.
+    pub fn selection_state(&self) -> Checked {
+        let visible = self.visible();
+        if visible.is_empty() {
+            return Checked::Empty;
+        }
+        let checked = self
+            .selected
+            .with(|s| visible.iter().filter(|t| s.contains(&t.id)).count());
+        match checked {
+            0 => Checked::Empty,
+            n if n == visible.len() => Checked::Full,
+            _ => Checked::Partial,
+        }
+    }
+
+    /// Whether a dismissal across these threads should restore or mark done.
+    ///
+    /// Restore only when every one of them is already done. The Saved view
+    /// can hold a thread that is both saved and done, so asking the view is
+    /// not good enough.
+    pub fn would_restore(&self, ids: &[String]) -> bool {
+        !ids.is_empty() && ids.iter().all(|id| self.is_done(id))
     }
 
     /// Whether a save across these threads should save or unsave.

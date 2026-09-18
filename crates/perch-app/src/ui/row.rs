@@ -5,13 +5,13 @@ use floem::views::{Container, Decorators, Empty, Label, Stack, dyn_container};
 use floem::text::{Alignment, FontWeight};
 use perch_github::{SubjectKind, Thread};
 
-use crate::filter::{Group, View};
+use crate::filter::Group;
 use crate::ui::list::{MarkAction, OnMark, OpenThread};
 use crate::icons::{self, SidebarIcon};
-use crate::state::AppState;
+use crate::state::{AppState, Checked};
 use crate::theme;
 use crate::timefmt;
-use crate::ui::widgets::{avatar, icon_button, icon_in, reason_pill};
+use crate::ui::widgets::{avatar, checkbox, icon_button, icon_in, reason_pill};
 
 pub fn row(state: AppState, thread: Thread, on_open: OpenThread, on_mark: OnMark) -> impl IntoView {
     let unread = thread.unread;
@@ -31,6 +31,7 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread, on_mark: OnMark
 
     Stack::horizontal((
         unread_dot(unread),
+        row_checkbox(state, thread.clone()),
         state_icon(state, thread.clone()),
         text_column(state, thread.clone()),
         row_actions(state, thread.clone(), on_mark),
@@ -75,6 +76,27 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread, on_mark: OnMark
     })
 }
 
+/// The selection box, where the web puts it.
+///
+/// Always drawn, never only on hover: a half-made selection has to stay
+/// legible while the reader looks down the list for the next one.
+fn row_checkbox(state: AppState, thread: Thread) -> impl IntoView {
+    let id = thread.id.clone();
+    let toggle_id = thread.id.clone();
+
+    Container::new(checkbox(
+        move || {
+            if state.is_selected(&id) {
+                Checked::Full
+            } else {
+                Checked::Empty
+            }
+        },
+        move |extend| state.toggle_selected(&toggle_id, extend),
+    ))
+    .style(|s| s.width(26.0).items_center().justify_center().flex_shrink(0.0_f32))
+}
+
 /// Save and dismiss, at the end of the row.
 ///
 /// The space is reserved whether or not the buttons are showing, so a row
@@ -100,12 +122,15 @@ fn row_actions(state: AppState, thread: Thread, on_mark: OnMark) -> impl IntoVie
 
     let done_id = thread.id.clone();
     let done_mark = on_mark;
-    // In Done the check becomes a way back out, which is the only undo there
-    // is for a dismissal.
-    let restoring = move || state.view.get() == View::Done;
+    // The button follows the thread, not the view. Saved can hold a thread
+    // that is also done, and offering to dismiss it again would be a lie.
+    let act_id = thread.id.clone();
     let dismiss = move || {
-        done_mark(vec![done_id.clone()], MarkAction::Done(!restoring()));
+        let restoring = state.is_done(&act_id);
+        done_mark(vec![done_id.clone()], MarkAction::Done(!restoring));
     };
+    let glyph_id = thread.id.clone();
+    let restoring = move || state.is_done(&glyph_id);
 
     Stack::horizontal((
         dyn_container(
@@ -124,7 +149,7 @@ fn row_actions(state: AppState, thread: Thread, on_mark: OnMark) -> impl IntoVie
                         }
                     },
                     move || if saved { theme::ACCENT } else { theme::FG_SUBTLE },
-                    move || save(),
+                    save,
                 )
                 .into_any()
             },
@@ -146,7 +171,7 @@ fn row_actions(state: AppState, thread: Thread, on_mark: OnMark) -> impl IntoVie
                         }
                     },
                     || theme::FG_SUBTLE,
-                    move || dismiss(),
+                    dismiss,
                 )
                 .into_any()
             },

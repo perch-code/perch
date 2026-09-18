@@ -6,7 +6,7 @@ use floem::text::FontWeight;
 use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
 
 use crate::icons::{self, SidebarIcon};
-use crate::state::AppState;
+use crate::state::{AppState, Checked};
 use floem::style::ObjectFit;
 
 use crate::theme;
@@ -54,6 +54,87 @@ pub fn icon_in(source: impl Fn() -> String + 'static, color: impl Fn() -> Color 
 
 pub fn sidebar_glyph(name: SidebarIcon, color: Color) -> impl IntoView {
     icon_in(move || icons::sidebar_icon(name, color), move || color)
+}
+
+/// A checkbox, in the three states a set can be in.
+///
+/// Toggling happens on pointer-down rather than on click, because that is the
+/// event that carries the shift key, and a shift-click has to extend the run
+/// rather than check one row. The click is swallowed as well, so checking a
+/// row inside a row-shaped button does not also open it.
+pub fn checkbox(
+    checked: impl Fn() -> Checked + 'static,
+    on_toggle: impl Fn(bool) + 'static,
+) -> impl IntoView {
+    // Two readers, one closure: the container picks the glyph and the style
+    // picks the fill, and a closure that captures a thread id is not Copy.
+    let checked = std::rc::Rc::new(checked);
+    let for_glyph = checked.clone();
+
+    Container::new(
+        dyn_container(move || for_glyph(), |checked| match checked {
+            Checked::Empty => Empty::new().into_any(),
+            Checked::Partial => sidebar_glyph(SidebarIcon::Dash, theme::CANVAS).into_any(),
+            Checked::Full => sidebar_glyph(SidebarIcon::Check, theme::CANVAS).into_any(),
+        })
+        .style(|s| s.size(12.0, 12.0).items_center().justify_center()),
+    )
+    .on_event_stop(
+        floem::event::listener::PointerDown,
+        move |_, e: &PointerButtonEvent| {
+            on_toggle(e.state.modifiers.contains(Modifiers::SHIFT));
+        },
+    )
+    // Belt and braces: the row around this one is itself a button.
+    .on_event_stop(floem::event::listener::Click, |_, _| {})
+    .style(move |s| {
+        let base = clickable(s)
+            .size(16.0, 16.0)
+            .items_center()
+            .justify_center()
+            .border_radius(4.0)
+            .border(1.5);
+        if checked() == Checked::Empty {
+            base.background(theme::CANVAS)
+                .border_color(theme::BORDER)
+                .hover(|s| s.border_color(theme::FG_SUBTLE))
+        } else {
+            base.background(theme::ACCENT).border_color(theme::ACCENT)
+        }
+    })
+}
+
+/// A small bordered text button, as used by the selection bar and the group
+/// headers.
+pub fn text_button(
+    label: impl Fn() -> String + 'static,
+    glyph: SidebarIcon,
+    on_click: impl Fn() + 'static,
+) -> impl IntoView {
+    Container::new(
+        Stack::horizontal((
+            sidebar_glyph(glyph, theme::FG_MUTED).style(|s| s.margin_right(6.0)),
+            Label::derived(label).style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG)
+                    .selectable(false)
+                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
+            }),
+        ))
+        .style(|s| s.items_center()),
+    )
+    .on_event_stop(floem::event::listener::Click, move |_, _| on_click())
+    .style(|s| {
+        clickable(s)
+            .height(28.0)
+            .items_center()
+            .padding_horiz(10.0)
+            .background(theme::CANVAS)
+            .border(1.0)
+            .border_color(theme::BORDER)
+            .border_radius(theme::RADIUS)
+            .hover(|s| s.background(theme::CANVAS_HOVER))
+    })
 }
 
 /// A small round icon button, as sits at the end of a notification row.

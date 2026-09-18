@@ -199,6 +199,18 @@ pub fn pool(live: &[Thread], marks: &HashMap<String, Mark>) -> Vec<Thread> {
     out
 }
 
+/// The run of rows between two ids, inclusive, in the order the list shows.
+///
+/// What a shift-click means. `None` when either end has left the list, which
+/// happens when a poll lands between the two clicks; the caller then treats
+/// the second click as an ordinary one rather than guessing at a range.
+pub fn range_between<'a>(order: &'a [String], from: &str, to: &str) -> Option<&'a [String]> {
+    let a = order.iter().position(|id| id == from)?;
+    let b = order.iter().position(|id| id == to)?;
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    Some(&order[lo..=hi])
+}
+
 /// How many of these threads the view holds, before any other filter.
 ///
 /// What the empty state needs: an empty Saved is a different thing to say
@@ -758,6 +770,24 @@ mod tests {
         let inbox = counts(&all, &m, View::Inbox);
         assert_eq!(inbox.repos[0].1, 2);
         assert_eq!(inbox.by_reason.get(&ReasonFilter::Mentioned), None);
+    }
+
+    #[test]
+    fn a_shift_click_takes_the_run_between_two_rows() {
+        let order: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+
+        assert_eq!(range_between(&order, "b", "d").unwrap(), ["b", "c", "d"]);
+        // Backwards is the same run.
+        assert_eq!(range_between(&order, "d", "b").unwrap(), ["b", "c", "d"]);
+        assert_eq!(range_between(&order, "c", "c").unwrap(), ["c"]);
+    }
+
+    #[test]
+    fn a_shift_click_past_a_row_that_left_the_list_is_no_run_at_all() {
+        let order: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        assert!(range_between(&order, "gone", "b").is_none());
+        assert!(range_between(&order, "a", "gone").is_none());
+        assert!(range_between(&[], "a", "b").is_none());
     }
 
     #[test]
