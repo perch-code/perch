@@ -1567,6 +1567,7 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str) -> Result<String, String> {
         owned: true,
         on_disk: true,
         churn: Some((0, 0)),
+        last_seen_head: None,
     });
     item.from_item_id = Some(issue_item.id.clone());
     ctx.with_cache(|c| c.insert_item(&item)).transpose().map_err(|e| e.to_string())?;
@@ -1636,6 +1637,7 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         owned: true,
         on_disk: true,
         churn: Some((0, 0)),
+        last_seen_head: None,
     });
     item.from_item_id = Some(source.id.clone());
     ctx.with_cache(|c| c.insert_item(&item)).transpose().map_err(|e| e.to_string())?;
@@ -1917,6 +1919,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                             owned: false,
                             on_disk: true,
                             churn,
+                            last_seen_head: None,
                         });
                         if let Some(Err(e)) = ctx.with_cache(|c| c.insert_item(&item)) {
                             tracing::warn!(error = %e, "could not record a root worktree");
@@ -2401,6 +2404,7 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         owned: kept.as_ref().is_none_or(|c| c.owned),
         on_disk: true,
         churn: kept.as_ref().and_then(|c| c.churn),
+        last_seen_head: kept.as_ref().and_then(|c| c.last_seen_head.clone()),
     });
     item.archived_at = None;
     item.last_opened_at = now;

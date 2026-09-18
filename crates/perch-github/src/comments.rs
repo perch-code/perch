@@ -33,7 +33,11 @@ impl ThreadOrigin {
 }
 
 /// Which file a line number counts in: the old one or the new one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Shared with GitHub's review comments, whose `side` is the same two
+/// words. Serialised as `left` and `right`, the column values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Side {
     Left,
     Right,

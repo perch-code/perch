@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use perch_github::GitHub;
+use perch_github::{GitHub, PullEvent, PullEventKind, Side};
 
 fn read_path(stream: &mut TcpStream) -> Option<String> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
@@ -67,11 +67,13 @@ fn spawn(comments: usize) -> (String, Arc<AtomicUsize>) {
                 page(vec![r#"{"id":9,"user":{"login":"r"},"body":"lgtm","state":"APPROVED","submitted_at":"2026-09-16T11:40:00Z","html_url":"https://github.com/a/b/pull/1#pullrequestreview-9"}"#.into()])
             } else if path.contains("/pulls/1/comments") {
                 page(vec![
-                    r#"{"id":3,"pull_request_review_id":9,"user":{"login":"r"},"body":"here","path":"src/x.rs","line":41,"created_at":"2026-09-16T11:38:00Z","html_url":"https://github.com/a/b/pull/1#discussion_r3"}"#.into(),
+                    r#"{"id":3,"pull_request_review_id":9,"user":{"login":"r"},"body":"here","path":"src/x.rs","line":41,"side":"LEFT","diff_hunk":"@@ -40,3 +40,3 @@","created_at":"2026-09-16T11:38:00Z","html_url":"https://github.com/a/b/pull/1#discussion_r3"}"#.into(),
                     r#"{"id":4,"pull_request_review_id":9,"in_reply_to_id":3,"user":{"login":"a"},"body":"ok","path":"src/x.rs","line":41,"created_at":"2026-09-16T11:39:00Z","html_url":"https://github.com/a/b/pull/1#discussion_r4"}"#.into(),
                 ])
             } else if path.contains("/pulls/1") {
-                r#"{"number":1,"body":"The description.","created_at":"2026-09-14T14:02:00Z","head":{"sha":"h"},"base":{"sha":"b"}}"#.into()
+                r#"{"number":1,"body":"The description.","created_at":"2026-09-14T14:02:00Z",
+                    "merged":true,"merged_at":"2026-09-17T15:00:00Z","merged_by":{"login":"r"},
+                    "closed_at":"2026-09-17T15:00:00Z","head":{"sha":"h"},"base":{"sha":"b"}}"#.into()
             } else {
                 "[]".into()
             };
@@ -97,6 +99,20 @@ async fn every_page_of_the_conversation_is_read() {
     assert_eq!(d.review_comments.len(), 2);
     assert_eq!(d.review_comments[1].in_reply_to_id, Some(3));
     assert_eq!(d.review_comments[0].location(), "src/x.rs:41");
+    assert_eq!(d.review_comments[0].side, Side::Left);
+    assert_eq!(d.review_comments[0].diff_hunk, "@@ -40,3 +40,3 @@");
+    assert_eq!(d.review_comments[1].side, Side::Right, "no side is the head side");
+    // Opened and merged, out of the pull request's own payload.
+    assert_eq!(
+        d.events,
+        vec![
+            PullEvent { kind: PullEventKind::Opened, at: "2026-09-14T14:02:00Z".parse().unwrap() },
+            PullEvent {
+                kind: PullEventKind::Merged { by: Some("r".into()) },
+                at: "2026-09-17T15:00:00Z".parse().unwrap(),
+            },
+        ]
+    );
     // The pull request, two comment pages, one reviews page, one line page.
     assert_eq!(requests.load(Ordering::SeqCst), 5);
 }

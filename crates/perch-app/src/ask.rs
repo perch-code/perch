@@ -489,6 +489,11 @@ mod tests {
             review_requested: false,
             checks: None,
             review_decision: None,
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: vec![],
+            milestone: None,
         }
     }
 

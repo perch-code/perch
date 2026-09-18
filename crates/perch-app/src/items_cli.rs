@@ -187,6 +187,11 @@ mod tests {
             review_requested: true,
             checks: Some(CheckStatus::Failure),
             review_decision: Some(ReviewDecision::ReviewRequested),
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: vec![],
+            milestone: None,
         }));
         wanted.attention_at = Some(at("2026-09-18T09:00:00Z"));
         wanted.attention_reason = Some("review_requested".into());
@@ -201,6 +206,7 @@ mod tests {
             owned: true,
             on_disk: true,
             churn: None,
+            last_seen_head: None,
         });
         branch.pinned_at = Some(at("2026-09-18T10:00:00Z"));
 

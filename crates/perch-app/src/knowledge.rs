@@ -174,7 +174,7 @@ pub fn skill_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perch_github::{IssueComment, Review, ReviewComment};
+    use perch_github::{IssueComment, Review, ReviewComment, Side};
 
     fn at(s: &str) -> jiff::Timestamp {
         s.parse().unwrap()
@@ -202,6 +202,11 @@ mod tests {
             review_requested: false,
             checks: None,
             review_decision: None,
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: vec![],
+            milestone: None,
         }
     }
 
@@ -246,6 +251,8 @@ mod tests {
                     path: "src/manifest.rs".into(),
                     line: Some(41),
                     original_line: None,
+                    diff_hunk: String::new(),
+                    side: Side::Right,
                     created_at: at("2026-09-16T11:38:00Z"),
                     updated_at: Some(at("2026-09-16T11:38:00Z")),
                     html_url: "https://github.com/slatedb/slatedb/pull/812#discussion_r3".into(),
@@ -259,11 +266,14 @@ mod tests {
                     path: "src/manifest.rs".into(),
                     line: Some(41),
                     original_line: None,
+                    diff_hunk: String::new(),
+                    side: Side::Right,
                     created_at: at("2026-09-16T11:45:00Z"),
                     updated_at: None,
                     html_url: "https://github.com/slatedb/slatedb/pull/812#discussion_r4".into(),
                 },
             ],
+            events: vec![],
         }
     }
 

@@ -4,6 +4,7 @@
 //! request needs the commits to check out and the branches to diff, which
 //! only this endpoint carries.
 
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// What Perch needs to check out and describe a pull request.
@@ -43,6 +44,29 @@ pub struct PullRequest {
     /// Where the reviews stand, from the reviews list.
     #[serde(default)]
     pub review_decision: Option<ReviewDecision>,
+    /// When it was merged, and who pressed the button.
+    #[serde(default)]
+    pub merged_at: Option<Timestamp>,
+    #[serde(default)]
+    pub merged_by: Option<String>,
+    /// When it was closed. Set on a merged pull request too.
+    #[serde(default)]
+    pub closed_at: Option<Timestamp>,
+    /// Who has been asked to review and has not yet. Teams are not here:
+    /// they have no login, and `review_requested` counts them.
+    #[serde(default)]
+    pub requested_reviewers: Vec<Reviewer>,
+    /// The milestone's title.
+    #[serde(default)]
+    pub milestone: Option<String>,
+}
+
+/// Someone asked to review, for the strip under the header.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Reviewer {
+    pub login: String,
+    #[serde(default)]
+    pub avatar_url: String,
 }
 
 /// The CI chip.
@@ -107,6 +131,14 @@ pub(crate) struct PullPayload {
     pub requested_reviewers: Vec<UserRef>,
     #[serde(default)]
     pub requested_teams: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub merged_at: Option<Timestamp>,
+    #[serde(default)]
+    pub merged_by: Option<UserRef>,
+    #[serde(default)]
+    pub closed_at: Option<Timestamp>,
+    #[serde(default)]
+    pub milestone: Option<MilestoneRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +163,12 @@ pub(crate) struct GitRef {
 pub(crate) struct RepoRef {
     #[serde(default)]
     pub full_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct MilestoneRef {
+    #[serde(default)]
+    pub title: String,
 }
 
 impl PullPayload {
@@ -178,6 +216,15 @@ impl PullPayload {
             review_requested: !self.requested_reviewers.is_empty() || !self.requested_teams.is_empty(),
             checks: None,
             review_decision: None,
+            merged_at: self.merged_at,
+            merged_by: self.merged_by.map(|u| u.login),
+            closed_at: self.closed_at,
+            requested_reviewers: self
+                .requested_reviewers
+                .into_iter()
+                .map(|u| Reviewer { login: u.login, avatar_url: u.avatar_url })
+                .collect(),
+            milestone: self.milestone.map(|m| m.title),
         }
     }
 }
@@ -253,5 +300,50 @@ mod tests {
         let pr = payload.into_pull_request("a/b");
         assert!(!pr.is_open());
         assert!(pr.merged);
+    }
+
+    #[test]
+    fn the_fields_the_header_shows_are_read_when_present_and_empty_when_not() {
+        let bare: PullPayload = serde_json::from_str(SAMPLE).unwrap();
+        let pr = bare.into_pull_request("a/b");
+        assert_eq!(pr.merged_at, None);
+        assert_eq!(pr.merged_by, None);
+        assert_eq!(pr.closed_at, None);
+        assert!(pr.requested_reviewers.is_empty());
+        assert_eq!(pr.milestone, None);
+
+        let json = SAMPLE.replace(
+            r#""merged": false,"#,
+            r#""merged": true,
+            "merged_at": "2026-09-17T15:00:00Z",
+            "merged_by": { "login": "rohan", "avatar_url": "https://avatars/2" },
+            "closed_at": "2026-09-17T15:00:00Z",
+            "requested_reviewers": [ { "login": "chris", "avatar_url": "https://avatars/3" } ],
+            "requested_teams": [ { "slug": "storage" } ],
+            "milestone": { "title": "0.9", "number": 4 },"#,
+        );
+        let payload: PullPayload = serde_json::from_str(&json).unwrap();
+        let pr = payload.into_pull_request("a/b");
+        assert_eq!(pr.merged_at, Some("2026-09-17T15:00:00Z".parse().unwrap()));
+        assert_eq!(pr.merged_by.as_deref(), Some("rohan"));
+        assert_eq!(pr.closed_at, Some("2026-09-17T15:00:00Z".parse().unwrap()));
+        assert_eq!(
+            pr.requested_reviewers,
+            vec![Reviewer { login: "chris".into(), avatar_url: "https://avatars/3".into() }]
+        );
+        assert_eq!(pr.milestone.as_deref(), Some("0.9"));
+        assert!(pr.review_requested);
+    }
+
+    #[test]
+    fn a_snapshot_written_before_the_header_fields_still_loads() {
+        let payload: PullPayload = serde_json::from_str(SAMPLE).unwrap();
+        let pr = payload.into_pull_request("a/b");
+        let mut old: serde_json::Value = serde_json::to_value(&pr).unwrap();
+        for field in ["merged_at", "merged_by", "closed_at", "requested_reviewers", "milestone"] {
+            old.as_object_mut().unwrap().remove(field);
+        }
+        let loaded: PullRequest = serde_json::from_value(old).unwrap();
+        assert_eq!(loaded, pr);
     }
 }

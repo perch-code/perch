@@ -5,21 +5,23 @@
 //! launch. Avatars are cached as files rather than blobs, keyed by a hash of
 //! their URL.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::comments::{self, Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStep};
+use crate::discussion::Discussion;
 use crate::items::{Checkout as ItemCheckout, Item, Project, Subject, SubjectKind};
 use crate::model::{SubjectDetail, Thread};
 use crate::pulls::PullRequest;
+use crate::workflow_runs::Checks;
 
 /// The shape of the tables. A database with an older number, or none, is
 /// deleted and recreated: there is no migration, and nothing before the
 /// number was written has shipped to anyone.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// Perch's own opinion about a thread: bookmarked, dismissed, or both.
 ///
@@ -229,6 +231,7 @@ impl Cache {
                 last_opened_at   TEXT NOT NULL,
                 additions        INTEGER,
                 deletions        INTEGER,
+                last_seen_head   TEXT,
                 CHECK (subject_kind IS NOT NULL OR branch IS NOT NULL)
             );
             CREATE UNIQUE INDEX IF NOT EXISTS items_subject
@@ -287,6 +290,24 @@ impl Cache {
                 done_at    TEXT,
                 marked_at  TEXT NOT NULL,
                 json       TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS discussions (
+                item_id     TEXT PRIMARY KEY,
+                fetched_at  TEXT NOT NULL,
+                json        TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS checks (
+                item_id     TEXT PRIMARY KEY,
+                head_sha    TEXT NOT NULL,
+                fetched_at  TEXT NOT NULL,
+                json        TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS viewed (
+                item_id    TEXT NOT NULL,
+                path       TEXT NOT NULL,
+                blob       TEXT NOT NULL,
+                viewed_at  TEXT NOT NULL,
+                PRIMARY KEY (item_id, path, blob)
             );
             "#,
         )?;
@@ -1112,8 +1133,8 @@ impl Cache {
              (id, project_id, repo_full_name, subject_kind, subject_number, subject_json,
               branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name,
               saved, pinned_at, done_at, attention_at, attention_reason, archived_at,
-              created_at, last_opened_at, additions, deletions, subject_repo)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+              created_at, last_opened_at, additions, deletions, subject_repo, last_seen_head)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             params![
                 item.id, item.project_id, item.repo_full_name,
                 c.subject_kind, c.subject_number, c.subject_json,
@@ -1130,6 +1151,7 @@ impl Cache {
                 c.additions,
                 c.deletions,
                 c.subject_repo,
+                c.last_seen_head,
             ],
         )?;
         Ok(())
@@ -1148,7 +1170,7 @@ impl Cache {
                 owned = ?11, on_disk = ?12, from_item_id = ?13, name = ?14, saved = ?15,
                 pinned_at = ?16, done_at = ?17, attention_at = ?18, attention_reason = ?19,
                 archived_at = ?20, last_opened_at = ?21, additions = ?22, deletions = ?23,
-                subject_repo = ?24
+                subject_repo = ?24, last_seen_head = ?25
              WHERE id = ?1",
             params![
                 item.id, item.project_id, item.repo_full_name,
@@ -1165,13 +1187,15 @@ impl Cache {
                 c.additions,
                 c.deletions,
                 c.subject_repo,
+                c.last_seen_head,
             ],
         )?;
         Ok(())
     }
 
-    /// Delete an item and everything said in it. Items cut from it keep
-    /// their rows and lose the pointer.
+    /// Delete an item and everything said in it, and what was fetched and
+    /// marked for it. Items cut from it keep their rows and lose the
+    /// pointer.
     pub fn delete_item(&self, id: &str) -> Result<(), CacheError> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
@@ -1183,10 +1207,104 @@ impl Cache {
             params![id],
         )?;
         tx.execute("DELETE FROM comment_threads WHERE worktree_id = ?1", params![id])?;
+        tx.execute("DELETE FROM discussions WHERE item_id = ?1", params![id])?;
+        tx.execute("DELETE FROM checks WHERE item_id = ?1", params![id])?;
+        tx.execute("DELETE FROM viewed WHERE item_id = ?1", params![id])?;
         tx.execute("UPDATE items SET from_item_id = NULL WHERE from_item_id = ?1", params![id])?;
         tx.execute("DELETE FROM items WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // What was fetched for an item, and what the reader marked on it
+    // -----------------------------------------------------------------
+
+    /// Keep the discussion, replacing whatever was kept before. One row per
+    /// item, so Conversation can paint before the network answers.
+    pub fn store_discussion(&self, item_id: &str, discussion: &Discussion) -> Result<(), CacheError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO discussions (item_id, fetched_at, json) VALUES (?1, ?2, ?3)",
+            params![item_id, Timestamp::now().to_string(), serde_json::to_string(discussion)?],
+        )?;
+        Ok(())
+    }
+
+    /// The kept discussion and when it was fetched. A row an older build
+    /// wrote that no longer reads is `None`, the same as no row.
+    pub fn load_discussion(&self, item_id: &str) -> Result<Option<(Timestamp, Discussion)>, CacheError> {
+        let row: Option<(String, String)> = self
+            .conn
+            .query_row(
+                "SELECT fetched_at, json FROM discussions WHERE item_id = ?1",
+                params![item_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((fetched_at, json)) = row else { return Ok(None) };
+        let (Ok(fetched_at), Ok(discussion)) =
+            (fetched_at.parse::<Timestamp>(), serde_json::from_str::<Discussion>(&json))
+        else {
+            tracing::warn!(item_id, "skipping unreadable cached discussion");
+            return Ok(None);
+        };
+        Ok(Some((fetched_at, discussion)))
+    }
+
+    /// Keep the checks for the head they were read at, replacing whatever
+    /// was kept before.
+    pub fn store_checks(&self, item_id: &str, head_sha: &str, checks: &Checks) -> Result<(), CacheError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO checks (item_id, head_sha, fetched_at, json) VALUES (?1, ?2, ?3, ?4)",
+            params![item_id, head_sha, Timestamp::now().to_string(), serde_json::to_string(checks)?],
+        )?;
+        Ok(())
+    }
+
+    /// The kept checks, only if they were read at `head_sha`. Checks for
+    /// another head say nothing about this one, so they are a miss and the
+    /// caller fetches.
+    pub fn load_checks(&self, item_id: &str, head_sha: &str) -> Result<Option<Checks>, CacheError> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT json FROM checks WHERE item_id = ?1 AND head_sha = ?2",
+                params![item_id, head_sha],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Mark a file's content viewed, or not. The key is the blob, not the
+    /// commit: a push that changes the file gives it a blob with no row,
+    /// and a file that comes back to a viewed blob is viewed again.
+    pub fn set_viewed(&self, item_id: &str, path: &str, blob: &str, viewed: bool) -> Result<(), CacheError> {
+        if viewed {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO viewed (item_id, path, blob, viewed_at) VALUES (?1, ?2, ?3, ?4)",
+                params![item_id, path, blob, Timestamp::now().to_string()],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM viewed WHERE item_id = ?1 AND path = ?2 AND blob = ?3",
+                params![item_id, path, blob],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Every `(path, blob)` marked viewed on an item.
+    pub fn load_viewed(&self, item_id: &str) -> Result<HashSet<(String, String)>, CacheError> {
+        let mut stmt = self.conn.prepare("SELECT path, blob FROM viewed WHERE item_id = ?1")?;
+        let rows = stmt.query_map(params![item_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = HashSet::new();
+        for row in rows {
+            out.insert(row?);
+        }
+        Ok(out)
     }
 
     pub fn set_item_marks(&self, id: &str, saved: bool, done_at: Option<Timestamp>) -> Result<(), CacheError> {
@@ -1262,7 +1380,7 @@ fn hash(s: &str) -> String {
 const ITEM_COLUMNS: &str = "id, project_id, repo_full_name, subject_kind, subject_number, subject_json,
     branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name, saved,
     pinned_at, done_at, attention_at, attention_reason, archived_at, created_at, last_opened_at,
-    additions, deletions";
+    additions, deletions, last_seen_head";
 
 /// An item's optional parts as columns.
 struct ItemColumns {
@@ -1278,6 +1396,7 @@ struct ItemColumns {
     additions: Option<i64>,
     deletions: Option<i64>,
     subject_repo: Option<String>,
+    last_seen_head: Option<String>,
 }
 
 impl ItemColumns {
@@ -1300,6 +1419,7 @@ impl ItemColumns {
             additions: c.and_then(|c| c.churn).map(|(a, _)| a as i64),
             deletions: c.and_then(|c| c.churn).map(|(_, d)| d as i64),
             subject_repo: item.subject.as_ref().map(|s| s.repo_full_name().to_lowercase()),
+            last_seen_head: c.and_then(|c| c.last_seen_head.clone()),
         })
     }
 }
@@ -1325,6 +1445,7 @@ fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
             (Some(a), Some(d)) => Some((a as u32, d as u32)),
             _ => None,
         },
+        last_seen_head: r.get::<_, Option<String>>(24).ok().flatten(),
     });
     let created: String = r.get(20)?;
     let opened: String = r.get(21)?;
@@ -1638,6 +1759,11 @@ mod tests {
             review_requested: false,
             checks: None,
             review_decision: None,
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: vec![],
+            milestone: None,
         }
     }
 
@@ -1960,6 +2086,7 @@ mod tests {
             owned: true,
             on_disk: true,
             churn: None,
+            last_seen_head: None,
         });
         i
     }
@@ -2048,6 +2175,7 @@ mod tests {
             owned: true,
             on_disk: false,
             churn: None,
+            last_seen_head: None,
         });
         i.name = Some("the fence".into());
         i.saved = true;
@@ -2145,6 +2273,153 @@ mod tests {
         assert!(c.load_item(&pr_item(7).id).unwrap().is_none());
         let cut = c.load_item(&cut.id).unwrap().unwrap();
         assert_eq!(cut.from_item_id, None, "the pointer is cleared, the row stays");
+    }
+
+    #[test]
+    fn the_last_seen_head_is_a_column_of_its_own() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_project(&project("acme")).unwrap();
+        let mut i = branch_item("feature");
+        c.insert_item(&i).unwrap();
+        assert_eq!(c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().last_seen_head, None);
+
+        i.checkout.as_mut().unwrap().last_seen_head = Some("abc".into());
+        i.checkout.as_mut().unwrap().head_sha = "def".into();
+        c.update_item(&i).unwrap();
+        let checkout = c.load_item(&i.id).unwrap().unwrap().checkout.unwrap();
+        assert_eq!(checkout.last_seen_head.as_deref(), Some("abc"));
+        assert_eq!(checkout.head_sha, "def");
+    }
+
+    fn discussion() -> Discussion {
+        use crate::discussion::{IssueComment, PullEvent, PullEventKind, Review, ReviewComment};
+        Discussion {
+            opened_at: Some(stamp_of("2026-09-14T14:02:00Z")),
+            body: "The description.".into(),
+            comments: vec![IssueComment {
+                id: 1,
+                user: "chris".into(),
+                user_avatar_url: "https://avatars/1".into(),
+                body: "q".into(),
+                created_at: stamp_of("2026-09-15T09:14:00Z"),
+                updated_at: None,
+                html_url: "https://github.com/acme/widgets/pull/7#issuecomment-1".into(),
+            }],
+            reviews: vec![Review {
+                id: 9,
+                user: "rohan".into(),
+                body: "nice".into(),
+                state: "APPROVED".into(),
+                submitted_at: Some(stamp_of("2026-09-16T11:40:00Z")),
+                html_url: String::new(),
+            }],
+            review_comments: vec![ReviewComment {
+                id: 3,
+                pull_request_review_id: Some(9),
+                in_reply_to_id: None,
+                user: "rohan".into(),
+                body: "epoch".into(),
+                path: "src/manifest.rs".into(),
+                line: Some(41),
+                original_line: None,
+                diff_hunk: "@@ -40,3 +40,3 @@".into(),
+                side: Side::Right,
+                created_at: stamp_of("2026-09-16T11:38:00Z"),
+                updated_at: None,
+                html_url: String::new(),
+            }],
+            events: vec![
+                PullEvent { kind: PullEventKind::Opened, at: stamp_of("2026-09-14T14:02:00Z") },
+                PullEvent { kind: PullEventKind::Merged { by: Some("rohan".into()) }, at: stamp_of("2026-09-17T15:00:00Z") },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_discussion_round_trips_through_its_row_and_is_replaced_whole() {
+        let c = Cache::open_in_memory().unwrap();
+        assert_eq!(c.load_discussion("item-pr-7").unwrap(), None);
+
+        let before = Timestamp::now();
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        let (fetched_at, loaded) = c.load_discussion("item-pr-7").unwrap().unwrap();
+        assert_eq!(loaded, discussion());
+        assert!(fetched_at >= before);
+        assert_eq!(c.load_discussion("item-pr-8").unwrap(), None, "keyed by item");
+
+        // A second fetch replaces the row rather than adding to it.
+        let mut newer = discussion();
+        newer.comments.clear();
+        c.store_discussion("item-pr-7", &newer).unwrap();
+        assert_eq!(c.load_discussion("item-pr-7").unwrap().unwrap().1, newer);
+    }
+
+    #[test]
+    fn checks_are_only_good_for_the_head_they_were_read_at() {
+        use crate::workflow_runs::CheckState;
+        let c = Cache::open_in_memory().unwrap();
+        let checks = Checks {
+            state: CheckState::Failing { workflow: "CI".into() },
+            url: Some("https://github.com/acme/widgets/actions/runs/1".into()),
+        };
+        c.store_checks("item-pr-7", "abc123", &checks).unwrap();
+        assert_eq!(c.load_checks("item-pr-7", "abc123").unwrap(), Some(checks.clone()));
+        assert_eq!(c.load_checks("item-pr-7", "fff999").unwrap(), None, "a push makes them a miss");
+        assert_eq!(c.load_checks("item-pr-8", "abc123").unwrap(), None);
+
+        // Reading them at the new head replaces the row.
+        let green = Checks { state: CheckState::Passing, url: None };
+        c.store_checks("item-pr-7", "fff999", &green).unwrap();
+        assert_eq!(c.load_checks("item-pr-7", "fff999").unwrap(), Some(green));
+        assert_eq!(c.load_checks("item-pr-7", "abc123").unwrap(), None);
+    }
+
+    #[test]
+    fn viewed_is_keyed_by_blob_so_the_same_path_can_be_viewed_at_one_and_not_another() {
+        let c = Cache::open_in_memory().unwrap();
+        assert!(c.load_viewed("item-pr-7").unwrap().is_empty());
+
+        c.set_viewed("item-pr-7", "src/x.rs", "blob-a", true).unwrap();
+        c.set_viewed("item-pr-7", "src/y.rs", "blob-y", true).unwrap();
+        let viewed = c.load_viewed("item-pr-7").unwrap();
+        assert!(viewed.contains(&("src/x.rs".into(), "blob-a".into())));
+        assert!(viewed.contains(&("src/y.rs".into(), "blob-y".into())));
+        // The file was pushed to: a new blob, and no row for it.
+        assert!(!viewed.contains(&("src/x.rs".into(), "blob-b".into())));
+
+        // Viewing the new blob leaves the old one's row alone, so a revert
+        // to it is still viewed.
+        c.set_viewed("item-pr-7", "src/x.rs", "blob-b", true).unwrap();
+        let viewed = c.load_viewed("item-pr-7").unwrap();
+        assert!(viewed.contains(&("src/x.rs".into(), "blob-a".into())));
+        assert!(viewed.contains(&("src/x.rs".into(), "blob-b".into())));
+
+        // Unviewing is by blob too, and marking twice is one row.
+        c.set_viewed("item-pr-7", "src/x.rs", "blob-a", true).unwrap();
+        c.set_viewed("item-pr-7", "src/x.rs", "blob-a", false).unwrap();
+        let viewed = c.load_viewed("item-pr-7").unwrap();
+        assert!(!viewed.contains(&("src/x.rs".into(), "blob-a".into())));
+        assert_eq!(viewed.len(), 2);
+        assert!(c.load_viewed("item-pr-8").unwrap().is_empty(), "keyed by item");
+    }
+
+    #[test]
+    fn deleting_an_item_takes_what_was_fetched_and_marked_for_it() {
+        use crate::workflow_runs::CheckState;
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_project(&project("acme")).unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        let id = pr_item(7).id;
+        c.store_discussion(&id, &discussion()).unwrap();
+        c.store_checks(&id, "abc123", &Checks { state: CheckState::Passing, url: None }).unwrap();
+        c.set_viewed(&id, "src/x.rs", "blob-a", true).unwrap();
+        c.set_viewed("other", "src/x.rs", "blob-a", true).unwrap();
+
+        c.delete_item(&id).unwrap();
+        assert_eq!(c.load_discussion(&id).unwrap(), None);
+        assert_eq!(c.load_checks(&id, "abc123").unwrap(), None);
+        assert!(c.load_viewed(&id).unwrap().is_empty());
+        assert_eq!(c.load_viewed("other").unwrap().len(), 1, "another item's rows stay");
     }
 
     #[test]

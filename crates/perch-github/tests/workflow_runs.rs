@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
-use perch_github::{GitHub, SubjectState, WorkflowRunQuery};
+use perch_github::{CheckState, Checks, GitHub, SubjectState, WorkflowRunQuery};
 
 fn read_path(stream: &mut TcpStream) -> Option<String> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
@@ -99,4 +99,22 @@ async fn a_branch_with_no_fitting_run_is_not_an_error() {
     let (base, _) = spawn(r#"{"total_count":0,"workflow_runs":[]}"#);
     let gh = GitHub::with_base_uri("t", &base).unwrap();
     assert_eq!(gh.fetch_workflow_run_detail(&query()).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn the_runs_for_a_head_are_asked_for_by_sha_and_read_whole() {
+    let (base, paths) = spawn(RUNS);
+    let gh = GitHub::with_base_uri("t", &base).unwrap();
+
+    let runs = gh.list_workflow_runs_for_sha("slatedb/slatedb", "abc123").await.unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].name, "Hourly DST");
+    assert_eq!(perch_github::worst(&runs), CheckState::Failing { workflow: "Hourly DST".into() });
+    assert_eq!(
+        Checks::of(&runs).url.as_deref(),
+        Some("https://github.com/slatedb/slatedb/actions/runs/35035566266")
+    );
+
+    let paths = paths.lock().unwrap();
+    assert_eq!(paths.as_slice(), ["/repos/slatedb/slatedb/actions/runs?head_sha=abc123&per_page=100"]);
 }

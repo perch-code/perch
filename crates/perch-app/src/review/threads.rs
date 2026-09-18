@@ -1001,6 +1001,11 @@ mod column {
             review_requested: false,
             checks: None,
             review_decision: None,
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: vec![],
+            milestone: None,
         };
         let now = "2026-09-18T09:59:00Z".parse().unwrap();
         let mut item = Item::new("slatedb", "slatedb/slatedb", now);
@@ -1014,6 +1019,7 @@ mod column {
             owned: true,
             on_disk: true,
             churn: None,
+            last_seen_head: None,
         });
         state.item.set(Some(Arc::new(item)));
         state.ready.set(true);
