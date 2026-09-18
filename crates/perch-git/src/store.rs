@@ -1,6 +1,6 @@
 //! Where clones and worktrees live on disk.
 //!
-//! One bare clone per repository, one worktree per pull request head. Objects
+//! One bare clone per repository, one worktree per branch. Objects
 //! are shared between worktrees, so a second pull request from the same
 //! repository costs a fetch rather than a clone, and one worktree can stay
 //! indexed by a language server while another is prepared.
@@ -60,17 +60,19 @@ impl Store {
             .join(format!("{}.git", sanitize(&id.repo)))
     }
 
-    /// Worktree directory for one pull request head.
+    /// Worktree directory for one branch of a repository.
     ///
-    /// Keyed by commit rather than pull request number: a force-push produces
-    /// a new directory instead of a stale checkout wearing the right name.
-    pub fn worktree_path(&self, id: &RepoId, head_sha: &str) -> PathBuf {
-        let short: String = head_sha.chars().take(12).collect();
+    /// Keyed by branch, not by commit. A worktree is a place work happens,
+    /// and a branch is what work sits on: when the pull request's head moves,
+    /// the same directory follows it, rather than a new directory appearing
+    /// beside a stale one. The `/` in a branch name becomes `-` so the whole
+    /// key is one path segment.
+    pub fn worktree_path(&self, id: &RepoId, branch: &str) -> PathBuf {
         self.root.join("worktrees").join(format!(
             "{}__{}__{}",
             sanitize(&id.owner),
             sanitize(&id.repo),
-            sanitize(&short)
+            sanitize(&branch.replace('/', "-"))
         ))
     }
 
@@ -149,13 +151,19 @@ mod tests {
     }
 
     #[test]
-    fn worktrees_are_keyed_by_commit_not_pull_request() {
+    fn worktrees_are_keyed_by_branch() {
         let store = Store::new("/tmp/perch");
         let id = RepoId::new("slatedb", "slatedb");
-        let a = store.worktree_path(&id, "abcdef0123456789abcdef");
-        let b = store.worktree_path(&id, "999999999999999999");
-        assert_ne!(a, b, "a force-push must land in its own directory");
-        assert!(a.to_string_lossy().contains("abcdef012345"));
+        let path = store.worktree_path(&id, "perch/pr-2091");
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/perch/worktrees/slatedb__slatedb__perch-pr-2091"),
+            "the branch's slash becomes a dash so the key is one segment"
+        );
+        // The same branch always lands in the same directory, whatever the
+        // head is, which is what lets a moved pull request keep its checkout.
+        assert_eq!(path, store.worktree_path(&id, "perch/pr-2091"));
+        assert_ne!(path, store.worktree_path(&id, "perch/pr-2092"));
     }
 
     #[test]
@@ -168,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn separators_in_a_sha_cannot_escape_the_worktree_directory() {
+    fn separators_in_a_branch_cannot_escape_the_worktree_directory() {
         let store = Store::new("/tmp/perch");
         let id = RepoId::new("a", "b");
         let path = store.worktree_path(&id, "../../../etc");

@@ -34,8 +34,9 @@ async fn main() -> anyhow::Result<()> {
     let preparer = Preparer::new(Store::new(root), Some(token.value.clone()));
 
     let started = std::time::Instant::now();
+    let branch = format!("perch/pr-{number}");
     let checkout = preparer
-        .prepare(&id, number, &pr.head_sha, &pr.base_ref, |step| match step {
+        .prepare(&id, number, &pr.head_sha, &pr.base_ref, &branch, |step| match step {
             Step::Cloning { phase, percent } => match percent {
                 Some(p) => eprint!("\r  cloning: {phase} {p}%   "),
                 None => eprint!("\r  cloning: {phase}   "),
@@ -46,7 +47,10 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
-    eprintln!("  worktree: {}", checkout.worktree.display());
+    eprintln!("  worktree: {}  ({})", checkout.worktree.display(), checkout.branch);
+    if let Some(wanted) = &checkout.stale {
+        eprintln!("  stale: dirty, left at {} instead of {}", &checkout.head_sha[..12], &wanted[..12]);
+    }
     eprintln!("  merge base: {}", &checkout.merge_base[..12.min(checkout.merge_base.len())]);
     eprintln!("  prepared in {:.1}s", started.elapsed().as_secs_f32());
 
