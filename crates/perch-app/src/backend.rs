@@ -329,15 +329,19 @@ async fn run(
         events: events.clone(),
     };
 
+    // Bring the table and the disk into agreement before any command can
+    // make a directory. Inline, not spawned: a checkout made by a launch
+    // hook while this ran would have no row yet, and would be taken for a
+    // stray and removed from under it. It is a directory listing and at
+    // most a prune, so the inbox is not kept waiting.
+    reconcile_worktrees(&ctx).await;
     {
-        // Bring the table and the disk into agreement, then put away
-        // whatever nobody has opened in a fortnight. Archived, not deleted:
-        // the branch and the row stay, so restoring is a checkout.
+        // Then put away whatever nobody has opened in a fortnight. Archived,
+        // not deleted: the branch and the row stay, so restoring is a
+        // checkout. Only rows it knows are touched, so this can run beside
+        // whatever the reader does next.
         let ctx = ctx.clone();
-        tokio::spawn(async move {
-            reconcile_worktrees(&ctx).await;
-            sweep_worktrees(&ctx).await;
-        });
+        tokio::spawn(async move { sweep_worktrees(&ctx).await });
     }
 
     // A refresh happens immediately, then on whatever cadence the server asks
