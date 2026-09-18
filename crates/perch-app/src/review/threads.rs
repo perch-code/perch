@@ -949,6 +949,10 @@ mod column {
             deletions: 0,
             changed_files: 0,
             repo_full_name: "slatedb/slatedb".into(),
+            updated_at: None,
+            review_requested: false,
+            checks: None,
+            review_decision: None,
         };
         let now = "2026-09-18T09:59:00Z".parse().unwrap();
         state.worktree.set(Some(Arc::new(Worktree {

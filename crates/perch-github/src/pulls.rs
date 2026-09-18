@@ -27,6 +27,46 @@ pub struct PullRequest {
     pub changed_files: u32,
     /// `owner/repo` of the repository the pull request lives in.
     pub repo_full_name: String,
+    /// When GitHub last saw activity on it.
+    #[serde(default)]
+    pub updated_at: Option<jiff::Timestamp>,
+    /// Whether anyone has been asked to review and nobody has yet.
+    #[serde(default)]
+    pub review_requested: bool,
+    /// The state of the head commit's checks, from the checks API.
+    #[serde(default)]
+    pub checks: Option<CheckStatus>,
+    /// Where the reviews stand, from the reviews list.
+    #[serde(default)]
+    pub review_decision: Option<ReviewDecision>,
+}
+
+/// The CI chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Pending,
+    Success,
+    Failure,
+}
+
+/// The review chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecision {
+    ReviewRequested,
+    ChangesRequested,
+    Approved,
+}
+
+impl ReviewDecision {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReviewDecision::ReviewRequested => "review requested",
+            ReviewDecision::ChangesRequested => "changes requested",
+            ReviewDecision::Approved => "approved",
+        }
+    }
 }
 
 impl PullRequest {
@@ -57,6 +97,12 @@ pub(crate) struct PullPayload {
     pub user: Option<UserRef>,
     pub head: GitRef,
     pub base: GitRef,
+    #[serde(default)]
+    pub updated_at: Option<jiff::Timestamp>,
+    #[serde(default)]
+    pub requested_reviewers: Vec<UserRef>,
+    #[serde(default)]
+    pub requested_teams: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +162,10 @@ impl PullPayload {
             deletions: self.deletions,
             changed_files: self.changed_files,
             repo_full_name,
+            updated_at: self.updated_at,
+            review_requested: !self.requested_reviewers.is_empty() || !self.requested_teams.is_empty(),
+            checks: None,
+            review_decision: None,
         }
     }
 }

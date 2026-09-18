@@ -1212,7 +1212,7 @@ async fn archive_discussion(ctx: &Ctx, pr: &perch_github::PullRequest) {
         }
     }
 
-    let project = ctx.config.knowledge.project_for(&pr.repo_full_name);
+    let project = ctx.config.project_for(&pr.repo_full_name);
     let messages = crate::knowledge::to_messages(pr, &discussion, &project);
     let knowledge = ctx.knowledge.clone();
     let write_skill = ctx.config.knowledge.skills;

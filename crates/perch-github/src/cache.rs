@@ -12,8 +12,14 @@ use jiff::Timestamp;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::comments::{self, Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStep};
+use crate::items::{Checkout as ItemCheckout, Item, Project, Subject, SubjectKind};
 use crate::model::{SubjectDetail, Thread};
 use crate::pulls::PullRequest;
+
+/// The shape of the tables. A database with an older number, or none, is
+/// deleted and recreated: there is no migration, and nothing before the
+/// number was written has shipped to anyone.
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Perch's own opinion about a thread: bookmarked, dismissed, or both.
 ///
@@ -120,8 +126,35 @@ pub struct Cache {
 
 impl Cache {
     pub fn open(db_path: &Path, avatar_dir: Option<PathBuf>) -> Result<Self, CacheError> {
+        let (cache, _) = Self::open_checked(db_path, avatar_dir)?;
+        Ok(cache)
+    }
+
+    /// Open, resetting a database whose schema is older than this build's.
+    /// Returns whether it was reset, for the status line.
+    pub fn open_checked(db_path: &Path, avatar_dir: Option<PathBuf>) -> Result<(Self, bool), CacheError> {
+        let reset = db_path.exists() && !Self::is_current(db_path);
+        if reset {
+            tracing::info!(path = %db_path.display(), "schema is old; recreating the database");
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
+            }
+        }
         let conn = Connection::open(db_path)?;
-        Self::from_conn(conn, avatar_dir)
+        let cache = Self::from_conn(conn, avatar_dir)?;
+        Ok((cache, reset))
+    }
+
+    /// Whether a database on disk carries this build's schema version.
+    fn is_current(db_path: &Path) -> bool {
+        let Ok(conn) = Connection::open(db_path) else {
+            return false;
+        };
+        let version: Option<String> = conn
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
+            .optional()
+            .unwrap_or(None);
+        version.and_then(|v| v.parse::<u32>().ok()) == Some(SCHEMA_VERSION)
     }
 
     /// In-memory cache, used by tests.
@@ -162,6 +195,46 @@ impl Cache {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS projects (
+                id            TEXT PRIMARY KEY,
+                name          TEXT NOT NULL,
+                repos_json    TEXT NOT NULL,
+                roots_json    TEXT NOT NULL,
+                implicit      INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS items (
+                id               TEXT PRIMARY KEY,
+                project_id       TEXT NOT NULL REFERENCES projects(id),
+                repo_full_name   TEXT NOT NULL,
+                subject_kind     TEXT,
+                subject_number   INTEGER,
+                subject_json     TEXT,
+                branch           TEXT,
+                base_ref         TEXT,
+                head_sha         TEXT,
+                checkout_path    TEXT,
+                owned            INTEGER NOT NULL DEFAULT 1,
+                on_disk          INTEGER NOT NULL DEFAULT 1,
+                from_item_id     TEXT REFERENCES items(id),
+                name             TEXT,
+                saved            INTEGER NOT NULL DEFAULT 0,
+                pinned_at        TEXT,
+                done_at          TEXT,
+                attention_at     TEXT,
+                attention_reason TEXT,
+                archived_at      TEXT,
+                created_at       TEXT NOT NULL,
+                last_opened_at   TEXT NOT NULL,
+                CHECK (subject_kind IS NOT NULL OR branch IS NOT NULL)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS items_subject
+                ON items(repo_full_name, subject_kind, subject_number)
+                WHERE subject_kind IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS items_branch
+                ON items(repo_full_name, branch)
+                WHERE branch IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS items_project ON items(project_id);
             CREATE TABLE IF NOT EXISTS comment_threads (
                 id             TEXT PRIMARY KEY,
                 worktree_id    TEXT NOT NULL,
@@ -213,6 +286,10 @@ impl Cache {
                 json       TEXT NOT NULL
             );
             "#,
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_string()],
         )?;
         Ok(Self { conn, avatar_dir })
     }
@@ -906,6 +983,229 @@ impl Cache {
         Ok(n)
     }
 
+    // -----------------------------------------------------------------
+    // Projects and items
+    // -----------------------------------------------------------------
+
+    pub fn load_projects(&self) -> Result<Vec<Project>, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, repos_json, roots_json, implicit FROM projects ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, repos, roots, implicit) = row?;
+            let repos: Vec<String> = serde_json::from_str(&repos).unwrap_or_default();
+            let roots: Vec<String> = serde_json::from_str(&roots).unwrap_or_default();
+            out.push(Project {
+                id,
+                name,
+                repos,
+                roots: roots.into_iter().map(PathBuf::from).collect(),
+                implicit: implicit != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn upsert_project(&self, p: &Project) -> Result<(), CacheError> {
+        let roots: Vec<String> = p.roots.iter().map(|r| r.to_string_lossy().into_owned()).collect();
+        self.conn.execute(
+            "INSERT INTO projects (id, name, repos_json, roots_json, implicit, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name, repos_json = excluded.repos_json,
+                roots_json = excluded.roots_json, implicit = excluded.implicit",
+            params![
+                p.id,
+                p.name,
+                serde_json::to_string(&p.repos)?,
+                serde_json::to_string(&roots)?,
+                p.implicit as i64,
+                Timestamp::now().to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_project(&self, id: &str) -> Result<(), CacheError> {
+        self.conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn load_items(&self) -> Result<Vec<Item>, CacheError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS} FROM items ORDER BY created_at"
+        ))?;
+        let rows = stmt.query_map([], read_item)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn load_item(&self, id: &str) -> Result<Option<Item>, CacheError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {ITEM_COLUMNS} FROM items WHERE id = ?1"),
+                params![id],
+                read_item,
+            )
+            .optional()?)
+    }
+
+    pub fn find_item_by_subject(
+        &self,
+        repo_full_name: &str,
+        kind: SubjectKind,
+        number: u64,
+    ) -> Result<Option<Item>, CacheError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ITEM_COLUMNS} FROM items
+                     WHERE repo_full_name = ?1 COLLATE NOCASE AND subject_kind = ?2 AND subject_number = ?3"
+                ),
+                params![repo_full_name, kind.column(), number as i64],
+                read_item,
+            )
+            .optional()?)
+    }
+
+    pub fn find_item_by_branch(&self, repo_full_name: &str, branch: &str) -> Result<Option<Item>, CacheError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {ITEM_COLUMNS} FROM items
+                     WHERE repo_full_name = ?1 COLLATE NOCASE AND branch = ?2"
+                ),
+                params![repo_full_name, branch],
+                read_item,
+            )
+            .optional()?)
+    }
+
+    /// Insert an item. One with neither a subject nor a checkout is
+    /// refused, as is a second row for the same subject or branch.
+    pub fn insert_item(&self, item: &Item) -> Result<(), CacheError> {
+        if !item.is_valid() {
+            return Err(CacheError::Corrupt("an item needs a subject or a checkout".into()));
+        }
+        let c = ItemColumns::of(item)?;
+        self.conn.execute(
+            "INSERT INTO items
+             (id, project_id, repo_full_name, subject_kind, subject_number, subject_json,
+              branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name,
+              saved, pinned_at, done_at, attention_at, attention_reason, archived_at,
+              created_at, last_opened_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+            params![
+                item.id, item.project_id, item.repo_full_name,
+                c.subject_kind, c.subject_number, c.subject_json,
+                c.branch, c.base_ref, c.head_sha, c.checkout_path, c.owned, c.on_disk,
+                item.from_item_id, item.name,
+                item.saved as i64,
+                item.pinned_at.map(|t| t.to_string()),
+                item.done_at.map(|t| t.to_string()),
+                item.attention_at.map(|t| t.to_string()),
+                item.attention_reason,
+                item.archived_at.map(|t| t.to_string()),
+                item.created_at.to_string(),
+                item.last_opened_at.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Rewrite every column of an item that can move.
+    pub fn update_item(&self, item: &Item) -> Result<(), CacheError> {
+        if !item.is_valid() {
+            return Err(CacheError::Corrupt("an item needs a subject or a checkout".into()));
+        }
+        let c = ItemColumns::of(item)?;
+        self.conn.execute(
+            "UPDATE items SET
+                project_id = ?2, repo_full_name = ?3, subject_kind = ?4, subject_number = ?5,
+                subject_json = ?6, branch = ?7, base_ref = ?8, head_sha = ?9, checkout_path = ?10,
+                owned = ?11, on_disk = ?12, from_item_id = ?13, name = ?14, saved = ?15,
+                pinned_at = ?16, done_at = ?17, attention_at = ?18, attention_reason = ?19,
+                archived_at = ?20, last_opened_at = ?21
+             WHERE id = ?1",
+            params![
+                item.id, item.project_id, item.repo_full_name,
+                c.subject_kind, c.subject_number, c.subject_json,
+                c.branch, c.base_ref, c.head_sha, c.checkout_path, c.owned, c.on_disk,
+                item.from_item_id, item.name,
+                item.saved as i64,
+                item.pinned_at.map(|t| t.to_string()),
+                item.done_at.map(|t| t.to_string()),
+                item.attention_at.map(|t| t.to_string()),
+                item.attention_reason,
+                item.archived_at.map(|t| t.to_string()),
+                item.last_opened_at.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Delete an item and everything said in it. Items cut from it keep
+    /// their rows and lose the pointer.
+    pub fn delete_item(&self, id: &str) -> Result<(), CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM comment_messages WHERE thread_id IN (SELECT id FROM comment_threads WHERE worktree_id = ?1)",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM runs WHERE thread_id IN (SELECT id FROM comment_threads WHERE worktree_id = ?1)",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM comment_threads WHERE worktree_id = ?1", params![id])?;
+        tx.execute("UPDATE items SET from_item_id = NULL WHERE from_item_id = ?1", params![id])?;
+        tx.execute("DELETE FROM items WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_item_marks(&self, id: &str, saved: bool, done_at: Option<Timestamp>) -> Result<(), CacheError> {
+        self.conn.execute(
+            "UPDATE items SET saved = ?2, done_at = ?3 WHERE id = ?1",
+            params![id, saved as i64, done_at.map(|t| t.to_string())],
+        )?;
+        Ok(())
+    }
+
+    /// Set attention, only ever forward: an older notification arriving
+    /// late cannot rewind it, and cannot change the reason either.
+    pub fn touch_attention(&self, id: &str, at: Timestamp, reason: &str) -> Result<bool, CacheError> {
+        let current: Option<String> = self
+            .conn
+            .query_row("SELECT attention_at FROM items WHERE id = ?1", params![id], |r| r.get(0))
+            .optional()?
+            .flatten();
+        let current = current.and_then(|c| c.parse::<Timestamp>().ok());
+        if current.is_some_and(|c| c >= at) {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "UPDATE items SET attention_at = ?2, attention_reason = ?3 WHERE id = ?1",
+            params![id, at.to_string(), reason],
+        )?;
+        Ok(true)
+    }
+
     pub fn set_meta(&self, key: &str, value: &str) -> Result<(), CacheError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -949,10 +1249,88 @@ fn hash(s: &str) -> String {
     format!("{h:016x}")
 }
 
+const ITEM_COLUMNS: &str = "id, project_id, repo_full_name, subject_kind, subject_number, subject_json,
+    branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name, saved,
+    pinned_at, done_at, attention_at, attention_reason, archived_at, created_at, last_opened_at";
+
+/// An item's optional parts as columns.
+struct ItemColumns {
+    subject_kind: Option<&'static str>,
+    subject_number: Option<i64>,
+    subject_json: Option<String>,
+    branch: Option<String>,
+    base_ref: Option<String>,
+    head_sha: Option<String>,
+    checkout_path: Option<String>,
+    owned: i64,
+    on_disk: i64,
+}
+
+impl ItemColumns {
+    fn of(item: &Item) -> Result<Self, CacheError> {
+        let subject_json = match &item.subject {
+            Some(s) => Some(serde_json::to_string(s)?),
+            None => None,
+        };
+        let c = item.checkout.as_ref();
+        Ok(Self {
+            subject_kind: item.subject.as_ref().map(|s| s.kind().column()),
+            subject_number: item.subject.as_ref().map(|s| s.number() as i64),
+            subject_json,
+            branch: c.map(|c| c.branch.clone()),
+            base_ref: c.map(|c| c.base_ref.clone()),
+            head_sha: c.map(|c| c.head_sha.clone()),
+            checkout_path: c.map(|c| c.path.to_string_lossy().into_owned()),
+            owned: c.map(|c| c.owned as i64).unwrap_or(1),
+            on_disk: c.map(|c| c.on_disk as i64).unwrap_or(1),
+        })
+    }
+}
+
+fn stamp(s: Option<String>) -> Option<Timestamp> {
+    s.and_then(|s| s.parse().ok())
+}
+
+fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
+    let subject_json: Option<String> = r.get(5)?;
+    // A snapshot an older build wrote is dropped rather than failing the
+    // row; the item still has its branch, or is invalid and skipped later.
+    let subject: Option<Subject> = subject_json.and_then(|j| serde_json::from_str(&j).ok());
+    let branch: Option<String> = r.get(6)?;
+    let checkout = branch.map(|branch| ItemCheckout {
+        branch,
+        base_ref: r.get::<_, Option<String>>(7).ok().flatten().unwrap_or_default(),
+        head_sha: r.get::<_, Option<String>>(8).ok().flatten().unwrap_or_default(),
+        path: PathBuf::from(r.get::<_, Option<String>>(9).ok().flatten().unwrap_or_default()),
+        owned: r.get::<_, i64>(10).unwrap_or(1) != 0,
+        on_disk: r.get::<_, i64>(11).unwrap_or(1) != 0,
+    });
+    let created: String = r.get(20)?;
+    let opened: String = r.get(21)?;
+    Ok(Item {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        repo_full_name: r.get(2)?,
+        subject,
+        checkout,
+        from_item_id: r.get(12)?,
+        name: r.get(13)?,
+        saved: r.get::<_, i64>(14)? != 0,
+        pinned_at: stamp(r.get(15)?),
+        done_at: stamp(r.get(16)?),
+        attention_at: stamp(r.get(17)?),
+        attention_reason: r.get(18)?,
+        archived_at: stamp(r.get(19)?),
+        created_at: created.parse().unwrap_or(Timestamp::UNIX_EPOCH),
+        last_opened_at: opened.parse().unwrap_or(Timestamp::UNIX_EPOCH),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::comments::{RunStatus, Side, ThreadOrigin};
+    use crate::items::{Subject as ItemSubject, SubjectKind as ItemKind};
     use crate::model::{Reason, Repository, Subject, SubjectKind, SubjectState};
 
     fn thread(id: &str, updated: &str) -> Thread {
@@ -1234,6 +1612,10 @@ mod tests {
             deletions: 2,
             changed_files: 3,
             repo_full_name: "acme/widgets".into(),
+            updated_at: None,
+            review_requested: false,
+            checks: None,
+            review_decision: None,
         }
     }
 
@@ -1526,6 +1908,204 @@ mod tests {
         let mut failed = t.clone();
         failed.messages[1].run.as_mut().unwrap().status = RunStatus::Failed;
         assert_eq!(failed.resumable_session(), None);
+    }
+
+    fn project(name: &str) -> Project {
+        Project {
+            id: Project::id_for(name),
+            name: name.into(),
+            repos: vec!["acme/widgets".into()],
+            roots: vec![PathBuf::from("/tmp/widgets")],
+            implicit: false,
+        }
+    }
+
+    fn pr_item(number: u64) -> Item {
+        let mut i = Item::new("acme", "acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
+        i.id = format!("item-pr-{number}");
+        i.subject = Some(ItemSubject::PullRequest(pull_request(number)));
+        i
+    }
+
+    fn branch_item(branch: &str) -> Item {
+        let mut i = Item::new("acme", "acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
+        i.id = format!("item-{branch}");
+        i.checkout = Some(ItemCheckout {
+            branch: branch.into(),
+            base_ref: "main".into(),
+            head_sha: "abc".into(),
+            path: PathBuf::from(format!("/tmp/wt/{branch}")),
+            owned: true,
+            on_disk: true,
+        });
+        i
+    }
+
+    fn stamp_of(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_fresh_database_carries_the_schema_version() {
+        let c = Cache::open_in_memory().unwrap();
+        assert_eq!(c.meta("schema_version").unwrap().as_deref(), Some(&*SCHEMA_VERSION.to_string()));
+    }
+
+    #[test]
+    fn a_database_with_no_version_is_recreated_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE worktrees (id TEXT PRIMARY KEY);
+                 INSERT INTO worktrees VALUES ('old');",
+            )
+            .unwrap();
+        }
+        let (c, reset) = Cache::open_checked(&path, None).unwrap();
+        assert!(reset);
+        let n: i64 = c
+            .conn
+            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'items'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "the new tables exist");
+        let old: i64 = c
+            .conn
+            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'worktrees' AND sql LIKE '%id TEXT PRIMARY KEY)%'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(old, 0, "the old table is gone");
+    }
+
+    #[test]
+    fn a_database_with_an_old_version_is_recreated_and_a_current_one_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        {
+            let (c, reset) = Cache::open_checked(&path, None).unwrap();
+            assert!(!reset, "a new file is not a reset");
+            c.upsert_project(&project("acme")).unwrap();
+            c.set_meta("schema_version", "6").unwrap();
+        }
+        let (c, reset) = Cache::open_checked(&path, None).unwrap();
+        assert!(reset);
+        assert!(c.load_projects().unwrap().is_empty());
+        c.upsert_project(&project("acme")).unwrap();
+        drop(c);
+        let (c, reset) = Cache::open_checked(&path, None).unwrap();
+        assert!(!reset, "a current database is kept");
+        assert_eq!(c.load_projects().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn projects_round_trip_and_upsert_replaces() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_project(&project("Acme")).unwrap();
+        let mut p = project("Acme");
+        p.roots.push(PathBuf::from("/tmp/other"));
+        p.implicit = true;
+        c.upsert_project(&p).unwrap();
+        let all = c.load_projects().unwrap();
+        assert_eq!(all, vec![p]);
+        c.delete_project("acme").unwrap();
+        assert!(c.load_projects().unwrap().is_empty());
+    }
+
+    #[test]
+    fn items_round_trip_whole() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_project(&project("acme")).unwrap();
+        let mut i = pr_item(7);
+        i.checkout = Some(ItemCheckout {
+            branch: "perch/pr-7".into(),
+            base_ref: "main".into(),
+            head_sha: "abc".into(),
+            path: PathBuf::from("/tmp/wt/pr-7"),
+            owned: true,
+            on_disk: false,
+        });
+        i.name = Some("the fence".into());
+        i.saved = true;
+        i.pinned_at = Some(stamp_of("2026-09-18T11:00:00Z"));
+        i.attention_at = Some(stamp_of("2026-09-18T12:00:00Z"));
+        i.attention_reason = Some("review_requested".into());
+        c.insert_item(&i).unwrap();
+        assert_eq!(c.load_items().unwrap(), vec![i.clone()]);
+        assert_eq!(c.load_item(&i.id).unwrap(), Some(i.clone()));
+        assert_eq!(c.find_item_by_subject("ACME/widgets", ItemKind::PullRequest, 7).unwrap(), Some(i.clone()));
+        assert_eq!(c.find_item_by_branch("acme/widgets", "perch/pr-7").unwrap(), Some(i.clone()));
+        assert_eq!(c.find_item_by_subject("acme/widgets", ItemKind::Issue, 7).unwrap(), None);
+
+        i.archived_at = Some(stamp_of("2026-09-19T00:00:00Z"));
+        i.project_id = "other".into();
+        c.upsert_project(&project("other")).unwrap();
+        c.update_item(&i).unwrap();
+        assert_eq!(c.load_items().unwrap(), vec![i]);
+    }
+
+    #[test]
+    fn a_second_row_per_subject_or_branch_is_refused() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_project(&project("acme")).unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        let mut dup = pr_item(7);
+        dup.id = "another".into();
+        assert!(c.insert_item(&dup).is_err(), "one row per pull request");
+
+        c.insert_item(&branch_item("feature")).unwrap();
+        let mut dup = branch_item("feature");
+        dup.id = "another-branch".into();
+        assert!(c.insert_item(&dup).is_err(), "one row per branch");
+
+        // A row may be both, and a different branch is fine.
+        let mut both = pr_item(8);
+        both.checkout = branch_item("feature-8").checkout;
+        c.insert_item(&both).unwrap();
+    }
+
+    #[test]
+    fn an_item_with_neither_part_is_refused() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_project(&project("acme")).unwrap();
+        let empty = Item::new("acme", "acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
+        assert!(c.insert_item(&empty).is_err());
+        assert!(c.load_items().unwrap().is_empty());
+    }
+
+    #[test]
+    fn touch_attention_only_moves_forward() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_project(&project("acme")).unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        let id = pr_item(7).id;
+        assert!(c.touch_attention(&id, stamp_of("2026-09-18T12:00:00Z"), "mention").unwrap());
+        assert!(!c.touch_attention(&id, stamp_of("2026-09-18T11:00:00Z"), "comment").unwrap(), "older is ignored");
+        assert!(!c.touch_attention(&id, stamp_of("2026-09-18T12:00:00Z"), "comment").unwrap(), "equal is ignored");
+        let i = c.load_item(&id).unwrap().unwrap();
+        assert_eq!(i.attention_at, Some(stamp_of("2026-09-18T12:00:00Z")));
+        assert_eq!(i.attention_reason.as_deref(), Some("mention"));
+        assert!(c.touch_attention(&id, stamp_of("2026-09-18T13:00:00Z"), "comment").unwrap());
+        assert_eq!(c.load_item(&id).unwrap().unwrap().attention_reason.as_deref(), Some("comment"));
+    }
+
+    #[test]
+    fn marks_and_deletion() {
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_project(&project("acme")).unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        let mut cut = branch_item("perch/pr-7-2");
+        cut.from_item_id = Some(pr_item(7).id);
+        c.insert_item(&cut).unwrap();
+        c.set_item_marks(&pr_item(7).id, true, Some(stamp_of("2026-09-18T12:00:00Z"))).unwrap();
+        let i = c.load_item(&pr_item(7).id).unwrap().unwrap();
+        assert!(i.saved);
+        assert_eq!(i.done_at, Some(stamp_of("2026-09-18T12:00:00Z")));
+
+        c.delete_item(&pr_item(7).id).unwrap();
+        assert!(c.load_item(&pr_item(7).id).unwrap().is_none());
+        let cut = c.load_item(&cut.id).unwrap().unwrap();
+        assert_eq!(cut.from_item_id, None, "the pointer is cleared, the row stays");
     }
 
     #[test]

@@ -20,6 +20,13 @@ pub struct Config {
     pub knowledge: KnowledgeConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    /// `[[project]]` entries.
+    #[serde(default)]
+    pub project: Vec<ProjectConfig>,
+    /// Things wrong with the file that are worth one line in the status
+    /// bar. Filled by `load`, never by the file.
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 /// The coding agent a thread's question goes to.
@@ -73,7 +80,7 @@ pub struct KnowledgeConfig {
     /// Write the two `SKILL.md` files. On unless turned off.
     #[serde(default = "default_true")]
     pub skills: bool,
-    /// `[[knowledge.project]]` entries.
+    /// The old home of `[[project]]`. Read only to say it has moved.
     #[serde(default)]
     pub project: Vec<ProjectConfig>,
 }
@@ -84,6 +91,16 @@ pub struct ProjectConfig {
     /// `owner/repo` names that belong to this project.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// Directories that are checkouts of one of those repositories, or
+    /// worktrees of one. A leading `~` is the home directory.
+    #[serde(default)]
+    pub roots: Vec<String>,
+}
+
+impl ProjectConfig {
+    pub fn root_paths(&self) -> Vec<PathBuf> {
+        self.roots.iter().map(|r| expand_home(r)).collect()
+    }
 }
 
 fn default_true() -> bool {
@@ -98,6 +115,25 @@ impl Default for KnowledgeConfig {
     }
 }
 
+impl Config {
+    /// The project a repository belongs to: the declared one, or the
+    /// repository's own name, so nothing has to be configured before the
+    /// first item appears. The knowledge directory uses the same rule, so
+    /// the two agree.
+    pub fn project_for(&self, repo_full_name: &str) -> String {
+        self.project
+            .iter()
+            .find(|p| p.repos.iter().any(|r| r.eq_ignore_ascii_case(repo_full_name)))
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| implicit_project_name(repo_full_name))
+    }
+}
+
+/// What a repository nobody claims is called: its own name.
+pub fn implicit_project_name(repo_full_name: &str) -> String {
+    repo_full_name.rsplit('/').next().unwrap_or(repo_full_name).to_string()
+}
+
 impl KnowledgeConfig {
     /// The knowledge root, `~` expanded.
     pub fn root_path(&self) -> PathBuf {
@@ -107,22 +143,6 @@ impl KnowledgeConfig {
         }
     }
 
-    /// The project a repository belongs to: the configured one, or the
-    /// repository's own name, so nothing has to be configured before the
-    /// first file appears.
-    pub fn project_for(&self, repo_full_name: &str) -> String {
-        self.project
-            .iter()
-            .find(|p| p.repos.iter().any(|r| r.eq_ignore_ascii_case(repo_full_name)))
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| {
-                repo_full_name
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(repo_full_name)
-                    .to_string()
-            })
-    }
 }
 
 pub fn home_dir() -> PathBuf {
@@ -153,7 +173,14 @@ impl Config {
             return Self::fallback();
         };
         match toml::from_str::<Config>(&text) {
-            Ok(c) => c,
+            Ok(mut c) => {
+                if !c.knowledge.project.is_empty() {
+                    c.warnings.push(
+                        "config.toml: [[knowledge.project]] is no longer read; declare projects as [[project]]".into(),
+                    );
+                }
+                c
+            }
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "ignoring malformed config");
                 Self::fallback()
@@ -167,6 +194,8 @@ impl Config {
             poll_interval_secs: default_poll_secs(),
             knowledge: KnowledgeConfig::default(),
             agent: AgentConfig::default(),
+            project: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 }
@@ -229,15 +258,43 @@ mod tests {
             root = "~/elsewhere"
             skills = false
 
-            [[knowledge.project]]
+            [[project]]
             name = "slatedb"
             repos = ["slatedb/slatedb", "slatedb/slatedb-go"]
             "#,
         )
         .unwrap();
-        assert_eq!(c.knowledge.project_for("slatedb/slatedb-go"), "slatedb");
-        assert_eq!(c.knowledge.project_for("criccomini/perch"), "perch");
+        assert_eq!(c.project_for("slatedb/slatedb-go"), "slatedb");
+        assert_eq!(c.project_for("criccomini/perch"), "perch");
         assert!(!c.knowledge.skills);
         assert_eq!(c.knowledge.root_path(), home_dir().join("elsewhere"));
+    }
+
+    #[test]
+    fn a_project_parses_with_and_without_roots() {
+        let c: Config = toml::from_str(
+            r#"
+            [[project]]
+            name = "perch"
+            repos = ["criccomini/perch"]
+            roots = ["~/Code/perch", "/tmp/perch-2"]
+
+            [[project]]
+            name = "slatedb"
+            repos = ["slatedb/slatedb"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.project.len(), 2);
+        assert_eq!(c.project[0].root_paths(), vec![home_dir().join("Code/perch"), PathBuf::from("/tmp/perch-2")]);
+        assert!(c.project[1].roots.is_empty());
+        assert!(c.project[1].root_paths().is_empty());
+    }
+
+    #[test]
+    fn the_old_knowledge_project_key_still_parses_but_is_not_a_project() {
+        let c: Config = toml::from_str("[[knowledge.project]]\nname = \"x\"\nrepos = [\"a/b\"]").unwrap();
+        assert!(c.project.is_empty());
+        assert_eq!(c.project_for("a/b"), "b", "the old key no longer maps");
     }
 }

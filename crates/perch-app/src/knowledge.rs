@@ -137,6 +137,10 @@ mod tests {
             deletions: 0,
             changed_files: 0,
             repo_full_name: "slatedb/slatedb".into(),
+            updated_at: None,
+            review_requested: false,
+            checks: None,
+            review_decision: None,
         }
     }
 

@@ -9,6 +9,7 @@ pub mod comments;
 pub mod client;
 pub mod config;
 pub mod discussion;
+pub mod items;
 pub mod model;
 pub mod pulls;
 pub mod workflow_runs;
@@ -22,7 +23,8 @@ pub use comments::{
 pub use client::{Error, GitHub, ListResult};
 pub use config::{AgentConfig, Config, KnowledgeConfig};
 pub use discussion::{Discussion, IssueComment, Review, ReviewComment};
-pub use pulls::PullRequest;
+pub use items::{Checkout as ItemCheckout, Issue, Item, Label, Project, Subject as ItemSubject, SubjectKind as ItemKind};
+pub use pulls::{CheckStatus, PullRequest, ReviewDecision};
 pub use workflow_runs::WorkflowRunQuery;
 pub use model::{
     DetailSource, Reason, Repository, Subject, SubjectDetail, SubjectKind, SubjectState, Thread,
