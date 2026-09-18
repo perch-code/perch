@@ -4,10 +4,6 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-const QUALIFIER: &str = "com";
-const ORGANIZATION: &str = "perch";
-const APPLICATION: &str = "perch";
-
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
     /// Last-resort token, used only when env vars and `gh` come up empty.
@@ -74,7 +70,8 @@ impl Default for AgentConfig {
 /// Where archived discussion goes and which repositories share a project.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct KnowledgeConfig {
-    /// Defaults to `~/.perch/knowledge`. A leading `~` is the home directory.
+    /// Defaults to `knowledge/` under the Perch home. A leading `~` is the
+    /// home directory.
     #[serde(default)]
     pub root: Option<String>,
     /// Write the two `SKILL.md` files. On unless turned off.
@@ -135,11 +132,12 @@ pub fn implicit_project_name(repo_full_name: &str) -> String {
 }
 
 impl KnowledgeConfig {
-    /// The knowledge root, `~` expanded.
+    /// The knowledge root, `~` expanded: `knowledge/` under the Perch home
+    /// unless the file says otherwise.
     pub fn root_path(&self) -> PathBuf {
         match &self.root {
             Some(root) => expand_home(root),
-            None => home_dir().join(".perch").join("knowledge"),
+            None => perch_home().join("knowledge"),
         }
     }
 
@@ -200,17 +198,25 @@ impl Config {
     }
 }
 
-fn project_dirs() -> Option<directories::ProjectDirs> {
-    directories::ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
+/// Where everything Perch keeps lives: `$PERCH_HOME`, else `~/.perch`.
+///
+/// One directory, so it can be named in a sentence, backed up, or deleted
+/// as a whole. Under it: `config.toml`, `perch.db`, `avatars/`, `repos/`,
+/// `worktrees/`, `homes/`, and `knowledge/`.
+pub fn perch_home() -> PathBuf {
+    match std::env::var_os("PERCH_HOME").filter(|v| !v.is_empty()) {
+        Some(dir) => expand_home(&dir.to_string_lossy()),
+        None => home_dir().join(".perch"),
+    }
 }
 
 pub fn config_path() -> Option<PathBuf> {
-    Some(project_dirs()?.data_dir().join("config.toml"))
+    Some(perch_home().join("config.toml"))
 }
 
-/// Directory for the SQLite database and the avatar cache.
+/// The home, made if it is not there yet.
 pub fn data_dir() -> Option<PathBuf> {
-    let dir = project_dirs()?.data_dir().to_path_buf();
+    let dir = perch_home();
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
@@ -230,12 +236,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_home_follows_the_variable_and_holds_everything() {
+        // Set and unset in one test, since the variable is process-wide.
+        std::env::set_var("PERCH_HOME", "/tmp/perch-test-home");
+        assert_eq!(perch_home(), PathBuf::from("/tmp/perch-test-home"));
+        assert_eq!(config_path(), Some(PathBuf::from("/tmp/perch-test-home/config.toml")));
+        assert_eq!(KnowledgeConfig::default().root_path(), PathBuf::from("/tmp/perch-test-home/knowledge"));
+        std::env::set_var("PERCH_HOME", "~/elsewhere");
+        assert_eq!(perch_home(), home_dir().join("elsewhere"));
+        std::env::remove_var("PERCH_HOME");
+        assert_eq!(perch_home(), home_dir().join(".perch"));
+    }
+
+    #[test]
     fn an_old_config_still_parses() {
         let c: Config = toml::from_str("poll_interval_secs = 30").unwrap();
         assert_eq!(c.poll_interval_secs, 30);
         assert!(c.knowledge.skills);
         assert!(c.knowledge.project.is_empty());
-        assert!(c.knowledge.root_path().ends_with(".perch/knowledge"));
+        assert!(c.knowledge.root_path().ends_with("knowledge"));
     }
 
     #[test]
