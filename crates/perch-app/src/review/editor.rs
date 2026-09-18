@@ -29,6 +29,7 @@ use crate::icons::SidebarIcon;
 use crate::review::gutter::{diff_gutter, side_gutter};
 use crate::review::hover;
 use crate::review::model::{Layout, LoadedFile, ReviewState};
+use crate::review::references;
 use crate::review::styling::PerchStyling;
 use crate::review::OpenFile;
 use crate::state::AppState;
@@ -80,6 +81,7 @@ pub fn editor_pane(
         )
         .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full().background(theme::CODE_BG)),
         symbol_panel(state, backend),
+        references::panel(state, open_file),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0))
 }
@@ -521,7 +523,8 @@ fn panel_body(state: ReviewState, backend: Rc<Backend>, text: String) -> impl In
                     .color(theme::FG_SUBTLE)
                     .flex_grow(1.0_f32)
             }),
-            definition_button(state, backend),
+            definition_button(state, backend.clone()),
+            references_button(state, backend),
             dismiss_button(state),
         ))
         .style(|s| {
@@ -555,15 +558,29 @@ fn panel_body(state: ReviewState, backend: Rc<Backend>, text: String) -> impl In
 }
 
 fn definition_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    Container::new(Label::derived(|| "Go to definition".to_string()).style(|s| {
-        s.font_size(theme::TEXT_BADGE).color(theme::ACCENT)
-    }))
-    .on_event_stop(el::Click, move |_, _| {
+    panel_button("Go to definition", move || {
         let Some(file) = state.active_file() else { return };
         let Some(position) = state.last_position.get() else { return };
         let token = state.next_token();
         backend.definition(token, &file.path, position.0 as u32, position.1 as u32);
     })
+}
+
+/// Asks about the same symbol the panel is describing, the way the
+/// definition button does.
+fn references_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    panel_button("Find references", move || {
+        let Some((line, column)) = state.last_position.get() else { return };
+        references::find(state, &backend, line, Some(column));
+    })
+}
+
+/// A text button in the panel's header row.
+fn panel_button(text: &'static str, on_click: impl Fn() + 'static) -> impl IntoView {
+    Container::new(Label::derived(move || text.to_string()).style(|s| {
+        s.font_size(theme::TEXT_BADGE).color(theme::ACCENT)
+    }))
+    .on_event_stop(el::Click, move |_, _| on_click())
     .style(|s| {
         s.padding_horiz(8.0)
             .padding_vert(2.0)

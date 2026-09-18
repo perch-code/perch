@@ -300,3 +300,9 @@ pub const VIEWED_ROW_HEIGHT: f64 = 28.0;
 pub const DIFF_FILLER_BG: Color = Color::from_rgb8(0xf1, 0xf3, 0xf5);
 /// The Stacked and Split tiles at the right end of the file tab bar.
 pub const LAYOUT_TILE: f64 = 22.0;
+/// The references panel under the editor: its header, a file's heading
+/// row, the rows under it, and the line number column at their left.
+pub const REFERENCES_HEADER_HEIGHT: f64 = 30.0;
+pub const REFERENCES_GROUP_HEIGHT: f64 = 28.0;
+pub const REFERENCES_ROW_HEIGHT: f64 = 22.0;
+pub const REFERENCES_LINE_WIDTH: f64 = 48.0;
