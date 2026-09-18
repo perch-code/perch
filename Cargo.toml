@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/perch-github",
     "crates/perch-git",
+    "crates/perch-knowledge",
     "crates/perch-lsp",
     "crates/perch-syntax",
     "crates/perch-app",
