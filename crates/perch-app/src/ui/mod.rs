@@ -92,6 +92,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let key_mark = on_mark.clone();
     let review_mark = on_mark.clone();
     let key_backend = backend.clone();
+    let capture_backend = backend.clone();
     let references_backend = backend.clone();
 
     // Settings the sidebar asks to be remembered go through here, which is
@@ -181,15 +182,17 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // Over everything, and only while the drawer's edge is being dragged.
         sidebar::resize_cursor_sheet(state),
     ))
-    // Two keys the code editor would otherwise keep. The editor stops
-    // every key once it has focus, and both of these are pressed right
-    // after clicking in it, so they are caught on the way down to it
-    // rather than on the way back up. Target as well, for when nothing
-    // has focus and floem hands the key straight to whoever listens.
+    // The keys the code editor would otherwise keep. The editor stops
+    // every key once it has focus, and these are pressed right after
+    // clicking in it, so they are caught on the way down to it rather
+    // than on the way back up. Target as well, for when nothing has focus
+    // and floem hands the key straight to whoever listens. Nothing here
+    // runs while a text box has the keyboard.
     .on_event_with_config(
         el::KeyDown,
         floem::context::EventCallbackConfig { phases: floem::context::Phases::CAPTURE_AND_TARGET },
         move |_, key: &KeyboardEvent| {
+            let key_backend = &capture_backend;
             let typing = state.search_focused.get() || review.composer_focused.get();
             if typing || !review.is_open() {
                 return EventPropagation::Continue;
@@ -212,6 +215,80 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             {
                 review.references.set(None);
                 return EventPropagation::Stop;
+            }
+
+            // `a` opens a composer for the selection, or for the worktree when
+            // no file is open. Caught on the way down for the same reason as
+            // Shift-F12: the code editor keeps every key once it has focus,
+            // and `a` is pressed right after selecting lines in it.
+            if key.modifiers.is_empty() {
+                match key.code {
+                    Code::KeyA => {
+                        // On Conversation the composer is laid in place at the
+                        // end of the column, about the item as a whole: `a`
+                        // opens it, or takes the keyboard back to it.
+                        if review.tab.get() == crate::review::model::ItemTab::Conversation {
+                            match review.composer_box.get().filter(|_| review.composer.with(Option::is_some)) {
+                                Some(id) => {
+                                    id.scroll_to(None);
+                                    id.request_focus();
+                                }
+                                None => review.open_composer(None, None, String::new(), crate::review::threads::defaults(state)),
+                            }
+                            return EventPropagation::Stop;
+                        }
+                        let anchor = review.anchor_from_selection();
+                        review.open_composer(None, anchor, String::new(), crate::review::threads::defaults(state));
+                        return EventPropagation::Stop;
+                    }
+                    // Close an empty composer. One with a question in it stays,
+                    // so an Escape meant for the selection cannot throw the
+                    // question away; the composer's own close button does that.
+                    Code::Escape
+                        if review.composer.with(Option::is_some)
+                            && review.composer_draft.with(|d| d.trim().is_empty()) =>
+                    {
+                        review.close_composer();
+                        return EventPropagation::Stop;
+                    }
+                    _ => {}
+                }
+            }
+
+            // `v` checks the open file as viewed, `}` and `{` open the next and
+            // previous unviewed file. Files only. The braces are shifted
+            // brackets: the physical codes with Shift alone, so Cmd-[ stays
+            // back.
+            if review.tab.get() == crate::review::model::ItemTab::Files {
+                let shifted = key.modifiers == Modifiers::SHIFT;
+                match key.code {
+                    Code::KeyV if key.modifiers.is_empty() => {
+                        let item_id = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
+                        let file = review.active.get().and_then(|path| {
+                            review.changed_files.with(|f| f.iter().find(|f| f.path == path).cloned())
+                        });
+                        // A deletion has no content to have viewed.
+                        if let (Some(item_id), Some(file)) = (item_id, file) {
+                            if let Some(blob) = &file.head_blob {
+                                key_backend.set_viewed(&item_id, &file.path, blob, !review.is_viewed(&file));
+                            }
+                        }
+                        return EventPropagation::Stop;
+                    }
+                    Code::BracketRight | Code::BracketLeft if shifted => {
+                        let active = review.active.get();
+                        let forward = key.code == Code::BracketRight;
+                        if let Some(path) = review.next_unviewed(active.as_deref(), forward) {
+                            // The same path a click in the rail takes.
+                            review.expanded.update(|expanded| crate::review::tree::reveal(expanded, &path));
+                            if review.open_tab(&path) {
+                                key_backend.open_file(&path);
+                            }
+                        }
+                        return EventPropagation::Stop;
+                    }
+                    _ => {}
+                }
             }
             EventPropagation::Continue
         },
@@ -308,87 +385,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
             state.clear_selection();
             return EventPropagation::Stop;
-        }
-
-        // `a` opens a composer for the selection, or for the worktree when
-        // no file is open. It stands down while any text box has the
-        // keyboard, as `e` and `s` do.
-        if key.modifiers.is_empty()
-            && review.is_open()
-            && !state.search_focused.get()
-            && !review.composer_focused.get()
-        {
-            match key.code {
-                Code::KeyA => {
-                    // On Conversation the composer is laid in place at the
-                    // end of the column, about the item as a whole: `a`
-                    // opens it, or takes the keyboard back to it.
-                    if review.tab.get() == crate::review::model::ItemTab::Conversation {
-                        match review.composer_box.get().filter(|_| review.composer.with(Option::is_some)) {
-                            Some(id) => {
-                                id.scroll_to(None);
-                                id.request_focus();
-                            }
-                            None => review.open_composer(None, None, String::new(), crate::review::threads::defaults(state)),
-                        }
-                        return EventPropagation::Stop;
-                    }
-                    let anchor = review.anchor_from_selection();
-                    review.open_composer(None, anchor, String::new(), crate::review::threads::defaults(state));
-                    return EventPropagation::Stop;
-                }
-                // Close an empty composer. One with a question in it stays,
-                // so an Escape meant for the selection cannot throw the
-                // question away; the composer's own close button does that.
-                Code::Escape
-                    if review.composer.with(Option::is_some)
-                        && review.composer_draft.with(|d| d.trim().is_empty()) =>
-                {
-                    review.close_composer();
-                    return EventPropagation::Stop;
-                }
-                _ => {}
-            }
-        }
-
-        // `v` checks the open file as viewed, `}` and `{` open the next and
-        // previous unviewed file. Files only, under the same guards as `a`.
-        // The braces are shifted brackets: the physical codes with Shift
-        // alone, so Cmd-[ stays back.
-        if review.is_open()
-            && review.tab.get() == crate::review::model::ItemTab::Files
-            && !state.search_focused.get()
-            && !review.composer_focused.get()
-        {
-            let shifted = key.modifiers == Modifiers::SHIFT;
-            match key.code {
-                Code::KeyV if key.modifiers.is_empty() => {
-                    let item_id = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
-                    let file = review.active.get().and_then(|path| {
-                        review.changed_files.with(|f| f.iter().find(|f| f.path == path).cloned())
-                    });
-                    // A deletion has no content to have viewed.
-                    if let (Some(item_id), Some(file)) = (item_id, file) {
-                        if let Some(blob) = &file.head_blob {
-                            key_backend.set_viewed(&item_id, &file.path, blob, !review.is_viewed(&file));
-                        }
-                    }
-                    return EventPropagation::Stop;
-                }
-                Code::BracketRight | Code::BracketLeft if shifted => {
-                    let active = review.active.get();
-                    let forward = key.code == Code::BracketRight;
-                    if let Some(path) = review.next_unviewed(active.as_deref(), forward) {
-                        // The same path a click in the rail takes.
-                        review.expanded.update(|expanded| crate::review::tree::reveal(expanded, &path));
-                        if review.open_tab(&path) {
-                            key_backend.open_file(&path);
-                        }
-                    }
-                    return EventPropagation::Stop;
-                }
-                _ => {}
-            }
         }
 
         if !key.modifiers.contains(OS_MOD) {

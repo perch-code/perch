@@ -13,7 +13,7 @@
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::text::FontWeight;
 use floem::views::{
@@ -722,9 +722,23 @@ pub fn follow_up(
     face: ThreadFace,
 ) -> impl IntoView {
     let composer_thread = thread_id.clone();
+    let running_thread = thread_id.clone();
+    // Keyed on whether a run is going as well as on the composer: the line
+    // is absent while the agent works and has to appear when it is done,
+    // which only the thread list says.
+    let running = Memo::new(move |_| {
+        state
+            .comment_threads
+            .with(|t| t.iter().find(|t| t.id == running_thread).is_some_and(|t| t.running_run().is_some()))
+    });
     dyn_container(
-        move || state.composer.with(|c| c.as_ref().filter(|c| c.thread_id.as_deref() == Some(composer_thread.as_str())).cloned()),
-        move |composer| match composer {
+        move || {
+            let composer = state
+                .composer
+                .with(|c| c.as_ref().filter(|c| c.thread_id.as_deref() == Some(composer_thread.as_str())).cloned());
+            (composer, running.get())
+        },
+        move |(composer, _)| match composer {
             Some(c) => composer_view(app, state, backend.clone(), c, face).into_any(),
             None => {
                 let thread = state.comment_threads.with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());

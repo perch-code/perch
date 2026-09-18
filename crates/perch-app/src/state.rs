@@ -323,6 +323,7 @@ impl AppState {
                             let mut open = (**r).clone();
                             open.locations = references;
                             open.elsewhere = elsewhere;
+                            open.pending = false;
                             *r = Arc::new(open);
                         }
                     });

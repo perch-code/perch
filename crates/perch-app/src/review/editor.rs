@@ -117,7 +117,7 @@ fn stacked_view(
     let editor = code_editor(file.buffer.text.clone(), PerchStyling::new(file.clone(), epoch));
     let rows = Rows::Unified(file.clone());
     wire_cursor(state, backend, rows.clone(), editor.editor().cursor);
-    wire_jump(state, rows, editor.editor().scroll_to);
+    wire_jump(state, rows, editor.editor().scroll_to, epoch);
 
     // The gutter tracks the same signals the editor lays out from, so the two
     // stay aligned without any scroll plumbing of their own.
@@ -160,7 +160,7 @@ fn split_view(
 
     let rows = Rows::Head(file.clone(), right_doc.clone());
     wire_cursor(state, backend, rows.clone(), right.editor().cursor);
-    wire_jump(state, rows, right.editor().scroll_to);
+    wire_jump(state, rows, right.editor().scroll_to, epoch);
 
     let (left_viewport, left_scroll_to, left_delta) =
         (left.editor().viewport, left.editor().scroll_to, left.editor().scroll_delta);
@@ -353,11 +353,18 @@ fn wire_cursor(state: ReviewState, backend: Rc<Backend>, rows: Rows, cursor: RwS
 /// scrolled to. The head line has to be translated through the row table
 /// first, because the spliced diff shifts everything below a removal, and a
 /// split's fillers do the same.
-fn wire_jump(state: ReviewState, rows: Rows, scroll_to: RwSignal<Option<Vec2>>) {
+fn wire_jump(state: ReviewState, rows: Rows, scroll_to: RwSignal<Option<Vec2>>, epoch: u64) {
     Effect::new(move |_| {
         let Some(head_line) = state.jump_to_line.get() else {
             return;
         };
+        // A jump written in the same breath as a file open lands here
+        // before the container has swapped this editor for the new one:
+        // effects run on the write, the rebuild waits for the update pass.
+        // Left in place, the editor being built picks it up.
+        if state.editor_epoch.get_untracked() != epoch {
+            return;
+        }
         state.jump_to_line.set(None);
         let row = rows.row_of_head(head_line).unwrap_or(head_line);
         // Land the target a few lines below the top rather than flush

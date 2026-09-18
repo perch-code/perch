@@ -118,6 +118,9 @@ fn card_view(
         Card::Description { author, avatar_url, at, body } => {
             let description = cards::description_card(app, author, avatar_url, at, body);
             if is_issue {
+                // In Perch hides itself when nothing was started from the
+                // issue, and a hidden item takes no gap, so the next card
+                // sits at the usual distance.
                 Stack::vertical((description, cards::in_perch(app, state, backend, open_item)))
                     .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP))
                     .into_any()
@@ -139,11 +142,17 @@ fn card_view(
 /// of the column, or the box that opens it. A follow-up's composer is
 /// under its thread instead.
 fn composer(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    // Keyed on whether one is open and what it is about, not on the
-    // composer itself: picking a model writes the composer, and a rebuild
-    // on that would throw the typed question away.
+    // Keyed on whether one is open, what it is about and which opening it
+    // is, not on the composer itself: picking a model writes the composer,
+    // and a rebuild on that would throw the typed question away. The
+    // opening count is there so Ask about this on a second comment, which
+    // opens a composer about the same thing with another quote, gets a
+    // fresh box rather than the first one's text.
     let open = floem::reactive::Memo::new(move |_| {
-        state.composer.with(|c| c.as_ref().filter(|c| c.thread_id.is_none()).map(|c| c.anchor.clone()))
+        state
+            .composer
+            .with(|c| c.as_ref().filter(|c| c.thread_id.is_none()).map(|c| c.anchor.clone()))
+            .map(|anchor| (anchor, state.composer_opened.get()))
     });
     dyn_container(
         move || open.get(),

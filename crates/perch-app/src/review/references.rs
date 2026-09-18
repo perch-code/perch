@@ -47,6 +47,7 @@ pub fn find(state: ReviewState, backend: &Backend, head_line: usize, column: Opt
         symbol: symbol.to_string(),
         locations: Vec::new(),
         elsewhere: 0,
+        pending: true,
     })));
     let token = state.next_token();
     backend.references(token, &file.path, head_line as u32, start as u32);
@@ -184,7 +185,8 @@ fn rows(references: &References) -> Vec<Row> {
     let groups = group_by_file(&references.locations);
     if groups.is_empty() {
         let text = match references.elsewhere {
-            0 => "Looking\u{2026}".to_string(),
+            _ if references.pending => "Looking\u{2026}".to_string(),
+            0 => "None found.".to_string(),
             n => format!("None in this worktree; {n} elsewhere."),
         };
         return vec![Row::Notice(text)];
@@ -267,7 +269,7 @@ fn header(state: ReviewState) -> impl IntoView {
         }),
         Label::derived(count).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_SUBTLE)
+                .color(theme::FG_MUTED)
                 .margin_left(10.0)
                 .flex_grow(1.0_f32)
                 .text_ellipsis()
@@ -429,7 +431,11 @@ fn location_row(
         line_text(text, symbol),
     ))
     .on_event_stop(el::Click, move |_, _| {
-        open_file(&path);
+        // Opening the active file again would rebuild its editor for
+        // nothing; the jump alone moves it.
+        if state.active.with(|a| a.as_deref() != Some(path.as_str())) {
+            open_file(&path);
+        }
         state.jump_to_line.set(Some(line.saturating_sub(1)));
     })
     .style(|s| {
@@ -615,14 +621,14 @@ mod tests {
         let locations = vec![reference("a.rs", 3, 4, "foo(foo)"), reference("a.rs", 3, 8, "foo(foo)")];
         let groups = group_by_file(&locations);
         assert_eq!(groups[0].1.len(), 1);
-        let rows = rows(&References { symbol: "foo".into(), locations, elsewhere: 0 });
+        let rows = rows(&References { symbol: "foo".into(), locations, elsewhere: 0, pending: false });
         assert_eq!(rows.len(), 2, "a heading and one line");
         assert_eq!(rows[0], Row::File { path: "a.rs".into(), count: 1, first: true });
     }
 
     #[test]
     fn the_summary_counts_lines_files_and_the_rest() {
-        let one = References { symbol: "s".into(), locations: vec![reference("a.rs", 1, 0, "")], elsewhere: 0 };
+        let one = References { symbol: "s".into(), locations: vec![reference("a.rs", 1, 0, "")], elsewhere: 0, pending: false };
         assert_eq!(summary(&one), "1 in 1 file");
 
         let many = References {
@@ -633,14 +639,18 @@ mod tests {
                 reference("b.rs", 1, 0, ""),
             ],
             elsewhere: 3,
+            pending: false,
         };
         assert_eq!(summary(&many), "3 in 2 files and 3 elsewhere");
 
-        let looking = References { symbol: "s".into(), locations: vec![], elsewhere: 0 };
+        let looking = References { symbol: "s".into(), locations: vec![], elsewhere: 0, pending: true };
         assert_eq!(summary(&looking), "");
         assert_eq!(rows(&looking), vec![Row::Notice("Looking\u{2026}".into())]);
 
-        let away = References { symbol: "s".into(), locations: vec![], elsewhere: 2 };
+        let none = References { symbol: "s".into(), locations: vec![], elsewhere: 0, pending: false };
+        assert_eq!(rows(&none), vec![Row::Notice("None found.".into())]);
+
+        let away = References { symbol: "s".into(), locations: vec![], elsewhere: 2, pending: false };
         assert_eq!(summary(&away), "2 elsewhere");
     }
 
@@ -655,8 +665,8 @@ mod tests {
     #[test]
     fn rows_carry_the_symbol_so_a_new_question_redraws_them() {
         let locations = vec![reference("a.rs", 1, 0, "a b")];
-        let a = rows(&References { symbol: "a".into(), locations: locations.clone(), elsewhere: 0 });
-        let b = rows(&References { symbol: "b".into(), locations, elsewhere: 0 });
+        let a = rows(&References { symbol: "a".into(), locations: locations.clone(), elsewhere: 0, pending: false });
+        let b = rows(&References { symbol: "b".into(), locations, elsewhere: 0, pending: false });
         assert_ne!(a[1], b[1]);
     }
 }
@@ -790,6 +800,7 @@ mod window {
                 reference("src/y.rs", 7, "let a = alpha();"),
             ],
             elsewhere: 1,
+            pending: false,
         })
     }
 

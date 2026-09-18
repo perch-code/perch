@@ -74,8 +74,6 @@ pub enum Command {
     SetScope { item_id: String, scope: perch_git::Scope },
     /// Check or uncheck a file's content as viewed.
     SetViewed { item_id: String, path: String, blob: String, viewed: bool },
-    /// Ask GitHub again about the workflow runs for the item's head.
-    RefreshChecks { item_id: String },
     /// Ask the language server about a position. `token` lets the UI drop an
     /// answer that arrives after the pointer has moved on.
     Hover { token: u64, path: String, line: u32, character: u32 },
@@ -270,10 +268,6 @@ impl Backend {
             blob: blob.to_string(),
             viewed,
         });
-    }
-
-    pub fn refresh_checks(&self, item_id: &str) {
-        let _ = self.commands.send(Command::RefreshChecks { item_id: item_id.to_string() });
     }
 
     pub fn references(&self, token: u64, path: &str, line: u32, character: u32) {
@@ -777,17 +771,6 @@ async fn run(
                     tracing::warn!(error = %e, "could not record viewed");
                 }
                 send_viewed(&ctx, &item_id);
-            }
-            Some(Command::RefreshChecks { item_id }) => {
-                let open = ctx.slot.lock().ok().and_then(|g| {
-                    g.as_ref()
-                        .filter(|c| c.item_id == item_id)
-                        .and_then(|c| c.pull_request.clone().map(|p| (p, c.checkout.head_sha.clone())))
-                });
-                if let Some((pr, head)) = open {
-                    let ctx = ctx.clone();
-                    tokio::spawn(async move { fetch_checks(&ctx, &item_id, &pr, &head).await });
-                }
             }
             Some(Command::References { token, path, line, character }) => {
                 let checkout = checkout.clone();

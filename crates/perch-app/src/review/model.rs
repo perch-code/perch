@@ -121,6 +121,9 @@ pub struct References {
     /// How many locations were outside the worktree, in a dependency, and
     /// are not listed.
     pub elsewhere: usize,
+    /// True until the answer lands, so an empty answer can say so rather
+    /// than look like one still on its way.
+    pub pending: bool,
 }
 
 /// What the review view has on screen. One signal, written once per
@@ -249,6 +252,10 @@ pub struct ReviewState {
     pub threads_open: RwSignal<bool>,
     /// An open composer, and where it is anchored.
     pub composer: RwSignal<Option<Composer>>,
+    /// Rises each time a composer is opened, so a view keyed on what the
+    /// composer is about still starts afresh when it is opened again about
+    /// the same thing with a new draft.
+    pub composer_opened: RwSignal<u64>,
     /// The editor's selection as display lines, first and last inclusive.
     pub selection: RwSignal<Option<(usize, usize)>>,
     /// A gutter marker was clicked: the thread to scroll the column to.
@@ -341,6 +348,7 @@ impl ReviewState {
             comment_threads: RwSignal::new(Arc::new(Vec::new())),
             threads_open: RwSignal::new(false),
             composer: RwSignal::new(None),
+            composer_opened: RwSignal::new(0),
             selection: RwSignal::new(None),
             focus_thread: RwSignal::new(None),
             threads_width: RwSignal::new(crate::theme::THREADS_WIDTH),
@@ -662,6 +670,7 @@ impl ReviewState {
     pub fn open_composer(&self, thread_id: Option<String>, anchor: Option<Anchor>, draft: String, defaults: AgentChoice) {
         let (backend, model, effort) = self.agent_last.get().unwrap_or(defaults);
         self.composer_draft.set(draft.clone());
+        self.composer_opened.update(|n| *n += 1);
         self.composer.set(Some(Composer { thread_id, anchor, backend, model, effort, draft }));
         self.show_threads();
     }

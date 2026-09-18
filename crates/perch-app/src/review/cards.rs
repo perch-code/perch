@@ -38,7 +38,14 @@ use crate::ui::widgets::{avatar, clickable, icon_button, open_in_browser, sideba
 /// GitHub can edit; a thread's messages are read live and stay out of it.
 pub fn key(card: &Card) -> String {
     match card {
-        Card::Description { body, .. } => format!("description:{}", body.len()),
+        // The time lands with the discussion, after a first paint from
+        // the snapshot, and an edit can keep a body's length.
+        Card::Description { body, at, .. } => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            body.hash(&mut h);
+            format!("description:{:?}:{:x}", at, h.finish())
+        }
         Card::Comment(c) => format!("comment:{}:{:?}", c.id, c.updated_at),
         Card::Review { review, comments } => {
             let id = review.as_ref().map(|r| r.id).or_else(|| comments.first().map(|t| t.comment.id)).unwrap_or(0);
@@ -826,6 +833,7 @@ pub fn in_perch(app: AppState, state: ReviewState, backend: Rc<Backend>, open_it
                 .collect::<Vec<_>>()
         })
     };
+    let hidden = move || children().is_empty();
     dyn_container(
         move || children().is_empty(),
         move |empty| {
@@ -865,7 +873,8 @@ pub fn in_perch(app: AppState, state: ReviewState, backend: Rc<Backend>, open_it
                 .into_any()
         },
     )
-    .style(|s| s.width_full())
+    // Hidden, not merely empty, so the column's gap skips it.
+    .style(move |s| s.width_full().apply_if(hidden(), |s| s.hide()))
 }
 
 /// A row that opens the composer when nothing is in it: the box the
