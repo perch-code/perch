@@ -70,6 +70,18 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
 - A worktree opens without a network. The list paints from a snapshot, and
   the review shows the checkout as it was last left.
 
+**Knowledge**
+
+- Opening a pull request also archives its discussion: the description,
+  the conversation, each review and the line comments under it, as plain
+  markdown under `~/.perch/knowledge/<project>/github/<owner>/<repo>/pulls/`.
+  Every message carries its author, time and a permalink.
+- A skill is written for Claude Code and Codex that says where the files are
+  and how to search them, so an agent working in one of those repositories
+  can answer "why was this done" from the thread rather than guessing.
+- Ripgrep is the search. There is no index and no database: `raw/` holds one
+  JSON record per line, and everything else is rendered from it.
+
 ## What it deliberately does not do
 
 Nothing in Perch writes to GitHub. There is no mark as read and no
@@ -167,12 +179,55 @@ Perch is the safe way to reclaim the space, since it checks for uncommitted
 work first and keeps the branch; a directory removed by hand simply shows
 as archived on the next launch.
 
+## Knowledge
+
+Discussion lands under `~/.perch/knowledge`, outside the app's own data
+directory, because agents have to be told the path and it has to survive
+a reinstall. Change it with `knowledge.root`. A repository belongs to the
+project named for it unless `config.toml` says otherwise:
+
+```toml
+[knowledge]
+root = "~/.perch/knowledge"   # optional; this is the default
+skills = true                 # optional; write the two SKILL.md files
+
+[[knowledge.project]]
+name = "slatedb"
+repos = ["slatedb/slatedb", "slatedb/slatedb-go"]
+```
+
+The layout, per project:
+
+```
+~/.perch/knowledge/
+  index.md                          projects, their repositories, last updated
+  slatedb/
+    index.md                        this project's containers and how current
+    raw/github/slatedb-slatedb.jsonl  one record per line; the truth
+    github/slatedb/slatedb/pulls/812.md   rendered from raw
+```
+
+Everything outside `raw/` can be deleted and comes back the next time a
+pull request is opened. Deleting `raw/` too only loses what has not been
+opened since; a pull request is archived again whenever it is opened, and
+re-opening one that has not changed writes nothing.
+
+The skill goes to `~/.claude/skills/perch/SKILL.md` for Claude Code and
+`~/.agents/skills/perch/SKILL.md` for Codex. It names every project the
+store holds and the root, and tells the agent to start from `index.md` and
+search with `rg`. Nothing else is needed to point an agent at the files;
+ask it why a change was made in a checkout of one of those repositories.
+
+Only pull requests opened in Perch are archived. There is no backfill and
+no timer.
+
 ## Layout
 
 | Crate | Contents |
 |---|---|
 | `perch-github` | Model, REST client, SQLite cache. |
 | `perch-git` | Clone, fetch, worktree, diff, tree listing. |
+| `perch-knowledge` | Discussion records, raw JSONL, rendered markdown, the skill. |
 | `perch-syntax` | tree-sitter highlighting. |
 | `perch-lsp` | Language server client. |
 | `perch-app` | Floem UI and the background worker. Binary target `perch`. |
