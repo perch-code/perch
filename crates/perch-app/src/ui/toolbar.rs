@@ -9,16 +9,19 @@ use crate::filter::{Group, Sort};
 use crate::icons::SidebarIcon;
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::titlebar::title_bar;
 use crate::ui::widgets::{picker, sidebar_glyph};
 use floem::reactive::{RwSignal, SignalUpdate};
 
 pub fn toolbar(state: AppState) -> impl IntoView {
-    Stack::horizontal((
+    // The bar doubles as the window's title bar: a press on the room around
+    // the controls drags the window.
+    title_bar(Stack::horizontal((
         segmented(state),
         search_box(state),
         menu_picker("Sort by", state.sort, Sort::ALL),
         menu_picker("Group by", state.group, Group::ALL),
-    ))
+    )))
     .style(|s| {
         s.height(theme::TOOLBAR_HEIGHT)
             .width_full()

@@ -4,6 +4,7 @@ pub mod list;
 pub mod row;
 pub mod sidebar;
 pub mod status;
+pub mod titlebar;
 pub mod toolbar;
 pub mod widgets;
 pub mod worktrees;

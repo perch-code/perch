@@ -11,6 +11,7 @@ use crate::icons::{self, SidebarIcon};
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::titlebar::title_bar;
 use crate::ui::widgets::{avatar, sidebar_glyph, text_button, worktree_menu};
 
 pub fn header(
@@ -20,16 +21,19 @@ pub fn header(
     on_done: impl Fn(String) + 'static,
     on_archive: impl Fn(String) + 'static,
 ) -> impl IntoView {
-    Stack::horizontal((
+    // The bar is the window's title bar, so a press on anything in it that
+    // is not a control drags the window. Those parts are `pointer_events_none`
+    // so the press falls through to the bar.
+    title_bar(Stack::horizontal((
         back_button(on_back),
         icon_and_title(app, state),
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
         notice(state),
         branches(state),
         directory(state, on_archive),
         churn(state),
         done_button(state, on_done),
-    ))
+    )))
     .style(|s| {
         s.height(theme::REVIEW_HEADER_HEIGHT)
             .width_full()
@@ -143,7 +147,13 @@ fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
         })
         .style(|s| s.size(20.0, 20.0).flex_shrink(0.0_f32)),
     ))
-    .style(|s| s.items_center().gap(9.0).min_width(0.0).flex_shrink(1.0_f32))
+    .style(|s| {
+        s.items_center()
+            .gap(9.0)
+            .min_width(0.0)
+            .flex_shrink(1.0_f32)
+            .pointer_events_none()
+    })
 }
 
 fn state_icon(state: ReviewState) -> impl IntoView {
@@ -196,6 +206,7 @@ fn branches(state: ReviewState) -> impl IntoView {
             .flex_shrink(0.0_f32)
             .text_ellipsis()
             .max_width(320.0)
+            .pointer_events_none()
     })
 }
 
@@ -303,7 +314,7 @@ fn notice(state: ReviewState) -> impl IntoView {
         })
         .into_any()
     })
-    .style(|s| s.min_width(0.0).flex_shrink(1.0_f32))
+    .style(|s| s.min_width(0.0).flex_shrink(1.0_f32).pointer_events_none())
 }
 
 fn churn(state: ReviewState) -> impl IntoView {
@@ -331,7 +342,7 @@ fn churn(state: ReviewState) -> impl IntoView {
                 .margin_left(6.0)
         }),
     ))
-    .style(|s| s.items_center().flex_shrink(0.0_f32))
+    .style(|s| s.items_center().flex_shrink(0.0_f32).pointer_events_none())
 }
 
 /// Shown while a checkout is being prepared.

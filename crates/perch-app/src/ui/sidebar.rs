@@ -9,6 +9,7 @@ use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::state::{AppState, Screen, WorktreeSegment};
 use crate::theme;
+use crate::ui::titlebar::title_bar;
 use crate::ui::widgets::{avatar, count_badge, section_heading, sidebar_row};
 use crate::ui::worktrees::OpenWorktree;
 use perch_github::Worktree;
@@ -534,11 +535,9 @@ fn repo_row(state: AppState, name: String, count: usize, avatar_url: String) -> 
 /// sit at the top of it and need the room. Since the rail is never hidden,
 /// nothing else in the window has to leave space for them.
 pub fn activity_rail(state: AppState, review: ReviewState) -> impl IntoView {
-    use floem::views::drag_window_area;
-
     Stack::vertical((
         // The lights sit over this.
-        drag_window_area(Empty::new().style(|s| s.size_full()))
+        title_bar(Empty::new())
             .style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().flex_shrink(0.0_f32)),
         rail_entry(state, review, RailSection::Notifications),
         rail_entry(state, review, RailSection::Worktrees),
