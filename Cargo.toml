@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/perch-agent",
     "crates/perch-github",
     "crates/perch-git",
     "crates/perch-knowledge",
