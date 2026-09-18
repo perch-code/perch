@@ -9,9 +9,8 @@ use crate::filter::{Group, Sort};
 use crate::icons::SidebarIcon;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::sidebar_glyph;
-use floem::menu::Menu;
-use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
+use crate::ui::widgets::{picker, sidebar_glyph};
+use floem::reactive::{RwSignal, SignalUpdate};
 
 pub fn toolbar(state: AppState) -> impl IntoView {
     Stack::horizontal((
@@ -123,12 +122,7 @@ fn search_box(state: AppState) -> impl IntoView {
     })
 }
 
-/// A caption, the current value, and a native popup menu of the options.
-///
-/// floem's own Dropdown renders its label and its popup list outside this
-/// app's styling, so its text never quite matched the rest of the window.
-/// The button here is an ordinary label, and the menu is the platform's, so
-/// both look like they belong.
+/// A caption beside one of the window's pop-up buttons.
 fn menu_picker<T, const N: usize>(
     caption: &'static str,
     selected: RwSignal<T>,
@@ -145,47 +139,7 @@ where
                 .margin_right(6.0)
                 .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
-        Stack::horizontal((
-            // floem looks for a popout menu on the deepest view under the
-            // pointer and never walks up, so a click that landed on the text
-            // or the chevron found nothing and opened nothing. Only a click
-            // on the padding around them reached the stack that owns the
-            // menu, which is why it seemed to work at random. Making both
-            // children transparent to the pointer keeps the stack the
-            // deepest hit wherever the click lands.
-            Label::derived(move || selected.get().to_string()).style(|s| {
-                s.font_size(theme::TEXT_BODY)
-                    .color(theme::FG)
-                    .selectable(false)
-                    .pointer_events_none()
-                    .margin_right(6.0)
-                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-            }),
-            sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
-                .style(|s| s.size(11.0, 11.0).pointer_events_none()),
-        ))
-        .popout_menu(move || {
-            let mut menu = Menu::new();
-            for option in options {
-                let label = option.to_string();
-                menu = menu.item(label, |item| {
-                    item.checked(selected.get_untracked() == option)
-                        .action(move || selected.set(option))
-                });
-            }
-            menu
-        })
-        .style(|s| {
-            s.items_center()
-                .height(28.0)
-                .padding_horiz(9.0)
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS)
-                .selectable(false)
-                .hover(|s| s.background(theme::CANVAS_SUBTLE).cursor(CursorStyle::Pointer))
-        }),
+        picker(selected, options, move |option| selected.set(option)),
     ))
     .style(|s| s.items_center().flex_shrink(0.0_f32))
 }

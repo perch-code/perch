@@ -3,6 +3,8 @@
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::text::FontWeight;
+use floem::menu::Menu;
+use floem::reactive::RwSignal;
 use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
 
 use crate::icons::{self, SidebarIcon};
@@ -211,6 +213,76 @@ pub fn icon_button(
             .justify_center()
             .border_radius(13.0)
             .hover(|s| s.background(theme::BADGE_BG))
+    })
+}
+
+/// A pop-up button: the value that is set, a chevron, and a menu of the rest.
+///
+/// Every dropdown in the window is this one control, so none of them can
+/// drift into looking like a special case. floem's own Dropdown renders its
+/// label and its popup list outside this app's styling, so its text never
+/// quite matched the rest of the window. The button here is an ordinary
+/// label, and the menu is the platform's, so both look like they belong.
+///
+/// floem looks for a popout menu on the deepest view under the pointer and
+/// never walks up, so a click that landed on the text or the chevron found
+/// nothing and opened nothing. Only a click on the padding around them
+/// reached the stack that owns the menu, which is why it seemed to work at
+/// random. Making both children transparent to the pointer keeps the stack
+/// the deepest hit wherever the click lands. The flag is inherited, so it
+/// cannot go on the stack itself: that would make the stack unpickable too
+/// and the menu would never open at all.
+///
+/// `on_pick` rather than a plain write, because choosing a value is not
+/// always only a write: the sidebar's view picker also has to leave whatever
+/// pull request is open.
+pub fn picker<T, const N: usize>(
+    selected: RwSignal<T>,
+    options: [T; N],
+    on_pick: impl Fn(T) + 'static + Copy,
+) -> impl IntoView
+where
+    T: Copy + PartialEq + std::fmt::Display + 'static,
+{
+    Stack::horizontal((
+        Label::derived(move || selected.get().to_string()).style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .color(theme::FG)
+                .selectable(false)
+                .pointer_events_none()
+                .margin_right(6.0)
+                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
+        }),
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
+            .style(|s| s.size(11.0, 11.0).pointer_events_none()),
+    ))
+    .popout_menu(move || {
+        let mut menu = Menu::new();
+        for option in options {
+            let label = option.to_string();
+            menu = menu.item(label, |item| {
+                // Untracked: the builder runs from event dispatch, outside any
+                // reactive scope, and again on every open, which is exactly
+                // when the tick has to be recomputed.
+                item.checked(selected.get_untracked() == option)
+                    .action(move || on_pick(option))
+            });
+        }
+        menu
+    })
+    .style(|s| {
+        s.items_center()
+            .height(28.0)
+            .padding_horiz(9.0)
+            .background(theme::CANVAS)
+            .border(1.0)
+            .border_color(theme::BORDER)
+            .border_radius(theme::RADIUS)
+            .selectable(false)
+            .hover(|s| {
+                s.background(theme::CANVAS_SUBTLE)
+                    .cursor(floem::style::CursorStyle::Pointer)
+            })
     })
 }
 

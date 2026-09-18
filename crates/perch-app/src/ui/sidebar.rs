@@ -46,7 +46,8 @@ pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
             .style(|s| s.size_full().flex_col().gap(1.0))
             .into_any(),
         },
-    )    .style(|s| {
+    )
+    .style(|s| {
         s.width(theme::SIDEBAR_WIDTH)
             .height_full()
             .flex_col()
@@ -62,85 +63,32 @@ pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
 /// and the unread count those rows carried now lives on the rail's bell
 /// alone, where it answers "is anything asking for me?" without a click.
 ///
-/// Choosing a view also leaves an open pull request, so this is the way back
-/// out of the review as well as the way between lists. It stays a way out
-/// when you pick the view you are already in, which is why there is no
-/// "same view, do nothing" guard on the action.
+/// The same pop-up button the toolbar uses for Sort by and Group by, rather
+/// than one dressed to match: a dropdown that is a little taller and a little
+/// bolder than the other two reads as a special case, and there is nothing
+/// special about it.
 ///
-/// floem hands a popout menu to the deepest view under the pointer and never
-/// walks up, so all three children are transparent to the pointer and this
-/// stack stays the deepest hit wherever the click lands. The flag is
-/// inherited, so it cannot go on the stack itself: that would make the stack
-/// unpickable too and the menu would never open at all.
+/// Picking a view goes through `show_screen` rather than writing the signal
+/// on its own, the way every other route into a list does. Today that costs
+/// nothing, because the panel only builds this picker when the threads screen
+/// is up and no review is showing, so there is never anything to leave. It is
+/// the rule that survives the next change to when the panel is on screen.
 fn view_picker(state: AppState, review: ReviewState) -> impl IntoView {
-    use floem::menu::Menu;
-    use floem::text::FontWeight;
-
-    // The rail's bell goes subtle the moment a pull request starts opening,
-    // and this sits an inch from it. `is_open` would leave the panel claiming
-    // a list is up while the review's progress card fills the window.
-    let active = move || !review.is_showing();
-    let fg = move || if active() { theme::FG } else { theme::FG_MUTED };
-
-    Stack::horizontal((
-        crate::ui::widgets::icon_in(
-            move || crate::icons::sidebar_icon(glyph_for(state.view.get()), fg()),
-            fg,
-        )
-        .style(|s| s.margin_right(9.0).pointer_events_none()),
-        Label::derived(move || state.view.get().label()).style(move |s| {
-            s.font_size(theme::TEXT_BODY)
-                .font_weight(if active() {
-                    FontWeight::SEMI_BOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .color(fg())
-                .text_ellipsis()
-                .flex_grow(1.0_f32)
-                .min_width(0.0)
-                .pointer_events_none()
-        }),
-        crate::ui::widgets::sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
-            .style(|s| s.size(11.0, 11.0).pointer_events_none()),
+    Container::new(crate::ui::widgets::picker(
+        state.view,
+        View::ALL,
+        move |view| {
+            state.show_screen(review, Screen::Threads);
+            // Filters carry over, the way the web keeps a search when you
+            // cross from the inbox into Done. Clearing them here made this a
+            // reset button nobody asked for.
+            state.set_view(view);
+        },
     ))
-    .popout_menu(move || {
-        let mut menu = Menu::new();
-        for view in View::ALL {
-            menu = menu.item(view.label(), |item| {
-                // Untracked: the builder runs from event dispatch, outside
-                // any reactive scope, and again on every open, which is
-                // exactly when the tick has to be recomputed.
-                item.checked(state.view.get_untracked() == view).action(move || {
-                    // Doubles as the way back from a pull request, and from
-                    // the worktrees screen.
-                    state.show_screen(review, Screen::Threads);
-                    // Filters carry over, the way the web keeps a search when
-                    // you cross from the inbox into Done. Clearing them here
-                    // made this a reset button nobody asked for.
-                    state.set_view(view);
-                })
-            });
-        }
-        menu
-    })
-    // The box does not change while a pull request is open. This is still the
-    // control that gets you out of one, and a control that sheds its chrome
-    // reads as disabled; the muted glyph and label carry that instead.
-    .style(|s| {
-        crate::ui::widgets::clickable(s)
-            .width_full()
-            .height(34.0)
-            .flex_shrink(0.0_f32)
-            .items_center()
-            .padding_horiz(10.0)
-            .margin_horiz(6.0)
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER)
-            .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
-    })}
+    // The panel's rows carry their own 6px side margin; this lines the button
+    // up with them rather than with the panel's edge.
+    .style(|s| s.width_full().items_center().padding_horiz(6.0))
+}
 
 /// Active or Archived, in the worktrees panel. Same card as a view row, so
 /// the two sections of the app read as one control.
@@ -219,14 +167,6 @@ fn filters_section(state: AppState) -> impl IntoView {
         },
     )
     .style(|s| s.flex_col().width_full().gap(1.0))
-}
-
-fn glyph_for(view: View) -> SidebarIcon {
-    match view {
-        View::Inbox => SidebarIcon::Inbox,
-        View::Saved => SidebarIcon::Bookmark,
-        View::Done => SidebarIcon::Check,
-    }
 }
 
 fn icon_for(f: ReasonFilter) -> SidebarIcon {
