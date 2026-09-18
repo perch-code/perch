@@ -12,6 +12,7 @@ pub mod rail;
 pub mod styling;
 pub mod tabs;
 pub mod threads;
+pub mod timeline;
 pub mod tree;
 
 use std::rc::Rc;

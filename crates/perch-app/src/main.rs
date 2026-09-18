@@ -26,6 +26,7 @@ use crate::state::AppState;
 
 mod dump;
 mod scan_cli;
+mod timeline_cli;
 
 fn main() {
     // A debugging mode that renders a file the way the editor would, without
@@ -51,6 +52,12 @@ fn main() {
     // What the root scan finds under each project's roots, without writing.
     if args.get(1).map(String::as_str) == Some("--scan") {
         scan_cli::run(&args[2..]);
+        return;
+    }
+    // An item's Conversation as text, from the cache alone: one line per
+    // card, in the order the window shows them.
+    if args.get(1).map(String::as_str) == Some("--timeline") {
+        timeline_cli::run(&args[2..]);
         return;
     }
 
