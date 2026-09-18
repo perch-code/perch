@@ -181,13 +181,23 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
         }
 
-        // `e` and `s` on the sidebar row under the pointer, as on inbox rows.
+        // `e` and `s` on the sidebar row under the pointer, else on the
+        // selected row, as on inbox rows. The inbox's own rows come first
+        // when it is the screen and nothing in the sidebar is hovered.
         if key.modifiers.is_empty()
             && !state.search_focused.get()
             && !review.composer_focused.get()
             && matches!(key.code, Code::KeyE | Code::KeyS)
         {
-            if let Some(item) = state.hovered_item.get().and_then(|id| state.item(&id)) {
+            let target = state
+                .hovered_item
+                .get()
+                .or_else(|| {
+                    let inbox_showing = !review.is_showing() && state.screen.get() == Screen::Inbox;
+                    if inbox_showing { None } else { state.open_item.get() }
+                })
+                .and_then(|id| state.item(&id));
+            if let Some(item) = target {
                 match key.code {
                     Code::KeyE => key_backend.mark_item(&item.id, None, Some(!item.is_done())),
                     _ => key_backend.mark_item(&item.id, Some(!item.saved), None),
