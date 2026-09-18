@@ -173,7 +173,7 @@ fn comment_view(app: AppState, state: ReviewState, comment: IssueComment) -> imp
     let body = comment.body.clone();
     Stack::vertical((
         Stack::horizontal((
-            avatar(app, || String::new(), 20.0, seed).style(|s| s.margin_right(8.0)),
+            avatar(app, String::new, 20.0, seed).style(|s| s.margin_right(8.0)),
             Label::derived(move || login.clone()).style(|s| {
                 s.font_size(theme::TEXT_META).font_weight(FontWeight::SEMI_BOLD).color(theme::FG)
             }),

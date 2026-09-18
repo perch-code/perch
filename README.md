@@ -1,16 +1,45 @@
 # Perch
 
-A native, read-only GitHub notifications inbox for macOS, written entirely in
-Rust with [floem](https://github.com/lapce/floem).
+A native macOS tool for reviewing code, written entirely in Rust with
+[floem](https://github.com/lapce/floem).
 
-Perch is the first milestone of a larger code review tool. Today it does one
-thing: show your GitHub notifications the way the web inbox does, with the
-same filters, sorting, grouping, and search, and nothing that mutates state.
+The sidebar lists your projects, and under each the things being worked on:
+a pull request someone opened, an issue, a branch of your own. Click one
+and the view that fits it opens: a read-only editor over the diff with
+rust-analyzer behind it, or the issue with its comments. Ask Claude Code
+about the lines on screen and the answer stays there as a thread. What
+needs looking at sits at the top, and every discussion is archived as
+markdown that a coding agent can search. Nothing in Perch writes to
+GitHub.
 
 ## What it does
 
+**Projects and items**
+
+- A project is a name, the repositories that belong to it, and the
+  directories where you already work on them, declared in `config.toml`.
+  A repository nobody declares gets a project named after it the first
+  time something from it is opened.
+- Under a project, an *item* is one row with up to three parts: a GitHub
+  pull request or issue, a checkout on disk, and attention. A branch of
+  your own becomes a pull request when GitHub opens one on it, and it is
+  the same row before and after, with the same threads.
+- **Priority** at the top lists items with attention newer than their Done
+  mark, newest first, with why: review requested, mentioned, commented, CI
+  failed. **Pinned** holds what you pinned. Then one section per project,
+  or one per date, with a count of active items.
+- Each row has Save and Done on hover and a menu: Open in GitHub, Finder or
+  Terminal, Pin, Mark unread, Rename, Fork or Start work, Move to project,
+  Archive, Delete. Every entry is on every row; the ones that cannot apply
+  are greyed. The filter button narrows the list by status, kind, grouping
+  and sort, and the search box matches titles, numbers, branches and
+  project names.
+
 **The inbox**
 
+- Behind the bell, with a count: the notifications that are not about any
+  item. A notification about an item becomes the item's attention instead
+  and is acted on there.
 - Lists your notification inbox, grouped by repository or date.
 - Sidebar filters: Assigned, Participating, Mentioned, Team mentioned,
   Review requested, plus a per-repository filter with counts.
@@ -40,7 +69,13 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
   on a branch of its own (`perch/pr-<n>`) in a worktree, and shows what
   changed. A second pull request from the same repository costs a fetch
   rather than a clone. Opening the same one again finds the same directory.
-- The header names the worktree's directory. Click it to reveal it in the
+  A pull request whose head branch you already have checked out under a
+  project root opens in that directory instead.
+- A branch of your own opens the same way, diffed against the default
+  branch, with the branch and the directory in the header and no pull
+  request block. When the branch has nothing past its base the diff is
+  empty and the rail shows the whole tree.
+- The header names the checkout's directory. Click it to reveal it in the
   Finder, open a Terminal there, or copy the path.
 - A rail of changed files, or the whole worktree, with change markers on
   files the pull request touched.
@@ -52,23 +87,39 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
 - Click a symbol and rust-analyzer says what it is, with go-to-definition
   from the same panel.
 
-**Worktrees**
+**Issues**
 
-- The second entry in the rail lists every checkout Perch has made, active
-  and archived, by repository, with the pull request's state and when it
-  was last opened.
-- Archive a worktree and the directory goes while the branch and the record
-  stay, so restoring it is a checkout rather than a clone. A worktree with
-  uncommitted changes refuses to be archived, and says so in the status
-  line. Forget an archived worktree and the branch goes too.
-- Anything not opened for a fortnight is archived on launch. Nothing is
-  ever deleted on a timer.
-- A worktree is somewhere work can happen. If the pull request moves on
-  while there are uncommitted changes in it, Perch leaves them alone, shows
-  what is on disk, and says so in the header. Clean worktrees follow the
-  pull request.
-- A worktree opens without a network. The list paints from a snapshot, and
-  the review shows the checkout as it was last left.
+- Open an issue and Perch shows its body and comments, the labels and
+  assignees, and under a divider the branches and pull requests it has
+  started from it.
+- Ask about it the way you ask about a pull request. The question runs in
+  the repository's *home checkout*, a worktree on the default branch that
+  Perch keeps up to date and never lists, so "where does this live" gets
+  an answer from the code.
+- Press Start work and Perch cuts `perch/issue-<n>` from the default
+  branch, checks it out, and opens it as a branch item that points back at
+  the issue. Nothing is assigned or commented on GitHub.
+
+**Branches, roots, and checkouts**
+
+- Declare `roots` on a project and every git worktree under them on a
+  branch other than the default becomes an item, with lines added and
+  removed against the base on the row. Perch never touches a directory it
+  did not make: Archive and Delete on such a row act on the row.
+- Fork cuts `<branch>-2` from an item's head into a new item, with an empty
+  diff against the source, so what is shown is what was done on top.
+- On every refresh Perch asks GitHub, conditionally, whether a pull request
+  has been opened on each branch without one, and attaches it to the row.
+- Archive an item and an owned checkout's directory goes while the branch,
+  the row and the threads stay, so restoring it is a checkout rather than
+  a clone. A checkout with uncommitted changes refuses to be archived, and
+  says so in the status line. Delete removes the row and its threads, and
+  for an owned checkout the directory and the branch. Owned checkouts not
+  opened for a fortnight are archived on launch; nothing is deleted on a
+  timer.
+- If a pull request moves on while there are uncommitted changes in its
+  checkout, Perch leaves them alone, shows what is on disk, and says so in
+  the header. Clean checkouts follow the pull request.
 
 **Knowledge**
 
@@ -96,9 +147,9 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
   run `git diff`, `git log`, `git show`, `git blame` and `rg`. Edits are
   denied, and a denial shows as a step line. It runs in the worktree, as a
   child process of Perch, on your own Claude Code login.
-- Threads live in `perch.db` beside the worktree record. Archiving a
-  worktree keeps them; forgetting it removes them. When the pull request
-  moves on and the anchored file changes, the thread says Outdated.
+- Threads belong to the item. Archiving keeps them; deleting removes them.
+  When the pull request moves on and the anchored file changes, the thread
+  says Outdated.
 
 ## What it deliberately does not do
 
@@ -117,14 +168,15 @@ the same inbox you see in a browser.
 
 | Key | What it does |
 |---|---|
-| `e` | Mark done, or restore. The selection, or the row under the pointer. |
+| `e` | Mark done, or restore, the row under the pointer, in the sidebar or the inbox. |
 | `s` | Save or unsave, the same way. |
-| `Escape` | Drop the selection. |
-| `Cmd-\` | Show or hide the drawer. |
-| `Cmd-[` | Back from a pull request to wherever it was opened from. |
-| `Cmd-1` | Notifications. |
-| `Cmd-2` | Worktrees. |
+| `Escape` | Drop the selection, or put away a rename or a confirmation. |
+| `Cmd-\` | Show or hide the sidebar. |
+| `Cmd-[` | Back from a review to wherever it was opened from. |
+| `Cmd-1` | The sidebar's search box. |
+| `Cmd-2` | The inbox. |
 | `Cmd-W` | Close the open file. |
+| `P` `U` `R` `F` `A` `D` | Inside an open row menu: Pin, Mark unread, Rename, Fork, Archive, Delete. |
 | `a` | Ask about the selected lines, or the pull request. |
 | `Cmd-Enter` | Send the question. |
 | `Cmd-Shift-\` | Show or hide the thread column. |
@@ -178,28 +230,55 @@ and gradients. Icon generation requires `rsvg-convert` (`brew install librsvg`).
 Run `scripts/build-icon.sh` after changing it to regenerate `assets/Perch.icns`
 at all macOS icon sizes, then rebuild the app.
 
+## Where everything lives
+
+Everything Perch keeps is under one directory, `$PERCH_HOME` if set, else
+`~/.perch`:
+
+```
+~/.perch/
+  config.toml        projects, token, agent, knowledge settings
+  perch.db           items, projects, threads, marks, the inbox cache
+  avatars/
+  repos/             one bare clone per repository
+  worktrees/         one checkout per branch Perch made, <owner>__<repo>__<branch>
+  homes/             one checkout per repository on its default branch
+  knowledge/         the archived discussion, as markdown
+```
+
+The worktrees are ordinary git worktrees of the bare clone: `git status`,
+`git diff` and a shell all work in them. Archiving from Perch is the safe
+way to reclaim the space, since it checks for uncommitted work first and
+keeps the branch; a directory removed by hand simply shows as archived on
+the next launch. Deleting the whole directory costs a cold start, every
+mark and thread, and every checkout; marks and threads are the things
+GitHub cannot give back.
+
+The database carries a schema version. One from an older build is
+recreated on launch, with a notice; the clones stay and are reused.
+
 ## Configuration
 
-Optional, at
-`~/Library/Application Support/com.perch.perch/config.toml`:
+Optional, at `~/.perch/config.toml`:
 
 ```toml
 token = "ghp_..."        # only when env vars and gh are unavailable
 poll_interval_secs = 60  # a floor; X-Poll-Interval may raise it
+
+[[project]]
+name = "perch"
+repos = ["criccomini/perch"]
+roots = ["~/Code/perch"]         # optional; checkouts you already have
+
+[[project]]
+name = "slatedb"
+repos = ["slatedb/slatedb", "slatedb/slatedb-go"]
 ```
 
-Cache and avatars live beside it, and so do your Saved and Done marks and
-the record of your worktrees. Deleting that directory costs a cold start,
-every mark you have made, and every worktree; marks are the one thing
-GitHub cannot give back.
-
-Clones live under `repos/` in that directory, one bare clone per repository,
-and worktrees under `worktrees/`, one directory per branch, named
-`<owner>__<repo>__perch-pr-<n>`. They are ordinary git worktrees of the bare
-clone: `git status`, `git diff` and a shell all work in them. Archiving from
-Perch is the safe way to reclaim the space, since it checks for uncommitted
-work first and keeps the branch; a directory removed by hand simply shows
-as archived on the next launch.
+`repos` says which GitHub repositories belong to a project; `roots` says
+where you already work on them, and each root's worktrees become items.
+A repository no project claims gets an implicit project named after it
+when an item needs one, and declaring it later adopts the items.
 
 ## Threads
 
@@ -219,23 +298,20 @@ models = ["fable", "opus", "sonnet", "haiku"]   # optional; what the picker offe
 
 `perch --ask owner/repo#N path:start-end "question"` runs one question
 from a terminal and prints the prompt, every event, and the answer. Leave
-the path out to ask about the pull request as a whole.
+the path out to ask about the pull request as a whole, or name an issue
+to ask about it from the home checkout. `perch --items` prints the sidebar
+as text, and `perch --scan` what the root scan finds.
 
 ## Knowledge
 
-Discussion lands under `~/.perch/knowledge`, outside the app's own data
-directory, because agents have to be told the path and it has to survive
-a reinstall. Change it with `knowledge.root`. A repository belongs to the
-project named for it unless `config.toml` says otherwise:
+Discussion lands under `knowledge/` in the Perch home. Change it with
+`knowledge.root`. Which project a repository's files go under follows the
+same `[[project]]` list as the sidebar:
 
 ```toml
 [knowledge]
 root = "~/.perch/knowledge"   # optional; this is the default
 skills = true                 # optional; write the two SKILL.md files
-
-[[knowledge.project]]
-name = "slatedb"
-repos = ["slatedb/slatedb", "slatedb/slatedb-go"]
 ```
 
 The layout, per project:
@@ -247,6 +323,7 @@ The layout, per project:
     index.md                        this project's containers and how current
     raw/github/slatedb-slatedb.jsonl  one record per line; the truth
     github/slatedb/slatedb/pulls/812.md   rendered from raw
+    github/slatedb/slatedb/issues/42.md   an issue, the same way
 ```
 
 Everything outside `raw/` can be deleted and comes back the next time a

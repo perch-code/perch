@@ -371,7 +371,9 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
 }
 
 /// What a row is rebuilt on: everything it draws.
-fn row_key(item: &Item) -> (String, Option<jiff::Timestamp>, Option<jiff::Timestamp>, bool, Option<String>, String, bool, bool, Option<String>) {
+type RowKey = (String, Option<jiff::Timestamp>, Option<jiff::Timestamp>, bool, Option<String>, String, bool, bool, Option<String>);
+
+fn row_key(item: &Item) -> RowKey {
     (
         item.id.clone(),
         item.attention_at,
