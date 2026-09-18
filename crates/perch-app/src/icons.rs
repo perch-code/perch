@@ -135,6 +135,13 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M1.9 9.2 h3.4 a2.7 2.7 0 0 0 5.4 0 h3.4" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linejoin="round"/>"#
         ),
+        SidebarIcon::Bell => format!(
+            r#"<path d="M8 2.2 C5.7 2.2 4.3 3.9 4.3 6.1 V9.3 L3.1 11.3 H12.9 L11.7 9.3 V6.1
+                       C11.7 3.9 10.3 2.2 8 2.2 Z" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M6.5 13.1 A1.6 1.6 0 0 0 9.5 13.1" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
         SidebarIcon::Bookmark => format!(
             r#"<path d="M4 2.2 h8 v11.6 l-4-3.1 -4 3.1 z" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linejoin="round"/>"#
@@ -232,6 +239,7 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarIcon {
     Inbox,
+    Bell,
     Bookmark,
     BookmarkFilled,
     Check,

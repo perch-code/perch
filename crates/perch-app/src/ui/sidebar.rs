@@ -35,9 +35,11 @@ pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
 }
 
 fn views_section(state: AppState, review: ReviewState) -> impl IntoView {
-    // The inbox is the rail's own entry, so the panel does not repeat it.
-    // Saved and Done stay here until they have rail entries of their own.
+    // The three views are one control: whichever is open wears the card.
+    // The rail's bell stands for all of them, so the way between them lives
+    // here.
     Stack::vertical((
+        view_row(state, review, View::Inbox, SidebarIcon::Inbox),
         view_row(state, review, View::Saved, SidebarIcon::Bookmark),
         view_row(state, review, View::Done, SidebarIcon::Check),
     ))
@@ -261,22 +263,23 @@ pub fn activity_rail(state: AppState, review: ReviewState) -> impl IntoView {
     })
 }
 
-/// The inbox entry: an icon, the unread count, and a stripe when it is the
-/// view on screen.
+/// The notifications entry: a bell, the unread count, and a stripe while any
+/// of the notification views is on screen. Inbox, Saved and Done are chosen
+/// in the panel beside it; this is the section they belong to.
 fn rail_entry(state: AppState, review: ReviewState) -> impl IntoView {
     use floem::peniko::Color;
     use floem::style::Position;
 
     let unread = move || state.counts().unread;
-    // Current only when the inbox itself is on screen: not Saved, not Done,
-    // and not a pull request.
-    let active = move || state.view.get() == View::Inbox && !review.is_showing();
+    // Current whenever a notification view is on screen, whichever of the
+    // three it is. Only a pull request takes it away.
+    let active = move || !review.is_showing();
 
     Container::new(
         Container::new(Stack::horizontal((
             dyn_container(active, move |on| {
                 crate::ui::widgets::sidebar_glyph(
-                    SidebarIcon::Inbox,
+                    SidebarIcon::Bell,
                     if on { theme::FG } else { theme::FG_SUBTLE },
                 )
                 .style(|s| s.size(20.0, 20.0))
@@ -301,14 +304,12 @@ fn rail_entry(state: AppState, review: ReviewState) -> impl IntoView {
     )
     .on_event_stop(el::Click, move |_, _| {
         if active() {
-            // Already here, so this is the collapse control.
+            // Already in notifications, so this is the collapse control.
             state.sidebar_open.update(|open| *open = !*open);
         } else {
-            // From Saved, Done, or a pull request: go to the inbox and make
-            // sure its panel is showing. Filters carry over, as they do
-            // between the views.
+            // Back from a pull request to whichever view was open, with the
+            // panel showing so the three views are in reach.
             review.close();
-            state.set_view(View::Inbox);
             state.sidebar_open.set(true);
         }
     })
