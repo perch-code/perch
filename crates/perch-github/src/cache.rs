@@ -13,7 +13,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::comments::{self, Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStep};
 use crate::discussion::Discussion;
-use crate::items::{Checkout as ItemCheckout, Item, Project, Subject, SubjectKind};
+use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
 use crate::model::{SubjectDetail, Thread};
 use crate::pulls::PullRequest;
 use crate::workflow_runs::Checks;
@@ -21,7 +21,7 @@ use crate::workflow_runs::Checks;
 /// The shape of the tables. A database with an older number, or none, is
 /// deleted and recreated: there is no migration, and nothing before the
 /// number was written has shipped to anyone.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// Perch's own opinion about a thread: bookmarked, dismissed, or both.
 ///
@@ -197,17 +197,8 @@ impl Cache {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS projects (
-                id            TEXT PRIMARY KEY,
-                name          TEXT NOT NULL,
-                repos_json    TEXT NOT NULL,
-                roots_json    TEXT NOT NULL,
-                implicit      INTEGER NOT NULL DEFAULT 0,
-                created_at    TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS items (
                 id               TEXT PRIMARY KEY,
-                project_id       TEXT NOT NULL REFERENCES projects(id),
                 repo_full_name   TEXT NOT NULL,
                 subject_kind     TEXT,
                 subject_number   INTEGER,
@@ -240,7 +231,7 @@ impl Cache {
             CREATE UNIQUE INDEX IF NOT EXISTS items_branch
                 ON items(repo_full_name, branch)
                 WHERE branch IS NOT NULL;
-            CREATE INDEX IF NOT EXISTS items_project ON items(project_id);
+            CREATE INDEX IF NOT EXISTS items_repo ON items(repo_full_name COLLATE NOCASE);
             CREATE TABLE IF NOT EXISTS comment_threads (
                 id             TEXT PRIMARY KEY,
                 worktree_id    TEXT NOT NULL,
@@ -1008,61 +999,102 @@ impl Cache {
     }
 
     // -----------------------------------------------------------------
-    // Projects and items
+    // Items
     // -----------------------------------------------------------------
 
-    pub fn load_projects(&self) -> Result<Vec<Project>, CacheError> {
+    /// Every repository with an item in it, archived ones included: one
+    /// entry per repository whatever the case its items spell it in, in the
+    /// spelling of the oldest item, ordered by name without regard to case.
+    /// With the declared list this is what the sidebar sections over.
+    pub fn repos(&self) -> Result<Vec<String>, CacheError> {
+        let mut stmt = self.conn.prepare("SELECT repo_full_name FROM items ORDER BY created_at, rowid")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for row in rows {
+            let name = row?;
+            if seen.insert(name.to_lowercase()) {
+                out.push(name);
+            }
+        }
+        out.sort_by_cached_key(|n| n.to_lowercase());
+        Ok(out)
+    }
+
+    /// The kind, number, and item id of every item whose subject is open
+    /// in a repository, by number. The list pass compares this with what
+    /// GitHub lists as open to learn what closed. The repository is the
+    /// subject's, as `find_item_by_subject` takes it, so a branch on a fork
+    /// counts for the upstream its pull request is in. Openness is read
+    /// from the parsed subject rather than asked of the JSON, so the rule
+    /// stays `Subject::is_open`'s.
+    pub fn open_subjects_in(&self, repo_full_name: &str) -> Result<Vec<(SubjectKind, u64, String)>, CacheError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, repos_json, roots_json, implicit FROM projects ORDER BY created_at",
+            "SELECT id, subject_json FROM items
+             WHERE subject_repo = ?1 COLLATE NOCASE AND subject_kind IS NOT NULL
+             ORDER BY subject_number",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-            ))
+        let rows = stmt.query_map(params![repo_full_name], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, name, repos, roots, implicit) = row?;
-            let repos: Vec<String> = serde_json::from_str(&repos).unwrap_or_default();
-            let roots: Vec<String> = serde_json::from_str(&roots).unwrap_or_default();
-            out.push(Project {
-                id,
-                name,
-                repos,
-                roots: roots.into_iter().map(PathBuf::from).collect(),
-                implicit: implicit != 0,
-            });
+            let (id, json) = row?;
+            let Some(subject) = json.and_then(|j| serde_json::from_str::<Subject>(&j).ok()) else {
+                tracing::warn!(id, "skipping an item with an unreadable subject");
+                continue;
+            };
+            if subject.is_open() {
+                out.push((subject.kind(), subject.number(), id));
+            }
         }
         Ok(out)
     }
 
-    pub fn upsert_project(&self, p: &Project) -> Result<(), CacheError> {
-        let roots: Vec<String> = p.roots.iter().map(|r| r.to_string_lossy().into_owned()).collect();
-        self.conn.execute(
-            "INSERT INTO projects (id, name, repos_json, roots_json, implicit, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name, repos_json = excluded.repos_json,
-                roots_json = excluded.roots_json, implicit = excluded.implicit",
-            params![
-                p.id,
-                p.name,
-                serde_json::to_string(&p.repos)?,
-                serde_json::to_string(&roots)?,
-                p.implicit as i64,
-                Timestamp::now().to_string(),
-            ],
+    /// The items whose kept discussion is missing, or was fetched before the
+    /// subject's own last activity, newest subject first, so the backfill
+    /// archives what is moving before what is not. A pull request whose
+    /// `updated_at` is unknown is stale only when there is no row: with
+    /// nothing to compare against, no fetch could ever be the last one.
+    /// The comparison is made on parsed timestamps: `fetched_at` carries
+    /// fractions of a second and GitHub's times do not, and as strings the
+    /// two misorder within a second.
+    pub fn discussion_stale(&self) -> Result<Vec<String>, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT i.id, i.subject_json, d.fetched_at FROM items i
+             LEFT JOIN discussions d ON d.item_id = i.id
+             WHERE i.subject_kind IS NOT NULL",
         )?;
-        Ok(())
-    }
-
-    pub fn delete_project(&self, id: &str) -> Result<(), CacheError> {
-        self.conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
-        Ok(())
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut stale: Vec<(Option<Timestamp>, String)> = Vec::new();
+        for row in rows {
+            let (id, json, fetched_at) = row?;
+            let Some(subject) = json.and_then(|j| serde_json::from_str::<Subject>(&j).ok()) else {
+                continue;
+            };
+            let updated_at = subject.updated_at();
+            // An unreadable `fetched_at` is treated as no row: refetching is
+            // the only way to get one that reads.
+            let fetched_at = fetched_at.and_then(|f| f.parse::<Timestamp>().ok());
+            let is_stale = match (fetched_at, updated_at) {
+                (None, _) => true,
+                (Some(fetched), Some(updated)) => fetched < updated,
+                (Some(_), None) => false,
+            };
+            if is_stale {
+                stale.push((updated_at, id));
+            }
+        }
+        // Newest first, an unknown time last, and by id between equals so
+        // the order is the same on every call.
+        stale.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        Ok(stale.into_iter().map(|(_, id)| id).collect())
     }
 
     pub fn load_items(&self) -> Result<Vec<Item>, CacheError> {
@@ -1130,13 +1162,13 @@ impl Cache {
         let c = ItemColumns::of(item)?;
         self.conn.execute(
             "INSERT INTO items
-             (id, project_id, repo_full_name, subject_kind, subject_number, subject_json,
+             (id, repo_full_name, subject_kind, subject_number, subject_json,
               branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name,
               saved, pinned_at, done_at, attention_at, attention_reason, archived_at,
               created_at, last_opened_at, additions, deletions, subject_repo, last_seen_head)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
-                item.id, item.project_id, item.repo_full_name,
+                item.id, item.repo_full_name,
                 c.subject_kind, c.subject_number, c.subject_json,
                 c.branch, c.base_ref, c.head_sha, c.checkout_path, c.owned, c.on_disk,
                 item.from_item_id, item.name,
@@ -1165,15 +1197,15 @@ impl Cache {
         let c = ItemColumns::of(item)?;
         self.conn.execute(
             "UPDATE items SET
-                project_id = ?2, repo_full_name = ?3, subject_kind = ?4, subject_number = ?5,
-                subject_json = ?6, branch = ?7, base_ref = ?8, head_sha = ?9, checkout_path = ?10,
-                owned = ?11, on_disk = ?12, from_item_id = ?13, name = ?14, saved = ?15,
-                pinned_at = ?16, done_at = ?17, attention_at = ?18, attention_reason = ?19,
-                archived_at = ?20, last_opened_at = ?21, additions = ?22, deletions = ?23,
-                subject_repo = ?24, last_seen_head = ?25
+                repo_full_name = ?2, subject_kind = ?3, subject_number = ?4,
+                subject_json = ?5, branch = ?6, base_ref = ?7, head_sha = ?8, checkout_path = ?9,
+                owned = ?10, on_disk = ?11, from_item_id = ?12, name = ?13, saved = ?14,
+                pinned_at = ?15, done_at = ?16, attention_at = ?17, attention_reason = ?18,
+                archived_at = ?19, last_opened_at = ?20, additions = ?21, deletions = ?22,
+                subject_repo = ?23, last_seen_head = ?24
              WHERE id = ?1",
             params![
-                item.id, item.project_id, item.repo_full_name,
+                item.id, item.repo_full_name,
                 c.subject_kind, c.subject_number, c.subject_json,
                 c.branch, c.base_ref, c.head_sha, c.checkout_path, c.owned, c.on_disk,
                 item.from_item_id, item.name,
@@ -1351,6 +1383,13 @@ impl Cache {
             .optional()?)
     }
 
+    /// Forget a key. Absent reads the same as never set, which is what a
+    /// list pass wants when an endpoint stops sending an ETag.
+    pub fn delete_meta(&self, key: &str) -> Result<(), CacheError> {
+        self.conn.execute("DELETE FROM meta WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     pub fn avatar_path(&self, url: &str) -> Option<PathBuf> {
         Some(self.avatar_dir.as_ref()?.join(format!("{}.img", hash(url))))
     }
@@ -1377,7 +1416,7 @@ fn hash(s: &str) -> String {
     format!("{h:016x}")
 }
 
-const ITEM_COLUMNS: &str = "id, project_id, repo_full_name, subject_kind, subject_number, subject_json,
+const ITEM_COLUMNS: &str = "id, repo_full_name, subject_kind, subject_number, subject_json,
     branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name, saved,
     pinned_at, done_at, attention_at, attention_reason, archived_at, created_at, last_opened_at,
     additions, deletions, last_seen_head";
@@ -1429,40 +1468,39 @@ fn stamp(s: Option<String>) -> Option<Timestamp> {
 }
 
 fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
-    let subject_json: Option<String> = r.get(5)?;
+    let subject_json: Option<String> = r.get(4)?;
     // A snapshot an older build wrote is dropped rather than failing the
     // row; the item still has its branch, or is invalid and skipped later.
     let subject: Option<Subject> = subject_json.and_then(|j| serde_json::from_str(&j).ok());
-    let branch: Option<String> = r.get(6)?;
+    let branch: Option<String> = r.get(5)?;
     let checkout = branch.map(|branch| ItemCheckout {
         branch,
-        base_ref: r.get::<_, Option<String>>(7).ok().flatten().unwrap_or_default(),
-        head_sha: r.get::<_, Option<String>>(8).ok().flatten().unwrap_or_default(),
-        path: PathBuf::from(r.get::<_, Option<String>>(9).ok().flatten().unwrap_or_default()),
-        owned: r.get::<_, i64>(10).unwrap_or(1) != 0,
-        on_disk: r.get::<_, i64>(11).unwrap_or(1) != 0,
-        churn: match (r.get::<_, Option<i64>>(22).ok().flatten(), r.get::<_, Option<i64>>(23).ok().flatten()) {
+        base_ref: r.get::<_, Option<String>>(6).ok().flatten().unwrap_or_default(),
+        head_sha: r.get::<_, Option<String>>(7).ok().flatten().unwrap_or_default(),
+        path: PathBuf::from(r.get::<_, Option<String>>(8).ok().flatten().unwrap_or_default()),
+        owned: r.get::<_, i64>(9).unwrap_or(1) != 0,
+        on_disk: r.get::<_, i64>(10).unwrap_or(1) != 0,
+        churn: match (r.get::<_, Option<i64>>(21).ok().flatten(), r.get::<_, Option<i64>>(22).ok().flatten()) {
             (Some(a), Some(d)) => Some((a as u32, d as u32)),
             _ => None,
         },
-        last_seen_head: r.get::<_, Option<String>>(24).ok().flatten(),
+        last_seen_head: r.get::<_, Option<String>>(23).ok().flatten(),
     });
-    let created: String = r.get(20)?;
-    let opened: String = r.get(21)?;
+    let created: String = r.get(19)?;
+    let opened: String = r.get(20)?;
     Ok(Item {
         id: r.get(0)?,
-        project_id: r.get(1)?,
-        repo_full_name: r.get(2)?,
+        repo_full_name: r.get(1)?,
         subject,
         checkout,
-        from_item_id: r.get(12)?,
-        name: r.get(13)?,
-        saved: r.get::<_, i64>(14)? != 0,
-        pinned_at: stamp(r.get(15)?),
-        done_at: stamp(r.get(16)?),
-        attention_at: stamp(r.get(17)?),
-        attention_reason: r.get(18)?,
-        archived_at: stamp(r.get(19)?),
+        from_item_id: r.get(11)?,
+        name: r.get(12)?,
+        saved: r.get::<_, i64>(13)? != 0,
+        pinned_at: stamp(r.get(14)?),
+        done_at: stamp(r.get(15)?),
+        attention_at: stamp(r.get(16)?),
+        attention_reason: r.get(17)?,
+        archived_at: stamp(r.get(18)?),
         created_at: created.parse().unwrap_or(Timestamp::UNIX_EPOCH),
         last_opened_at: opened.parse().unwrap_or(Timestamp::UNIX_EPOCH),
     })
@@ -2060,25 +2098,15 @@ mod tests {
         assert_eq!(failed.resumable_session("claude-code"), None);
     }
 
-    fn project(name: &str) -> Project {
-        Project {
-            id: Project::id_for(name),
-            name: name.into(),
-            repos: vec!["acme/widgets".into()],
-            roots: vec![PathBuf::from("/tmp/widgets")],
-            implicit: false,
-        }
-    }
-
     fn pr_item(number: u64) -> Item {
-        let mut i = Item::new("acme", "acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
+        let mut i = Item::new("acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
         i.id = format!("item-pr-{number}");
         i.subject = Some(ItemSubject::PullRequest(pull_request(number)));
         i
     }
 
     fn branch_item(branch: &str) -> Item {
-        let mut i = Item::new("acme", "acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
+        let mut i = Item::new("acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
         i.id = format!("item-{branch}");
         i.checkout = Some(ItemCheckout {
             branch: branch.into(),
@@ -2090,6 +2118,27 @@ mod tests {
             churn: None,
             last_seen_head: None,
         });
+        i
+    }
+
+    fn issue_item(number: u64, state: &str, updated: &str) -> Item {
+        let mut i = Item::new("acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
+        i.id = format!("item-issue-{number}");
+        i.subject = Some(ItemSubject::Issue(crate::items::Issue {
+            number,
+            title: "t".into(),
+            body: String::new(),
+            state: state.into(),
+            state_reason: None,
+            author_login: String::new(),
+            author_avatar_url: String::new(),
+            labels: vec![],
+            assignees: vec![],
+            comments: 0,
+            created_at: None,
+            updated_at: stamp_of(updated),
+            repo_full_name: "acme/widgets".into(),
+        }));
         i
     }
 
@@ -2137,37 +2186,55 @@ mod tests {
         {
             let (c, reset) = Cache::open_checked(&path, None).unwrap();
             assert!(!reset, "a new file is not a reset");
-            c.upsert_project(&project("acme")).unwrap();
+            c.insert_item(&pr_item(7)).unwrap();
             c.set_meta("schema_version", "6").unwrap();
         }
         let (c, reset) = Cache::open_checked(&path, None).unwrap();
         assert!(reset);
-        assert!(c.load_projects().unwrap().is_empty());
-        c.upsert_project(&project("acme")).unwrap();
+        assert!(c.load_items().unwrap().is_empty());
+        c.insert_item(&pr_item(7)).unwrap();
         drop(c);
         let (c, reset) = Cache::open_checked(&path, None).unwrap();
         assert!(!reset, "a current database is kept");
-        assert_eq!(c.load_projects().unwrap().len(), 1);
+        assert_eq!(c.load_items().unwrap().len(), 1);
     }
 
     #[test]
-    fn projects_round_trip_and_upsert_replaces() {
+    fn the_schema_has_no_project_table_and_indexes_items_by_repository() {
         let c = Cache::open_in_memory().unwrap();
-        c.upsert_project(&project("Acme")).unwrap();
-        let mut p = project("Acme");
-        p.roots.push(PathBuf::from("/tmp/other"));
-        p.implicit = true;
-        c.upsert_project(&p).unwrap();
-        let all = c.load_projects().unwrap();
-        assert_eq!(all, vec![p]);
-        c.delete_project("acme").unwrap();
-        assert!(c.load_projects().unwrap().is_empty());
+        let count = |sql: &str| -> i64 { c.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT count(*) FROM sqlite_master WHERE name = 'projects'"), 0);
+        assert_eq!(count("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'items_project'"), 0);
+        assert_eq!(count("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'items_repo'"), 1);
+        assert_eq!(count("SELECT count(*) FROM pragma_table_info('items') WHERE name = 'project_id'"), 0);
+    }
+
+    #[test]
+    fn repos_lists_each_repository_with_an_item_once_in_name_order() {
+        let c = Cache::open_in_memory().unwrap();
+        assert!(c.repos().unwrap().is_empty());
+        c.insert_item(&pr_item(7)).unwrap();
+        let mut fork = branch_item("feature");
+        fork.repo_full_name = "Zed/widgets".into();
+        c.insert_item(&fork).unwrap();
+        let mut archived = branch_item("old");
+        archived.repo_full_name = "beta/things".into();
+        archived.archived_at = Some(stamp_of("2026-09-19T00:00:00Z"));
+        c.insert_item(&archived).unwrap();
+        let mut spelled = branch_item("other");
+        spelled.repo_full_name = "ACME/Widgets".into();
+        spelled.created_at = stamp_of("2026-09-18T11:00:00Z");
+        c.insert_item(&spelled).unwrap();
+        assert_eq!(
+            c.repos().unwrap(),
+            vec!["acme/widgets", "beta/things", "Zed/widgets"],
+            "one entry per repository in its oldest item's spelling, archived included, ordered without regard to case"
+        );
     }
 
     #[test]
     fn items_round_trip_whole() {
         let c = Cache::open_in_memory().unwrap();
-        c.upsert_project(&project("acme")).unwrap();
         let mut i = pr_item(7);
         i.checkout = Some(ItemCheckout {
             branch: "perch/pr-7".into(),
@@ -2192,8 +2259,7 @@ mod tests {
         assert_eq!(c.find_item_by_subject("acme/widgets", ItemKind::Issue, 7).unwrap(), None);
 
         i.archived_at = Some(stamp_of("2026-09-19T00:00:00Z"));
-        i.project_id = "other".into();
-        c.upsert_project(&project("other")).unwrap();
+        i.repo_full_name = "acme/widgets-fork".into();
         c.update_item(&i).unwrap();
         assert_eq!(c.load_items().unwrap(), vec![i]);
     }
@@ -2204,7 +2270,6 @@ mod tests {
         // item is the fork's, the pull request is upstream's, and a
         // notification names the upstream.
         let c = Cache::open_in_memory().unwrap();
-        c.upsert_project(&project("acme")).unwrap();
         let mut i = branch_item("feature");
         i.repo_full_name = "chris/widgets".into();
         i.subject = Some(ItemSubject::PullRequest(pull_request(7)));
@@ -2216,7 +2281,6 @@ mod tests {
     #[test]
     fn a_second_row_per_subject_or_branch_is_refused() {
         let c = Cache::open_in_memory().unwrap();
-        c.upsert_project(&project("acme")).unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         let mut dup = pr_item(7);
         dup.id = "another".into();
@@ -2236,8 +2300,7 @@ mod tests {
     #[test]
     fn an_item_with_neither_part_is_refused() {
         let c = Cache::open_in_memory().unwrap();
-        c.upsert_project(&project("acme")).unwrap();
-        let empty = Item::new("acme", "acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
+        let empty = Item::new("acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
         assert!(c.insert_item(&empty).is_err());
         assert!(c.load_items().unwrap().is_empty());
     }
@@ -2245,7 +2308,6 @@ mod tests {
     #[test]
     fn touch_attention_only_moves_forward() {
         let c = Cache::open_in_memory().unwrap();
-        c.upsert_project(&project("acme")).unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         let id = pr_item(7).id;
         assert!(c.touch_attention(&id, stamp_of("2026-09-18T12:00:00Z"), "mention").unwrap());
@@ -2261,7 +2323,6 @@ mod tests {
     #[test]
     fn marks_and_deletion() {
         let c = Cache::open_in_memory().unwrap();
-        c.upsert_project(&project("acme")).unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         let mut cut = branch_item("perch/pr-7-2");
         cut.from_item_id = Some(pr_item(7).id);
@@ -2280,7 +2341,6 @@ mod tests {
     #[test]
     fn the_last_seen_head_is_a_column_of_its_own() {
         let c = Cache::open_in_memory().unwrap();
-        c.upsert_project(&project("acme")).unwrap();
         let mut i = branch_item("feature");
         c.insert_item(&i).unwrap();
         assert_eq!(c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().last_seen_head, None);
@@ -2409,7 +2469,6 @@ mod tests {
     fn deleting_an_item_takes_what_was_fetched_and_marked_for_it() {
         use crate::workflow_runs::CheckState;
         let c = Cache::open_in_memory().unwrap();
-        c.upsert_project(&project("acme")).unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         let id = pr_item(7).id;
         c.store_discussion(&id, &discussion()).unwrap();
@@ -2422,6 +2481,84 @@ mod tests {
         assert_eq!(c.load_checks(&id, "abc123").unwrap(), None);
         assert!(c.load_viewed(&id).unwrap().is_empty());
         assert_eq!(c.load_viewed("other").unwrap().len(), 1, "another item's rows stay");
+    }
+
+    #[test]
+    fn open_subjects_in_a_repository_are_what_the_list_pass_compares_against() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        let mut merged = pr_item(8);
+        if let Some(ItemSubject::PullRequest(pr)) = merged.subject.as_mut() {
+            pr.state = "closed".into();
+            pr.merged = true;
+        }
+        c.insert_item(&merged).unwrap();
+        c.insert_item(&issue_item(42, "open", "2026-09-18T10:00:00Z")).unwrap();
+        c.insert_item(&issue_item(43, "closed", "2026-09-18T10:00:00Z")).unwrap();
+        c.insert_item(&branch_item("feature")).unwrap();
+        // A branch on a fork with an open pull request upstream counts for
+        // the upstream, where the list pass will look for it.
+        let mut fork = branch_item("fork-branch");
+        fork.repo_full_name = "chris/widgets".into();
+        fork.subject = Some(ItemSubject::PullRequest(pull_request(9)));
+        c.insert_item(&fork).unwrap();
+
+        assert_eq!(
+            c.open_subjects_in("ACME/widgets").unwrap(),
+            vec![
+                (ItemKind::PullRequest, 7, "item-pr-7".to_string()),
+                (ItemKind::PullRequest, 9, "item-fork-branch".to_string()),
+                (ItemKind::Issue, 42, "item-issue-42".to_string()),
+            ]
+        );
+        assert!(c.open_subjects_in("chris/widgets").unwrap().is_empty(), "the subject's repository, not the checkout's");
+        assert!(c.open_subjects_in("nobody/here").unwrap().is_empty());
+    }
+
+    #[test]
+    fn discussion_stale_lists_missing_and_outdated_rows_newest_subject_first() {
+        let c = Cache::open_in_memory().unwrap();
+        let fetched_at = |id: &str, at: &str| {
+            c.conn
+                .execute("UPDATE discussions SET fetched_at = ?2 WHERE item_id = ?1", params![id, at])
+                .unwrap();
+        };
+        // No row at all.
+        c.insert_item(&issue_item(1, "open", "2026-09-18T09:00:00Z")).unwrap();
+        // A row older than the subject.
+        c.insert_item(&issue_item(2, "open", "2026-09-18T11:00:00Z")).unwrap();
+        c.store_discussion("item-issue-2", &discussion()).unwrap();
+        fetched_at("item-issue-2", "2026-09-18T10:00:00Z");
+        // A row from the same second as the subject, a fraction later: as
+        // strings the fraction would sort it before, but it is current.
+        c.insert_item(&issue_item(3, "open", "2026-09-18T10:00:00Z")).unwrap();
+        c.store_discussion("item-issue-3", &discussion()).unwrap();
+        fetched_at("item-issue-3", "2026-09-18T10:00:00.250Z");
+        // A pull request whose updated_at is unknown: stale without a row,
+        // never with one.
+        c.insert_item(&pr_item(7)).unwrap();
+        c.insert_item(&pr_item(8)).unwrap();
+        c.store_discussion("item-pr-8", &discussion()).unwrap();
+        fetched_at("item-pr-8", "2000-01-01T00:00:00Z");
+        // A checkout with no subject has no discussion to be stale.
+        c.insert_item(&branch_item("feature")).unwrap();
+
+        assert_eq!(c.discussion_stale().unwrap(), vec!["item-issue-2", "item-issue-1", "item-pr-7"]);
+
+        // Storing the discussion again makes the row current.
+        c.store_discussion("item-issue-2", &discussion()).unwrap();
+        fetched_at("item-issue-2", "2026-09-18T11:00:00Z");
+        assert_eq!(c.discussion_stale().unwrap(), vec!["item-issue-1", "item-pr-7"]);
+    }
+
+    #[test]
+    fn deleting_a_meta_key_makes_it_absent_and_is_fine_when_it_already_is() {
+        let c = Cache::open_in_memory().unwrap();
+        c.set_meta("etag:pulls:acme/widgets", "\"abc\"").unwrap();
+        c.delete_meta("etag:pulls:acme/widgets").unwrap();
+        assert_eq!(c.meta("etag:pulls:acme/widgets").unwrap(), None);
+        c.delete_meta("etag:pulls:acme/widgets").unwrap();
+        assert!(c.meta("schema_version").unwrap().is_some(), "other keys stay");
     }
 
     #[test]

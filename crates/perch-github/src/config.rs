@@ -17,9 +17,15 @@ pub struct Config {
     pub knowledge: KnowledgeConfig,
     #[serde(default)]
     pub agent: AgentConfig,
-    /// `[[project]]` entries.
+    /// `[[repo]]` entries: the repositories Perch lists, syncs, and files
+    /// knowledge under.
     #[serde(default)]
-    pub project: Vec<ProjectConfig>,
+    pub repo: Vec<RepoConfig>,
+    /// The old `[[project]]` key. Read only so `load` can refuse the file
+    /// by name: with no field for it, toml would drop the table without a
+    /// word and the reader would see an empty sidebar and no reason.
+    #[serde(default)]
+    project: Vec<toml::Value>,
     /// Things wrong with the file that are worth one line in the status
     /// bar. Filled by `load`, never by the file.
     #[serde(skip)]
@@ -144,7 +150,7 @@ impl AgentConfig {
     }
 }
 
-/// Where archived discussion goes and which repositories share a project.
+/// Where archived discussion goes.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct KnowledgeConfig {
     /// Defaults to `knowledge/` under the Perch home. A leading `~` is the
@@ -154,24 +160,25 @@ pub struct KnowledgeConfig {
     /// Write the two `SKILL.md` files. On unless turned off.
     #[serde(default = "default_true")]
     pub skills: bool,
-    /// The old home of `[[project]]`. Read only to say it has moved.
+    /// The older home of `[[project]]`. Read only so `load` can refuse the
+    /// file by name, as with `Config::project`.
     #[serde(default)]
-    pub project: Vec<ProjectConfig>,
+    project: Vec<toml::Value>,
 }
 
+/// A repository the reader follows: `owner/repo`, and any checkouts of it
+/// already on this machine.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct ProjectConfig {
+pub struct RepoConfig {
+    /// `owner/repo`. The identity, compared without regard to case.
     pub name: String,
-    /// `owner/repo` names that belong to this project.
-    #[serde(default)]
-    pub repos: Vec<String>,
-    /// Directories that are checkouts of one of those repositories, or
-    /// worktrees of one. A leading `~` is the home directory.
+    /// Directories that are checkouts of the repository, or worktrees of
+    /// one. A leading `~` is the home directory.
     #[serde(default)]
     pub roots: Vec<String>,
 }
 
-impl ProjectConfig {
+impl RepoConfig {
     pub fn root_paths(&self) -> Vec<PathBuf> {
         self.roots.iter().map(|r| expand_home(r)).collect()
     }
@@ -190,22 +197,36 @@ impl Default for KnowledgeConfig {
 }
 
 impl Config {
-    /// The project a repository belongs to: the declared one, or the
-    /// repository's own name, so nothing has to be configured before the
-    /// first item appears. The knowledge directory uses the same rule, so
-    /// the two agree.
-    pub fn project_for(&self, repo_full_name: &str) -> String {
-        self.project
-            .iter()
-            .find(|p| p.repos.iter().any(|r| r.eq_ignore_ascii_case(repo_full_name)))
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| implicit_project_name(repo_full_name))
+    /// Whether a repository is one of the `[[repo]]` entries. Declaring one
+    /// is what starts the list pass and the backfill for it; an item in a
+    /// repository nobody declared is still an item.
+    pub fn is_declared(&self, repo_full_name: &str) -> bool {
+        self.entry(repo_full_name).is_some()
+    }
+
+    /// The declared roots of a repository, `~` expanded. Empty when it is
+    /// not declared, or declared without any.
+    pub fn roots_for(&self, repo_full_name: &str) -> Vec<PathBuf> {
+        self.entry(repo_full_name).map(RepoConfig::root_paths).unwrap_or_default()
+    }
+
+    /// The declared names in config order, which is the order the sidebar
+    /// and the list pass take them in.
+    pub fn declared(&self) -> Vec<String> {
+        self.repo.iter().map(|r| r.name.clone()).collect()
+    }
+
+    fn entry(&self, repo_full_name: &str) -> Option<&RepoConfig> {
+        self.repo.iter().find(|r| r.name.eq_ignore_ascii_case(repo_full_name))
     }
 }
 
-/// What a repository nobody claims is called: its own name.
-pub fn implicit_project_name(repo_full_name: &str) -> String {
-    repo_full_name.rsplit('/').next().unwrap_or(repo_full_name).to_string()
+/// Whether a name is `owner/repo`: one slash, something on each side.
+fn is_full_name(name: &str) -> bool {
+    match name.split_once('/') {
+        Some((owner, repo)) => !owner.is_empty() && !repo.is_empty() && !repo.contains('/'),
+        None => false,
+    }
 }
 
 impl KnowledgeConfig {
@@ -247,20 +268,55 @@ impl Config {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::fallback();
         };
-        match toml::from_str::<Config>(&text) {
-            Ok(mut c) => {
-                if !c.knowledge.project.is_empty() {
-                    c.warnings.push(
-                        "config.toml: [[knowledge.project]] is no longer read; declare projects as [[project]]".into(),
-                    );
-                }
-                c
-            }
+        match Self::parse(&text) {
+            Ok(c) => c,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "ignoring malformed config");
                 Self::fallback()
             }
         }
+    }
+
+    /// The file's text as a config. A file that still declares its
+    /// repositories under `[[project]]` or `[[knowledge.project]]` is not
+    /// loaded at all: the fallback comes back with one warning naming the
+    /// new key. Taking everything but that table would look like a config
+    /// with no repositories, which is harder to notice than one with none
+    /// of the reader's settings and a line saying why.
+    fn parse(text: &str) -> Result<Self, toml::de::Error> {
+        let mut c = toml::from_str::<Config>(text)?;
+        let old_key = if !c.project.is_empty() {
+            Some("[[project]]")
+        } else if !c.knowledge.project.is_empty() {
+            Some("[[knowledge.project]]")
+        } else {
+            None
+        };
+        if let Some(key) = old_key {
+            let mut refused = Self::fallback();
+            refused.warnings.push(format!(
+                "config.toml: {key} is no longer read; declare each repository as [[repo]] with name = \"owner/repo\". The file was not loaded."
+            ));
+            return Ok(refused);
+        }
+        c.keep_well_formed_names();
+        Ok(c)
+    }
+
+    /// Drop a `[[repo]]` whose name is not `owner/repo`, with a warning
+    /// naming it. Everything downstream splits the name on its one slash,
+    /// and a name that does not split would be a section nothing could
+    /// list or file under. The rest of the file loads.
+    fn keep_well_formed_names(&mut self) {
+        let (kept, dropped): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.repo).into_iter().partition(|r| is_full_name(&r.name));
+        for r in dropped {
+            self.warnings.push(format!(
+                "config.toml: [[repo]] name = {:?} is not owner/repo; the entry was skipped",
+                r.name
+            ));
+        }
+        self.repo = kept;
     }
 
     fn fallback() -> Self {
@@ -269,6 +325,7 @@ impl Config {
             poll_interval_secs: default_poll_secs(),
             knowledge: KnowledgeConfig::default(),
             agent: AgentConfig::default(),
+            repo: Vec::new(),
             project: Vec::new(),
             warnings: Vec::new(),
         }
@@ -330,7 +387,7 @@ mod tests {
         let c: Config = toml::from_str("poll_interval_secs = 30").unwrap();
         assert_eq!(c.poll_interval_secs, 30);
         assert!(c.knowledge.skills);
-        assert!(c.knowledge.project.is_empty());
+        assert!(c.repo.is_empty());
         assert!(c.knowledge.root_path().ends_with("knowledge"));
     }
 
@@ -398,33 +455,57 @@ mod tests {
     }
 
     #[test]
-    fn projects_map_repositories_and_fall_back_to_the_repository_name() {
-        let c: Config = toml::from_str(
+    fn a_declared_repository_is_known_by_its_whole_name_whatever_the_case() {
+        let c = Config::parse(
             r#"
             [knowledge]
             root = "~/elsewhere"
             skills = false
 
-            [[project]]
-            name = "slatedb"
-            repos = ["slatedb/slatedb", "slatedb/slatedb-go"]
+            [[repo]]
+            name = "slatedb/slatedb"
+
+            [[repo]]
+            name = "slatedb/slatedb-go"
             "#,
         )
         .unwrap();
-        assert_eq!(c.project_for("slatedb/slatedb-go"), "slatedb");
-        assert_eq!(c.project_for("criccomini/perch"), "perch");
+        assert!(c.warnings.is_empty());
+        assert_eq!(c.declared(), vec!["slatedb/slatedb", "slatedb/slatedb-go"]);
+        assert!(c.is_declared("slatedb/slatedb-go"));
+        assert!(c.is_declared("SlateDB/SlateDB"), "the name is an identity, not a spelling");
+        assert!(!c.is_declared("slatedb"), "the whole owner/repo, not a part of it");
+        assert!(!c.is_declared("criccomini/perch"));
         assert!(!c.knowledge.skills);
         assert_eq!(c.knowledge.root_path(), home_dir().join("elsewhere"));
     }
 
     #[test]
-    fn a_project_parses_with_and_without_roots() {
-        let c: Config = toml::from_str(
+    fn a_repository_parses_with_and_without_roots() {
+        let c = Config::parse(
             r#"
-            [[project]]
-            name = "perch"
-            repos = ["criccomini/perch"]
+            [[repo]]
+            name = "criccomini/perch"
             roots = ["~/Code/perch", "/tmp/perch-2"]
+
+            [[repo]]
+            name = "slatedb/slatedb"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.repo.len(), 2);
+        assert_eq!(c.repo[0].root_paths(), vec![home_dir().join("Code/perch"), PathBuf::from("/tmp/perch-2")]);
+        assert_eq!(c.roots_for("Criccomini/Perch"), c.repo[0].root_paths());
+        assert!(c.repo[1].roots.is_empty());
+        assert!(c.roots_for("slatedb/slatedb").is_empty());
+        assert!(c.roots_for("nobody/declared").is_empty());
+    }
+
+    #[test]
+    fn the_old_project_key_refuses_the_file_and_names_the_new_one() {
+        let c = Config::parse(
+            r#"
+            poll_interval_secs = 5
 
             [[project]]
             name = "slatedb"
@@ -432,16 +513,45 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(c.project.len(), 2);
-        assert_eq!(c.project[0].root_paths(), vec![home_dir().join("Code/perch"), PathBuf::from("/tmp/perch-2")]);
-        assert!(c.project[1].roots.is_empty());
-        assert!(c.project[1].root_paths().is_empty());
+        assert_eq!(c.warnings.len(), 1);
+        assert!(c.warnings[0].starts_with("config.toml: [[project]] is no longer read"), "{}", c.warnings[0]);
+        assert!(c.warnings[0].contains("[[repo]]"), "the message names the new key");
+        assert!(c.repo.is_empty());
+        assert_eq!(c.poll_interval_secs, 60, "nothing else in the file was taken either");
     }
 
     #[test]
-    fn the_old_knowledge_project_key_still_parses_but_is_not_a_project() {
-        let c: Config = toml::from_str("[[knowledge.project]]\nname = \"x\"\nrepos = [\"a/b\"]").unwrap();
-        assert!(c.project.is_empty());
-        assert_eq!(c.project_for("a/b"), "b", "the old key no longer maps");
+    fn the_old_knowledge_project_key_refuses_the_file_too() {
+        let c = Config::parse("[[knowledge.project]]\nname = \"x\"\nrepos = [\"a/b\"]").unwrap();
+        assert_eq!(c.warnings.len(), 1);
+        assert!(c.warnings[0].starts_with("config.toml: [[knowledge.project]] is no longer read"), "{}", c.warnings[0]);
+        assert!(c.warnings[0].contains("[[repo]]"));
+        assert!(c.repo.is_empty());
+    }
+
+    #[test]
+    fn a_name_that_is_not_owner_and_repo_is_skipped_with_a_warning() {
+        let c = Config::parse(
+            r#"
+            [[repo]]
+            name = "slatedb"
+
+            [[repo]]
+            name = "slatedb/slatedb"
+
+            [[repo]]
+            name = "a/b/c"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.declared(), vec!["slatedb/slatedb"], "the rest of the file loads");
+        assert_eq!(c.warnings.len(), 2);
+        assert!(c.warnings[0].contains("\"slatedb\""), "{}", c.warnings[0]);
+        assert!(c.warnings[1].contains("\"a/b/c\""), "{}", c.warnings[1]);
+    }
+
+    #[test]
+    fn a_malformed_file_is_an_error_not_a_config() {
+        assert!(Config::parse("poll_interval_secs = = 3").is_err());
     }
 }

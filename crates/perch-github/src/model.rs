@@ -160,6 +160,32 @@ impl Reason {
                 | Reason::Assign
         )
     }
+
+    /// Whether a notification with this reason puts its item in Priority.
+    /// Someone asked for the reader, or the reader is part of the
+    /// conversation; anything else is the repository moving, which the
+    /// list pass already shows by moving the row. Subscribed activity
+    /// in particular would put every push on every pull request the
+    /// reader watches into Priority, which is what made the inbox noisy.
+    /// The set matches `is_participating` today and is its own rule so
+    /// the two can part without either being wrong.
+    pub fn makes_attention(&self) -> bool {
+        match self {
+            Reason::ReviewRequested
+            | Reason::Mention
+            | Reason::TeamMention
+            | Reason::Assign
+            | Reason::Comment
+            | Reason::Author => true,
+            Reason::CiActivity
+            | Reason::Invitation
+            | Reason::Manual
+            | Reason::SecurityAlert
+            | Reason::StateChange
+            | Reason::Subscribed
+            | Reason::Other(_) => false,
+        }
+    }
 }
 
 impl Serialize for Reason {
@@ -468,6 +494,31 @@ mod tests {
         assert!(Reason::ReviewRequested.is_participating());
         assert!(!Reason::Subscribed.is_participating());
         assert!(!Reason::CiActivity.is_participating());
+    }
+
+    #[test]
+    fn attention_comes_from_being_asked_for_or_in_the_conversation() {
+        for reason in [
+            Reason::ReviewRequested,
+            Reason::Mention,
+            Reason::TeamMention,
+            Reason::Assign,
+            Reason::Comment,
+            Reason::Author,
+        ] {
+            assert!(reason.makes_attention(), "{}", reason.wire());
+        }
+        for reason in [
+            Reason::CiActivity,
+            Reason::Invitation,
+            Reason::Manual,
+            Reason::SecurityAlert,
+            Reason::StateChange,
+            Reason::Subscribed,
+            Reason::Other("brand_new_reason".into()),
+        ] {
+            assert!(!reason.makes_attention(), "{}", reason.wire());
+        }
     }
 
     #[test]

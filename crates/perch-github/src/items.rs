@@ -1,4 +1,4 @@
-//! Projects, and the items under them.
+//! Items, and the repositories they belong to.
 //!
 //! An item is one record with three optional parts: a GitHub subject, a
 //! checkout, and attention. Which parts are present decides what it looks
@@ -12,41 +12,6 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::pulls::{PullRequest, UserRef};
-
-/// A place work belongs to: some repositories, and some directories where
-/// you already work on them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Project {
-    /// The name, lower-cased.
-    pub id: String,
-    pub name: String,
-    /// `owner/repo`.
-    pub repos: Vec<String>,
-    /// Absolute paths to checkouts of those repositories.
-    pub roots: Vec<PathBuf>,
-    /// Not in config: made because an item needed a home.
-    pub implicit: bool,
-}
-
-impl Project {
-    pub fn id_for(name: &str) -> String {
-        name.trim().to_lowercase()
-    }
-
-    pub fn implicit(name: &str) -> Self {
-        Self {
-            id: Self::id_for(name),
-            name: name.trim().to_string(),
-            repos: Vec::new(),
-            roots: Vec::new(),
-            implicit: true,
-        }
-    }
-
-    pub fn claims(&self, repo_full_name: &str) -> bool {
-        self.repos.iter().any(|r| r.eq_ignore_ascii_case(repo_full_name))
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Label {
@@ -270,7 +235,10 @@ pub struct Checkout {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Item {
     pub id: String,
-    pub project_id: String,
+    /// `owner/repo`: the repository the item is in, which is what the
+    /// sidebar sections over. For a checkout this is the checkout's remote,
+    /// so a branch on a fork is the fork's even when its pull request is
+    /// upstream's.
     pub repo_full_name: String,
     pub subject: Option<Subject>,
     pub checkout: Option<Checkout>,
@@ -292,10 +260,9 @@ pub struct Item {
 
 impl Item {
     /// A fresh item with nothing set but what is given.
-    pub fn new(project_id: &str, repo_full_name: &str, now: Timestamp) -> Self {
+    pub fn new(repo_full_name: &str, now: Timestamp) -> Self {
         Self {
             id: crate::comments::new_id(),
-            project_id: project_id.to_string(),
             repo_full_name: repo_full_name.to_string(),
             subject: None,
             checkout: None,
@@ -411,7 +378,7 @@ mod tests {
     }
 
     fn item() -> Item {
-        Item::new("perch", "criccomini/perch", at("2026-09-18T10:00:00Z"))
+        Item::new("criccomini/perch", at("2026-09-18T10:00:00Z"))
     }
 
     #[test]
@@ -494,15 +461,6 @@ mod tests {
         j.archived_at = Some(at("2026-09-18T12:00:00Z"));
         assert!(j.is_archived());
         assert!(!j.is_active());
-    }
-
-    #[test]
-    fn a_project_id_is_its_name_lower_cased() {
-        assert_eq!(Project::id_for("SlateDB "), "slatedb");
-        let p = Project::implicit("perch");
-        assert!(p.implicit);
-        assert!(p.roots.is_empty());
-        assert!(!p.claims("criccomini/perch"));
     }
 
     const ISSUE_PAYLOAD: &str = r#"{
