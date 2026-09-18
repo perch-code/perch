@@ -27,6 +27,10 @@ pub struct PullRequest {
     pub changed_files: u32,
     /// `owner/repo` of the repository the pull request lives in.
     pub repo_full_name: String,
+    /// `owner/repo` of the repository the head branch is on: the same, or
+    /// a fork.
+    #[serde(default)]
+    pub head_repo_full_name: Option<String>,
     /// When GitHub last saw activity on it.
     #[serde(default)]
     pub updated_at: Option<jiff::Timestamp>,
@@ -146,11 +150,19 @@ impl PullPayload {
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| fallback_repo.to_string());
 
+        let head_repo_full_name = self
+            .head
+            .repo
+            .as_ref()
+            .map(|r| r.full_name.clone())
+            .filter(|n| !n.is_empty());
+
         PullRequest {
             number: self.number,
             title: self.title,
             author_login,
             author_avatar_url,
+            head_repo_full_name,
             head_sha: self.head.sha,
             head_ref: self.head.ref_name,
             base_sha: self.base.sha,

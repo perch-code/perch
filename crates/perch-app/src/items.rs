@@ -550,6 +550,7 @@ mod tests {
             deletions: 0,
             changed_files: 0,
             repo_full_name: "criccomini/perch".into(),
+            head_repo_full_name: None,
             updated_at: Some(at(updated)),
             review_requested: false,
             checks: None,

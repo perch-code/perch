@@ -203,6 +203,16 @@ impl Subject {
         }
     }
 
+    /// The repository the subject lives in on GitHub. For a pull request
+    /// opened from a fork this is the upstream, whichever repository the
+    /// item's checkout is of.
+    pub fn repo_full_name(&self) -> &str {
+        match self {
+            Subject::PullRequest(pr) => &pr.repo_full_name,
+            Subject::Issue(i) => &i.repo_full_name,
+        }
+    }
+
     pub fn updated_at(&self) -> Option<Timestamp> {
         match self {
             Subject::PullRequest(pr) => pr.updated_at,

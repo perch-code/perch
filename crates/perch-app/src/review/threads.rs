@@ -996,6 +996,7 @@ mod column {
             deletions: 0,
             changed_files: 0,
             repo_full_name: "slatedb/slatedb".into(),
+            head_repo_full_name: None,
             updated_at: None,
             review_requested: false,
             checks: None,

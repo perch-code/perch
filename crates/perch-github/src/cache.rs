@@ -19,7 +19,7 @@ use crate::pulls::PullRequest;
 /// The shape of the tables. A database with an older number, or none, is
 /// deleted and recreated: there is no migration, and nothing before the
 /// number was written has shipped to anyone.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Perch's own opinion about a thread: bookmarked, dismissed, or both.
 ///
@@ -210,6 +210,7 @@ impl Cache {
                 subject_kind     TEXT,
                 subject_number   INTEGER,
                 subject_json     TEXT,
+                subject_repo     TEXT,
                 branch           TEXT,
                 base_ref         TEXT,
                 head_sha         TEXT,
@@ -231,7 +232,7 @@ impl Cache {
                 CHECK (subject_kind IS NOT NULL OR branch IS NOT NULL)
             );
             CREATE UNIQUE INDEX IF NOT EXISTS items_subject
-                ON items(repo_full_name, subject_kind, subject_number)
+                ON items(subject_repo, subject_kind, subject_number)
                 WHERE subject_kind IS NOT NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS items_branch
                 ON items(repo_full_name, branch)
@@ -1077,7 +1078,7 @@ impl Cache {
             .query_row(
                 &format!(
                     "SELECT {ITEM_COLUMNS} FROM items
-                     WHERE repo_full_name = ?1 COLLATE NOCASE AND subject_kind = ?2 AND subject_number = ?3"
+                     WHERE subject_repo = ?1 COLLATE NOCASE AND subject_kind = ?2 AND subject_number = ?3"
                 ),
                 params![repo_full_name, kind.column(), number as i64],
                 read_item,
@@ -1111,8 +1112,8 @@ impl Cache {
              (id, project_id, repo_full_name, subject_kind, subject_number, subject_json,
               branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name,
               saved, pinned_at, done_at, attention_at, attention_reason, archived_at,
-              created_at, last_opened_at, additions, deletions)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+              created_at, last_opened_at, additions, deletions, subject_repo)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
                 item.id, item.project_id, item.repo_full_name,
                 c.subject_kind, c.subject_number, c.subject_json,
@@ -1128,6 +1129,7 @@ impl Cache {
                 item.last_opened_at.to_string(),
                 c.additions,
                 c.deletions,
+                c.subject_repo,
             ],
         )?;
         Ok(())
@@ -1145,7 +1147,8 @@ impl Cache {
                 subject_json = ?6, branch = ?7, base_ref = ?8, head_sha = ?9, checkout_path = ?10,
                 owned = ?11, on_disk = ?12, from_item_id = ?13, name = ?14, saved = ?15,
                 pinned_at = ?16, done_at = ?17, attention_at = ?18, attention_reason = ?19,
-                archived_at = ?20, last_opened_at = ?21, additions = ?22, deletions = ?23
+                archived_at = ?20, last_opened_at = ?21, additions = ?22, deletions = ?23,
+                subject_repo = ?24
              WHERE id = ?1",
             params![
                 item.id, item.project_id, item.repo_full_name,
@@ -1161,6 +1164,7 @@ impl Cache {
                 item.last_opened_at.to_string(),
                 c.additions,
                 c.deletions,
+                c.subject_repo,
             ],
         )?;
         Ok(())
@@ -1273,6 +1277,7 @@ struct ItemColumns {
     on_disk: i64,
     additions: Option<i64>,
     deletions: Option<i64>,
+    subject_repo: Option<String>,
 }
 
 impl ItemColumns {
@@ -1294,6 +1299,7 @@ impl ItemColumns {
             on_disk: c.map(|c| c.on_disk as i64).unwrap_or(1),
             additions: c.and_then(|c| c.churn).map(|(a, _)| a as i64),
             deletions: c.and_then(|c| c.churn).map(|(_, d)| d as i64),
+            subject_repo: item.subject.as_ref().map(|s| s.repo_full_name().to_lowercase()),
         })
     }
 }
@@ -1627,6 +1633,7 @@ mod tests {
             deletions: 2,
             changed_files: 3,
             repo_full_name: "acme/widgets".into(),
+            head_repo_full_name: None,
             updated_at: None,
             review_requested: false,
             checks: None,
@@ -2059,6 +2066,21 @@ mod tests {
         c.upsert_project(&project("other")).unwrap();
         c.update_item(&i).unwrap();
         assert_eq!(c.load_items().unwrap(), vec![i]);
+    }
+
+    #[test]
+    fn a_subject_is_found_by_its_own_repository_not_the_checkouts() {
+        // A branch on a fork with a pull request against the upstream: the
+        // item is the fork's, the pull request is upstream's, and a
+        // notification names the upstream.
+        let c = Cache::open_in_memory().unwrap();
+        c.upsert_project(&project("acme")).unwrap();
+        let mut i = branch_item("feature");
+        i.repo_full_name = "chris/widgets".into();
+        i.subject = Some(ItemSubject::PullRequest(pull_request(7)));
+        c.insert_item(&i).unwrap();
+        assert_eq!(c.find_item_by_subject("acme/widgets", ItemKind::PullRequest, 7).unwrap().map(|i| i.id), Some(i.id.clone()));
+        assert_eq!(c.find_item_by_subject("chris/widgets", ItemKind::PullRequest, 7).unwrap(), None);
     }
 
     #[test]

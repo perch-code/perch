@@ -361,18 +361,29 @@ impl Preparer {
         }
         let bare = self.store.bare_path(id);
 
+        // A name is taken when the branch exists, or when a worktree
+        // already sits at the path the name maps to: two branches can map
+        // to one path once slashes become dashes, and a checkout there is
+        // someone's work whichever branch it is on.
         let mut branch = wanted.to_string();
         let mut n = 1u32;
-        while self.branch_exists(&bare, &branch).await {
+        loop {
+            let taken = self.branch_exists(&bare, &branch).await
+                || self.store.worktree_path(id, &branch).join(".git").exists();
+            if !taken {
+                break;
+            }
             n += 1;
             branch = format!("{wanted}-{n}");
         }
 
         let worktree = self.store.worktree_path(id, &branch);
         std::fs::create_dir_all(self.store.worktrees_dir()).map_err(|e| Error::Io(e.to_string()))?;
-        // The branch is new, so a directory already at its path is a
-        // leftover from an interrupted run, not anyone's work.
-        let _ = std::fs::remove_dir_all(&worktree);
+        // Neither a branch nor a checkout, so anything at the path is a
+        // leftover from an interrupted run, and empty of git's knowledge.
+        if worktree.exists() {
+            std::fs::remove_dir_all(&worktree).map_err(|e| Error::Io(e.to_string()))?;
+        }
         let _ = self.git.run(Some(&bare), ["worktree", "prune"], WORKTREE_TIMEOUT).await;
 
         let path = worktree.to_string_lossy().into_owned();

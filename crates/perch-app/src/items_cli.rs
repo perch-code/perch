@@ -182,6 +182,7 @@ mod tests {
             deletions: 0,
             changed_files: 0,
             repo_full_name: "criccomini/perch".into(),
+            head_repo_full_name: None,
             updated_at: Some(at("2026-09-17T10:00:00Z")),
             review_requested: true,
             checks: Some(CheckStatus::Failure),
