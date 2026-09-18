@@ -217,19 +217,21 @@ fn branches(state: ReviewState) -> impl IntoView {
 fn directory(state: ReviewState, on_archive: impl Fn(String) + 'static) -> impl IntoView {
     let on_archive = std::rc::Rc::new(on_archive);
     dyn_container(
-        move || state.worktree.get(),
-        move |worktree| {
-            let Some(worktree) = worktree else {
+        move || state.item.get(),
+        move |item| {
+            let Some(checkout) = item.as_ref().and_then(|i| i.checkout.clone()).filter(|c| c.on_disk) else {
                 return Empty::new().into_any();
             };
-            let name = worktree
+            let name = checkout
                 .path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let path = worktree.path.clone();
-            let id = worktree.id.clone();
-            let on_archive = on_archive.clone();
+            let path = checkout.path.clone();
+            let id = item.as_ref().map(|i| i.id.clone()).unwrap_or_default();
+            // Only a checkout Perch owns can be archived from here; one
+            // under a root is the reader's.
+            let on_archive = checkout.owned.then(|| on_archive.clone());
 
             Stack::horizontal((
                 sidebar_glyph(SidebarIcon::Folder, theme::FG_MUTED)
@@ -246,9 +248,11 @@ fn directory(state: ReviewState, on_archive: impl Fn(String) + 'static) -> impl 
                     .style(|s| s.size(10.0, 10.0).margin_left(5.0).pointer_events_none()),
             ))
             .popout_menu(move || {
-                let on_archive = on_archive.clone();
-                let id = id.clone();
-                worktree_menu(path.clone(), Some(std::rc::Rc::new(move || on_archive(id.clone()))))
+                let archive = on_archive.clone().map(|on_archive| {
+                    let id = id.clone();
+                    std::rc::Rc::new(move || on_archive(id.clone())) as std::rc::Rc<dyn Fn()>
+                });
+                worktree_menu(path.clone(), archive)
             })
             .style(|s| {
                 s.items_center()

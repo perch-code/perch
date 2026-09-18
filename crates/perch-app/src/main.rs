@@ -89,7 +89,7 @@ fn main() {
 
                 if let Some((repo, number)) = open_at_launch.clone() {
                     review.opening.set(true);
-                    backend.open_pull_request(&repo, number);
+                    backend.open_subject(&repo, perch_github::ItemKind::PullRequest, number);
 
                     // Optionally open a file once the checkout lands, so the
                     // whole path can be exercised without a pointer.

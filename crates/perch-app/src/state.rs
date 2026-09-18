@@ -9,37 +9,22 @@ use std::sync::Arc;
 
 use floem::reactive::{Effect, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use jiff::Timestamp;
-use perch_github::{AgentConfig, Mark, SubjectDetail, Thread, Worktree};
+use perch_github::{AgentConfig, Item, ItemKind, Mark, Project, SubjectDetail, SubjectKind, Thread};
 
 use crate::backend::{Event, Status};
 use crate::filter::{self, Counts, Filters, Group, ReasonFilter, Section, Sort, View};
 
-/// Which list fills the window: the notification views, or the worktrees.
+/// What the window is showing when no review is open: the sidebar with its
+/// projects and an empty main area, or the inbox of notifications that are
+/// not about any item.
 ///
 /// The review view sits over either. `AppState::return_to` remembers which
 /// one it was opened from, so leaving a review lands where it started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Screen {
     #[default]
-    Threads,
-    Worktrees,
-}
-
-/// Which half of the worktrees list is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WorktreeSegment {
-    #[default]
-    Active,
-    Archived,
-}
-
-impl WorktreeSegment {
-    pub fn label(self) -> &'static str {
-        match self {
-            WorktreeSegment::Active => "Active",
-            WorktreeSegment::Archived => "Archived",
-        }
-    }
+    Sidebar,
+    Inbox,
 }
 
 /// How much of a set is checked.
@@ -59,8 +44,12 @@ pub struct AppState {
     pub avatars: RwSignal<HashMap<String, Arc<Vec<u8>>>>,
     /// Perch's own saved and done flags, keyed by thread id.
     pub marks: RwSignal<HashMap<String, Mark>>,
-    /// Every checkout Perch holds a record of, active and archived.
-    pub worktrees: RwSignal<Vec<Worktree>>,
+    /// Every project, declared in config or made for an item.
+    pub projects: RwSignal<Vec<Project>>,
+    /// Every item, active and archived.
+    pub items: RwSignal<Vec<Item>>,
+    /// The item whose row is selected in the sidebar: the open one.
+    pub open_item: RwSignal<Option<String>>,
     /// The agent section of config.toml: binary, defaults, and the models
     /// the picker offers.
     pub agent: RwSignal<AgentConfig>,
@@ -68,14 +57,13 @@ pub struct AppState {
     /// Cleared by the next thing that goes right.
     pub notice: RwSignal<Option<String>>,
 
-    /// Notifications or worktrees.
+    /// The sidebar, or the inbox.
     pub screen: RwSignal<Screen>,
     /// The screen a review was opened over, and returns to.
     pub return_to: RwSignal<Screen>,
-    /// Active or archived, on the worktrees screen.
-    pub worktree_segment: RwSignal<WorktreeSegment>,
-    /// The worktree the pointer is over, so a row can show its buttons.
-    pub hovered_worktree: RwSignal<Option<String>>,
+    /// The item the pointer is over, so a row can show its buttons and a
+    /// bare keystroke knows what it means.
+    pub hovered_item: RwSignal<Option<String>>,
     /// Which of Inbox, Saved and Done is showing.
     pub view: RwSignal<View>,
     pub reason_filter: RwSignal<Option<ReasonFilter>>,
@@ -125,13 +113,14 @@ impl AppState {
             details: RwSignal::new(HashMap::new()),
             avatars: RwSignal::new(HashMap::new()),
             marks: RwSignal::new(HashMap::new()),
-            worktrees: RwSignal::new(Vec::new()),
+            projects: RwSignal::new(Vec::new()),
+            items: RwSignal::new(Vec::new()),
+            open_item: RwSignal::new(None),
             notice: RwSignal::new(None),
             agent: RwSignal::new(AgentConfig::default()),
-            screen: RwSignal::new(Screen::Threads),
-            return_to: RwSignal::new(Screen::Threads),
-            worktree_segment: RwSignal::new(WorktreeSegment::Active),
-            hovered_worktree: RwSignal::new(None),
+            screen: RwSignal::new(Screen::Sidebar),
+            return_to: RwSignal::new(Screen::Sidebar),
+            hovered_item: RwSignal::new(None),
             view: RwSignal::new(View::default()),
             reason_filter: RwSignal::new(None),
             repo_filter: RwSignal::new(None),
@@ -160,18 +149,20 @@ impl AppState {
             Event::ReviewProgress { message, percent } => {
                 review.preparing.set(Preparing::Working { message, percent });
             }
-            Event::ReviewReady { pull_request, worktree, files, tree, stale_head, offline } => {
+            Event::ReviewReady { item, pull_request, files, tree, stale_head, offline } => {
                 review.preparing.set(Preparing::Idle);
                 review.changed_files.set(files);
                 review.tree.set(tree);
-                review.worktree.set(Some(worktree));
+                self.open_item.set(Some(item.id.clone()));
+                review.item.set(Some(item));
                 review.stale_head.set(stale_head);
                 review.offline.set(offline);
-                review.pull_request.set(Some(pull_request));
+                review.pull_request.set(pull_request);
+                review.ready.set(true);
             }
-            Event::CommentThreads { worktree_id, threads } => {
-                let open = review.worktree.with(|w| w.as_ref().map(|w| w.id.clone()));
-                if open.as_deref() == Some(worktree_id.as_str()) {
+            Event::CommentThreads { item_id, threads } => {
+                let open = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
+                if open.as_deref() == Some(item_id.as_str()) {
                     review.comment_threads.set(Arc::new(threads));
                 }
             }
@@ -190,16 +181,27 @@ impl AppState {
                     review.archived.set(Some(added));
                 }
             }
-            Event::Worktrees(worktrees) => {
-                // The open review can be archived from the list, or by the
-                // sweep. Its files are gone, so the view goes with them.
-                let open = review.worktree.with(|w| w.as_ref().map(|w| w.id.clone()));
+            Event::Items(items) => {
+                // The open review can be archived from the sidebar, or by
+                // the sweep, or deleted. Its files are gone, so the view
+                // goes with them. Otherwise the header follows the row, so
+                // a branch that gained a pull request fills in.
+                let open = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
                 if let Some(open) = open {
-                    if worktrees.iter().any(|w| w.id == open && w.is_archived()) {
-                        self.leave_review(review);
+                    match items.iter().find(|i| i.id == open) {
+                        Some(i) if i.is_archived() => self.leave_review(review),
+                        Some(i) => {
+                            review.item.set(Some(Arc::new(i.clone())));
+                            if let Some(pr) = i.pull_request() {
+                                if review.pull_request.with(|p| p.as_ref().map(|p| p.number) != Some(pr.number)) {
+                                    review.pull_request.set(Some(Arc::new(pr.clone())));
+                                }
+                            }
+                        }
+                        None => self.leave_review(review),
                     }
                 }
-                self.apply(Event::Worktrees(worktrees));
+                self.apply(Event::Items(items));
             }
             Event::ReviewFailed { message } => {
                 review.preparing.set(Preparing::Failed { message });
@@ -277,17 +279,17 @@ impl AppState {
                 // resurfaced one leaves Done the same way.
                 self.prune_selection();
             }
-            Event::Worktrees(worktrees) => {
-                self.worktrees.set(worktrees);
+            Event::Items(items) => {
+                self.items.set(items);
                 self.notice.set(None);
+                // A notification that has become an item leaves the inbox,
+                // and with it any check it had.
+                self.prune_selection();
             }
+            Event::Projects(projects) => self.projects.set(projects),
             Event::Notice(message) => self.notice.set(Some(message)),
             Event::AgentConfig(agent) => self.agent.set(agent),
             Event::Archived { .. } | Event::CommentThreads { .. } | Event::AgentStep { .. } => {}
-            Event::WorktreeFailed { id, message } => {
-                tracing::warn!(id, message, "worktree action refused");
-                self.notice.set(Some(message));
-            }
             Event::ReviewProgress { .. }
             | Event::ReviewReady { .. }
             | Event::ReviewFailed { .. }
@@ -315,11 +317,19 @@ impl AppState {
         }
     }
 
-    /// Every thread the app can show: the live inbox, plus a snapshot for any
-    /// marked thread GitHub has stopped returning.
+    /// Every thread the inbox can show: the live inbox, plus a snapshot for
+    /// any marked thread GitHub has stopped returning, less every thread
+    /// that is about an item. Those have become the item's attention and
+    /// are acted on there; the two sets are disjoint by construction.
     pub fn pool(&self) -> Vec<Thread> {
-        self.threads
-            .with(|live| self.marks.with(|marks| filter::pool(live, marks)))
+        let pool = self
+            .threads
+            .with(|live| self.marks.with(|marks| filter::pool(live, marks)));
+        self.items.with(|items| {
+            pool.into_iter()
+                .filter(|t| !resolves_to_item(t, items))
+                .collect()
+        })
     }
 
     /// The ids the API still returns.
@@ -551,46 +561,39 @@ impl AppState {
     }
 
     /// Show a screen, leaving any review. The inbox's filters and selection
-    /// are not touched: crossing to Worktrees and back should find the
+    /// are not touched: crossing to the sidebar and back should find the
     /// inbox exactly as it was left.
     pub fn show_screen(&self, review: crate::review::model::ReviewState, screen: Screen) {
         review.close();
+        self.open_item.set(None);
         self.screen.set(screen);
         self.notice.set(None);
     }
 
-    /// The rows of one segment, most recently touched first.
-    pub fn worktrees_in(&self, segment: WorktreeSegment) -> Vec<Worktree> {
-        self.worktrees.with(|all| {
-            let mut rows: Vec<Worktree> = all
-                .iter()
-                .filter(|w| w.is_archived() == (segment == WorktreeSegment::Archived))
-                .cloned()
-                .collect();
-            rows.sort_by_key(|w| std::cmp::Reverse(worktree_time(w)));
-            rows
-        })
+    pub fn item(&self, id: &str) -> Option<Item> {
+        self.items.with(|all| all.iter().find(|i| i.id == id).cloned())
     }
 
-    /// Rows of one segment grouped by repository, in the order of each
-    /// repository's most recent row.
-    pub fn worktree_groups(&self, segment: WorktreeSegment) -> Vec<(String, Vec<Worktree>)> {
-        let mut groups: Vec<(String, Vec<Worktree>)> = Vec::new();
-        for row in self.worktrees_in(segment) {
-            match groups.iter_mut().find(|(name, _)| *name == row.repo_full_name) {
-                Some((_, rows)) => rows.push(row),
-                None => groups.push((row.repo_full_name.clone(), vec![row])),
-            }
-        }
-        groups
+    pub fn project(&self, id: &str) -> Option<Project> {
+        self.projects.with(|all| all.iter().find(|p| p.id == id).cloned())
     }
 
-    pub fn worktree_count(&self, segment: WorktreeSegment) -> usize {
-        self.worktrees.with(|all| {
-            all.iter()
-                .filter(|w| w.is_archived() == (segment == WorktreeSegment::Archived))
-                .count()
-        })
+    /// Items with attention newer than their Done, newest attention first.
+    pub fn priority_items(&self) -> Vec<Item> {
+        let mut out: Vec<Item> = self
+            .items
+            .with(|all| all.iter().filter(|i| i.needs_attention() && !i.is_archived()).cloned().collect());
+        out.sort_by_key(|i| std::cmp::Reverse(i.attention_at));
+        out
+    }
+
+    /// A project's active items, most recent activity first.
+    pub fn project_items(&self, project_id: &str) -> Vec<Item> {
+        let mut out: Vec<Item> = self
+            .items
+            .with(|all| all.iter().filter(|i| i.project_id == project_id && i.is_active()).cloned().collect());
+        out.sort_by_key(|i| std::cmp::Reverse(i.last_activity()));
+        out
     }
 
     /// The owner avatar the inbox already holds for a repository, if any.
@@ -633,8 +636,17 @@ impl AppState {
 
 }
 
-/// When a worktree row was last touched: archived rows by when they were put
-/// away, active ones by when they were opened.
-pub fn worktree_time(w: &Worktree) -> Timestamp {
-    w.archived_at.unwrap_or(w.last_opened_at)
+/// Whether a notification is about an item: same repository, same kind,
+/// same number.
+pub fn resolves_to_item(thread: &Thread, items: &[Item]) -> bool {
+    let kind = match thread.subject.kind {
+        SubjectKind::PullRequest => ItemKind::PullRequest,
+        SubjectKind::Issue => ItemKind::Issue,
+        _ => return false,
+    };
+    let Some(number) = thread.number_hint() else { return false };
+    items.iter().any(|i| {
+        i.repo_full_name.eq_ignore_ascii_case(&thread.repository.full_name)
+            && i.subject.as_ref().is_some_and(|s| s.kind() == kind && s.number() == number)
+    })
 }

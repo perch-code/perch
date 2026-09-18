@@ -75,7 +75,7 @@ pub fn worktree_menu(
     if let Some(archive) = on_archive {
         menu = menu
             .separator()
-            .item("Archive Worktree", move |item| item.action(move || archive()));
+            .item("Archive", move |item| item.action(move || archive()));
     }
     menu
 }

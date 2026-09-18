@@ -190,8 +190,8 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
     let anchor_label = match &composer.anchor {
         Some(a) => a.label(),
         None => state
-            .worktree
-            .with(|w| w.as_ref().map(|w| w.branch.clone()))
+            .item
+            .with(|i| i.as_ref().and_then(|i| i.branch().map(str::to_string)))
             .unwrap_or_else(|| "Worktree".to_string()),
     };
     let outdated = composer
@@ -220,11 +220,11 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
                 return;
             }
             let Some(composer) = state.composer.get() else { return };
-            let Some(worktree_id) = state.worktree.with(|w| w.as_ref().map(|w| w.id.clone())) else {
+            let Some(item_id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
                 return;
             };
             backend.ask(
-                &worktree_id,
+                &item_id,
                 composer.thread_id.clone(),
                 composer.anchor.clone(),
                 question.trim(),
@@ -860,8 +860,8 @@ mod column {
     use floem::prelude::{Code, KeyboardEvent, Modifiers};
     use floem::reactive::{SignalGet, SignalUpdate};
     use perch_github::{
-        Anchor, Author, CommentMessage, CommentThread, PullRequest, RunRecord, RunStatus, RunStep, Side,
-        ThreadOrigin, Worktree,
+        Anchor, Author, CommentMessage, CommentThread, Item, ItemCheckout, ItemSubject, PullRequest,
+        RunRecord, RunStatus, RunStep, Side, ThreadOrigin,
     };
 
     use crate::review::model::ReviewState;
@@ -955,25 +955,25 @@ mod column {
             review_decision: None,
         };
         let now = "2026-09-18T09:59:00Z".parse().unwrap();
-        state.worktree.set(Some(Arc::new(Worktree {
-            id: "wt".into(),
-            repo_full_name: "slatedb/slatedb".into(),
+        let mut item = Item::new("slatedb", "slatedb/slatedb", now);
+        item.id = "wt".into();
+        item.subject = Some(ItemSubject::PullRequest(pr.clone()));
+        item.checkout = Some(ItemCheckout {
             branch: "perch/pr-812".into(),
             base_ref: "main".into(),
-            pr_number: Some(812),
             head_sha: "h".into(),
             path: std::path::PathBuf::from("/tmp/wt"),
-            created_at: now,
-            last_opened_at: now,
-            archived_at: None,
-            pull_request: Some(pr.clone()),
-        })));
+            owned: true,
+            on_disk: true,
+        });
+        state.item.set(Some(Arc::new(item)));
+        state.ready.set(true);
         state.pull_request.set(Some(Arc::new(pr)));
         state.comment_threads.set(Arc::new(vec![thread()]));
         state.threads_open.set(true);
         // See the field: a focused editor cannot be driven headlessly.
         state.composer_autofocus.set(false);
-        let (backend, _events) = crate::backend::spawn();
+        let backend = crate::backend::Backend::detached();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
         harness.rebuild();

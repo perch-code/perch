@@ -7,7 +7,7 @@ pub mod status;
 pub mod titlebar;
 pub mod toolbar;
 pub mod widgets;
-pub mod worktrees;
+pub mod items;
 
 use std::rc::Rc;
 
@@ -48,17 +48,17 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             // dismiss it. The backend never needs to know; the click already
             // has it, and a round trip would only be a way of forgetting.
             review.thread_id.set(Some(thread_id.to_string()).filter(|id| !id.is_empty()));
-            backend.open_pull_request(repo, number);
+            backend.open_subject(repo, perch_github::ItemKind::PullRequest, number);
         }
     });
 
-    // Opening from the worktrees list. An archived row is restored on the
-    // way, which the backend treats as the same act.
-    let open_worktree: worktrees::OpenWorktree = Rc::new({
+    // Opening from the sidebar. An archived row is restored on the way,
+    // which the backend treats as the same act.
+    let open_item: items::OpenItem = Rc::new({
         let backend = backend.clone();
-        move |worktree: &perch_github::Worktree| {
+        move |item: &perch_github::Item| {
             review.preparing.set(crate::review::model::Preparing::Working {
-                message: if worktree.is_archived() {
+                message: if item.is_archived() {
                     "Checking out the files".into()
                 } else {
                     "Reading the pull request".into()
@@ -66,16 +66,17 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 percent: None,
             });
             state.begin_review(review);
+            state.open_item.set(Some(item.id.clone()));
             review.thread_id.set(None);
-            if worktree.is_archived() {
-                backend.restore_worktree(&worktree.id);
+            if item.is_archived() {
+                backend.restore_item(&item.id);
             } else {
-                backend.open_worktree(&worktree.id);
+                backend.open_item(&item.id);
             }
         }
     });
-    let list_backend = backend.clone();
-    let panel_open = open_worktree.clone();
+    let panel_backend = backend.clone();
+    let panel_open = open_item.clone();
 
     // Every way of marking a thread lands here, so each of them costs the
     // backend one write and the UI one event.
@@ -101,7 +102,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         // The handle is absolutely placed over the panel's
                         // right edge, so the panel is its positioning box.
                         floem::views::Container::new(Stack::horizontal((
-                            sidebar::nav_panel(state, review, panel_open.clone()),
+                            sidebar::nav_panel(state, review, panel_backend.clone(), panel_open.clone()),
                             sidebar::resize_handle(state),
                         )))
                         .style(|s| {
@@ -128,11 +129,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                             review_mark.clone(),
                         )
                         .into_any()
-                    } else if screen == Screen::Worktrees {
-                        worktrees::worktrees_screen(
-                            state,
-                            list_backend.clone(),
-                            open_worktree.clone(),
+                    } else if screen == Screen::Sidebar {
+                        widgets::centered_message(
+                            crate::icons::SidebarIcon::Branch,
+                            || "Nothing open".to_string(),
+                            || "Pick a pull request, an issue, or a branch from the sidebar.".to_string(),
                         )
                         .into_any()
                     } else {
@@ -161,7 +162,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // box reports its own.
         if key.modifiers.is_empty()
             && !review.is_showing()
-            && state.screen.get() == Screen::Threads
+            && state.screen.get() == Screen::Inbox
             && !state.search_focused.get()
             && matches!(key.code, Code::KeyE | Code::KeyS | Code::Escape)
         {
@@ -271,11 +272,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             // The two sections, numbered the way an editor numbers its
             // panels.
             Code::Digit1 => {
-                state.show_screen(review, Screen::Threads);
+                state.show_screen(review, Screen::Sidebar);
                 EventPropagation::Stop
             }
             Code::Digit2 => {
-                state.show_screen(review, Screen::Worktrees);
+                state.show_screen(review, Screen::Inbox);
                 EventPropagation::Stop
             }
             _ => EventPropagation::Continue,

@@ -7,31 +7,35 @@ use floem::views::{Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_co
 use crate::filter::{ReasonFilter, View};
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::state::{AppState, Screen, WorktreeSegment};
+use crate::state::{AppState, Screen};
 use crate::theme;
+use crate::ui::items::{item_row, section_header, OpenItem};
 use crate::ui::titlebar::title_bar;
 use crate::ui::widgets::{avatar, count_badge, section_heading, sidebar_row};
-use crate::ui::worktrees::OpenWorktree;
-use perch_github::Worktree;
 
 /// The navigation panel: views, reason filters, and the repository list.
 ///
 /// Sits beside the activity rail and hides when the rail's current entry is
 /// clicked, the way an editor's explorer does.
-pub fn nav_panel(state: AppState, review: ReviewState, on_open: OpenWorktree) -> impl IntoView {
-    // A review belongs to the worktrees section, whichever screen it was
-    // opened from, so the panel beside it lists worktrees. The rail entry
-    // follows the same rule, and the two must agree.
+pub fn nav_panel(
+    state: AppState,
+    review: ReviewState,
+    backend: std::rc::Rc<crate::backend::Backend>,
+    on_open: OpenItem,
+) -> impl IntoView {
+    // A review belongs to the sidebar, whichever screen it was opened
+    // from, so the panel beside it lists projects. The rail entry follows
+    // the same rule, and the two must agree.
     dyn_container(
         move || {
             if review.is_showing() {
-                Screen::Worktrees
+                Screen::Sidebar
             } else {
                 state.screen.get()
             }
         },
         move |screen| match screen {
-            Screen::Threads => Stack::vertical((
+            Screen::Inbox => Stack::vertical((
                 Empty::new().style(|s| s.height(8.0).width_full().flex_shrink(0.0_f32)),
                 views_section(state, review),
                 section_heading("Filters"),
@@ -41,7 +45,7 @@ pub fn nav_panel(state: AppState, review: ReviewState, on_open: OpenWorktree) ->
             ))
             .style(|s| s.size_full().flex_col())
             .into_any(),
-            Screen::Worktrees => worktrees_panel(state, review, on_open.clone()).into_any(),
+            Screen::Sidebar => items_panel(state, backend.clone(), on_open.clone()).into_any(),
         },
     )
     .style(move |s| {
@@ -198,7 +202,7 @@ fn view_row(
     Container::new(content)
         .on_event_stop(el::Click, move |_, _| {
             // Doubles as the way back from a pull request.
-            state.show_screen(review, Screen::Threads);
+            state.show_screen(review, Screen::Inbox);
             // Filters carry over, the way the web keeps a search when you
             // cross from the inbox into Done. Clearing them here made this a
             // reset button nobody asked for.
@@ -222,203 +226,91 @@ fn view_row(
         })
 }
 
-/// The worktrees panel: every active checkout under its repository, the way
-/// an editor lists open projects, with Archived as one row at the bottom.
-///
-/// The worktree being read is lifted to the top of its repository and wears
-/// the card, so the panel always says where the reader is.
-fn worktrees_panel(state: AppState, review: ReviewState, on_open: OpenWorktree) -> impl IntoView {
-    let open_id = move || review.worktree.with(|w| w.as_ref().map(|w| w.id.clone()));
-
-    let groups = move || {
-        let open = open_id();
-        let mut groups = state.worktree_groups(WorktreeSegment::Active);
-        for (_, rows) in &mut groups {
-            if let Some(i) = rows.iter().position(|w| Some(&w.id) == open.as_ref()) {
-                let row = rows.remove(i);
-                rows.insert(0, row);
-            }
-        }
-        groups
-    };
+/// The projects panel: what needs attention, then each project's items.
+fn items_panel(
+    state: AppState,
+    backend: std::rc::Rc<crate::backend::Backend>,
+    on_open: OpenItem,
+) -> impl IntoView {
+    let priority_backend = backend.clone();
+    let priority_open = on_open.clone();
 
     Stack::vertical((
-        Empty::new().style(|s| s.height(4.0).width_full().flex_shrink(0.0_f32)),
+        Stack::vertical((
+            section_header("Priority".into(), 0),
+            dyn_stack(
+                move || state.priority_items(),
+                |i| (i.id.clone(), i.attention_at, i.done_at, i.saved),
+                move |item| {
+                    let project = state.project(&item.project_id);
+                    item_row(state, priority_backend.clone(), item, project, false, priority_open.clone())
+                },
+            )
+            .style(|s| s.flex_col().width_full().gap(1.0)),
+            dyn_container(
+                move || state.priority_items().is_empty(),
+                |empty| {
+                    if empty {
+                        Label::derived(|| "Nothing needs attention".to_string())
+                            .style(|s| {
+                                s.font_size(theme::TEXT_META)
+                                    .color(theme::FG_SUBTLE)
+                                    .padding_horiz(16.0)
+                                    .padding_vert(6.0)
+                                    .selectable(false)
+                            })
+                            .into_any()
+                    } else {
+                        Empty::new().into_any()
+                    }
+                },
+            ),
+        ))
+        .style(|s| s.flex_col().width_full()),
         dyn_stack(
-            groups,
-            |(repo, rows)| (repo.clone(), rows.iter().map(|w| w.id.clone()).collect::<Vec<_>>()),
-            move |(repo, rows)| repo_group(state, review, repo, rows, on_open.clone()),
+            move || {
+                state.projects.with(|all| {
+                    all.iter()
+                        .filter(|p| !state.project_items(&p.id).is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+            },
+            |p| p.id.clone(),
+            move |project| project_section(state, backend.clone(), project, on_open.clone()),
         )
-        .style(|s| s.flex_col().width_full().padding_bottom(10.0))
-        .scroll()
-        .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
-        Empty::new().style(|s| s.height(1.0).width_full().background(theme::BORDER_MUTED)),
-        Empty::new().style(|s| s.height(6.0).width_full().flex_shrink(0.0_f32)),
-        segment_row(state, review, WorktreeSegment::Archived),
-        Empty::new().style(|s| s.height(6.0).width_full().flex_shrink(0.0_f32)),
+        .style(|s| s.flex_col().width_full().padding_bottom(10.0)),
     ))
-    .style(|s| s.size_full().flex_col())
+    .style(|s| s.flex_col().width_full())
+    .scroll()
+    .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
 }
 
-fn repo_group(
+fn project_section(
     state: AppState,
-    review: ReviewState,
-    repo: String,
-    rows: Vec<Worktree>,
-    on_open: OpenWorktree,
+    backend: std::rc::Rc<crate::backend::Backend>,
+    project: perch_github::Project,
+    on_open: OpenItem,
 ) -> impl IntoView {
-    // The owner is in every row's branch and in the card on the screen
-    // beside this; the heading only needs the name.
-    let name = repo.rsplit('/').next().unwrap_or(&repo).to_string();
-
+    let id = project.id.clone();
+    let count_id = project.id.clone();
+    let row_project = project.clone();
     Stack::vertical((
-        Label::derived(move || name.clone()).style(|s| {
-            s.font_size(theme::TEXT_META)
-                .color(theme::FG_SUBTLE)
-                .padding_horiz(16.0)
-                .padding_top(14.0)
-                .padding_bottom(5.0)
-                .text_ellipsis()
-                .selectable(false)
-        }),
+        dyn_container(
+            move || state.project_items(&count_id).len(),
+            {
+                let name = project.name.clone();
+                move |count| section_header(name.clone(), count).into_any()
+            },
+        ),
         dyn_stack(
-            move || rows.clone(),
-            |w| w.id.clone(),
-            move |w| worktree_row(state, review, w, on_open.clone()),
+            move || state.project_items(&id),
+            |i| (i.id.clone(), i.attention_at, i.done_at, i.saved, i.name.clone(), i.subject.as_ref().map(|s| s.title().to_string())),
+            move |item| item_row(state, backend.clone(), item, Some(row_project.clone()), false, on_open.clone()),
         )
         .style(|s| s.flex_col().width_full().gap(1.0)),
     ))
     .style(|s| s.flex_col().width_full())
-}
-
-/// One checkout: a dot in the pull request's colour, and its title.
-fn worktree_row(
-    state: AppState,
-    review: ReviewState,
-    worktree: Worktree,
-    on_open: OpenWorktree,
-) -> impl IntoView {
-    use floem::peniko::Color;
-    use floem::text::FontWeight;
-
-    // One closure per use: each captures a String, so none of them is Copy.
-    let (id_a, id_b, id_c, id_d) =
-        (worktree.id.clone(), worktree.id.clone(), worktree.id.clone(), worktree.id.clone());
-    let is = |id: String| move || review.worktree.with(|w| w.as_ref().is_some_and(|w| w.id == id));
-    let (selected_dot, selected_text, selected_click, selected_box) =
-        (is(id_a), is(id_b), is(id_c), is(id_d));
-    let title = worktree
-        .pull_request
-        .as_ref()
-        .map(|pr| pr.title.clone())
-        .unwrap_or_else(|| worktree.branch.clone());
-    let color = crate::ui::worktrees::state_color_of(&worktree);
-    let open_target = worktree.clone();
-
-    let content = Stack::horizontal((
-        Empty::new().style(move |s| {
-            let base = s.size(8.0, 8.0).border_radius(4.0).flex_shrink(0.0_f32);
-            // Filled while it is the one being read; a ring otherwise.
-            if selected_dot() {
-                base.background(color)
-            } else {
-                base.border(1.5).border_color(color)
-            }
-        }),
-        Label::derived(move || title.clone()).style(move |s| {
-            s.font_size(theme::TEXT_BODY)
-                .font_weight(if selected_text() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
-                .color(if selected_text() { theme::FG } else { theme::FG_MUTED })
-                .margin_left(10.0)
-                .text_ellipsis()
-                .min_width(0.0)
-                .flex_grow(1.0_f32)
-        }),
-    ))
-    .style(|s| s.items_center().width_full().min_width(0.0));
-
-    Container::new(content)
-        .on_event_stop(el::Click, move |_, _| {
-            if !selected_click() {
-                state.show_screen(review, Screen::Worktrees);
-                on_open(&open_target);
-            }
-        })
-        .style(move |s| {
-            let base = crate::ui::widgets::clickable(s)
-                .width_full()
-                .height(30.0)
-                .items_center()
-                .padding_horiz(10.0)
-                .margin_horiz(6.0)
-                .border_radius(theme::RADIUS);
-            if selected_box() {
-                base.background(theme::CANVAS_SELECTED).border(1.0).border_color(Color::TRANSPARENT)
-            } else {
-                base.border(1.0)
-                    .border_color(Color::TRANSPARENT)
-                    .hover(|s| s.background(theme::CANVAS_HOVER))
-            }
-        })
-}
-
-/// Active or Archived, in the worktrees panel. Same card as a view row, so
-/// the two sections of the app read as one control.
-fn segment_row(state: AppState, review: ReviewState, segment: WorktreeSegment) -> impl IntoView {
-    use floem::peniko::Color;
-    use floem::text::FontWeight;
-
-    let selected = move || state.worktree_segment.get() == segment && !review.is_open();
-    let count = move || state.worktree_count(segment);
-    let icon = match segment {
-        WorktreeSegment::Active => SidebarIcon::Branch,
-        WorktreeSegment::Archived => SidebarIcon::Archive,
-    };
-
-    let content = Stack::horizontal((
-        dyn_container(
-            move || if selected() { theme::FG } else { theme::FG_MUTED },
-            move |c| crate::ui::widgets::sidebar_glyph(icon, c).into_any(),
-        )
-        .style(|s| s.size(16.0, 16.0)),
-        Label::derived(move || segment.label()).style(move |s| {
-            s.font_size(theme::TEXT_BODY)
-                .font_weight(if selected() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
-                .color(if selected() { theme::FG } else { theme::FG_MUTED })
-                .margin_left(9.0)
-                .flex_grow(1.0_f32)
-        }),
-        dyn_container(count, move |n| {
-            if n == 0 {
-                Empty::new().into_any()
-            } else {
-                count_badge(move || n).into_any()
-            }
-        }),
-    ))
-    .style(|s| s.items_center().width_full());
-
-    Container::new(content)
-        .on_event_stop(el::Click, move |_, _| {
-            state.show_screen(review, Screen::Worktrees);
-            state.worktree_segment.set(segment);
-        })
-        .style(move |s| {
-            let base = crate::ui::widgets::clickable(s)
-                .width_full()
-                .height(34.0)
-                .items_center()
-                .padding_horiz(10.0)
-                .margin_horiz(6.0)
-                .border_radius(theme::RADIUS);
-            if selected() {
-                base.background(theme::CANVAS_SELECTED).border(1.0).border_color(Color::TRANSPARENT)
-            } else {
-                base.border(1.0)
-                    .border_color(Color::TRANSPARENT)
-                    .hover(|s| s.background(theme::CANVAS_HOVER))
-            }
-        })
 }
 
 fn filters_section(state: AppState) -> impl IntoView {
@@ -539,8 +431,8 @@ pub fn activity_rail(state: AppState, review: ReviewState) -> impl IntoView {
         // The lights sit over this.
         title_bar(Empty::new())
             .style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().flex_shrink(0.0_f32)),
+        rail_entry(state, review, RailSection::Projects),
         rail_entry(state, review, RailSection::Notifications),
-        rail_entry(state, review, RailSection::Worktrees),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
     ))
     .style(|s| {
@@ -560,9 +452,9 @@ pub fn activity_rail(state: AppState, review: ReviewState) -> impl IntoView {
 enum RailSection {
     /// Inbox, Saved and Done, chosen in the panel beside the rail.
     Notifications,
-    /// The checkouts, active and archived. A review is one of these being
-    /// read, so the entry stays current while one is open.
-    Worktrees,
+    /// The projects and their items. A review is one of these being read,
+    /// so the entry stays current while one is open.
+    Projects,
 }
 
 /// One rail entry: a glyph, a stripe while its section is on screen, and
@@ -574,18 +466,16 @@ fn rail_entry(state: AppState, review: ReviewState, section: RailSection) -> imp
 
     let unread = move || match section {
         RailSection::Notifications => state.counts().unread,
-        // A count of worktrees is not something to act on.
-        RailSection::Worktrees => 0,
+        // A count of items is not something to act on.
+        RailSection::Projects => 0,
     };
     let active = move || match section {
-        RailSection::Notifications => {
-            !review.is_showing() && state.screen.get() == Screen::Threads
-        }
-        RailSection::Worktrees => review.is_showing() || state.screen.get() == Screen::Worktrees,
+        RailSection::Notifications => !review.is_showing() && state.screen.get() == Screen::Inbox,
+        RailSection::Projects => review.is_showing() || state.screen.get() == Screen::Sidebar,
     };
     let glyph = match section {
         RailSection::Notifications => SidebarIcon::Bell,
-        RailSection::Worktrees => SidebarIcon::Branch,
+        RailSection::Projects => SidebarIcon::Branch,
     };
 
     Container::new(
@@ -623,8 +513,8 @@ fn rail_entry(state: AppState, review: ReviewState, section: RailSection) -> imp
             // Over from the other section, or back from a pull request,
             // with the panel showing so the section's lists are in reach.
             let screen = match section {
-                RailSection::Notifications => Screen::Threads,
-                RailSection::Worktrees => Screen::Worktrees,
+                RailSection::Notifications => Screen::Inbox,
+                RailSection::Projects => Screen::Sidebar,
             };
             state.show_screen(review, screen);
             state.sidebar_open.set(true);

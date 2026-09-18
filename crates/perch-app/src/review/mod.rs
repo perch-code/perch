@@ -75,7 +75,7 @@ pub fn review_view(
     // leaves everything as it was, with the reason in the status line.
     let on_archive = {
         let backend = backend.clone();
-        move |id: String| backend.archive_worktree(&id)
+        move |id: String| backend.archive_item(&id)
     };
 
     Stack::vertical((

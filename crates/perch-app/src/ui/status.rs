@@ -36,14 +36,17 @@ pub fn status_bar(
             move |(open, screen)| {
                 if open {
                     crate::review::review_status(review).into_any()
-                } else if screen == Screen::Worktrees {
+                } else if screen == Screen::Sidebar {
                     Label::derived(move || {
-                        let active = state.worktree_count(crate::state::WorktreeSegment::Active);
-                        let archived =
-                            state.worktree_count(crate::state::WorktreeSegment::Archived);
+                        let (active, archived) = state.items.with(|all| {
+                            (
+                                all.iter().filter(|i| i.is_active()).count(),
+                                all.iter().filter(|i| i.is_archived()).count(),
+                            )
+                        });
                         match (active, archived) {
-                            (1, 0) => "1 worktree".to_string(),
-                            (n, 0) => format!("{n} worktrees"),
+                            (1, 0) => "1 item".to_string(),
+                            (n, 0) => format!("{n} items"),
                             (n, a) => format!("{n} active, {a} archived"),
                         }
                     })

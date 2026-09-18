@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use perch_git::{ChangeStatus, ChangedFile, DisplayBuffer, TreeEntry};
-use perch_github::{Anchor, CommentThread, PullRequest, Worktree};
+use perch_github::{Anchor, CommentThread, Item, PullRequest};
 use perch_syntax::{Language, LineSpans};
 
 /// A file prepared for the editor: text to render, and everything needed to
@@ -87,8 +87,12 @@ pub struct Tab {
 pub struct ReviewState {
     /// `None` when the inbox is showing.
     pub pull_request: RwSignal<Option<Arc<PullRequest>>>,
-    /// The checkout this review is reading from.
-    pub worktree: RwSignal<Option<Arc<Worktree>>>,
+    /// The item this review is reading: its checkout, and its pull request
+    /// when it has one.
+    pub item: RwSignal<Option<Arc<Item>>>,
+    /// True once the checkout is ready, whether or not there is a pull
+    /// request to show.
+    pub ready: RwSignal<bool>,
     /// The head the pull request moved to while the worktree had work in
     /// it. The files on screen are the older ones.
     pub stale_head: RwSignal<Option<String>>,
@@ -181,7 +185,8 @@ impl ReviewState {
     pub fn new() -> Self {
         Self {
             pull_request: RwSignal::new(None),
-            worktree: RwSignal::new(None),
+            item: RwSignal::new(None),
+            ready: RwSignal::new(false),
             stale_head: RwSignal::new(None),
             offline: RwSignal::new(false),
             thread_id: RwSignal::new(None),
@@ -221,7 +226,7 @@ impl ReviewState {
     }
 
     pub fn is_open(&self) -> bool {
-        self.pull_request.with(|p| p.is_some())
+        self.ready.get()
     }
 
     /// Whether the review view should be on screen at all.
@@ -233,7 +238,8 @@ impl ReviewState {
     pub fn close(&self) {
         self.opening.set(false);
         self.pull_request.set(None);
-        self.worktree.set(None);
+        self.item.set(None);
+        self.ready.set(false);
         self.stale_head.set(None);
         self.offline.set(false);
         self.thread_id.set(None);
@@ -380,7 +386,7 @@ impl ReviewState {
         let mut heads = (first..=last).filter_map(|d| file.buffer.head_line(d));
         let start = heads.next()?;
         let end = heads.next_back().unwrap_or(start);
-        let commit_sha = self.worktree.with(|w| w.as_ref().map(|w| w.head_sha.clone()))?;
+        let commit_sha = self.item.with(|i| i.as_ref().and_then(|i| i.checkout.as_ref()).map(|c| c.head_sha.clone()))?;
         Some(Anchor {
             path: file.path.clone(),
             start_line: start as u32 + 1,

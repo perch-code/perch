@@ -16,7 +16,8 @@ use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, Store};
 use perch_github::{
     resolve_token, Anchor, Author, Cache, CommentMessage, CommentThread, Config, DetailSource,
-    GitHub, Mark, RunRecord, RunStatus, SubjectDetail, Thread, ThreadOrigin, Worktree,
+    GitHub, Item, ItemCheckout, ItemKind, ItemSubject, Mark, Project, PullRequest, Reason,
+    RunRecord, RunStatus, SubjectDetail, SubjectKind, Thread, ThreadOrigin,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
@@ -56,8 +57,13 @@ impl Fetches {
 #[derive(Debug, Clone)]
 pub enum Command {
     Refresh,
-    /// Turn a notification into a checkout and open the review view.
-    OpenPullRequest { repo_full_name: String, number: u64 },
+    /// Open an item's view: the review for a pull request or a branch, the
+    /// issue view for an issue. Prepares the checkout when there is one to
+    /// prepare.
+    OpenItem { id: String },
+    /// Turn a notification into an item, or find the one it already has,
+    /// and open it.
+    OpenSubject { repo_full_name: String, kind: ItemKind, number: u64 },
     /// Read, diff, and highlight one file of the open checkout.
     OpenFile { path: String },
     /// Ask the language server about a position. `token` lets the UI drop an
@@ -66,21 +72,31 @@ pub enum Command {
     Definition { token: u64, path: String, line: u32, character: u32 },
     CloseReview,
 
-    /// Open a checkout from the Worktrees list. Fetches the pull request
-    /// when it can, and opens what is on disk when it cannot.
-    OpenWorktree { id: String },
-    /// Remove the directory, keep the branch and the row. Refused when
-    /// there is uncommitted work in it.
-    ArchiveWorktree { id: String },
-    /// Put an archived worktree back on disk and open it.
-    RestoreWorktree { id: String },
-    /// Delete the branch and the row of an archived worktree.
-    ForgetWorktree { id: String },
+    /// Leave Active. An owned checkout's directory goes too, refused when
+    /// there is uncommitted work in it; a checkout under a root is left
+    /// alone and only the row is hidden.
+    ArchiveItem { id: String },
+    /// Back to Active, and an owned checkout back on disk.
+    RestoreItem { id: String },
+    /// Remove the row and its threads. An owned checkout's directory and
+    /// branch go too; anything under a root is not touched.
+    DeleteItem { id: String },
+    /// Saved and Done, each left alone when `None`.
+    MarkItem { id: String, saved: Option<bool>, done: Option<bool> },
+    PinItem { id: String, pinned: bool },
+    /// Attention now, reason `manual`.
+    MarkUnread { id: String },
+    RenameItem { id: String, name: Option<String> },
+    /// `project_id` of `None` with `new_project` set makes an implicit
+    /// project of that name first.
+    MoveItem { id: String, project_id: Option<String>, new_project: Option<String> },
+    /// Rescan roots and re-ask GitHub about subject-less branches.
+    RefreshItems,
 
-    /// Ask the agent a question in the open worktree. `thread_id` of `None`
+    /// Ask the agent a question in an item's checkout. `thread_id` of `None`
     /// starts a thread; the anchor is ignored on a follow-up.
     Ask {
-        worktree_id: String,
+        item_id: String,
         thread_id: Option<String>,
         anchor: Option<Anchor>,
         question: String,
@@ -117,12 +133,10 @@ pub enum Event {
     /// Every mark Perch holds. Sent whole rather than as a patch, because
     /// the set is small and a replacement cannot drift.
     Marks(Vec<Mark>),
-    /// Every worktree Perch has a record of, active and archived. Whole,
-    /// for the same reason marks are.
-    Worktrees(Vec<Worktree>),
-    /// Something asked of a worktree could not be done. The message is for
-    /// the status line: "has uncommitted changes" is the usual one.
-    WorktreeFailed { id: String, message: String },
+    /// Every project, declared or implicit. Whole, like marks.
+    Projects(Vec<Project>),
+    /// Every item, active and archived. Whole, for the same reason.
+    Items(Vec<Item>),
     /// A pull request's discussion was archived under the knowledge root.
     /// `added` counts records that were new or changed.
     Archived { repo_full_name: String, number: u64, added: usize },
@@ -130,8 +144,8 @@ pub enum Event {
     Notice(String),
     /// What config.toml says about the agent, for the pickers.
     AgentConfig(perch_github::AgentConfig),
-    /// Every thread in a worktree. Whole, like `Worktrees`.
-    CommentThreads { worktree_id: String, threads: Vec<CommentThread> },
+    /// Every thread on an item. Whole, like `Items`.
+    CommentThreads { item_id: String, threads: Vec<CommentThread> },
     /// One step of a run, applied in place to the run it names.
     AgentStep { run_id: String, thread_id: String, event: perch_agent::RunEvent },
     Status(Status),
@@ -139,8 +153,9 @@ pub enum Event {
     /// A step of preparing a checkout.
     ReviewProgress { message: String, percent: Option<u8> },
     ReviewReady {
-        pull_request: Arc<perch_github::PullRequest>,
-        worktree: Arc<Worktree>,
+        item: Arc<Item>,
+        /// `None` for a branch of the reader's own with no pull request.
+        pull_request: Option<Arc<PullRequest>>,
         files: Arc<Vec<perch_git::ChangedFile>>,
         tree: Arc<Vec<perch_git::TreeEntry>>,
         /// The head the pull request moved to while the worktree had
@@ -182,11 +197,18 @@ impl Backend {
         let _ = self.commands.send(Command::Refresh);
     }
 
-    pub fn open_pull_request(&self, repo_full_name: &str, number: u64) {
-        let _ = self.commands.send(Command::OpenPullRequest {
+    /// Open a pull request or an issue by number, making its item if it has
+    /// none yet.
+    pub fn open_subject(&self, repo_full_name: &str, kind: ItemKind, number: u64) {
+        let _ = self.commands.send(Command::OpenSubject {
             repo_full_name: repo_full_name.to_string(),
+            kind,
             number,
         });
+    }
+
+    pub fn open_item(&self, id: &str) {
+        let _ = self.commands.send(Command::OpenItem { id: id.to_string() });
     }
 
     pub fn open_file(&self, path: &str) {
@@ -197,26 +219,46 @@ impl Backend {
         let _ = self.commands.send(Command::CloseReview);
     }
 
-    pub fn open_worktree(&self, id: &str) {
-        let _ = self.commands.send(Command::OpenWorktree { id: id.to_string() });
+    pub fn archive_item(&self, id: &str) {
+        let _ = self.commands.send(Command::ArchiveItem { id: id.to_string() });
     }
 
-    pub fn archive_worktree(&self, id: &str) {
-        let _ = self.commands.send(Command::ArchiveWorktree { id: id.to_string() });
+    pub fn restore_item(&self, id: &str) {
+        let _ = self.commands.send(Command::RestoreItem { id: id.to_string() });
     }
 
-    pub fn restore_worktree(&self, id: &str) {
-        let _ = self.commands.send(Command::RestoreWorktree { id: id.to_string() });
+    pub fn delete_item(&self, id: &str) {
+        let _ = self.commands.send(Command::DeleteItem { id: id.to_string() });
     }
 
-    pub fn forget_worktree(&self, id: &str) {
-        let _ = self.commands.send(Command::ForgetWorktree { id: id.to_string() });
+    pub fn mark_item(&self, id: &str, saved: Option<bool>, done: Option<bool>) {
+        let _ = self.commands.send(Command::MarkItem { id: id.to_string(), saved, done });
+    }
+
+    pub fn pin_item(&self, id: &str, pinned: bool) {
+        let _ = self.commands.send(Command::PinItem { id: id.to_string(), pinned });
+    }
+
+    pub fn mark_unread(&self, id: &str) {
+        let _ = self.commands.send(Command::MarkUnread { id: id.to_string() });
+    }
+
+    pub fn rename_item(&self, id: &str, name: Option<String>) {
+        let _ = self.commands.send(Command::RenameItem { id: id.to_string(), name });
+    }
+
+    pub fn move_item(&self, id: &str, project_id: Option<String>, new_project: Option<String>) {
+        let _ = self.commands.send(Command::MoveItem { id: id.to_string(), project_id, new_project });
+    }
+
+    pub fn refresh_items(&self) {
+        let _ = self.commands.send(Command::RefreshItems);
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn ask(
         &self,
-        worktree_id: &str,
+        item_id: &str,
         thread_id: Option<String>,
         anchor: Option<Anchor>,
         question: &str,
@@ -224,7 +266,7 @@ impl Backend {
         effort: perch_agent::Effort,
     ) {
         let _ = self.commands.send(Command::Ask {
-            worktree_id: worktree_id.to_string(),
+            item_id: item_id.to_string(),
             thread_id,
             anchor,
             question: question.to_string(),
@@ -271,6 +313,18 @@ impl Backend {
             line,
             character,
         });
+    }
+}
+
+impl Backend {
+    /// A handle with nobody behind it: every command is dropped. For
+    /// headless tests, which must not open the reader's database or talk
+    /// to GitHub.
+    #[cfg(test)]
+    pub fn detached() -> Self {
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let (marks, _) = tokio::sync::mpsc::unbounded_channel();
+        Backend { commands, marks }
     }
 }
 
@@ -338,8 +392,16 @@ async fn run(
     };
 
     tracing::info!("github client ready");
-    let cache = open_cache();
-    tracing::info!(cache = cache.is_some(), "cache opened");
+    let (cache, reset) = open_cache();
+    tracing::info!(cache = cache.is_some(), reset, "cache opened");
+    if reset {
+        let _ = events.send(Event::Notice(
+            "The database was from an older Perch and has been reset; open a pull request to check it out again".into(),
+        ));
+    }
+    for warning in &config.warnings {
+        let _ = events.send(Event::Notice(warning.clone()));
+    }
     if let Some(cache) = cache.as_ref() {
         // A run still marked running is one Perch died in the middle of.
         if let Ok(guard) = cache.lock() {
@@ -370,7 +432,11 @@ async fn run(
         // round, a dismissed row would paint for a frame before vanishing.
         if let Ok(guard) = cache.lock() {
             send_marks(&guard, &events);
-            send_worktrees(&guard, &events);
+            // Projects follow the file on every launch, then the sidebar
+            // paints from the cache before the network is asked anything.
+            sync_projects(&guard, &config);
+            send_projects(&guard, &events);
+            send_items(&guard, &events);
         }
 
         let cached = cache.lock().ok().and_then(|guard| {
@@ -428,14 +494,14 @@ async fn run(
     // hook while this ran would have no row yet, and would be taken for a
     // stray and removed from under it. It is a directory listing and at
     // most a prune, so the inbox is not kept waiting.
-    reconcile_worktrees(&ctx).await;
+    reconcile_checkouts(&ctx).await;
     {
         // Then put away whatever nobody has opened in a fortnight. Archived,
         // not deleted: the branch and the row stay, so restoring is a
-        // checkout. Only rows it knows are touched, so this can run beside
-        // whatever the reader does next.
+        // checkout. Only owned checkouts are touched, so this can run
+        // beside whatever the reader does next.
         let ctx = ctx.clone();
-        tokio::spawn(async move { sweep_worktrees(&ctx).await });
+        tokio::spawn(async move { sweep_items(&ctx).await });
     }
 
     // A refresh happens immediately, then on whatever cadence the server asks
@@ -454,48 +520,83 @@ async fn run(
 
         match command {
             Some(Command::Refresh) | None => {
-                poll_after = refresh(
-                    &github,
-                    &cache,
-                    &events,
-                    config.as_ref(),
-                    &source,
-                    &fetches,
-                )
-                .await;
+                poll_after = refresh(&ctx, &source, &fetches).await;
             }
-            Some(Command::OpenPullRequest { repo_full_name, number }) => {
+            Some(Command::OpenSubject { repo_full_name, kind, number }) => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if open_pull_request(&ctx, repo_full_name, number).await {
+                    if open_subject(&ctx, repo_full_name, kind, number).await {
                         start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
                     }
                 });
             }
-            Some(Command::OpenWorktree { id }) | Some(Command::RestoreWorktree { id }) => {
-                // Restoring is opening: `prepare` checks the branch back out
-                // when the directory is gone, and the row's archived flag
-                // clears on the way through. One path, not two.
+            Some(Command::OpenItem { id }) | Some(Command::RestoreItem { id }) => {
+                // Restoring is opening: the archived flag clears on the way
+                // through and an owned checkout is put back by `prepare`.
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if open_worktree(&ctx, id).await {
+                    if open_item(&ctx, &id).await {
                         start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
                     }
                 });
             }
-            Some(Command::ArchiveWorktree { id }) => {
+            Some(Command::ArchiveItem { id }) => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if let Err(message) = archive_worktree(&ctx, &id).await {
-                        tracing::warn!(id, %message, "could not archive worktree");
-                        let _ = ctx.events.send(Event::WorktreeFailed { id, message });
+                    if let Err(message) = archive_item(&ctx, &id).await {
+                        tracing::warn!(id, %message, "could not archive item");
+                        let _ = ctx.events.send(Event::Notice(message));
                     }
                 });
             }
-            Some(Command::Ask { worktree_id, thread_id, anchor, question, model, effort }) => {
+            Some(Command::DeleteItem { id }) => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    ask(&ctx, worktree_id, thread_id, anchor, question, model, effort).await;
+                    if let Err(message) = delete_item(&ctx, &id).await {
+                        tracing::warn!(id, %message, "could not delete item");
+                        let _ = ctx.events.send(Event::Notice(message));
+                    }
+                });
+            }
+            Some(Command::MarkItem { id, saved, done }) => {
+                edit_item(&ctx, &id, |item| {
+                    if let Some(saved) = saved {
+                        item.saved = saved;
+                    }
+                    match done {
+                        // Done keeps the attention it answered, so newer
+                        // attention can reopen the item and older cannot.
+                        Some(true) => item.done_at = Some(item.attention_at.unwrap_or_else(Timestamp::now)),
+                        Some(false) => item.done_at = None,
+                        None => {}
+                    }
+                });
+            }
+            Some(Command::PinItem { id, pinned }) => {
+                edit_item(&ctx, &id, |item| {
+                    item.pinned_at = pinned.then(Timestamp::now);
+                });
+            }
+            Some(Command::MarkUnread { id }) => {
+                ctx.with_cache(|c| c.touch_attention(&id, Timestamp::now(), "manual"));
+                ctx.send_items();
+            }
+            Some(Command::RenameItem { id, name }) => {
+                edit_item(&ctx, &id, |item| {
+                    item.name = name.clone().filter(|n| !n.trim().is_empty());
+                });
+            }
+            Some(Command::MoveItem { id, project_id, new_project }) => {
+                move_item(&ctx, &id, project_id, new_project);
+            }
+            Some(Command::RefreshItems) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { refresh_items(&ctx).await });
+            }
+            Some(Command::Ask { item_id, thread_id, anchor, question, model, effort }) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    ask(&ctx, item_id, thread_id, anchor, question, model, effort).await;
                 });
             }
             Some(Command::CancelRun { run_id }) => {
@@ -508,15 +609,6 @@ async fn run(
             Some(Command::DeleteCommentThread { id }) => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { delete_comment_thread(&ctx, &id).await });
-            }
-            Some(Command::ForgetWorktree { id }) => {
-                let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    if let Err(message) = forget_worktree(&ctx, &id).await {
-                        tracing::warn!(id, %message, "could not forget worktree");
-                        let _ = ctx.events.send(Event::WorktreeFailed { id, message });
-                    }
-                });
             }
             Some(Command::OpenFile { path }) => {
                 let preparer = preparer.clone();
@@ -683,12 +775,12 @@ fn send_marks(cache: &Cache, events: &EventSender<Event>) {
     }
 }
 
-/// How long a worktree stays on disk without being opened before the sweep
-/// archives it.
-const WORKTREE_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+/// How long an owned checkout stays on disk without being opened before
+/// the sweep archives its item.
+const CHECKOUT_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
-/// Everything a worktree operation needs, so a spawned task takes one
-/// clone rather than six.
+/// Everything an item operation needs, so a spawned task takes one clone
+/// rather than six.
 #[derive(Clone)]
 struct Ctx {
     github: Arc<GitHub>,
@@ -704,12 +796,12 @@ struct Ctx {
 }
 
 impl Ctx {
-    fn send_threads(&self, worktree_id: &str) {
-        let threads = self.with_cache(|c| c.load_comment_threads(worktree_id));
+    fn send_threads(&self, item_id: &str) {
+        let threads = self.with_cache(|c| c.load_comment_threads(item_id));
         match threads {
             Some(Ok(threads)) => {
                 let _ = self.events.send(Event::CommentThreads {
-                    worktree_id: worktree_id.to_string(),
+                    item_id: item_id.to_string(),
                     threads,
                 });
             }
@@ -725,23 +817,28 @@ impl Ctx {
         Some(f(&guard))
     }
 
-    fn worktree(&self, id: &str) -> Option<Worktree> {
-        self.with_cache(|c| c.load_worktrees().ok())
-            .flatten()?
-            .into_iter()
-            .find(|w| w.id == id)
+    fn item(&self, id: &str) -> Option<Item> {
+        self.with_cache(|c| c.load_item(id).ok().flatten()).flatten()
     }
 
-    fn send_worktrees(&self) {
-        self.with_cache(|c| send_worktrees(c, &self.events));
+    fn send_items(&self) {
+        self.with_cache(|c| send_items(c, &self.events));
     }
 
-    /// Whether the open review is this worktree.
-    fn is_open(&self, worktree: &Worktree) -> bool {
+    fn send_projects(&self) {
+        self.with_cache(|c| send_projects(c, &self.events));
+    }
+
+    fn notice(&self, message: impl Into<String>) {
+        let _ = self.events.send(Event::Notice(message.into()));
+    }
+
+    /// Whether the open review is this item.
+    fn is_open(&self, item_id: &str) -> bool {
         self.slot
             .lock()
             .ok()
-            .is_some_and(|g| g.as_ref().is_some_and(|c| c.checkout.worktree == worktree.path))
+            .is_some_and(|g| g.as_ref().is_some_and(|c| c.item_id == item_id))
     }
 
     /// Drop the open review and stop its language server.
@@ -754,45 +851,180 @@ impl Ctx {
             client.shutdown().await;
         }
     }
-}
 
-fn send_worktrees(cache: &Cache, events: &EventSender<Event>) {
-    match cache.load_worktrees() {
-        Ok(worktrees) => {
-            let _ = events.send(Event::Worktrees(worktrees));
-        }
-        Err(e) => tracing::warn!(error = %e, "could not read worktrees"),
+    /// The project a repository's items go in, made implicit if nothing
+    /// declares it. Returns its id.
+    fn project_for(&self, repo_full_name: &str) -> String {
+        let name = self.config.project_for(repo_full_name);
+        let id = Project::id_for(&name);
+        self.with_cache(|c| {
+            let known = c.load_projects().unwrap_or_default();
+            if !known.iter().any(|p| p.id == id) {
+                if let Err(e) = c.upsert_project(&Project::implicit(&name)) {
+                    tracing::warn!(error = %e, "could not make an implicit project");
+                }
+                send_projects(c, &self.events);
+            }
+        });
+        id
     }
 }
 
-/// Make the table and the disk agree.
+fn send_items(cache: &Cache, events: &EventSender<Event>) {
+    match cache.load_items() {
+        Ok(items) => {
+            let _ = events.send(Event::Items(items));
+        }
+        Err(e) => tracing::warn!(error = %e, "could not read items"),
+    }
+}
+
+fn send_projects(cache: &Cache, events: &EventSender<Event>) {
+    match cache.load_projects() {
+        Ok(projects) => {
+            let _ = events.send(Event::Projects(projects));
+        }
+        Err(e) => tracing::warn!(error = %e, "could not read projects"),
+    }
+}
+
+/// Make the projects table follow config.toml.
 ///
-/// A row whose directory is gone becomes archived: someone deleted it by
-/// hand, which is the same as archiving. A directory no row knows about is
-/// removed: nothing can open it, and it is how the older commit-keyed
-/// layout gets retired.
-async fn reconcile_worktrees(ctx: &Ctx) {
-    let Some(rows) = ctx.with_cache(|c| c.load_worktrees().ok()).flatten() else {
+/// Declared projects are upserted whole. A row the file no longer mentions
+/// keeps its items and becomes implicit; one with no items and no entry is
+/// deleted.
+fn sync_projects(cache: &Cache, config: &Config) {
+    let declared: Vec<Project> = config
+        .project
+        .iter()
+        .map(|p| Project {
+            id: Project::id_for(&p.name),
+            name: p.name.trim().to_string(),
+            repos: p.repos.clone(),
+            roots: p.root_paths(),
+            implicit: false,
+        })
+        .collect();
+    for p in &declared {
+        if let Err(e) = cache.upsert_project(p) {
+            tracing::warn!(project = %p.id, error = %e, "could not record the project");
+        }
+    }
+    let items = cache.load_items().unwrap_or_default();
+    for existing in cache.load_projects().unwrap_or_default() {
+        if declared.iter().any(|d| d.id == existing.id) {
+            continue;
+        }
+        let has_items = items.iter().any(|i| i.project_id == existing.id);
+        if has_items {
+            if !existing.implicit {
+                let _ = cache.upsert_project(&Project {
+                    implicit: true,
+                    repos: Vec::new(),
+                    roots: Vec::new(),
+                    ..existing
+                });
+            }
+        } else {
+            let _ = cache.delete_project(&existing.id);
+        }
+    }
+}
+
+/// Apply one change to an item's row and tell the UI.
+fn edit_item(ctx: &Ctx, id: &str, edit: impl FnOnce(&mut Item)) {
+    let Some(mut item) = ctx.item(id) else {
+        ctx.notice("That item is gone");
+        return;
+    };
+    edit(&mut item);
+    if let Some(Err(e)) = ctx.with_cache(|c| c.update_item(&item)) {
+        ctx.notice(format!("Could not save the change: {e}"));
+        return;
+    }
+    ctx.send_items();
+}
+
+/// Put an item in another project, making the project when asked.
+fn move_item(ctx: &Ctx, id: &str, project_id: Option<String>, new_project: Option<String>) {
+    let target = match (project_id, new_project) {
+        (Some(id), _) => id,
+        (None, Some(name)) if !name.trim().is_empty() => {
+            let project = Project::implicit(&name);
+            if let Some(Err(e)) = ctx.with_cache(|c| c.upsert_project(&project)) {
+                ctx.notice(format!("Could not make the project: {e}"));
+                return;
+            }
+            project.id
+        }
+        _ => return,
+    };
+    let from = ctx.item(id).map(|i| i.project_id);
+    edit_item(ctx, id, |item| item.project_id = target.clone());
+    // An implicit project holds only what is moved there, and goes when
+    // its last item does.
+    if let Some(from) = from {
+        ctx.with_cache(|c| drop_empty_implicit(c, &from));
+    }
+    ctx.send_projects();
+}
+
+/// Delete a project if it is implicit and nothing is left in it.
+fn drop_empty_implicit(cache: &Cache, project_id: &str) {
+    let empty = cache
+        .load_items()
+        .unwrap_or_default()
+        .iter()
+        .all(|i| i.project_id != project_id);
+    let implicit = cache
+        .load_projects()
+        .unwrap_or_default()
+        .iter()
+        .any(|p| p.id == project_id && p.implicit);
+    if empty && implicit {
+        let _ = cache.delete_project(project_id);
+    }
+}
+
+/// Make the items table and the disk agree about owned checkouts.
+///
+/// An owned checkout whose directory is gone is marked off disk; someone
+/// deleted it by hand. A directory under the store's worktrees that no
+/// item claims is removed and pruned: nothing can open it, and it is how
+/// what an older schema left behind gets retired.
+async fn reconcile_checkouts(ctx: &Ctx) {
+    let Some(items) = ctx.with_cache(|c| c.load_items().ok()).flatten() else {
         return;
     };
 
     let mut changed = false;
-    for row in &rows {
-        if !row.is_archived() && !row.path.join(".git").exists() {
-            tracing::info!(id = %row.id, path = %row.path.display(), "worktree directory is gone; archiving its row");
-            ctx.with_cache(|c| c.set_worktree_archived(&row.id, Some(Timestamp::now())));
+    for item in &items {
+        let Some(checkout) = &item.checkout else { continue };
+        if !checkout.owned {
+            continue;
+        }
+        let present = checkout.path.join(".git").exists();
+        if checkout.on_disk != present {
+            tracing::info!(id = %item.id, path = %checkout.path.display(), present, "checkout presence changed");
+            let mut updated = item.clone();
+            if let Some(c) = updated.checkout.as_mut() {
+                c.on_disk = present;
+            }
+            ctx.with_cache(|c| c.update_item(&updated));
             changed = true;
         }
     }
 
-    let known: std::collections::HashSet<std::path::PathBuf> =
-        rows.iter().map(|r| r.path.clone()).collect();
+    let known: std::collections::HashSet<std::path::PathBuf> = items
+        .iter()
+        .filter_map(|i| i.checkout.as_ref().map(|c| c.path.clone()))
+        .collect();
     let mut removed = false;
     for dir in ctx.preparer.worktree_dirs() {
         if known.contains(&dir) {
             continue;
         }
-        tracing::info!(path = %dir.display(), "removing a worktree directory no record claims");
+        tracing::info!(path = %dir.display(), "removing a worktree directory no item claims");
         if let Err(e) = std::fs::remove_dir_all(&dir) {
             tracing::warn!(path = %dir.display(), error = %e, "could not remove it");
         }
@@ -803,7 +1035,7 @@ async fn reconcile_worktrees(ctx: &Ctx) {
     }
 
     if changed {
-        ctx.send_worktrees();
+        ctx.send_items();
     }
 }
 
@@ -827,101 +1059,158 @@ async fn prune_every_clone(ctx: &Ctx) {
     }
 }
 
-/// Archive whatever has sat unopened for too long.
-async fn sweep_worktrees(ctx: &Ctx) {
-    let stale = ctx.preparer.stale_worktrees(WORKTREE_MAX_AGE);
+/// Archive items whose owned checkout has sat unopened for too long. An
+/// issue, or a checkout under a root, is archived only by hand.
+async fn sweep_items(ctx: &Ctx) {
+    let stale = ctx.preparer.stale_worktrees(CHECKOUT_MAX_AGE);
     if stale.is_empty() {
         return;
     }
-    let rows = ctx.with_cache(|c| c.load_worktrees().ok()).flatten().unwrap_or_default();
+    let items = ctx.with_cache(|c| c.load_items().ok()).flatten().unwrap_or_default();
 
     for path in stale {
-        match rows.iter().find(|r| r.path == path) {
-            Some(row) if !row.is_archived() => match archive_worktree(ctx, &row.id).await {
-                Ok(()) => tracing::info!(id = %row.id, "archived a stale worktree"),
+        let owner = items
+            .iter()
+            .find(|i| i.checkout.as_ref().is_some_and(|c| c.path == path && c.owned));
+        match owner {
+            Some(item) if !item.is_archived() => match archive_item(ctx, &item.id).await {
+                Ok(()) => tracing::info!(id = %item.id, "archived a stale checkout"),
                 // Dirty, most likely. It stays; the reader has work in it.
-                Err(message) => tracing::info!(id = %row.id, %message, "left a stale worktree alone"),
+                Err(message) => tracing::info!(id = %item.id, %message, "left a stale checkout alone"),
             },
             Some(_) => {}
             None => {
                 // Reconciliation runs first, so this is a directory that
                 // appeared in between. Same treatment.
-                tracing::info!(path = %path.display(), "removing a stale worktree directory no record claims");
+                tracing::info!(path = %path.display(), "removing a stale worktree directory no item claims");
                 let _ = std::fs::remove_dir_all(&path);
             }
         }
     }
 }
 
-/// Take a worktree off disk, keeping its branch and its row.
-async fn archive_worktree(ctx: &Ctx, id: &str) -> Result<(), String> {
-    let Some(row) = ctx.worktree(id) else {
-        return Err(format!("no worktree called {id}"));
+/// Leave Active. An owned checkout's directory goes; the branch, the row,
+/// the threads and the knowledge stay.
+async fn archive_item(ctx: &Ctx, id: &str) -> Result<(), String> {
+    let Some(mut item) = ctx.item(id) else {
+        return Err("That item is gone".into());
     };
-    let Some(repo) = RepoId::parse(&row.repo_full_name) else {
-        return Err(format!("{} is not a repository name", row.repo_full_name));
+    let Some(repo) = RepoId::parse(&item.repo_full_name) else {
+        return Err(format!("{} is not a repository name", item.repo_full_name));
     };
-    let bare = ctx.preparer.store().bare_path(&repo);
-
-    if row.path.join(".git").exists() {
-        let dirty = ctx.preparer.is_dirty(&row.path).await.map_err(|e| e.to_string())?;
-        if dirty {
-            return Err(format!("{} has uncommitted changes", row.branch));
+    if let Some(checkout) = item.checkout.as_mut().filter(|c| c.owned && c.on_disk) {
+        if checkout.path.join(".git").exists() {
+            let dirty = ctx.preparer.is_dirty(&checkout.path).await.map_err(|e| e.to_string())?;
+            if dirty {
+                return Err(format!("{} has uncommitted changes", checkout.branch));
+            }
+            if ctx.is_open(id) {
+                ctx.close_review().await;
+            }
+            let bare = ctx.preparer.store().bare_path(&repo);
+            ctx.preparer
+                .remove_worktree(&bare, &checkout.path)
+                .await
+                .map_err(|e| e.to_string())?;
         }
-        if ctx.is_open(&row) {
-            ctx.close_review().await;
-        }
-        ctx.preparer
-            .remove_worktree(&bare, &row.path)
-            .await
-            .map_err(|e| e.to_string())?;
+        checkout.on_disk = false;
+    } else if ctx.is_open(id) {
+        ctx.close_review().await;
     }
-
-    ctx.with_cache(|c| c.set_worktree_archived(id, Some(Timestamp::now())))
+    item.archived_at = Some(Timestamp::now());
+    ctx.with_cache(|c| c.update_item(&item))
         .transpose()
         .map_err(|e| e.to_string())?;
-    ctx.send_worktrees();
+    ctx.send_items();
     Ok(())
 }
 
-/// Delete an archived worktree's branch and its row.
-async fn forget_worktree(ctx: &Ctx, id: &str) -> Result<(), String> {
-    let Some(row) = ctx.worktree(id) else {
-        return Err(format!("no worktree called {id}"));
+/// Remove the row and its threads. An owned checkout's directory and
+/// branch go too; a checkout under a root is not touched.
+async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
+    let Some(item) = ctx.item(id) else {
+        return Err("That item is gone".into());
     };
-    if !row.is_archived() {
-        return Err(format!("{} is still checked out; archive it first", row.branch));
+    if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned) {
+        if let Some(repo) = RepoId::parse(&item.repo_full_name) {
+            let bare = ctx.preparer.store().bare_path(&repo);
+            if checkout.path.join(".git").exists() {
+                let dirty = ctx.preparer.is_dirty(&checkout.path).await.map_err(|e| e.to_string())?;
+                if dirty {
+                    return Err(format!("{} has uncommitted changes", checkout.branch));
+                }
+                if ctx.is_open(id) {
+                    ctx.close_review().await;
+                }
+                ctx.preparer
+                    .remove_worktree(&bare, &checkout.path)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            if bare.join("HEAD").is_file() {
+                // A branch that is already gone is not a reason to keep the row.
+                if let Err(e) = ctx.preparer.delete_branch(&bare, &checkout.branch).await {
+                    tracing::info!(id, error = %e, "branch was not there to delete");
+                }
+            }
+        }
+    } else if ctx.is_open(id) {
+        ctx.close_review().await;
     }
-    if let Some(repo) = RepoId::parse(&row.repo_full_name) {
-        let bare = ctx.preparer.store().bare_path(&repo);
-        if bare.join("HEAD").is_file() {
-            // A branch that is already gone is not a reason to keep the row.
-            if let Err(e) = ctx.preparer.delete_branch(&bare, &row.branch).await {
-                tracing::info!(id, error = %e, "branch was not there to delete");
+    // Stop anything still running in its threads.
+    let thread_ids: Vec<String> = ctx
+        .with_cache(|c| c.load_comment_threads(id).unwrap_or_default())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    if let Ok(runs) = ctx.runs.lock() {
+        for (run, thread) in runs.values() {
+            if thread_ids.contains(thread) {
+                run.cancel();
             }
         }
     }
-    ctx.with_cache(|c| c.forget_worktree(id))
+    ctx.with_cache(|c| c.delete_item(id))
         .transpose()
         .map_err(|e| e.to_string())?;
-    ctx.send_worktrees();
+    ctx.with_cache(|c| drop_empty_implicit(c, &item.project_id));
+    ctx.send_projects();
+    ctx.send_items();
     Ok(())
 }
 
-/// Open a worktree from its row.
-async fn open_worktree(ctx: &Ctx, id: String) -> bool {
-    let Some(row) = ctx.worktree(&id) else {
-        let message = format!("no worktree called {id}");
-        let _ = ctx.events.send(Event::ReviewFailed { message });
+/// Open whatever an item is.
+async fn open_item(ctx: &Ctx, id: &str) -> bool {
+    let Some(item) = ctx.item(id) else {
+        let _ = ctx.events.send(Event::ReviewFailed { message: "That item is gone".into() });
         return false;
     };
-    let Some(number) = row.pr_number else {
-        let message = format!("{} has no pull request to open", row.branch);
-        let _ = ctx.events.send(Event::ReviewFailed { message });
-        return false;
-    };
-    open_pull_request(ctx, row.repo_full_name.clone(), number).await
+    match (&item.subject, &item.checkout) {
+        (Some(ItemSubject::PullRequest(pr)), _) => {
+            open_subject(ctx, pr.repo_full_name.clone(), ItemKind::PullRequest, pr.number).await
+        }
+        (Some(ItemSubject::Issue(issue)), _) => {
+            open_subject(ctx, issue.repo_full_name.clone(), ItemKind::Issue, issue.number).await
+        }
+        (None, Some(_)) => open_branch_item(ctx, item).await,
+        (None, None) => {
+            let _ = ctx.events.send(Event::ReviewFailed {
+                message: "That item has nothing to open".into(),
+            });
+            false
+        }
+    }
 }
+
+/// A branch of the reader's own: not yet.
+async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
+    let _ = ctx.events.send(Event::ReviewFailed {
+        message: format!("Opening a branch ({}) is not built yet", item.branch().unwrap_or("")),
+    });
+    false
+}
+
 /// A file larger than this opens as a notice rather than as text.
 const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
@@ -929,21 +1218,19 @@ const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 struct ReviewContext {
     checkout: perch_git::Checkout,
     files: Arc<Vec<perch_git::ChangedFile>>,
-    worktree_id: String,
-    pull_request: Arc<perch_github::PullRequest>,
+    item_id: String,
+    /// `None` for a branch with no pull request.
+    pull_request: Option<Arc<PullRequest>>,
     /// The description, once the discussion has been fetched.
     body: Option<String>,
 }
 
 /// One poll of the notifications API. Returns how long to wait before the next.
-async fn refresh(
-    github: &Arc<GitHub>,
-    cache: &SharedCache,
-    events: &EventSender<Event>,
-    config: &Config,
-    source: &str,
-    fetches: &Fetches,
-) -> Duration {
+async fn refresh(ctx: &Ctx, source: &str, fetches: &Fetches) -> Duration {
+    let github = &ctx.github;
+    let cache = &ctx.cache;
+    let events = &ctx.events;
+    let config = ctx.config.as_ref();
     let _ = events.send(Event::Status(Status::Refreshing));
 
     let since = cache
@@ -997,6 +1284,10 @@ async fn refresh(
                     from_cache: false,
                 });
 
+                // A notification about an item is the item's attention, and
+                // a review request makes the item it is about.
+                attend(ctx, &threads).await;
+
                 fetch_details(
                     github.clone(),
                     cache.clone(),
@@ -1026,11 +1317,91 @@ async fn refresh(
     }
 }
 
+/// Set attention on the items these notifications are about, and make an
+/// item for a review request that has none.
+///
+/// The one case a notification makes an item is the case the tool exists
+/// for. Every other reason on an unknown subject stays in the inbox.
+async fn attend(ctx: &Ctx, threads: &[Thread]) {
+    let mut changed = false;
+    for thread in threads {
+        let kind = match thread.subject.kind {
+            SubjectKind::PullRequest => ItemKind::PullRequest,
+            SubjectKind::Issue => ItemKind::Issue,
+            _ => continue,
+        };
+        let Some(number) = thread.number_hint() else { continue };
+        let repo = thread.repository.full_name.as_str();
+        let existing = ctx
+            .with_cache(|c| c.find_item_by_subject(repo, kind, number).ok().flatten())
+            .flatten();
+        let reason = thread.reason.wire().to_string();
+
+        let item = match existing {
+            Some(item) => item,
+            None if thread.reason == Reason::ReviewRequested && kind == ItemKind::PullRequest => {
+                match ctx.github.fetch_pull_request(repo, number).await {
+                    Ok(pr) => {
+                        let project = ctx.project_for(&pr.repo_full_name);
+                        let mut item = Item::new(&project, &pr.repo_full_name, Timestamp::now());
+                        item.subject = Some(ItemSubject::PullRequest(pr));
+                        match ctx.with_cache(|c| c.insert_item(&item)) {
+                            Some(Ok(())) => {
+                                tracing::info!(repo, number, "review request made an item");
+                                changed = true;
+                                item
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(repo, number, error = %e, "could not make the item");
+                                continue;
+                            }
+                            None => continue,
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(repo, number, error = %e, "could not fetch the requested review");
+                        continue;
+                    }
+                }
+            }
+            None => continue,
+        };
+        if let Some(Ok(true)) =
+            ctx.with_cache(|c| c.touch_attention(&item.id, thread.updated_at, &reason))
+        {
+            changed = true;
+        }
+    }
+    if changed {
+        ctx.send_items();
+    }
+}
+
+/// Rescan roots and re-ask GitHub about subject-less branches: not yet.
+async fn refresh_items(ctx: &Ctx) {
+    ctx.send_items();
+}
+
+/// Find or make the item for a pull request or issue, and open it.
+async fn open_subject(ctx: &Ctx, repo_full_name: String, kind: ItemKind, number: u64) -> bool {
+    match kind {
+        ItemKind::PullRequest => open_pull_request(ctx, repo_full_name, number).await,
+        ItemKind::Issue => {
+            let _ = ctx.events.send(Event::ReviewFailed {
+                message: format!("Opening an issue (#{number}) is not built yet"),
+            });
+            false
+        }
+    }
+}
+
 /// Resolve a pull request, lay down a checkout on its branch, and report
 /// its files. Returns whether a review is now open.
 ///
-/// The worktree row is found or made on the way: this is the one place a
-/// worktree comes into being, and every open refreshes what the row knows.
+/// The item is found or made on the way, and every open refreshes what
+/// its row knows. A pull request whose head branch matches a checkout of
+/// the reader's own in the same repository attaches to that item rather
+/// than making a second one.
 async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
     let events = &ctx.events;
     macro_rules! fail {
@@ -1047,17 +1418,26 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         percent: None,
     });
 
-    let id = Worktree::for_pull_request(&repo_full_name, number);
-    let existing = ctx.worktree(&id);
+    let existing = ctx
+        .with_cache(|c| {
+            c.find_item_by_subject(&repo_full_name, ItemKind::PullRequest, number)
+                .ok()
+                .flatten()
+        })
+        .flatten();
 
     let (pull_request, offline) = match ctx.github.fetch_pull_request(&repo_full_name, number).await {
         Ok(pr) => (pr, false),
         Err(e) => {
-            // No network, or no GitHub. A worktree that is already on disk
+            // No network, or no GitHub. A checkout that is already on disk
             // opens anyway, as it was last left, from the snapshot.
-            match existing.as_ref().and_then(|w| w.pull_request.clone()) {
-                Some(snapshot) if existing.as_ref().is_some_and(|w| w.path.join(".git").exists()) => {
-                    tracing::info!(repo = %repo_full_name, number, error = %e, "opening the worktree offline");
+            let on_disk = existing
+                .as_ref()
+                .and_then(|i| i.checkout.as_ref())
+                .is_some_and(|c| c.path.join(".git").exists());
+            match existing.as_ref().and_then(|i| i.pull_request().cloned()) {
+                Some(snapshot) if on_disk => {
+                    tracing::info!(repo = %repo_full_name, number, error = %e, "opening the checkout offline");
                     (snapshot, true)
                 }
                 _ => fail!("{e}"),
@@ -1068,10 +1448,35 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     let Some(repo) = RepoId::parse(&pull_request.repo_full_name) else {
         fail!("{} is not a repository name", pull_request.repo_full_name)
     };
-    let branch = Worktree::pr_branch(number);
 
-    let checkout = if offline {
-        reopen_from_disk(ctx, &repo, number, &branch, existing.as_ref().map(|w| w.path.clone())).await
+    // The item: the one for this pull request, else a checkout of the
+    // reader's own on its head branch, else a new one.
+    let existing = match existing {
+        Some(item) => Some(item),
+        None => ctx
+            .with_cache(|c| {
+                c.find_item_by_branch(&pull_request.repo_full_name, &pull_request.head_ref)
+                    .ok()
+                    .flatten()
+            })
+            .flatten()
+            .filter(|i| i.subject.is_none()),
+    };
+    let own_checkout = existing
+        .as_ref()
+        .and_then(|i| i.checkout.as_ref())
+        .filter(|c| !c.owned)
+        .cloned();
+    let branch = match &own_checkout {
+        Some(c) => c.branch.clone(),
+        None => format!("perch/pr-{number}"),
+    };
+
+    let checkout = if let Some(own) = &own_checkout {
+        open_own_checkout(ctx, &repo, own, &pull_request.base_ref).await
+    } else if offline {
+        let path = existing.as_ref().and_then(|i| i.checkout.as_ref()).map(|c| c.path.clone());
+        reopen_from_disk(ctx, &repo, number, &branch, path).await
     } else {
         let progress = events.clone();
         let label = repo.full_name();
@@ -1105,23 +1510,37 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     // The row. Every column that can move is rewritten from what just
     // happened, and an archived row is back in service.
     let now = Timestamp::now();
-    let row = Worktree {
-        id: id.clone(),
-        repo_full_name: pull_request.repo_full_name.clone(),
+    let is_new = existing.is_none();
+    let mut item = match existing {
+        Some(item) => item,
+        None => {
+            let project = ctx.project_for(&pull_request.repo_full_name);
+            Item::new(&project, &pull_request.repo_full_name, now)
+        }
+    };
+    // CI turning red is attention. Nothing else about the snapshot is.
+    let ci_failed_now = pull_request.checks == Some(perch_github::CheckStatus::Failure)
+        && item.pull_request().and_then(|p| p.checks) != Some(perch_github::CheckStatus::Failure);
+    item.subject = Some(ItemSubject::PullRequest(pull_request.clone()));
+    item.checkout = Some(ItemCheckout {
         branch: branch.clone(),
         base_ref: pull_request.base_ref.clone(),
-        pr_number: Some(number),
         head_sha: checkout.head_sha.clone(),
         path: checkout.worktree.clone(),
-        created_at: existing.as_ref().map(|w| w.created_at).unwrap_or(now),
-        last_opened_at: now,
-        archived_at: None,
-        pull_request: Some(pull_request.clone()),
-    };
-    if let Some(Err(e)) = ctx.with_cache(|c| c.upsert_worktree(&row)) {
-        tracing::warn!(id, error = %e, "could not record the worktree");
+        owned: own_checkout.is_none(),
+        on_disk: true,
+    });
+    item.archived_at = None;
+    item.last_opened_at = now;
+    if ci_failed_now {
+        item.attention_at = Some(now);
+        item.attention_reason = Some("ci_failed".into());
     }
-    ctx.send_worktrees();
+    let written = ctx.with_cache(|c| if is_new { c.insert_item(&item) } else { c.update_item(&item) });
+    if let Some(Err(e)) = written {
+        tracing::warn!(id = %item.id, error = %e, "could not record the item");
+    }
+    ctx.send_items();
 
     let _ = events.send(Event::ReviewProgress {
         message: "Computing the diff".into(),
@@ -1145,12 +1564,13 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     let head_for_threads = checkout.head_sha.clone();
     let worktree_for_threads = checkout.worktree.clone();
     let pull_request = Arc::new(pull_request);
+    let item = Arc::new(item);
     if let Ok(mut guard) = ctx.slot.lock() {
         *guard = Some(ReviewContext {
             checkout,
             files: files.clone(),
-            worktree_id: id.clone(),
-            pull_request: pull_request.clone(),
+            item_id: item.id.clone(),
+            pull_request: Some(pull_request.clone()),
             body: None,
         });
     }
@@ -1166,8 +1586,8 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         "review ready"
     );
     let _ = events.send(Event::ReviewReady {
-        pull_request: pull_request.clone(),
-        worktree: Arc::new(row),
+        item: item.clone(),
+        pull_request: Some(pull_request.clone()),
         files,
         tree: Arc::new(tree),
         stale_head,
@@ -1178,10 +1598,10 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     // a git call per moved thread, so both go on their own task.
     {
         let ctx = ctx.clone();
-        let worktree_id = id.clone();
+        let item_id = item.id.clone();
         tokio::spawn(async move {
-            mark_outdated_threads(&ctx, &worktree_id, &head_for_threads, &worktree_for_threads).await;
-            ctx.send_threads(&worktree_id);
+            mark_outdated_threads(&ctx, &item_id, &head_for_threads, &worktree_for_threads).await;
+            ctx.send_threads(&item_id);
         });
     }
 
@@ -1192,6 +1612,19 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         tokio::spawn(async move { archive_discussion(&ctx, &pull_request).await });
     }
     true
+}
+
+/// A checkout under one of the reader's roots, opened where it is: not yet.
+async fn open_own_checkout(
+    _ctx: &Ctx,
+    _repo: &RepoId,
+    own: &ItemCheckout,
+    _base_ref: &str,
+) -> Result<perch_git::Checkout, perch_git::Error> {
+    Err(perch_git::Error::Io(format!(
+        "opening a checkout of your own ({}) is not built yet",
+        own.path.display()
+    )))
 }
 
 /// Fetch what was said on a pull request and file it under the knowledge
@@ -1207,7 +1640,10 @@ async fn archive_discussion(ctx: &Ctx, pr: &perch_github::PullRequest) {
     };
 
     if let Ok(mut guard) = ctx.slot.lock() {
-        if let Some(open) = guard.as_mut().filter(|c| c.pull_request.number == pr.number) {
+        if let Some(open) = guard
+            .as_mut()
+            .filter(|c| c.pull_request.as_ref().is_some_and(|p| p.number == pr.number))
+        {
             open.body = Some(discussion.body.clone());
         }
     }
@@ -1254,8 +1690,8 @@ async fn archive_discussion(ctx: &Ctx, pr: &perch_github::PullRequest) {
 ///
 /// `git diff --quiet <sha> <head> -- <path>` per thread whose sha differs
 /// from the head; the common case, same sha, costs nothing.
-async fn mark_outdated_threads(ctx: &Ctx, worktree_id: &str, head: &str, worktree: &Path) {
-    let Some(Ok(threads)) = ctx.with_cache(|c| c.load_comment_threads(worktree_id)) else {
+async fn mark_outdated_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &Path) {
+    let Some(Ok(threads)) = ctx.with_cache(|c| c.load_comment_threads(item_id)) else {
         return;
     };
     for thread in threads {
@@ -1284,7 +1720,7 @@ async fn mark_outdated_threads(ctx: &Ctx, worktree_id: &str, head: &str, worktre
 /// current as events arrive.
 async fn ask(
     ctx: &Ctx,
-    worktree_id: String,
+    item_id: String,
     thread_id: Option<String>,
     anchor: Option<Anchor>,
     question: String,
@@ -1292,12 +1728,12 @@ async fn ask(
     effort: perch_agent::Effort,
 ) {
     let open = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref().filter(|c| c.worktree_id == worktree_id).map(|c| {
+        g.as_ref().filter(|c| c.item_id == item_id).map(|c| {
             (c.checkout.clone(), c.pull_request.clone(), c.body.clone())
         })
     });
     let Some((checkout, pull_request, body)) = open else {
-        let _ = ctx.events.send(Event::Notice("That worktree is no longer open".into()));
+        let _ = ctx.events.send(Event::Notice("That item is no longer open".into()));
         return;
     };
     let now = Timestamp::now();
@@ -1305,7 +1741,7 @@ async fn ask(
     // The thread: found, or made with the question as its first message.
     let existing = match &thread_id {
         Some(id) => ctx
-            .with_cache(|c| c.load_comment_threads(&worktree_id))
+            .with_cache(|c| c.load_comment_threads(&item_id))
             .and_then(Result::ok)
             .and_then(|all| all.into_iter().find(|t| &t.id == id)),
         None => None,
@@ -1314,7 +1750,7 @@ async fn ask(
         Some(t) => t,
         None => CommentThread {
             id: perch_github::comments::new_id(),
-            worktree_id: worktree_id.clone(),
+            worktree_id: item_id.clone(),
             origin: ThreadOrigin::Local,
             anchor: anchor.clone(),
             outdated: false,
@@ -1361,7 +1797,7 @@ async fn ask(
         let _ = ctx.events.send(Event::Notice(format!("Could not save the question: {e}")));
         return;
     }
-    ctx.send_threads(&worktree_id);
+    ctx.send_threads(&item_id);
 
     // The prompt. A follow-up resumes the last finished run; a thread with
     // none starts over with its history folded in.
@@ -1373,7 +1809,7 @@ async fn ask(
         thread.messages.iter().map(|m| (m.author.clone(), m.body.clone())).collect();
     let resume = thread.resumable_session();
     let input = crate::ask::PromptInput {
-        pull_request: Some(&pull_request),
+        pull_request: pull_request.as_deref(),
         body: body.as_deref(),
         anchor: thread.anchor.as_ref(),
         file: file.as_ref(),
@@ -1392,7 +1828,7 @@ async fn ask(
             let message = format!("{e}. Set agent.binary in config.toml to where Claude Code is installed.");
             crate::ask::apply_run_event(&mut run, &perch_agent::RunEvent::Failed { message });
             ctx.with_cache(|c| c.update_run(&run));
-            ctx.send_threads(&worktree_id);
+            ctx.send_threads(&item_id);
             return;
         }
     };
@@ -1439,7 +1875,7 @@ async fn ask(
         runs.remove(&run.id);
     }
     tracing::info!(thread = %thread.id, run = %run.id, status = run.status.name(), steps = run.steps.len(), "run ended");
-    ctx.send_threads(&worktree_id);
+    ctx.send_threads(&item_id);
 }
 
 async fn delete_comment_thread(ctx: &Ctx, id: &str) {
@@ -1456,9 +1892,9 @@ async fn delete_comment_thread(ctx: &Ctx, id: &str) {
         let _ = ctx.events.send(Event::Notice(format!("Could not delete the thread: {e}")));
         return;
     }
-    let worktree_id = ctx.slot.lock().ok().and_then(|g| g.as_ref().map(|c| c.worktree_id.clone()));
-    if let Some(worktree_id) = worktree_id {
-        ctx.send_threads(&worktree_id);
+    let item_id = ctx.slot.lock().ok().and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
+    if let Some(item_id) = item_id {
+        ctx.send_threads(&item_id);
     }
 }
 
@@ -1770,15 +2206,18 @@ pub(crate) fn build_loaded_file(
 
 type SharedCache = Option<Arc<std::sync::Mutex<Cache>>>;
 
-fn open_cache() -> SharedCache {
-    let path = perch_github::config::db_path()?;
+/// The cache, and whether an older one had to be thrown away.
+fn open_cache() -> (SharedCache, bool) {
+    let Some(path) = perch_github::config::db_path() else {
+        return (None, false);
+    };
     let avatars = perch_github::config::avatar_dir();
-    match Cache::open(&path, avatars) {
-        Ok(c) => Some(Arc::new(std::sync::Mutex::new(c))),
+    match Cache::open_checked(&path, avatars) {
+        Ok((c, reset)) => (Some(Arc::new(std::sync::Mutex::new(c))), reset),
         Err(e) => {
             // A broken cache must not stop the app; it only costs a cold start.
             tracing::warn!(error = %e, "running without a local cache");
-            None
+            (None, false)
         }
     }
 }
