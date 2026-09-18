@@ -35,17 +35,11 @@ pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
 }
 
 fn views_section(state: AppState, review: ReviewState) -> impl IntoView {
-    // The three views are one control: whichever is open wears the card.
-    let rows = [
-        (View::Inbox, SidebarIcon::Inbox),
-        (View::Saved, SidebarIcon::Bookmark),
-        (View::Done, SidebarIcon::Check),
-    ];
-
+    // The inbox is the rail's own entry, so the panel does not repeat it.
+    // Saved and Done stay here until they have rail entries of their own.
     Stack::vertical((
-        view_row(state, review, rows[0].0, rows[0].1),
-        view_row(state, review, rows[1].0, rows[1].1),
-        view_row(state, review, rows[2].0, rows[2].1),
+        view_row(state, review, View::Saved, SidebarIcon::Bookmark),
+        view_row(state, review, View::Done, SidebarIcon::Check),
     ))
     .style(|s| s.width_full().gap(1.0))
 }
@@ -274,8 +268,9 @@ fn rail_entry(state: AppState, review: ReviewState) -> impl IntoView {
     use floem::style::Position;
 
     let unread = move || state.counts().unread;
-    // The inbox is showing whenever a pull request is not.
-    let active = move || !review.is_showing();
+    // Current only when the inbox itself is on screen: not Saved, not Done,
+    // and not a pull request.
+    let active = move || state.view.get() == View::Inbox && !review.is_showing();
 
     Container::new(
         Container::new(Stack::horizontal((
@@ -305,13 +300,16 @@ fn rail_entry(state: AppState, review: ReviewState) -> impl IntoView {
         }),
     )
     .on_event_stop(el::Click, move |_, _| {
-        if review.is_showing() {
-            // Coming back from a pull request: show the inbox and its panel.
-            review.close();
-            state.sidebar_open.set(true);
-        } else {
+        if active() {
             // Already here, so this is the collapse control.
             state.sidebar_open.update(|open| *open = !*open);
+        } else {
+            // From Saved, Done, or a pull request: go to the inbox and make
+            // sure its panel is showing. Filters carry over, as they do
+            // between the views.
+            review.close();
+            state.set_view(View::Inbox);
+            state.sidebar_open.set(true);
         }
     })
     .style(move |s| {
