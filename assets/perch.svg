@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1280" viewBox="0 0 1280 1280" fill="none">
+  <title>Perch</title>
+  <desc>A cream wren perched on a curved twig with a leaf, on a deep blue rounded square. All artwork is editable vector paths and gradients.</desc>
+  <defs>
+    <linearGradient id="blue" x1="220" y1="150" x2="1045" y2="1110" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1e5eb4"/>
+      <stop offset=".42" stop-color="#033580"/>
+      <stop offset="1" stop-color="#002665"/>
+    </linearGradient>
+    <radialGradient id="light" cx="0" cy="0" r="1" gradientTransform="translate(340 165) rotate(53) scale(890 805)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#438bdf" stop-opacity=".23"/>
+      <stop offset="1" stop-color="#103e77" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cream" x1="440" y1="340" x2="753" y2="894" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff7e5"/>
+      <stop offset=".55" stop-color="#fff6e2"/>
+      <stop offset="1" stop-color="#fff5df"/>
+    </linearGradient>
+    <linearGradient id="wing" x1="440" y1="577" x2="657" y2="682" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#dfd1b7"/>
+      <stop offset=".52" stop-color="#dfd2bb"/>
+      <stop offset="1" stop-color="#eadfc9"/>
+    </linearGradient>
+    <linearGradient id="eye" x1="731" y1="462" x2="757" y2="502" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#001732"/>
+      <stop offset="1" stop-color="#002453"/>
+    </linearGradient>
+    <clipPath id="body-clip"><path d="M352 589C411 567 455 522 510 480C561 441 607 403 665 398C730 392 783 421 811 475L863 485Q872 488 863 493L817 511C819 595 802 657 761 704C721 749 666 769 608 767C553 768 508 751 463 724C406 690 367 644 350 612C345 602 348 592 352 589Z"/></clipPath>
+    <path id="tile" d="M350 134H904C1058 134 1125 194 1125 348V907C1125 1059 1063 1122 908 1122H351C194 1122 130 1061 130 907V350C130 194 193 134 350 134Z"/>
+  </defs>
+  <g id="background">
+    <use href="#tile" fill="url(#blue)"/>
+    <use href="#tile" fill="url(#light)"/>
+  </g>
+  <g id="bird" fill="url(#cream)">
+    <path id="tail" d="M397 591L278 418C271 407 275 394 284 385L326 344C340 330 355 333 361 350L432 538Z"/>
+    <path id="body" d="M352 589C411 567 455 522 510 480C561 441 607 403 665 398C730 392 783 421 811 475L863 485Q872 488 863 493L817 511C819 595 802 657 761 704C721 749 666 769 608 767C553 768 508 751 463 724C406 690 367 644 350 612C345 602 348 592 352 589Z"/>
+    <path id="left-leg" d="M489 733L527 745L552 807H524Z"/>
+    <path id="right-leg" d="M560 751L597 751L665 817H630Z"/>
+    <path id="wing-shape" clip-path="url(#body-clip)" d="M355 631C410 623 464 598 516 575C552 559 584 541 613 531C635 523 652 529 662 546C675 568 667 597 651 619C625 655 589 679 549 688C481 699 410 677 355 631Z" fill="url(#wing)"/>
+    <path id="eye-shape" d="M768 482C768 494 759 504 747 504C734 504 724 495 724 483C724 470 733 460 746 460C758 460 768 470 768 482Z" fill="url(#eye)"/>
+  </g>
+  <path id="branch" fill="url(#cream)" d="M297 827C371 802 449 803 521 805C593 804 654 809 708 815C802 827 865 811 936 752L944 759C914 786 883 808 851 823C901 832 937 866 996 876C1003 877 1003 884 996 885C939 886 901 851 849 844C808 838 783 846 732 845C652 845 591 831 518 831C474 830 438 832 403 837C420 855 434 876 442 896C447 910 429 913 423 900C411 875 394 853 373 840C348 841 325 844 303 850C285 856 280 834 297 827Z"/>
+  <path id="leaf" fill="url(#cream)" d="M936 754C940 705 975 683 1034 678C1021 734 1001 764 940 765Z"/>
+  <path id="leaf-vein" fill="url(#wing)" d="M937 760C956 735 979 716 1002 703C981 723 960 743 937 760Z"/>
+</svg>

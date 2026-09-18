@@ -108,6 +108,19 @@ gh auth login
 cargo run --release
 ```
 
+The Dock icon is embedded in the binary, including when using `cargo run`.
+To build a Finder-launchable macOS app with the same icon:
+
+```bash
+scripts/bundle.sh
+open target/Perch.app
+```
+
+The icon artwork is in `assets/perch.svg`, drawn with editable vector paths
+and gradients. Icon generation requires `rsvg-convert` (`brew install librsvg`).
+Run `scripts/build-icon.sh` after changing it to regenerate `assets/Perch.icns`
+at all macOS icon sizes, then rebuild the app.
+
 ## Configuration
 
 Optional, at

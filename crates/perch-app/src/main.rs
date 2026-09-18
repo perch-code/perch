@@ -1,5 +1,6 @@
 //! Perch: a read-only GitHub notifications inbox for the desktop.
 
+mod app_icon;
 mod backend;
 mod filter;
 mod icons;
@@ -57,6 +58,7 @@ fn main() {
     Application::new()
         .window(
             move |_| {
+                app_icon::install();
                 let state = AppState::new();
                 let review = review::model::ReviewState::new();
 
