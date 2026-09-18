@@ -32,3 +32,9 @@ toml = "0.9"
 opt-level = 3
 lto = "thin"
 codegen-units = 4
+
+# Carries a fix for a floem panic ("all view ids are created with a root") when a
+# view is removed in the same update batch as its listener registration. Drop once
+# upstream merges https://github.com/criccomini/floem/tree/stale-listener-ids.
+[patch."https://github.com/lapce/floem"]
+floem = { git = "https://github.com/criccomini/floem", rev = "d1184f236dd77ec7de0ac99aeb2a4006c1997bb7" }

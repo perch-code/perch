@@ -1101,7 +1101,7 @@ checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 [[package]]
 name = "floem"
 version = "0.2.0"
-source = "git+https://github.com/lapce/floem?branch=main#778bb5f2aa08429e579ee2e6ac97e84fbf18b618"
+source = "git+https://github.com/criccomini/floem?rev=d1184f236dd77ec7de0ac99aeb2a4006c1997bb7#d1184f236dd77ec7de0ac99aeb2a4006c1997bb7"
 dependencies = [
  "bitflags 2.13.2",
  "clipboard-win",
@@ -1155,7 +1155,7 @@ dependencies = [
 [[package]]
 name = "floem-editor-core"
 version = "0.2.0"
-source = "git+https://github.com/lapce/floem?branch=main#778bb5f2aa08429e579ee2e6ac97e84fbf18b618"
+source = "git+https://github.com/criccomini/floem?rev=d1184f236dd77ec7de0ac99aeb2a4006c1997bb7#d1184f236dd77ec7de0ac99aeb2a4006c1997bb7"
 dependencies = [
  "bitflags 2.13.2",
  "itertools",
@@ -1387,7 +1387,7 @@ dependencies = [
 [[package]]
 name = "floem_reactive"
 version = "0.2.0"
-source = "git+https://github.com/lapce/floem?branch=main#778bb5f2aa08429e579ee2e6ac97e84fbf18b618"
+source = "git+https://github.com/criccomini/floem?rev=d1184f236dd77ec7de0ac99aeb2a4006c1997bb7#d1184f236dd77ec7de0ac99aeb2a4006c1997bb7"
 dependencies = [
  "parking_lot",
  "smallvec",
@@ -1396,7 +1396,7 @@ dependencies = [
 [[package]]
 name = "floem_renderer"
 version = "0.2.0"
-source = "git+https://github.com/lapce/floem?branch=main#778bb5f2aa08429e579ee2e6ac97e84fbf18b618"
+source = "git+https://github.com/criccomini/floem?rev=d1184f236dd77ec7de0ac99aeb2a4006c1997bb7#d1184f236dd77ec7de0ac99aeb2a4006c1997bb7"
 dependencies = [
  "floem-winit",
  "fontique",
@@ -1412,7 +1412,7 @@ dependencies = [
 [[package]]
 name = "floem_tiny_skia_renderer"
 version = "0.2.0"
-source = "git+https://github.com/lapce/floem?branch=main#778bb5f2aa08429e579ee2e6ac97e84fbf18b618"
+source = "git+https://github.com/criccomini/floem?rev=d1184f236dd77ec7de0ac99aeb2a4006c1997bb7#d1184f236dd77ec7de0ac99aeb2a4006c1997bb7"
 dependencies = [
  "anyhow",
  "floem_renderer",
@@ -1428,7 +1428,7 @@ dependencies = [
 [[package]]
 name = "floem_vello_renderer"
 version = "0.2.0"
-source = "git+https://github.com/lapce/floem?branch=main#778bb5f2aa08429e579ee2e6ac97e84fbf18b618"
+source = "git+https://github.com/criccomini/floem?rev=d1184f236dd77ec7de0ac99aeb2a4006c1997bb7#d1184f236dd77ec7de0ac99aeb2a4006c1997bb7"
 dependencies = [
  "anyhow",
  "floem_renderer",
@@ -5814,7 +5814,7 @@ dependencies = [
 [[package]]
 name = "ui-events-floem-winit"
 version = "0.2.0"
-source = "git+https://github.com/lapce/floem?branch=main#778bb5f2aa08429e579ee2e6ac97e84fbf18b618"
+source = "git+https://github.com/criccomini/floem?rev=d1184f236dd77ec7de0ac99aeb2a4006c1997bb7#d1184f236dd77ec7de0ac99aeb2a4006c1997bb7"
 dependencies = [
  "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "floem-winit",
