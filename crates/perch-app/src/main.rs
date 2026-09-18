@@ -67,7 +67,13 @@ fn main() {
                 update_signal_from_channel(incoming.write_only(), events);
                 floem::reactive::Effect::new(move |_| {
                     if let Some(event) = incoming.get() {
-                        state.apply_with_review(event, review);
+                        // Folding an event is not a derivation. Untracked, so
+                        // that a signal this happens to read on the way past
+                        // cannot subscribe the effect to its own output and
+                        // have the last event applied twice.
+                        floem::reactive::Effect::untrack(|| {
+                            state.apply_with_review(event, review)
+                        });
                     }
                 });
 

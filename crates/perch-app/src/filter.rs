@@ -773,6 +773,22 @@ mod tests {
     }
 
     #[test]
+    fn grouping_reorders_the_rows_a_shift_click_runs_between() {
+        let all = fixture();
+        let v = vis(&all, &Filters::default(), Sort::Newest);
+        let grouped: Vec<String> = sections(&v, Group::Repository, Sort::Newest, now())
+            .into_iter()
+            .flat_map(|s| s.threads)
+            .map(|t| t.id)
+            .collect();
+
+        // Sorting interleaves the two repositories; the screen does not, so a
+        // shift-click has to run down the cards rather than down the sort.
+        assert_eq!(ids(&v), ["1", "2", "3", "4", "5"]);
+        assert_eq!(grouped, ["1", "2", "4", "3", "5"]);
+    }
+
+    #[test]
     fn a_shift_click_takes_the_run_between_two_rows() {
         let order: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
 

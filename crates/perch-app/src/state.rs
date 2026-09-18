@@ -137,7 +137,6 @@ impl AppState {
     pub fn apply(&self, event: Event) {
         match event {
             Event::Threads { threads, from_cache } => {
-                let had_selection = self.selected.with(|s| !s.is_empty());
                 // The cache read races the first network response. If the
                 // network won, its list is authoritative and the cached one
                 // is stale by definition.
@@ -160,9 +159,7 @@ impl AppState {
                 if still_present == Some(false) {
                     self.repo_filter.set(None);
                 }
-                if had_selection {
-                    self.prune_selection();
-                }
+                self.prune_selection();
             }
             Event::Detail { thread_id, detail } => {
                 self.details.update(|m| {
@@ -182,6 +179,9 @@ impl AppState {
                         .map(|m| (m.thread_id.clone(), m))
                         .collect(),
                 );
+                // Marking a row done takes it off the screen, and a
+                // resurfaced one leaves Done the same way.
+                self.prune_selection();
             }
             Event::ReviewProgress { .. }
             | Event::ReviewReady { .. }
@@ -300,7 +300,7 @@ impl AppState {
     pub fn toggle_selected(&self, thread_id: &str, extend: bool) {
         if extend {
             if let Some(anchor) = self.last_toggled.get() {
-                let order: Vec<String> = self.visible().into_iter().map(|t| t.id).collect();
+                let order = self.visible_order();
                 // No run means the anchor has left the list, so fall through
                 // and treat this as an ordinary click.
                 if let Some(run) = filter::range_between(&order, &anchor, thread_id) {
@@ -319,6 +319,20 @@ impl AppState {
         self.last_toggled.set(Some(thread_id.to_string()));
     }
 
+    /// Thread ids in the order the list draws them, cards and all.
+    ///
+    /// Not the same as `visible()` once the list is grouped: sorting puts two
+    /// repositories' threads in one sequence, while the screen shows each
+    /// repository as its own card. A shift-click means the run between two
+    /// rows as the reader sees them, so it has to follow the cards.
+    fn visible_order(&self) -> Vec<String> {
+        self.sections()
+            .into_iter()
+            .flat_map(|s| s.threads)
+            .map(|t| t.id)
+            .collect()
+    }
+
     /// Check every row the filters currently show, scrolled into view or not.
     pub fn select_all_visible(&self) {
         let ids: HashSet<String> = self.visible().into_iter().map(|t| t.id).collect();
@@ -335,17 +349,25 @@ impl AppState {
         }
     }
 
-    /// Drop checked rows the inbox no longer holds.
+    /// Drop checked rows that have left the list.
+    ///
+    /// Against what the reader can actually see, not against everything the
+    /// app holds: a thread that resurfaces out of Done is still in the pool,
+    /// and leaving it checked would have the bar count a row that is no
+    /// longer on screen.
     ///
     /// A poll must never quietly empty the selection, so this removes only
     /// ids that are genuinely gone, and writes nothing when none are.
     fn prune_selection(&self) {
-        let live: HashSet<String> = self.pool().into_iter().map(|t| t.id).collect();
+        if self.selected.with(HashSet::is_empty) {
+            return;
+        }
+        let shown: HashSet<String> = self.visible().into_iter().map(|t| t.id).collect();
         let stale = self
             .selected
-            .with(|s| s.iter().any(|id| !live.contains(id)));
+            .with(|s| s.iter().any(|id| !shown.contains(id)));
         if stale {
-            self.selected.update(|s| s.retain(|id| live.contains(id)));
+            self.selected.update(|s| s.retain(|id| shown.contains(id)));
         }
     }
 
