@@ -291,3 +291,7 @@ pub const REPLY_RULE: f64 = 2.0;
 pub const THREAD_DASH: [f64; 2] = [4.0, 3.0];
 /// The box that opens the composer, and the composer in its place.
 pub const ASK_BOX_HEIGHT: f64 = 48.0;
+/// The scope button at the top of the rail, and the Viewed count row
+/// between the mode toggle and the changed list.
+pub const SCOPE_BUTTON_HEIGHT: f64 = 34.0;
+pub const VIEWED_ROW_HEIGHT: f64 = 28.0;
