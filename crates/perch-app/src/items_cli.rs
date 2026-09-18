@@ -192,6 +192,8 @@ mod tests {
             closed_at: None,
             requested_reviewers: vec![],
             milestone: None,
+            labels: vec![],
+            assignees: vec![],
         }));
         wanted.attention_at = Some(at("2026-09-18T09:00:00Z"));
         wanted.attention_reason = Some("review_requested".into());

@@ -342,7 +342,10 @@ pub fn review_card(
 
 /// A line comment and its replies under `path:line` and the lines of the
 /// hunk it was left on.
-fn line_thread_block(app: AppState, state: ReviewState, open_file: OpenFile, thread: LineThread) -> impl IntoView {
+/// A review comment and its replies as one block: the lines it was on,
+/// then the comments, each with Ask about this. On Conversation inside a
+/// review card; on Files in the thread column under On GitHub.
+pub fn line_thread_block(app: AppState, state: ReviewState, open_file: OpenFile, thread: LineThread) -> impl IntoView {
     let first = thread.comment.clone();
     let path = first.path.clone();
     let line = first.line.or(first.original_line);
@@ -383,7 +386,13 @@ fn line_thread_block(app: AppState, state: ReviewState, open_file: OpenFile, thr
 /// it: the head side unless the comment is on a removed line. `None` when
 /// GitHub no longer places it.
 fn anchor_for(state: ReviewState, comment: &ReviewComment) -> Option<Anchor> {
-    let line = comment.line.or(comment.original_line)? as u32;
+    // Anchors are on the head. A comment on a removed line is on the
+    // base, and one GitHub no longer places has no line; both go through
+    // as the quote alone.
+    if comment.side == perch_github::Side::Left {
+        return None;
+    }
+    let line = comment.line? as u32;
     let commit_sha = state
         .item
         .with(|i| i.as_ref().and_then(|i| i.checkout.as_ref()).map(|c| c.head_sha.clone()))
@@ -711,9 +720,10 @@ pub fn thread_card(
 ) -> impl IntoView {
     let id = thread.id.clone();
     Stack::vertical((
-        thread_byline(app, backend.clone(), &thread),
+        thread_byline(app, state, &thread),
+        threads::delete_confirmation(state, backend.clone(), id.clone()),
         match thread.anchor.clone() {
-            Some(anchor) => anchor_block(state, open_file, anchor, thread.outdated).into_any(),
+            Some(anchor) => anchor_block(state, backend.clone(), open_file, anchor, thread.outdated).into_any(),
             None => Empty::new().into_any(),
         },
         threads::messages_view(app, state, backend.clone(), id.clone(), ThreadFace::Card),
@@ -732,9 +742,12 @@ pub fn thread_card(
 }
 
 /// "You asked Sonnet · High", the time, Local, and the thread's menu.
-fn thread_byline(app: AppState, backend: Rc<Backend>, thread: &CommentThread) -> impl IntoView {
+fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> impl IntoView {
     let question = thread.messages.first();
-    let asked = match question.and_then(|m| m.run.as_ref()) {
+    // The run sits on the question while it goes and on the answer once
+    // it is done; whichever message has one names the model.
+    let run = thread.messages.iter().rev().find_map(|m| m.run.as_ref());
+    let asked = match run {
         Some(run) => {
             let effort = perch_agent::Effort::parse(&run.effort)
                 .map(|e| e.label().to_string())
@@ -755,7 +768,7 @@ fn thread_byline(app: AppState, backend: Rc<Backend>, thread: &CommentThread) ->
             .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_MUTED).margin_left(6.0).text_ellipsis().min_width(0.0)),
         local_chip(),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        threads::thread_menu(backend, thread.id.clone()),
+        threads::thread_menu(state, thread.id.clone()),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0))
 }
@@ -784,11 +797,25 @@ fn local_chip() -> impl IntoView {
     )
 }
 
-/// Where a thread is anchored, and the lines, when the file is loaded:
-/// the same block a review comment shows its lines in.
-fn anchor_block(state: ReviewState, open_file: OpenFile, anchor: Anchor, outdated: bool) -> impl IntoView {
+/// Where a thread is anchored, and the lines: the same block a review
+/// comment shows its lines in. The lines come from the loaded file, which
+/// is asked for when nothing has loaded it yet; a load fills `files`
+/// without opening a tab.
+fn anchor_block(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_file: OpenFile,
+    anchor: Anchor,
+    outdated: bool,
+) -> impl IntoView {
     let path = anchor.path.clone();
     let loaded = Memo::new(move |_| state.files.with(|m| m.contains_key(&path)));
+    if !loaded.get_untracked() && !state.is_loading(&anchor.path) {
+        state.loading.update(|m| {
+            m.insert(anchor.path.clone(), ());
+        });
+        backend.open_file(&anchor.path);
+    }
     let lines_anchor = anchor.clone();
     Stack::vertical((
         location_row(state, open_file, anchor.path.clone(), Some(anchor.start_line as u64), anchor.label(), outdated),

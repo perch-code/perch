@@ -59,6 +59,11 @@ pub struct PullRequest {
     /// The milestone's title.
     #[serde(default)]
     pub milestone: Option<String>,
+    /// As on an issue, for the strip under the header.
+    #[serde(default)]
+    pub labels: Vec<crate::items::Label>,
+    #[serde(default)]
+    pub assignees: Vec<String>,
 }
 
 /// Someone asked to review, for the strip under the header.
@@ -139,6 +144,10 @@ pub(crate) struct PullPayload {
     pub closed_at: Option<Timestamp>,
     #[serde(default)]
     pub milestone: Option<MilestoneRef>,
+    #[serde(default)]
+    pub labels: Vec<crate::items::LabelRef>,
+    #[serde(default)]
+    pub assignees: Vec<UserRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,6 +234,12 @@ impl PullPayload {
                 .map(|u| Reviewer { login: u.login, avatar_url: u.avatar_url })
                 .collect(),
             milestone: self.milestone.map(|m| m.title),
+            labels: self
+                .labels
+                .into_iter()
+                .map(|l| crate::items::Label { name: l.name, color: l.color.unwrap_or_default() })
+                .collect(),
+            assignees: self.assignees.into_iter().map(|u| u.login).collect(),
         }
     }
 }

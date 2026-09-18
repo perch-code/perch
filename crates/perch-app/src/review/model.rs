@@ -124,6 +124,9 @@ pub struct References {
     /// True until the answer lands, so an empty answer can say so rather
     /// than look like one still on its way.
     pub pending: bool,
+    /// The request's token. The answer is matched against this, not the
+    /// shared counter, which every hover moves on.
+    pub token: u64,
 }
 
 /// What the review view has on screen. One signal, written once per
@@ -165,6 +168,11 @@ pub struct Composer {
     pub effort: perch_agent::Effort,
     /// A question to start with, when a failed run is retried.
     pub draft: String,
+    /// Which opening this is, so a view keyed on what the composer is
+    /// about still starts afresh when it is opened again about the same
+    /// thing with a new draft. In the composer rather than beside it so
+    /// opening is one write.
+    pub opening: u64,
 }
 
 /// One open editor tab.
@@ -216,6 +224,9 @@ pub struct ReviewState {
     /// Whether the checkout has unstaged or staged work, for greying the
     /// scope menu's entries.
     pub dirty: RwSignal<Dirt>,
+    /// The head at the previous open of this item, which "Since you last
+    /// looked" ranges from. `None` before the first.
+    pub since_head: RwSignal<Option<String>>,
     /// Everything said on the pull request on GitHub, once fetched or read
     /// back from the cache.
     pub discussion: RwSignal<Option<Arc<Discussion>>>,
@@ -252,14 +263,14 @@ pub struct ReviewState {
     pub threads_open: RwSignal<bool>,
     /// An open composer, and where it is anchored.
     pub composer: RwSignal<Option<Composer>>,
-    /// Rises each time a composer is opened, so a view keyed on what the
-    /// composer is about still starts afresh when it is opened again about
-    /// the same thing with a new draft.
+    /// How many composers have been opened, for `Composer::opening`.
     pub composer_opened: RwSignal<u64>,
     /// The editor's selection as display lines, first and last inclusive.
     pub selection: RwSignal<Option<(usize, usize)>>,
     /// A gutter marker was clicked: the thread to scroll the column to.
     pub focus_thread: RwSignal<Option<String>>,
+    /// A thread whose Delete is waiting for a yes, under its byline.
+    pub confirm_thread: RwSignal<Option<String>>,
     /// How wide the thread column is. Dragged.
     pub threads_width: RwSignal<f64>,
     /// Runs whose step list the reader opened.
@@ -330,6 +341,7 @@ impl ReviewState {
             scope: RwSignal::new(Scope::Branch),
             commits: RwSignal::new(Arc::new(Vec::new())),
             dirty: RwSignal::new(Dirt::default()),
+            since_head: RwSignal::new(None),
             discussion: RwSignal::new(None),
             checks: RwSignal::new(None),
             viewed: RwSignal::new(Arc::new(std::collections::HashSet::new())),
@@ -351,6 +363,7 @@ impl ReviewState {
             composer_opened: RwSignal::new(0),
             selection: RwSignal::new(None),
             focus_thread: RwSignal::new(None),
+            confirm_thread: RwSignal::new(None),
             threads_width: RwSignal::new(crate::theme::THREADS_WIDTH),
             expanded_runs: RwSignal::new(std::collections::HashSet::new()),
             agent_last: RwSignal::new(None),
@@ -388,6 +401,10 @@ impl ReviewState {
     /// under its name.
     pub fn begin(&self, message: &str) {
         self.reset_checkout();
+        // Whatever the last item still has on its way, a discussion or a
+        // list of commits, must not land on the one being opened. Until
+        // Ready says which item this is, there is none.
+        self.item.set(None);
         self.preparing.set(Preparing::Working { message: message.into(), percent: None });
         self.opening.set(true);
         self.set_phase(Phase::Preparing);
@@ -406,6 +423,7 @@ impl ReviewState {
         self.scope.set(Scope::Branch);
         self.commits.set(Arc::new(Vec::new()));
         self.dirty.set(Dirt::default());
+        self.since_head.set(None);
         self.discussion.set(None);
         self.checks.set(None);
         self.viewed.set(Arc::new(std::collections::HashSet::new()));
@@ -423,6 +441,7 @@ impl ReviewState {
         self.composer.set(None);
         self.selection.set(None);
         self.focus_thread.set(None);
+        self.confirm_thread.set(None);
         self.hovered_line.set(None);
         self.composer_focused.set(false);
         self.composer_draft.set(String::new());
@@ -592,10 +611,13 @@ impl ReviewState {
     }
 
     /// How many of the changed files are viewed, and how many there are.
+    ///
+    /// A deletion has no content to view, so it is in neither number.
     pub fn viewed_count(&self) -> (usize, usize) {
         self.changed_files.with(|files| {
-            let viewed = files.iter().filter(|f| self.is_viewed(f)).count();
-            (viewed, files.len())
+            let viewable = files.iter().filter(|f| f.head_blob.is_some());
+            let viewed = viewable.clone().filter(|f| self.is_viewed(f)).count();
+            (viewed, viewable.count())
         })
     }
 
@@ -615,7 +637,11 @@ impl ReviewState {
                     ((base + if forward { k } else { -k }).rem_euclid(n as isize)) as usize
                 })
                 .collect();
-            order.into_iter().map(|i| &files[i]).find(|f| !self.is_viewed(f)).map(|f| f.path.clone())
+            order
+                .into_iter()
+                .map(|i| &files[i])
+                .find(|f| f.head_blob.is_some() && !self.is_viewed(f))
+                .map(|f| f.path.clone())
         })
     }
 
@@ -656,7 +682,14 @@ impl ReviewState {
         let mut heads = (first..=last).filter_map(|d| file.buffer.head_line(d));
         let start = heads.next()?;
         let end = heads.next_back().unwrap_or(start);
-        let commit_sha = self.item.with(|i| i.as_ref().and_then(|i| i.checkout.as_ref()).map(|c| c.head_sha.clone()))?;
+        // The commit the lines are of. Under a commit scope that is the
+        // commit, not the branch head: the numbers are its, and the quote
+        // and the outdated check read from it.
+        let head = self.item.with(|i| i.as_ref().and_then(|i| i.checkout.as_ref()).map(|c| c.head_sha.clone()))?;
+        let commit_sha = match self.scope.get_untracked() {
+            Scope::Commit { sha } => sha,
+            _ => head,
+        };
         Some(Anchor {
             path: file.path.clone(),
             start_line: start as u32 + 1,
@@ -670,8 +703,9 @@ impl ReviewState {
     pub fn open_composer(&self, thread_id: Option<String>, anchor: Option<Anchor>, draft: String, defaults: AgentChoice) {
         let (backend, model, effort) = self.agent_last.get().unwrap_or(defaults);
         self.composer_draft.set(draft.clone());
-        self.composer_opened.update(|n| *n += 1);
-        self.composer.set(Some(Composer { thread_id, anchor, backend, model, effort, draft }));
+        let opening = self.composer_opened.get_untracked() + 1;
+        self.composer_opened.set(opening);
+        self.composer.set(Some(Composer { thread_id, anchor, backend, model, effort, draft, opening }));
         self.show_threads();
     }
 
@@ -701,6 +735,9 @@ impl ReviewState {
     pub fn close_composer(&self) {
         self.composer.set(None);
         self.composer_draft.set(String::new());
+        // The box goes with the composer and is never told it lost focus,
+        // so the flag that stands the keys down is cleared here.
+        self.composer_focused.set(false);
     }
 
     /// The thread whose anchor starts on a display line of the open file.
@@ -711,6 +748,31 @@ impl ReviewState {
                 .find(|t| t.anchor.as_ref().is_some_and(|a| a.path == file.path && a.start_line == head))
                 .cloned()
         })
+    }
+
+    /// GitHub's review comments on a file, each with its replies, in time
+    /// order. Only those on the head side with a line GitHub still places:
+    /// one on a removed line, or outdated, has nowhere in the file to be.
+    pub fn github_threads_in(&self, path: &str) -> Vec<crate::review::timeline::LineThread> {
+        self.discussion.with(|d| {
+            let Some(d) = d.as_ref() else { return Vec::new() };
+            let on_file: Vec<perch_github::ReviewComment> =
+                d.review_comments.iter().filter(|c| c.path == path).cloned().collect();
+            crate::review::timeline::line_threads(&on_file)
+                .into_iter()
+                .filter(|t| t.comment.side == perch_github::Side::Right && t.comment.line.is_some())
+                .collect()
+        })
+    }
+
+    /// The GitHub review comment that starts on a display line of the open
+    /// file, for the gutter's hollow marker.
+    pub fn github_comment_starting_at(&self, file: &LoadedFile, display_line: usize) -> Option<u64> {
+        let head = file.buffer.head_line(display_line)? as u64 + 1;
+        self.github_threads_in(&file.path)
+            .into_iter()
+            .find(|t| t.comment.line == Some(head))
+            .map(|t| t.comment.id)
     }
 
     /// Threads anchored in a file, newest first.
@@ -779,16 +841,19 @@ mod tests {
         assert!(!state.is_viewed(&files[0]));
         assert!(!state.is_viewed(&changed("b.rs", Some("blob-b2"))), "a new blob is new content");
         assert!(!state.is_viewed(&files[2]));
-        assert_eq!(state.viewed_count(), (1, 4));
+        // The deletion has nothing to view, so it is not counted.
+        assert_eq!(state.viewed_count(), (1, 3));
     }
 
     #[test]
     fn next_unviewed_skips_viewed_files_and_wraps_both_ways() {
         let state = state();
-        assert_eq!(state.next_unviewed(Some("a.rs"), true).as_deref(), Some("gone.rs"), "b is viewed");
+        // b is viewed and the deletion has nothing to view, so both are
+        // stepped over.
+        assert_eq!(state.next_unviewed(Some("a.rs"), true).as_deref(), Some("c.rs"));
         assert_eq!(state.next_unviewed(Some("c.rs"), true).as_deref(), Some("a.rs"), "wraps forward");
         assert_eq!(state.next_unviewed(Some("a.rs"), false).as_deref(), Some("c.rs"), "wraps back");
-        assert_eq!(state.next_unviewed(Some("gone.rs"), false).as_deref(), Some("a.rs"), "b is viewed");
+        assert_eq!(state.next_unviewed(Some("gone.rs"), false).as_deref(), Some("a.rs"));
         // No open file: the first from either end.
         assert_eq!(state.next_unviewed(None, true).as_deref(), Some("a.rs"));
         assert_eq!(state.next_unviewed(None, false).as_deref(), Some("c.rs"));
@@ -805,9 +870,10 @@ mod tests {
                 .map(|(p, b)| (p.to_string(), b.to_string()))
                 .collect(),
         ));
-        // The deletion has no blob, so it is never viewed and is always next.
-        assert_eq!(state.next_unviewed(Some("a.rs"), true).as_deref(), Some("gone.rs"));
-        assert_eq!(state.viewed_count(), (3, 4));
+        // The deletion has no blob and is not in the round, so a review
+        // that deletes a file can still be viewed whole.
+        assert_eq!(state.next_unviewed(Some("a.rs"), true), None);
+        assert_eq!(state.viewed_count(), (3, 3));
 
         state.changed_files.set(Arc::new(vec![changed("a.rs", Some("blob-a"))]));
         assert_eq!(state.next_unviewed(Some("a.rs"), true), None);

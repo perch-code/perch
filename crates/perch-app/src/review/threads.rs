@@ -143,8 +143,13 @@ fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: Open
             move || {
                 let path = state.active.get();
                 let here = path.as_deref().map(|p| state.threads_in(p)).unwrap_or_default();
+                let github = path.as_deref().map(|p| state.github_threads_in(p)).unwrap_or_default();
                 let elsewhere = state.threads_elsewhere(path.as_deref());
                 let mut rows: Vec<Row> = here.into_iter().map(Row::Thread).collect();
+                if !github.is_empty() {
+                    rows.push(Row::GitHubDivider);
+                    rows.extend(github.into_iter().map(Row::GitHub));
+                }
                 if !elsewhere.is_empty() {
                     rows.push(Row::Divider);
                     rows.extend(elsewhere.into_iter().map(Row::Thread));
@@ -154,25 +159,22 @@ fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: Open
             |row| match row {
                 Row::Thread(t) => t.id.clone(),
                 Row::Divider => "divider".to_string(),
+                Row::GitHubDivider => "github".to_string(),
+                Row::GitHub(t) => format!("github:{}:{}", t.comment.id, t.replies.len()),
             },
             move |row| match row {
                 Row::Thread(t) => thread_card(app, state, here_backend.clone(), here_open.clone(), t).into_any(),
-                Row::Divider => Label::derived(|| "Elsewhere in this worktree".to_string())
-                    .style(|s| {
-                        s.font_size(theme::TEXT_SECTION)
-                            .font_weight(FontWeight::SEMI_BOLD)
-                            .color(theme::FG_SUBTLE)
-                            .padding_horiz(14.0)
-                            .padding_top(14.0)
-                            .padding_bottom(4.0)
-                            .selectable(false)
-                    })
-                    .into_any(),
+                Row::Divider => group_heading("Elsewhere in this worktree").into_any(),
+                Row::GitHubDivider => group_heading("On GitHub").into_any(),
+                Row::GitHub(t) => crate::review::cards::line_thread_block(app, state, here_open.clone(), t).into_any(),
             },
         )
         .style(|s| s.flex_col().width_full().gap(10.0).padding(12.0)),
         dyn_container(
-            move || state.comment_threads.with(|t| t.is_empty()) && state.composer.with(Option::is_none),
+            move || {
+                let github = state.active.with(|p| p.as_deref().map(|p| !state.github_threads_in(p).is_empty()).unwrap_or(false));
+                state.comment_threads.with(|t| t.is_empty()) && state.composer.with(Option::is_none) && !github
+            },
             |empty| {
                 if empty {
                     Label::derived(|| {
@@ -202,6 +204,11 @@ fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: Open
 enum Row {
     Thread(CommentThread),
     Divider,
+    /// The heading over GitHub's review comments on the open file, which
+    /// are not threads of the reader's own and are drawn as the nested
+    /// blocks Conversation shows.
+    GitHubDivider,
+    GitHub(crate::review::timeline::LineThread),
 }
 
 // ---------------------------------------------------------------------
@@ -570,7 +577,8 @@ fn thread_card(
     let flashing = RwSignal::new(false);
 
     let card = Stack::vertical((
-        anchor_line(state, backend.clone(), open_file, thread.clone()),
+        anchor_line(state, open_file, thread.clone()),
+        delete_confirmation(state, backend.clone(), thread.id.clone()),
         messages_view(app, state, backend.clone(), thread.id.clone(), ThreadFace::Column),
         follow_up(app, state, backend, thread.id.clone(), ThreadFace::Column),
     ))
@@ -611,12 +619,7 @@ fn thread_card(
 }
 
 /// `src/x.rs:41–58`, clickable, with Outdated and the `...` menu.
-fn anchor_line(
-    state: ReviewState,
-    backend: Rc<Backend>,
-    open_file: OpenFile,
-    thread: CommentThread,
-) -> impl IntoView {
+fn anchor_line(state: ReviewState, open_file: OpenFile, thread: CommentThread) -> impl IntoView {
     let label = thread.anchor.as_ref().map(|a| a.label()).unwrap_or_else(|| "Worktree".to_string());
     let anchor = thread.anchor.clone();
     let delete_id = thread.id.clone();
@@ -651,25 +654,82 @@ fn anchor_line(
             }),
         outdated_pill(thread.outdated),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        thread_menu(backend, delete_id),
+        thread_menu(state, delete_id),
     ))
     .style(|s| s.items_center().width_full())
 }
 
 /// The `...` at the end of a thread's first row, and the menu under it.
-pub fn thread_menu(backend: Rc<Backend>, thread_id: String) -> impl IntoView {
+/// A small heading over a group of the column's rows.
+fn group_heading(text: &'static str) -> impl IntoView {
+    Label::derived(move || text.to_string()).style(|s| {
+        s.font_size(theme::TEXT_SECTION)
+            .font_weight(FontWeight::SEMI_BOLD)
+            .color(theme::FG_SUBTLE)
+            .padding_horiz(14.0)
+            .padding_top(14.0)
+            .padding_bottom(4.0)
+            .selectable(false)
+    })
+}
+
+/// "Delete this thread?" with Delete and Cancel, under the thread that
+/// asked, on a card or in the column alike. Nothing else deletes.
+pub fn delete_confirmation(state: ReviewState, backend: Rc<Backend>, thread_id: String) -> impl IntoView {
+    let asking = Memo::new(move |_| state.confirm_thread.with(|c| c.as_deref() == Some(thread_id.as_str())));
+    dyn_container(
+        move || asking.get(),
+        move |asking| {
+            if !asking {
+                return Empty::new().into_any();
+            }
+            let backend = backend.clone();
+            Stack::vertical((
+                Label::derived(|| "Delete this thread?".to_string()).style(|s| {
+                    s.font_size(theme::TEXT_META).font_weight(FontWeight::SEMI_BOLD).color(theme::FG).selectable(false)
+                }),
+                Label::derived(|| "The question, its answers and the anchor go. Nothing on GitHub is touched.".to_string())
+                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).text_wrap().width_full().margin_top(2.0)),
+                Stack::horizontal((
+                    text_button(|| "Delete".to_string(), SidebarIcon::Trash, move || {
+                        if let Some(id) = state.confirm_thread.get_untracked() {
+                            backend.delete_comment_thread(&id);
+                        }
+                        state.confirm_thread.set(None);
+                    }),
+                    text_button(|| "Cancel".to_string(), SidebarIcon::Close, move || state.confirm_thread.set(None)),
+                ))
+                .style(|s| s.gap(6.0).margin_top(8.0)),
+            ))
+            .on_event_stop(el::Click, |_, _| {})
+            .style(|s| {
+                s.flex_col()
+                    .width_full()
+                    .padding(10.0)
+                    .background(theme::NOTICE_BG)
+                    .border(1.0)
+                    .border_color(theme::NOTICE_BORDER)
+                    .border_radius(theme::RADIUS)
+            })
+            .into_any()
+        },
+    )
+    .style(|s| s.width_full())
+}
+
+pub fn thread_menu(state: ReviewState, thread_id: String) -> impl IntoView {
     use floem::menu::Menu;
 
     Container::new(
         sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE).style(|s| s.pointer_events_none()),
     )
     .popout_menu(move || {
-        let backend = backend.clone();
         let id = thread_id.clone();
-        Menu::new().item("Delete Thread", move |item| {
-            let backend = backend.clone();
+        // Delete asks first, under the byline, wherever the thread is
+        // showing; the confirmation is the one thing that deletes.
+        Menu::new().item("Delete Thread\u{2026}", move |item| {
             let id = id.clone();
-            item.action(move || backend.delete_comment_thread(&id))
+            item.action(move || state.confirm_thread.set(Some(id.clone())))
         })
     })
     .style(|s| {
@@ -1178,6 +1238,8 @@ mod column {
             closed_at: None,
             requested_reviewers: vec![],
             milestone: None,
+            labels: vec![],
+            assignees: vec![],
         };
         let now = "2026-09-18T09:59:00Z".parse().unwrap();
         let mut item = Item::new("slatedb", "slatedb/slatedb", now);

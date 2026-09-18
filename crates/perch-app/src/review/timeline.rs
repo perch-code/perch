@@ -209,7 +209,7 @@ fn review_cards(reviews: &[Review], comments: &[ReviewComment]) -> Vec<Card> {
 /// Nest replies under the comment they answer, in time order. A reply
 /// points at the first comment of its thread, but a chain is followed all
 /// the same, and a reply whose parent is missing starts a thread of its own.
-fn line_threads(comments: &[ReviewComment]) -> Vec<LineThread> {
+pub fn line_threads(comments: &[ReviewComment]) -> Vec<LineThread> {
     let root_of = |c: &ReviewComment| -> u64 {
         let mut at = c;
         // Bounded, in case the ids loop.
@@ -277,6 +277,8 @@ pub(crate) mod tests {
             closed_at: None,
             requested_reviewers: vec![],
             milestone: None,
+            labels: vec![],
+            assignees: vec![],
         }
     }
 

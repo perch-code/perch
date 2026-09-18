@@ -622,6 +622,8 @@ fn strip_data(app: AppState, state: ReviewState) -> Strip {
             strip.closes = closes(&d.body);
         });
         strip.milestone = pr.milestone.clone();
+        strip.labels = pr.labels.clone();
+        strip.assignees = pr.assignees.clone();
     }
     if let Some(issue) = state.issue.get() {
         strip.labels = issue.labels.clone();

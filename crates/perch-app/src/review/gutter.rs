@@ -276,16 +276,29 @@ fn anchor_slot(
     display_line: usize,
 ) -> impl IntoView {
     let marker_file = file.clone();
+    let github_file = file.clone();
     let plus_file = file;
 
     dyn_container(
         move || {
             let thread = state.thread_starting_at(&marker_file, display_line).map(|t| (t.id, t.outdated));
+            let github = state.github_comment_starting_at(&github_file, display_line);
             let hovered = state.hovered_line.get() == Some(key);
-            (thread, hovered)
+            (thread, github, hovered)
         },
-        move |(thread, hovered)| match thread {
-            Some((id, outdated)) => Container::new(
+        move |(thread, github, hovered)| match (thread, github) {
+            // A review comment from GitHub on this line, hollow where a
+            // thread of the reader's own is solid. Click opens the column,
+            // where it is listed under On GitHub.
+            (None, Some(_)) => Container::new(
+                sidebar_glyph(SidebarIcon::ThreadHollow, theme::FG_MUTED).style(|s| s.size(12.0, 12.0)),
+            )
+            .on_event_stop(el::Click, move |_, _| state.show_threads())
+            .style(|s| {
+                crate::ui::widgets::clickable(s).size(16.0, 16.0).items_center().justify_center()
+            })
+            .into_any(),
+            (Some((id, outdated)), _) => Container::new(
                 sidebar_glyph(
                     SidebarIcon::Thread,
                     if outdated { theme::FG_SUBTLE } else { theme::ACCENT },
@@ -297,7 +310,7 @@ fn anchor_slot(
                 crate::ui::widgets::clickable(s).size(16.0, 16.0).items_center().justify_center()
             })
             .into_any(),
-            None if hovered && plus_file.buffer.head_line(display_line).is_some() => {
+            (None, None) if hovered && plus_file.buffer.head_line(display_line).is_some() => {
                 let plus_file = plus_file.clone();
                 Container::new(
                     sidebar_glyph(SidebarIcon::Plus, theme::CANVAS).style(|s| s.size(11.0, 11.0)),
@@ -321,7 +334,7 @@ fn anchor_slot(
                 })
                 .into_any()
             }
-            None => Empty::new().into_any(),
+            (None, None) => Empty::new().into_any(),
         },
     )
 }

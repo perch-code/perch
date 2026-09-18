@@ -5,7 +5,7 @@ use imara_diff::sources::lines;
 use imara_diff::{diff, Algorithm};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChangeStatus {
     Added,
     Modified,
@@ -42,7 +42,7 @@ impl ChangeStatus {
 }
 
 /// One entry in the changed-files rail.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChangedFile {
     /// Path in the head tree. For a deletion, the path in the base tree.
     pub path: String,

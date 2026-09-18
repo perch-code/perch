@@ -298,10 +298,11 @@ impl AppState {
                     review.checks.set(Some(checks));
                 }
             }
-            Event::CommitsReady { item_id, commits, dirt } => {
+            Event::CommitsReady { item_id, commits, dirt, since } => {
                 if review.is_item(&item_id) {
                     review.commits.set(commits);
                     review.dirty.set(dirt);
+                    review.since_head.set(since);
                 }
             }
             Event::ScopeReady { item_id, scope, files } => {
@@ -317,17 +318,17 @@ impl AppState {
                 }
             }
             Event::LspReferences { token, references, elsewhere } => {
-                if review.request_token.get() == token {
-                    review.references.update(|r| {
-                        if let Some(r) = r.as_mut() {
-                            let mut open = (**r).clone();
-                            open.locations = references;
-                            open.elsewhere = elsewhere;
-                            open.pending = false;
-                            *r = Arc::new(open);
-                        }
-                    });
-                }
+                // Matched against the panel's own token: the shared counter
+                // moves on with every hover while the answer is on its way.
+                review.references.update(|r| {
+                    if let Some(r) = r.as_mut().filter(|r| r.token == token) {
+                        let mut open = (**r).clone();
+                        open.locations = references;
+                        open.elsewhere = elsewhere;
+                        open.pending = false;
+                        *r = Arc::new(open);
+                    }
+                });
             }
             other => self.apply(other),
         }
@@ -833,6 +834,8 @@ mod tests {
             closed_at: None,
             requested_reviewers: vec![],
             milestone: None,
+            labels: vec![],
+            assignees: vec![],
         }));
         item
     }

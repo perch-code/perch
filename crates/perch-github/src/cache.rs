@@ -1764,6 +1764,8 @@ mod tests {
             closed_at: None,
             requested_reviewers: vec![],
             milestone: None,
+            labels: vec![],
+            assignees: vec![],
         }
     }
 

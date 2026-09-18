@@ -72,6 +72,10 @@ pub enum Command {
     /// What the diff is over: the branch, a commit, the uncommitted work.
     /// The changed list is recomputed and every open file reloads.
     SetScope { item_id: String, scope: perch_git::Scope },
+    /// Look at the checkout again: its head, its dirt and its commits, and
+    /// the changed list if the head moved. Sent as the scope menu is about
+    /// to open, and on every poll, so terminal work shows up.
+    RefreshScope { item_id: String },
     /// Check or uncheck a file's content as viewed.
     SetViewed { item_id: String, path: String, blob: String, viewed: bool },
     /// Ask the language server about a position. `token` lets the UI drop an
@@ -201,8 +205,9 @@ pub enum Event {
     /// The workflow runs' verdict for the item's head.
     ChecksReady { item_id: String, checks: Arc<perch_github::Checks> },
     /// The commits over the base and whether the checkout has work in it,
-    /// for the scope menu.
-    CommitsReady { item_id: String, commits: Arc<Vec<perch_git::Commit>>, dirt: perch_git::Dirt },
+    /// for the scope menu, and the head as it was at the previous open,
+    /// which "Since you last looked" ranges from.
+    CommitsReady { item_id: String, commits: Arc<Vec<perch_git::Commit>>, dirt: perch_git::Dirt, since: Option<String> },
     /// The changed list under a scope, after `SetScope`.
     ScopeReady { item_id: String, scope: perch_git::Scope, files: Arc<Vec<perch_git::ChangedFile>> },
     /// Every (path, blob) the reader has viewed on the item. Whole.
@@ -259,6 +264,10 @@ impl Backend {
 
     pub fn set_scope(&self, item_id: &str, scope: perch_git::Scope) {
         let _ = self.commands.send(Command::SetScope { item_id: item_id.to_string(), scope });
+    }
+
+    pub fn refresh_scope(&self, item_id: &str) {
+        let _ = self.commands.send(Command::RefreshScope { item_id: item_id.to_string() });
     }
 
     pub fn set_viewed(&self, item_id: &str, path: &str, blob: &str, viewed: bool) {
@@ -562,6 +571,7 @@ async fn run(
         events: events.clone(),
         runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         avatars: fetches.avatars.clone(),
+        seen_ci: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     };
 
     // Bring the table and the disk into agreement before any command can
@@ -608,6 +618,11 @@ async fn run(
         match command {
             Some(Command::Refresh) | None => {
                 poll_after = refresh(&ctx, &source, &fetches).await;
+                let open = ctx.slot.lock().ok().and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
+                if let Some(item_id) = open {
+                    let ctx = ctx.clone();
+                    tokio::spawn(async move { refresh_scope(&ctx, &item_id).await });
+                }
                 let ctx = ctx.clone();
                 tokio::spawn(async move { refresh_items(&ctx).await });
             }
@@ -765,6 +780,10 @@ async fn run(
             Some(Command::SetScope { item_id, scope }) => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { set_scope(&ctx, &item_id, scope).await });
+            }
+            Some(Command::RefreshScope { item_id }) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { refresh_scope(&ctx, &item_id).await });
             }
             Some(Command::SetViewed { item_id, path, blob, viewed }) => {
                 if let Some(Err(e)) = ctx.with_cache(|c| c.set_viewed(&item_id, &path, &blob, viewed)) {
@@ -947,6 +966,9 @@ struct Ctx {
     runs: Arc<std::sync::Mutex<std::collections::HashMap<String, (perch_agent::Run, String)>>>,
     /// The avatar download limit, shared with the inbox's fetches.
     avatars: Arc<Semaphore>,
+    /// CI notifications already acted on, by id and time, so one sitting
+    /// in the inbox does not fetch the checks again on every poll.
+    seen_ci: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
 }
 
 impl Ctx {
@@ -1441,8 +1463,11 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
     // The row as it is now: the git work took a while, and a refresh may
     // have attached a pull request or a poll marked it since.
     let mut item = ctx.item(&item.id).unwrap_or(item);
+    let since = item.checkout.as_ref().and_then(|c| c.last_seen_head.clone());
     if let Some(c) = item.checkout.as_mut() {
-        c.last_seen_head = Some(c.head_sha.clone()).filter(|h| !h.is_empty());
+        // The scan moves head_sha with the worktree, so the previous
+        // open's head is kept on its own, and replaced by this one's.
+        c.last_seen_head = Some(git_checkout.head_sha.clone()).filter(|h| !h.is_empty());
         c.head_sha = git_checkout.head_sha.clone();
         c.on_disk = true;
     }
@@ -1452,7 +1477,7 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
     ctx.send_items();
 
     let pull_request = item.pull_request().cloned().map(Arc::new);
-    finish_open(ctx, item, pull_request, git_checkout, false).await
+    finish_open(ctx, item, pull_request, git_checkout, false, since).await
 }
 
 /// A checkout under the store on a branch Perch cut: back on disk if it
@@ -1533,6 +1558,7 @@ async fn finish_open(
     pull_request: Option<Arc<PullRequest>>,
     checkout: perch_git::Checkout,
     offline: bool,
+    since: Option<String>,
 ) -> bool {
     let events = &ctx.events;
     let _ = events.send(Event::ReviewProgress { message: "Computing the diff".into(), percent: None });
@@ -1560,6 +1586,7 @@ async fn finish_open(
             checkout,
             files: files.clone(),
             scope,
+            since: since.clone(),
             item_id: item.id.clone(),
             pull_request: pull_request.clone(),
             body: None,
@@ -1602,25 +1629,34 @@ async fn finish_open(
         let ctx = ctx.clone();
         let item_id = item.id.clone();
         let head = head.clone();
-        tokio::spawn(async move { send_commits(&ctx, &item_id, &worktree, &merge_base, &head).await });
+        tokio::spawn(async move { send_commits(&ctx, &item_id, &worktree, &merge_base, &head, since).await });
     }
 
     if let Some(pr) = pull_request {
         // The cached discussion and checks paint before GitHub answers,
-        // as the inbox does. A checkout with no pull request has neither.
-        ctx.with_cache(|c| {
-            if let Ok(Some((_, d))) = c.load_discussion(&item.id) {
-                let _ = ctx.events.send(Event::DiscussionReady { item_id: item.id.clone(), discussion: Arc::new(d) });
+        // as the inbox does, with the faces the last open left on disk and
+        // the description a question needs. A checkout with no pull
+        // request has neither.
+        let cached = ctx.with_cache(|c| c.load_discussion(&item.id).ok().flatten()).flatten();
+        if let Some((_, d)) = cached {
+            if let Ok(mut guard) = ctx.slot.lock() {
+                if let Some(open) = guard.as_mut().filter(|c| c.item_id == item.id) {
+                    open.body = Some(d.body.clone());
+                }
             }
-            if let Ok(Some(checks)) = c.load_checks(&item.id, &head) {
-                let _ = ctx.events.send(Event::ChecksReady { item_id: item.id.clone(), checks: Arc::new(checks) });
-            }
-        });
+            ctx.want_avatars(d.comments.iter().map(|c| c.user_avatar_url.clone()));
+            let _ = ctx.events.send(Event::DiscussionReady { item_id: item.id.clone(), discussion: Arc::new(d) });
+        }
+        ctx.want_avatars(pr.requested_reviewers.iter().map(|r| r.avatar_url.clone()));
+        let cached = ctx.with_cache(|c| c.load_checks(&item.id, &pr.head_sha).ok().flatten()).flatten();
+        if let Some(checks) = cached {
+            let _ = ctx.events.send(Event::ChecksReady { item_id: item.id.clone(), checks: Arc::new(checks) });
+        }
         if !offline {
             let (ctx2, item_id2, pr2) = (ctx.clone(), item.id.clone(), pr.clone());
             tokio::spawn(async move { archive_discussion(&ctx2, &item_id2, &pr2).await });
             let (ctx2, item_id2) = (ctx.clone(), item.id.clone());
-            tokio::spawn(async move { fetch_checks(&ctx2, &item_id2, &pr, &head).await });
+            tokio::spawn(async move { fetch_checks(&ctx2, &item_id2, &pr).await });
         }
     }
     true
@@ -1643,9 +1679,10 @@ fn send_viewed(ctx: &Ctx, item_id: &str) {
 }
 
 /// The commits over the base and whether there is work in the checkout,
-/// for the scope menu. A checkout with no history over its base, an
-/// issue's home say, sends an empty list.
-async fn send_commits(ctx: &Ctx, item_id: &str, worktree: &Path, merge_base: &str, head: &str) {
+/// for the scope menu, with the head as it was at the previous open. A
+/// checkout with no history over its base, an issue's home say, sends an
+/// empty list.
+async fn send_commits(ctx: &Ctx, item_id: &str, worktree: &Path, merge_base: &str, head: &str, since: Option<String>) {
     let git = ctx.preparer.git();
     let commits = if merge_base.is_empty() || merge_base == head {
         Vec::new()
@@ -1659,12 +1696,55 @@ async fn send_commits(ctx: &Ctx, item_id: &str, worktree: &Path, merge_base: &st
         }
     };
     let dirt = perch_git::dirt(git, worktree).await.unwrap_or_default();
-    let _ = ctx.events.send(Event::CommitsReady { item_id: item_id.to_string(), commits: Arc::new(commits), dirt });
+    let _ = ctx.events.send(Event::CommitsReady { item_id: item_id.to_string(), commits: Arc::new(commits), dirt, since });
 }
 
-/// One request for the workflow runs on the head, kept and shown. A
-/// failure shows nothing: absent means unknown.
-async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest, head: &str) {
+/// Look at the checkout again. The head may have moved under a terminal
+/// commit: then the review context follows it and the changed list is
+/// recomputed under the scope that is set; the commits and the dirt are
+/// read again either way.
+async fn refresh_scope(ctx: &Ctx, item_id: &str) {
+    let open = ctx.slot.lock().ok().and_then(|g| {
+        g.as_ref().filter(|c| c.item_id == item_id).map(|c| (c.checkout.clone(), c.scope.clone(), c.since.clone()))
+    });
+    let Some((mut checkout, scope, since)) = open else { return };
+    if !checkout.worktree.join(".git").exists() {
+        return;
+    }
+    let git = ctx.preparer.git();
+    let head = git
+        .run(Some(&checkout.worktree), ["rev-parse", "HEAD"], Duration::from_secs(30))
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    // A head that moved is a commit the reader made: the branch grew, and
+    // a pull request checkout left stale by a dirty tree is not this.
+    if !head.is_empty() && head != checkout.head_sha && checkout.stale.is_none() {
+        checkout.head_sha = head.clone();
+        let files = match scoped_files(&ctx.preparer, &checkout, &scope).await {
+            Ok(f) => Arc::new(f),
+            Err(e) => {
+                tracing::info!(item = item_id, error = %e, "could not reread the changed list");
+                return;
+            }
+        };
+        if let Ok(mut guard) = ctx.slot.lock() {
+            if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+                open.checkout.head_sha = head.clone();
+                open.files = files.clone();
+            }
+        }
+        let _ = ctx.events.send(Event::ScopeReady { item_id: item_id.to_string(), scope, files });
+    }
+    send_commits(ctx, item_id, &checkout.worktree, &checkout.merge_base, &checkout.head_sha, since).await;
+}
+
+/// One request for the workflow runs on the pull request's head, kept and
+/// shown. The pull request's, not the checkout's: a root or a branch of
+/// the reader's own may sit ahead of or behind what GitHub ran. A failure
+/// shows nothing: absent means unknown.
+async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
+    let head = pr.head_sha.as_str();
     match ctx.github.list_workflow_runs_for_sha(&pr.repo_full_name, head).await {
         Ok(runs) => {
             let checks = perch_github::Checks::of(&runs);
@@ -1843,6 +1923,8 @@ struct ReviewContext {
     files: Arc<Vec<perch_git::ChangedFile>>,
     /// What the diff is over. Branch when the item opens.
     scope: perch_git::Scope,
+    /// The head at the previous open, for "Since you last looked".
+    since: Option<String>,
     item_id: String,
     /// `None` for a branch with no pull request.
     pull_request: Option<Arc<PullRequest>>,
@@ -2031,14 +2113,18 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
 async fn refresh_open_checks(ctx: &Ctx, thread: &Thread) {
     let Some(query) = perch_github::WorkflowRunQuery::from_thread(thread) else { return };
     let open = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref().and_then(|c| {
-            c.pull_request.clone().map(|p| (c.item_id.clone(), p, c.checkout.head_sha.clone()))
-        })
+        g.as_ref().and_then(|c| c.pull_request.clone().map(|p| (c.item_id.clone(), p)))
     });
-    let Some((item_id, pr, head)) = open else { return };
-    if pr.repo_full_name.eq_ignore_ascii_case(&query.repo_full_name) && pr.head_ref == query.branch {
-        fetch_checks(ctx, &item_id, &pr, &head).await;
+    let Some((item_id, pr)) = open else { return };
+    if !(pr.repo_full_name.eq_ignore_ascii_case(&query.repo_full_name) && pr.head_ref == query.branch) {
+        return;
     }
+    // Once per notification, not once per poll it is still in the inbox.
+    let key = (thread.id.clone(), thread.updated_at);
+    if ctx.seen_ci.lock().map(|mut s| !s.insert(key)).unwrap_or(true) {
+        return;
+    }
+    fetch_checks(ctx, &item_id, &pr).await;
 }
 
 /// Rescan roots, then ask GitHub about subject-less branches.
@@ -2412,6 +2498,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
             checkout,
             files: Arc::new(Vec::new()),
             scope: perch_git::Scope::Branch,
+            since: None,
             item_id: item.id.clone(),
             pull_request: None,
             body: None,
@@ -2617,10 +2704,11 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         owned: kept.as_ref().is_none_or(|c| c.owned),
         on_disk: true,
         churn: kept.as_ref().and_then(|c| c.churn),
-        // Where the head was the last time this was opened, for "Since
-        // you last looked". A first open has nothing to look back to.
-        last_seen_head: kept.as_ref().map(|c| c.head_sha.clone()).filter(|h| !h.is_empty()),
+        // The head being opened now, which the next open will look back
+        // to. What the row held until now is this open's "since".
+        last_seen_head: Some(checkout.head_sha.clone()).filter(|h| !h.is_empty()),
     });
+    let since = kept.as_ref().and_then(|c| c.last_seen_head.clone());
     item.archived_at = None;
     item.last_opened_at = now;
     if ci_failed_now {
@@ -2633,7 +2721,7 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     }
     ctx.send_items();
 
-    finish_open(ctx, item, Some(Arc::new(pull_request)), checkout, offline).await
+    finish_open(ctx, item, Some(Arc::new(pull_request)), checkout, offline, since).await
 }
 
 /// A branch Perch cut, read against a pull request that was opened from
@@ -2817,10 +2905,10 @@ async fn ask(
 ) {
     let open = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref().filter(|c| c.item_id == item_id).map(|c| {
-            (c.checkout.clone(), c.pull_request.clone(), c.body.clone(), c.issue.clone())
+            (c.checkout.clone(), c.pull_request.clone(), c.body.clone(), c.issue.clone(), c.scope.clone())
         })
     });
-    let Some((checkout, pull_request, body, issue)) = open else {
+    let Some((checkout, pull_request, body, issue, scope)) = open else {
         let _ = ctx.events.send(Event::Notice("That item is no longer open".into()));
         return;
     };
@@ -2895,7 +2983,7 @@ async fn ask(
     // this backend's; a thread with none, or one that switched backends,
     // starts over with its history folded in.
     let file = match &thread.anchor {
-        Some(a) => crate::ask::load_display(&ctx.preparer, &checkout, &a.path).await.ok(),
+        Some(a) => crate::ask::load_display(&ctx.preparer, &checkout, &scope, &a.commit_sha, &a.path).await.ok(),
         None => None,
     };
     let history: Vec<(Author, String)> =
@@ -3071,11 +3159,13 @@ async fn open_file(
     let (base_rev, head_rev) = scope.sides(&checkout.merge_base, &checkout.head_sha);
     let git = preparer.git();
 
-    // Both sides come from the scope: a commit's tree, the index, or the
-    // disk. A file outside the changed list has a head side only.
+    // Both sides of a changed file come from the scope: a commit's tree,
+    // the index, or the disk. A file outside the changed list is the same
+    // under every scope, so it is read from disk, where it may be binary,
+    // untracked or too big, which the changed list would have said.
     let head = match &entry {
         Some(f) if f.status == perch_git::ChangeStatus::Deleted => String::new(),
-        _ => match perch_git::read_side(git, &checkout.worktree, &head_rev, &path).await {
+        Some(_) => match perch_git::read_side(git, &checkout.worktree, &head_rev, &path).await {
             Ok(Some(text)) if text.len() > MAX_FILE_BYTES => {
                 let _ = events.send(Event::FileFailed { path, message: "file is too large to display".into() });
                 return;
@@ -3085,6 +3175,23 @@ async fn open_file(
                 let _ = events.send(Event::FileFailed { path, message: "file is not there".into() });
                 return;
             }
+            Err(e) => {
+                let _ = events.send(Event::FileFailed { path, message: e.to_string() });
+                return;
+            }
+        },
+        None => match tokio::fs::read(checkout.worktree.join(&path)).await {
+            Ok(bytes) if bytes.len() > MAX_FILE_BYTES => {
+                let _ = events.send(Event::FileFailed { path, message: "file is too large to display".into() });
+                return;
+            }
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => {
+                    let _ = events.send(Event::FileFailed { path, message: "file is not text".into() });
+                    return;
+                }
+            },
             Err(e) => {
                 let _ = events.send(Event::FileFailed { path, message: e.to_string() });
                 return;

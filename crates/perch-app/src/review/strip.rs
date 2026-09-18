@@ -17,11 +17,24 @@ use crate::theme;
 
 pub fn strip(state: ReviewState) -> impl IntoView {
     let has_files = move || state.item.with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
+    // The cards Conversation shows, less the description and the events:
+    // the same interleave, so a review GitHub minted for a reply and the
+    // timeline drops is not counted either.
     let conversation_count = move || {
-        let said = state.discussion.with(|d| {
-            d.as_ref().map(|d| d.comments.len() + d.reviews.len()).unwrap_or(0)
-        }) + state.issue_comments.with(|c| c.len());
-        said + state.comment_threads.with(|t| t.len())
+        let pull = state.pull_request.get();
+        let discussion = state.discussion.get();
+        let issue = state.issue.get();
+        let comments = state.issue_comments.get();
+        let threads = state.comment_threads.get();
+        crate::review::timeline::timeline(
+            pull.as_deref(),
+            discussion.as_deref(),
+            issue.as_deref().map(|i| (i, comments.as_slice())),
+            &threads,
+        )
+        .iter()
+        .filter(|c| !matches!(c.kind(), "description" | "event"))
+        .count()
     };
     let files_count = move || state.changed_files.with(|f| f.len());
 

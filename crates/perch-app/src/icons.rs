@@ -274,6 +274,12 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="{c}"
                      stroke="{c}" stroke-width="1.2" stroke-linejoin="round"/>"#
         ),
+        // The same shape, hollow: a comment from GitHub, not a thread of
+        // the reader's own.
+        SidebarIcon::ThreadHollow => format!(
+            r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="none"
+                     stroke="{c}" stroke-width="1.3" stroke-linejoin="round"/>"#
+        ),
         SidebarIcon::Pin => format!(
             r#"<path d="M6 2.5 H10 L9.3 6.2 L11.6 8.6 V9.6 H8.6 V13.8 L8 14.4 L7.4 13.8 V9.6 H4.4 V8.6
                        L6.7 6.2 Z" fill="none" stroke="{c}" stroke-width="1.3" stroke-linejoin="round"/>"#
@@ -365,6 +371,8 @@ pub enum SidebarIcon {
     Filter,
     /// Two links of a chain: a permalink.
     Link,
+    /// A speech bubble drawn hollow: a review comment from GitHub.
+    ThreadHollow,
     /// A page with a plus and a minus: a review that requested changes.
     ChangesRequested,
     /// A signpost: a milestone.
@@ -379,8 +387,9 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 34] = [
+    pub const ALL: [SidebarIcon; 35] = [
         SidebarIcon::Link,
+        SidebarIcon::ThreadHollow,
         SidebarIcon::ChangesRequested,
         SidebarIcon::Milestone,
         SidebarIcon::Stacked,

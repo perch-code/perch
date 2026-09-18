@@ -186,7 +186,7 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
                 side: Side::Right,
                 commit_sha: checkout.head_sha.clone(),
             };
-            let file = load_display(&preparer, &checkout, path).await?;
+            let file = load_display(&preparer, &checkout, &perch_git::Scope::Branch, &checkout.head_sha, path).await?;
             (Some(anchor), Some(file))
         }
         Some(_) => return Err("an anchor needs a pull request".into()),
@@ -225,15 +225,31 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
 }
 
 /// The file the way the editor lays it out, diff spliced in.
+/// The file as the reader saw it when the anchor was made: under the
+/// scope that is set when the anchor is of the branch head, and at the
+/// anchor's own commit when it is of another, so the quoted lines are
+/// the ones that were selected.
 pub(crate) async fn load_display(
     preparer: &perch_git::Preparer,
     checkout: &perch_git::Checkout,
+    scope: &perch_git::Scope,
+    anchor_sha: &str,
     path: &str,
 ) -> Result<DisplayBuffer, String> {
-    let head = std::fs::read_to_string(checkout.worktree.join(path)).map_err(|e| e.to_string())?;
-    let base = preparer
-        .show_blob(&checkout.bare, &checkout.merge_base, path)
+    let (base_rev, head_rev) = if !anchor_sha.is_empty() && anchor_sha != checkout.head_sha {
+        (perch_git::Rev::Sha(format!("{anchor_sha}^")), perch_git::Rev::Sha(anchor_sha.to_string()))
+    } else {
+        scope.sides(&checkout.merge_base, &checkout.head_sha)
+    };
+    let git = preparer.git();
+    let head = perch_git::read_side(git, &checkout.worktree, &head_rev, path)
         .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("{path} is not there"))?;
+    let base = perch_git::read_side(git, &checkout.worktree, &base_rev, path)
+        .await
+        .ok()
+        .flatten()
         .unwrap_or_default();
     Ok(if base.is_empty() {
         DisplayBuffer::plain(&head)
@@ -514,6 +530,8 @@ mod tests {
             closed_at: None,
             requested_reviewers: vec![],
             milestone: None,
+            labels: vec![],
+            assignees: vec![],
         }
     }
 

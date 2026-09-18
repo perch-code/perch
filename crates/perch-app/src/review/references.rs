@@ -43,13 +43,14 @@ pub fn find(state: ReviewState, backend: &Backend, head_line: usize, column: Opt
     };
     let Some((start, symbol)) = found else { return };
 
+    let token = state.next_token();
     state.references.set(Some(Arc::new(References {
         symbol: symbol.to_string(),
         locations: Vec::new(),
         elsewhere: 0,
         pending: true,
+        token,
     })));
-    let token = state.next_token();
     backend.references(token, &file.path, head_line as u32, start as u32);
 }
 
@@ -621,14 +622,14 @@ mod tests {
         let locations = vec![reference("a.rs", 3, 4, "foo(foo)"), reference("a.rs", 3, 8, "foo(foo)")];
         let groups = group_by_file(&locations);
         assert_eq!(groups[0].1.len(), 1);
-        let rows = rows(&References { symbol: "foo".into(), locations, elsewhere: 0, pending: false });
+        let rows = rows(&References { symbol: "foo".into(), locations, elsewhere: 0, pending: false, token: 0 });
         assert_eq!(rows.len(), 2, "a heading and one line");
         assert_eq!(rows[0], Row::File { path: "a.rs".into(), count: 1, first: true });
     }
 
     #[test]
     fn the_summary_counts_lines_files_and_the_rest() {
-        let one = References { symbol: "s".into(), locations: vec![reference("a.rs", 1, 0, "")], elsewhere: 0, pending: false };
+        let one = References { symbol: "s".into(), locations: vec![reference("a.rs", 1, 0, "")], elsewhere: 0, pending: false, token: 0 };
         assert_eq!(summary(&one), "1 in 1 file");
 
         let many = References {
@@ -640,17 +641,18 @@ mod tests {
             ],
             elsewhere: 3,
             pending: false,
+            token: 0,
         };
         assert_eq!(summary(&many), "3 in 2 files and 3 elsewhere");
 
-        let looking = References { symbol: "s".into(), locations: vec![], elsewhere: 0, pending: true };
+        let looking = References { symbol: "s".into(), locations: vec![], elsewhere: 0, pending: true, token: 0 };
         assert_eq!(summary(&looking), "");
         assert_eq!(rows(&looking), vec![Row::Notice("Looking\u{2026}".into())]);
 
-        let none = References { symbol: "s".into(), locations: vec![], elsewhere: 0, pending: false };
+        let none = References { symbol: "s".into(), locations: vec![], elsewhere: 0, pending: false, token: 0 };
         assert_eq!(rows(&none), vec![Row::Notice("None found.".into())]);
 
-        let away = References { symbol: "s".into(), locations: vec![], elsewhere: 2, pending: false };
+        let away = References { symbol: "s".into(), locations: vec![], elsewhere: 2, pending: false, token: 0 };
         assert_eq!(summary(&away), "2 elsewhere");
     }
 
@@ -665,8 +667,8 @@ mod tests {
     #[test]
     fn rows_carry_the_symbol_so_a_new_question_redraws_them() {
         let locations = vec![reference("a.rs", 1, 0, "a b")];
-        let a = rows(&References { symbol: "a".into(), locations: locations.clone(), elsewhere: 0, pending: false });
-        let b = rows(&References { symbol: "b".into(), locations, elsewhere: 0, pending: false });
+        let a = rows(&References { symbol: "a".into(), locations: locations.clone(), elsewhere: 0, pending: false, token: 0 });
+        let b = rows(&References { symbol: "b".into(), locations, elsewhere: 0, pending: false, token: 0 });
         assert_ne!(a[1], b[1]);
     }
 }
@@ -721,6 +723,8 @@ mod window {
             closed_at: None,
             requested_reviewers: vec![],
             milestone: None,
+            labels: vec![],
+            assignees: vec![],
         };
         let now = "2026-09-18T09:59:00Z".parse().unwrap();
         let mut item = Item::new("slatedb", "slatedb/slatedb", now);
@@ -801,6 +805,7 @@ mod window {
             ],
             elsewhere: 1,
             pending: false,
+            token: 0,
         })
     }
 

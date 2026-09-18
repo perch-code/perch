@@ -198,9 +198,12 @@ fn set_all_viewed(state: ReviewState, backend: &Backend, viewed: bool) {
 }
 
 fn changed_list(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl IntoView {
+    // Keyed on the whole row, not the path: a scope change keeps the path
+    // and changes the churn, the status and the blob Viewed is keyed on,
+    // and a row kept by its key would show the old ones.
     dyn_stack(
         move || state.changed_files.get().as_ref().clone(),
-        |f| f.path.clone(),
+        |f| f.clone(),
         move |f| changed_row(state, f, on_open.clone(), backend.clone()),
     )
     .style(|s| s.flex_col().width_full().padding_vert(4.0))

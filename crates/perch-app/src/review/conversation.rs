@@ -151,8 +151,7 @@ fn composer(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
     let open = floem::reactive::Memo::new(move |_| {
         state
             .composer
-            .with(|c| c.as_ref().filter(|c| c.thread_id.is_none()).map(|c| c.anchor.clone()))
-            .map(|anchor| (anchor, state.composer_opened.get()))
+            .with(|c| c.as_ref().filter(|c| c.thread_id.is_none()).map(|c| (c.anchor.clone(), c.opening)))
     });
     dyn_container(
         move || open.get(),
@@ -216,6 +215,8 @@ mod tests {
             closed_at: Some(at("2026-09-17T15:00:00Z")),
             requested_reviewers: vec![],
             milestone: None,
+            labels: vec![],
+            assignees: vec![],
         }
     }
 

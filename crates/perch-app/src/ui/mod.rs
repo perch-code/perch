@@ -197,6 +197,25 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             if typing || !review.is_open() {
                 return EventPropagation::Continue;
             }
+            // Cmd-Shift-1 and Cmd-Shift-2 are the item view's tabs. Here
+            // rather than with the other Cmd keys because they are pressed
+            // from the code as often as from anywhere.
+            if key.modifiers == OS_MOD | Modifiers::SHIFT {
+                match key.code {
+                    Code::Digit1 => {
+                        review.show_tab(crate::review::model::ItemTab::Conversation);
+                        return EventPropagation::Stop;
+                    }
+                    Code::Digit2 => {
+                        let has_files = review.item.with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
+                        if has_files {
+                            review.show_tab(crate::review::model::ItemTab::Files);
+                        }
+                        return EventPropagation::Stop;
+                    }
+                    _ => {}
+                }
+            }
             // Shift-F12 asks for references to the cursor's symbol.
             if key.code == Code::F12 && key.modifiers == Modifiers::SHIFT {
                 crate::review::references::find_at_cursor(review, &references_backend);
@@ -418,20 +437,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     return EventPropagation::Stop;
                 }
                 EventPropagation::Continue
-            }
-            // Cmd-Shift-1 and Cmd-Shift-2 are the item view's tabs.
-            Code::Digit1 if key.modifiers.contains(Modifiers::SHIFT) => {
-                if review.is_open() {
-                    review.show_tab(crate::review::model::ItemTab::Conversation);
-                }
-                EventPropagation::Stop
-            }
-            Code::Digit2 if key.modifiers.contains(Modifiers::SHIFT) => {
-                let has_files = review.item.with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
-                if review.is_open() && has_files {
-                    review.show_tab(crate::review::model::ItemTab::Files);
-                }
-                EventPropagation::Stop
             }
             // Cmd-1 is the sidebar's search; Cmd-2 is the inbox.
             Code::Digit1 => {

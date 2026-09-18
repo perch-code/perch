@@ -61,7 +61,7 @@ impl Facts {
         let checkout = state.item.with_untracked(|i| i.as_ref().and_then(|i| i.checkout.clone()))?;
         Some(Facts {
             current: state.scope.get_untracked(),
-            last_seen_head: checkout.last_seen_head,
+            last_seen_head: state.since_head.get_untracked(),
             head_sha: checkout.head_sha,
             on_disk: checkout.on_disk,
             dirty: state.dirty.get_untracked(),
@@ -242,6 +242,17 @@ pub fn button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
         sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
             .style(|s| s.size(10.0, 10.0).margin_left(8.0).flex_shrink(0.0_f32).pointer_events_none()),
     ))
+    .on_event_cont(el::PointerEnter, {
+        let backend = backend.clone();
+        move |_, _| {
+            // The dirt and the commits were read when the item opened;
+            // the reader may have edited or committed since. A look now,
+            // as the pointer arrives, lands before the menu opens.
+            if let Some(id) = item_id() {
+                backend.refresh_scope(&id);
+            }
+        }
+    })
     .popout_menu(move || match item_id() {
         Some(id) => menu(state, backend.clone(), id),
         None => Menu::new(),
