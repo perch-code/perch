@@ -146,15 +146,23 @@ where
                 .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
         Stack::horizontal((
+            // floem looks for a popout menu on the deepest view under the
+            // pointer and never walks up, so a click that landed on the text
+            // or the chevron found nothing and opened nothing. Only a click
+            // on the padding around them reached the stack that owns the
+            // menu, which is why it seemed to work at random. Making both
+            // children transparent to the pointer keeps the stack the
+            // deepest hit wherever the click lands.
             Label::derived(move || selected.get().to_string()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
                     .color(theme::FG)
                     .selectable(false)
+                    .pointer_events_none()
                     .margin_right(6.0)
                     .margin_bottom(theme::OPTICAL_TEXT_LIFT)
             }),
             sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
-                .style(|s| s.size(11.0, 11.0)),
+                .style(|s| s.size(11.0, 11.0).pointer_events_none()),
         ))
         .popout_menu(move || {
             let mut menu = Menu::new();
