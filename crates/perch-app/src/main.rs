@@ -26,15 +26,8 @@ use crate::state::AppState;
 
 mod dump;
 mod scan_cli;
-    // The changed list under a scope, as the Files tab would show it.
-    if args.get(1).map(String::as_str) == Some("--scope") {
-        scope_cli::run(&args[2..]);
-        return;
-    }
-    // An item's Conversation as text, from the cache alone: one line per
-    // card, in the order the window shows them.
-    if args.get(1).map(String::as_str) == Some("--timeline") {
-        timeline_cli::run(&args[2..]);
+mod scope_cli;
+mod timeline_cli;
 
 fn main() {
     // A debugging mode that renders a file the way the editor would, without
@@ -62,16 +55,15 @@ fn main() {
         scan_cli::run(&args[2..]);
         return;
     }
-<<<<<<< HEAD
     // The changed list under a scope, as the Files tab would show it.
     if args.get(1).map(String::as_str) == Some("--scope") {
         scope_cli::run(&args[2..]);
-=======
+        return;
+    }
     // An item's Conversation as text, from the cache alone: one line per
     // card, in the order the window shows them.
     if args.get(1).map(String::as_str) == Some("--timeline") {
         timeline_cli::run(&args[2..]);
->>>>>>> worktree-wf_6e414703-a53-1
         return;
     }
 
