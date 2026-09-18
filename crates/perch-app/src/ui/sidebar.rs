@@ -129,7 +129,7 @@ fn view_row(
                 .margin_horiz(6.0)
                 .border_radius(theme::RADIUS);
             if selected() {
-                base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER)
+                base.background(theme::CANVAS_SELECTED).border(1.0).border_color(Color::TRANSPARENT)
             } else {
                 base.border(1.0)
                     .border_color(Color::TRANSPARENT)
@@ -269,7 +269,7 @@ fn worktree_row(
                 .margin_horiz(6.0)
                 .border_radius(theme::RADIUS);
             if selected_box() {
-                base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER)
+                base.background(theme::CANVAS_SELECTED).border(1.0).border_color(Color::TRANSPARENT)
             } else {
                 base.border(1.0)
                     .border_color(Color::TRANSPARENT)
@@ -328,7 +328,7 @@ fn segment_row(state: AppState, review: ReviewState, segment: WorktreeSegment) -
                 .margin_horiz(6.0)
                 .border_radius(theme::RADIUS);
             if selected() {
-                base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER)
+                base.background(theme::CANVAS_SELECTED).border(1.0).border_color(Color::TRANSPARENT)
             } else {
                 base.border(1.0)
                     .border_color(Color::TRANSPARENT)

@@ -13,6 +13,9 @@ pub const CANVAS_SIDEBAR: Color = Color::from_rgb8(0xfa, 0xfb, 0xfc);
 /// The activity rail sits a shade deeper than the panel beside it.
 pub const CANVAS_RAIL: Color = Color::from_rgb8(0xf2, 0xf4, 0xf6);
 pub const CANVAS_HOVER: Color = Color::from_rgb8(0xf3, 0xf4, 0xf6);
+/// The "you are here" row in a panel: a flat fill a shade deeper than hover.
+/// A white card on the panel's near-white ground only showed as its border.
+pub const CANVAS_SELECTED: Color = Color::from_rgb8(0xe8, 0xec, 0xf0);
 pub const CANVAS_UNREAD: Color = Color::from_rgb8(0xf7, 0xfb, 0xff);
 
 /// Lines.
