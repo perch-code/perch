@@ -80,6 +80,20 @@ impl Store {
         self.root.join("worktrees")
     }
 
+    /// The home checkout of a repository: a worktree kept on the default
+    /// branch, where the agent runs for an issue and where new branches are
+    /// cut from. One per repository, apart from the pull request worktrees
+    /// so that neither the fortnight rule nor the archive code can see it.
+    pub fn home_path(&self, id: &RepoId) -> PathBuf {
+        self.root
+            .join("homes")
+            .join(format!("{}__{}", sanitize(&id.owner), sanitize(&id.repo)))
+    }
+
+    pub fn homes_dir(&self) -> PathBuf {
+        self.root.join("homes")
+    }
+
     pub fn has_bare_clone(&self, id: &RepoId) -> bool {
         self.bare_path(id).join("HEAD").is_file()
     }
@@ -164,6 +178,20 @@ mod tests {
         // head is, which is what lets a moved pull request keep its checkout.
         assert_eq!(path, store.worktree_path(&id, "perch/pr-2091"));
         assert_ne!(path, store.worktree_path(&id, "perch/pr-2092"));
+    }
+
+    #[test]
+    fn homes_live_apart_from_the_worktrees() {
+        let store = Store::new("/tmp/perch");
+        let id = RepoId::new("slatedb", "slatedb");
+        assert_eq!(
+            store.home_path(&id),
+            PathBuf::from("/tmp/perch/homes/slatedb__slatedb")
+        );
+        assert!(
+            !store.home_path(&id).starts_with(store.worktrees_dir()),
+            "a home under the worktrees directory would be archived like one"
+        );
     }
 
     #[test]

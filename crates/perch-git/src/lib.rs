@@ -14,7 +14,7 @@ pub use diff::{
     file_diff, ChangeStatus, ChangedFile, DeletedRun, FileDiff, Hunk, LineStatus,
 };
 pub use display::{DisplayBuffer, Row};
-pub use prepare::{Checkout, Preparer, Step};
+pub use prepare::{home_ref, Checkout, Cut, Preparer, Step};
 pub use store::{RepoId, Store};
 pub use tree::{list_tree, TreeEntry};
 
