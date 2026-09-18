@@ -61,6 +61,48 @@ pub fn backend_for(agent: &perch_github::AgentConfig, model: &str) -> perch_agen
     perch_agent::Backend::parse(agent.backend_of(model)).unwrap_or(perch_agent::Backend::ClaudeCode)
 }
 
+/// What is installed, worked out once at startup and written back into
+/// the agent config the window and the runs share.
+///
+/// Each binary is looked for and, when found, its path replaces the name,
+/// so a spawn works even where `PATH` would not have found it. An agent
+/// whose binary is missing loses its models: the picker then offers only
+/// what can run. Codex's models come from its own catalog unless the file
+/// pinned a list, and if the catalog cannot be read the one model Codex
+/// itself is set to run stands in. Returns what went wrong, for the log;
+/// a missing Codex is not wrong, so it is not reported.
+pub async fn discover(agent: &mut perch_github::AgentConfig) -> Vec<String> {
+    let mut problems = Vec::new();
+
+    match perch_agent::find_binary(&agent.binary) {
+        Some(path) => agent.binary = path.to_string_lossy().into_owned(),
+        None => {
+            problems.push(format!("Claude Code not found as {}", agent.binary));
+            agent.models.clear();
+        }
+    }
+
+    let Some(codex) = perch_agent::find_binary(&agent.codex.binary) else {
+        agent.codex.models.clear();
+        return problems;
+    };
+    agent.codex.binary = codex.to_string_lossy().into_owned();
+    if !agent.codex.models.is_empty() {
+        return problems;
+    }
+    match perch_agent::codex_catalog(&codex).await {
+        Ok(models) => {
+            agent.codex.models = models.iter().map(|m| m.slug.clone()).collect();
+            agent.codex.efforts = models.into_iter().map(|m| (m.slug, m.efforts)).collect();
+        }
+        Err(e) => {
+            problems.push(e);
+            agent.codex.models = perch_agent::codex_default_model().into_iter().collect();
+        }
+    }
+    problems
+}
+
 /// The config key to point at when a backend's binary cannot be started.
 pub fn binary_hint(backend: perch_agent::Backend) -> &'static str {
     match backend {
@@ -124,7 +166,10 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
     let number: u64 = number.parse().map_err(|_| "bad number")?;
     let id = RepoId::parse(full_name).ok_or("bad repo")?;
 
-    let config = Config::load();
+    let mut config = Config::load();
+    for problem in discover(&mut config.agent).await {
+        eprintln!("note: {problem}");
+    }
     let token = resolve_token(&config).ok_or("no token")?;
     let gh = GitHub::new(&token.value).map_err(|e| e.to_string())?;
     let root = perch_github::config::data_dir().ok_or("no data dir")?;
@@ -641,7 +686,7 @@ mod tests {
     fn agent_config() -> perch_github::AgentConfig {
         perch_github::AgentConfig {
             binary: "/opt/claude".into(),
-            codex: perch_github::CodexConfig { binary: "/opt/codex".into(), models: vec!["gpt-5.6-sol".into()] },
+            codex: perch_github::CodexConfig { binary: "/opt/codex".into(), models: vec!["gpt-5.6-sol".into()], ..Default::default() },
             ..perch_github::AgentConfig::default()
         }
     }
@@ -667,6 +712,70 @@ mod tests {
         let args = codex.args();
         assert_eq!(&args[..4], ["exec", "--json", "resume", "t-1"]);
         assert!(args.windows(2).any(|w| w == ["-c", "model_reasoning_effort=ultra"]));
+    }
+
+    fn fake(dir: &std::path::Path, name: &str, script: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    const CATALOG: &str = r#"{"models":[{"slug":"gpt-6-astra","display_name":"GPT-6-Astra","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"ultra"}]},{"slug":"gpt-5.5","visibility":"list","supported_reasoning_levels":[{"effort":"low"}]}]}"#;
+
+    #[tokio::test]
+    async fn discovery_asks_codex_for_its_models_and_keeps_a_pinned_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = fake(dir.path(), "claude", "exit 0");
+        let codex = fake(dir.path(), "codex", &format!("cat <<'EOF'\n{CATALOG}\nEOF"));
+
+        let mut agent = perch_github::AgentConfig { binary: claude.clone(), ..Default::default() };
+        agent.codex.binary = codex.clone();
+        assert!(discover(&mut agent).await.is_empty());
+        assert_eq!(agent.binary, claude, "a path found is kept as a path");
+        assert_eq!(agent.codex.models, ["gpt-6-astra", "gpt-5.5"]);
+        assert!(agent.effort_supported("gpt-6-astra", "ultra"));
+        assert!(!agent.effort_supported("gpt-5.5", "ultra"));
+        assert_eq!(agent.backend_of("gpt-6-astra"), perch_github::CODEX);
+
+        let mut pinned = perch_github::AgentConfig { binary: claude, ..Default::default() };
+        pinned.codex.binary = codex;
+        pinned.codex.models = vec!["mine".into()];
+        assert!(discover(&mut pinned).await.is_empty());
+        assert_eq!(pinned.codex.models, ["mine"], "the file's list wins");
+        assert!(pinned.codex.efforts.is_empty(), "and nothing is doubted about it");
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_is_not_installed_is_not_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = perch_github::AgentConfig {
+            binary: dir.path().join("no-claude").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        agent.codex.binary = dir.path().join("no-codex").to_string_lossy().into_owned();
+        agent.codex.models = vec!["pinned-but-gone".into()];
+        let problems = discover(&mut agent).await;
+        assert!(agent.models.is_empty(), "Claude Code's aliases go when its binary is missing");
+        assert!(agent.codex.models.is_empty(), "and so does a pinned Codex list");
+        assert_eq!(problems.len(), 1, "a missing Codex is not a problem to report: {problems:?}");
+        assert!(problems[0].starts_with("Claude Code not found"));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_that_cannot_be_read_falls_back_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = fake(dir.path(), "claude", "exit 0");
+        let codex = fake(dir.path(), "codex", "echo 'catalog unavailable' >&2; exit 1");
+        let mut agent = perch_github::AgentConfig { binary: claude, ..Default::default() };
+        agent.codex.binary = codex;
+        let problems = discover(&mut agent).await;
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("catalog unavailable"), "{problems:?}");
+        // What is offered then depends on the machine's own Codex config,
+        // so only the shape is pinned: at most the one default model.
+        assert!(agent.codex.models.len() <= 1);
     }
 
     #[test]

@@ -95,13 +95,22 @@ pub fn model_label(model: &str) -> String {
 
 /// What a fresh composer starts on: the last thing sent, else config.
 pub fn defaults(app: AppState) -> AgentChoice {
-    app.agent.with(|a| {
-        (
-            crate::ask::backend_for(a, &a.model),
-            a.model.clone(),
-            perch_agent::Effort::parse(&a.effort).unwrap_or_default(),
-        )
-    })
+    app.agent.with(default_choice)
+}
+
+/// Config's model and effort, unless that model is not on offer, which
+/// happens when its agent is not installed: then the first model that is,
+/// at the nearest effort it takes. With nothing installed the config's
+/// own choice stands, and the run says what is missing.
+fn default_choice(agent: &perch_github::AgentConfig) -> AgentChoice {
+    let effort = perch_agent::Effort::parse(&agent.effort).unwrap_or_default();
+    let offered = agent.models.iter().chain(agent.codex_models()).any(|m| *m == agent.model);
+    let model = if offered {
+        agent.model.clone()
+    } else {
+        model_groups(agent).into_iter().flatten().next().map(|(_, m)| m).unwrap_or_else(|| agent.model.clone())
+    };
+    (crate::ask::backend_for(agent, &model), model.clone(), nearest_effort(agent, &model, effort))
 }
 
 /// Where a thread is drawn: in the column beside the editor, or as a card
@@ -412,7 +421,7 @@ pub fn composer_view(
         editor,
         Stack::horizontal((
             model_picker(app, state),
-            effort_picker(state),
+            effort_picker(app, state),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
             text_button(|| "Send".to_string(), SidebarIcon::ChevronRight, move || send()),
         ))
@@ -467,10 +476,12 @@ fn model_picker(app: AppState, state: ReviewState) -> impl IntoView {
                 menu = menu.item(label, move |item| {
                     let pick = pick.clone();
                     item.checked(checked).action(move || {
+                        let agent = app.agent.get_untracked();
                         state.composer.update(|c| {
                             if let Some(c) = c {
                                 c.backend = backend;
                                 c.model = pick.clone();
+                                c.effort = nearest_effort(&agent, &pick, c.effort);
                             }
                         })
                     })
@@ -492,16 +503,36 @@ fn model_groups(agent: &perch_github::AgentConfig) -> Vec<Vec<(perch_agent::Back
     [claude, codex].into_iter().filter(|g| !g.is_empty()).collect()
 }
 
-fn effort_picker(state: ReviewState) -> impl IntoView {
+/// The effort a model keeps when the one chosen is not among those it
+/// takes: the highest it does take, so a reader who asked for Ultra of a
+/// model without it gets Max and sees so, rather than Codex quietly
+/// running Max under the name Ultra.
+fn nearest_effort(agent: &perch_github::AgentConfig, model: &str, wanted: perch_agent::Effort) -> perch_agent::Effort {
+    if agent.effort_supported(model, wanted.name()) {
+        return wanted;
+    }
+    perch_agent::Effort::ALL
+        .into_iter()
+        .rev()
+        .find(|e| agent.effort_supported(model, e.name()))
+        .unwrap_or(wanted)
+}
+
+/// The effort to run with. A level the chosen model does not take, by
+/// Codex's own catalog, is shown but cannot be picked.
+fn effort_picker(app: AppState, state: ReviewState) -> impl IntoView {
     use floem::menu::Menu;
 
     let current = move || state.composer.with(|c| c.as_ref().map(|c| c.effort.label().to_string()).unwrap_or_default());
     menu_button(current, move || {
-        let selected = state.composer.get_untracked().map(|c| c.effort).unwrap_or_default();
+        let (selected, model) =
+            state.composer.get_untracked().map(|c| (c.effort, c.model)).unwrap_or_default();
+        let agent = app.agent.get_untracked();
         let mut menu = Menu::new();
         for effort in perch_agent::Effort::ALL {
+            let takes = agent.effort_supported(&model, effort.name());
             menu = menu.item(effort.label(), move |item| {
-                item.checked(effort == selected).action(move || {
+                item.checked(effort == selected).enabled(takes).action(move || {
                     state.composer.update(|c| {
                         if let Some(c) = c {
                             c.effort = effort;
@@ -1143,11 +1174,40 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_composer_starts_on_a_model_that_is_offered() {
+        use perch_agent::{Backend, Effort};
+        let mut agent = perch_github::AgentConfig { model: "sonnet".into(), effort: "ultra".into(), ..Default::default() };
+        assert_eq!(default_choice(&agent), (Backend::ClaudeCode, "sonnet".to_string(), Effort::Ultra));
+
+        // Claude Code is not installed: its aliases are gone, and Codex is.
+        agent.models.clear();
+        agent.codex.models = vec!["gpt-5.5".into(), "gpt-6-astra".into()];
+        agent.codex.efforts.insert("gpt-5.5".into(), ["low", "xhigh"].map(String::from).to_vec());
+        assert_eq!(default_choice(&agent), (Backend::Codex, "gpt-5.5".to_string(), Effort::XHigh));
+
+        // Nothing at all: config's choice stands, and the run will say so.
+        agent.codex.models.clear();
+        assert_eq!(default_choice(&agent), (Backend::ClaudeCode, "sonnet".to_string(), Effort::Ultra));
+    }
+
+    #[test]
+    fn picking_a_model_without_the_effort_drops_to_the_highest_it_takes() {
+        use perch_agent::Effort;
+        let mut agent = perch_github::AgentConfig::default();
+        agent.codex.efforts.insert("gpt-5.5".into(), ["low", "medium", "high", "xhigh"].map(String::from).to_vec());
+        agent.codex.efforts.insert("odd".into(), vec!["medium".into()]);
+        assert_eq!(nearest_effort(&agent, "gpt-5.5", Effort::Ultra), Effort::XHigh);
+        assert_eq!(nearest_effort(&agent, "gpt-5.5", Effort::High), Effort::High, "a level it takes is kept");
+        assert_eq!(nearest_effort(&agent, "odd", Effort::Low), Effort::Medium, "even upward, to the one it has");
+        assert_eq!(nearest_effort(&agent, "sonnet", Effort::Ultra), Effort::Ultra, "no catalog, no doubt");
+    }
+
+    #[test]
     fn the_picker_lists_claude_then_codex_and_each_model_knows_its_backend() {
         use perch_agent::Backend;
         let agent = perch_github::AgentConfig {
             models: vec!["opus".into(), "sonnet".into()],
-            codex: perch_github::CodexConfig { binary: "codex".into(), models: vec!["gpt-5.6-sol".into()] },
+            codex: perch_github::CodexConfig { binary: "codex".into(), models: vec!["gpt-5.6-sol".into()], ..Default::default() },
             ..perch_github::AgentConfig::default()
         };
         assert_eq!(
@@ -1163,7 +1223,7 @@ mod tests {
 
         let shared = perch_github::AgentConfig {
             models: vec!["shared".into()],
-            codex: perch_github::CodexConfig { binary: "codex".into(), models: vec!["shared".into()] },
+            codex: perch_github::CodexConfig { binary: "codex".into(), models: vec!["shared".into()], ..Default::default() },
             ..perch_github::AgentConfig::default()
         };
         assert_eq!(model_groups(&shared)[1], vec![(Backend::ClaudeCode, "shared".to_string())], "config decides, not the section");

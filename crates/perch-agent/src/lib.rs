@@ -7,6 +7,7 @@
 //! are the whole contract with them.
 
 mod codex;
+mod discover;
 mod parse;
 
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Notify;
 
 pub use codex::CodexParser;
+pub use discover::{codex_catalog, codex_default_model, find_binary, parse_codex_catalog, CodexModel};
 pub use parse::{parse_line, summarize_tool_call};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

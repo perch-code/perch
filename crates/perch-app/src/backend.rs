@@ -450,9 +450,29 @@ async fn run(
     events: EventSender<Event>,
 ) {
     tracing::info!("backend started");
-    let config = Config::load();
+    let mut config = Config::load();
     tracing::info!(poll = config.poll_interval_secs, "config loaded");
-    let _ = events.send(Event::AgentConfig(config.agent.clone()));
+
+    // Which agents are installed, asked alongside the GitHub setup rather
+    // than before it: Codex's catalog can take a few seconds on a cold
+    // cache, and the inbox should not wait for a picker.
+    let agents = {
+        let mut agent = config.agent.clone();
+        let events = events.clone();
+        tokio::spawn(async move {
+            for problem in crate::ask::discover(&mut agent).await {
+                tracing::warn!(%problem, "agent discovery");
+            }
+            tracing::info!(claude = %agent.binary, codex = ?agent.codex.models, "agents found");
+            if agent.models.is_empty() && agent.codex.models.is_empty() {
+                let _ = events.send(Event::Notice(
+                    "No coding agent found. Install Claude Code or Codex, or set agent.binary in config.toml.".into(),
+                ));
+            }
+            let _ = events.send(Event::AgentConfig(agent.clone()));
+            agent
+        })
+    };
 
     let Some(token) = resolve_token(&config) else {
         tracing::warn!("no token resolved");
@@ -562,6 +582,11 @@ async fn run(
 
     let knowledge = Arc::new(perch_knowledge::Knowledge::open(config.knowledge.root_path()));
     tracing::info!(root = %knowledge.root().display(), "knowledge root");
+    // The runs spawn what discovery found, so the shared config carries
+    // its answer. A discovery that panicked leaves the file's own words.
+    if let Ok(agent) = agents.await {
+        config.agent = agent;
+    }
     let config = Arc::new(config);
     let ctx = Ctx {
         github: github.clone(),

@@ -1,5 +1,6 @@
 //! Config file and on-disk paths.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -49,17 +50,24 @@ pub struct AgentConfig {
     pub codex: CodexConfig,
 }
 
-/// The second backend. Absent from an old file, which is the same as
-/// present with no models: Codex is not offered.
+/// The second backend. Absent from an old file is the usual case: the
+/// binary is looked for, and the models come from Codex's own catalog.
+/// Naming models here pins the list instead.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CodexConfig {
     /// The Codex executable. Found on `PATH` unless a path is given here.
     #[serde(default = "default_codex_binary")]
     pub binary: String,
     /// The Codex models the picker offers, after the Claude Code ones.
-    /// Empty means Codex does not appear.
+    /// Empty in the file means ask Codex; empty after that means Codex
+    /// is not offered.
     #[serde(default)]
     pub models: Vec<String>,
+    /// The effort names each model takes, from the catalog, keyed by
+    /// model. Filled by discovery at startup, never by the file. A model
+    /// not listed here is assumed to take every level.
+    #[serde(skip)]
+    pub efforts: BTreeMap<String, Vec<String>>,
 }
 
 /// The backend names, spelled as `perch-agent` spells them. Strings rather
@@ -98,7 +106,7 @@ impl Default for AgentConfig {
 
 impl Default for CodexConfig {
     fn default() -> Self {
-        Self { binary: default_codex_binary(), models: Vec::new() }
+        Self { binary: default_codex_binary(), models: Vec::new(), efforts: BTreeMap::new() }
     }
 }
 
@@ -121,6 +129,18 @@ impl AgentConfig {
     /// What the picker lists after the Claude Code models.
     pub fn codex_models(&self) -> &[String] {
         &self.codex.models
+    }
+
+    /// Whether a model takes an effort level. Only Codex's catalog says,
+    /// and only for the models it listed; any other model is taken to
+    /// take them all. Codex runs a level a model lacks at the nearest one
+    /// it has, so this is what lets the picker say so rather than let it
+    /// happen.
+    pub fn effort_supported(&self, model: &str, effort: &str) -> bool {
+        match self.codex.efforts.get(model) {
+            Some(levels) => levels.iter().any(|l| l == effort),
+            None => true,
+        }
     }
 }
 
@@ -357,6 +377,18 @@ mod tests {
         assert_eq!(c.agent.binary_for(CODEX), "/opt/codex");
         assert_eq!(c.agent.binary_for(CLAUDE_CODE), "claude");
         assert_eq!(c.agent.binary_for("something-else"), "claude");
+    }
+
+    #[test]
+    fn the_catalog_says_which_efforts_a_model_takes_and_silence_means_all() {
+        let mut c = AgentConfig::default();
+        c.codex.efforts.insert("gpt-5.5".into(), vec!["low".into(), "high".into()]);
+        assert!(c.effort_supported("gpt-5.5", "high"));
+        assert!(!c.effort_supported("gpt-5.5", "ultra"));
+        assert!(c.effort_supported("gpt-6-astra", "ultra"), "not in the catalog, so not doubted");
+        assert!(c.effort_supported("sonnet", "ultra"), "Claude Code has no catalog");
+        let parsed: Config = toml::from_str("[agent.codex]\nmodels = [\"x\"]").unwrap();
+        assert!(parsed.agent.codex.efforts.is_empty(), "the file never fills it");
     }
 
     #[test]

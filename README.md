@@ -352,6 +352,15 @@ On Codex it is `model_reasoning_effort=ultra`; the helpers it spawns do
 not appear in the thread, only the parent's commands and answer. Only
 some models support it on either side.
 
+Nothing needs configuring for either. At startup Perch looks for
+`claude` and `codex` on `PATH` and in the directories they install into,
+and offers whichever it finds. Claude Code's models are its aliases.
+Codex's come from its own catalog, `codex debug models`, which also says
+which effort levels each takes: a level a model lacks is greyed out in
+the picker, and picking such a model drops the effort to the highest it
+has, since Codex would otherwise run the lower level quietly. An agent
+whose binary is missing is not offered; with neither, the window says so.
+
 ```toml
 [agent]
 binary = "claude"              # optional; found on PATH by default
@@ -361,12 +370,13 @@ models = ["fable", "opus", "sonnet", "haiku"]   # optional; what the picker offe
 
 [agent.codex]
 binary = "codex"               # optional; found on PATH by default
-models = ["gpt-5.6-sol"]       # optional; empty, and Codex is not offered
+models = ["gpt-6-astra"]       # optional; pins the list instead of asking Codex
 ```
 
 The top-level keys mean Claude Code, so an older file keeps working. The
 picker lists the Claude Code models, then Codex's under a line when there
-are any. A model named under both goes to Claude Code.
+are any. A model named under both goes to Claude Code. If the catalog
+cannot be read, the one model Codex itself is set to run is offered.
 
 `perch --ask owner/repo#N path:start-end "question"` runs one question
 from a terminal and prints the prompt, every event, and the answer. Leave

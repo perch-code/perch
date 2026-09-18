@@ -3683,6 +3683,7 @@ dependencies = [
  "perch-syntax",
  "pulldown-cmark",
  "serde",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
