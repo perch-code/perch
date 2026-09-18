@@ -100,17 +100,19 @@ impl ListMode {
         if matches!(state.status.get(), Status::NoToken { .. }) {
             return ListMode::NoToken;
         }
-        // Saved and Done are Perch's own, so they can paint before the
-        // network answers and without it ever answering. Waiting on `loaded`
-        // alone left them showing a spinner over rows that were already in
-        // hand, and left them showing it forever when the cached inbox was
+        // Only the inbox can be loading. Saved and Done are Perch's own, so
+        // they are never waiting on anything: they paint before the network
+        // answers, and they paint when it never answers at all. Holding them
+        // behind the inbox's flag showed a spinner over rows that were
+        // already in hand, and showed it forever when the cached inbox was
         // empty but the marks were not.
-        let total = state.view_total();
-        if total == 0 && !state.loaded.get() {
-            return ListMode::Loading;
-        }
-        if total == 0 {
-            return ListMode::Empty(state.view.get());
+        let view = state.view.get();
+        if state.view_total() == 0 {
+            return if view == View::Inbox && !state.loaded.get() {
+                ListMode::Loading
+            } else {
+                ListMode::Empty(view)
+            };
         }
         if state.visible().is_empty() {
             return ListMode::NoMatches;
