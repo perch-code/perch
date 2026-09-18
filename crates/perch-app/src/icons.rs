@@ -226,6 +226,40 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M3.6 6.2 L8 10.6 L12.4 6.2" fill="none" stroke="{c}"
                      stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
+        SidebarIcon::Branch => format!(
+            r#"<circle cx="4.5" cy="3.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <circle cx="4.5" cy="12.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <circle cx="11.5" cy="5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <path d="M4.5 5.2 V10.8" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>
+               <path d="M11.5 6.7 C11.5 9.6 4.5 8.3 4.5 10.8" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::Archive => format!(
+            r#"<rect x="2" y="2.8" width="12" height="3.2" rx="0.8" fill="none" stroke="{c}"
+                     stroke-width="1.4"/>
+               <path d="M3.2 6 V12.4 a1 1 0 0 0 1 1 H11.8 a1 1 0 0 0 1 -1 V6" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>
+               <path d="M6.6 9 H9.4" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::Trash => format!(
+            r#"<path d="M2.8 4.3 H13.2" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>
+               <path d="M6.2 4.3 V2.9 a0.7 0.7 0 0 1 0.7 -0.7 H9.1 a0.7 0.7 0 0 1 0.7 0.7 V4.3"
+                     fill="none" stroke="{c}" stroke-width="1.4"/>
+               <path d="M4 4.3 L4.7 12.6 a1 1 0 0 0 1 0.9 H10.3 a1 1 0 0 0 1 -0.9 L12 4.3"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M6.7 6.8 V11 M9.3 6.8 V11" stroke="{c}" stroke-width="1.3"
+                     stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::Ellipsis => format!(
+            r#"<circle cx="3.5" cy="8" r="1.3" fill="{c}"/>
+               <circle cx="8" cy="8" r="1.3" fill="{c}"/>
+               <circle cx="12.5" cy="8" r="1.3" fill="{c}"/>"#
+        ),
+        SidebarIcon::Folder => format!(
+            r#"<path d="M2 4.2 a1 1 0 0 1 1 -1 H6.2 L7.6 4.8 H13 a1 1 0 0 1 1 1 V12 a1 1 0 0 1 -1 1
+                       H3 a1 1 0 0 1 -1 -1 Z" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-linejoin="round"/>"#
+        ),
         SidebarIcon::Warning => format!(
             r#"<path d="M8 2.2 L14.6 13.4 H1.4 Z" fill="none" stroke="{c}" stroke-width="1.4"
                      stroke-linejoin="round"/>
@@ -258,14 +292,28 @@ pub enum SidebarIcon {
     Search,
     Refresh,
     Warning,
+    /// A branch forking off a line: the worktrees section.
+    Branch,
+    /// A box with a lid: put away, keep.
+    Archive,
+    Trash,
+    /// Three dots: more actions.
+    Ellipsis,
+    Folder,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 19] = [
+    pub const ALL: [SidebarIcon; 25] = [
         SidebarIcon::Inbox,
+        SidebarIcon::Bell,
+        SidebarIcon::Branch,
+        SidebarIcon::Archive,
+        SidebarIcon::Trash,
+        SidebarIcon::Ellipsis,
+        SidebarIcon::Folder,
         SidebarIcon::Bookmark,
         SidebarIcon::BookmarkFilled,
         SidebarIcon::Check,

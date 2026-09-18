@@ -37,6 +37,47 @@ pub fn open_in_browser(url: &str) {
 /// Note this deliberately does not make children transparent to the pointer:
 /// a selectable label does not swallow clicks, and `pointer_events_none` on
 /// the view that owns the handler would stop it receiving them at all.
+/// Show a directory in the Finder.
+pub fn reveal_in_finder(path: &std::path::Path) {
+    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+}
+
+/// Open a Terminal window in a directory.
+pub fn open_in_terminal(path: &std::path::Path) {
+    let _ = std::process::Command::new("open").arg("-a").arg("Terminal").arg(path).spawn();
+}
+
+pub fn copy_to_clipboard(text: String) {
+    if let Err(e) = floem::Clipboard::set_contents(text) {
+        tracing::warn!(error = ?e, "could not write to the clipboard");
+    }
+}
+
+/// The menu every worktree offers: where it is, and how to get there.
+///
+/// Archive is appended when the caller passes a way to do it; the review
+/// header offers it, the archived rows of the list do not.
+pub fn worktree_menu(
+    path: std::path::PathBuf,
+    on_archive: Option<std::rc::Rc<dyn Fn()>>,
+) -> floem::menu::Menu {
+    use floem::menu::Menu;
+
+    let (reveal, terminal, copy) = (path.clone(), path.clone(), path);
+    let mut menu = Menu::new()
+        .item("Reveal in Finder", move |item| item.action(move || reveal_in_finder(&reveal)))
+        .item("Open in Terminal", move |item| item.action(move || open_in_terminal(&terminal)))
+        .item("Copy Path", move |item| {
+            item.action(move || copy_to_clipboard(copy.to_string_lossy().into_owned()))
+        });
+    if let Some(archive) = on_archive {
+        menu = menu
+            .separator()
+            .item("Archive Worktree", move |item| item.action(move || archive()));
+    }
+    menu
+}
+
 pub fn clickable(style: floem::style::Style) -> floem::style::Style {
     style
         .selectable(false)

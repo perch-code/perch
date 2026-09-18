@@ -14,6 +14,34 @@ use perch_github::{Mark, SubjectDetail, Thread, Worktree};
 use crate::backend::{Event, Status};
 use crate::filter::{self, Counts, Filters, Group, ReasonFilter, Section, Sort, View};
 
+/// Which list fills the window: the notification views, or the worktrees.
+///
+/// The review view sits over either. `AppState::return_to` remembers which
+/// one it was opened from, so leaving a review lands where it started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Screen {
+    #[default]
+    Threads,
+    Worktrees,
+}
+
+/// Which half of the worktrees list is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorktreeSegment {
+    #[default]
+    Active,
+    Archived,
+}
+
+impl WorktreeSegment {
+    pub fn label(self) -> &'static str {
+        match self {
+            WorktreeSegment::Active => "Active",
+            WorktreeSegment::Archived => "Archived",
+        }
+    }
+}
+
 /// How much of a set is checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Checked {
@@ -37,6 +65,14 @@ pub struct AppState {
     /// Cleared by the next thing that goes right.
     pub notice: RwSignal<Option<String>>,
 
+    /// Notifications or worktrees.
+    pub screen: RwSignal<Screen>,
+    /// The screen a review was opened over, and returns to.
+    pub return_to: RwSignal<Screen>,
+    /// Active or archived, on the worktrees screen.
+    pub worktree_segment: RwSignal<WorktreeSegment>,
+    /// The worktree the pointer is over, so a row can show its buttons.
+    pub hovered_worktree: RwSignal<Option<String>>,
     /// Which of Inbox, Saved and Done is showing.
     pub view: RwSignal<View>,
     pub reason_filter: RwSignal<Option<ReasonFilter>>,
@@ -82,6 +118,10 @@ impl AppState {
             marks: RwSignal::new(HashMap::new()),
             worktrees: RwSignal::new(Vec::new()),
             notice: RwSignal::new(None),
+            screen: RwSignal::new(Screen::Threads),
+            return_to: RwSignal::new(Screen::Threads),
+            worktree_segment: RwSignal::new(WorktreeSegment::Active),
+            hovered_worktree: RwSignal::new(None),
             view: RwSignal::new(View::default()),
             reason_filter: RwSignal::new(None),
             repo_filter: RwSignal::new(None),
@@ -123,7 +163,7 @@ impl AppState {
                 let open = review.worktree.with(|w| w.as_ref().map(|w| w.id.clone()));
                 if let Some(open) = open {
                     if worktrees.iter().any(|w| w.id == open && w.is_archived()) {
-                        review.close();
+                        self.leave_review(review);
                     }
                 }
                 self.apply(Event::Worktrees(worktrees));
@@ -454,6 +494,80 @@ impl AppState {
         self.view.set(view);
     }
 
+    // -----------------------------------------------------------------
+    // Screens and worktrees
+    // -----------------------------------------------------------------
+
+    /// Note where a review is being opened from, so leaving it can go back.
+    pub fn begin_review(&self, review: crate::review::model::ReviewState) {
+        self.return_to.set(self.screen.get());
+        review.pull_request.set(None);
+        review.opening.set(true);
+    }
+
+    /// Leave the review view for the screen it was opened over.
+    pub fn leave_review(&self, review: crate::review::model::ReviewState) {
+        review.close();
+        self.screen.set(self.return_to.get());
+    }
+
+    /// Show a screen, leaving any review. The inbox's filters and selection
+    /// are not touched: crossing to Worktrees and back should find the
+    /// inbox exactly as it was left.
+    pub fn show_screen(&self, review: crate::review::model::ReviewState, screen: Screen) {
+        review.close();
+        self.screen.set(screen);
+        self.notice.set(None);
+    }
+
+    pub fn worktree(&self, id: &str) -> Option<Worktree> {
+        self.worktrees.with(|w| w.iter().find(|w| w.id == id).cloned())
+    }
+
+    /// The rows of one segment, most recently touched first.
+    pub fn worktrees_in(&self, segment: WorktreeSegment) -> Vec<Worktree> {
+        self.worktrees.with(|all| {
+            let mut rows: Vec<Worktree> = all
+                .iter()
+                .filter(|w| w.is_archived() == (segment == WorktreeSegment::Archived))
+                .cloned()
+                .collect();
+            rows.sort_by_key(|w| std::cmp::Reverse(worktree_time(w)));
+            rows
+        })
+    }
+
+    /// Rows of one segment grouped by repository, in the order of each
+    /// repository's most recent row.
+    pub fn worktree_groups(&self, segment: WorktreeSegment) -> Vec<(String, Vec<Worktree>)> {
+        let mut groups: Vec<(String, Vec<Worktree>)> = Vec::new();
+        for row in self.worktrees_in(segment) {
+            match groups.iter_mut().find(|(name, _)| *name == row.repo_full_name) {
+                Some((_, rows)) => rows.push(row),
+                None => groups.push((row.repo_full_name.clone(), vec![row])),
+            }
+        }
+        groups
+    }
+
+    pub fn worktree_count(&self, segment: WorktreeSegment) -> usize {
+        self.worktrees.with(|all| {
+            all.iter()
+                .filter(|w| w.is_archived() == (segment == WorktreeSegment::Archived))
+                .count()
+        })
+    }
+
+    /// The owner avatar the inbox already holds for a repository, if any.
+    pub fn repo_avatar_url(&self, repo_full_name: &str) -> Option<String> {
+        self.threads.with(|t| {
+            t.iter()
+                .find(|t| t.repository.full_name == repo_full_name)
+                .map(|t| t.repository.owner_avatar_url.clone())
+                .filter(|u| !u.is_empty())
+        })
+    }
+
     pub fn detail_for(&self, thread_id: &str) -> Option<SubjectDetail> {
         self.details.with(|m| m.get(thread_id).cloned())
     }
@@ -482,4 +596,10 @@ impl AppState {
         });
     }
 
+}
+
+/// When a worktree row was last touched: archived rows by when they were put
+/// away, active ones by when they were opened.
+pub fn worktree_time(w: &Worktree) -> Timestamp {
+    w.archived_at.unwrap_or(w.last_opened_at)
 }

@@ -8,7 +8,7 @@ use floem::views::{Container, Decorators, Label, Stack, dyn_container};
 use crate::backend::{Backend, Status};
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::state::AppState;
+use crate::state::{AppState, Screen};
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{sidebar_glyph, spacer};
@@ -22,16 +22,33 @@ pub fn status_bar(
         dot(state),
         Label::derived(move || message(state)).style(move |s| {
             s.font_size(theme::TEXT_META)
-                .color(color_for(&state.status.get()))
+                .color(if state.notice.with(Option::is_some) {
+                    theme::CLOSED
+                } else {
+                    color_for(&state.status.get())
+                })
                 .text_ellipsis()
                 .min_width(0.0)
         }),
         spacer(),
         dyn_container(
-            move || review.pull_request.with(|p| p.is_some()),
-            move |open| {
+            move || (review.pull_request.with(|p| p.is_some()), state.screen.get()),
+            move |(open, screen)| {
                 if open {
                     crate::review::review_status(review).into_any()
+                } else if screen == Screen::Worktrees {
+                    Label::derived(move || {
+                        let active = state.worktree_count(crate::state::WorktreeSegment::Active);
+                        let archived =
+                            state.worktree_count(crate::state::WorktreeSegment::Archived);
+                        match (active, archived) {
+                            (1, 0) => "1 worktree".to_string(),
+                            (n, 0) => format!("{n} worktrees"),
+                            (n, a) => format!("{n} active, {a} archived"),
+                        }
+                    })
+                    .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE))
+                    .into_any()
                 } else {
                     Label::derived(move || {
                         let n = state.visible().len();
@@ -67,7 +84,11 @@ fn dot(state: AppState) -> impl IntoView {
         s.size(7.0, 7.0)
             .border_radius(4.0)
             .flex_shrink(0.0_f32)
-            .background(color_for(&state.status.get()))
+            .background(if state.notice.with(Option::is_some) {
+                theme::CLOSED
+            } else {
+                color_for(&state.status.get())
+            })
     })
 }
 
@@ -81,6 +102,11 @@ fn color_for(status: &Status) -> Color {
 }
 
 fn message(state: AppState) -> String {
+    // A refusal, such as archiving a worktree with work in it, outranks the
+    // poll state until the next thing goes right.
+    if let Some(notice) = state.notice.get() {
+        return notice;
+    }
     match state.status.get() {
         Status::Refreshing => "Refreshing…".into(),
         Status::Idle { at, source } => {

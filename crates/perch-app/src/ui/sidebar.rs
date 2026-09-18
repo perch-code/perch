@@ -7,7 +7,7 @@ use floem::views::{Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_co
 use crate::filter::{ReasonFilter, View};
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::state::AppState;
+use crate::state::{AppState, Screen, WorktreeSegment};
 use crate::theme;
 use crate::ui::widgets::{avatar, count_badge, section_heading, sidebar_row};
 
@@ -16,14 +16,28 @@ use crate::ui::widgets::{avatar, count_badge, section_heading, sidebar_row};
 /// Sits beside the activity rail and hides when the rail's current entry is
 /// clicked, the way an editor's explorer does.
 pub fn nav_panel(state: AppState, review: ReviewState) -> impl IntoView {
-    Stack::vertical((
-        Empty::new().style(|s| s.height(8.0).width_full().flex_shrink(0.0_f32)),
-        views_section(state, review),
-        section_heading("Filters"),
-        filters_section(state),
-        section_heading("Repositories"),
-        repos_section(state),
-    ))
+    dyn_container(
+        move || state.screen.get(),
+        move |screen| match screen {
+            Screen::Threads => Stack::vertical((
+                Empty::new().style(|s| s.height(8.0).width_full().flex_shrink(0.0_f32)),
+                views_section(state, review),
+                section_heading("Filters"),
+                filters_section(state),
+                section_heading("Repositories"),
+                repos_section(state),
+            ))
+            .style(|s| s.size_full().flex_col())
+            .into_any(),
+            Screen::Worktrees => Stack::vertical((
+                Empty::new().style(|s| s.height(8.0).width_full().flex_shrink(0.0_f32)),
+                segment_row(state, review, WorktreeSegment::Active),
+                segment_row(state, review, WorktreeSegment::Archived),
+            ))
+            .style(|s| s.size_full().flex_col().gap(1.0))
+            .into_any(),
+        },
+    )
     .style(|s| {
         s.width(theme::SIDEBAR_WIDTH)
             .height_full()
@@ -102,7 +116,7 @@ fn view_row(
     Container::new(content)
         .on_event_stop(el::Click, move |_, _| {
             // Doubles as the way back from a pull request.
-            review.close();
+            state.show_screen(review, Screen::Threads);
             // Filters carry over, the way the web keeps a search when you
             // cross from the inbox into Done. Clearing them here made the
             // rail a reset button nobody asked for.
@@ -120,6 +134,65 @@ fn view_row(
                 base.background(theme::CANVAS)
                     .border(1.0)
                     .border_color(theme::BORDER)
+            } else {
+                base.border(1.0)
+                    .border_color(Color::TRANSPARENT)
+                    .hover(|s| s.background(theme::CANVAS_HOVER))
+            }
+        })
+}
+
+/// Active or Archived, in the worktrees panel. Same card as a view row, so
+/// the two sections of the app read as one control.
+fn segment_row(state: AppState, review: ReviewState, segment: WorktreeSegment) -> impl IntoView {
+    use floem::peniko::Color;
+    use floem::text::FontWeight;
+
+    let selected = move || state.worktree_segment.get() == segment && !review.is_open();
+    let count = move || state.worktree_count(segment);
+    let icon = match segment {
+        WorktreeSegment::Active => SidebarIcon::Branch,
+        WorktreeSegment::Archived => SidebarIcon::Archive,
+    };
+
+    let content = Stack::horizontal((
+        dyn_container(
+            move || if selected() { theme::FG } else { theme::FG_MUTED },
+            move |c| crate::ui::widgets::sidebar_glyph(icon, c).into_any(),
+        )
+        .style(|s| s.size(16.0, 16.0)),
+        Label::derived(move || segment.label()).style(move |s| {
+            s.font_size(theme::TEXT_BODY)
+                .font_weight(if selected() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
+                .color(if selected() { theme::FG } else { theme::FG_MUTED })
+                .margin_left(9.0)
+                .flex_grow(1.0_f32)
+        }),
+        dyn_container(count, move |n| {
+            if n == 0 {
+                Empty::new().into_any()
+            } else {
+                count_badge(move || n, false).into_any()
+            }
+        }),
+    ))
+    .style(|s| s.items_center().width_full());
+
+    Container::new(content)
+        .on_event_stop(el::Click, move |_, _| {
+            state.show_screen(review, Screen::Worktrees);
+            state.worktree_segment.set(segment);
+        })
+        .style(move |s| {
+            let base = crate::ui::widgets::clickable(s)
+                .width_full()
+                .height(34.0)
+                .items_center()
+                .padding_horiz(10.0)
+                .margin_horiz(6.0)
+                .border_radius(theme::RADIUS);
+            if selected() {
+                base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER)
             } else {
                 base.border(1.0)
                     .border_color(Color::TRANSPARENT)
@@ -248,7 +321,8 @@ pub fn activity_rail(state: AppState, review: ReviewState) -> impl IntoView {
         // The lights sit over this.
         drag_window_area(Empty::new().style(|s| s.size_full()))
             .style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().flex_shrink(0.0_f32)),
-        rail_entry(state, review),
+        rail_entry(state, review, RailSection::Notifications),
+        rail_entry(state, review, RailSection::Worktrees),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
     ))
     .style(|s| {
@@ -263,23 +337,44 @@ pub fn activity_rail(state: AppState, review: ReviewState) -> impl IntoView {
     })
 }
 
-/// The notifications entry: a bell, the unread count, and a stripe while any
-/// of the notification views is on screen. Inbox, Saved and Done are chosen
-/// in the panel beside it; this is the section they belong to.
-fn rail_entry(state: AppState, review: ReviewState) -> impl IntoView {
+/// The two sections of the app, as the rail names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RailSection {
+    /// Inbox, Saved and Done, chosen in the panel beside the rail.
+    Notifications,
+    /// The checkouts, active and archived. A review is one of these being
+    /// read, so the entry stays current while one is open.
+    Worktrees,
+}
+
+/// One rail entry: a glyph, a stripe while its section is on screen, and
+/// for notifications the unread count. Clicking the current entry folds the
+/// panel away; clicking the other switches to it with the panel showing.
+fn rail_entry(state: AppState, review: ReviewState, section: RailSection) -> impl IntoView {
     use floem::peniko::Color;
     use floem::style::Position;
 
-    let unread = move || state.counts().unread;
-    // Current whenever a notification view is on screen, whichever of the
-    // three it is. Only a pull request takes it away.
-    let active = move || !review.is_showing();
+    let unread = move || match section {
+        RailSection::Notifications => state.counts().unread,
+        // A count of worktrees is not something to act on.
+        RailSection::Worktrees => 0,
+    };
+    let active = move || match section {
+        RailSection::Notifications => {
+            !review.is_showing() && state.screen.get() == Screen::Threads
+        }
+        RailSection::Worktrees => review.is_showing() || state.screen.get() == Screen::Worktrees,
+    };
+    let glyph = match section {
+        RailSection::Notifications => SidebarIcon::Bell,
+        RailSection::Worktrees => SidebarIcon::Branch,
+    };
 
     Container::new(
         Container::new(Stack::horizontal((
             dyn_container(active, move |on| {
                 crate::ui::widgets::sidebar_glyph(
-                    SidebarIcon::Bell,
+                    glyph,
                     if on { theme::FG } else { theme::FG_SUBTLE },
                 )
                 .style(|s| s.size(20.0, 20.0))
@@ -303,13 +398,17 @@ fn rail_entry(state: AppState, review: ReviewState) -> impl IntoView {
         }),
     )
     .on_event_stop(el::Click, move |_, _| {
-        if active() {
-            // Already in notifications, so this is the collapse control.
+        if active() && !review.is_showing() {
+            // Already here, so this is the collapse control.
             state.sidebar_open.update(|open| *open = !*open);
         } else {
-            // Back from a pull request to whichever view was open, with the
-            // panel showing so the three views are in reach.
-            review.close();
+            // Over from the other section, or back from a pull request,
+            // with the panel showing so the section's lists are in reach.
+            let screen = match section {
+                RailSection::Notifications => Screen::Threads,
+                RailSection::Worktrees => Screen::Worktrees,
+            };
+            state.show_screen(review, screen);
             state.sidebar_open.set(true);
         }
     })

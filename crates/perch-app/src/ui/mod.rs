@@ -6,6 +6,7 @@ pub mod sidebar;
 pub mod status;
 pub mod toolbar;
 pub mod widgets;
+pub mod worktrees;
 
 use std::rc::Rc;
 
@@ -16,7 +17,7 @@ use floem::views::{Decorators, Stack, dyn_container};
 
 use crate::backend::Backend;
 use crate::review::model::ReviewState;
-use crate::state::AppState;
+use crate::state::{AppState, Screen};
 use crate::theme;
 
 /// The platform's command modifier.
@@ -41,15 +42,38 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             });
             // Showing the review view immediately, with its progress card,
             // beats leaving the inbox looking like the click did nothing.
-            review.pull_request.set(None);
+            state.begin_review(review);
             // Which notification this came from, so finishing the review can
             // dismiss it. The backend never needs to know; the click already
             // has it, and a round trip would only be a way of forgetting.
             review.thread_id.set(Some(thread_id.to_string()).filter(|id| !id.is_empty()));
-            review.opening.set(true);
             backend.open_pull_request(repo, number);
         }
     });
+
+    // Opening from the worktrees list. An archived row is restored on the
+    // way, which the backend treats as the same act.
+    let open_worktree: worktrees::OpenWorktree = Rc::new({
+        let backend = backend.clone();
+        move |worktree: &perch_github::Worktree| {
+            review.preparing.set(crate::review::model::Preparing::Working {
+                message: if worktree.is_archived() {
+                    "Checking out the files".into()
+                } else {
+                    "Reading the pull request".into()
+                },
+                percent: None,
+            });
+            state.begin_review(review);
+            review.thread_id.set(None);
+            if worktree.is_archived() {
+                backend.restore_worktree(&worktree.id);
+            } else {
+                backend.open_worktree(&worktree.id);
+            }
+        }
+    });
+    let list_backend = backend.clone();
 
     // Every way of marking a thread lands here, so each of them costs the
     // backend one write and the UI one event.
@@ -81,14 +105,21 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             // The review view replaces the inbox in place, so the sidebar and
             // the status line stay where they were.
             dyn_container(
-                move || review.is_showing(),
-                move |open| {
+                move || (review.is_showing(), state.screen.get()),
+                move |(open, screen)| {
                     if open {
                         crate::review::review_view(
                             state,
                             review,
                             review_backend.clone(),
                             review_mark.clone(),
+                        )
+                        .into_any()
+                    } else if screen == Screen::Worktrees {
+                        worktrees::worktrees_screen(
+                            state,
+                            list_backend.clone(),
+                            open_worktree.clone(),
                         )
                         .into_any()
                     } else {
@@ -115,6 +146,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // box reports its own.
         if key.modifiers.is_empty()
             && !review.is_showing()
+            && state.screen.get() == Screen::Threads
             && !state.search_focused.get()
             && matches!(key.code, Code::KeyE | Code::KeyS | Code::Escape)
         {
@@ -179,13 +211,23 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 state.sidebar_open.update(|open| *open = !*open);
                 EventPropagation::Stop
             }
-            // Back to the inbox.
+            // Back to wherever the review was opened from.
             Code::BracketLeft => {
                 if review.is_showing() {
-                    review.close();
+                    state.leave_review(review);
                     return EventPropagation::Stop;
                 }
                 EventPropagation::Continue
+            }
+            // The two sections, numbered the way an editor numbers its
+            // panels.
+            Code::Digit1 => {
+                state.show_screen(review, Screen::Threads);
+                EventPropagation::Stop
+            }
+            Code::Digit2 => {
+                state.show_screen(review, Screen::Worktrees);
+                EventPropagation::Stop
             }
             _ => EventPropagation::Continue,
         }
