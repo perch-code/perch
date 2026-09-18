@@ -87,9 +87,13 @@ pub fn resize_handle(state: AppState) -> impl IntoView {
                 false,
             );
         })
-        .on_event_stop(el::DragMove, move |_, e: &floem::event::DragMoveEvent| {
-            let x = e.current_state.logical_point().x;
-            let width = (x - theme::ACTIVITY_RAIL_WIDTH).clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
+        .on_event_stop(el::DragMove, move |cx, e: &floem::event::DragMoveEvent| {
+            // The event arrives in the handle's own coordinates, and the
+            // handle moves with the edge it drags, so measured from there
+            // the pointer never gets far. Map it back to the window first.
+            let point = cx.world_transform.inverse() * e.current_state.logical_point();
+            let width = (point.x - theme::ACTIVITY_RAIL_WIDTH)
+                .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
             state.sidebar_width.set(width);
         })
         .style(|s| {
@@ -652,4 +656,72 @@ fn unread_badge(unread: impl Fn() -> usize + 'static + Copy) -> impl IntoView {
             }
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floem::headless::{HeadlessHarness, TestRoot};
+    use floem::style::Position;
+
+    /// The window's left side as `app_view` lays it out: the rail, then the
+    /// panel with the handle over its right edge. A blank rail and a blank
+    /// panel are enough; the handle only needs the positioning box.
+    fn harness(state: AppState) -> HeadlessHarness {
+        let root = TestRoot::new();
+        let view = Stack::horizontal((
+            Empty::new().style(|s| s.width(theme::ACTIVITY_RAIL_WIDTH).height_full()),
+            Container::new(Stack::horizontal((
+                Empty::new().style(move |s| s.width(state.sidebar_width.get()).height_full()),
+                resize_handle(state),
+            )))
+            .style(|s| {
+                s.height_full()
+                    .flex_shrink(0.0_f32)
+                    .position(Position::Relative)
+            }),
+        ))
+        .style(|s| s.size_full());
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1280.0, 820.0);
+        harness.rebuild();
+        harness
+    }
+
+    /// Where the handle is: over the panel's right edge.
+    fn edge(state: AppState) -> f64 {
+        theme::ACTIVITY_RAIL_WIDTH + state.sidebar_width.get()
+    }
+
+    #[test]
+    fn dragging_the_handle_puts_the_edge_under_the_pointer() {
+        let state = AppState::new();
+        let mut harness = harness(state);
+        let start = edge(state);
+
+        harness.pointer_down(start - 1.0, 300.0);
+        harness.pointer_move(start + 100.0, 300.0);
+        assert_eq!(state.sidebar_width.get(), theme::SIDEBAR_WIDTH + 100.0);
+
+        // The handle has moved with the edge. The next move is still
+        // measured from the rail, not from wherever the handle is now.
+        harness.pointer_move(start - 30.0, 310.0);
+        assert_eq!(state.sidebar_width.get(), theme::SIDEBAR_WIDTH - 30.0);
+
+        harness.pointer_up(start - 30.0, 310.0);
+        assert_eq!(state.sidebar_width.get(), theme::SIDEBAR_WIDTH - 30.0);
+    }
+
+    #[test]
+    fn the_width_stays_between_the_limits() {
+        let state = AppState::new();
+        let mut harness = harness(state);
+        let start = edge(state);
+
+        harness.pointer_down(start - 1.0, 300.0);
+        harness.pointer_move(1200.0, 300.0);
+        assert_eq!(state.sidebar_width.get(), theme::SIDEBAR_MAX_WIDTH);
+        harness.pointer_move(10.0, 300.0);
+        assert_eq!(state.sidebar_width.get(), theme::SIDEBAR_MIN_WIDTH);
+        harness.pointer_up(10.0, 300.0);
+    }
 }
