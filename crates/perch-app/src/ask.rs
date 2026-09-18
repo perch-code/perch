@@ -9,6 +9,51 @@
 use perch_git::{DisplayBuffer, LineStatus, Row};
 use perch_github::{Anchor, Author, PullRequest};
 
+/// Fold one event from the agent into its run record.
+///
+/// The backend applies this to the row it persists and the UI applies it to
+/// the copy it draws, so the two cannot drift. Returns the text the agent
+/// said, if the event carried any, for the caller to collect.
+pub fn apply_run_event(run: &mut perch_github::RunRecord, event: &perch_agent::RunEvent) -> Option<String> {
+    use perch_agent::RunEvent;
+    use perch_github::{RunStatus, RunStep};
+
+    match event {
+        RunEvent::Started { session_id, .. } => {
+            run.session_id = Some(session_id.clone());
+        }
+        RunEvent::Text(text) => return Some(text.clone()),
+        RunEvent::ToolCall { summary, .. } => {
+            run.steps.push(RunStep { summary: summary.clone(), ok: true });
+        }
+        RunEvent::ToolResult { ok, summary, .. } => {
+            // Results come back in order, so the last step still marked good
+            // is the one this answers.
+            if !ok {
+                if let Some(step) = run.steps.iter_mut().rev().find(|s| s.ok) {
+                    step.ok = false;
+                    if !summary.is_empty() {
+                        step.summary = format!("{}: {summary}", step.summary);
+                    }
+                }
+            }
+        }
+        RunEvent::Finished { session_id, cost_usd, duration_ms } => {
+            run.session_id = Some(session_id.clone());
+            run.status = RunStatus::Finished;
+            run.cost_usd = *cost_usd;
+            run.duration_ms = Some(*duration_ms);
+            run.ended_at = Some(jiff::Timestamp::now());
+        }
+        RunEvent::Failed { message } => {
+            run.status = if message == "Stopped" { RunStatus::Stopped } else { RunStatus::Failed };
+            run.error = Some(message.clone());
+            run.ended_at = Some(jiff::Timestamp::now());
+        }
+    }
+    None
+}
+
 /// The spec a run takes, from config, the prompt, and where to run it.
 pub fn run_spec(
     agent: &perch_github::AgentConfig,
@@ -127,7 +172,7 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
 }
 
 /// The file the way the editor lays it out, diff spliced in.
-async fn load_display(
+pub(crate) async fn load_display(
     preparer: &perch_git::Preparer,
     checkout: &perch_git::Checkout,
     path: &str,
@@ -416,6 +461,47 @@ mod tests {
         let p = first_prompt(&PromptInput { pull_request: Some(&pr()), body: Some(&body), ..input(None, None, "q") });
         assert!(p.user.contains("line 40\n[…]\n"), "{}", p.user);
         assert!(!p.user.contains("line 41\n"));
+    }
+
+    #[test]
+    fn run_events_fold_into_the_record() {
+        use perch_agent::RunEvent;
+        use perch_github::{RunRecord, RunStatus};
+        let mut run = RunRecord {
+            id: "r".into(),
+            thread_id: "t".into(),
+            backend: "claude-code".into(),
+            model: "sonnet".into(),
+            effort: "medium".into(),
+            session_id: None,
+            status: RunStatus::Running,
+            cost_usd: None,
+            duration_ms: None,
+            steps: vec![],
+            error: None,
+            started_at: jiff::Timestamp::now(),
+            ended_at: None,
+        };
+        apply_run_event(&mut run, &RunEvent::Started { session_id: "s".into(), model: "m".into() });
+        assert_eq!(run.session_id.as_deref(), Some("s"));
+        apply_run_event(&mut run, &RunEvent::ToolCall { id: "1".into(), name: "Read".into(), summary: "Read a.rs".into() });
+        apply_run_event(&mut run, &RunEvent::ToolCall { id: "2".into(), name: "Write".into(), summary: "Asked to edit a.rs".into() });
+        apply_run_event(&mut run, &RunEvent::ToolResult { id: "2".into(), ok: false, summary: "not allowed".into() });
+        assert_eq!(run.steps[1].summary, "Asked to edit a.rs: not allowed");
+        assert!(!run.steps[1].ok);
+        assert!(run.steps[0].ok);
+        assert_eq!(apply_run_event(&mut run, &RunEvent::Text("hi".into())), Some("hi".into()));
+        apply_run_event(&mut run, &RunEvent::Finished { session_id: "s".into(), cost_usd: Some(0.1), duration_ms: 900 });
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(run.duration_ms, Some(900));
+
+        let mut stopped = run.clone();
+        apply_run_event(&mut stopped, &RunEvent::Failed { message: "Stopped".into() });
+        assert_eq!(stopped.status, RunStatus::Stopped);
+        let mut failed = run.clone();
+        apply_run_event(&mut failed, &RunEvent::Failed { message: "boom".into() });
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("boom"));
     }
 
     #[test]

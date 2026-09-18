@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use perch_git::{ChangeStatus, ChangedFile, DisplayBuffer, TreeEntry};
-use perch_github::{PullRequest, Worktree};
+use perch_github::{Anchor, CommentThread, PullRequest, Worktree};
 use perch_syntax::{Language, LineSpans};
 
 /// A file prepared for the editor: text to render, and everything needed to
@@ -62,6 +62,19 @@ pub enum Preparing {
     Failed { message: String },
 }
 
+/// A composer that is open: where the question will be anchored and how
+/// it will be run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Composer {
+    /// `None` starts a thread; `Some` is a follow-up in that thread.
+    pub thread_id: Option<String>,
+    pub anchor: Option<Anchor>,
+    pub model: String,
+    pub effort: perch_agent::Effort,
+    /// A question to start with, when a failed run is retried.
+    pub draft: String,
+}
+
 /// One open editor tab.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tab {
@@ -107,6 +120,17 @@ pub struct ReviewState {
 
     /// How many discussion records the archive took in, once it has.
     pub archived: RwSignal<Option<usize>>,
+
+    /// Every thread in the open worktree, with messages and runs.
+    pub comment_threads: RwSignal<Arc<Vec<CommentThread>>>,
+    /// Whether the thread column is showing.
+    pub threads_open: RwSignal<bool>,
+    /// An open composer, and where it is anchored.
+    pub composer: RwSignal<Option<Composer>>,
+    /// The editor's selection as display lines, first and last inclusive.
+    pub selection: RwSignal<Option<(usize, usize)>>,
+    /// A gutter marker was clicked: the thread to scroll the column to.
+    pub focus_thread: RwSignal<Option<String>>,
     pub lsp_status: RwSignal<perch_lsp::Status>,
     /// Rises with every hover and jump request. An answer carrying an older
     /// token is stale, because the pointer has moved on since it was asked.
@@ -155,6 +179,11 @@ impl ReviewState {
             cursor_line: RwSignal::new(0),
             editor_epoch: RwSignal::new(0),
             archived: RwSignal::new(None),
+            comment_threads: RwSignal::new(Arc::new(Vec::new())),
+            threads_open: RwSignal::new(false),
+            composer: RwSignal::new(None),
+            selection: RwSignal::new(None),
+            focus_thread: RwSignal::new(None),
             lsp_status: RwSignal::new(perch_lsp::Status::Absent),
             request_token: RwSignal::new(0),
             hover_at: RwSignal::new(None),
@@ -193,6 +222,10 @@ impl ReviewState {
         self.rail_mode.set(RailMode::Changed);
         self.lsp_status.set(perch_lsp::Status::Absent);
         self.archived.set(None);
+        self.comment_threads.set(Arc::new(Vec::new()));
+        self.composer.set(None);
+        self.selection.set(None);
+        self.focus_thread.set(None);
         self.expanded.set(std::collections::HashSet::new());
         self.dismiss_hover();
     }
@@ -289,6 +322,45 @@ impl ReviewState {
     }
 
     /// Status of a path in the pull request, for the tree's change markers.
+    /// Fold a run event into the thread list in place, so the running block
+    /// updates without a reload.
+    pub fn apply_run_event(&self, run_id: &str, event: &perch_agent::RunEvent) {
+        self.comment_threads.update(|threads| {
+            let mut all: Vec<CommentThread> = threads.as_ref().clone();
+            for thread in &mut all {
+                for message in &mut thread.messages {
+                    if let Some(run) = message.run.as_mut().filter(|r| r.id == run_id) {
+                        crate::ask::apply_run_event(run, event);
+                    }
+                }
+            }
+            *threads = Arc::new(all);
+        });
+    }
+
+    /// Threads anchored in a file, newest first.
+    pub fn threads_in(&self, path: &str) -> Vec<CommentThread> {
+        let mut out: Vec<CommentThread> = self
+            .comment_threads
+            .with(|t| t.iter().filter(|t| t.anchor.as_ref().is_some_and(|a| a.path == path)).cloned().collect());
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out
+    }
+
+    /// Everything else: other files and the worktree as a whole, newest first.
+    pub fn threads_elsewhere(&self, path: Option<&str>) -> Vec<CommentThread> {
+        let mut out: Vec<CommentThread> = self
+            .comment_threads
+            .with(|t| {
+                t.iter()
+                    .filter(|t| !t.anchor.as_ref().is_some_and(|a| Some(a.path.as_str()) == path))
+                    .cloned()
+                    .collect()
+            });
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out
+    }
+
     pub fn status_of(&self, path: &str) -> Option<ChangeStatus> {
         self.changed_files
             .with(|files| files.iter().find(|f| f.path == path).map(|f| f.status))

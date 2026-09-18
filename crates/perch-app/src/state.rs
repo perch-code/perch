@@ -160,6 +160,13 @@ impl AppState {
                 review.offline.set(offline);
                 review.pull_request.set(Some(pull_request));
             }
+            Event::CommentThreads { worktree_id, threads } => {
+                let open = review.worktree.with(|w| w.as_ref().map(|w| w.id.clone()));
+                if open.as_deref() == Some(worktree_id.as_str()) {
+                    review.comment_threads.set(Arc::new(threads));
+                }
+            }
+            Event::RunEvent { run_id, event, .. } => review.apply_run_event(&run_id, &event),
             Event::Archived { repo_full_name, number, added } => {
                 // Only for the review that is still open; a slow archive of
                 // a pull request since left has nothing to say.
@@ -263,7 +270,7 @@ impl AppState {
                 self.notice.set(None);
             }
             Event::Notice(message) => self.notice.set(Some(message)),
-            Event::Archived { .. } => {}
+            Event::Archived { .. } | Event::CommentThreads { .. } | Event::RunEvent { .. } => {}
             Event::WorktreeFailed { id, message } => {
                 tracing::warn!(id, message, "worktree action refused");
                 self.notice.set(Some(message));

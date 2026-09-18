@@ -8,12 +8,16 @@
 //! because that is what floem's `update_signal_from_channel` consumes.
 
 use std::sync::mpsc::Sender as EventSender;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, Store};
-use perch_github::{resolve_token, Cache, Config, GitHub, Mark, SubjectDetail, Thread, Worktree};
+use perch_github::{
+    resolve_token, Anchor, Author, Cache, CommentMessage, CommentThread, Config, GitHub, Mark,
+    RunRecord, RunStatus, SubjectDetail, Thread, ThreadOrigin, Worktree,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
@@ -49,6 +53,19 @@ pub enum Command {
     RestoreWorktree { id: String },
     /// Delete the branch and the row of an archived worktree.
     ForgetWorktree { id: String },
+
+    /// Ask the agent a question in the open worktree. `thread_id` of `None`
+    /// starts a thread; the anchor is ignored on a follow-up.
+    Ask {
+        worktree_id: String,
+        thread_id: Option<String>,
+        anchor: Option<Anchor>,
+        question: String,
+        model: String,
+        effort: perch_agent::Effort,
+    },
+    CancelRun { run_id: String },
+    DeleteCommentThread { id: String },
 }
 
 /// A mark write.
@@ -88,6 +105,10 @@ pub enum Event {
     Archived { repo_full_name: String, number: u64, added: usize },
     /// Something worth a line in the status bar and nothing more.
     Notice(String),
+    /// Every thread in a worktree. Whole, like `Worktrees`.
+    CommentThreads { worktree_id: String, threads: Vec<CommentThread> },
+    /// One step of a run, applied in place to the run it names.
+    RunEvent { run_id: String, thread_id: String, event: perch_agent::RunEvent },
     Status(Status),
 
     /// A step of preparing a checkout.
@@ -165,6 +186,34 @@ impl Backend {
 
     pub fn forget_worktree(&self, id: &str) {
         let _ = self.commands.send(Command::ForgetWorktree { id: id.to_string() });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn ask(
+        &self,
+        worktree_id: &str,
+        thread_id: Option<String>,
+        anchor: Option<Anchor>,
+        question: &str,
+        model: &str,
+        effort: perch_agent::Effort,
+    ) {
+        let _ = self.commands.send(Command::Ask {
+            worktree_id: worktree_id.to_string(),
+            thread_id,
+            anchor,
+            question: question.to_string(),
+            model: model.to_string(),
+            effort,
+        });
+    }
+
+    pub fn cancel_run(&self, run_id: &str) {
+        let _ = self.commands.send(Command::CancelRun { run_id: run_id.to_string() });
+    }
+
+    pub fn delete_comment_thread(&self, id: &str) {
+        let _ = self.commands.send(Command::DeleteCommentThread { id: id.to_string() });
     }
 
     pub fn set_saved(&self, thread_ids: Vec<String>, saved: bool) {
@@ -265,6 +314,16 @@ async fn run(
     tracing::info!("github client ready");
     let cache = open_cache();
     tracing::info!(cache = cache.is_some(), "cache opened");
+    if let Some(cache) = cache.as_ref() {
+        // A run still marked running is one Perch died in the middle of.
+        if let Ok(guard) = cache.lock() {
+            match guard.fail_running_runs("Perch quit") {
+                Ok(n) if n > 0 => tracing::info!(n, "marked interrupted runs failed"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "could not clean up runs"),
+            }
+        }
+    }
 
     // Marks run beside the loop rather than in it. A poll can hold the loop
     // for as long as the network takes, and a reader who presses Done should
@@ -337,6 +396,7 @@ async fn run(
         slot: checkout.clone(),
         language_server: language_server.clone(),
         events: events.clone(),
+        runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Bring the table and the disk into agreement before any command can
@@ -408,6 +468,23 @@ async fn run(
                         let _ = ctx.events.send(Event::WorktreeFailed { id, message });
                     }
                 });
+            }
+            Some(Command::Ask { worktree_id, thread_id, anchor, question, model, effort }) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    ask(&ctx, worktree_id, thread_id, anchor, question, model, effort).await;
+                });
+            }
+            Some(Command::CancelRun { run_id }) => {
+                if let Ok(runs) = ctx.runs.lock() {
+                    if let Some((run, _)) = runs.get(&run_id) {
+                        run.cancel();
+                    }
+                }
+            }
+            Some(Command::DeleteCommentThread { id }) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { delete_comment_thread(&ctx, &id).await });
             }
             Some(Command::ForgetWorktree { id }) => {
                 let ctx = ctx.clone();
@@ -599,9 +676,25 @@ struct Ctx {
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
     events: EventSender<Event>,
+    /// Running agents by run id, so a cancel can find its child.
+    runs: Arc<std::sync::Mutex<std::collections::HashMap<String, (perch_agent::Run, String)>>>,
 }
 
 impl Ctx {
+    fn send_threads(&self, worktree_id: &str) {
+        let threads = self.with_cache(|c| c.load_comment_threads(worktree_id));
+        match threads {
+            Some(Ok(threads)) => {
+                let _ = self.events.send(Event::CommentThreads {
+                    worktree_id: worktree_id.to_string(),
+                    threads,
+                });
+            }
+            Some(Err(e)) => tracing::warn!(error = %e, "could not load threads"),
+            None => {}
+        }
+    }
+
     /// Run one closure against the cache. The guard never crosses an await.
     fn with_cache<T>(&self, f: impl FnOnce(&Cache) -> T) -> Option<T> {
         let cache = self.cache.as_ref()?;
@@ -813,6 +906,10 @@ const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 struct ReviewContext {
     checkout: perch_git::Checkout,
     files: Arc<Vec<perch_git::ChangedFile>>,
+    worktree_id: String,
+    pull_request: Arc<perch_github::PullRequest>,
+    /// The description, once the discussion has been fetched.
+    body: Option<String>,
 }
 
 /// One poll of the notifications API. Returns how long to wait before the next.
@@ -1024,8 +1121,17 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
 
     let stale_head = checkout.stale.clone();
     let worktree_label = checkout.worktree.display().to_string();
+    let head_for_threads = checkout.head_sha.clone();
+    let worktree_for_threads = checkout.worktree.clone();
+    let pull_request = Arc::new(pull_request);
     if let Ok(mut guard) = ctx.slot.lock() {
-        *guard = Some(ReviewContext { checkout, files: files.clone() });
+        *guard = Some(ReviewContext {
+            checkout,
+            files: files.clone(),
+            worktree_id: id.clone(),
+            pull_request: pull_request.clone(),
+            body: None,
+        });
     }
 
     tracing::info!(
@@ -1038,7 +1144,6 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         offline,
         "review ready"
     );
-    let pull_request = Arc::new(pull_request);
     let _ = events.send(Event::ReviewReady {
         pull_request: pull_request.clone(),
         worktree: Arc::new(row),
@@ -1047,6 +1152,17 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         stale_head,
         offline,
     });
+
+    // Threads paint after the code, not before, and the outdated check is
+    // a git call per moved thread, so both go on their own task.
+    {
+        let ctx = ctx.clone();
+        let worktree_id = id.clone();
+        tokio::spawn(async move {
+            mark_outdated_threads(&ctx, &worktree_id, &head_for_threads, &worktree_for_threads).await;
+            ctx.send_threads(&worktree_id);
+        });
+    }
 
     // The discussion arrives after the checkout, on its own task, so the
     // review paints first. Offline there is nothing to fetch.
@@ -1068,6 +1184,12 @@ async fn archive_discussion(ctx: &Ctx, pr: &perch_github::PullRequest) {
             return;
         }
     };
+
+    if let Ok(mut guard) = ctx.slot.lock() {
+        if let Some(open) = guard.as_mut().filter(|c| c.pull_request.number == pr.number) {
+            open.body = Some(discussion.body.clone());
+        }
+    }
 
     let project = ctx.config.knowledge.project_for(&pr.repo_full_name);
     let messages = crate::knowledge::to_messages(pr, &discussion, &project);
@@ -1104,6 +1226,218 @@ async fn archive_discussion(ctx: &Ctx, pr: &perch_github::PullRequest) {
             let _ = ctx.events.send(Event::Notice(format!("Could not archive the discussion: {e}")));
         }
         Err(e) => tracing::warn!(error = %e, "archive task panicked"),
+    }
+}
+
+/// A thread whose file changed since its anchor was made may have moved.
+///
+/// `git diff --quiet <sha> <head> -- <path>` per thread whose sha differs
+/// from the head; the common case, same sha, costs nothing.
+async fn mark_outdated_threads(ctx: &Ctx, worktree_id: &str, head: &str, worktree: &Path) {
+    let Some(Ok(threads)) = ctx.with_cache(|c| c.load_comment_threads(worktree_id)) else {
+        return;
+    };
+    for thread in threads {
+        let Some(anchor) = &thread.anchor else { continue };
+        if anchor.commit_sha == head || thread.outdated {
+            continue;
+        }
+        let changed = ctx
+            .preparer
+            .git()
+            .run(
+                Some(worktree),
+                ["diff", "--quiet", &anchor.commit_sha, head, "--", &anchor.path],
+                Duration::from_secs(30),
+            )
+            .await
+            .is_err();
+        if changed {
+            tracing::info!(thread = %thread.id, path = %anchor.path, "thread is outdated");
+            ctx.with_cache(|c| c.set_thread_outdated(&thread.id, true));
+        }
+    }
+}
+
+/// Start a thread or continue one, run the agent, and keep the record
+/// current as events arrive.
+async fn ask(
+    ctx: &Ctx,
+    worktree_id: String,
+    thread_id: Option<String>,
+    anchor: Option<Anchor>,
+    question: String,
+    model: String,
+    effort: perch_agent::Effort,
+) {
+    let open = ctx.slot.lock().ok().and_then(|g| {
+        g.as_ref().filter(|c| c.worktree_id == worktree_id).map(|c| {
+            (c.checkout.clone(), c.pull_request.clone(), c.body.clone())
+        })
+    });
+    let Some((checkout, pull_request, body)) = open else {
+        let _ = ctx.events.send(Event::Notice("That worktree is no longer open".into()));
+        return;
+    };
+    let now = Timestamp::now();
+
+    // The thread: found, or made with the question as its first message.
+    let existing = match &thread_id {
+        Some(id) => ctx
+            .with_cache(|c| c.load_comment_threads(&worktree_id))
+            .and_then(Result::ok)
+            .and_then(|all| all.into_iter().find(|t| &t.id == id)),
+        None => None,
+    };
+    let thread = match existing {
+        Some(t) => t,
+        None => CommentThread {
+            id: perch_github::comments::new_id(),
+            worktree_id: worktree_id.clone(),
+            origin: ThreadOrigin::Local,
+            anchor: anchor.clone(),
+            outdated: false,
+            resolved: false,
+            created_at: now,
+            messages: Vec::new(),
+        },
+    };
+    let is_new = thread_id.is_none();
+
+    let run = RunRecord {
+        id: perch_github::comments::new_id(),
+        thread_id: thread.id.clone(),
+        backend: perch_agent::Backend::ClaudeCode.name().into(),
+        model: model.clone(),
+        effort: effort.name().into(),
+        session_id: None,
+        status: RunStatus::Running,
+        cost_usd: None,
+        duration_ms: None,
+        steps: Vec::new(),
+        error: None,
+        started_at: now,
+        ended_at: None,
+    };
+    // The question carries the run while it runs, so the thread has
+    // somewhere to show the steps before there is an answer.
+    let question_message = CommentMessage {
+        id: perch_github::comments::new_id(),
+        thread_id: thread.id.clone(),
+        origin: ThreadOrigin::Local,
+        author: Author::User,
+        body: question.clone(),
+        created_at: now,
+        run: Some(run.clone()),
+    };
+    let written = ctx.with_cache(|c| {
+        if is_new {
+            c.insert_comment_thread(&thread)?;
+        }
+        c.insert_comment_message(&question_message)
+    });
+    if let Some(Err(e)) = written {
+        let _ = ctx.events.send(Event::Notice(format!("Could not save the question: {e}")));
+        return;
+    }
+    ctx.send_threads(&worktree_id);
+
+    // The prompt. A follow-up resumes the last finished run; a thread with
+    // none starts over with its history folded in.
+    let file = match &thread.anchor {
+        Some(a) => crate::ask::load_display(&ctx.preparer, &checkout, &a.path).await.ok(),
+        None => None,
+    };
+    let history: Vec<(Author, String)> =
+        thread.messages.iter().map(|m| (m.author.clone(), m.body.clone())).collect();
+    let resume = thread.resumable_session();
+    let input = crate::ask::PromptInput {
+        pull_request: Some(&pull_request),
+        body: body.as_deref(),
+        anchor: thread.anchor.as_ref(),
+        file: file.as_ref(),
+        outdated: thread.outdated,
+        question: &question,
+        history: if is_new || resume.is_some() { &[] } else { &history },
+    };
+    let prompt = if is_new { crate::ask::first_prompt(&input) } else { crate::ask::follow_up_prompt(&input) };
+    let spec = crate::ask::run_spec(&ctx.config.agent, &model, effort, checkout.worktree.clone(), &prompt, resume);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut run = run;
+    let handle = match perch_agent::Run::spawn(spec, tx) {
+        Ok(h) => h,
+        Err(e) => {
+            let message = format!("{e}. Set agent.binary in config.toml to where Claude Code is installed.");
+            crate::ask::apply_run_event(&mut run, &perch_agent::RunEvent::Failed { message });
+            ctx.with_cache(|c| c.update_run(&run));
+            ctx.send_threads(&worktree_id);
+            return;
+        }
+    };
+    if let Ok(mut runs) = ctx.runs.lock() {
+        runs.insert(run.id.clone(), (handle, thread.id.clone()));
+    }
+
+    let mut answer: Vec<String> = Vec::new();
+    while let Some(event) = rx.recv().await {
+        if let Some(text) = crate::ask::apply_run_event(&mut run, &event) {
+            answer.push(text);
+        }
+        // Persist every step as it comes, so a crash mid-run loses nothing
+        // that was shown.
+        ctx.with_cache(|c| c.update_run(&run));
+        let _ = ctx.events.send(Event::RunEvent {
+            run_id: run.id.clone(),
+            thread_id: thread.id.clone(),
+            event: event.clone(),
+        });
+        match event {
+            perch_agent::RunEvent::Finished { .. } => {
+                let reply = CommentMessage {
+                    id: perch_github::comments::new_id(),
+                    thread_id: thread.id.clone(),
+                    origin: ThreadOrigin::Local,
+                    author: Author::Agent { backend: run.backend.clone(), model: run.model.clone() },
+                    body: answer.join("\n\n"),
+                    created_at: Timestamp::now(),
+                    run: Some(run.clone()),
+                };
+                ctx.with_cache(|c| {
+                    c.insert_comment_message(&reply)?;
+                    // The answer carries the run now; the question lets go.
+                    c.set_message_run(&question_message.id, None)
+                });
+                break;
+            }
+            perch_agent::RunEvent::Failed { .. } => break,
+            _ => {}
+        }
+    }
+    if let Ok(mut runs) = ctx.runs.lock() {
+        runs.remove(&run.id);
+    }
+    tracing::info!(thread = %thread.id, run = %run.id, status = run.status.name(), steps = run.steps.len(), "run ended");
+    ctx.send_threads(&worktree_id);
+}
+
+async fn delete_comment_thread(ctx: &Ctx, id: &str) {
+    // Stop anything still running in it first.
+    let running: Vec<perch_agent::Run> = ctx
+        .runs
+        .lock()
+        .map(|runs| runs.values().filter(|(_, t)| t == id).map(|(r, _)| r.clone()).collect())
+        .unwrap_or_default();
+    for run in running {
+        run.cancel();
+    }
+    if let Some(Err(e)) = ctx.with_cache(|c| c.delete_comment_thread(id)) {
+        let _ = ctx.events.send(Event::Notice(format!("Could not delete the thread: {e}")));
+        return;
+    }
+    let worktree_id = ctx.slot.lock().ok().and_then(|g| g.as_ref().map(|c| c.worktree_id.clone()));
+    if let Some(worktree_id) = worktree_id {
+        ctx.send_threads(&worktree_id);
     }
 }
 
