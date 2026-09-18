@@ -981,6 +981,8 @@ mod tests {
             state: SubjectState::PrOpen,
             author_login: "octocat".into(),
             author_avatar_url: "https://avatars/2".into(),
+            workflow: None,
+            html_url: None,
         }
     }
 

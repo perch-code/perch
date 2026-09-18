@@ -28,6 +28,7 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread, on_mark: OnMark
         None
     };
     let web_url = thread.html_url();
+    let click_id = thread.id.clone();
 
     Stack::horizontal((
         unread_dot(unread),
@@ -45,7 +46,15 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread, on_mark: OnMark
     ))
     .on_event_stop(el::Click, move |_, _| match &review_target {
         Some((repo, number, thread_id)) => on_open(repo, *number, thread_id),
-        None => crate::ui::widgets::open_in_browser(&web_url),
+        None => {
+            // A workflow run's page is known only once its run is found;
+            // the notification links to nothing better than the repository.
+            let url = state
+                .detail_for(&click_id)
+                .and_then(|d| d.html_url)
+                .unwrap_or_else(|| web_url.clone());
+            crate::ui::widgets::open_in_browser(&url)
+        }
     })
     // A bare keystroke acts on the row under the pointer, so the row has to
     // say when it is under it.
@@ -226,9 +235,8 @@ fn text_column(state: AppState, thread: Thread) -> impl IntoView {
     let meta = move || {
         let number = state
             .detail_for(&id)
-            .map(|d| d.number)
-            .or(hint)
-            .map(|n| format!("#{n}"));
+            .map(|d| d.reference())
+            .or_else(|| hint.map(|n| format!("#{n}")));
         let show_repo = state.group.get() != Group::Repository;
         match (show_repo, number) {
             (true, Some(n)) => format!("{repo}  {n}"),

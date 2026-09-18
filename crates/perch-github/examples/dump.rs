@@ -2,7 +2,7 @@
 //!
 //!     cargo run -p perch-github --example dump
 
-use perch_github::{resolve_token, Config, GitHub};
+use perch_github::{resolve_token, Config, DetailSource, GitHub};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,11 +31,23 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Exercise the detail path on the first issue or PR.
-    if let Some(t) = threads.iter().find(|t| t.has_detail()) {
-        let url = t.subject.url.as_deref().unwrap();
-        let detail = gh.fetch_detail(url, &t.subject.kind).await?;
-        eprintln!("\ndetail for {}: {:?}", t.subject.title, detail);
+    // Exercise both detail paths: the first issue or PR, and the first
+    // workflow run.
+    let (mut subject_done, mut run_done) = (false, false);
+    for t in &threads {
+        match t.detail_source() {
+            Some(DetailSource::Subject { url, kind }) if !subject_done => {
+                subject_done = true;
+                let detail = gh.fetch_detail(&url, &kind).await?;
+                eprintln!("\ndetail for {}: {:?}", t.subject.title, detail);
+            }
+            Some(DetailSource::WorkflowRun(query)) if !run_done => {
+                run_done = true;
+                let detail = gh.fetch_workflow_run_detail(&query).await?;
+                eprintln!("\nrun for {}: {:?}", t.subject.title, detail);
+            }
+            _ => {}
+        }
     }
 
     Ok(())

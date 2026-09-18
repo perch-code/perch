@@ -7,6 +7,8 @@
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::workflow_runs::WorkflowRunQuery;
+
 /// A notification thread, as returned by `GET /notifications`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thread {
@@ -58,13 +60,34 @@ impl Thread {
         format!("https://github.com/{}/{}/{}/{}", parts[0], parts[1], kind, parts[3])
     }
 
+    /// What to fetch for this thread's detail, if its subject has any.
+    pub fn detail_source(&self) -> Option<DetailSource> {
+        match self.subject.kind {
+            SubjectKind::Issue | SubjectKind::PullRequest => Some(DetailSource::Subject {
+                url: self.subject.url.clone()?,
+                kind: self.subject.kind.clone(),
+            }),
+            SubjectKind::CheckSuite => {
+                WorkflowRunQuery::from_thread(self).map(DetailSource::WorkflowRun)
+            }
+            _ => None,
+        }
+    }
+
     /// True when this thread's subject supports a detail fetch.
     pub fn has_detail(&self) -> bool {
-        matches!(
-            self.subject.kind,
-            SubjectKind::Issue | SubjectKind::PullRequest
-        )
+        self.detail_source().is_some()
     }
+}
+
+/// What a thread's detail request asks for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DetailSource {
+    /// An issue or pull request, at its API URL.
+    Subject { url: String, kind: SubjectKind },
+    /// A workflow run. The notification carries no link to it, so it is
+    /// looked up by name and time.
+    WorkflowRun(WorkflowRunQuery),
 }
 
 /// Why this thread is in the inbox.
@@ -256,13 +279,38 @@ fn owner_avatar<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     })
 }
 
-/// Per-thread detail, fetched from `subject.url`. Issues and PRs only.
+/// Per-thread detail: what a row shows beyond the notification itself.
+///
+/// An issue or pull request is fetched from `subject.url`. A workflow run is
+/// found by a [`WorkflowRunQuery`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubjectDetail {
+    /// The issue or pull request number, or a run's number within its
+    /// workflow.
     pub number: u64,
     pub state: SubjectState,
     pub author_login: String,
     pub author_avatar_url: String,
+    /// The workflow's name, for a run. github.com writes a run as
+    /// `Hourly DST #912`, and so does [`Self::reference`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    /// Where a run lives on github.com. The notification itself links to
+    /// nothing better than the repository. Issues and pull requests carry
+    /// nothing here: `Thread::html_url` already knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html_url: Option<String>,
+}
+
+impl SubjectDetail {
+    /// How the row names it: `#2097` for an issue or pull request, and
+    /// `Hourly DST #912` for a workflow run, the way github.com does.
+    pub fn reference(&self) -> String {
+        match &self.workflow {
+            Some(workflow) => format!("{workflow} #{}", self.number),
+            None => format!("#{}", self.number),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -274,6 +322,11 @@ pub enum SubjectState {
     PrDraft,
     PrMerged,
     PrClosed,
+    RunSuccess,
+    RunFailure,
+    /// Also skipped, stale and neutral: nothing ran.
+    RunCancelled,
+    RunInProgress,
 }
 
 /// The raw shape of an issue or PR payload, reduced to what a row needs.
@@ -294,7 +347,7 @@ pub(crate) struct SubjectPayload {
     pub user: Option<UserPayload>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct UserPayload {
     #[serde(default)]
     pub login: String,
@@ -336,12 +389,14 @@ impl SubjectPayload {
             state,
             author_login,
             author_avatar_url,
+            workflow: None,
+            html_url: None,
         }
     }
 }
 
 /// GitHub emits RFC 3339 with a `Z` suffix, which `jiff::Timestamp` parses.
-mod ts {
+pub(crate) mod ts {
     use jiff::Timestamp;
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -456,6 +511,60 @@ mod tests {
     #[test]
     fn number_hint_is_none_without_a_url() {
         assert_eq!(thread_with_url(None).number_hint(), None);
+    }
+
+    #[test]
+    fn an_issue_is_fetched_at_its_url() {
+        let t = thread_with_url(Some("https://api.github.com/repos/a/b/issues/7"));
+        assert_eq!(
+            t.detail_source(),
+            Some(DetailSource::Subject {
+                url: "https://api.github.com/repos/a/b/issues/7".into(),
+                kind: SubjectKind::Issue,
+            })
+        );
+        // Without the URL there is nothing to ask for.
+        assert_eq!(thread_with_url(None).detail_source(), None);
+        assert!(!thread_with_url(None).has_detail());
+    }
+
+    #[test]
+    fn a_workflow_run_is_looked_up_from_its_title() {
+        let mut t = thread_with_url(None);
+        t.subject.kind = SubjectKind::CheckSuite;
+        t.subject.title = "Hourly DST workflow run failed for main branch".into();
+        assert_eq!(
+            t.detail_source(),
+            Some(DetailSource::WorkflowRun(WorkflowRunQuery {
+                repo_full_name: "a/b".into(),
+                workflow: "Hourly DST".into(),
+                branch: "main".into(),
+                at: t.updated_at,
+            }))
+        );
+
+        // A title that names no run is left alone rather than guessed at.
+        t.subject.title = "Something else entirely".into();
+        assert_eq!(t.detail_source(), None);
+    }
+
+    #[test]
+    fn a_run_is_referenced_by_workflow_and_number() {
+        let mut d = payload(r#"{"number":2097,"state":"open"}"#).into_detail(&SubjectKind::Issue);
+        assert_eq!(d.reference(), "#2097");
+        d.workflow = Some("Hourly DST".into());
+        d.number = 912;
+        assert_eq!(d.reference(), "Hourly DST #912");
+    }
+
+    #[test]
+    fn a_detail_cached_before_runs_existed_still_loads() {
+        let json = r#"{"number":7,"state":"PrOpen","author_login":"o","author_avatar_url":"u"}"#;
+        let d: SubjectDetail = serde_json::from_str(json).unwrap();
+        assert_eq!(d.workflow, None);
+        assert_eq!(d.html_url, None);
+        // And an issue's detail is written the way it always was.
+        assert_eq!(serde_json::to_string(&d).unwrap(), json);
     }
 
     #[test]

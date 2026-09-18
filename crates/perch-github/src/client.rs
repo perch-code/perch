@@ -14,6 +14,7 @@ use http_body_util::BodyExt;
 use octocrab::Octocrab;
 
 use crate::model::{SubjectDetail, SubjectKind, SubjectPayload, Thread};
+use crate::workflow_runs::{WorkflowRunQuery, WorkflowRunsPayload};
 
 /// Page size for the notifications list. GitHub caps `per_page` at 50 here.
 const PER_PAGE: usize = 50;
@@ -230,6 +231,20 @@ impl GitHub {
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
 
         Ok(payload.into_detail(kind))
+    }
+
+    /// Find the workflow run behind a `CheckSuite` notification.
+    ///
+    /// `Ok(None)` when no run on the branch fits: it has aged out of GitHub's
+    /// retention, or the title named something the branch's runs do not.
+    pub async fn fetch_workflow_run_detail(
+        &self,
+        query: &WorkflowRunQuery,
+    ) -> Result<Option<SubjectDetail>, Error> {
+        let body = self.get_text(&query.path()).await?;
+        let payload: WorkflowRunsPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(query.pick(payload.workflow_runs))
     }
 
     /// Fetch the pull request behind a notification.

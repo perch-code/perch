@@ -30,25 +30,39 @@ fn hex(c: Color) -> String {
 /// The colour a state's icon and its number are drawn in.
 pub fn state_color(state: SubjectState) -> Color {
     match state {
-        SubjectState::IssueOpen | SubjectState::PrOpen => theme::OPEN,
+        SubjectState::IssueOpen | SubjectState::PrOpen | SubjectState::RunSuccess => theme::OPEN,
         SubjectState::IssueClosed | SubjectState::PrMerged => theme::MERGED,
-        SubjectState::PrClosed => theme::CLOSED,
-        SubjectState::IssueNotPlanned | SubjectState::PrDraft => theme::DRAFT,
+        SubjectState::PrClosed | SubjectState::RunFailure => theme::CLOSED,
+        SubjectState::IssueNotPlanned | SubjectState::PrDraft | SubjectState::RunCancelled => {
+            theme::DRAFT
+        }
+        SubjectState::RunInProgress => theme::PENDING,
     }
 }
 
-/// Icon for a resolved issue or pull request state.
+/// Icon for a resolved issue, pull request or workflow run state.
 pub fn state_icon(state: SubjectState) -> String {
     let c = hex(state_color(state));
     let body = match state {
-        SubjectState::IssueOpen => format!(
+        // A run still going shares the open issue's dot: something is
+        // happening, in the amber GitHub uses for it.
+        SubjectState::IssueOpen | SubjectState::RunInProgress => format!(
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
                <circle cx="8" cy="8" r="2" fill="{c}"/>"#
         ),
-        SubjectState::IssueClosed => format!(
+        SubjectState::IssueClosed | SubjectState::RunSuccess => format!(
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
                <path d="M5.1 8.2 L7.1 10.2 L11 5.9" fill="none" stroke="{c}"
                      stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
+        SubjectState::RunFailure => format!(
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
+               <path d="M5.7 5.7 L10.3 10.3 M10.3 5.7 L5.7 10.3" stroke="{c}"
+                     stroke-width="1.6" stroke-linecap="round"/>"#
+        ),
+        SubjectState::RunCancelled => format!(
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
+               <path d="M5.2 8 H10.8" stroke="{c}" stroke-width="1.6" stroke-linecap="round"/>"#
         ),
         SubjectState::IssueNotPlanned => format!(
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
@@ -85,14 +99,14 @@ pub fn state_icon(state: SubjectState) -> String {
     svg16(&body)
 }
 
-/// Icon for a thread whose detail has not arrived, or whose subject is not an
-/// issue or pull request.
+/// Icon for a thread whose detail has not arrived, or whose subject has none.
 pub fn kind_icon(kind: &SubjectKind) -> String {
     let c = hex(theme::FG_SUBTLE);
     let body = match kind {
         // Detail pending. A dashed ring reads as "not known yet" without
-        // implying a state the row does not have.
-        SubjectKind::Issue | SubjectKind::PullRequest => format!(
+        // implying a state the row does not have. A workflow run is here
+        // too: until its run is found, a check mark would claim it passed.
+        SubjectKind::Issue | SubjectKind::PullRequest | SubjectKind::CheckSuite => format!(
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.4"
                        stroke-dasharray="2.4 2.6" stroke-linecap="round"/>"#
         ),
@@ -108,11 +122,6 @@ pub fn kind_icon(kind: &SubjectKind) -> String {
             r#"<path d="M8.4 1.9 H14.1 V7.6 L7.9 13.8 L2.2 8.1 Z" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linejoin="round"/>
                <circle cx="11.3" cy="4.7" r="1.15" fill="{c}"/>"#
-        ),
-        SubjectKind::CheckSuite => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <path d="M5.2 8.2 L7.2 10.2 L10.9 6.1" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
         SubjectKind::RepositoryVulnerabilityAlert => format!(
             r#"<path d="M8 1.8 L13.4 3.7 V8 C13.4 11 11 13.4 8 14.2 C5 13.4 2.6 11 2.6 8 V3.7 Z"
@@ -369,6 +378,10 @@ mod tests {
             SubjectState::PrDraft,
             SubjectState::PrMerged,
             SubjectState::PrClosed,
+            SubjectState::RunSuccess,
+            SubjectState::RunFailure,
+            SubjectState::RunCancelled,
+            SubjectState::RunInProgress,
         ] {
             let svg = state_icon(s);
             assert!(svg.starts_with("<svg"), "{s:?}");
@@ -387,6 +400,18 @@ mod tests {
             open.replace(&hex(theme::OPEN), "X"),
             draft.replace(&hex(theme::DRAFT), "X")
         );
+    }
+
+    #[test]
+    fn a_failed_run_is_not_drawn_as_a_check() {
+        let failed = state_icon(SubjectState::RunFailure);
+        let passed = state_icon(SubjectState::RunSuccess);
+        assert_ne!(
+            failed.replace(&hex(theme::CLOSED), "X"),
+            passed.replace(&hex(theme::OPEN), "X")
+        );
+        assert!(failed.contains(&hex(theme::CLOSED)));
+        assert!(passed.contains(&hex(theme::OPEN)));
     }
 
     #[test]

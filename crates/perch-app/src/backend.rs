@@ -15,8 +15,8 @@ use std::time::Duration;
 use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, Store};
 use perch_github::{
-    resolve_token, Anchor, Author, Cache, CommentMessage, CommentThread, Config, GitHub, Mark,
-    RunRecord, RunStatus, SubjectDetail, Thread, ThreadOrigin, Worktree,
+    resolve_token, Anchor, Author, Cache, CommentMessage, CommentThread, Config, DetailSource,
+    GitHub, Mark, RunRecord, RunStatus, SubjectDetail, Thread, ThreadOrigin, Worktree,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
@@ -29,6 +29,29 @@ use tokio::sync::Semaphore;
 const DETAIL_CONCURRENCY: usize = 8;
 const AVATAR_CONCURRENCY: usize = 6;
 const LAST_MODIFIED_KEY: &str = "notifications_last_modified";
+
+/// What the per-thread fetches share.
+#[derive(Clone)]
+struct Fetches {
+    details: Arc<Semaphore>,
+    avatars: Arc<Semaphore>,
+    /// Workflow run lookups that came back empty, by thread id and
+    /// `updated_at`. A run GitHub no longer lists, or a title the branch's
+    /// runs do not match, would otherwise be looked up again on every inbox
+    /// refresh. Kept for the process only, so a restart asks once more in
+    /// case the answer has changed.
+    unresolved: Arc<std::sync::Mutex<std::collections::HashSet<(String, String)>>>,
+}
+
+impl Fetches {
+    fn new() -> Self {
+        Self {
+            details: Arc::new(Semaphore::new(DETAIL_CONCURRENCY)),
+            avatars: Arc::new(Semaphore::new(AVATAR_CONCURRENCY)),
+            unresolved: Default::default(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -333,8 +356,7 @@ async fn run(
     // not find out how long that is.
     spawn_mark_writer(marks, cache.clone(), events.clone());
 
-    let detail_limit = Arc::new(Semaphore::new(DETAIL_CONCURRENCY));
-    let avatar_limit = Arc::new(Semaphore::new(AVATAR_CONCURRENCY));
+    let fetches = Fetches::new();
 
     // Paint from the cache first. A cold launch with no network still shows
     // the inbox as it was.
@@ -365,8 +387,7 @@ async fn run(
                 github.clone(),
                 Some(cache.clone()),
                 events.clone(),
-                detail_limit.clone(),
-                avatar_limit.clone(),
+                fetches.clone(),
                 threads,
             );
         }
@@ -439,8 +460,7 @@ async fn run(
                     &events,
                     config.as_ref(),
                     &source,
-                    &detail_limit,
-                    &avatar_limit,
+                    &fetches,
                 )
                 .await;
             }
@@ -922,8 +942,7 @@ async fn refresh(
     events: &EventSender<Event>,
     config: &Config,
     source: &str,
-    detail_limit: &Arc<Semaphore>,
-    avatar_limit: &Arc<Semaphore>,
+    fetches: &Fetches,
 ) -> Duration {
     let _ = events.send(Event::Status(Status::Refreshing));
 
@@ -982,8 +1001,7 @@ async fn refresh(
                     github.clone(),
                     cache.clone(),
                     events.clone(),
-                    detail_limit.clone(),
-                    avatar_limit.clone(),
+                    fetches.clone(),
                     threads,
                 );
             }
@@ -1770,8 +1788,7 @@ fn fetch_details(
     github: Arc<GitHub>,
     cache: SharedCache,
     events: EventSender<Event>,
-    detail_limit: Arc<Semaphore>,
-    avatar_limit: Arc<Semaphore>,
+    fetches: Fetches,
     threads: Vec<Thread>,
 ) {
     // Repository owner avatars, for the section headers.
@@ -1784,17 +1801,14 @@ fn fetch_details(
                 github.clone(),
                 cache.clone(),
                 events.clone(),
-                avatar_limit.clone(),
+                fetches.avatars.clone(),
                 t.repository.owner_avatar_url.clone(),
             );
         }
     }
 
     for thread in threads {
-        if !thread.has_detail() {
-            continue;
-        }
-        let Some(url) = thread.subject.url.clone() else {
+        let Some(source) = thread.detail_source() else {
             continue;
         };
 
@@ -1824,27 +1838,36 @@ fn fetch_details(
                     github.clone(),
                     cache.clone(),
                     events.clone(),
-                    avatar_limit.clone(),
+                    fetches.avatars.clone(),
                     avatar,
                 );
             }
             continue;
         }
 
+        let key = (thread.id.clone(), updated_at.clone());
+        if fetches.unresolved.lock().is_ok_and(|set| set.contains(&key)) {
+            continue;
+        }
+
         let github = github.clone();
         let cache = cache.clone();
         let events = events.clone();
-        let limit = detail_limit.clone();
-        let avatar_limit = avatar_limit.clone();
-        let kind = thread.subject.kind.clone();
+        let fetches = fetches.clone();
         let thread_id = thread.id.clone();
 
         tokio::spawn(async move {
-            let Ok(_permit) = limit.acquire().await else {
+            let Ok(_permit) = fetches.details.acquire().await else {
                 return;
             };
-            match github.fetch_detail(&url, &kind).await {
-                Ok(detail) => {
+            let fetched = match &source {
+                DetailSource::Subject { url, kind } => {
+                    github.fetch_detail(url, kind).await.map(Some)
+                }
+                DetailSource::WorkflowRun(query) => github.fetch_workflow_run_detail(query).await,
+            };
+            match fetched {
+                Ok(Some(detail)) => {
                     if let Some(cache) = cache.as_ref() {
                         if let Ok(guard) = cache.lock() {
                             let _ = guard.store_detail(&thread_id, &updated_at, &detail);
@@ -1854,10 +1877,16 @@ fn fetch_details(
                     tracing::debug!(thread_id, number = detail.number, "detail fetched");
                     let _ = events.send(Event::Detail { thread_id, detail });
                     if !avatar.is_empty() {
-                        spawn_avatar(github, cache, events, avatar_limit, avatar);
+                        spawn_avatar(github, cache, events, fetches.avatars.clone(), avatar);
                     }
                 }
-                Err(e) => tracing::debug!(error = %e, url, "detail fetch failed"),
+                Ok(None) => {
+                    tracing::debug!(thread_id, ?source, "no run fits the notification");
+                    if let Ok(mut set) = fetches.unresolved.lock() {
+                        set.insert(key);
+                    }
+                }
+                Err(e) => tracing::debug!(error = %e, ?source, "detail fetch failed"),
             }
         });
     }
