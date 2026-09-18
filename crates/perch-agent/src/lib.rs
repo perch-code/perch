@@ -53,6 +53,17 @@ impl Effort {
         }
     }
 
+    /// For the screen: "Medium", "XHigh".
+    pub fn label(self) -> &'static str {
+        match self {
+            Effort::Low => "Low",
+            Effort::Medium => "Medium",
+            Effort::High => "High",
+            Effort::XHigh => "XHigh",
+            Effort::Max => "Max",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|e| e.name().eq_ignore_ascii_case(s.trim()))
     }

@@ -75,6 +75,19 @@ fn header(app: AppState, state: ReviewState) -> impl IntoView {
     })
 }
 
+/// A model alias as the screen shows it: "Sonnet" for `sonnet`. A full id
+/// such as `claude-sonnet-5` is shown as typed.
+pub fn model_label(model: &str) -> String {
+    if model.contains('-') {
+        return model.to_string();
+    }
+    let mut chars = model.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// What a fresh composer starts on: the last thing sent, else config.
 pub fn defaults(app: AppState) -> (String, perch_agent::Effort) {
     app.agent.with(|a| {
@@ -289,13 +302,13 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
 fn model_picker(app: AppState, state: ReviewState) -> impl IntoView {
     use floem::menu::Menu;
 
-    let current = move || state.composer.with(|c| c.as_ref().map(|c| c.model.clone()).unwrap_or_default());
+    let current = move || state.composer.with(|c| c.as_ref().map(|c| model_label(&c.model)).unwrap_or_default());
     menu_button(current, move || {
         let models = app.agent.with(|a| a.models.clone());
         let selected = state.composer.get_untracked().map(|c| c.model).unwrap_or_default();
         let mut menu = Menu::new();
         for model in models {
-            let label = model.clone();
+            let label = model_label(&model);
             let pick = model.clone();
             let checked = model == selected;
             menu = menu.item(label, move |item| {
@@ -316,12 +329,12 @@ fn model_picker(app: AppState, state: ReviewState) -> impl IntoView {
 fn effort_picker(state: ReviewState) -> impl IntoView {
     use floem::menu::Menu;
 
-    let current = move || state.composer.with(|c| c.as_ref().map(|c| c.effort.name().to_string()).unwrap_or_default());
+    let current = move || state.composer.with(|c| c.as_ref().map(|c| c.effort.label().to_string()).unwrap_or_default());
     menu_button(current, move || {
         let selected = state.composer.get_untracked().map(|c| c.effort).unwrap_or_default();
         let mut menu = Menu::new();
         for effort in perch_agent::Effort::ALL {
-            menu = menu.item(effort.name(), move |item| {
+            menu = menu.item(effort.label(), move |item| {
                 item.checked(effort == selected).action(move || {
                     state.composer.update(|c| {
                         if let Some(c) = c {
@@ -579,7 +592,8 @@ fn run_block(
         RunStatus::Finished => Label::derived(move || {
             let secs = run.duration_ms.unwrap_or(0) as f64 / 1000.0;
             let cost = run.cost_usd.map(|c| format!(" \u{00b7} ${c:.2}")).unwrap_or_default();
-            format!("{} \u{00b7} {} \u{00b7} {secs:.0}s{cost}", run.model, run.effort)
+            let effort = perch_agent::Effort::parse(&run.effort).map(|e| e.label().to_string()).unwrap_or_else(|| run.effort.clone());
+            format!("{} \u{00b7} {effort} \u{00b7} {secs:.0}s{cost}", model_label(&run.model))
         })
         .style(|s| s.font_size(theme::TEXT_SECTION).color(theme::FG_SUBTLE).selectable(false))
         .into_any(),
@@ -896,6 +910,13 @@ mod tests {
                 Block::Paragraph("Done.".into()),
             ]
         );
+    }
+
+    #[test]
+    fn aliases_are_capitalised_and_ids_left_alone() {
+        assert_eq!(model_label("sonnet"), "Sonnet");
+        assert_eq!(model_label("fable"), "Fable");
+        assert_eq!(model_label("claude-sonnet-5"), "claude-sonnet-5");
     }
 
     #[test]
