@@ -19,7 +19,7 @@ pub use comments::{
     ThreadOrigin,
 };
 pub use client::{Error, GitHub, ListResult};
-pub use config::{Config, KnowledgeConfig};
+pub use config::{AgentConfig, Config, KnowledgeConfig};
 pub use discussion::{Discussion, IssueComment, Review, ReviewComment};
 pub use pulls::PullRequest;
 pub use model::{

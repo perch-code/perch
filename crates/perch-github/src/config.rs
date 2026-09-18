@@ -18,6 +18,49 @@ pub struct Config {
     pub poll_interval_secs: u64,
     #[serde(default)]
     pub knowledge: KnowledgeConfig,
+    #[serde(default)]
+    pub agent: AgentConfig,
+}
+
+/// The coding agent a thread's question goes to.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AgentConfig {
+    /// The executable. Found on `PATH` unless a path is given here.
+    #[serde(default = "default_binary")]
+    pub binary: String,
+    /// What the picker starts on.
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// `low`, `medium`, `high`, `xhigh` or `max`.
+    #[serde(default = "default_effort")]
+    pub effort: String,
+    /// What the picker offers.
+    #[serde(default = "default_models")]
+    pub models: Vec<String>,
+}
+
+fn default_binary() -> String {
+    "claude".into()
+}
+fn default_model() -> String {
+    "sonnet".into()
+}
+fn default_effort() -> String {
+    "medium".into()
+}
+fn default_models() -> Vec<String> {
+    vec!["sonnet".into(), "opus".into()]
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            binary: default_binary(),
+            model: default_model(),
+            effort: default_effort(),
+            models: default_models(),
+        }
+    }
 }
 
 /// Where archived discussion goes and which repositories share a project.
@@ -122,6 +165,7 @@ impl Config {
             token: None,
             poll_interval_secs: default_poll_secs(),
             knowledge: KnowledgeConfig::default(),
+            agent: AgentConfig::default(),
         }
     }
 }
@@ -162,6 +206,18 @@ mod tests {
         assert!(c.knowledge.skills);
         assert!(c.knowledge.project.is_empty());
         assert!(c.knowledge.root_path().ends_with(".perch/knowledge"));
+    }
+
+    #[test]
+    fn the_agent_section_defaults_and_overrides() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.agent.binary, "claude");
+        assert_eq!(c.agent.model, "sonnet");
+        assert_eq!(c.agent.models, vec!["sonnet", "opus"]);
+        let c: Config = toml::from_str("[agent]\nbinary = \"/opt/claude\"\neffort = \"high\"").unwrap();
+        assert_eq!(c.agent.binary, "/opt/claude");
+        assert_eq!(c.agent.effort, "high");
+        assert_eq!(c.agent.model, "sonnet");
     }
 
     #[test]

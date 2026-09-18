@@ -9,6 +9,141 @@
 use perch_git::{DisplayBuffer, LineStatus, Row};
 use perch_github::{Anchor, Author, PullRequest};
 
+/// The spec a run takes, from config, the prompt, and where to run it.
+pub fn run_spec(
+    agent: &perch_github::AgentConfig,
+    model: &str,
+    effort: perch_agent::Effort,
+    cwd: std::path::PathBuf,
+    prompt: &Prompt,
+    resume: Option<String>,
+) -> perch_agent::RunSpec {
+    perch_agent::RunSpec {
+        backend: perch_agent::Backend::ClaudeCode,
+        binary: agent.binary.clone().into(),
+        model: model.to_string(),
+        effort,
+        cwd,
+        prompt: prompt.user.clone(),
+        system: prompt.system.clone(),
+        resume,
+        allowed_tools: perch_agent::READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
+    }
+}
+
+/// `perch --ask owner/repo#N [path:start-end] "question"`.
+///
+/// Opens the worktree, builds the prompt exactly as the app would, runs it,
+/// and prints each event on its own line, then the answer. How the prompt
+/// and the parser get checked without a window.
+pub fn run_cli(args: &[String]) {
+    let (target, anchor, question) = match args {
+        [target, anchor, question] => (target, Some(anchor.as_str()), question),
+        [target, question] => (target, None, question),
+        _ => {
+            eprintln!("usage: perch --ask owner/repo#number [path:start-end] \"question\"");
+            std::process::exit(2);
+        }
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("runtime");
+    if let Err(e) = runtime.block_on(ask(target, anchor, question)) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}
+
+async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), String> {
+    use perch_git::{Preparer, RepoId, Store};
+    use perch_github::{resolve_token, Config, GitHub, Side};
+
+    let (full_name, number) = target.split_once('#').ok_or("expected owner/repo#number")?;
+    let number: u64 = number.parse().map_err(|_| "bad number")?;
+    let id = RepoId::parse(full_name).ok_or("bad repo")?;
+
+    let config = Config::load();
+    let token = resolve_token(&config).ok_or("no token")?;
+    let gh = GitHub::new(&token.value).map_err(|e| e.to_string())?;
+    let pr = gh.fetch_pull_request(full_name, number).await.map_err(|e| e.to_string())?;
+    let body = gh.fetch_discussion(full_name, number).await.map(|d| d.body).unwrap_or_default();
+
+    let root = perch_github::config::data_dir().ok_or("no data dir")?;
+    let preparer = Preparer::new(Store::new(root), Some(token.value.clone()));
+    let checkout = preparer
+        .prepare(&id, number, &pr.head_sha, &pr.base_ref, &format!("perch/pr-{number}"), |_| {})
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // The anchor, and the file as the editor would show it.
+    let (anchor, file) = match anchor {
+        Some(spec) => {
+            let (path, range) = spec.rsplit_once(':').ok_or("anchor is path:start-end")?;
+            let (start, end) = match range.split_once('-') {
+                Some((a, b)) => (a.parse::<u32>().map_err(|_| "bad line")?, b.parse::<u32>().map_err(|_| "bad line")?),
+                None => {
+                    let n = range.parse::<u32>().map_err(|_| "bad line")?;
+                    (n, n)
+                }
+            };
+            let anchor = Anchor {
+                path: path.to_string(),
+                start_line: start,
+                line: end,
+                side: Side::Right,
+                commit_sha: checkout.head_sha.clone(),
+            };
+            let file = load_display(&preparer, &checkout, path).await?;
+            (Some(anchor), Some(file))
+        }
+        None => (None, None),
+    };
+
+    let prompt = first_prompt(&PromptInput {
+        pull_request: Some(&pr),
+        body: Some(&body),
+        anchor: anchor.as_ref(),
+        file: file.as_ref(),
+        outdated: false,
+        question,
+        history: &[],
+    });
+    println!("--- system ---\n{}\n--- user ---\n{}\n--- run ---", prompt.system.as_deref().unwrap_or(""), prompt.user);
+
+    let effort = perch_agent::Effort::parse(&config.agent.effort).unwrap_or_default();
+    let spec = run_spec(&config.agent, &config.agent.model, effort, checkout.worktree.clone(), &prompt, None);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    perch_agent::Run::spawn(spec, tx).map_err(|e| e.to_string())?;
+
+    let mut answer = Vec::new();
+    while let Some(event) = rx.recv().await {
+        println!("{event:?}");
+        match event {
+            perch_agent::RunEvent::Text(t) => answer.push(t),
+            perch_agent::RunEvent::Failed { message } => return Err(message),
+            _ => {}
+        }
+    }
+    println!("--- answer ---\n{}", answer.join("\n\n"));
+    Ok(())
+}
+
+/// The file the way the editor lays it out, diff spliced in.
+async fn load_display(
+    preparer: &perch_git::Preparer,
+    checkout: &perch_git::Checkout,
+    path: &str,
+) -> Result<DisplayBuffer, String> {
+    let head = std::fs::read_to_string(checkout.worktree.join(path)).map_err(|e| e.to_string())?;
+    let base = preparer
+        .show_blob(&checkout.bare, &checkout.merge_base, path)
+        .await
+        .unwrap_or_default();
+    Ok(if base.is_empty() {
+        DisplayBuffer::plain(&head)
+    } else {
+        DisplayBuffer::unified(&head, &base, &perch_git::diff::file_diff(&base, &head))
+    })
+}
+
 /// What the agent is told about the tool it is inside.
 pub const FRAMING: &str = "You are answering a question inside a code review tool. The reader is \
 looking at a pull request checked out in the current directory. Answer \

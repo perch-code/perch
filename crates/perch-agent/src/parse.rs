@@ -120,7 +120,7 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
                 None => format!("Searched for {pattern}"),
             }
         }
-        "Bash" => format!("Ran {}", field("command").unwrap_or_default()),
+        "Bash" => format!("Ran {}", strip_cd(&field("command").unwrap_or_default())),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
             format!("Asked to edit {}", field("file_path").map(|p| short_path(&p)).unwrap_or_default())
         }
@@ -130,6 +130,21 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
         },
     };
     one_line(&summary, 120)
+}
+
+/// Drop a leading `cd <dir> &&`: the agent prefixes one to every command
+/// when its working directory has a space in it, and the reader wants the
+/// command, not the directory they are already in.
+fn strip_cd(command: &str) -> String {
+    let trimmed = command.trim();
+    let Some(rest) = trimmed.strip_prefix("cd ") else {
+        return trimmed.to_string();
+    };
+    // The directory may be quoted and may contain spaces; the `&&` ends it.
+    match rest.split_once("&&") {
+        Some((_, after)) => after.trim().to_string(),
+        None => trimmed.to_string(),
+    }
 }
 
 /// The last three path components, which is what a reader recognises.
@@ -175,6 +190,15 @@ mod tests {
             summarize_tool_call("Bash", &json!({"command": "git log -5 -- src/"})),
             "Ran git log -5 -- src/"
         );
+    }
+
+    #[test]
+    fn a_leading_cd_is_dropped_from_a_command() {
+        assert_eq!(
+            summarize_tool_call("Bash", &json!({"command": "cd \"/a b/wt\" && git log -3 -- src/"})),
+            "Ran git log -3 -- src/"
+        );
+        assert_eq!(summarize_tool_call("Bash", &json!({"command": "cd src"})), "Ran cd src");
     }
 
     #[test]

@@ -33,6 +33,12 @@ fn main() {
         dump::run(&args[2..]);
         return;
     }
+    // The same, for a question: the prompt as the app would build it, the
+    // run's events one per line, then the answer.
+    if args.get(1).map(String::as_str) == Some("--ask") {
+        ask::run_cli(&args[2..]);
+        return;
+    }
 
     tracing_subscriber::fmt()
         // stderr, so logs are not held in a block-buffered stdout when the
