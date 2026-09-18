@@ -44,7 +44,7 @@ async fn dump(target: &str, path: &str) -> Result<(), String> {
     let root = perch_github::config::data_dir().ok_or_else(|| "no data dir".to_string())?;
     let preparer = Preparer::new(Store::new(root), Some(token.value.clone()));
     let checkout = preparer
-        .prepare(&id, number, &pr.head_sha, &pr.base_ref, |_| {})
+        .prepare(&id, number, &pr.head_sha, &pr.base_ref, &format!("perch/pr-{number}"), |_| {})
         .await
         .map_err(|e| e.to_string())?;
 

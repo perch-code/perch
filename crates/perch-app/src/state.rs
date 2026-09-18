@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use floem::reactive::{Effect, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use jiff::Timestamp;
-use perch_github::{Mark, SubjectDetail, Thread};
+use perch_github::{Mark, SubjectDetail, Thread, Worktree};
 
 use crate::backend::{Event, Status};
 use crate::filter::{self, Counts, Filters, Group, ReasonFilter, Section, Sort, View};
@@ -31,6 +31,11 @@ pub struct AppState {
     pub avatars: RwSignal<HashMap<String, Arc<Vec<u8>>>>,
     /// Perch's own saved and done flags, keyed by thread id.
     pub marks: RwSignal<HashMap<String, Mark>>,
+    /// Every checkout Perch holds a record of, active and archived.
+    pub worktrees: RwSignal<Vec<Worktree>>,
+    /// Something a worktree action could not do, for the status line.
+    /// Cleared by the next thing that goes right.
+    pub notice: RwSignal<Option<String>>,
 
     /// Which of Inbox, Saved and Done is showing.
     pub view: RwSignal<View>,
@@ -75,6 +80,8 @@ impl AppState {
             details: RwSignal::new(HashMap::new()),
             avatars: RwSignal::new(HashMap::new()),
             marks: RwSignal::new(HashMap::new()),
+            worktrees: RwSignal::new(Vec::new()),
+            notice: RwSignal::new(None),
             view: RwSignal::new(View::default()),
             reason_filter: RwSignal::new(None),
             repo_filter: RwSignal::new(None),
@@ -101,11 +108,25 @@ impl AppState {
             Event::ReviewProgress { message, percent } => {
                 review.preparing.set(Preparing::Working { message, percent });
             }
-            Event::ReviewReady { pull_request, files, tree } => {
+            Event::ReviewReady { pull_request, worktree, files, tree, stale_head, offline } => {
                 review.preparing.set(Preparing::Idle);
                 review.changed_files.set(files);
                 review.tree.set(tree);
+                review.worktree.set(Some(worktree));
+                review.stale_head.set(stale_head);
+                review.offline.set(offline);
                 review.pull_request.set(Some(pull_request));
+            }
+            Event::Worktrees(worktrees) => {
+                // The open review can be archived from the list, or by the
+                // sweep. Its files are gone, so the view goes with them.
+                let open = review.worktree.with(|w| w.as_ref().map(|w| w.id.clone()));
+                if let Some(open) = open {
+                    if worktrees.iter().any(|w| w.id == open && w.is_archived()) {
+                        review.close();
+                    }
+                }
+                self.apply(Event::Worktrees(worktrees));
             }
             Event::ReviewFailed { message } => {
                 review.preparing.set(Preparing::Failed { message });
@@ -183,6 +204,11 @@ impl AppState {
                 // resurfaced one leaves Done the same way.
                 self.prune_selection();
             }
+            Event::Worktrees(worktrees) => {
+                self.worktrees.set(worktrees);
+                self.notice.set(None);
+            }
+            Event::WorktreeFailed { message, .. } => self.notice.set(Some(message)),
             Event::ReviewProgress { .. }
             | Event::ReviewReady { .. }
             | Event::ReviewFailed { .. }

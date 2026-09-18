@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use perch_git::{ChangeStatus, ChangedFile, DisplayBuffer, TreeEntry};
-use perch_github::PullRequest;
+use perch_github::{PullRequest, Worktree};
 use perch_syntax::{Language, LineSpans};
 
 /// A file prepared for the editor: text to render, and everything needed to
@@ -74,6 +74,14 @@ pub struct Tab {
 pub struct ReviewState {
     /// `None` when the inbox is showing.
     pub pull_request: RwSignal<Option<Arc<PullRequest>>>,
+    /// The checkout this review is reading from.
+    pub worktree: RwSignal<Option<Arc<Worktree>>>,
+    /// The head the pull request moved to while the worktree had work in
+    /// it. The files on screen are the older ones.
+    pub stale_head: RwSignal<Option<String>>,
+    /// The pull request could not be fetched; this is the checkout as it
+    /// was last left.
+    pub offline: RwSignal<bool>,
     /// The notification this was opened from, so finishing a review can
     /// dismiss it. `None` when a pull request was opened by any other route,
     /// such as the launch hook, and there is no notification to mark.
@@ -129,6 +137,9 @@ impl ReviewState {
     pub fn new() -> Self {
         Self {
             pull_request: RwSignal::new(None),
+            worktree: RwSignal::new(None),
+            stale_head: RwSignal::new(None),
+            offline: RwSignal::new(false),
             thread_id: RwSignal::new(None),
             opening: RwSignal::new(false),
             preparing: RwSignal::new(Preparing::Idle),
@@ -165,6 +176,9 @@ impl ReviewState {
     pub fn close(&self) {
         self.opening.set(false);
         self.pull_request.set(None);
+        self.worktree.set(None);
+        self.stale_head.set(None);
+        self.offline.set(false);
         self.thread_id.set(None);
         self.preparing.set(Preparing::Idle);
         self.changed_files.set(Arc::new(Vec::new()));

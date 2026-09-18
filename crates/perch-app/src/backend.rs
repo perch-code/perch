@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, Store};
-use perch_github::{resolve_token, Cache, Config, GitHub, Mark, SubjectDetail, Thread};
+use perch_github::{resolve_token, Cache, Config, GitHub, Mark, SubjectDetail, Thread, Worktree};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
@@ -38,6 +38,17 @@ pub enum Command {
     Hover { token: u64, path: String, line: u32, character: u32 },
     Definition { token: u64, path: String, line: u32, character: u32 },
     CloseReview,
+
+    /// Open a checkout from the Worktrees list. Fetches the pull request
+    /// when it can, and opens what is on disk when it cannot.
+    OpenWorktree { id: String },
+    /// Remove the directory, keep the branch and the row. Refused when
+    /// there is uncommitted work in it.
+    ArchiveWorktree { id: String },
+    /// Put an archived worktree back on disk and open it.
+    RestoreWorktree { id: String },
+    /// Delete the branch and the row of an archived worktree.
+    ForgetWorktree { id: String },
 }
 
 /// A mark write.
@@ -66,14 +77,27 @@ pub enum Event {
     /// Every mark Perch holds. Sent whole rather than as a patch, because
     /// the set is small and a replacement cannot drift.
     Marks(Vec<Mark>),
+    /// Every worktree Perch has a record of, active and archived. Whole,
+    /// for the same reason marks are.
+    Worktrees(Vec<Worktree>),
+    /// Something asked of a worktree could not be done. The message is for
+    /// the status line: "has uncommitted changes" is the usual one.
+    WorktreeFailed { id: String, message: String },
     Status(Status),
 
     /// A step of preparing a checkout.
     ReviewProgress { message: String, percent: Option<u8> },
     ReviewReady {
         pull_request: Arc<perch_github::PullRequest>,
+        worktree: Arc<Worktree>,
         files: Arc<Vec<perch_git::ChangedFile>>,
         tree: Arc<Vec<perch_git::TreeEntry>>,
+        /// The head the pull request moved to while the worktree had
+        /// uncommitted changes. The files shown are the older ones on disk.
+        stale_head: Option<String>,
+        /// True when the pull request could not be fetched and the review
+        /// is showing the checkout as it was last left.
+        offline: bool,
     },
     ReviewFailed { message: String },
     FileLoaded { path: String, file: Arc<crate::review::model::LoadedFile> },
@@ -120,6 +144,22 @@ impl Backend {
 
     pub fn close_review(&self) {
         let _ = self.commands.send(Command::CloseReview);
+    }
+
+    pub fn open_worktree(&self, id: &str) {
+        let _ = self.commands.send(Command::OpenWorktree { id: id.to_string() });
+    }
+
+    pub fn archive_worktree(&self, id: &str) {
+        let _ = self.commands.send(Command::ArchiveWorktree { id: id.to_string() });
+    }
+
+    pub fn restore_worktree(&self, id: &str) {
+        let _ = self.commands.send(Command::RestoreWorktree { id: id.to_string() });
+    }
+
+    pub fn forget_worktree(&self, id: &str) {
+        let _ = self.commands.send(Command::ForgetWorktree { id: id.to_string() });
     }
 
     pub fn set_saved(&self, thread_ids: Vec<String>, saved: bool) {
@@ -241,6 +281,7 @@ async fn run(
         // round, a dismissed row would paint for a frame before vanishing.
         if let Ok(guard) = cache.lock() {
             send_marks(&guard, &events);
+            send_worktrees(&guard, &events);
         }
 
         let cached = cache.lock().ok().and_then(|guard| {
@@ -279,14 +320,23 @@ async fn run(
     let language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    let ctx = Ctx {
+        github: github.clone(),
+        preparer: preparer.clone(),
+        cache: cache.clone(),
+        slot: checkout.clone(),
+        language_server: language_server.clone(),
+        events: events.clone(),
+    };
+
     {
-        // Reclaim disk from pull requests nobody has looked at in a fortnight.
-        let preparer = preparer.clone();
+        // Bring the table and the disk into agreement, then put away
+        // whatever nobody has opened in a fortnight. Archived, not deleted:
+        // the branch and the row stay, so restoring is a checkout.
+        let ctx = ctx.clone();
         tokio::spawn(async move {
-            let removed = preparer.sweep_worktrees(WORKTREE_MAX_AGE).await;
-            if removed > 0 {
-                tracing::info!(removed, "swept stale worktrees");
-            }
+            reconcile_worktrees(&ctx).await;
+            sweep_worktrees(&ctx).await;
         });
     }
 
@@ -318,22 +368,40 @@ async fn run(
                 .await;
             }
             Some(Command::OpenPullRequest { repo_full_name, number }) => {
-                let github = github.clone();
-                let preparer = preparer.clone();
-                let checkout = checkout.clone();
-                let events = events.clone();
-                let language_server = language_server.clone();
+                let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    open_pull_request(
-                        github,
-                        preparer,
-                        checkout.clone(),
-                        events.clone(),
-                        repo_full_name,
-                        number,
-                    )
-                    .await;
-                    start_language_server(checkout, language_server, events).await;
+                    if open_pull_request(&ctx, repo_full_name, number).await {
+                        start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                    }
+                });
+            }
+            Some(Command::OpenWorktree { id }) | Some(Command::RestoreWorktree { id }) => {
+                // Restoring is opening: `prepare` checks the branch back out
+                // when the directory is gone, and the row's archived flag
+                // clears on the way through. One path, not two.
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    if open_worktree(&ctx, id).await {
+                        start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                    }
+                });
+            }
+            Some(Command::ArchiveWorktree { id }) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    if let Err(message) = archive_worktree(&ctx, &id).await {
+                        tracing::warn!(id, %message, "could not archive worktree");
+                        let _ = ctx.events.send(Event::WorktreeFailed { id, message });
+                    }
+                });
+            }
+            Some(Command::ForgetWorktree { id }) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    if let Err(message) = forget_worktree(&ctx, &id).await {
+                        tracing::warn!(id, %message, "could not forget worktree");
+                        let _ = ctx.events.send(Event::WorktreeFailed { id, message });
+                    }
                 });
             }
             Some(Command::OpenFile { path }) => {
@@ -501,8 +569,227 @@ fn send_marks(cache: &Cache, events: &EventSender<Event>) {
     }
 }
 
-/// How long a worktree survives without being opened.
+/// How long a worktree stays on disk without being opened before the sweep
+/// archives it.
 const WORKTREE_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+
+/// Everything a worktree operation needs, so a spawned task takes one
+/// clone rather than six.
+#[derive(Clone)]
+struct Ctx {
+    github: Arc<GitHub>,
+    preparer: Arc<Preparer>,
+    cache: SharedCache,
+    slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    events: EventSender<Event>,
+}
+
+impl Ctx {
+    /// Run one closure against the cache. The guard never crosses an await.
+    fn with_cache<T>(&self, f: impl FnOnce(&Cache) -> T) -> Option<T> {
+        let cache = self.cache.as_ref()?;
+        let guard = cache.lock().ok()?;
+        Some(f(&guard))
+    }
+
+    fn worktree(&self, id: &str) -> Option<Worktree> {
+        self.with_cache(|c| c.load_worktrees().ok())
+            .flatten()?
+            .into_iter()
+            .find(|w| w.id == id)
+    }
+
+    fn send_worktrees(&self) {
+        self.with_cache(|c| send_worktrees(c, &self.events));
+    }
+
+    /// Whether the open review is this worktree.
+    fn is_open(&self, worktree: &Worktree) -> bool {
+        self.slot
+            .lock()
+            .ok()
+            .is_some_and(|g| g.as_ref().is_some_and(|c| c.checkout.worktree == worktree.path))
+    }
+
+    /// Drop the open review and stop its language server.
+    async fn close_review(&self) {
+        if let Ok(mut guard) = self.slot.lock() {
+            *guard = None;
+        }
+        let client = self.language_server.lock().await.take();
+        if let Some(client) = client {
+            client.shutdown().await;
+        }
+    }
+}
+
+fn send_worktrees(cache: &Cache, events: &EventSender<Event>) {
+    match cache.load_worktrees() {
+        Ok(worktrees) => {
+            let _ = events.send(Event::Worktrees(worktrees));
+        }
+        Err(e) => tracing::warn!(error = %e, "could not read worktrees"),
+    }
+}
+
+/// Make the table and the disk agree.
+///
+/// A row whose directory is gone becomes archived: someone deleted it by
+/// hand, which is the same as archiving. A directory no row knows about is
+/// removed: nothing can open it, and it is how the older commit-keyed
+/// layout gets retired.
+async fn reconcile_worktrees(ctx: &Ctx) {
+    let Some(rows) = ctx.with_cache(|c| c.load_worktrees().ok()).flatten() else {
+        return;
+    };
+
+    let mut changed = false;
+    for row in &rows {
+        if !row.is_archived() && !row.path.join(".git").exists() {
+            tracing::info!(id = %row.id, path = %row.path.display(), "worktree directory is gone; archiving its row");
+            ctx.with_cache(|c| c.set_worktree_archived(&row.id, Some(Timestamp::now())));
+            changed = true;
+        }
+    }
+
+    let known: std::collections::HashSet<std::path::PathBuf> =
+        rows.iter().map(|r| r.path.clone()).collect();
+    let mut removed = false;
+    for dir in ctx.preparer.worktree_dirs() {
+        if known.contains(&dir) {
+            continue;
+        }
+        tracing::info!(path = %dir.display(), "removing a worktree directory no record claims");
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(path = %dir.display(), error = %e, "could not remove it");
+        }
+        removed = true;
+    }
+    if removed {
+        prune_every_clone(ctx).await;
+    }
+
+    if changed {
+        ctx.send_worktrees();
+    }
+}
+
+/// `git worktree prune` in every bare clone, after directories were removed
+/// without knowing which clone they belonged to.
+async fn prune_every_clone(ctx: &Ctx) {
+    let repos = ctx.preparer.store().root().join("repos").join("github.com");
+    let Ok(owners) = std::fs::read_dir(repos) else { return };
+    for owner in owners.flatten() {
+        let Ok(clones) = std::fs::read_dir(owner.path()) else { continue };
+        for clone in clones.flatten() {
+            let path = clone.path();
+            if path.join("HEAD").is_file() {
+                let _ = ctx
+                    .preparer
+                    .git()
+                    .run(Some(&path), ["worktree", "prune"], Duration::from_secs(30))
+                    .await;
+            }
+        }
+    }
+}
+
+/// Archive whatever has sat unopened for too long.
+async fn sweep_worktrees(ctx: &Ctx) {
+    let stale = ctx.preparer.stale_worktrees(WORKTREE_MAX_AGE);
+    if stale.is_empty() {
+        return;
+    }
+    let rows = ctx.with_cache(|c| c.load_worktrees().ok()).flatten().unwrap_or_default();
+
+    for path in stale {
+        match rows.iter().find(|r| r.path == path) {
+            Some(row) if !row.is_archived() => match archive_worktree(ctx, &row.id).await {
+                Ok(()) => tracing::info!(id = %row.id, "archived a stale worktree"),
+                // Dirty, most likely. It stays; the reader has work in it.
+                Err(message) => tracing::info!(id = %row.id, %message, "left a stale worktree alone"),
+            },
+            Some(_) => {}
+            None => {
+                // Reconciliation runs first, so this is a directory that
+                // appeared in between. Same treatment.
+                tracing::info!(path = %path.display(), "removing a stale worktree directory no record claims");
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+    }
+}
+
+/// Take a worktree off disk, keeping its branch and its row.
+async fn archive_worktree(ctx: &Ctx, id: &str) -> Result<(), String> {
+    let Some(row) = ctx.worktree(id) else {
+        return Err(format!("no worktree called {id}"));
+    };
+    let Some(repo) = RepoId::parse(&row.repo_full_name) else {
+        return Err(format!("{} is not a repository name", row.repo_full_name));
+    };
+    let bare = ctx.preparer.store().bare_path(&repo);
+
+    if row.path.join(".git").exists() {
+        let dirty = ctx.preparer.is_dirty(&row.path).await.map_err(|e| e.to_string())?;
+        if dirty {
+            return Err(format!("{} has uncommitted changes", row.branch));
+        }
+        if ctx.is_open(&row) {
+            ctx.close_review().await;
+        }
+        ctx.preparer
+            .remove_worktree(&bare, &row.path)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    ctx.with_cache(|c| c.set_worktree_archived(id, Some(Timestamp::now())))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    ctx.send_worktrees();
+    Ok(())
+}
+
+/// Delete an archived worktree's branch and its row.
+async fn forget_worktree(ctx: &Ctx, id: &str) -> Result<(), String> {
+    let Some(row) = ctx.worktree(id) else {
+        return Err(format!("no worktree called {id}"));
+    };
+    if !row.is_archived() {
+        return Err(format!("{} is still checked out; archive it first", row.branch));
+    }
+    if let Some(repo) = RepoId::parse(&row.repo_full_name) {
+        let bare = ctx.preparer.store().bare_path(&repo);
+        if bare.join("HEAD").is_file() {
+            // A branch that is already gone is not a reason to keep the row.
+            if let Err(e) = ctx.preparer.delete_branch(&bare, &row.branch).await {
+                tracing::info!(id, error = %e, "branch was not there to delete");
+            }
+        }
+    }
+    ctx.with_cache(|c| c.forget_worktree(id))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    ctx.send_worktrees();
+    Ok(())
+}
+
+/// Open a worktree from its row.
+async fn open_worktree(ctx: &Ctx, id: String) -> bool {
+    let Some(row) = ctx.worktree(&id) else {
+        let message = format!("no worktree called {id}");
+        let _ = ctx.events.send(Event::ReviewFailed { message });
+        return false;
+    };
+    let Some(number) = row.pr_number else {
+        let message = format!("{} has no pull request to open", row.branch);
+        let _ = ctx.events.send(Event::ReviewFailed { message });
+        return false;
+    };
+    open_pull_request(ctx, row.repo_full_name.clone(), number).await
+}
 /// A file larger than this opens as a notice rather than as text.
 const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
@@ -605,21 +892,19 @@ async fn refresh(
     }
 }
 
-/// Resolve a pull request, lay down a checkout, and report its files.
-async fn open_pull_request(
-    github: Arc<GitHub>,
-    preparer: Arc<Preparer>,
-    slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
-    events: EventSender<Event>,
-    repo_full_name: String,
-    number: u64,
-) {
+/// Resolve a pull request, lay down a checkout on its branch, and report
+/// its files. Returns whether a review is now open.
+///
+/// The worktree row is found or made on the way: this is the one place a
+/// worktree comes into being, and every open refreshes what the row knows.
+async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
+    let events = &ctx.events;
     macro_rules! fail {
         ($($arg:tt)*) => {{
             let message = format!($($arg)*);
             tracing::warn!(repo = %repo_full_name, number, %message, "could not open pull request");
             let _ = events.send(Event::ReviewFailed { message });
-            return;
+            return false;
         }};
     }
 
@@ -628,48 +913,88 @@ async fn open_pull_request(
         percent: None,
     });
 
-    let pull_request = match github.fetch_pull_request(&repo_full_name, number).await {
-        Ok(pr) => pr,
-        Err(e) => fail!("{e}"),
+    let id = Worktree::for_pull_request(&repo_full_name, number);
+    let existing = ctx.worktree(&id);
+
+    let (pull_request, offline) = match ctx.github.fetch_pull_request(&repo_full_name, number).await {
+        Ok(pr) => (pr, false),
+        Err(e) => {
+            // No network, or no GitHub. A worktree that is already on disk
+            // opens anyway, as it was last left, from the snapshot.
+            match existing.as_ref().and_then(|w| w.pull_request.clone()) {
+                Some(snapshot) if existing.as_ref().is_some_and(|w| w.path.join(".git").exists()) => {
+                    tracing::info!(repo = %repo_full_name, number, error = %e, "opening the worktree offline");
+                    (snapshot, true)
+                }
+                _ => fail!("{e}"),
+            }
+        }
     };
 
-    let Some(id) = RepoId::parse(&pull_request.repo_full_name) else {
+    let Some(repo) = RepoId::parse(&pull_request.repo_full_name) else {
         fail!("{} is not a repository name", pull_request.repo_full_name)
     };
+    let branch = Worktree::pr_branch(number);
 
-    let progress = events.clone();
-    let label = id.full_name();
-    let checkout = preparer
-        .prepare(
-            &id,
-            number,
-            &pull_request.head_sha,
-            &pull_request.base_ref,
-            move |step| {
-                let (message, percent) = match step {
-                    perch_git::Step::Cloning { phase, percent } => {
-                        (format!("Cloning {label}: {phase}"), percent)
-                    }
-                    perch_git::Step::Fetching => ("Fetching the pull request".into(), None),
-                    perch_git::Step::CreatingWorktree => ("Checking out the files".into(), None),
-                    perch_git::Step::ComputingDiff => ("Computing the diff".into(), None),
-                };
-                let _ = progress.send(Event::ReviewProgress { message, percent });
-            },
-        )
-        .await;
+    let checkout = if offline {
+        reopen_from_disk(ctx, &repo, number, &branch, existing.as_ref().map(|w| w.path.clone())).await
+    } else {
+        let progress = events.clone();
+        let label = repo.full_name();
+        ctx.preparer
+            .prepare(
+                &repo,
+                number,
+                &pull_request.head_sha,
+                &pull_request.base_ref,
+                &branch,
+                move |step| {
+                    let (message, percent) = match step {
+                        perch_git::Step::Cloning { phase, percent } => {
+                            (format!("Cloning {label}: {phase}"), percent)
+                        }
+                        perch_git::Step::Fetching => ("Fetching the pull request".into(), None),
+                        perch_git::Step::CreatingWorktree => ("Checking out the files".into(), None),
+                        perch_git::Step::ComputingDiff => ("Computing the diff".into(), None),
+                    };
+                    let _ = progress.send(Event::ReviewProgress { message, percent });
+                },
+            )
+            .await
+    };
 
     let checkout = match checkout {
         Ok(c) => c,
         Err(e) => fail!("{e}"),
     };
 
+    // The row. Every column that can move is rewritten from what just
+    // happened, and an archived row is back in service.
+    let now = Timestamp::now();
+    let row = Worktree {
+        id: id.clone(),
+        repo_full_name: pull_request.repo_full_name.clone(),
+        branch: branch.clone(),
+        base_ref: pull_request.base_ref.clone(),
+        pr_number: Some(number),
+        head_sha: checkout.head_sha.clone(),
+        path: checkout.worktree.clone(),
+        created_at: existing.as_ref().map(|w| w.created_at).unwrap_or(now),
+        last_opened_at: now,
+        archived_at: None,
+        pull_request: Some(pull_request.clone()),
+    };
+    if let Some(Err(e)) = ctx.with_cache(|c| c.upsert_worktree(&row)) {
+        tracing::warn!(id, error = %e, "could not record the worktree");
+    }
+    ctx.send_worktrees();
+
     let _ = events.send(Event::ReviewProgress {
         message: "Computing the diff".into(),
         percent: None,
     });
 
-    let files = match changed_files(&preparer, &checkout).await {
+    let files = match changed_files(&ctx.preparer, &checkout).await {
         Ok(f) => Arc::new(f),
         Err(e) => fail!("{e}"),
     };
@@ -681,8 +1006,9 @@ async fn open_pull_request(
     .await
     .unwrap_or_default();
 
+    let stale_head = checkout.stale.clone();
     let worktree_label = checkout.worktree.display().to_string();
-    if let Ok(mut guard) = slot.lock() {
+    if let Ok(mut guard) = ctx.slot.lock() {
         *guard = Some(ReviewContext { checkout, files: files.clone() });
     }
 
@@ -692,13 +1018,61 @@ async fn open_pull_request(
         files = files.len(),
         tree = tree.len(),
         worktree = %worktree_label,
+        stale = stale_head.is_some(),
+        offline,
         "review ready"
     );
     let _ = events.send(Event::ReviewReady {
         pull_request: Arc::new(pull_request),
+        worktree: Arc::new(row),
         files,
         tree: Arc::new(tree),
+        stale_head,
+        offline,
     });
+    true
+}
+
+/// A checkout for a worktree already on disk, without touching the network.
+///
+/// The head is whatever the worktree is at, and the merge base comes from
+/// the base ref the last fetch left in the bare clone.
+async fn reopen_from_disk(
+    ctx: &Ctx,
+    repo: &RepoId,
+    number: u64,
+    branch: &str,
+    path: Option<std::path::PathBuf>,
+) -> Result<perch_git::Checkout, perch_git::Error> {
+    let store = ctx.preparer.store();
+    let worktree = path.unwrap_or_else(|| store.worktree_path(repo, branch));
+    let bare = store.bare_path(repo);
+    let git = ctx.preparer.git();
+    let timeout = Duration::from_secs(30);
+
+    let head_sha = git
+        .run(Some(&worktree), ["rev-parse", "HEAD"], timeout)
+        .await?
+        .trim()
+        .to_string();
+    let base = format!("refs/perch/base/{number}");
+    let merge_base = git
+        .run(Some(&bare), ["merge-base", &base, &head_sha], timeout)
+        .await?
+        .trim()
+        .to_string();
+    if merge_base.is_empty() {
+        return Err(perch_git::Error::NoMergeBase);
+    }
+
+    Ok(perch_git::Checkout {
+        worktree,
+        bare,
+        branch: branch.to_string(),
+        head_sha,
+        merge_base,
+        stale: None,
+    })
 }
 
 /// The pull request's file list, from a local diff rather than the API.
