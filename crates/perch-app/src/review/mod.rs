@@ -133,7 +133,7 @@ fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Back
     Effect::new(move |_| {
         if let Some(path) = state.active.get() {
             if !state.threads_in(&path).is_empty() {
-                state.threads_open.set(true);
+                state.show_threads();
             }
         }
     });

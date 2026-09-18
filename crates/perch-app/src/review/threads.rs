@@ -465,7 +465,7 @@ fn thread_card(
     Effect::new(move |_| {
         if state.focus_thread.get().as_deref() == Some(flash_id.as_str()) {
             state.focus_thread.set(None);
-            state.threads_open.set(true);
+            state.show_threads();
             card_id.scroll_to(None);
             flashing.set(true);
             floem::action::exec_after(std::time::Duration::from_millis(900), move |_| {
@@ -808,4 +808,153 @@ mod tests {
         assert_eq!(model_label("claude-sonnet-5"), "claude-sonnet-5");
     }
 
+}
+
+/// The column in a headless window, driven by clicks.
+#[cfg(test)]
+mod column {
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use floem::headless::{HeadlessHarness, TestRoot};
+    use floem::reactive::{SignalGet, SignalUpdate};
+    use perch_github::{
+        Anchor, Author, CommentMessage, CommentThread, PullRequest, RunRecord, RunStatus, RunStep, Side,
+        ThreadOrigin, Worktree,
+    };
+
+    use crate::review::model::ReviewState;
+    use crate::state::AppState;
+
+    fn run(status: RunStatus) -> RunRecord {
+        RunRecord {
+            id: "r1".into(),
+            thread_id: "t1".into(),
+            backend: "claude-code".into(),
+            model: "sonnet".into(),
+            effort: "medium".into(),
+            session_id: Some("sess".into()),
+            status,
+            cost_usd: Some(0.03),
+            duration_ms: Some(14_000),
+            steps: vec![
+                RunStep { summary: "Read src/x.rs".into(), ok: true },
+                RunStep { summary: "Asked to edit src/x.rs".into(), ok: false },
+            ],
+            error: None,
+            started_at: "2026-09-18T10:00:00Z".parse().unwrap(),
+            ended_at: Some("2026-09-18T10:00:14Z".parse().unwrap()),
+        }
+    }
+
+    /// A question and its answer, both finished.
+    fn thread() -> CommentThread {
+        let created_at = "2026-09-18T09:59:00Z".parse().unwrap();
+        let message = |id: &str, author: Author, body: &str| CommentMessage {
+            id: id.into(),
+            thread_id: "t1".into(),
+            origin: ThreadOrigin::Local,
+            author,
+            body: body.into(),
+            created_at,
+            run: Some(run(RunStatus::Finished)),
+        };
+        CommentThread {
+            id: "t1".into(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::Local,
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: 41,
+                line: 58,
+                side: Side::Right,
+                commit_sha: "abc".into(),
+            }),
+            outdated: false,
+            resolved: false,
+            created_at,
+            messages: vec![
+                message("m1", Author::User, "why?"),
+                message(
+                    "m2",
+                    Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                    "because\n\n```rust\nfn x() {}\n```\n\n- one\n- two",
+                ),
+            ],
+        }
+    }
+
+    /// The whole window with a pull request open and the column showing
+    /// one thread. The whole window rather than the column alone, because
+    /// the column sits in a `dyn_container` of its own, and what that
+    /// container does on a signal write is part of what is being tested.
+    fn app_harness() -> (HeadlessHarness, ReviewState) {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let pr = PullRequest {
+            number: 812,
+            title: "Fence the manifest".into(),
+            author_login: "rohan".into(),
+            author_avatar_url: String::new(),
+            head_sha: "h".into(),
+            head_ref: "f".into(),
+            base_sha: "b".into(),
+            base_ref: "main".into(),
+            draft: false,
+            merged: false,
+            state: "open".into(),
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            repo_full_name: "slatedb/slatedb".into(),
+        };
+        let now = "2026-09-18T09:59:00Z".parse().unwrap();
+        state.worktree.set(Some(Arc::new(Worktree {
+            id: "wt".into(),
+            repo_full_name: "slatedb/slatedb".into(),
+            branch: "perch/pr-812".into(),
+            base_ref: "main".into(),
+            pr_number: Some(812),
+            head_sha: "h".into(),
+            path: std::path::PathBuf::from("/tmp/wt"),
+            created_at: now,
+            last_opened_at: now,
+            archived_at: None,
+            pull_request: Some(pr.clone()),
+        })));
+        state.pull_request.set(Some(Arc::new(pr)));
+        state.comment_threads.set(Arc::new(vec![thread()]));
+        state.threads_open.set(true);
+        let (backend, _events) = crate::backend::spawn();
+        let view = crate::ui::app_view(app, state, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        (harness, state)
+    }
+
+    /// Opening a composer used to write `threads_open` whether or not the
+    /// column was already open. The write rebuilt the column, and the
+    /// composer's editor, torn down with the old column before its
+    /// deferred listener registration ran, was left registered as a dead
+    /// view. The next box tree commit then panicked inside floem asking it
+    /// for a window origin. The follow-up line is found by clicking up the
+    /// column from the bottom, so the test is not tied to the layout.
+    #[test]
+    fn a_follow_up_opens_without_rebuilding_the_column() {
+        let (mut harness, state) = app_harness();
+        let x = 1400.0 - crate::theme::THREADS_WIDTH + 40.0;
+        let mut y = 860.0;
+        while y > 0.0 && state.composer.get().is_none() {
+            harness.click(x, y);
+            harness.rebuild();
+            harness.paint();
+            y -= 6.0;
+        }
+        assert!(state.composer.get().and_then(|c| c.thread_id).is_some(), "never hit the follow-up line");
+        harness.pointer_move(x, y + 40.0);
+        harness.rebuild();
+        harness.paint();
+    }
 }

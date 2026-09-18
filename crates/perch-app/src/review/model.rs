@@ -384,7 +384,24 @@ impl ReviewState {
     pub fn open_composer(&self, thread_id: Option<String>, anchor: Option<Anchor>, draft: String, defaults: (String, perch_agent::Effort)) {
         let (model, effort) = self.agent_last.get().unwrap_or(defaults);
         self.composer.set(Some(Composer { thread_id, anchor, model, effort, draft }));
-        self.threads_open.set(true);
+        self.show_threads();
+    }
+
+    /// Open the thread column, if it is not open already.
+    ///
+    /// Only writes when the value changes. A signal write notifies whether
+    /// or not the value changed, and the column is a `dyn_container` on
+    /// this signal, so a redundant write rebuilds the whole column: every
+    /// card, and any composer that was just put in it. Rebuilding is not
+    /// only wasteful, it crashes: the first composer's editor registers a
+    /// layout listener through a deferred message, and by the time that
+    /// message runs the editor has been torn down with the old column.
+    /// floem then registers the dead view anyway, and the next box tree
+    /// commit asks it for a window origin it no longer has.
+    pub fn show_threads(&self) {
+        if !self.threads_open.get() {
+            self.threads_open.set(true);
+        }
     }
 
     /// The thread whose anchor starts on a display line of the open file.
