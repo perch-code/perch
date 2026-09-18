@@ -339,20 +339,23 @@ impl Preparer {
     /// second Fork of the same item gets a fresh branch rather than an
     /// error. `from` is anything git resolves to a commit: a sha, or the
     /// `refs/perch/home/<branch>` ref a home was just fetched to.
-    pub async fn cut_branch(&self, id: &RepoId, wanted: &str, from: &str) -> Result<Cut, Error> {
+    pub async fn cut_branch(&self, id: &RepoId, wanted: &str, from: &str, reserved: &[String]) -> Result<Cut, Error> {
         if !self.store.has_bare_clone(id) {
             return Err(Error::Io(format!("no clone of {} in the store", id.full_name())));
         }
         let bare = self.store.bare_path(id);
 
-        // A name is taken when the branch exists, or when a worktree
-        // already sits at the path the name maps to: two branches can map
-        // to one path once slashes become dashes, and a checkout there is
-        // someone's work whichever branch it is on.
+        // A name is taken when the branch exists, when a worktree already
+        // sits at the path the name maps to (two branches can map to one
+        // path once slashes become dashes, and a checkout there is
+        // someone's work whichever branch it is on), or when the caller
+        // has it spoken for: a root's branch is not in this clone, but it
+        // is a row, and a second row on the name would be refused.
         let mut branch = wanted.to_string();
         let mut n = 1u32;
         loop {
-            let taken = self.branch_exists(&bare, &branch).await
+            let taken = reserved.iter().any(|r| r == &branch)
+                || self.branch_exists(&bare, &branch).await
                 || self.store.worktree_path(id, &branch).join(".git").exists();
             if !taken {
                 break;

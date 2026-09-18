@@ -1404,6 +1404,17 @@ async fn open_owned_branch(
     })
 }
 
+/// The branches items already hold in a repository, which a cut must not
+/// take: `items_branch` allows one row per branch.
+fn branches_in(ctx: &Ctx, repo_full_name: &str) -> Vec<String> {
+    ctx.with_cache(|c| c.load_items().unwrap_or_default())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| i.repo_full_name.eq_ignore_ascii_case(repo_full_name))
+        .filter_map(|i| i.checkout.map(|c| c.branch))
+        .collect()
+}
+
 /// Everything after a checkout is in hand: the file list, the tree, the
 /// review context, `ReviewReady`, and the threads.
 async fn finish_open(
@@ -1497,7 +1508,7 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str) -> Result<String, String> {
     ctx.preparer.ensure_home(&repo, &default).await.map_err(|e| e.to_string())?;
     let cut = ctx
         .preparer
-        .cut_branch(&repo, &wanted, &perch_git::home_ref(&default))
+        .cut_branch(&repo, &wanted, &perch_git::home_ref(&default), &branches_in(ctx, &issue_item.repo_full_name))
         .await
         .map_err(|e| e.to_string())?;
     let head_sha = ctx
@@ -1559,9 +1570,11 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
             .map_err(|e| e.to_string())?;
         sha
     };
+    // The source's own name is spoken for by the source; the cut takes
+    // the next one, whether or not this clone has heard of it.
     let cut = ctx
         .preparer
-        .cut_branch(&repo, &checkout.branch, &head)
+        .cut_branch(&repo, &checkout.branch, &head, &branches_in(ctx, &source.repo_full_name))
         .await
         .map_err(|e| e.to_string())?;
 
