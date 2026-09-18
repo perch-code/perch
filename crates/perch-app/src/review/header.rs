@@ -488,6 +488,21 @@ fn notice(state: ReviewState) -> impl IntoView {
         if state.offline.get() {
             return Some("Offline; showing the checkout as it was last left".to_string());
         }
+        // Under a commit or the index the files on Files are not the
+        // disk's, which is what rust-analyzer reads, so hover and
+        // definition can be off by the lines that differ.
+        if state.tab.get() == ItemTab::Files {
+            match state.scope.get() {
+                perch_git::Scope::Commit { sha } => {
+                    let short: String = sha.chars().take(7).collect();
+                    return Some(format!("Showing {short}; rust-analyzer sees the working tree"));
+                }
+                perch_git::Scope::Staged => {
+                    return Some("Showing the index; rust-analyzer sees the working tree".to_string());
+                }
+                _ => {}
+            }
+        }
         None
     };
 

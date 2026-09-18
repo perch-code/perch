@@ -60,8 +60,7 @@ pub fn review_view(
     });
 
     let body_backend = backend.clone();
-    let header_open_item = open_item.clone();
-    let body_open_item = open_item;
+    let header_open_item = open_item;
     let on_back: Rc<dyn Fn()> = Rc::new({
         let backend = backend.clone();
         move || {
@@ -138,7 +137,7 @@ pub fn review_view(
                 )
                 .into_any(),
                 Phase::Issue | Phase::Ready => {
-                    item_view(app, state, open_file.clone(), body_backend.clone(), body_open_item.clone()).into_any()
+                    item_view(app, state, open_file.clone(), body_backend.clone()).into_any()
                 }
             },
         )
@@ -150,13 +149,7 @@ pub fn review_view(
 /// The tab strip, then the tab: Conversation for every item, Files for one
 /// with a checkout. The strip is drawn for an issue too, with one tab, so
 /// the view keeps its shape when Start work adds a checkout.
-fn item_view(
-    app: AppState,
-    state: ReviewState,
-    open_file: OpenFile,
-    backend: Rc<Backend>,
-    open_item: crate::ui::items::OpenItem,
-) -> impl IntoView {
+fn item_view(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Backend>) -> impl IntoView {
     // An item without a checkout has no Files to show, whatever the tab
     // remembered for it says.
     let tab = floem::reactive::Memo::new(move |_| {
@@ -172,7 +165,7 @@ fn item_view(
             move || tab.get(),
             move |tab| match tab {
                 ItemTab::Conversation => {
-                    conversation::view(app, state, backend.clone(), open_item.clone(), open_file.clone()).into_any()
+                    conversation::view(app, state, backend.clone(), open_file.clone()).into_any()
                 }
                 ItemTab::Files => body(app, state, open_file.clone(), backend.clone()).into_any(),
             },

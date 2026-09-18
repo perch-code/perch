@@ -30,7 +30,6 @@ use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
-use crate::ui::items::{OpenItem, Placement, item_row};
 use crate::ui::widgets::{avatar, clickable, icon_button, open_in_browser, sidebar_glyph};
 
 /// What a card's row in the column is keyed by. A row with the same key is
@@ -296,6 +295,7 @@ pub fn verdict_glyph(review: Option<&Review>) -> (SidebarIcon, Color) {
 pub fn review_card(
     app: AppState,
     state: ReviewState,
+    backend: Rc<Backend>,
     open_file: OpenFile,
     review: Option<Review>,
     comments: Vec<LineThread>,
@@ -331,7 +331,7 @@ pub fn review_card(
         dyn_stack(
             move || comments.clone(),
             |t| t.comment.id,
-            move |t| line_thread_block(app, state, open_file.clone(), t),
+            move |t| line_thread_block(app, state, backend.clone(), open_file.clone(), t),
         )
         .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP)),
     ))
@@ -345,18 +345,53 @@ pub fn review_card(
 /// A review comment and its replies as one block: the lines it was on,
 /// then the comments, each with Ask about this. On Conversation inside a
 /// review card; on Files in the thread column under On GitHub.
-pub fn line_thread_block(app: AppState, state: ReviewState, open_file: OpenFile, thread: LineThread) -> impl IntoView {
+pub fn line_thread_block(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_file: OpenFile,
+    thread: LineThread,
+) -> impl IntoView {
     let first = thread.comment.clone();
     let path = first.path.clone();
     let line = first.line.or(first.original_line);
     let heading = first.location();
-    let lines = hunk_tail(&first.diff_hunk, theme::HUNK_LINES);
+
+    // The lines as the checkout has them, when the comment still lands on
+    // it and the file is loaded at the branch head; GitHub's hunk, as of
+    // the comment's commit, otherwise. The file is asked for when nothing
+    // has loaded it.
+    let hunk = hunk_tail(&first.diff_hunk, theme::HUNK_LINES);
+    let anchor = anchor_for(state, &first);
+    let lines_path = first.path.clone();
+    let loaded = Memo::new(move |_| state.files.with(|m| m.contains_key(&lines_path)));
+    if anchor.is_some() && !loaded.get_untracked() && !state.is_loading(&first.path) {
+        state.loading.update(|m| {
+            m.insert(first.path.clone(), ());
+        });
+        backend.open_file(&first.path);
+    }
+    let lines_anchor = anchor.clone();
+    let lines_view = dyn_container(
+        move || loaded.get(),
+        move |loaded| {
+            let checkout = lines_anchor
+                .as_ref()
+                .filter(|_| loaded)
+                .and_then(|a| state.file(&a.path).map(|f| (f, a.clone())))
+                .filter(|(f, _)| f.scope == perch_git::Scope::Branch)
+                .map(|(f, a)| anchored_lines(&f, &a, theme::HUNK_LINES).0)
+                .filter(|l| !l.is_empty());
+            code_lines(checkout.unwrap_or_else(|| hunk.clone())).into_any()
+        },
+    )
+    .style(|s| s.width_full());
 
     let replies = thread.replies.clone();
     let anchor_of = move |c: &ReviewComment| anchor_for(state, c);
     Stack::vertical((
         location_row(state, open_file, path, line, heading, false),
-        code_lines(lines),
+        lines_view,
         Stack::vertical((
             nested_comment(app, state, first.clone(), anchor_of(&first), false),
             dyn_stack(
@@ -757,11 +792,15 @@ fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> i
         None => "asked".to_string(),
     };
     let at = question.map(|m| m.created_at).unwrap_or(thread.created_at);
+    // The reader's own face and login, once GitHub has said who the token
+    // belongs to; "You" until then. Read live, since that answer can land
+    // after the card is built.
+    let viewer = move || app.viewer.get().filter(|(l, _)| !l.is_empty());
+    let seed = viewer().map(|(l, _)| l).unwrap_or_else(|| "you".into());
     Stack::horizontal((
-        // The login is not known here; the seed keeps the tint the same
-        // on every card.
-        avatar(app, String::new, theme::CARD_AVATAR, "you".into()).style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
-        Label::derived(|| "You".to_string()).style(|s| {
+        avatar(app, move || viewer().map(|(_, a)| a).unwrap_or_default(), theme::CARD_AVATAR, seed)
+            .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
+        Label::derived(move || viewer().map(|(l, _)| l).unwrap_or_else(|| "You".into())).style(|s| {
             s.font_size(theme::TEXT_META).font_weight(FontWeight::SEMI_BOLD).color(theme::FG)
         }),
         Label::derived(move || format!("{asked} \u{00b7} {}", timefmt::relative(at, app.now.get())))
@@ -846,63 +885,8 @@ fn anchor_block(
 }
 
 // ---------------------------------------------------------------------
-// In Perch
+// The composer's place
 // ---------------------------------------------------------------------
-
-/// The branches and pull requests Perch started from this issue.
-pub fn in_perch(app: AppState, state: ReviewState, backend: Rc<Backend>, open_item: OpenItem) -> impl IntoView {
-    let children = move || {
-        let id = state.item.with(|i| i.as_ref().map(|i| i.id.clone()));
-        app.items.with(|all| {
-            all.iter()
-                .filter(|i| i.from_item_id.is_some() && i.from_item_id == id)
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-    };
-    let hidden = move || children().is_empty();
-    dyn_container(
-        move || children().is_empty(),
-        move |empty| {
-            if empty {
-                return Empty::new().into_any();
-            }
-            let (b, o) = (backend.clone(), open_item.clone());
-            let heading = byline_strip(Stack::horizontal((
-                sidebar_glyph(SidebarIcon::Branch, theme::FG_MUTED).style(|s| s.size(13.0, 13.0).margin_right(7.0)),
-                Label::derived(|| "In Perch".to_string()).style(|s| {
-                    s.font_size(theme::TEXT_META).font_weight(FontWeight::SEMI_BOLD).color(theme::FG).selectable(false)
-                }),
-            ))
-            .style(|s| s.items_center()));
-            let rows = dyn_stack(
-                children,
-                |i| i.clone(),
-                move |item| {
-                    let project = app.project(&item.project_id);
-                    item_row(app, b.clone(), item, project, Placement::Section(crate::items::ItemGroup::Project), o.clone())
-                },
-            )
-            .style(|s| s.flex_col().width_full().padding_vert(6.0));
-            Stack::vertical((heading, rows))
-                .style(|s| s.flex_col().width_full())
-                .clip()
-                .style(|s| {
-                    s.width_full()
-                        .background(theme::CANVAS)
-                        .border(1.0)
-                        .border_color(theme::BORDER)
-                        .border_radius(theme::RADIUS_LG)
-                        .box_shadow_blur(4.0)
-                        .box_shadow_v_offset(1.0)
-                        .box_shadow_color(theme::SHADOW)
-                })
-                .into_any()
-        },
-    )
-    // Hidden, not merely empty, so the column's gap skips it.
-    .style(move |s| s.width_full().apply_if(hidden(), |s| s.hide()))
-}
 
 /// A row that opens the composer when nothing is in it: the box the
 /// question will go in, with its placeholder, before it is a box.

@@ -31,7 +31,8 @@ const DETAIL_CONCURRENCY: usize = 8;
 const AVATAR_CONCURRENCY: usize = 6;
 const LAST_MODIFIED_KEY: &str = "notifications_last_modified";
 /// Settings the UI keeps between launches. Sent back at startup.
-pub const UI_META_KEYS: [&str; 3] = ["item_filters", "collapsed_projects", "review.layout"];
+pub const UI_META_KEYS: [&str; 5] =
+    ["item_filters", "collapsed_projects", "review.layout", "viewer.login", "viewer.avatar_url"];
 
 /// What the per-thread fetches share.
 #[derive(Clone)]
@@ -196,12 +197,14 @@ pub enum Event {
         offline: bool,
     },
     ReviewFailed { message: String },
-    FileLoaded { path: String, file: Arc<crate::review::model::LoadedFile> },
+    FileLoaded { item_id: String, path: String, file: Arc<crate::review::model::LoadedFile> },
     FileFailed { path: String, message: String },
 
     /// Everything said on the pull request: from the cache first, then
     /// from GitHub.
     DiscussionReady { item_id: String, discussion: Arc<perch_github::Discussion> },
+    /// An issue's comments, fetched again after a notification about it.
+    IssueComments { item_id: String, comments: Arc<Vec<perch_github::IssueComment>> },
     /// The workflow runs' verdict for the item's head.
     ChecksReady { item_id: String, checks: Arc<perch_github::Checks> },
     /// The commits over the base and whether the checkout has work in it,
@@ -573,6 +576,25 @@ async fn run(
         avatars: fetches.avatars.clone(),
         seen_ci: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     };
+
+    // Who the reader is on GitHub, for their own byline: once per launch,
+    // kept in meta so the next launch has it before the network does.
+    {
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            match ctx.github.viewer().await {
+                Ok(user) if !user.login.is_empty() => {
+                    for (key, value) in [("viewer.login", &user.login), ("viewer.avatar_url", &user.avatar_url)] {
+                        ctx.with_cache(|c| c.set_meta(key, value));
+                        let _ = ctx.events.send(Event::Meta { key: key.into(), value: value.clone() });
+                    }
+                    ctx.want_avatars(std::iter::once(user.avatar_url));
+                }
+                Ok(_) => {}
+                Err(e) => tracing::info!(error = %e, "could not ask who the token belongs to"),
+            }
+        });
+    }
 
     // Bring the table and the disk into agreement before any command can
     // make a directory. Inline, not spawned: a checkout made by a launch
@@ -1587,6 +1609,7 @@ async fn finish_open(
             files: files.clone(),
             scope,
             since: since.clone(),
+            scope_gen: 0,
             item_id: item.id.clone(),
             pull_request: pull_request.clone(),
             body: None,
@@ -1705,9 +1728,11 @@ async fn send_commits(ctx: &Ctx, item_id: &str, worktree: &Path, merge_base: &st
 /// read again either way.
 async fn refresh_scope(ctx: &Ctx, item_id: &str) {
     let open = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref().filter(|c| c.item_id == item_id).map(|c| (c.checkout.clone(), c.scope.clone(), c.since.clone()))
+        g.as_ref()
+            .filter(|c| c.item_id == item_id)
+            .map(|c| (c.checkout.clone(), c.scope.clone(), c.since.clone(), c.scope_gen))
     });
-    let Some((mut checkout, scope, since)) = open else { return };
+    let Some((mut checkout, scope, since, gen)) = open else { return };
     if !checkout.worktree.join(".git").exists() {
         return;
     }
@@ -1717,10 +1742,21 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
         .await
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    // A head that moved is a commit the reader made: the branch grew, and
-    // a pull request checkout left stale by a dirty tree is not this.
+    // A head that moved is a commit the reader made: the branch grew, or
+    // was rebased, so the base is found again too. A pull request checkout
+    // left stale by a dirty tree is not this.
     if !head.is_empty() && head != checkout.head_sha && checkout.stale.is_none() {
         checkout.head_sha = head.clone();
+        if let Some(item) = ctx.item(item_id) {
+            if let Some(base) = base_rev_for(&item) {
+                if let Ok(mb) = git.run(Some(&checkout.worktree), ["merge-base", &base, &head], Duration::from_secs(30)).await {
+                    let mb = mb.trim().to_string();
+                    if !mb.is_empty() {
+                        checkout.merge_base = mb;
+                    }
+                }
+            }
+        }
         let files = match scoped_files(&ctx.preparer, &checkout, &scope).await {
             Ok(f) => Arc::new(f),
             Err(e) => {
@@ -1728,15 +1764,51 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
                 return;
             }
         };
-        if let Ok(mut guard) = ctx.slot.lock() {
-            if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
-                open.checkout.head_sha = head.clone();
-                open.files = files.clone();
+        // The reader may have picked a scope while this looked; theirs
+        // wins, and the next look reads under it.
+        let written = ctx.slot.lock().ok().is_some_and(|mut guard| {
+            match guard.as_mut().filter(|c| c.item_id == item_id && c.scope_gen == gen) {
+                Some(open) => {
+                    open.checkout.head_sha = head.clone();
+                    open.checkout.merge_base = checkout.merge_base.clone();
+                    open.files = files.clone();
+                    true
+                }
+                None => false,
             }
+        });
+        if !written {
+            return;
+        }
+        // The row's head is what the view derives anchors and the menu
+        // from, so it follows too.
+        if let Some(mut item) = ctx.item(item_id) {
+            if let Some(c) = item.checkout.as_mut() {
+                c.head_sha = head.clone();
+            }
+            ctx.with_cache(|c| c.update_item(&item));
+            ctx.send_items();
         }
         let _ = ctx.events.send(Event::ScopeReady { item_id: item_id.to_string(), scope, files });
     }
     send_commits(ctx, item_id, &checkout.worktree, &checkout.merge_base, &checkout.head_sha, since).await;
+}
+
+/// The revision an item's diff is taken against, as the opens find it:
+/// a pull request's fetched base, a branch Perch cut's home ref or the
+/// commit it was forked from, a root checkout's origin branch.
+fn base_rev_for(item: &Item) -> Option<String> {
+    let checkout = item.checkout.as_ref()?;
+    if let Some(pr) = item.pull_request() {
+        return Some(format!("refs/perch/base/{}", pr.number));
+    }
+    let base = &checkout.base_ref;
+    let is_sha = base.len() == 40 && base.chars().all(|c| c.is_ascii_hexdigit());
+    Some(match (checkout.owned, is_sha) {
+        (_, true) => base.clone(),
+        (true, false) => perch_git::home_ref(base),
+        (false, false) => format!("origin/{base}"),
+    })
 }
 
 /// One request for the workflow runs on the pull request's head, kept and
@@ -1771,6 +1843,7 @@ async fn set_scope(ctx: &Ctx, item_id: &str, scope: perch_git::Scope) {
                 if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
                     open.scope = scope.clone();
                     open.files = files.clone();
+                    open.scope_gen += 1;
                 }
             }
             let _ = ctx.events.send(Event::ScopeReady { item_id: item_id.to_string(), scope, files });
@@ -1925,6 +1998,9 @@ struct ReviewContext {
     scope: perch_git::Scope,
     /// The head at the previous open, for "Since you last looked".
     since: Option<String>,
+    /// Rises with every scope pick, so a look at the checkout that began
+    /// under an earlier scope does not write its list over the reader's.
+    scope_gen: u64,
     item_id: String,
     /// `None` for a branch with no pull request.
     pull_request: Option<Arc<PullRequest>>,
@@ -2102,10 +2178,82 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
         {
             changed = true;
         }
+        // Something was said about the item that is open: its Conversation
+        // follows. Once per notification, as with CI.
+        if ctx.is_open(&item.id) {
+            let key = (thread.id.clone(), thread.updated_at);
+            let fresh = ctx.seen_ci.lock().map(|mut s| s.insert(key)).unwrap_or(false);
+            if fresh {
+                let ctx = ctx.clone();
+                let item_id = item.id.clone();
+                tokio::spawn(async move { refresh_open_item(&ctx, &item_id).await });
+            }
+        }
     }
     if changed {
         ctx.send_items();
     }
+}
+
+/// Fetch again what the open item shows from GitHub: the pull request and
+/// its discussion and checks, or the issue's comments.
+async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
+    let open = ctx.slot.lock().ok().and_then(|g| {
+        g.as_ref().filter(|c| c.item_id == item_id).map(|c| (c.pull_request.clone(), c.issue.clone()))
+    });
+    let Some((pull_request, issue)) = open else { return };
+    if let Some(pr) = pull_request {
+        // The snapshot first, so the checks are for the head GitHub ran.
+        let pr = match ctx.github.fetch_pull_request(&pr.repo_full_name, pr.number).await {
+            Ok(fresh) => {
+                let fresh = Arc::new(fresh);
+                if let Ok(mut guard) = ctx.slot.lock() {
+                    if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+                        open.pull_request = Some(fresh.clone());
+                    }
+                }
+                if let Some(mut item) = ctx.item(item_id) {
+                    item.subject = Some(ItemSubject::PullRequest((*fresh).clone()));
+                    ctx.with_cache(|c| c.update_item(&item));
+                    ctx.send_items();
+                }
+                fresh
+            }
+            Err(e) => {
+                tracing::info!(item = item_id, error = %e, "could not fetch the pull request again");
+                pr
+            }
+        };
+        archive_discussion(ctx, item_id, &pr).await;
+        fetch_checks(ctx, item_id, &pr).await;
+    } else if let Some(issue) = issue {
+        let (issue, _) = &*issue;
+        match ctx.github.fetch_issue_comments(&issue.repo_full_name, issue.number).await {
+            Ok(comments) => {
+                keep_issue_comments(ctx, item_id, issue, &comments);
+                if ctx.is_open(item_id) {
+                    ctx.want_avatars(comments.iter().map(|c| c.user_avatar_url.clone()));
+                    let _ = ctx.events.send(Event::IssueComments { item_id: item_id.to_string(), comments: Arc::new(comments) });
+                }
+            }
+            Err(e) => tracing::info!(item = item_id, error = %e, "could not fetch the comments again"),
+        }
+    }
+}
+
+/// An issue's comments are kept the way a pull request's discussion is,
+/// in the same table, so the next open paints them before the network
+/// answers and the harness can print them.
+fn keep_issue_comments(ctx: &Ctx, item_id: &str, issue: &perch_github::Issue, comments: &[perch_github::IssueComment]) {
+    let discussion = perch_github::Discussion {
+        opened_at: issue.created_at,
+        body: issue.body.clone(),
+        comments: comments.to_vec(),
+        reviews: Vec::new(),
+        review_comments: Vec::new(),
+        events: Vec::new(),
+    };
+    ctx.with_cache(|c| c.store_discussion(item_id, &discussion));
 }
 
 /// Fetch the checks again when a CI notification names the open pull
@@ -2119,12 +2267,14 @@ async fn refresh_open_checks(ctx: &Ctx, thread: &Thread) {
     if !(pr.repo_full_name.eq_ignore_ascii_case(&query.repo_full_name) && pr.head_ref == query.branch) {
         return;
     }
+    // The snapshot is refetched on the way, so the checks are for the head
+    // the run was on, not the one the item opened at.
     // Once per notification, not once per poll it is still in the inbox.
     let key = (thread.id.clone(), thread.updated_at);
     if ctx.seen_ci.lock().map(|mut s| !s.insert(key)).unwrap_or(true) {
         return;
     }
-    fetch_checks(ctx, &item_id, &pr).await;
+    refresh_open_item(ctx, &item_id).await;
 }
 
 /// Rescan roots, then ask GitHub about subject-less branches.
@@ -2381,13 +2531,20 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
         .with_cache(|c| c.find_item_by_subject(&repo_full_name, ItemKind::Issue, number).ok().flatten())
         .flatten();
 
+    // The comments as they were last kept, for offline and for a first
+    // paint that does not wait on the network.
+    let kept: Vec<perch_github::IssueComment> = existing
+        .as_ref()
+        .and_then(|i| ctx.with_cache(|c| c.load_discussion(&i.id).ok().flatten()).flatten())
+        .map(|(_, d)| d.comments)
+        .unwrap_or_default();
     let (issue, comments, offline) = match ctx.github.fetch_issue(&repo_full_name, number).await {
         Ok(issue) => {
             let comments = match ctx.github.fetch_issue_comments(&repo_full_name, number).await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(repo = %repo_full_name, number, error = %e, "could not fetch the comments");
-                    Vec::new()
+                    kept.clone()
                 }
             };
             (issue, comments, false)
@@ -2396,7 +2553,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
             Some(snapshot) => {
                 tracing::info!(repo = %repo_full_name, number, error = %e, "showing the issue from its snapshot");
                 ctx.notice("Offline; showing the issue as it was last fetched");
-                (snapshot, Vec::new(), true)
+                (snapshot, kept.clone(), true)
             }
             None => {
                 let _ = events.send(Event::ReviewFailed { message: e.to_string() });
@@ -2499,6 +2656,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
             files: Arc::new(Vec::new()),
             scope: perch_git::Scope::Branch,
             since: None,
+            scope_gen: 0,
             item_id: item.id.clone(),
             pull_request: None,
             body: None,
@@ -2506,6 +2664,9 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
         });
     }
     tracing::info!(repo = %issue.repo_full_name, number, comments = comments.len(), offline, "issue ready");
+    if !offline {
+        keep_issue_comments(ctx, &item.id, &issue, &comments);
+    }
     let _ = events.send(Event::IssueReady { item: item.clone(), issue: issue.clone(), comments: comments.clone(), offline });
     ctx.want_avatars(
         std::iter::once(issue.author_avatar_url.clone())
@@ -3143,10 +3304,10 @@ async fn open_file(
     events: EventSender<Event>,
     path: String,
 ) {
-    let Some((checkout, changed, scope)) = slot
+    let Some((checkout, changed, scope, item_id)) = slot
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|c| (c.checkout.clone(), c.files.clone(), c.scope.clone())))
+        .and_then(|g| g.as_ref().map(|c| (c.checkout.clone(), c.files.clone(), c.scope.clone(), c.item_id.clone())))
     else {
         let _ = events.send(Event::FileFailed {
             path,
@@ -3229,7 +3390,7 @@ async fn open_file(
                 scope = %file.scope,
                 "file loaded"
             );
-            let _ = events.send(Event::FileLoaded { path: file.path.clone(), file: Arc::new(file) });
+            let _ = events.send(Event::FileLoaded { item_id, path: file.path.clone(), file: Arc::new(file) });
         }
         Err(e) => tracing::warn!(error = %e, "file load panicked"),
     }

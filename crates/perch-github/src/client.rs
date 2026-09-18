@@ -361,6 +361,13 @@ impl GitHub {
         Ok(payload.into_issue(repo_full_name))
     }
 
+    /// Who the token belongs to: the login and the avatar, for the
+    /// reader's own byline.
+    pub async fn viewer(&self) -> Result<crate::model::UserPayload, Error> {
+        let body = self.get_text("/user").await?;
+        serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))
+    }
+
     /// The conversation on an issue, read to the end.
     pub async fn fetch_issue_comments(
         &self,

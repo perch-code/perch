@@ -45,17 +45,19 @@ fn print(id: &str) -> Result<bool, String> {
     let discussion = cache.load_discussion(id).map_err(|e| e.to_string())?.map(|(_, d)| d);
     let threads = cache.load_comment_threads(id).map_err(|e| e.to_string())?;
 
-    // Notes on what the list below is missing, on stderr so stdout stays
-    // the cards alone.
-    if item.pull_request().is_some() && discussion.is_none() {
-        eprintln!("note: no discussion is cached for this item; open it in the app once");
+    // A note on what the list below is missing, on stderr so stdout stays
+    // the cards alone. An issue's comments are kept in the same row a pull
+    // request's discussion is.
+    if discussion.is_none() && item.subject.is_some() {
+        eprintln!("note: nothing is cached for this item yet; open it in the app once");
     }
-    let issue = item.issue().map(|i| (i, &[][..]));
-    if issue.is_some() {
-        eprintln!("note: an issue's comments are not cached; this is the description and the threads");
-    }
-
-    let cards = timeline(item.pull_request(), discussion.as_ref(), issue, &threads);
+    let comments: Vec<perch_github::IssueComment> = match (&item.issue(), &discussion) {
+        (Some(_), Some(d)) => d.comments.clone(),
+        _ => Vec::new(),
+    };
+    let issue = item.issue().map(|i| (i, comments.as_slice()));
+    let pull = item.pull_request();
+    let cards = timeline(pull, if pull.is_some() { discussion.as_ref() } else { None }, issue, &threads);
     let mut out = String::new();
     render(&mut out, &cards);
     print!("{out}");

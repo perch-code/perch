@@ -221,6 +221,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 crate::review::references::find_at_cursor(review, &references_backend);
                 return EventPropagation::Stop;
             }
+            // Escape backs out of a thread's Delete first.
+            if key.code == Code::Escape && key.modifiers.is_empty() && review.confirm_thread.with(Option::is_some) {
+                review.confirm_thread.set(None);
+                return EventPropagation::Stop;
+            }
             // Escape closes the references panel when nothing else claims
             // it: a composer, or something open under a sidebar row.
             let claimed = review.composer.with(Option::is_some)

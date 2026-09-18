@@ -586,9 +586,17 @@ impl ReviewState {
     pub fn change_scope(&self, scope: Scope, files: Arc<Vec<ChangedFile>>) -> Vec<String> {
         self.scope.set(scope);
         self.changed_files.set(files);
+        // Every loaded file, not only the tabs: a thread card on
+        // Conversation shows lines from a file no tab has, and would go
+        // blank until something loaded it again.
+        let mut paths: Vec<String> = self.files.with(|m| m.keys().cloned().collect());
         self.files.set(HashMap::new());
         self.loading.set(HashMap::new());
-        let mut paths: Vec<String> = self.tabs.with(|t| t.iter().map(|t| t.path.clone()).collect());
+        for tab in self.tabs.with(|t| t.iter().map(|t| t.path.clone()).collect::<Vec<_>>()) {
+            if !paths.contains(&tab) {
+                paths.push(tab);
+            }
+        }
         if let Some(active) = self.active.get() {
             paths.retain(|p| *p != active);
             paths.insert(0, active);

@@ -166,7 +166,9 @@ fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: Open
                 Row::Thread(t) => thread_card(app, state, here_backend.clone(), here_open.clone(), t).into_any(),
                 Row::Divider => group_heading("Elsewhere in this worktree").into_any(),
                 Row::GitHubDivider => group_heading("On GitHub").into_any(),
-                Row::GitHub(t) => crate::review::cards::line_thread_block(app, state, here_open.clone(), t).into_any(),
+                Row::GitHub(t) => {
+                    crate::review::cards::line_thread_block(app, state, here_backend.clone(), here_open.clone(), t).into_any()
+                }
             },
         )
         .style(|s| s.flex_col().width_full().gap(10.0).padding(12.0)),
@@ -826,15 +828,26 @@ pub fn message_view(
     let body = message.body.clone();
 
     // Questions and answers are both markdown; the reader writes it too.
-    let _ = is_agent;
-    Stack::vertical((
-        crate::review::markdown::render(&body),
-        match message.run.clone() {
-            Some(run) => run_block(app, state, backend, thread, message.body.clone(), run, face).into_any(),
-            None => Empty::new().into_any(),
-        },
-    ))
-    .style(|s| s.flex_col().width_full().gap(8.0))
+    // A finished run sits on the answer, and reads in the order it went:
+    // what the agent did, then what it said, then what it cost. While it
+    // runs, or when it failed, the run sits under the question whole.
+    let finished = message.run.as_ref().is_some_and(|r| r.status == RunStatus::Finished);
+    match message.run.clone() {
+        Some(run) if is_agent && finished => Stack::vertical((
+            run_surface(steps_view(state, run.clone()), face),
+            crate::review::markdown::render(&body),
+            run_footer(app, state, backend, thread, message.body.clone(), run, face),
+        ))
+        .style(|s| s.flex_col().width_full().gap(8.0))
+        .into_any(),
+        Some(run) => Stack::vertical((
+            crate::review::markdown::render(&body),
+            run_block(app, state, backend, thread, message.body.clone(), run, face),
+        ))
+        .style(|s| s.flex_col().width_full().gap(8.0))
+        .into_any(),
+        None => crate::review::markdown::render(&body).into_any(),
+    }
 }
 
 /// What the agent did, under its answer or under the question while it
@@ -849,17 +862,42 @@ pub fn run_block(
     run: RunRecord,
     face: ThreadFace,
 ) -> impl IntoView {
-    let running = run.status == RunStatus::Running;
-    let run_id = run.id.clone();
-    let expanded = move || running || state.expanded_runs.with(|e| e.contains(&run_id));
-    let chevron_id = run.id.clone();
-    let expanded_chevron = move || running || state.expanded_runs.with(|e| e.contains(&chevron_id));
-    let toggle_id = run.id.clone();
-    let steps = run.steps.clone();
-    let summary = steps_summary(&steps);
-    let cancel_id = run.id.clone();
+    run_surface(
+        Stack::vertical((
+            steps_view(state, run.clone()),
+            run_footer(app, state, backend, thread, question, run, face),
+        ))
+        .style(|s| s.flex_col().width_full().gap(6.0)),
+        face,
+    )
+}
 
-    let footer: floem::AnyView = match run.status {
+/// The box a run's lines sit in. The column's cards are white, so the run
+/// sits on the page grey; a thread card is the page grey, so the run sits
+/// on white.
+fn run_surface(inner: impl IntoView + 'static, face: ThreadFace) -> impl IntoView {
+    Container::new(inner).style(move |s| {
+        let base = s.width_full().padding(8.0).border_radius(theme::RADIUS);
+        match face {
+            ThreadFace::Column => base.background(theme::CANVAS_SUBTLE),
+            ThreadFace::Card => base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER_MUTED),
+        }
+    })
+}
+
+/// The footer under a run: Stop while it goes, cost and time once it is
+/// done, the error and Retry when it is not.
+fn run_footer(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread: CommentThread,
+    question: String,
+    run: RunRecord,
+    face: ThreadFace,
+) -> floem::AnyView {
+    let cancel_id = run.id.clone();
+    match run.status {
         RunStatus::Running => text_button(|| "Stop".to_string(), SidebarIcon::Stop, move || {
             backend.cancel_run(&cancel_id)
         })
@@ -899,7 +937,20 @@ pub fn run_block(
             .style(|s| s.items_center().width_full().gap(8.0))
             .into_any()
         }
-    };
+    }
+}
+
+/// The step lines, folded to "Read 4 files, ran 2 commands" until the
+/// line is clicked, and open while the run goes.
+fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
+    let running = run.status == RunStatus::Running;
+    let run_id = run.id.clone();
+    let expanded = move || running || state.expanded_runs.with(|e| e.contains(&run_id));
+    let chevron_id = run.id.clone();
+    let expanded_chevron = move || running || state.expanded_runs.with(|e| e.contains(&chevron_id));
+    let toggle_id = run.id.clone();
+    let steps = run.steps.clone();
+    let summary = steps_summary(&steps);
 
     Stack::vertical((
         Container::new(
@@ -944,17 +995,8 @@ pub fn run_block(
             .style(|s| s.flex_col().width_full().gap(2.0).padding_left(15.0))
             .into_any()
         }),
-        footer,
     ))
-    .style(move |s| {
-        let base = s.flex_col().width_full().gap(6.0).padding(8.0).border_radius(theme::RADIUS);
-        // The column's cards are white, so the run sits on the page grey;
-        // a thread card is the page grey, so the run sits on white.
-        match face {
-            ThreadFace::Column => base.background(theme::CANVAS_SUBTLE),
-            ThreadFace::Card => base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER_MUTED),
-        }
-    })
+    .style(|s| s.flex_col().width_full().gap(6.0))
 }
 
 /// "Read 3 files, ran 1 command", from the step lines.

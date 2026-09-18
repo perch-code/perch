@@ -26,7 +26,6 @@ pub fn view(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
-    open_item: crate::ui::items::OpenItem,
     open_file: OpenFile,
 ) -> impl IntoView {
     let card_backend = backend.clone();
@@ -74,7 +73,7 @@ pub fn view(
                 cards,
                 |(card, gap)| format!("{}:{gap}", cards::key(card)),
                 move |(card, gap)| {
-                    card_view(app, state, card_backend.clone(), open_item.clone(), open_file.clone(), card, gap)
+                    card_view(app, state, card_backend.clone(), open_file.clone(), card, gap)
                 },
             )
             .style(|s| s.flex_col().width_full()),
@@ -106,30 +105,20 @@ fn card_view(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
-    open_item: crate::ui::items::OpenItem,
     open_file: OpenFile,
     card: Card,
     gap: f64,
 ) -> floem::AnyView {
     let pull = state.pull_request.get_untracked();
-    let is_issue = state.issue.with_untracked(Option::is_some);
     let debug = card.kind();
     let view: floem::AnyView = match card {
+        // What Perch started from an issue is in the strip under the
+        // header, as chips, not repeated under the description.
         Card::Description { author, avatar_url, at, body } => {
-            let description = cards::description_card(app, author, avatar_url, at, body);
-            if is_issue {
-                // In Perch hides itself when nothing was started from the
-                // issue, and a hidden item takes no gap, so the next card
-                // sits at the usual distance.
-                Stack::vertical((description, cards::in_perch(app, state, backend, open_item)))
-                    .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP))
-                    .into_any()
-            } else {
-                description.into_any()
-            }
+            cards::description_card(app, author, avatar_url, at, body).into_any()
         }
         Card::Comment(comment) => cards::comment_card(app, state, comment).into_any(),
-        Card::Review { review, comments } => cards::review_card(app, state, open_file, review, comments).into_any(),
+        Card::Review { review, comments } => cards::review_card(app, state, backend, open_file, review, comments).into_any(),
         Card::Event(event) => cards::event_row(app, event, pull.map(|p| p.author_login.clone())).into_any(),
         Card::Thread(thread) => cards::thread_card(app, state, backend, open_file, thread).into_any(),
     };

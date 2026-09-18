@@ -59,6 +59,9 @@ pub struct AppState {
     /// The review view's state, once the window has made it, so a menu
     /// that ends in something being opened can put the progress card up.
     pub review: RwSignal<Option<crate::review::model::ReviewState>>,
+    /// The reader's own login and avatar on GitHub, once known, for the
+    /// byline of a thread of their own.
+    pub viewer: RwSignal<Option<(String, String)>>,
     /// Files the view should ask the backend to load again, after a scope
     /// change threw the loaded ones away. Drained by the window, which
     /// holds the backend handle.
@@ -142,6 +145,7 @@ impl AppState {
             open_item: RwSignal::new(None),
             notice: RwSignal::new(None),
             review: RwSignal::new(None),
+            viewer: RwSignal::new(None),
             reload: RwSignal::new(Vec::new()),
             agent: RwSignal::new(AgentConfig::default()),
             screen: RwSignal::new(Screen::Sidebar),
@@ -280,7 +284,18 @@ impl AppState {
                     }
                 }
             }
-            Event::FileLoaded { path, file } => review.finish_load(&path, file),
+            // A load for the last item, still on its way when the next one
+            // opened, is nobody's now.
+            Event::FileLoaded { item_id, path, file } => {
+                if review.is_item(&item_id) {
+                    review.finish_load(&path, file);
+                }
+            }
+            Event::IssueComments { item_id, comments } => {
+                if review.is_item(&item_id) {
+                    review.issue_comments.set(comments);
+                }
+            }
             Event::FileFailed { path, message } => {
                 tracing::warn!(path, message, "could not open file");
                 review.fail_load(&path);
@@ -406,6 +421,16 @@ impl AppState {
                         review.layout.set(layout);
                     }
                 }
+                // The two arrive one after the other; whichever comes second
+                // completes the pair.
+                "viewer.login" => self.viewer.update(|v| {
+                    let avatar = v.as_ref().map(|(_, a)| a.clone()).unwrap_or_default();
+                    *v = Some((value, avatar));
+                }),
+                "viewer.avatar_url" => self.viewer.update(|v| {
+                    let login = v.as_ref().map(|(l, _)| l.clone()).unwrap_or_default();
+                    *v = Some((login, value));
+                }),
                 _ => {}
             },
             // An empty notice is the backend saying the last one has been
@@ -425,6 +450,7 @@ impl AppState {
             | Event::LspHover { .. }
             | Event::LspDefinition { .. }
             | Event::DiscussionReady { .. }
+            | Event::IssueComments { .. }
             | Event::ChecksReady { .. }
             | Event::CommitsReady { .. }
             | Event::ScopeReady { .. }
