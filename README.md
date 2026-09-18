@@ -37,8 +37,11 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
 **The review view**
 
 - Click a pull request and Perch clones the repository, checks the head out
-  into a worktree, and shows what changed. A second pull request from the
-  same repository costs a fetch rather than a clone.
+  on a branch of its own (`perch/pr-<n>`) in a worktree, and shows what
+  changed. A second pull request from the same repository costs a fetch
+  rather than a clone. Opening the same one again finds the same directory.
+- The header names the worktree's directory. Click it to reveal it in the
+  Finder, open a Terminal there, or copy the path.
 - A rail of changed files, or the whole worktree, with change markers on
   files the pull request touched.
 - A read-only editor with tree-sitter highlighting for Rust, TOML, Markdown,
@@ -48,6 +51,24 @@ same filters, sorting, grouping, and search, and nothing that mutates state.
   line numbers with change bars.
 - Click a symbol and rust-analyzer says what it is, with go-to-definition
   from the same panel.
+
+**Worktrees**
+
+- The second entry in the rail lists every checkout Perch has made, active
+  and archived, by repository, with the pull request's state and when it
+  was last opened.
+- Archive a worktree and the directory goes while the branch and the record
+  stay, so restoring it is a checkout rather than a clone. A worktree with
+  uncommitted changes refuses to be archived, and says so in the status
+  line. Forget an archived worktree and the branch goes too.
+- Anything not opened for a fortnight is archived on launch. Nothing is
+  ever deleted on a timer.
+- A worktree is somewhere work can happen. If the pull request moves on
+  while there are uncommitted changes in it, Perch leaves them alone, shows
+  what is on disk, and says so in the header. Clean worktrees follow the
+  pull request.
+- A worktree opens without a network. The list paints from a snapshot, and
+  the review shows the checkout as it was last left.
 
 ## What it deliberately does not do
 
@@ -70,7 +91,9 @@ the same inbox you see in a browser.
 | `s` | Save or unsave, the same way. |
 | `Escape` | Drop the selection. |
 | `Cmd-\` | Show or hide the drawer. |
-| `Cmd-[` | Back to the inbox from a pull request. |
+| `Cmd-[` | Back from a pull request to wherever it was opened from. |
+| `Cmd-1` | Notifications. |
+| `Cmd-2` | Worktrees. |
 | `Cmd-W` | Close the open file. |
 
 `e` and `s` stand down while the search box has focus.
@@ -131,10 +154,18 @@ token = "ghp_..."        # only when env vars and gh are unavailable
 poll_interval_secs = 60  # a floor; X-Poll-Interval may raise it
 ```
 
-Cache and avatars live beside it, and so do your Saved and Done marks.
-Deleting that directory costs a cold start and every mark you have made;
-nothing else in Perch is worth keeping, and marks are the one thing GitHub
-cannot give back.
+Cache and avatars live beside it, and so do your Saved and Done marks and
+the record of your worktrees. Deleting that directory costs a cold start,
+every mark you have made, and every worktree; marks are the one thing
+GitHub cannot give back.
+
+Clones live under `repos/` in that directory, one bare clone per repository,
+and worktrees under `worktrees/`, one directory per branch, named
+`<owner>__<repo>__perch-pr-<n>`. They are ordinary git worktrees of the bare
+clone: `git status`, `git diff` and a shell all work in them. Archiving from
+Perch is the safe way to reclaim the space, since it checks for uncommitted
+work first and keeps the branch; a directory removed by hand simply shows
+as archived on the next launch.
 
 ## Layout
 
