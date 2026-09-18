@@ -321,10 +321,12 @@ fn rail_entry(state: AppState, review: ReviewState) -> impl IntoView {
             .flex_shrink(0.0_f32)
             .items_center()
             .justify_center();
+        // The placeholder is the same width as the stripe, so toggling the
+        // entry never shifts its icon sideways.
         if active() {
-            base.border_left(2.0).border_color(theme::ACCENT)
+            base.border_left(theme::RAIL_STRIPE).border_color(theme::ACCENT)
         } else {
-            base.border_left(2.0).border_color(Color::TRANSPARENT)
+            base.border_left(theme::RAIL_STRIPE).border_color(Color::TRANSPARENT)
         }
     })
 }
