@@ -62,6 +62,10 @@ pub enum Preparing {
     Failed { message: String },
 }
 
+/// How a question runs: which agent, which of its models, and how hard
+/// it thinks.
+pub type AgentChoice = (perch_agent::Backend, String, perch_agent::Effort);
+
 /// A composer that is open: where the question will be anchored and how
 /// it will be run.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +73,9 @@ pub struct Composer {
     /// `None` starts a thread; `Some` is a follow-up in that thread.
     pub thread_id: Option<String>,
     pub anchor: Option<Anchor>,
+    /// Which agent the model belongs to. Set with the model, never on
+    /// its own: the picker lists models, and config says whose each is.
+    pub backend: perch_agent::Backend,
     pub model: String,
     pub effort: perch_agent::Effort,
     /// A question to start with, when a failed run is retried.
@@ -142,8 +149,9 @@ pub struct ReviewState {
     pub threads_width: RwSignal<f64>,
     /// Runs whose step list the reader opened.
     pub expanded_runs: RwSignal<std::collections::HashSet<String>>,
-    /// The model and effort last sent, which the next composer starts on.
-    pub agent_last: RwSignal<Option<(String, perch_agent::Effort)>>,
+    /// The backend, model and effort last sent, which the next composer
+    /// starts on.
+    pub agent_last: RwSignal<Option<AgentChoice>>,
     /// The display line the pointer is over in the gutter, for the `+`.
     pub hovered_line: RwSignal<Option<usize>>,
     /// True while the composer's text box has the keyboard, so `a` stands
@@ -404,10 +412,10 @@ impl ReviewState {
     }
 
     /// Open a composer, for a new thread on `anchor` or the worktree.
-    pub fn open_composer(&self, thread_id: Option<String>, anchor: Option<Anchor>, draft: String, defaults: (String, perch_agent::Effort)) {
-        let (model, effort) = self.agent_last.get().unwrap_or(defaults);
+    pub fn open_composer(&self, thread_id: Option<String>, anchor: Option<Anchor>, draft: String, defaults: AgentChoice) {
+        let (backend, model, effort) = self.agent_last.get().unwrap_or(defaults);
         self.composer_draft.set(draft.clone());
-        self.composer.set(Some(Composer { thread_id, anchor, model, effort, draft }));
+        self.composer.set(Some(Composer { thread_id, anchor, backend, model, effort, draft }));
         self.show_threads();
     }
 

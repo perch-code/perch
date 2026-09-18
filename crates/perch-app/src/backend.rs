@@ -107,6 +107,7 @@ pub enum Command {
         thread_id: Option<String>,
         anchor: Option<Anchor>,
         question: String,
+        backend: perch_agent::Backend,
         model: String,
         effort: perch_agent::Effort,
     },
@@ -288,6 +289,7 @@ impl Backend {
         thread_id: Option<String>,
         anchor: Option<Anchor>,
         question: &str,
+        backend: perch_agent::Backend,
         model: &str,
         effort: perch_agent::Effort,
     ) {
@@ -296,6 +298,7 @@ impl Backend {
             thread_id,
             anchor,
             question: question.to_string(),
+            backend,
             model: model.to_string(),
             effort,
         });
@@ -668,10 +671,10 @@ async fn run(
             Some(Command::SetMeta { key, value }) => {
                 ctx.with_cache(|c| c.set_meta(&key, &value));
             }
-            Some(Command::Ask { item_id, thread_id, anchor, question, model, effort }) => {
+            Some(Command::Ask { item_id, thread_id, anchor, question, backend, model, effort }) => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    ask(&ctx, item_id, thread_id, anchor, question, model, effort).await;
+                    ask(&ctx, item_id, thread_id, anchor, question, backend, model, effort).await;
                 });
             }
             Some(Command::CancelRun { run_id }) => {
@@ -2421,12 +2424,14 @@ async fn mark_outdated_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &
 
 /// Start a thread or continue one, run the agent, and keep the record
 /// current as events arrive.
+#[allow(clippy::too_many_arguments)]
 async fn ask(
     ctx: &Ctx,
     item_id: String,
     thread_id: Option<String>,
     anchor: Option<Anchor>,
     question: String,
+    backend: perch_agent::Backend,
     model: String,
     effort: perch_agent::Effort,
 ) {
@@ -2471,7 +2476,7 @@ async fn ask(
     let run = RunRecord {
         id: perch_github::comments::new_id(),
         thread_id: thread.id.clone(),
-        backend: perch_agent::Backend::ClaudeCode.name().into(),
+        backend: backend.name().into(),
         model: model.clone(),
         effort: effort.name().into(),
         session_id: None,
@@ -2506,15 +2511,16 @@ async fn ask(
     }
     ctx.send_threads(&item_id);
 
-    // The prompt. A follow-up resumes the last finished run; a thread with
-    // none starts over with its history folded in.
+    // The prompt. A follow-up resumes the last finished run when it was
+    // this backend's; a thread with none, or one that switched backends,
+    // starts over with its history folded in.
     let file = match &thread.anchor {
         Some(a) => crate::ask::load_display(&ctx.preparer, &checkout, &a.path).await.ok(),
         None => None,
     };
     let history: Vec<(Author, String)> =
         thread.messages.iter().map(|m| (m.author.clone(), m.body.clone())).collect();
-    let resume = thread.resumable_session();
+    let resume = thread.resumable_session(backend.name());
     let input = crate::ask::PromptInput {
         pull_request: pull_request.as_deref(),
         issue: issue.as_ref().map(|i| (&i.0, i.1.as_slice())),
@@ -2526,14 +2532,14 @@ async fn ask(
         history: if is_new || resume.is_some() { &[] } else { &history },
     };
     let prompt = if is_new { crate::ask::first_prompt(&input) } else { crate::ask::follow_up_prompt(&input) };
-    let spec = crate::ask::run_spec(&ctx.config.agent, &model, effort, checkout.worktree.clone(), &prompt, resume);
+    let spec = crate::ask::run_spec(&ctx.config.agent, backend, &model, effort, checkout.worktree.clone(), &prompt, resume);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut run = run;
     let handle = match perch_agent::Run::spawn(spec, tx) {
         Ok(h) => h,
         Err(e) => {
-            let message = format!("{e}. Set agent.binary in config.toml to where Claude Code is installed.");
+            let message = format!("{e}. {}", crate::ask::binary_hint(backend));
             crate::ask::apply_run_event(&mut run, &perch_agent::RunEvent::Failed { message });
             ctx.with_cache(|c| c.update_run(&run));
             ctx.send_threads(&item_id);

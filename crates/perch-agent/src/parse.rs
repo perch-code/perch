@@ -14,6 +14,9 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
     };
     let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
     let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("");
+    // A subagent's lines name the parent's tool call. What it says is its
+    // report to the parent, not part of the answer; what it does still is.
+    let delegated = v.get("parent_tool_use_id").and_then(Value::as_str).is_some();
 
     match (kind, subtype) {
         ("system", "init") => vec![RunEvent::Started {
@@ -23,6 +26,7 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
         ("assistant", _) => blocks(&v)
             .iter()
             .filter_map(|b| match b.get("type").and_then(Value::as_str) {
+                Some("text") if delegated => None,
                 Some("text") => {
                     let text = str_of(b, "text");
                     (!text.trim().is_empty()).then_some(RunEvent::Text(text))
@@ -66,7 +70,8 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
                 }]
             }
         }
-        // thinking_tokens, task_summary, rate limits, and whatever comes next.
+        // thinking_tokens, task_summary, task_started and its progress,
+        // permission_denied, rate limits, and whatever comes next.
         _ => Vec::new(),
     }
 }
@@ -78,7 +83,7 @@ fn blocks(v: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn str_of(v: &Value, key: &str) -> String {
+pub(crate) fn str_of(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
@@ -124,6 +129,12 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
             format!("Asked to edit {}", field("file_path").map(|p| short_path(&p)).unwrap_or_default())
         }
+        "Agent" | "Task" => match field("description") {
+            Some(d) => format!("Delegated: {d}"),
+            None => "Delegated".to_string(),
+        },
+        // The input is a whole script; the line says only that one ran.
+        "Workflow" => "Ran a workflow".to_string(),
         other => match field("file_path").or_else(|| field("path")).or_else(|| field("pattern")) {
             Some(arg) => format!("{other} {}", short_path(&arg)),
             None => other.to_string(),
@@ -156,7 +167,7 @@ fn short_path(path: &str) -> String {
     parts[parts.len() - 3..].join("/")
 }
 
-fn one_line(text: &str, max: usize) -> String {
+pub(crate) fn one_line(text: &str, max: usize) -> String {
     let line = text.lines().next().unwrap_or("").trim();
     if line.chars().count() <= max {
         line.to_string()
@@ -202,6 +213,17 @@ mod tests {
     }
 
     #[test]
+    fn delegation_names_the_task_and_a_workflow_hides_its_script() {
+        assert_eq!(
+            summarize_tool_call("Agent", &json!({"description": "Read first line of lib.rs", "prompt": "..."})),
+            "Delegated: Read first line of lib.rs"
+        );
+        assert_eq!(summarize_tool_call("Task", &json!({"prompt": "..."})), "Delegated");
+        let s = summarize_tool_call("Workflow", &json!({"script": "const x = 1;\nawait run(x);"}));
+        assert_eq!(s, "Ran a workflow");
+    }
+
+    #[test]
     fn an_unknown_tool_still_gets_a_line() {
         assert_eq!(summarize_tool_call("WebFetch", &json!({"url": "https://x"})), "WebFetch");
         assert_eq!(summarize_tool_call("Thing", &json!({"path": "a/b"})), "Thing a/b");
@@ -221,6 +243,31 @@ mod tests {
         assert!(parse_line("not json").is_empty());
         assert!(parse_line("").is_empty());
         assert!(parse_line(r#"{"type":"rate_limit_event"}"#).is_empty());
+    }
+
+    #[test]
+    fn a_subagent_says_nothing_but_its_steps_still_show() {
+        let parent = "toolu_01WXCo8udLVT4woPKD2gWmjc";
+        let text = format!(
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"the first line is x"}}]}},"parent_tool_use_id":"{parent}","session_id":"s"}}"#
+        );
+        assert!(parse_line(&text).is_empty());
+
+        let call = format!(
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_r","name":"Read","input":{{"file_path":"/w/src/lib.rs","limit":1}}}}]}},"parent_tool_use_id":"{parent}","session_id":"s"}}"#
+        );
+        assert_eq!(
+            parse_line(&call),
+            vec![RunEvent::ToolCall { id: "toolu_r".into(), name: "Read".into(), summary: "Read w/src/lib.rs".into() }]
+        );
+        let result = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"toolu_r","type":"tool_result","content":"1\t//! x"}}]}},"parent_tool_use_id":"{parent}","session_id":"s"}}"#
+        );
+        assert_eq!(parse_line(&result), vec![RunEvent::ToolResult { id: "toolu_r".into(), ok: true, summary: "".into() }]);
+
+        // The parent's own text, with the field present but null, is the answer.
+        let top = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"//! x"}]},"parent_tool_use_id":null,"session_id":"s"}"#;
+        assert_eq!(parse_line(top), vec![RunEvent::Text("//! x".into())]);
     }
 
     #[test]

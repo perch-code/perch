@@ -74,6 +74,29 @@ async fn a_finished_run_sends_nothing_more() {
 }
 
 #[tokio::test]
+async fn a_codex_run_ends_with_its_thread_and_the_time_it_took() {
+    let tmp = tempfile::tempdir().unwrap();
+    let thread = r#"{"type":"thread.started","thread_id":"01a0b584-d485-7d52-84b0-231e5b9b82d4"}"#;
+    let done = r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#;
+    let bin = fake_agent(tmp.path(), &format!("echo '{thread}'\nsleep 0.2\necho '{done}'"));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut spec = spec(bin, tmp.path().to_path_buf());
+    spec.backend = Backend::Codex;
+    Run::spawn(spec, tx).unwrap();
+
+    assert!(matches!(rx.recv().await, Some(RunEvent::Started { .. })));
+    match rx.recv().await {
+        Some(RunEvent::Finished { session_id, cost_usd, duration_ms }) => {
+            assert_eq!(session_id, "01a0b584-d485-7d52-84b0-231e5b9b82d4");
+            assert_eq!(cost_usd, None);
+            assert!(duration_ms >= 200, "the wall clock stands in: {duration_ms}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(rx.recv().await, None);
+}
+
+#[tokio::test]
 async fn a_missing_binary_fails_to_spawn() {
     let tmp = tempfile::tempdir().unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

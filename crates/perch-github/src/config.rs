@@ -26,24 +26,52 @@ pub struct Config {
 }
 
 /// The coding agent a thread's question goes to.
+///
+/// The top-level keys mean Claude Code, as they did before there was a
+/// second backend, so an old file keeps working. Codex lives under
+/// `[agent.codex]`. A model name picks the backend: one listed only under
+/// Codex goes to Codex, anything else to Claude Code.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct AgentConfig {
-    /// The executable. Found on `PATH` unless a path is given here.
+    /// The Claude Code executable. Found on `PATH` unless a path is given here.
     #[serde(default = "default_binary")]
     pub binary: String,
     /// What the picker starts on.
     #[serde(default = "default_model")]
     pub model: String,
-    /// `low`, `medium`, `high`, `xhigh` or `max`.
+    /// `low`, `medium`, `high`, `xhigh`, `max` or `ultra`.
     #[serde(default = "default_effort")]
     pub effort: String,
-    /// What the picker offers.
+    /// The Claude Code models the picker offers.
     #[serde(default = "default_models")]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub codex: CodexConfig,
+}
+
+/// The second backend. Absent from an old file, which is the same as
+/// present with no models: Codex is not offered.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CodexConfig {
+    /// The Codex executable. Found on `PATH` unless a path is given here.
+    #[serde(default = "default_codex_binary")]
+    pub binary: String,
+    /// The Codex models the picker offers, after the Claude Code ones.
+    /// Empty means Codex does not appear.
+    #[serde(default)]
     pub models: Vec<String>,
 }
 
+/// The backend names, spelled as `perch-agent` spells them. Strings rather
+/// than its enum so this crate does not have to depend on it.
+pub const CLAUDE_CODE: &str = "claude-code";
+pub const CODEX: &str = "codex";
+
 fn default_binary() -> String {
     "claude".into()
+}
+fn default_codex_binary() -> String {
+    "codex".into()
 }
 fn default_model() -> String {
     "sonnet".into()
@@ -63,7 +91,36 @@ impl Default for AgentConfig {
             model: default_model(),
             effort: default_effort(),
             models: default_models(),
+            codex: CodexConfig::default(),
         }
+    }
+}
+
+impl Default for CodexConfig {
+    fn default() -> Self {
+        Self { binary: default_codex_binary(), models: Vec::new() }
+    }
+}
+
+impl AgentConfig {
+    /// Which backend runs a model. Codex only when the name is listed
+    /// under Codex and not under Claude Code, so a name in both, or one
+    /// nobody lists, goes where it always went.
+    pub fn backend_of(&self, model: &str) -> &'static str {
+        let claude = self.models.iter().any(|m| m == model);
+        let codex = self.codex.models.iter().any(|m| m == model);
+        if codex && !claude { CODEX } else { CLAUDE_CODE }
+    }
+
+    /// The executable for a backend name. An unknown name gets Claude
+    /// Code's, the same fallback `backend_of` makes.
+    pub fn binary_for(&self, backend: &str) -> &str {
+        if backend == CODEX { &self.codex.binary } else { &self.binary }
+    }
+
+    /// What the picker lists after the Claude Code models.
+    pub fn codex_models(&self) -> &[String] {
+        &self.codex.models
     }
 }
 
@@ -267,6 +324,45 @@ mod tests {
         assert_eq!(c.agent.binary, "/opt/claude");
         assert_eq!(c.agent.effort, "high");
         assert_eq!(c.agent.model, "sonnet");
+    }
+
+    #[test]
+    fn an_agent_table_without_codex_offers_no_codex_models() {
+        let c: Config = toml::from_str("[agent]\nmodel = \"opus\"").unwrap();
+        assert_eq!(c.agent.codex, CodexConfig::default());
+        assert_eq!(c.agent.codex.binary, "codex");
+        assert!(c.agent.codex_models().is_empty());
+        assert_eq!(c.agent.backend_of("opus"), CLAUDE_CODE);
+    }
+
+    #[test]
+    fn a_codex_table_parses_and_picks_the_backend_by_model() {
+        let c: Config = toml::from_str(
+            r#"
+            [agent]
+            effort = "ultra"
+
+            [agent.codex]
+            binary = "/opt/codex"
+            models = ["gpt-5.6-sol"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.agent.effort, "ultra");
+        assert_eq!(c.agent.codex.binary, "/opt/codex");
+        assert_eq!(c.agent.codex_models(), ["gpt-5.6-sol".to_string()]);
+        assert_eq!(c.agent.backend_of("gpt-5.6-sol"), CODEX);
+        assert_eq!(c.agent.backend_of("sonnet"), CLAUDE_CODE);
+        assert_eq!(c.agent.backend_of("nobody-lists-this"), CLAUDE_CODE);
+        assert_eq!(c.agent.binary_for(CODEX), "/opt/codex");
+        assert_eq!(c.agent.binary_for(CLAUDE_CODE), "claude");
+        assert_eq!(c.agent.binary_for("something-else"), "claude");
+    }
+
+    #[test]
+    fn a_model_listed_under_both_backends_stays_with_claude() {
+        let c: Config = toml::from_str("[agent]\nmodels = [\"shared\"]\n[agent.codex]\nmodels = [\"shared\"]").unwrap();
+        assert_eq!(c.agent.backend_of("shared"), CLAUDE_CODE);
     }
 
     #[test]

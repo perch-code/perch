@@ -18,7 +18,7 @@ use perch_github::{Author, CommentMessage, CommentThread, RunRecord, RunStatus};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::model::{Composer, ReviewState};
+use crate::review::model::{AgentChoice, Composer, ReviewState};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
@@ -89,9 +89,10 @@ pub fn model_label(model: &str) -> String {
 }
 
 /// What a fresh composer starts on: the last thing sent, else config.
-pub fn defaults(app: AppState) -> (String, perch_agent::Effort) {
+pub fn defaults(app: AppState) -> AgentChoice {
     app.agent.with(|a| {
         (
+            crate::ask::backend_for(a, &a.model),
             a.model.clone(),
             perch_agent::Effort::parse(&a.effort).unwrap_or_default(),
         )
@@ -228,10 +229,11 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
                 composer.thread_id.clone(),
                 composer.anchor.clone(),
                 question.trim(),
+                composer.backend,
                 &composer.model,
                 composer.effort,
             );
-            state.agent_last.set(Some((composer.model.clone(), composer.effort)));
+            state.agent_last.set(Some((composer.backend, composer.model.clone(), composer.effort)));
             state.close_composer();
         })
     };
@@ -344,32 +346,50 @@ fn composer_view(app: AppState, state: ReviewState, backend: Rc<Backend>, compos
     })
 }
 
-/// The model to run with, from what config offers.
+/// The model to run with, from what config offers: Claude Code's models,
+/// then Codex's under a line when there are any. A model carries its
+/// backend, so picking one sets both.
 fn model_picker(app: AppState, state: ReviewState) -> impl IntoView {
     use floem::menu::Menu;
 
     let current = move || state.composer.with(|c| c.as_ref().map(|c| model_label(&c.model)).unwrap_or_default());
     menu_button(current, move || {
-        let models = app.agent.with(|a| a.models.clone());
         let selected = state.composer.get_untracked().map(|c| c.model).unwrap_or_default();
         let mut menu = Menu::new();
-        for model in models {
-            let label = model_label(&model);
-            let pick = model.clone();
-            let checked = model == selected;
-            menu = menu.item(label, move |item| {
-                let pick = pick.clone();
-                item.checked(checked).action(move || {
-                    state.composer.update(|c| {
-                        if let Some(c) = c {
-                            c.model = pick.clone();
-                        }
+        for (i, group) in model_groups(&app.agent.get_untracked()).into_iter().enumerate() {
+            if i > 0 {
+                menu = menu.separator();
+            }
+            for (backend, model) in group {
+                let label = model_label(&model);
+                let pick = model.clone();
+                let checked = model == selected;
+                menu = menu.item(label, move |item| {
+                    let pick = pick.clone();
+                    item.checked(checked).action(move || {
+                        state.composer.update(|c| {
+                            if let Some(c) = c {
+                                c.backend = backend;
+                                c.model = pick.clone();
+                            }
+                        })
                     })
-                })
-            });
+                });
+            }
         }
         menu
     })
+}
+
+/// The picker's sections: one per backend that has models, Claude Code
+/// first. Each entry names the backend the model runs on, which is
+/// config's call, not the section's, so a model listed under both stays
+/// with Claude Code wherever it appears.
+fn model_groups(agent: &perch_github::AgentConfig) -> Vec<Vec<(perch_agent::Backend, String)>> {
+    let entry = |m: &String| (crate::ask::backend_for(agent, m), m.clone());
+    let claude: Vec<_> = agent.models.iter().map(entry).collect();
+    let codex: Vec<_> = agent.codex_models().iter().map(entry).collect();
+    [claude, codex].into_iter().filter(|g| !g.is_empty()).collect()
 }
 
 fn effort_picker(state: ReviewState) -> impl IntoView {
@@ -848,6 +868,33 @@ mod tests {
         assert_eq!(model_label("claude-sonnet-5"), "claude-sonnet-5");
     }
 
+    #[test]
+    fn the_picker_lists_claude_then_codex_and_each_model_knows_its_backend() {
+        use perch_agent::Backend;
+        let agent = perch_github::AgentConfig {
+            models: vec!["opus".into(), "sonnet".into()],
+            codex: perch_github::CodexConfig { binary: "codex".into(), models: vec!["gpt-5.6-sol".into()] },
+            ..perch_github::AgentConfig::default()
+        };
+        assert_eq!(
+            model_groups(&agent),
+            vec![
+                vec![(Backend::ClaudeCode, "opus".to_string()), (Backend::ClaudeCode, "sonnet".to_string())],
+                vec![(Backend::Codex, "gpt-5.6-sol".to_string())],
+            ]
+        );
+
+        let claude_only = perch_github::AgentConfig { models: vec!["sonnet".into()], ..perch_github::AgentConfig::default() };
+        assert_eq!(model_groups(&claude_only), vec![vec![(Backend::ClaudeCode, "sonnet".to_string())]], "no separator without Codex");
+
+        let shared = perch_github::AgentConfig {
+            models: vec!["shared".into()],
+            codex: perch_github::CodexConfig { binary: "codex".into(), models: vec!["shared".into()] },
+            ..perch_github::AgentConfig::default()
+        };
+        assert_eq!(model_groups(&shared)[1], vec![(Backend::ClaudeCode, "shared".to_string())], "config decides, not the section");
+    }
+
 }
 
 /// The column in a headless window, driven by clicks.
@@ -1009,7 +1056,7 @@ mod column {
         let (mut harness, state) = app_harness();
         // The state in the report: an unanchored composer, its box focused.
         state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(None, None, String::new(), ("sonnet".into(), perch_agent::Effort::Medium));
+        state.open_composer(None, None, String::new(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
         harness.rebuild();
         harness.paint();
         assert!(state.composer.get().is_some());
@@ -1085,7 +1132,7 @@ mod column {
     fn escape_in_an_empty_box_closes_the_composer() {
         let (mut harness, state) = app_harness();
         state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(None, None, String::new(), ("sonnet".into(), perch_agent::Effort::Medium));
+        state.open_composer(None, None, String::new(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
         harness.rebuild();
         harness.paint();
         harness.dispatch_event(escape());
@@ -1099,7 +1146,7 @@ mod column {
     fn escape_keeps_a_composer_with_a_question_in_it() {
         let (mut harness, state) = app_harness();
         state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(None, None, "why is this here?".into(), ("sonnet".into(), perch_agent::Effort::Medium));
+        state.open_composer(None, None, "why is this here?".into(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
         harness.rebuild();
         harness.paint();
         harness.dispatch_event(escape());
@@ -1112,7 +1159,7 @@ mod column {
     fn the_composers_close_button_dismisses_it() {
         let (mut harness, state) = app_harness();
         state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(None, None, "half a thought".into(), ("sonnet".into(), perch_agent::Effort::Medium));
+        state.open_composer(None, None, "half a thought".into(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
         harness.rebuild();
         harness.paint();
         // The anchor row is the card's first row; its close button is the

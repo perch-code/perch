@@ -54,9 +54,28 @@ pub fn apply_run_event(run: &mut perch_github::RunRecord, event: &perch_agent::R
     None
 }
 
+/// Which backend runs a model, as config decides it. Config speaks in
+/// names so it need not depend on `perch-agent`; a name it does not know
+/// is Claude Code, the same fallback config itself makes.
+pub fn backend_for(agent: &perch_github::AgentConfig, model: &str) -> perch_agent::Backend {
+    perch_agent::Backend::parse(agent.backend_of(model)).unwrap_or(perch_agent::Backend::ClaudeCode)
+}
+
+/// The config key to point at when a backend's binary cannot be started.
+pub fn binary_hint(backend: perch_agent::Backend) -> &'static str {
+    match backend {
+        perch_agent::Backend::ClaudeCode => "Set agent.binary in config.toml to where Claude Code is installed.",
+        perch_agent::Backend::Codex => "Set agent.codex.binary in config.toml to where Codex is installed.",
+    }
+}
+
 /// The spec a run takes, from config, the prompt, and where to run it.
+///
+/// The tool list goes along whatever the backend; Claude Code reads it
+/// and Codex ignores it in favour of its sandbox.
 pub fn run_spec(
     agent: &perch_github::AgentConfig,
+    backend: perch_agent::Backend,
     model: &str,
     effort: perch_agent::Effort,
     cwd: std::path::PathBuf,
@@ -64,8 +83,8 @@ pub fn run_spec(
     resume: Option<String>,
 ) -> perch_agent::RunSpec {
     perch_agent::RunSpec {
-        backend: perch_agent::Backend::ClaudeCode,
-        binary: agent.binary.clone().into(),
+        backend,
+        binary: agent.binary_for(backend.name()).into(),
         model: model.to_string(),
         effort,
         cwd,
@@ -187,7 +206,8 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
     println!("--- system ---\n{}\n--- user ---\n{}\n--- run ---", prompt.system.as_deref().unwrap_or(""), prompt.user);
 
     let effort = perch_agent::Effort::parse(&config.agent.effort).unwrap_or_default();
-    let spec = run_spec(&config.agent, &config.agent.model, effort, checkout.worktree.clone(), &prompt, None);
+    let backend = backend_for(&config.agent, &config.agent.model);
+    let spec = run_spec(&config.agent, backend, &config.agent.model, effort, checkout.worktree.clone(), &prompt, None);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     perch_agent::Run::spawn(spec, tx).map_err(|e| e.to_string())?;
 
@@ -572,6 +592,43 @@ mod tests {
         apply_run_event(&mut failed, &RunEvent::Failed { message: "boom".into() });
         assert_eq!(failed.status, RunStatus::Failed);
         assert_eq!(failed.error.as_deref(), Some("boom"));
+    }
+
+    fn agent_config() -> perch_github::AgentConfig {
+        perch_github::AgentConfig {
+            binary: "/opt/claude".into(),
+            codex: perch_github::CodexConfig { binary: "/opt/codex".into(), models: vec!["gpt-5.6-sol".into()] },
+            ..perch_github::AgentConfig::default()
+        }
+    }
+
+    #[test]
+    fn the_backend_follows_the_model_and_the_binary_follows_the_backend() {
+        use perch_agent::Backend;
+        let agent = agent_config();
+        assert_eq!(backend_for(&agent, "sonnet"), Backend::ClaudeCode);
+        assert_eq!(backend_for(&agent, "gpt-5.6-sol"), Backend::Codex);
+        assert_eq!(backend_for(&agent, "nobody-lists-this"), Backend::ClaudeCode);
+
+        let prompt = first_prompt(&input(None, None, "why?"));
+        let claude = run_spec(&agent, Backend::ClaudeCode, "sonnet", perch_agent::Effort::High, "/tmp".into(), &prompt, None);
+        assert_eq!(claude.backend, Backend::ClaudeCode);
+        assert_eq!(claude.binary, std::path::PathBuf::from("/opt/claude"));
+        assert!(claude.args().windows(2).any(|w| w == ["--effort", "high"]));
+
+        let codex = run_spec(&agent, Backend::Codex, "gpt-5.6-sol", perch_agent::Effort::Ultra, "/tmp".into(), &prompt, Some("t-1".into()));
+        assert_eq!(codex.backend, Backend::Codex);
+        assert_eq!(codex.binary, std::path::PathBuf::from("/opt/codex"));
+        assert_eq!(codex.system.as_deref(), Some(FRAMING), "the framing goes as developer instructions");
+        let args = codex.args();
+        assert_eq!(&args[..4], ["exec", "--json", "resume", "t-1"]);
+        assert!(args.windows(2).any(|w| w == ["-c", "model_reasoning_effort=ultra"]));
+    }
+
+    #[test]
+    fn a_spawn_failure_names_the_key_for_its_backend() {
+        assert!(binary_hint(perch_agent::Backend::ClaudeCode).starts_with("Set agent.binary "));
+        assert!(binary_hint(perch_agent::Backend::Codex).starts_with("Set agent.codex.binary "));
     }
 
     #[test]

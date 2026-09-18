@@ -6,8 +6,8 @@ A native macOS tool for reviewing code, written entirely in Rust with
 The sidebar lists your projects, and under each the things being worked on:
 a pull request someone opened, an issue, a branch of your own. Click one
 and the view that fits it opens: a read-only editor over the diff with
-rust-analyzer behind it, or the issue with its comments. Ask Claude Code
-about the lines on screen and the answer stays there as a thread. What
+rust-analyzer behind it, or the issue with its comments. Ask a coding
+agent about the lines on screen and the answer stays there as a thread. What
 needs looking at sits at the top, and every discussion is archived as
 markdown that a coding agent can search. Nothing in Perch writes to
 GitHub.
@@ -136,17 +136,19 @@ GitHub.
 **Threads**
 
 - Select lines in the editor and press `a`, or click the `+` in the gutter,
-  to ask Claude Code about them. The answer appears beside the code as a
-  thread anchored to those lines, with a marker in the gutter, and takes
+  to ask a coding agent about them. The answer appears beside the code as
+  a thread anchored to those lines, with a marker in the gutter, and takes
   follow-ups. Press `a` with no file open, or the `+` at the top of the
   column, to ask about the pull request as a whole.
-- Each question picks its model and effort. The thread shows what the
-  agent did, one line per file read or command run, then its answer, then
-  what it cost and how long it took. A run can be stopped.
-- The agent is read-only by construction: it may read files, search, and
-  run `git diff`, `git log`, `git show`, `git blame` and `rg`. Edits are
-  denied, and a denial shows as a step line. It runs in the worktree, as a
-  child process of Perch, on your own Claude Code login.
+- Each question picks its model and effort. The model picks the agent:
+  Claude Code, or Codex when its models are configured. The thread shows
+  what the agent did, one line per file read or command run, then its
+  answer, then what it cost and how long it took. A run can be stopped.
+- The agent is read-only by construction. Claude Code may read files,
+  search, and run `git diff`, `git log`, `git show`, `git blame` and `rg`;
+  edits are denied, and a denial shows as a step line. Codex runs under
+  its own read-only sandbox. Either runs in the worktree, as a child
+  process of Perch, on your own login.
 - Threads belong to the item. Archiving keeps them; deleting removes them.
   When the pull request moves on and the anchored file changes, the thread
   says Outdated.
@@ -282,19 +284,48 @@ when an item needs one, and declaring it later adopts the items.
 
 ## Threads
 
-A question runs `claude -p` in the worktree with `--output-format
+A question goes to one of two agents, and the model chosen in the
+composer decides which.
+
+Claude Code runs as `claude -p` in the worktree with `--output-format
 stream-json`, an allowed-tool list that permits only reading and a few
 git commands, and the writing tools explicitly denied. Nothing is passed
 that skips permissions. A follow-up resumes the agent's own session with
 `--resume`, so Perch never resends the conversation.
 
+Codex runs as `codex exec --json` in the worktree under its read-only
+sandbox (`-s read-only`; `sandbox_mode` on resume). The framing goes in
+as `developer_instructions`. A follow-up resumes the thread by id with
+the model repeated, since Codex would otherwise fall back to its default.
+Codex reports no cost, so the thread shows only the time.
+
+A follow-up resumes the last finished run only when the same agent
+answered it. Switching agents in a thread starts over, with the earlier
+messages folded into the prompt.
+
+Effort is `low`, `medium`, `high`, `xhigh`, `max` or `ultra`. The rungs
+below `ultra` pass straight through to both agents. `ultra` lets the
+agent delegate. On Claude Code it is `--effort ultracode`: xhigh plus the
+Workflow and Agent tools, whose subagents inherit the read-only tool list.
+On Codex it is `model_reasoning_effort=ultra`; the helpers it spawns do
+not appear in the thread, only the parent's commands and answer. Only
+some models support it on either side.
+
 ```toml
 [agent]
 binary = "claude"              # optional; found on PATH by default
 model = "sonnet"               # optional; what the picker starts on
-effort = "medium"              # optional; low | medium | high | xhigh | max
+effort = "medium"              # optional; low | medium | high | xhigh | max | ultra
 models = ["fable", "opus", "sonnet", "haiku"]   # optional; what the picker offers
+
+[agent.codex]
+binary = "codex"               # optional; found on PATH by default
+models = ["gpt-5.6-sol"]       # optional; empty, and Codex is not offered
 ```
+
+The top-level keys mean Claude Code, so an older file keeps working. The
+picker lists the Claude Code models, then Codex's under a line when there
+are any. A model named under both goes to Claude Code.
 
 `perch --ask owner/repo#N path:start-end "question"` runs one question
 from a terminal and prints the prompt, every event, and the answer. Leave
@@ -347,7 +378,7 @@ no timer.
 | `perch-github` | Model, REST client, SQLite cache. |
 | `perch-git` | Clone, fetch, worktree, diff, tree listing. |
 | `perch-knowledge` | Discussion records, raw JSONL, rendered markdown, the skill. |
-| `perch-agent` | Claude Code as a child process: the command line, the event parser, spawn and cancel. |
+| `perch-agent` | Claude Code and Codex as child processes: the command lines, an event parser for each, spawn and cancel. |
 | `perch-syntax` | tree-sitter highlighting. |
 | `perch-lsp` | Language server client. |
 | `perch-app` | Floem UI and the background worker. Binary target `perch`. |

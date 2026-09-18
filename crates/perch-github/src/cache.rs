@@ -1919,10 +1919,10 @@ mod tests {
     #[test]
     fn a_follow_up_resumes_the_last_finished_run() {
         let t = comment_thread("t1", "w");
-        assert_eq!(t.resumable_session().as_deref(), Some("sess"));
+        assert_eq!(t.resumable_session("claude-code").as_deref(), Some("sess"));
         let mut failed = t.clone();
         failed.messages[1].run.as_mut().unwrap().status = RunStatus::Failed;
-        assert_eq!(failed.resumable_session(), None);
+        assert_eq!(failed.resumable_session("claude-code"), None);
     }
 
     fn project(name: &str) -> Project {

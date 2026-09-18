@@ -94,12 +94,18 @@ pub struct CommentThread {
 impl CommentThread {
     /// The session id of the last run that finished, which a follow-up
     /// resumes. `None` means start over with the history folded in.
-    pub fn resumable_session(&self) -> Option<String> {
+    ///
+    /// A session belongs to the backend that made it, so the last finished
+    /// run only counts when it ran on `backend`. Switching backends
+    /// mid-thread starts over rather than looking for an older run of the
+    /// right kind, because the history since that run would be lost.
+    pub fn resumable_session(&self, backend: &str) -> Option<String> {
         self.messages
             .iter()
             .rev()
             .filter_map(|m| m.run.as_ref())
             .find(|r| r.status == RunStatus::Finished)
+            .filter(|r| r.backend == backend)
             .and_then(|r| r.session_id.clone())
     }
 
@@ -249,5 +255,76 @@ mod tests {
         let b = new_id();
         assert_ne!(a, b);
         assert!(!a.contains('/'));
+    }
+
+    fn run(backend: &str, session: &str, status: RunStatus) -> RunRecord {
+        RunRecord {
+            id: new_id(),
+            thread_id: "t".into(),
+            backend: backend.into(),
+            model: "m".into(),
+            effort: "medium".into(),
+            session_id: Some(session.into()),
+            status,
+            cost_usd: None,
+            duration_ms: None,
+            steps: Vec::new(),
+            error: None,
+            started_at: Timestamp::UNIX_EPOCH,
+            ended_at: None,
+        }
+    }
+
+    fn thread_of(runs: Vec<RunRecord>) -> CommentThread {
+        let messages = runs
+            .into_iter()
+            .map(|r| CommentMessage {
+                id: new_id(),
+                thread_id: "t".into(),
+                origin: ThreadOrigin::Local,
+                author: Author::Agent { backend: r.backend.clone(), model: r.model.clone() },
+                body: String::new(),
+                created_at: Timestamp::UNIX_EPOCH,
+                run: Some(r),
+            })
+            .collect();
+        CommentThread {
+            id: "t".into(),
+            worktree_id: "w".into(),
+            origin: ThreadOrigin::Local,
+            anchor: None,
+            outdated: false,
+            resolved: false,
+            created_at: Timestamp::UNIX_EPOCH,
+            messages,
+        }
+    }
+
+    #[test]
+    fn a_follow_up_resumes_only_a_session_of_its_own_backend() {
+        let t = thread_of(vec![run("codex", "thread-1", RunStatus::Finished)]);
+        assert_eq!(t.resumable_session("codex").as_deref(), Some("thread-1"));
+        assert_eq!(t.resumable_session("claude-code"), None);
+    }
+
+    #[test]
+    fn switching_backends_does_not_reach_past_the_last_finished_run() {
+        let t = thread_of(vec![
+            run("claude-code", "sess-1", RunStatus::Finished),
+            run("codex", "thread-2", RunStatus::Finished),
+        ]);
+        assert_eq!(t.resumable_session("codex").as_deref(), Some("thread-2"));
+        assert_eq!(t.resumable_session("claude-code"), None, "the newer Codex run made its history stale");
+    }
+
+    #[test]
+    fn a_newer_failed_run_does_not_hide_an_older_finished_one() {
+        let t = thread_of(vec![
+            run("claude-code", "sess-1", RunStatus::Finished),
+            run("claude-code", "sess-2", RunStatus::Failed),
+        ]);
+        assert_eq!(t.resumable_session("claude-code").as_deref(), Some("sess-1"));
+        let none = thread_of(vec![run("claude-code", "sess-1", RunStatus::Failed)]);
+        assert_eq!(none.resumable_session("claude-code"), None);
     }
 }
