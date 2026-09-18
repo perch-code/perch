@@ -146,6 +146,9 @@ impl Git {
         // Never let git block on an interactive prompt inside a GUI app.
         command.env("GIT_TERMINAL_PROMPT", "0");
         command.env("GIT_CONFIG_NOSYSTEM", "1");
+        // Some of git's messages are read back as text; a translated git
+        // would say them differently.
+        command.env("LC_ALL", "C");
         if let Some(token) = &self.token {
             command.env(TOKEN_ENV, token);
         }

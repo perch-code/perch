@@ -277,13 +277,16 @@ pub async fn changed_files(
     // besides, which is what Viewed keys on.
     let raw = diff(git, worktree, &["--raw", "--no-abbrev"], &revs).await?;
     let numstat = diff(git, worktree, &["--numstat"], &revs).await?;
-    let mut files = assemble(parse_raw(&raw), parse_numstat(&numstat));
+    let raw = parse_raw(&raw);
+    let irregular: std::collections::HashSet<String> =
+        raw.iter().filter(|c| !c.regular).map(|c| c.path.clone()).collect();
+    let mut files = assemble(raw, parse_numstat(&numstat));
 
     if head == Rev::Worktree {
         add_untracked(git, worktree, &mut files).await?;
         // git prints the null sha for a working tree file rather than
         // hashing it, so the head blobs are taken from disk.
-        hash_on_disk(git, worktree, &mut files).await?;
+        hash_on_disk(git, worktree, &mut files, &irregular).await?;
         files.sort_by(|a, b| a.path.cmp(&b.path));
     }
 
@@ -350,19 +353,37 @@ fn count_lines(bytes: &[u8]) -> (u32, bool) {
 ///
 /// The filters `git add` would apply are applied, so an unchanged file
 /// hashes to the blob its commit has and stays viewed.
-async fn hash_on_disk(git: &Git, worktree: &Path, files: &mut [ChangedFile]) -> Result<(), Error> {
-    let on_disk = |f: &ChangedFile| f.status != ChangeStatus::Deleted;
+async fn hash_on_disk(
+    git: &Git,
+    worktree: &Path,
+    files: &mut [ChangedFile],
+    irregular: &std::collections::HashSet<String>,
+) -> Result<(), Error> {
+    // Only a regular file has a blob to hash: a submodule is a commit and
+    // a symlink's blob is its target text, which hash-object would not
+    // give. Those keep no blob and are never Viewed.
+    let on_disk = |f: &ChangedFile| f.status != ChangeStatus::Deleted && !irregular.contains(&f.path);
     let paths: Vec<String> = files.iter().filter(|f| on_disk(f)).map(|f| f.path.clone()).collect();
     if paths.is_empty() {
         return Ok(());
     }
 
-    let args = ["hash-object", "--"].iter().map(|s| s.to_string()).chain(paths);
-    let out = git.run(Some(worktree), args, DIFF_TIMEOUT).await?;
-
-    let mut shas = out.lines();
-    for file in files.iter_mut().filter(|f| on_disk(f)) {
-        file.head_blob = shas.next().map(str::to_string);
+    let args = ["hash-object", "--"].iter().map(|s| s.to_string()).chain(paths.clone());
+    match git.run(Some(worktree), args, DIFF_TIMEOUT).await {
+        Ok(out) => {
+            let mut shas = out.lines();
+            for file in files.iter_mut().filter(|f| on_disk(f)) {
+                file.head_blob = shas.next().map(str::to_string);
+            }
+        }
+        // One unreadable file, a broken symlink say, fails the whole call;
+        // hash the rest one at a time and leave that one without a blob.
+        Err(_) => {
+            for file in files.iter_mut().filter(|f| on_disk(f)) {
+                let args = ["hash-object", "--", file.path.as_str()];
+                file.head_blob = git.run(Some(worktree), args, DIFF_TIMEOUT).await.ok().map(|s| s.trim().to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -377,6 +398,9 @@ pub struct RawChange {
     /// The head side's blob. `None` where git printed the null sha: a
     /// deletion, or a working tree file it did not hash.
     pub head_blob: Option<String>,
+    /// Whether the head side is a regular file, as opposed to a submodule
+    /// or a symlink, which have no blob worth keying Viewed on.
+    pub regular: bool,
 }
 
 /// Parse `git diff -M --raw --no-abbrev -z`.
@@ -389,11 +413,14 @@ pub fn parse_raw(raw: &str) -> Vec<RawChange> {
 
     while let Some(record) = fields.next() {
         let mut parts = record.strip_prefix(':').unwrap_or(record).split(' ');
-        let (_, _, _, Some(new_sha), Some(code)) =
+        let (_, Some(new_mode), _, Some(new_sha), Some(code)) =
             (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
         else {
             continue;
         };
+        // 100644 and 100755 are files; 120000 is a symlink, 160000 a
+        // submodule, and 000000 a deletion, which is regular enough.
+        let regular = new_mode.starts_with("100") || new_mode == "000000";
         let Some(status) = code.chars().next().and_then(ChangeStatus::from_letter) else {
             continue;
         };
@@ -408,9 +435,10 @@ pub fn parse_raw(raw: &str) -> Vec<RawChange> {
                     path: second.to_string(),
                     old_path: Some(first.to_string()),
                     head_blob,
+                    regular,
                 });
             }
-            _ => out.push(RawChange { status, path: first.to_string(), old_path: None, head_blob }),
+            _ => out.push(RawChange { status, path: first.to_string(), old_path: None, head_blob, regular }),
         }
     }
 
@@ -669,24 +697,28 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
                     path: "a.txt".into(),
                     old_path: None,
                     head_blob: Some("6addb9b7c753aa12cdc6c0f22d7c7fe4b43ec8eb".into()),
+                    regular: true,
                 },
                 RawChange {
                     status: ChangeStatus::Renamed,
                     path: "c.txt".into(),
                     old_path: Some("b.txt".into()),
                     head_blob: Some("61780798228d17af2d34fce4cfbdf35556832472".into()),
+                    regular: true,
                 },
                 RawChange {
                     status: ChangeStatus::Deleted,
                     path: "gone.txt".into(),
                     old_path: None,
                     head_blob: None,
+                    regular: true,
                 },
                 RawChange {
                     status: ChangeStatus::Added,
                     path: "new.txt".into(),
                     old_path: None,
                     head_blob: Some("3e757656cf36eca53338e520d134963a44f793f8".into()),
+                    regular: true,
                 },
             ]
         );
@@ -705,8 +737,8 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
     #[test]
     fn assembling_pairs_records_with_counts_and_sorts_by_path() {
         let raw = vec![
-            RawChange { status: ChangeStatus::Modified, path: "b.rs".into(), old_path: None, head_blob: Some("bb".into()) },
-            RawChange { status: ChangeStatus::Added, path: "a.rs".into(), old_path: None, head_blob: Some("aa".into()) },
+            RawChange { status: ChangeStatus::Modified, path: "b.rs".into(), old_path: None, head_blob: Some("bb".into()), regular: true },
+            RawChange { status: ChangeStatus::Added, path: "a.rs".into(), old_path: None, head_blob: Some("aa".into()), regular: true },
         ];
         let numstat = vec![(5, 2, false, "b.rs".to_string()), (40, 0, false, "a.rs".to_string())];
         let files = assemble(raw, numstat);
