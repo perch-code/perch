@@ -170,6 +170,46 @@ fn no_temporary_files_are_left_behind() {
     }
 }
 
+/// Issue 42 in the same repository as the pull request: an opener and one
+/// comment.
+fn issue() -> Vec<Message> {
+    let mut opener = msg("issue-42", "2026-09-13T08:00:00Z", "# Manifest races with compaction\n\nSeen twice.");
+    opener.container = "slatedb/slatedb#issue-42".into();
+    opener.url = "https://github.com/slatedb/slatedb/issues/42".into();
+    let mut reply = msg("comment-7", "2026-09-13T09:30:00Z", "Repro attached.");
+    reply.container = "slatedb/slatedb#issue-42".into();
+    reply.url = "https://github.com/slatedb/slatedb/issues/42#issuecomment-7".into();
+    vec![opener, reply]
+}
+
+#[test]
+fn an_issue_renders_beside_the_repository_pulls() {
+    let tmp = tempfile::tempdir().unwrap();
+    let k = Knowledge::open(tmp.path());
+    k.ingest(&discussion()).unwrap();
+    let n = k.ingest(&issue()).unwrap();
+    assert_eq!(n.added, 2);
+
+    let md = std::fs::read_to_string(tmp.path().join("slatedb/github/slatedb/slatedb/issues/42.md")).unwrap();
+    assert!(md.starts_with("# slatedb/slatedb#42: Manifest races with compaction\n"), "{md}");
+    assert!(md.contains("**chris** opened 2026-09-13 08:00 [↗](https://github.com/slatedb/slatedb/issues/42)"));
+    assert!(md.contains("Repro attached."));
+    assert!(!md.contains("issue-42"), "the heading names the issue as GitHub does");
+
+    // One raw file per repository, with both in it.
+    let raw = std::fs::read_to_string(tmp.path().join("slatedb/raw/github/slatedb-slatedb.jsonl")).unwrap();
+    assert_eq!(raw.lines().count(), 7);
+    assert!(tmp.path().join("slatedb/github/slatedb/slatedb/pulls/812.md").is_file());
+
+    // The project index knows one repository and lists both files under it.
+    let index = std::fs::read_to_string(tmp.path().join("slatedb/index.md")).unwrap();
+    assert!(index.contains("Repositories: slatedb/slatedb\n"), "{index}");
+    assert!(index.contains("| slatedb/slatedb#812 | github/slatedb/slatedb/pulls/812.md | 5 |"), "{index}");
+    assert!(index.contains("| slatedb/slatedb#42 | github/slatedb/slatedb/issues/42.md | 2 |"), "{index}");
+    let root = std::fs::read_to_string(tmp.path().join("index.md")).unwrap();
+    assert!(root.contains("| slatedb | slatedb/slatedb | 7 |"), "{root}");
+}
+
 #[test]
 fn the_skill_lands_in_every_directory_named() {
     let tmp = tempfile::tempdir().unwrap();
@@ -180,5 +220,6 @@ fn the_skill_lands_in_every_directory_named() {
         let text = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
         assert!(text.contains("slatedb"));
         assert!(text.contains(&tmp.path().join("knowledge").display().to_string()));
+        assert!(text.contains("issues/<n>.md"));
     }
 }

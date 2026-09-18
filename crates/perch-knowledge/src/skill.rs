@@ -22,7 +22,7 @@ pub fn render(root: &Path, projects: &[String]) -> String {
     format!(
         "---
 name: perch
-description: Discussion history for {names} from GitHub pull requests. Use when asked why something was decided, what was discussed, or for the context behind a change or a pull request.
+description: Discussion history for {names} from GitHub pull requests and issues. Use when asked why something was decided, what was discussed, or for the context behind a change, a pull request or an issue.
 ---
 
 Perch archives discussion about these projects as markdown under
@@ -35,12 +35,15 @@ Layout, per project:
     <project>/index.md                   what is here and how current it is
     <project>/github/<owner>/<repo>/pulls/<n>.md
                                          description, comments, reviews
+    <project>/github/<owner>/<repo>/issues/<n>.md
+                                         issue, comments
     <project>/raw/                       machine records; read the markdown instead
 
 Search with `rg` before reading anything whole:
 
     rg -n \"manifest fence\" {root}/{example}
     rg -n --glob 'pulls/8*.md' epoch {root}/{example}
+    rg -n --glob 'issues/*.md' epoch {root}/{example}
 
 Every message carries its author, time and a permalink. Cite the permalink
 when you rely on one. The files are updated while Perch runs, so read again
@@ -74,6 +77,14 @@ mod tests {
         let text = render(Path::new("/somewhere/else"), &["perch".into()]);
         assert!(text.contains("`/somewhere/else/index.md`"));
         assert!(text.contains("rg -n \"manifest fence\" /somewhere/else/perch"));
+    }
+
+    #[test]
+    fn issues_are_named_beside_pull_requests() {
+        let text = render(Path::new("/k"), &["perch".into()]);
+        assert!(description(&text).contains("from GitHub pull requests and issues"));
+        assert!(text.contains("<project>/github/<owner>/<repo>/issues/<n>.md"));
+        assert!(text.contains("<project>/github/<owner>/<repo>/pulls/<n>.md"));
     }
 
     #[test]

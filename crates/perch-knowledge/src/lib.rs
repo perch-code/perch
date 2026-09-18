@@ -49,7 +49,8 @@ pub struct Message {
     pub source: Source,
     /// The project the container belongs to, such as `slatedb`.
     pub project: String,
-    /// Where the message was said: `owner/repo#812`, later a channel.
+    /// Where the message was said: `owner/repo#812` for a pull request,
+    /// `owner/repo#issue-42` for an issue, later a channel.
     pub container: String,
     /// A review, later a Discord thread. `None` for the main conversation.
     pub thread: Option<String>,
@@ -235,18 +236,32 @@ impl Knowledge {
     /// Where a container's markdown lives, relative to the project.
     pub fn rendered_relative(source: Source, container: &str) -> PathBuf {
         let mut path = PathBuf::from(source.dir_name());
-        match container.split_once('#') {
-            // `owner/repo#812` → `owner/repo/pulls/812.md`
-            Some((repo, number)) => {
-                for part in repo.split('/') {
+        match numbered(container) {
+            // `owner/repo#812` → `owner/repo/pulls/812.md`,
+            // `owner/repo#issue-42` → `owner/repo/issues/42.md`
+            Some(n) => {
+                for part in n.repo.split('/') {
                     path.push(safe(part));
                 }
-                path.push("pulls");
-                path.push(format!("{}.md", safe(number)));
+                path.push(if n.issue { "issues" } else { "pulls" });
+                path.push(format!("{}.md", safe(n.number)));
             }
             None => path.push(format!("{}.md", safe(container))),
         }
         path
+    }
+
+    /// How a container is named in a heading or an index.
+    ///
+    /// An issue's container carries `issue-` so its records cannot be
+    /// mistaken for a pull request's in the shared raw file. The reader
+    /// sees `owner/repo#42` for both, which is how GitHub itself refers to
+    /// them; the rendered file's path says which kind it is.
+    pub fn container_label(container: &str) -> String {
+        match numbered(container) {
+            Some(n) => format!("{}#{}", n.repo, n.number),
+            None => container.to_string(),
+        }
     }
 
     fn render_container(
@@ -257,7 +272,7 @@ impl Knowledge {
         all: &[Message],
     ) -> Result<(), Error> {
         let messages: Vec<&Message> = all.iter().filter(|m| m.container == container).collect();
-        let text = render::container(container, &messages);
+        let text = render::container(&Self::container_label(container), &messages);
         let path = self.root.join(project).join(Self::rendered_relative(source, container));
         write_atomic(&path, &text)
     }
@@ -294,11 +309,30 @@ fn raw_key(m: &Message) -> RawKey {
     }
 }
 
+/// A container that names a numbered thing in a repository: a pull request
+/// as `owner/repo#812`, an issue as `owner/repo#issue-42`.
+struct Numbered<'a> {
+    repo: &'a str,
+    number: &'a str,
+    issue: bool,
+}
+
+fn numbered(container: &str) -> Option<Numbered<'_>> {
+    let (repo, rest) = container.split_once('#')?;
+    let (issue, number) = match rest.strip_prefix("issue-") {
+        Some(number) => (true, number),
+        None => (false, rest),
+    };
+    Some(Numbered { repo, number, issue })
+}
+
 /// The part of a container that names its raw file: the repository of
-/// `owner/repo#812`, the whole name otherwise. Slashes become dashes so the
-/// group is one path segment.
+/// `owner/repo#812` or `owner/repo#issue-42`, the whole name otherwise.
+/// Slashes become dashes so the group is one path segment. A pull request
+/// and an issue in one repository share a file, and their record ids
+/// (`pr-812`, `issue-42`) keep them apart in it.
 fn container_group(container: &str) -> String {
-    let group = container.split_once('#').map(|(g, _)| g).unwrap_or(container);
+    let group = numbered(container).map(|n| n.repo).unwrap_or(container);
     safe(&group.replace('/', "-"))
 }
 
@@ -374,6 +408,18 @@ mod tests {
             Knowledge::rendered_relative(Source::Discord, "general"),
             PathBuf::from("discord/general.md")
         );
+    }
+
+    #[test]
+    fn an_issue_shares_the_repository_raw_file_and_renders_beside_pulls() {
+        assert_eq!(container_group("slatedb/slatedb#issue-42"), "slatedb-slatedb");
+        assert_eq!(
+            Knowledge::rendered_relative(Source::GitHub, "slatedb/slatedb#issue-42"),
+            PathBuf::from("github/slatedb/slatedb/issues/42.md")
+        );
+        assert_eq!(Knowledge::container_label("slatedb/slatedb#issue-42"), "slatedb/slatedb#42");
+        assert_eq!(Knowledge::container_label("slatedb/slatedb#812"), "slatedb/slatedb#812");
+        assert_eq!(Knowledge::container_label("general"), "general");
     }
 
     #[test]
