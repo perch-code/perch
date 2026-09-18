@@ -10,6 +10,7 @@ pub mod issue;
 pub mod markdown;
 pub mod model;
 pub mod rail;
+pub mod references;
 pub mod strip;
 pub mod styling;
 pub mod tabs;

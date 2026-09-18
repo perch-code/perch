@@ -92,6 +92,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let key_mark = on_mark.clone();
     let review_mark = on_mark.clone();
     let key_backend = backend.clone();
+    let references_backend = backend.clone();
 
     // Settings the sidebar asks to be remembered go through here, which is
     // where the backend handle is.
@@ -180,6 +181,41 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // Over everything, and only while the drawer's edge is being dragged.
         sidebar::resize_cursor_sheet(state),
     ))
+    // Two keys the code editor would otherwise keep. The editor stops
+    // every key once it has focus, and both of these are pressed right
+    // after clicking in it, so they are caught on the way down to it
+    // rather than on the way back up. Target as well, for when nothing
+    // has focus and floem hands the key straight to whoever listens.
+    .on_event_with_config(
+        el::KeyDown,
+        floem::context::EventCallbackConfig { phases: floem::context::Phases::CAPTURE_AND_TARGET },
+        move |_, key: &KeyboardEvent| {
+            let typing = state.search_focused.get() || review.composer_focused.get();
+            if typing || !review.is_open() {
+                return EventPropagation::Continue;
+            }
+            // Shift-F12 asks for references to the cursor's symbol.
+            if key.code == Code::F12 && key.modifiers == Modifiers::SHIFT {
+                crate::review::references::find_at_cursor(review, &references_backend);
+                return EventPropagation::Stop;
+            }
+            // Escape closes the references panel when nothing else claims
+            // it: a composer, or something open under a sidebar row.
+            let claimed = review.composer.with(Option::is_some)
+                || state.renaming.with(Option::is_some)
+                || state.confirm_delete.with(Option::is_some)
+                || state.new_project_for.with(Option::is_some);
+            if key.code == Code::Escape
+                && key.modifiers.is_empty()
+                && !claimed
+                && review.references.with(Option::is_some)
+            {
+                review.references.set(None);
+                return EventPropagation::Stop;
+            }
+            EventPropagation::Continue
+        },
+    )
     // Window-level shortcuts. Key events bubble from whatever has focus, so
     // a handler on the root view catches them wherever the reader is.
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
