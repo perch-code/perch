@@ -8,6 +8,7 @@ pub mod diff;
 pub mod display;
 pub mod prepare;
 pub mod scan;
+pub mod scope;
 pub mod store;
 pub mod tree;
 
@@ -20,6 +21,7 @@ pub use scan::{
     branch_churn, head_commit_time, parse_worktree_list, repo_from_remote, scan_root, RootScan,
     WorktreeEntry,
 };
+pub use scope::{alignment, changed_files, dirt, log, read_side, Commit, Dirt, Rev, Scope};
 pub use store::{RepoId, Store};
 pub use tree::{list_tree, TreeEntry};
 

@@ -28,7 +28,7 @@ impl ChangeStatus {
         }
     }
 
-    fn from_letter(c: char) -> Option<Self> {
+    pub(crate) fn from_letter(c: char) -> Option<Self> {
         Some(match c {
             'A' => ChangeStatus::Added,
             'M' => ChangeStatus::Modified,
@@ -52,6 +52,10 @@ pub struct ChangedFile {
     pub additions: u32,
     pub deletions: u32,
     pub binary: bool,
+    /// The blob sha of the head side; `None` for a deletion. Viewed is
+    /// keyed by it, so a file is viewed by its content and not by which
+    /// scope or commit showed it.
+    pub head_blob: Option<String>,
 }
 
 impl ChangedFile {
@@ -252,7 +256,7 @@ pub fn merge_file_lists(
         .map(|(status, path, old_path)| {
             let (additions, deletions, binary) =
                 counts.get(&path).copied().unwrap_or((0, 0, false));
-            ChangedFile { path, old_path, status, additions, deletions, binary }
+            ChangedFile { path, old_path, status, additions, deletions, binary, head_blob: None }
         })
         .collect();
 
@@ -349,6 +353,7 @@ mod tests {
             additions: 0,
             deletions: 0,
             binary: false,
+            head_blob: None,
         };
         assert_eq!(f.directory(), "crates/perch-app/src/");
         assert_eq!(f.file_name(), "main.rs");
