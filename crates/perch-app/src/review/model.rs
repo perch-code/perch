@@ -728,3 +728,81 @@ impl ReviewState {
             .with(|files| files.iter().find(|f| f.path == path).map(|f| f.status))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn changed(path: &str, blob: Option<&str>) -> ChangedFile {
+        ChangedFile {
+            path: path.into(),
+            old_path: None,
+            status: if blob.is_some() { ChangeStatus::Modified } else { ChangeStatus::Deleted },
+            additions: 1,
+            deletions: 1,
+            binary: false,
+            head_blob: blob.map(String::from),
+        }
+    }
+
+    /// Three files with content and one deletion, with `b` viewed.
+    fn state() -> ReviewState {
+        let state = ReviewState::new();
+        state.changed_files.set(Arc::new(vec![
+            changed("a.rs", Some("blob-a")),
+            changed("b.rs", Some("blob-b")),
+            changed("gone.rs", None),
+            changed("c.rs", Some("blob-c")),
+        ]));
+        state.viewed.set(Arc::new([("b.rs".to_string(), "blob-b".to_string())].into_iter().collect()));
+        state
+    }
+
+    #[test]
+    fn viewed_is_by_path_and_blob_and_a_deletion_never_is() {
+        let state = state();
+        let files = state.changed_files.get();
+        assert!(state.is_viewed(&files[1]));
+        assert!(!state.is_viewed(&files[0]));
+        assert!(!state.is_viewed(&changed("b.rs", Some("blob-b2"))), "a new blob is new content");
+        assert!(!state.is_viewed(&files[2]));
+        assert_eq!(state.viewed_count(), (1, 4));
+    }
+
+    #[test]
+    fn next_unviewed_skips_viewed_files_and_wraps_both_ways() {
+        let state = state();
+        assert_eq!(state.next_unviewed(Some("a.rs"), true).as_deref(), Some("gone.rs"), "b is viewed");
+        assert_eq!(state.next_unviewed(Some("c.rs"), true).as_deref(), Some("a.rs"), "wraps forward");
+        assert_eq!(state.next_unviewed(Some("a.rs"), false).as_deref(), Some("c.rs"), "wraps back");
+        assert_eq!(state.next_unviewed(Some("gone.rs"), false).as_deref(), Some("a.rs"), "b is viewed");
+        // No open file: the first from either end.
+        assert_eq!(state.next_unviewed(None, true).as_deref(), Some("a.rs"));
+        assert_eq!(state.next_unviewed(None, false).as_deref(), Some("c.rs"));
+        // A file outside the list counts as none open.
+        assert_eq!(state.next_unviewed(Some("elsewhere.rs"), true).as_deref(), Some("a.rs"));
+    }
+
+    #[test]
+    fn next_unviewed_is_none_once_everything_is_viewed() {
+        let state = state();
+        state.viewed.set(Arc::new(
+            [("a.rs", "blob-a"), ("b.rs", "blob-b"), ("c.rs", "blob-c")]
+                .into_iter()
+                .map(|(p, b)| (p.to_string(), b.to_string()))
+                .collect(),
+        ));
+        // The deletion has no blob, so it is never viewed and is always next.
+        assert_eq!(state.next_unviewed(Some("a.rs"), true).as_deref(), Some("gone.rs"));
+        assert_eq!(state.viewed_count(), (3, 4));
+
+        state.changed_files.set(Arc::new(vec![changed("a.rs", Some("blob-a"))]));
+        assert_eq!(state.next_unviewed(Some("a.rs"), true), None);
+        assert_eq!(state.next_unviewed(None, false), None);
+        assert_eq!(state.viewed_count(), (1, 1));
+
+        state.changed_files.set(Arc::new(Vec::new()));
+        assert_eq!(state.next_unviewed(None, true), None);
+        assert_eq!(state.viewed_count(), (0, 0));
+    }
+}

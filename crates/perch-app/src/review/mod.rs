@@ -10,6 +10,7 @@ pub mod issue;
 pub mod markdown;
 pub mod model;
 pub mod rail;
+pub mod scope;
 pub mod strip;
 pub mod styling;
 pub mod tabs;
@@ -190,7 +191,7 @@ fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Back
     let column_backend = backend.clone();
     let column_open = open_file.clone();
     Stack::horizontal((
-        rail::rail(state, open_file.clone()),
+        rail::rail(state, open_file.clone(), backend.clone()),
         Stack::vertical((
             tabs::tab_bar(state),
             editor::editor_pane(app, state, backend, open_file),

@@ -245,3 +245,8 @@ pub fn language_color(language: Option<perch_syntax::Language>) -> Color {
         None => Color::from_rgb8(0xa8, 0xb0, 0xb8),
     }
 }
+
+/// The scope button at the top of the rail, and the Viewed count row
+/// between the mode toggle and the changed list.
+pub const SCOPE_BUTTON_HEIGHT: f64 = 34.0;
+pub const VIEWED_ROW_HEIGHT: f64 = 28.0;

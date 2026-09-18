@@ -302,6 +302,46 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
         }
 
+        // `v` checks the open file as viewed, `}` and `{` open the next and
+        // previous unviewed file. Files only, under the same guards as `a`.
+        // The braces are shifted brackets: the physical codes with Shift
+        // alone, so Cmd-[ stays back.
+        if review.is_open()
+            && review.tab.get() == crate::review::model::ItemTab::Files
+            && !state.search_focused.get()
+            && !review.composer_focused.get()
+        {
+            let shifted = key.modifiers == Modifiers::SHIFT;
+            match key.code {
+                Code::KeyV if key.modifiers.is_empty() => {
+                    let item_id = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
+                    let file = review.active.get().and_then(|path| {
+                        review.changed_files.with(|f| f.iter().find(|f| f.path == path).cloned())
+                    });
+                    // A deletion has no content to have viewed.
+                    if let (Some(item_id), Some(file)) = (item_id, file) {
+                        if let Some(blob) = &file.head_blob {
+                            key_backend.set_viewed(&item_id, &file.path, blob, !review.is_viewed(&file));
+                        }
+                    }
+                    return EventPropagation::Stop;
+                }
+                Code::BracketRight | Code::BracketLeft if shifted => {
+                    let active = review.active.get();
+                    let forward = key.code == Code::BracketRight;
+                    if let Some(path) = review.next_unviewed(active.as_deref(), forward) {
+                        // The same path a click in the rail takes.
+                        review.expanded.update(|expanded| crate::review::tree::reveal(expanded, &path));
+                        if review.open_tab(&path) {
+                            key_backend.open_file(&path);
+                        }
+                    }
+                    return EventPropagation::Stop;
+                }
+                _ => {}
+            }
+        }
+
         if !key.modifiers.contains(OS_MOD) {
             return EventPropagation::Continue;
         }

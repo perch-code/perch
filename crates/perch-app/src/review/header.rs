@@ -410,20 +410,41 @@ fn notice(state: ReviewState) -> impl IntoView {
     .style(|s| s.min_width(0.0).flex_shrink(1.0_f32).pointer_events_none())
 }
 
+/// On Files, the churn follows the scope: the changed list's total. On
+/// Conversation it is the branch's, as the pull request reports it.
 fn churn(state: ReviewState) -> impl IntoView {
+    let on_files = move || state.tab.get() == crate::review::model::ItemTab::Files;
+    let scoped = move || {
+        state.changed_files.with(|files| {
+            files.iter().fold((0u32, 0u32), |(a, d), f| (a + f.additions, d + f.deletions))
+        })
+    };
     let additions = move || {
+        if on_files() {
+            return scoped().0;
+        }
         state
             .pull_request
             .with(|p| p.as_ref().map(|p| p.additions).unwrap_or(0))
     };
     let deletions = move || {
+        if on_files() {
+            return scoped().1;
+        }
         state
             .pull_request
             .with(|p| p.as_ref().map(|p| p.deletions).unwrap_or(0))
     };
-    let has_pr = move || state.pull_request.with(|p| p.is_some());
+    // A bare branch has churn on Files too, once its list is in.
+    let shown = move || {
+        if on_files() {
+            scoped() != (0, 0)
+        } else {
+            state.pull_request.with(|p| p.is_some())
+        }
+    };
 
-    dyn_container(has_pr, move |has| if has { churn_labels(additions, deletions).into_any() } else { Empty::new().into_any() })
+    dyn_container(shown, move |has| if has { churn_labels(additions, deletions).into_any() } else { Empty::new().into_any() })
 }
 
 fn churn_labels(additions: impl Fn() -> u32 + 'static, deletions: impl Fn() -> u32 + 'static) -> impl IntoView {
