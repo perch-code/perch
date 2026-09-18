@@ -105,7 +105,14 @@ GitHub.
 - Declare `roots` on a project and every git worktree under them on a
   branch other than the default becomes an item, with lines added and
   removed against the base on the row. Perch never touches a directory it
-  did not make: Archive and Delete on such a row act on the row.
+  did not make: Archive and Delete on such a row act on the row. Switch a
+  root to another branch and the row for the old one is archived until the
+  branch is checked out again; remove the worktree and the row goes,
+  unless it has threads.
+- A pull request opened from a branch Perch cut, or from a root, is read
+  in that checkout: nothing is reset, and if the pull request has moved
+  past what is there the header says so. Only `perch/pr-N` checkouts follow
+  the pull request's head.
 - Fork cuts `<branch>-2` from an item's head into a new item, with an empty
   diff against the source, so what is shown is what was done on top.
 - On every refresh Perch asks GitHub, conditionally, whether a pull request
