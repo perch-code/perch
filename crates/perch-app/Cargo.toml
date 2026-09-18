@@ -16,6 +16,7 @@ perch-syntax = { path = "../perch-syntax" }
 perch-lsp = { path = "../perch-lsp" }
 perch-knowledge = { path = "../perch-knowledge" }
 perch-agent = { path = "../perch-agent" }
+pulldown-cmark = { version = "0.13", default-features = false }
 anyhow.workspace = true
 serde.workspace = true
 tokio.workspace = true

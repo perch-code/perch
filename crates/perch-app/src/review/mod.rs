@@ -4,6 +4,7 @@ pub mod editor;
 pub mod gutter;
 pub mod hover;
 pub mod header;
+pub mod markdown;
 pub mod model;
 pub mod rail;
 pub mod styling;

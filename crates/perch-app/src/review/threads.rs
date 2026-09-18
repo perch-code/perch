@@ -551,7 +551,7 @@ fn message_view(
 
     Stack::vertical((
         if is_agent {
-            markdown(&body).into_any()
+            crate::review::markdown::render(&body).into_any()
         } else {
             Label::derived(move || body.clone())
                 .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG).line_height(1.4).width_full().text_wrap())
@@ -731,105 +731,6 @@ fn reply_line(app: AppState, state: ReviewState, thread: CommentThread) -> impl 
         .into_any()
 }
 
-// ---------------------------------------------------------------------
-// Markdown, the little that an answer needs
-// ---------------------------------------------------------------------
-
-/// Paragraphs, fenced code in the code font, list items. Nothing more.
-pub fn markdown(text: &str) -> impl IntoView {
-    let blocks = blocks(text);
-    dyn_stack(
-        move || blocks.clone().into_iter().enumerate(),
-        |(i, _)| *i,
-        |(_, block)| match block {
-            Block::Code(code) => Label::derived(move || code.clone())
-                .style(|s| {
-                    s.font_family(theme::CODE_FONT_STACK.to_string())
-                        .font_size(theme::CODE_FONT_SIZE - 1.0)
-                        .color(theme::FG)
-                        .line_height(1.45)
-                        .padding(8.0)
-                        .width_full()
-                        .text_wrap()
-                        .background(theme::CANVAS_SUBTLE)
-                        .border(1.0)
-                        .border_color(theme::BORDER_MUTED)
-                        .border_radius(theme::RADIUS)
-                })
-                .into_any(),
-            Block::Item(item) => Stack::horizontal((
-                Label::derived(|| "\u{2022}".to_string()).style(|s| {
-                    s.font_size(theme::TEXT_BODY).color(theme::FG_MUTED).margin_right(8.0).flex_shrink(0.0_f32)
-                }),
-                Label::derived(move || item.clone())
-                    .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG).line_height(1.4).min_width(0.0).flex_grow(1.0_f32).text_wrap()),
-            ))
-            .style(|s| s.width_full().items_start())
-            .into_any(),
-            Block::Paragraph(p) => Label::derived(move || p.clone())
-                .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG).line_height(1.4).width_full().text_wrap())
-                .into_any(),
-        },
-    )
-    .style(|s| s.flex_col().width_full().gap(6.0))
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Block {
-    Paragraph(String),
-    Code(String),
-    Item(String),
-}
-
-fn blocks(text: &str) -> Vec<Block> {
-    let mut out = Vec::new();
-    let mut paragraph: Vec<String> = Vec::new();
-    let mut code: Option<Vec<String>> = None;
-
-    let flush = |paragraph: &mut Vec<String>, out: &mut Vec<Block>| {
-        if !paragraph.is_empty() {
-            out.push(Block::Paragraph(paragraph.join(" ")));
-            paragraph.clear();
-        }
-    };
-
-    for line in text.lines() {
-        if let Some(buf) = code.as_mut() {
-            if line.trim_start().starts_with("```") {
-                out.push(Block::Code(buf.join("\n")));
-                code = None;
-            } else {
-                buf.push(line.to_string());
-            }
-            continue;
-        }
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            flush(&mut paragraph, &mut out);
-            code = Some(Vec::new());
-        } else if trimmed.is_empty() {
-            flush(&mut paragraph, &mut out);
-        } else if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
-            flush(&mut paragraph, &mut out);
-            out.push(Block::Item(item.to_string()));
-        } else if trimmed.len() > 2
-            && trimmed.as_bytes()[0].is_ascii_digit()
-            && trimmed.split_once(". ").is_some_and(|(n, _)| n.chars().all(|c| c.is_ascii_digit()))
-        {
-            flush(&mut paragraph, &mut out);
-            out.push(Block::Item(trimmed.split_once(". ").map(|(_, r)| r.to_string()).unwrap_or_default()));
-        } else {
-            // A heading is a paragraph here; the answer is short.
-            paragraph.push(trimmed.trim_start_matches('#').trim().to_string());
-        }
-    }
-    if let Some(buf) = code {
-        out.push(Block::Code(buf.join("\n")));
-    }
-    flush(&mut paragraph, &mut out);
-    out
-}
-
 /// The strip along the column's left edge that drags it wider.
 pub fn resize_handle(state: ReviewState) -> impl IntoView {
     use floem::event::DragConfig;
@@ -900,29 +801,10 @@ mod tests {
     }
 
     #[test]
-    fn markdown_splits_into_the_blocks_the_column_draws() {
-        let text = "Because of X.\nSecond line.\n\n- one\n- two\n\n```rust\nlet a = 1;\n```\n\nDone.";
-        assert_eq!(
-            blocks(text),
-            vec![
-                Block::Paragraph("Because of X. Second line.".into()),
-                Block::Item("one".into()),
-                Block::Item("two".into()),
-                Block::Code("let a = 1;".into()),
-                Block::Paragraph("Done.".into()),
-            ]
-        );
-    }
-
-    #[test]
     fn aliases_are_capitalised_and_ids_left_alone() {
         assert_eq!(model_label("sonnet"), "Sonnet");
         assert_eq!(model_label("fable"), "Fable");
         assert_eq!(model_label("claude-sonnet-5"), "claude-sonnet-5");
     }
 
-    #[test]
-    fn an_unclosed_fence_still_renders() {
-        assert_eq!(blocks("```\ncode"), vec![Block::Code("code".into())]);
-    }
 }
