@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use floem::reactive::{Effect, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use jiff::Timestamp;
-use perch_github::{Mark, SubjectDetail, Thread, Worktree};
+use perch_github::{AgentConfig, Mark, SubjectDetail, Thread, Worktree};
 
 use crate::backend::{Event, Status};
 use crate::filter::{self, Counts, Filters, Group, ReasonFilter, Section, Sort, View};
@@ -61,6 +61,9 @@ pub struct AppState {
     pub marks: RwSignal<HashMap<String, Mark>>,
     /// Every checkout Perch holds a record of, active and archived.
     pub worktrees: RwSignal<Vec<Worktree>>,
+    /// The agent section of config.toml: binary, defaults, and the models
+    /// the picker offers.
+    pub agent: RwSignal<AgentConfig>,
     /// Something a worktree action could not do, for the status line.
     /// Cleared by the next thing that goes right.
     pub notice: RwSignal<Option<String>>,
@@ -120,6 +123,7 @@ impl AppState {
             marks: RwSignal::new(HashMap::new()),
             worktrees: RwSignal::new(Vec::new()),
             notice: RwSignal::new(None),
+            agent: RwSignal::new(AgentConfig::default()),
             screen: RwSignal::new(Screen::Threads),
             return_to: RwSignal::new(Screen::Threads),
             worktree_segment: RwSignal::new(WorktreeSegment::Active),
@@ -166,7 +170,10 @@ impl AppState {
                     review.comment_threads.set(Arc::new(threads));
                 }
             }
-            Event::RunEvent { run_id, event, .. } => review.apply_run_event(&run_id, &event),
+            Event::AgentStep { run_id, thread_id, event } => {
+                tracing::debug!(run_id, thread_id, ?event, "run event");
+                review.apply_run_event(&run_id, &event);
+            }
             Event::Archived { repo_full_name, number, added } => {
                 // Only for the review that is still open; a slow archive of
                 // a pull request since left has nothing to say.
@@ -270,7 +277,8 @@ impl AppState {
                 self.notice.set(None);
             }
             Event::Notice(message) => self.notice.set(Some(message)),
-            Event::Archived { .. } | Event::CommentThreads { .. } | Event::RunEvent { .. } => {}
+            Event::AgentConfig(agent) => self.agent.set(agent),
+            Event::Archived { .. } | Event::CommentThreads { .. } | Event::AgentStep { .. } => {}
             Event::WorktreeFailed { id, message } => {
                 tracing::warn!(id, message, "worktree action refused");
                 self.notice.set(Some(message));

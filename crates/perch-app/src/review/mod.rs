@@ -8,12 +8,13 @@ pub mod model;
 pub mod rail;
 pub mod styling;
 pub mod tabs;
+pub mod threads;
 pub mod tree;
 
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Effect, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{Decorators, Stack, dyn_container};
 
 use crate::backend::Backend;
@@ -108,7 +109,7 @@ pub fn review_view(
                 )
                 .into_any(),
                 Phase::Ready => {
-                    body(state, open_file.clone(), body_backend.clone()).into_any()
+                    body(app, state, open_file.clone(), body_backend.clone()).into_any()
                 }
             },
         )
@@ -124,14 +125,45 @@ enum Phase {
     Ready,
 }
 
-fn body(state: ReviewState, open_file: OpenFile, backend: Rc<Backend>) -> impl IntoView {
+fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Backend>) -> impl IntoView {
+    // The column opens itself when a file with threads is opened, and
+    // stays where it was put otherwise.
+    Effect::new(move |_| {
+        if let Some(path) = state.active.get() {
+            if !state.threads_in(&path).is_empty() {
+                state.threads_open.set(true);
+            }
+        }
+    });
+
+    let column_backend = backend.clone();
+    let column_open = open_file.clone();
     Stack::horizontal((
         rail::rail(state, open_file.clone()),
         Stack::vertical((
             tabs::tab_bar(state),
-            editor::editor_pane(state, backend, open_file),
+            editor::editor_pane(app, state, backend, open_file),
         ))
             .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().flex_col()),
+        dyn_container(
+            move || state.threads_open.get(),
+            move |open| {
+                if open {
+                    floem::views::Container::new(Stack::horizontal((
+                        threads::resize_handle(state),
+                        threads::thread_column(app, state, column_backend.clone(), column_open.clone()),
+                    )))
+                    .style(|s| {
+                        s.height_full()
+                            .flex_shrink(0.0_f32)
+                            .position(floem::style::Position::Relative)
+                    })
+                    .into_any()
+                } else {
+                    floem::views::Empty::new().into_any()
+                }
+            },
+        ),
     ))
     .style(|s| s.size_full().min_height(0.0))
 }

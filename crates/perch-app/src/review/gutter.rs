@@ -18,13 +18,16 @@ use std::sync::Arc;
 use floem::kurbo::Rect;
 use floem::peniko::Color;
 use floem::prelude::*;
-use floem::reactive::{RwSignal, SignalGet};
+use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
 use floem::style::Position;
-use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_stack};
+use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, dyn_stack};
 use perch_git::{LineStatus, Row};
 
-use crate::review::model::LoadedFile;
+use crate::icons::SidebarIcon;
+use crate::review::model::{LoadedFile, ReviewState};
+use crate::state::AppState;
 use crate::theme;
+use crate::ui::widgets::sidebar_glyph;
 
 /// Extra rows rendered past the viewport, so a partially visible line at
 /// either edge is still numbered.
@@ -55,7 +58,7 @@ fn column_offset(scroll_top: f64, line_height: f64) -> f64 {
     -(scroll_top.rem_euclid(line_height))
 }
 
-pub fn diff_gutter(file: Arc<LoadedFile>, viewport: RwSignal<Rect>) -> impl IntoView {
+pub fn diff_gutter(state: ReviewState, app: AppState, file: Arc<LoadedFile>, viewport: RwSignal<Rect>) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
     let total = file.buffer.len();
     let rows = file.clone();
@@ -65,7 +68,7 @@ pub fn diff_gutter(file: Arc<LoadedFile>, viewport: RwSignal<Rect>) -> impl Into
         visible_lines(vp.y0, vp.height(), line_height, total)
     };
 
-    let column = dyn_stack(visible, |line| *line, move |line| gutter_row(rows.clone(), line))
+    let column = dyn_stack(visible, |line| *line, move |line| gutter_row(state, app, rows.clone(), line))
         .style(move |s| {
             // The whole column slides by the sub-line remainder of the
             // scroll. Reading the viewport here, in a style closure, is what
@@ -94,8 +97,10 @@ pub fn diff_gutter(file: Arc<LoadedFile>, viewport: RwSignal<Rect>) -> impl Into
         })
 }
 
-fn gutter_row(file: Arc<LoadedFile>, line: usize) -> impl IntoView {
+fn gutter_row(state: ReviewState, app: AppState, file: Arc<LoadedFile>, line: usize) -> impl IntoView {
     let row = file.buffer.row(line);
+    let marker_file = file.clone();
+    let plus_file = file.clone();
 
     // A ghost line shows the base file's number; a real line shows its own.
     // Both are one-based, as every other tool displays them.
@@ -118,6 +123,55 @@ fn gutter_row(file: Arc<LoadedFile>, line: usize) -> impl IntoView {
     let dimmed = matches!(row, Some(Row::Deleted { .. }));
 
     Stack::horizontal((
+        // The left slot: a marker where a thread starts, a `+` under the
+        // pointer, nothing otherwise. Fixed width, so numbers never shift.
+        dyn_container(
+            move || {
+                let thread = state.thread_starting_at(&marker_file, line).map(|t| (t.id, t.outdated));
+                let hovered = state.hovered_line.get() == Some(line);
+                (thread, hovered)
+            },
+            move |(thread, hovered)| match thread {
+                Some((id, outdated)) => Container::new(
+                    sidebar_glyph(
+                        SidebarIcon::Thread,
+                        if outdated { theme::FG_SUBTLE } else { theme::ACCENT },
+                    )
+                    .style(|s| s.size(12.0, 12.0)),
+                )
+                .on_event_stop(el::Click, move |_, _| state.focus_thread.set(Some(id.clone())))
+                .style(|s| {
+                    crate::ui::widgets::clickable(s).size(16.0, 16.0).items_center().justify_center()
+                })
+                .into_any(),
+                None if hovered && plus_file.buffer.head_line(line).is_some() => {
+                    let plus_file = plus_file.clone();
+                    Container::new(
+                        sidebar_glyph(SidebarIcon::Plus, theme::CANVAS).style(|s| s.size(11.0, 11.0)),
+                    )
+                    .on_event_stop(el::Click, move |_, _| {
+                        // The selection if this line is inside it, else this line.
+                        let (first, last) = match state.selection.get() {
+                            Some((a, b)) if (a.min(b)..=a.max(b)).contains(&line) => (a, b),
+                            _ => (line, line),
+                        };
+                        let anchor = state.anchor_for_display_range(&plus_file, first, last);
+                        state.open_composer(None, anchor, String::new(), crate::review::threads::defaults(app));
+                    })
+                    .style(|s| {
+                        crate::ui::widgets::clickable(s)
+                            .size(16.0, 16.0)
+                            .items_center()
+                            .justify_center()
+                            .border_radius(3.0)
+                            .background(theme::ACCENT)
+                    })
+                    .into_any()
+                }
+                None => Empty::new().into_any(),
+            },
+        )
+        .style(|s| s.size(16.0, 16.0).margin_left(3.0).flex_shrink(0.0_f32)),
         Label::derived(move || number.map(|n| n.to_string()).unwrap_or_default()).style(
             move |s| {
                 s.flex_grow(1.0_f32)
@@ -131,6 +185,14 @@ fn gutter_row(file: Arc<LoadedFile>, line: usize) -> impl IntoView {
         ),
         change_bar(bar),
     ))
+    .on_event_cont(el::PointerEnter, move |_, _| state.hovered_line.set(Some(line)))
+    .on_event_cont(el::PointerLeave, move |_, _| {
+        state.hovered_line.update(|h| {
+            if *h == Some(line) {
+                *h = None;
+            }
+        })
+    })
     .style(move |s| {
         s.width_full()
             .height(theme::CODE_LINE_HEIGHT as f64)

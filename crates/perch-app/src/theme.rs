@@ -214,6 +214,10 @@ pub const GUTTER_WIDTH: f64 = 70.0;
 pub const CODE_GUTTER_GAP: f64 = 12.0;
 pub const RAIL_WIDTH: f64 = 312.0;
 pub const REVIEW_HEADER_HEIGHT: f64 = 60.0;
+/// The thread column beside the editor.
+pub const THREADS_WIDTH: f64 = 360.0;
+pub const THREADS_MIN_WIDTH: f64 = 260.0;
+pub const THREADS_MAX_WIDTH: f64 = 640.0;
 pub const TAB_HEIGHT: f64 = 38.0;
 /// Widest a tab grows before its name is ellipsized.
 pub const TAB_MAX_WIDTH: f64 = 210.0;

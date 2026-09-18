@@ -131,6 +131,17 @@ pub struct ReviewState {
     pub selection: RwSignal<Option<(usize, usize)>>,
     /// A gutter marker was clicked: the thread to scroll the column to.
     pub focus_thread: RwSignal<Option<String>>,
+    /// How wide the thread column is. Dragged.
+    pub threads_width: RwSignal<f64>,
+    /// Runs whose step list the reader opened.
+    pub expanded_runs: RwSignal<std::collections::HashSet<String>>,
+    /// The model and effort last sent, which the next composer starts on.
+    pub agent_last: RwSignal<Option<(String, perch_agent::Effort)>>,
+    /// The display line the pointer is over in the gutter, for the `+`.
+    pub hovered_line: RwSignal<Option<usize>>,
+    /// True while the composer's text box has the keyboard, so `a` stands
+    /// down.
+    pub composer_focused: RwSignal<bool>,
     pub lsp_status: RwSignal<perch_lsp::Status>,
     /// Rises with every hover and jump request. An answer carrying an older
     /// token is stale, because the pointer has moved on since it was asked.
@@ -184,6 +195,11 @@ impl ReviewState {
             composer: RwSignal::new(None),
             selection: RwSignal::new(None),
             focus_thread: RwSignal::new(None),
+            threads_width: RwSignal::new(crate::theme::THREADS_WIDTH),
+            expanded_runs: RwSignal::new(std::collections::HashSet::new()),
+            agent_last: RwSignal::new(None),
+            hovered_line: RwSignal::new(None),
+            composer_focused: RwSignal::new(false),
             lsp_status: RwSignal::new(perch_lsp::Status::Absent),
             request_token: RwSignal::new(0),
             hover_at: RwSignal::new(None),
@@ -226,6 +242,8 @@ impl ReviewState {
         self.composer.set(None);
         self.selection.set(None);
         self.focus_thread.set(None);
+        self.hovered_line.set(None);
+        self.composer_focused.set(false);
         self.expanded.set(std::collections::HashSet::new());
         self.dismiss_hover();
     }
@@ -338,12 +356,53 @@ impl ReviewState {
         });
     }
 
+    /// The head lines under the editor's selection, as an anchor. `None`
+    /// when nothing is selected or the selection is all removed lines.
+    pub fn anchor_from_selection(&self) -> Option<Anchor> {
+        let (first, last) = self.selection.get()?;
+        let file = self.active_file()?;
+        self.anchor_for_display_range(&file, first, last)
+    }
+
+    /// An anchor for a display range in a file.
+    pub fn anchor_for_display_range(&self, file: &LoadedFile, first: usize, last: usize) -> Option<Anchor> {
+        let (first, last) = (first.min(last), first.max(last));
+        let mut heads = (first..=last).filter_map(|d| file.buffer.head_line(d));
+        let start = heads.next()?;
+        let end = heads.next_back().unwrap_or(start);
+        let commit_sha = self.worktree.with(|w| w.as_ref().map(|w| w.head_sha.clone()))?;
+        Some(Anchor {
+            path: file.path.clone(),
+            start_line: start as u32 + 1,
+            line: end as u32 + 1,
+            side: perch_github::Side::Right,
+            commit_sha,
+        })
+    }
+
+    /// Open a composer, for a new thread on `anchor` or the worktree.
+    pub fn open_composer(&self, thread_id: Option<String>, anchor: Option<Anchor>, draft: String, defaults: (String, perch_agent::Effort)) {
+        let (model, effort) = self.agent_last.get().unwrap_or(defaults);
+        self.composer.set(Some(Composer { thread_id, anchor, model, effort, draft }));
+        self.threads_open.set(true);
+    }
+
+    /// The thread whose anchor starts on a display line of the open file.
+    pub fn thread_starting_at(&self, file: &LoadedFile, display_line: usize) -> Option<CommentThread> {
+        let head = file.buffer.head_line(display_line)? as u32 + 1;
+        self.comment_threads.with(|t| {
+            t.iter()
+                .find(|t| t.anchor.as_ref().is_some_and(|a| a.path == file.path && a.start_line == head))
+                .cloned()
+        })
+    }
+
     /// Threads anchored in a file, newest first.
     pub fn threads_in(&self, path: &str) -> Vec<CommentThread> {
         let mut out: Vec<CommentThread> = self
             .comment_threads
             .with(|t| t.iter().filter(|t| t.anchor.as_ref().is_some_and(|a| a.path == path)).cloned().collect());
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|t| std::cmp::Reverse(t.created_at));
         out
     }
 
@@ -357,7 +416,7 @@ impl ReviewState {
                     .cloned()
                     .collect()
             });
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|t| std::cmp::Reverse(t.created_at));
         out
     }
 

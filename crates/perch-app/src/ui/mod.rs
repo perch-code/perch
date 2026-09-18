@@ -205,6 +205,30 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             return EventPropagation::Stop;
         }
 
+        // `a` opens a composer for the selection, or for the worktree when
+        // no file is open. It stands down while any text box has the
+        // keyboard, as `e` and `s` do.
+        if key.modifiers.is_empty()
+            && review.is_open()
+            && !state.search_focused.get()
+            && !review.composer_focused.get()
+        {
+            match key.code {
+                Code::KeyA => {
+                    let anchor = review.anchor_from_selection();
+                    review.open_composer(None, anchor, String::new(), crate::review::threads::defaults(state));
+                    return EventPropagation::Stop;
+                }
+                // Close a composer. Whether it is empty is the composer's
+                // own business; a draft is kept nowhere.
+                Code::Escape if review.composer.with(Option::is_some) => {
+                    review.composer.set(None);
+                    return EventPropagation::Stop;
+                }
+                _ => {}
+            }
+        }
+
         if !key.modifiers.contains(OS_MOD) {
             return EventPropagation::Continue;
         }
@@ -218,9 +242,15 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 EventPropagation::Continue
             }
-            // Show or hide the drawer.
+            // Show or hide the drawer, or with shift, the thread column.
             Code::Backslash => {
-                state.sidebar_open.update(|open| *open = !*open);
+                if key.modifiers.contains(Modifiers::SHIFT) {
+                    if review.is_open() {
+                        review.threads_open.update(|open| *open = !*open);
+                    }
+                } else {
+                    state.sidebar_open.update(|open| *open = !*open);
+                }
                 EventPropagation::Stop
             }
             // Back to wherever the review was opened from.

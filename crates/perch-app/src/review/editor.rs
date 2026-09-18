@@ -19,10 +19,12 @@ use crate::review::hover;
 use crate::review::model::{LoadedFile, ReviewState};
 use crate::review::styling::PerchStyling;
 use crate::review::OpenFile;
+use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::centered_message;
 
 pub fn editor_pane(
+    app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     open_file: OpenFile,
@@ -57,7 +59,7 @@ pub fn editor_pane(
                 .into_any(),
                 Some(path) => match state.file(&path) {
                     Some(file) => {
-                        code_view(state, file, epoch, code_backend.clone()).into_any()
+                        code_view(app, state, file, epoch, code_backend.clone()).into_any()
                     }
                     None => loading_view(path).into_any(),
                 },
@@ -70,6 +72,7 @@ pub fn editor_pane(
 }
 
 fn code_view(
+    app: AppState,
     state: ReviewState,
     file: Arc<LoadedFile>,
     epoch: u64,
@@ -114,6 +117,19 @@ fn code_view(
             state.cursor_line.set(display_line);
             state.hover_text.set(None);
 
+            // The selection, as display lines, for a thread's anchor. A
+            // caret is a one-line selection.
+            let (lo, hi) = cursor.with(|c| {
+                c.mode.regions_iter().fold((usize::MAX, 0usize), |(lo, hi), (a, b, _)| {
+                    (lo.min(a.min(b)), hi.max(a.max(b)))
+                })
+            });
+            if lo != usize::MAX {
+                let (first, _) = hover::line_col_of_offset(&file.buffer.text, lo);
+                let (last, _) = hover::line_col_of_offset(&file.buffer.text, hi);
+                state.selection.set(Some((first, last)));
+            }
+
             if let Some((line, column)) = hover::head_position(&file, offset) {
                 state.last_position.set(Some((line, column)));
                 let token = state.next_token();
@@ -147,7 +163,7 @@ fn code_view(
         });
     }
 
-    Stack::horizontal((diff_gutter(file, viewport), editor))
+    Stack::horizontal((diff_gutter(state, app, file, viewport), editor))
         .style(|s| s.size_full().min_height(0.0))
 }
 

@@ -217,7 +217,18 @@ impl Run {
             }
 
             let status = child.wait().await;
-            let stderr = stderr_task.await.unwrap_or_default();
+            // A killed shell can leave a grandchild holding stderr open, so
+            // never wait on it for long; the tail is only for the message.
+            let stderr = if stopped {
+                stderr_task.abort();
+                String::new()
+            } else {
+                tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default()
+            };
 
             if ended {
                 return;

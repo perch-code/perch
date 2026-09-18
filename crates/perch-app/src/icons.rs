@@ -260,6 +260,18 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                        H3 a1 1 0 0 1 -1 -1 Z" fill="none" stroke="{c}" stroke-width="1.4"
                      stroke-linejoin="round"/>"#
         ),
+        SidebarIcon::Plus => format!(
+            r#"<path d="M8 3.2 V12.8 M3.2 8 H12.8" stroke="{c}" stroke-width="1.7"
+                     stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::Stop => format!(
+            r#"<path d="M5.5 4 H10.5 A1.5 1.5 0 0 1 12 5.5 V10.5 A1.5 1.5 0 0 1 10.5 12 H5.5
+                       A1.5 1.5 0 0 1 4 10.5 V5.5 A1.5 1.5 0 0 1 5.5 4 Z" fill="{c}"/>"#
+        ),
+        SidebarIcon::Thread => format!(
+            r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="{c}"
+                     stroke="{c}" stroke-width="1.2" stroke-linejoin="round"/>"#
+        ),
         SidebarIcon::Warning => format!(
             r#"<path d="M8 2.2 L14.6 13.4 H1.4 Z" fill="none" stroke="{c}" stroke-width="1.4"
                      stroke-linejoin="round"/>
@@ -300,13 +312,21 @@ pub enum SidebarIcon {
     /// Three dots: more actions.
     Ellipsis,
     Folder,
+    Plus,
+    /// A filled square: stop.
+    Stop,
+    /// A speech bubble with a dot: a thread anchored here.
+    Thread,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 25] = [
+    pub const ALL: [SidebarIcon; 28] = [
+        SidebarIcon::Plus,
+        SidebarIcon::Stop,
+        SidebarIcon::Thread,
         SidebarIcon::Inbox,
         SidebarIcon::Bell,
         SidebarIcon::Branch,

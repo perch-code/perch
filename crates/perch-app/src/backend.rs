@@ -105,10 +105,12 @@ pub enum Event {
     Archived { repo_full_name: String, number: u64, added: usize },
     /// Something worth a line in the status bar and nothing more.
     Notice(String),
+    /// What config.toml says about the agent, for the pickers.
+    AgentConfig(perch_github::AgentConfig),
     /// Every thread in a worktree. Whole, like `Worktrees`.
     CommentThreads { worktree_id: String, threads: Vec<CommentThread> },
     /// One step of a run, applied in place to the run it names.
-    RunEvent { run_id: String, thread_id: String, event: perch_agent::RunEvent },
+    AgentStep { run_id: String, thread_id: String, event: perch_agent::RunEvent },
     Status(Status),
 
     /// A step of preparing a checkout.
@@ -292,6 +294,7 @@ async fn run(
     tracing::info!("backend started");
     let config = Config::load();
     tracing::info!(poll = config.poll_interval_secs, "config loaded");
+    let _ = events.send(Event::AgentConfig(config.agent.clone()));
 
     let Some(token) = resolve_token(&config) else {
         tracing::warn!("no token resolved");
@@ -1387,7 +1390,7 @@ async fn ask(
         // Persist every step as it comes, so a crash mid-run loses nothing
         // that was shown.
         ctx.with_cache(|c| c.update_run(&run));
-        let _ = ctx.events.send(Event::RunEvent {
+        let _ = ctx.events.send(Event::AgentStep {
             run_id: run.id.clone(),
             thread_id: thread.id.clone(),
             event: event.clone(),
