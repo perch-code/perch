@@ -87,6 +87,9 @@ async fn describe(git: &Git, entry: &WorktreeEntry, default_branch: &str) -> Str
 
     match entry.branch.as_deref() {
         None => format!("{}  (detached)  {head}{main}", entry.path.display()),
+        Some(branch) if entry.prunable || !entry.path.join(".git").exists() => {
+            format!("{}  {branch}  {head}  (gone, not an item){main}", entry.path.display())
+        }
         Some(branch) if branch == default_branch => {
             format!(
                 "{}  {branch}  {head}  (default branch, not an item){main}",

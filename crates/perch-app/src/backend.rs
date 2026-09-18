@@ -572,6 +572,7 @@ async fn run(
                 tokio::spawn(async move { refresh_items(&ctx).await });
             }
             Some(Command::OpenSubject { repo_full_name, kind, number }) => {
+                ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if open_subject(&ctx, repo_full_name, kind, number).await {
@@ -582,6 +583,7 @@ async fn run(
             Some(Command::OpenItem { id }) | Some(Command::RestoreItem { id }) => {
                 // Restoring is opening: the archived flag clears on the way
                 // through and an owned checkout is put back by `prepare`.
+                ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if open_item(&ctx, &id).await {
@@ -590,6 +592,7 @@ async fn run(
                 });
             }
             Some(Command::ArchiveItem { id }) => {
+                ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if let Err(message) = archive_item(&ctx, &id).await {
@@ -599,6 +602,7 @@ async fn run(
                 });
             }
             Some(Command::DeleteItem { id }) => {
+                ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if let Err(message) = delete_item(&ctx, &id).await {
@@ -639,6 +643,7 @@ async fn run(
                 move_item(&ctx, &id, project_id, new_project);
             }
             Some(Command::StartWork { issue_item_id }) => {
+                ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     match start_work(&ctx, &issue_item_id).await {
@@ -654,6 +659,7 @@ async fn run(
                 });
             }
             Some(Command::ForkItem { id }) => {
+                ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     match fork_item(&ctx, &id).await {
@@ -922,6 +928,12 @@ impl Ctx {
 
     fn notice(&self, message: impl Into<String>) {
         let _ = self.events.send(Event::Notice(message.into()));
+    }
+
+    /// The reader is doing something new, so the last complaint has been
+    /// read. An empty notice is how the UI hears that.
+    fn clear_notice(&self) {
+        let _ = self.events.send(Event::Notice(String::new()));
     }
 
     /// Whether the open review is this item.
@@ -1207,13 +1219,14 @@ async fn sweep_items(ctx: &Ctx) {
 /// Leave Active. An owned checkout's directory goes; the branch, the row,
 /// the threads and the knowledge stay.
 async fn archive_item(ctx: &Ctx, id: &str) -> Result<(), String> {
-    let Some(mut item) = ctx.item(id) else {
+    let Some(item) = ctx.item(id) else {
         return Err("That item is gone".into());
     };
     let Some(repo) = RepoId::parse(&item.repo_full_name) else {
         return Err(format!("{} is not a repository name", item.repo_full_name));
     };
-    if let Some(checkout) = item.checkout.as_mut().filter(|c| c.owned && c.on_disk) {
+    let mut removed = false;
+    if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned && c.on_disk) {
         if checkout.path.join(".git").exists() {
             let dirty = ctx.preparer.is_dirty(&checkout.path).await.map_err(|e| e.to_string())?;
             if dirty {
@@ -1228,9 +1241,16 @@ async fn archive_item(ctx: &Ctx, id: &str) -> Result<(), String> {
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        checkout.on_disk = false;
+        removed = true;
     } else if ctx.is_open(id) {
         ctx.close_review().await;
+    }
+    // Written from the row as it is after the git work, not before.
+    let mut item = ctx.item(id).unwrap_or(item);
+    if removed {
+        if let Some(c) = item.checkout.as_mut() {
+            c.on_disk = false;
+        }
     }
     item.archived_at = Some(Timestamp::now());
     ctx.with_cache(|c| c.update_item(&item))
@@ -1350,7 +1370,9 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
         }
     };
 
-    let mut item = item;
+    // The row as it is now: the git work took a while, and a refresh may
+    // have attached a pull request or a poll marked it since.
+    let mut item = ctx.item(&item.id).unwrap_or(item);
     if let Some(c) = item.checkout.as_mut() {
         c.head_sha = git_checkout.head_sha.clone();
         c.on_disk = true;
@@ -1360,7 +1382,8 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
     ctx.with_cache(|c| c.update_item(&item));
     ctx.send_items();
 
-    finish_open(ctx, item, None, git_checkout, false).await
+    let pull_request = item.pull_request().cloned().map(Arc::new);
+    finish_open(ctx, item, pull_request, git_checkout, false).await
 }
 
 /// A checkout under the store on a branch Perch cut: back on disk if it
@@ -1402,6 +1425,21 @@ async fn open_owned_branch(
         merge_base,
         stale: None,
     })
+}
+
+/// A checkout of the reader's own on a pull request's head branch, with
+/// no subject yet, that the pull request can attach to. The head
+/// repository is the fork when there is one, and a branch of the same
+/// name on the upstream is someone else's; a head with no repository is a
+/// deleted fork, which is nobody's checkout. A root row the scan put away
+/// because its branch is no longer checked out is passed over too: it
+/// cannot be read, and a checkout of Perch's own can.
+fn branch_item_for(ctx: &Ctx, pr: &PullRequest) -> Option<Item> {
+    let head_repo = pr.head_repo_full_name.as_deref()?;
+    ctx.with_cache(|c| c.find_item_by_branch(head_repo, &pr.head_ref).ok().flatten())
+        .flatten()
+        .filter(|i| i.subject.is_none())
+        .filter(|i| !i.is_archived() || i.checkout.as_ref().is_some_and(|c| c.owned))
 }
 
 /// The branches items already hold in a repository, which a cut must not
@@ -1557,6 +1595,15 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         checkout.head_sha.clone()
     } else {
         let git = ctx.preparer.git();
+        // The root may have been switched since the row was made; a fork
+        // of another branch under this one's name would be a lie.
+        let on_branch = git
+            .run(Some(&checkout.path), ["rev-parse", "--abbrev-ref", "HEAD"], Duration::from_secs(30))
+            .await
+            .map_err(|e| e.to_string())?;
+        if on_branch.trim() != checkout.branch {
+            return Err(format!("{} has {} checked out now, not {}", checkout.path.display(), on_branch.trim(), checkout.branch));
+        }
         let sha = git
             .run(Some(&checkout.path), ["rev-parse", "HEAD"], Duration::from_secs(30))
             .await
@@ -1719,9 +1766,12 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
         };
         let Some(number) = thread.number_hint() else { continue };
         let repo = thread.repository.full_name.as_str();
+        // An archived item does not claim its notifications; they stay
+        // in the inbox, as the sidebar leaves them there.
         let existing = ctx
             .with_cache(|c| c.find_item_by_subject(repo, kind, number).ok().flatten())
-            .flatten();
+            .flatten()
+            .filter(|i| !i.is_archived());
         let reason = thread.reason.wire().to_string();
 
         let item = match existing {
@@ -1732,11 +1782,7 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
                         // A checkout of the reader's own on the head branch
                         // is this pull request's item already; it takes
                         // the subject rather than a second row being made.
-                        let head_repo = pr.head_repo_full_name.clone().unwrap_or_else(|| pr.repo_full_name.clone());
-                        let on_branch = ctx
-                            .with_cache(|c| c.find_item_by_branch(&head_repo, &pr.head_ref).ok().flatten())
-                            .flatten()
-                            .filter(|i| i.subject.is_none());
+                        let on_branch = branch_item_for(ctx, &pr);
                         let (mut item, is_new) = match on_branch {
                             Some(item) => (item, false),
                             None => {
@@ -1798,14 +1844,14 @@ async fn scan_roots(ctx: &Ctx) -> bool {
     let projects = ctx.with_cache(|c| c.load_projects().unwrap_or_default()).unwrap_or_default();
     let git = ctx.preparer.git();
     let mut changed = false;
-    // Which unowned items were seen, so the rest can be judged gone. A
-    // root that could not be scanned means the rest cannot be: its
-    // worktrees are not in any other root's listing when it is a clone of
-    // its own, and which repository it was for is exactly what the scan
-    // would have said.
-    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    // Which unowned items were seen, by directory and branch, so the rest
+    // can be judged gone. A root that could not be scanned takes its
+    // project out of the judgement: its worktrees are not in any other
+    // root's listing when it is a clone of its own, and which repository
+    // it was for is exactly what the scan would have said.
+    let mut seen: std::collections::HashSet<(std::path::PathBuf, String)> = std::collections::HashSet::new();
     let mut scanned_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut every_root_scanned = true;
+    let mut failed_projects: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for project in &projects {
         for root in &project.roots {
@@ -1813,7 +1859,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                 Ok(s) => s,
                 Err(e) => {
                     ctx.notice(format!("{}: {e}", root.display()));
-                    every_root_scanned = false;
+                    failed_projects.insert(project.id.clone());
                     continue;
                 }
             };
@@ -1832,7 +1878,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                     continue;
                 }
                 let path = entry.path.canonicalize().unwrap_or_else(|_| entry.path.clone());
-                seen.insert(path.clone());
+                seen.insert((path.clone(), branch.clone()));
                 let churn = perch_git::branch_churn(git, &entry.path, &format!("origin/{}", scan.default_branch))
                     .await
                     .ok();
@@ -1883,24 +1929,25 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         }
     }
 
-    if !every_root_scanned {
-        return changed;
-    }
-
     // Unowned items in scanned repositories whose branch no worktree has.
     // A directory that is gone takes its row with it, unless the row has
     // threads, which are worth an archived row. A directory still there on
     // another branch is the reader switching; the row is put away with its
     // directory marked gone, and the scan brings it back when the branch
-    // is checked out again.
+    // is checked out again. A row the reader archived is theirs, and is
+    // left exactly as it is.
     let items = ctx.with_cache(|c| c.load_items().unwrap_or_default()).unwrap_or_default();
     for item in items {
         let Some(c) = item.checkout.as_ref() else { continue };
-        if c.owned || !scanned_repos.contains(&item.repo_full_name.to_lowercase()) {
+        if c.owned
+            || item.is_archived()
+            || failed_projects.contains(&item.project_id)
+            || !scanned_repos.contains(&item.repo_full_name.to_lowercase())
+        {
             continue;
         }
         let path = c.path.canonicalize().unwrap_or_else(|_| c.path.clone());
-        if seen.contains(&path) || (item.is_archived() && !c.on_disk) {
+        if seen.contains(&(path, c.branch.clone())) {
             continue;
         }
         let still_there = c.path.join(".git").exists();
@@ -1955,10 +2002,12 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
                     // any of the owner's repositories with a pull request
                     // here; only one on this item's repository is this
                     // branch.
+                    // A head with no repository is a deleted fork, which
+                    // cannot be a checkout of the reader's.
                     let pull = pull.filter(|pr| {
                         pr.head_repo_full_name
                             .as_deref()
-                            .is_none_or(|h| h.eq_ignore_ascii_case(&item.repo_full_name))
+                            .is_some_and(|h| h.eq_ignore_ascii_case(&item.repo_full_name))
                     });
                     let Some(pr) = pull else {
                         if let Some(etag) = etag {
@@ -1966,6 +2015,19 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
                         }
                         continue;
                     };
+                    // A pull request some other row has already, opened in
+                    // Perch before the branch was checked out in a root,
+                    // stays with that row; this one stays a branch.
+                    let held = ctx
+                        .with_cache(|c| c.find_item_by_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number).ok().flatten())
+                        .flatten()
+                        .is_some_and(|other| other.id != item.id);
+                    if held {
+                        if let Some(etag) = etag {
+                            ctx.with_cache(|c| c.set_meta(&key, &etag));
+                        }
+                        break;
+                    }
                     tracing::info!(item = %item.id, number = pr.number, "branch gained a pull request");
                     // The row as it is now, not as it was when the loop
                     // began: a click may have opened it since.
@@ -2044,8 +2106,9 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
 
     let now = Timestamp::now();
     let is_new = existing.is_none();
+    // The row as it is now, not as it was before the fetch.
     let mut item = match existing {
-        Some(item) => item,
+        Some(item) => ctx.item(&item.id).unwrap_or(item),
         None => {
             let project = ctx.project_for(&issue.repo_full_name);
             Item::new(&project, &issue.repo_full_name, now)
@@ -2251,34 +2314,33 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     };
 
     // The item: the one for this pull request, else a checkout of the
-    // reader's own on its head branch in the head repository, else a new
-    // one. The head repository is the fork when there is one; a branch of
-    // the same name on the upstream is someone else's.
-    let head_repo = pull_request
-        .head_repo_full_name
-        .clone()
-        .unwrap_or_else(|| pull_request.repo_full_name.clone());
+    // reader's own on its head branch, else a new one.
     let existing = match existing {
         Some(item) => Some(item),
-        None => ctx
-            .with_cache(|c| c.find_item_by_branch(&head_repo, &pull_request.head_ref).ok().flatten())
-            .flatten()
-            .filter(|i| i.subject.is_none()),
+        None => branch_item_for(ctx, &pull_request),
     };
     let kept = existing.as_ref().and_then(|i| i.checkout.clone());
+    // The clone a kept checkout belongs to is its item's repository, which
+    // is the fork when the branch was cut there; a fresh checkout is cut
+    // in the pull request's own.
+    let clone = existing
+        .as_ref()
+        .and_then(|i| RepoId::parse(&i.repo_full_name))
+        .unwrap_or_else(|| repo.clone());
     let pr_branch = format!("perch/pr-{number}");
     let branch = kept.as_ref().map(|c| c.branch.clone()).unwrap_or_else(|| pr_branch.clone());
 
     let checkout = match &kept {
-        Some(own) if !own.owned => open_own_checkout(ctx, &repo, own, &pull_request.base_ref).await,
+        Some(own) if !own.owned => open_own_checkout(ctx, &clone, own, &pull_request.base_ref).await,
         _ if offline => {
             let path = kept.as_ref().map(|c| c.path.clone());
-            reopen_from_disk(ctx, &repo, number, &branch, path).await
+            reopen_from_disk(ctx, &clone, number, &branch, path).await
         }
         // Cut for something else, an issue most likely, and since pushed
         // as this pull request. Read as it is: its commits are the reader's.
         Some(owned) if owned.branch != pr_branch => {
-            open_owned_branch_for_pull(ctx, &repo, owned, number, &pull_request.head_sha, &pull_request.base_ref).await
+            open_owned_branch_for_pull(ctx, &clone, &repo, owned, number, &pull_request.head_sha, &pull_request.base_ref)
+                .await
         }
         _ => {
             let progress = events.clone();
@@ -2430,9 +2492,16 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
 /// directory comes back if it was archived, and nothing is reset: the
 /// commits on it are the reader's, pushed or not. When the pull request
 /// has moved past what is here, the review says so.
+///
+/// `clone` is the repository the checkout was cut in, and `upstream` the
+/// one the pull request is on; when they differ the pull request's refs
+/// are fetched across, so the diff, the base and the reader's unpushed
+/// commits are all in one object store.
+#[allow(clippy::too_many_arguments)]
 async fn open_owned_branch_for_pull(
     ctx: &Ctx,
-    repo: &RepoId,
+    clone: &RepoId,
+    upstream: &RepoId,
     owned: &ItemCheckout,
     number: u64,
     pr_head_sha: &str,
@@ -2440,10 +2509,11 @@ async fn open_owned_branch_for_pull(
 ) -> Result<perch_git::Checkout, perch_git::Error> {
     let events = &ctx.events;
     let _ = events.send(Event::ReviewProgress { message: "Fetching the pull request".into(), percent: None });
-    let bare = ctx.preparer.ensure_bare(repo, |_| {}).await?;
-    ctx.preparer.fetch_pull(&bare, number, base_ref).await?;
+    let bare = ctx.preparer.ensure_bare(clone, |_| {}).await?;
+    let from = if clone == upstream { "origin".to_string() } else { upstream.clone_url() };
+    ctx.preparer.fetch_pull(&bare, &from, number, base_ref).await?;
     let _ = events.send(Event::ReviewProgress { message: "Checking out the files".into(), percent: None });
-    let mut checkout = open_owned_branch(ctx, repo, owned).await?;
+    let mut checkout = open_owned_branch(ctx, clone, owned).await?;
     let base = format!("refs/perch/base/{number}");
     checkout.merge_base = ctx
         .preparer

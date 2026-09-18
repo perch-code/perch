@@ -266,34 +266,25 @@ impl ReviewState {
     }
 
     /// Start opening something: the progress card, over whatever was
-    /// showing, until the next Ready or Failed.
+    /// showing, until the next Ready or Failed. Everything that belonged
+    /// to the last checkout goes, so the next one's files are not shown
+    /// under its name.
     pub fn begin(&self, message: &str) {
+        self.reset_checkout();
         self.preparing.set(Preparing::Working { message: message.into(), percent: None });
-        self.pull_request.set(None);
-        self.issue.set(None);
-        self.ready.set(false);
         self.opening.set(true);
         self.set_phase(Phase::Preparing);
     }
 
-    /// Whether the review view should be on screen at all.
-    pub fn is_showing(&self) -> bool {
-        self.opening.get() || self.is_open()
-    }
-
-    /// Leave the review view and return to the inbox.
-    pub fn close(&self) {
-        self.opening.set(false);
+    /// Forget the open checkout: its files, tabs, threads and the rest.
+    /// The item and `opening` are the caller's to set.
+    fn reset_checkout(&self) {
         self.pull_request.set(None);
-        self.item.set(None);
         self.ready.set(false);
         self.issue.set(None);
-        self.set_phase(Phase::Preparing);
         self.issue_comments.set(Arc::new(Vec::new()));
         self.stale_head.set(None);
         self.offline.set(false);
-        self.thread_id.set(None);
-        self.preparing.set(Preparing::Idle);
         self.changed_files.set(Arc::new(Vec::new()));
         self.tree.set(Arc::new(Vec::new()));
         self.tabs.set(Vec::new());
@@ -311,7 +302,23 @@ impl ReviewState {
         self.composer_focused.set(false);
         self.composer_draft.set(String::new());
         self.expanded.set(std::collections::HashSet::new());
+        self.editor_epoch.update(|e| *e += 1);
         self.dismiss_hover();
+    }
+
+    /// Whether the review view should be on screen at all.
+    pub fn is_showing(&self) -> bool {
+        self.opening.get() || self.is_open()
+    }
+
+    /// Leave the review view and return to the inbox.
+    pub fn close(&self) {
+        self.reset_checkout();
+        self.opening.set(false);
+        self.item.set(None);
+        self.thread_id.set(None);
+        self.preparing.set(Preparing::Idle);
+        self.set_phase(Phase::Preparing);
     }
 
     /// Start a new request, invalidating any answer still in flight.

@@ -114,10 +114,11 @@ pub fn item_row(
 
     // The click and the context menu are on the row, and both land on the
     // deepest view under the pointer, so everything drawn in the row lets
-    // the pointer through to it, except the controls: the rename box and
-    // the hover buttons.
+    // the pointer through to it: the content stack is pointer_events_none
+    // and every view in it inherits that, except the controls, which set
+    // it back: the rename box and the hover buttons.
     let content = Stack::horizontal((
-        glyph(&item).style(|s| s.pointer_events_none()),
+        glyph(&item),
         Stack::vertical((
             // The title, or a text box in its place while it is renamed.
             dyn_container(
@@ -137,7 +138,6 @@ pub fn item_row(
                                     .color(if archived { theme::FG_SUBTLE } else { theme::FG })
                                     .text_ellipsis()
                                     .max_width_full()
-                                    .pointer_events_none()
                             })
                             .into_any()
                     }
@@ -155,13 +155,13 @@ pub fn item_row(
                 }),
                 chips(state, &item),
             ))
-            .style(|s| s.items_center().width_full().min_width(0.0).pointer_events_none()),
+            .style(|s| s.items_center().width_full().min_width(0.0)),
         ))
         .style(|s| s.flex_col().flex_grow(1.0_f32).min_width(0.0).justify_center()),
-        row_actions(state, actions_backend, row_item, placement),
-        trailing(attention, placement).style(|s| s.pointer_events_none()),
+        row_actions(state, actions_backend, row_item, placement).style(|s| s.pointer_events_auto()),
+        trailing(attention, placement),
     ))
-    .style(|s| s.items_center().width_full().min_width(0.0));
+    .style(|s| s.items_center().width_full().min_width(0.0).pointer_events_none());
 
     let row = Container::new(content)
         .on_event_stop(el::Click, move |_, _| on_open(&open_target))
@@ -571,7 +571,9 @@ fn rename_box(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoVie
         // A click in the box must not open the item.
         .on_event_stop(el::Click, |_, _| {})
         .style(|s| {
-            s.width_full()
+            // The row lets the pointer through; the box takes it back.
+            s.pointer_events_auto()
+                .width_full()
                 .height(24.0)
                 .font_size(theme::TEXT_BODY)
                 .padding_horiz(6.0)

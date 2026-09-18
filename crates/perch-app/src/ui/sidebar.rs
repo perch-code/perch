@@ -385,15 +385,11 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
 
 /// What a row is rebuilt on: everything it draws, which is the whole row
 /// and the name of its project. Listing the fields by hand missed one
-/// every time a chip was added, so the row is its own key: its Debug form,
-/// which is every field.
-type RowKey = (String, Option<String>);
+/// every time a chip was added, so the row is its own key.
+type RowKey = (Item, Option<String>);
 
 fn row_key(state: AppState, item: &Item) -> RowKey {
-    (
-        format!("{item:?}"),
-        state.project(&item.project_id).map(|p| p.name),
-    )
+    (item.clone(), state.project(&item.project_id).map(|p| p.name))
 }
 
 fn group_section(

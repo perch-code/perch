@@ -48,7 +48,7 @@ impl Project {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Label {
     pub name: String,
     /// Six hex digits, as GitHub sends it.
@@ -57,7 +57,7 @@ pub struct Label {
 }
 
 /// What Perch keeps of an issue.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Issue {
     pub number: u64,
     pub title: String,
@@ -166,7 +166,7 @@ impl IssuePayload {
 }
 
 /// The GitHub thing an item is about.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Subject {
     PullRequest(PullRequest),
@@ -246,7 +246,7 @@ impl SubjectKind {
 }
 
 /// A branch checked out somewhere on this machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Checkout {
     pub branch: String,
     /// What the diff is taken against.
@@ -263,7 +263,7 @@ pub struct Checkout {
     pub churn: Option<(u32, u32)>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Item {
     pub id: String,
     pub project_id: String,

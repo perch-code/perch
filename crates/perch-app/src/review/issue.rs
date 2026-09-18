@@ -320,7 +320,7 @@ fn in_perch(app: AppState, state: ReviewState, backend: Rc<Backend>, open_item: 
             });
             let rows = dyn_stack(
                 children,
-                |i| format!("{i:?}"),
+                |i| i.clone(),
                 move |item| {
                     let project = app.project(&item.project_id);
                     item_row(app, b.clone(), item, project, Placement::Section(crate::items::ItemGroup::Project), o.clone())

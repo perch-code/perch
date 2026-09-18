@@ -105,7 +105,7 @@ impl Preparer {
         let bare = self.ensure_bare(id, &mut on_step).await?;
 
         on_step(Step::Fetching);
-        self.fetch_pull(&bare, number, base_ref).await?;
+        self.fetch_pull(&bare, "origin", number, base_ref).await?;
         let base_local = format!("refs/perch/base/{number}");
 
         let merge_base = self
@@ -394,15 +394,17 @@ impl Preparer {
 
     /// Fetch a pull request's head and its base branch into the bare clone,
     /// in a namespace of our own so these refs can never collide with the
-    /// user's: `refs/perch/pull/N/head` and `refs/perch/base/N`.
-    pub async fn fetch_pull(&self, bare: &Path, number: u64, base_ref: &str) -> Result<(), Error> {
+    /// user's: `refs/perch/pull/N/head` and `refs/perch/base/N`. `from` is
+    /// `origin`, or the URL of the repository the pull request is on when
+    /// the clone is of a fork.
+    pub async fn fetch_pull(&self, bare: &Path, from: &str, number: u64, base_ref: &str) -> Result<(), Error> {
         self.git
             .run(
                 Some(bare),
                 [
                     "fetch".to_string(),
                     "--no-tags".to_string(),
-                    "origin".to_string(),
+                    from.to_string(),
                     format!("+refs/pull/{number}/head:refs/perch/pull/{number}/head"),
                     format!("+refs/heads/{base_ref}:refs/perch/base/{number}"),
                 ],

@@ -54,7 +54,7 @@ pub struct AppState {
     /// the picker offers.
     pub agent: RwSignal<AgentConfig>,
     /// Something a worktree action could not do, for the status line.
-    /// Cleared by the next thing that goes right.
+    /// Cleared by the next act the reader takes.
     pub notice: RwSignal<Option<String>>,
     /// The review view's state, once the window has made it, so a menu
     /// that ends in something being opened can put the progress card up.
@@ -191,6 +191,9 @@ impl AppState {
                 review.pull_request.set(pull_request);
                 review.issue.set(None);
                 review.issue_comments.set(Arc::new(Vec::new()));
+                // The threads follow on their own event; whatever is here
+                // is the last item's.
+                review.comment_threads.set(Arc::new(Vec::new()));
                 review.ready.set(true);
                 review.set_phase(Phase::Ready);
             }
@@ -205,6 +208,7 @@ impl AppState {
                 review.offline.set(offline);
                 review.issue.set(Some(issue));
                 review.issue_comments.set(comments);
+                review.comment_threads.set(Arc::new(Vec::new()));
                 review.ready.set(true);
                 review.set_phase(Phase::Issue);
             }
@@ -345,7 +349,9 @@ impl AppState {
                 }
                 _ => {}
             },
-            Event::Notice(message) => self.notice.set(Some(message)),
+            // An empty notice is the backend saying the last one has been
+            // read: the reader has moved on to something else.
+            Event::Notice(message) => self.notice.set(Some(message).filter(|m| !m.is_empty())),
             Event::AgentConfig(agent) => self.agent.set(agent),
             Event::Archived { .. }
             | Event::CommentThreads { .. }
