@@ -105,6 +105,10 @@ pub const RADIUS: f64 = 6.0;
 pub const BADGE_HEIGHT: f64 = 20.0;
 pub const PILL_HEIGHT: f64 = 22.0;
 pub const RADIUS_LG: f64 = 10.0;
+/// The references panel under the editor, and how far it can be dragged.
+pub const REFERENCES_HEIGHT: f64 = 220.0;
+pub const REFERENCES_MIN_HEIGHT: f64 = 100.0;
+pub const REFERENCES_MAX_HEIGHT: f64 = 600.0;
 
 /// The system UI font, by the one generic that reaches it.
 ///

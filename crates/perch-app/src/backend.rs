@@ -31,7 +31,7 @@ const DETAIL_CONCURRENCY: usize = 8;
 const AVATAR_CONCURRENCY: usize = 6;
 const LAST_MODIFIED_KEY: &str = "notifications_last_modified";
 /// Settings the UI keeps between launches. Sent back at startup.
-pub const UI_META_KEYS: [&str; 2] = ["item_filters", "collapsed_projects"];
+pub const UI_META_KEYS: [&str; 3] = ["item_filters", "collapsed_projects", "review.layout"];
 
 /// What the per-thread fetches share.
 #[derive(Clone)]
@@ -66,12 +66,21 @@ pub enum Command {
     /// Turn a notification into an item, or find the one it already has,
     /// and open it.
     OpenSubject { repo_full_name: String, kind: ItemKind, number: u64 },
-    /// Read, diff, and highlight one file of the open checkout.
+    /// Read, diff, and highlight one file of the open checkout, over the
+    /// scope that is set.
     OpenFile { path: String },
+    /// What the diff is over: the branch, a commit, the uncommitted work.
+    /// The changed list is recomputed and every open file reloads.
+    SetScope { item_id: String, scope: perch_git::Scope },
+    /// Check or uncheck a file's content as viewed.
+    SetViewed { item_id: String, path: String, blob: String, viewed: bool },
+    /// Ask GitHub again about the workflow runs for the item's head.
+    RefreshChecks { item_id: String },
     /// Ask the language server about a position. `token` lets the UI drop an
     /// answer that arrives after the pointer has moved on.
     Hover { token: u64, path: String, line: u32, character: u32 },
     Definition { token: u64, path: String, line: u32, character: u32 },
+    References { token: u64, path: String, line: u32, character: u32 },
     CloseReview,
 
     /// Leave Active. An owned checkout's directory goes too, refused when
@@ -188,10 +197,26 @@ pub enum Event {
     FileLoaded { path: String, file: Arc<crate::review::model::LoadedFile> },
     FileFailed { path: String, message: String },
 
+    /// Everything said on the pull request: from the cache first, then
+    /// from GitHub.
+    DiscussionReady { item_id: String, discussion: Arc<perch_github::Discussion> },
+    /// The workflow runs' verdict for the item's head.
+    ChecksReady { item_id: String, checks: Arc<perch_github::Checks> },
+    /// The commits over the base and whether the checkout has work in it,
+    /// for the scope menu.
+    CommitsReady { item_id: String, commits: Arc<Vec<perch_git::Commit>>, dirt: perch_git::Dirt },
+    /// The changed list under a scope, after `SetScope`.
+    ScopeReady { item_id: String, scope: perch_git::Scope, files: Arc<Vec<perch_git::ChangedFile>> },
+    /// Every (path, blob) the reader has viewed on the item. Whole.
+    ViewedReady { item_id: String, viewed: Arc<std::collections::HashSet<(String, String)>> },
+
     LspStatus(perch_lsp::Status),
     LspHover { token: u64, text: String },
     /// A definition inside the worktree, or `None` when it lands outside it.
     LspDefinition { token: u64, path: Option<String>, line: u32 },
+    /// Every use of a symbol inside the worktree, with the line's text, and
+    /// how many uses lie outside it.
+    LspReferences { token: u64, references: Vec<crate::review::model::Reference>, elsewhere: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -232,6 +257,27 @@ impl Backend {
 
     pub fn open_file(&self, path: &str) {
         let _ = self.commands.send(Command::OpenFile { path: path.to_string() });
+    }
+
+    pub fn set_scope(&self, item_id: &str, scope: perch_git::Scope) {
+        let _ = self.commands.send(Command::SetScope { item_id: item_id.to_string(), scope });
+    }
+
+    pub fn set_viewed(&self, item_id: &str, path: &str, blob: &str, viewed: bool) {
+        let _ = self.commands.send(Command::SetViewed {
+            item_id: item_id.to_string(),
+            path: path.to_string(),
+            blob: blob.to_string(),
+            viewed,
+        });
+    }
+
+    pub fn refresh_checks(&self, item_id: &str) {
+        let _ = self.commands.send(Command::RefreshChecks { item_id: item_id.to_string() });
+    }
+
+    pub fn references(&self, token: u64, path: &str, line: u32, character: u32) {
+        let _ = self.commands.send(Command::References { token, path: path.to_string(), line, character });
     }
 
     pub fn close_review(&self) {
@@ -720,6 +766,45 @@ async fn run(
                             let _ = events.send(Event::LspHover { token, text });
                         }
                     }
+                });
+            }
+            Some(Command::SetScope { item_id, scope }) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { set_scope(&ctx, &item_id, scope).await });
+            }
+            Some(Command::SetViewed { item_id, path, blob, viewed }) => {
+                if let Some(Err(e)) = ctx.with_cache(|c| c.set_viewed(&item_id, &path, &blob, viewed)) {
+                    tracing::warn!(error = %e, "could not record viewed");
+                }
+                send_viewed(&ctx, &item_id);
+            }
+            Some(Command::RefreshChecks { item_id }) => {
+                let open = ctx.slot.lock().ok().and_then(|g| {
+                    g.as_ref()
+                        .filter(|c| c.item_id == item_id)
+                        .and_then(|c| c.pull_request.clone().map(|p| (p, c.checkout.head_sha.clone())))
+                });
+                if let Some((pr, head)) = open {
+                    let ctx = ctx.clone();
+                    tokio::spawn(async move { fetch_checks(&ctx, &item_id, &pr, &head).await });
+                }
+            }
+            Some(Command::References { token, path, line, character }) => {
+                let checkout = checkout.clone();
+                let language_server = language_server.clone();
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await else {
+                        return;
+                    };
+                    let worktree = checkout
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
+                    let Some(worktree) = worktree else { return };
+                    let locations = client.references(&full, line, character).await;
+                    let (references, elsewhere) = read_references(&worktree, &locations).await;
+                    let _ = events.send(Event::LspReferences { token, references, elsewhere });
                 });
             }
             Some(Command::Definition { token, path, line, character }) => {
@@ -1374,6 +1459,7 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
     // have attached a pull request or a poll marked it since.
     let mut item = ctx.item(&item.id).unwrap_or(item);
     if let Some(c) = item.checkout.as_mut() {
+        c.last_seen_head = Some(c.head_sha.clone()).filter(|h| !h.is_empty());
         c.head_sha = git_checkout.head_sha.clone();
         c.on_disk = true;
     }
@@ -1453,8 +1539,11 @@ fn branches_in(ctx: &Ctx, repo_full_name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Everything after a checkout is in hand: the file list, the tree, the
-/// review context, `ReviewReady`, and the threads.
+/// Everything after a checkout is in hand: the file list over the branch,
+/// the tree, the review context, `ReviewReady`, and then, each on its own
+/// task so the code paints first, the threads, what is viewed, the
+/// commits and the dirt for the scope menu, and for a pull request the
+/// discussion and the checks: the cached copy first, then GitHub's.
 async fn finish_open(
     ctx: &Ctx,
     item: Item,
@@ -1465,7 +1554,8 @@ async fn finish_open(
     let events = &ctx.events;
     let _ = events.send(Event::ReviewProgress { message: "Computing the diff".into(), percent: None });
 
-    let files = match changed_files(&ctx.preparer, &checkout).await {
+    let scope = perch_git::Scope::Branch;
+    let files = match scoped_files(&ctx.preparer, &checkout, &scope).await {
         Ok(f) => Arc::new(f),
         Err(e) => {
             let _ = events.send(Event::ReviewFailed { message: e.to_string() });
@@ -1478,37 +1568,152 @@ async fn finish_open(
         .unwrap_or_default();
 
     let stale_head = checkout.stale.clone();
-    let head_for_threads = checkout.head_sha.clone();
-    let worktree_for_threads = checkout.worktree.clone();
+    let head = checkout.head_sha.clone();
+    let merge_base = checkout.merge_base.clone();
+    let worktree = checkout.worktree.clone();
     let item = Arc::new(item);
     if let Ok(mut guard) = ctx.slot.lock() {
         *guard = Some(ReviewContext {
             checkout,
             files: files.clone(),
+            scope,
             item_id: item.id.clone(),
             pull_request: pull_request.clone(),
             body: None,
             issue: None,
         });
     }
-    tracing::info!(item = %item.id, files = files.len(), tree = tree.len(), "review ready");
+    tracing::info!(
+        item = %item.id,
+        files = files.len(),
+        tree = tree.len(),
+        worktree = %worktree.display(),
+        stale = stale_head.is_some(),
+        offline,
+        "review ready"
+    );
     let _ = events.send(Event::ReviewReady {
         item: item.clone(),
-        pull_request,
+        pull_request: pull_request.clone(),
         files,
         tree: Arc::new(tree),
         stale_head,
         offline,
     });
+
+    // What was viewed is small and local; it goes straight away.
+    send_viewed(ctx, &item.id);
+
+    // The outdated check is a git call per moved thread; the log and the
+    // status are two more. Off the open, on their own tasks.
     {
         let ctx = ctx.clone();
         let item_id = item.id.clone();
+        let (head, worktree) = (head.clone(), worktree.clone());
         tokio::spawn(async move {
-            mark_outdated_threads(&ctx, &item_id, &head_for_threads, &worktree_for_threads).await;
+            mark_outdated_threads(&ctx, &item_id, &head, &worktree).await;
             ctx.send_threads(&item_id);
         });
     }
+    {
+        let ctx = ctx.clone();
+        let item_id = item.id.clone();
+        let head = head.clone();
+        tokio::spawn(async move { send_commits(&ctx, &item_id, &worktree, &merge_base, &head).await });
+    }
+
+    if let Some(pr) = pull_request {
+        // The cached discussion and checks paint before GitHub answers,
+        // as the inbox does. A checkout with no pull request has neither.
+        ctx.with_cache(|c| {
+            if let Ok(Some((_, d))) = c.load_discussion(&item.id) {
+                let _ = ctx.events.send(Event::DiscussionReady { item_id: item.id.clone(), discussion: Arc::new(d) });
+            }
+            if let Ok(Some(checks)) = c.load_checks(&item.id, &head) {
+                let _ = ctx.events.send(Event::ChecksReady { item_id: item.id.clone(), checks: Arc::new(checks) });
+            }
+        });
+        if !offline {
+            let (ctx2, item_id2, pr2) = (ctx.clone(), item.id.clone(), pr.clone());
+            tokio::spawn(async move { archive_discussion(&ctx2, &item_id2, &pr2).await });
+            let (ctx2, item_id2) = (ctx.clone(), item.id.clone());
+            tokio::spawn(async move { fetch_checks(&ctx2, &item_id2, &pr, &head).await });
+        }
+    }
     true
+}
+
+/// The changed list over a scope, in the worktree. Every scope produces
+/// the same shape, and nothing downstream knows which made it.
+async fn scoped_files(
+    preparer: &Preparer,
+    checkout: &perch_git::Checkout,
+    scope: &perch_git::Scope,
+) -> Result<Vec<perch_git::ChangedFile>, perch_git::Error> {
+    perch_git::changed_files(preparer.git(), &checkout.worktree, scope, &checkout.merge_base, &checkout.head_sha).await
+}
+
+/// Every (path, blob) the reader has viewed on an item.
+fn send_viewed(ctx: &Ctx, item_id: &str) {
+    let viewed = ctx.with_cache(|c| c.load_viewed(item_id).unwrap_or_default()).unwrap_or_default();
+    let _ = ctx.events.send(Event::ViewedReady { item_id: item_id.to_string(), viewed: Arc::new(viewed) });
+}
+
+/// The commits over the base and whether there is work in the checkout,
+/// for the scope menu. A checkout with no history over its base, an
+/// issue's home say, sends an empty list.
+async fn send_commits(ctx: &Ctx, item_id: &str, worktree: &Path, merge_base: &str, head: &str) {
+    let git = ctx.preparer.git();
+    let commits = if merge_base.is_empty() || merge_base == head {
+        Vec::new()
+    } else {
+        match perch_git::log(git, worktree, merge_base, head).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(item = item_id, error = %e, "could not list the commits");
+                Vec::new()
+            }
+        }
+    };
+    let dirt = perch_git::dirt(git, worktree).await.unwrap_or_default();
+    let _ = ctx.events.send(Event::CommitsReady { item_id: item_id.to_string(), commits: Arc::new(commits), dirt });
+}
+
+/// One request for the workflow runs on the head, kept and shown. A
+/// failure shows nothing: absent means unknown.
+async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest, head: &str) {
+    match ctx.github.list_workflow_runs_for_sha(&pr.repo_full_name, head).await {
+        Ok(runs) => {
+            let checks = perch_github::Checks::of(&runs);
+            ctx.with_cache(|c| c.store_checks(item_id, head, &checks));
+            if ctx.is_open(item_id) {
+                let _ = ctx.events.send(Event::ChecksReady { item_id: item_id.to_string(), checks: Arc::new(checks) });
+            }
+        }
+        Err(e) => tracing::info!(item = item_id, error = %e, "could not fetch the checks"),
+    }
+}
+
+/// The scope changed: the changed list is recomputed under it, kept in the
+/// review context for the file loads that follow, and sent.
+async fn set_scope(ctx: &Ctx, item_id: &str, scope: perch_git::Scope) {
+    let checkout = ctx.slot.lock().ok().and_then(|g| {
+        g.as_ref().filter(|c| c.item_id == item_id).map(|c| c.checkout.clone())
+    });
+    let Some(checkout) = checkout else { return };
+    match scoped_files(&ctx.preparer, &checkout, &scope).await {
+        Ok(files) => {
+            let files = Arc::new(files);
+            if let Ok(mut guard) = ctx.slot.lock() {
+                if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+                    open.scope = scope.clone();
+                    open.files = files.clone();
+                }
+            }
+            let _ = ctx.events.send(Event::ScopeReady { item_id: item_id.to_string(), scope, files });
+        }
+        Err(e) => ctx.notice(format!("Could not read that scope: {e}")),
+    }
 }
 
 /// Cut `perch/issue-<n>` from the default branch and make the item for it,
@@ -1651,7 +1856,10 @@ const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 /// What an open review needs in order to read and diff its files.
 struct ReviewContext {
     checkout: perch_git::Checkout,
+    /// The changed list under `scope`.
     files: Arc<Vec<perch_git::ChangedFile>>,
+    /// What the diff is over. Branch when the item opens.
+    scope: perch_git::Scope,
     item_id: String,
     /// `None` for a branch with no pull request.
     pull_request: Option<Arc<PullRequest>>,
@@ -1761,6 +1969,12 @@ async fn refresh(ctx: &Ctx, source: &str, fetches: &Fetches) -> Duration {
 async fn attend(ctx: &Ctx, threads: &[Thread]) {
     let mut changed = false;
     for thread in threads {
+        // A CI notification for the open pull request's branch is the one
+        // time the checks are asked about again.
+        if thread.subject.kind == SubjectKind::CheckSuite {
+            refresh_open_checks(ctx, thread).await;
+            continue;
+        }
         let kind = match thread.subject.kind {
             SubjectKind::PullRequest => ItemKind::PullRequest,
             SubjectKind::Issue => ItemKind::Issue,
@@ -1826,6 +2040,21 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
     }
     if changed {
         ctx.send_items();
+    }
+}
+
+/// Fetch the checks again when a CI notification names the open pull
+/// request's repository and head branch.
+async fn refresh_open_checks(ctx: &Ctx, thread: &Thread) {
+    let Some(query) = perch_github::WorkflowRunQuery::from_thread(thread) else { return };
+    let open = ctx.slot.lock().ok().and_then(|g| {
+        g.as_ref().and_then(|c| {
+            c.pull_request.clone().map(|p| (c.item_id.clone(), p, c.checkout.head_sha.clone()))
+        })
+    });
+    let Some((item_id, pr, head)) = open else { return };
+    if pr.repo_full_name.eq_ignore_ascii_case(&query.repo_full_name) && pr.head_ref == query.branch {
+        fetch_checks(ctx, &item_id, &pr, &head).await;
     }
 }
 
@@ -2199,6 +2428,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
         *guard = Some(ReviewContext {
             checkout,
             files: Arc::new(Vec::new()),
+            scope: perch_git::Scope::Branch,
             item_id: item.id.clone(),
             pull_request: None,
             body: None,
@@ -2404,7 +2634,9 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         owned: kept.as_ref().is_none_or(|c| c.owned),
         on_disk: true,
         churn: kept.as_ref().and_then(|c| c.churn),
-        last_seen_head: kept.as_ref().and_then(|c| c.last_seen_head.clone()),
+        // Where the head was the last time this was opened, for "Since
+        // you last looked". A first open has nothing to look back to.
+        last_seen_head: kept.as_ref().map(|c| c.head_sha.clone()).filter(|h| !h.is_empty()),
     });
     item.archived_at = None;
     item.last_opened_at = now;
@@ -2418,77 +2650,7 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     }
     ctx.send_items();
 
-    let _ = events.send(Event::ReviewProgress {
-        message: "Computing the diff".into(),
-        percent: None,
-    });
-
-    let files = match changed_files(&ctx.preparer, &checkout).await {
-        Ok(f) => Arc::new(f),
-        Err(e) => fail!("{e}"),
-    };
-
-    let worktree = checkout.worktree.clone();
-    let tree = tokio::task::spawn_blocking(move || {
-        perch_git::list_tree(&worktree, 50_000).unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default();
-
-    let stale_head = checkout.stale.clone();
-    let worktree_label = checkout.worktree.display().to_string();
-    let head_for_threads = checkout.head_sha.clone();
-    let worktree_for_threads = checkout.worktree.clone();
-    let pull_request = Arc::new(pull_request);
-    let item = Arc::new(item);
-    if let Ok(mut guard) = ctx.slot.lock() {
-        *guard = Some(ReviewContext {
-            checkout,
-            files: files.clone(),
-            item_id: item.id.clone(),
-            pull_request: Some(pull_request.clone()),
-            body: None,
-            issue: None,
-        });
-    }
-
-    tracing::info!(
-        repo = %pull_request.repo_full_name,
-        number,
-        files = files.len(),
-        tree = tree.len(),
-        worktree = %worktree_label,
-        stale = stale_head.is_some(),
-        offline,
-        "review ready"
-    );
-    let _ = events.send(Event::ReviewReady {
-        item: item.clone(),
-        pull_request: Some(pull_request.clone()),
-        files,
-        tree: Arc::new(tree),
-        stale_head,
-        offline,
-    });
-
-    // Threads paint after the code, not before, and the outdated check is
-    // a git call per moved thread, so both go on their own task.
-    {
-        let ctx = ctx.clone();
-        let item_id = item.id.clone();
-        tokio::spawn(async move {
-            mark_outdated_threads(&ctx, &item_id, &head_for_threads, &worktree_for_threads).await;
-            ctx.send_threads(&item_id);
-        });
-    }
-
-    // The discussion arrives after the checkout, on its own task, so the
-    // review paints first. Offline there is nothing to fetch.
-    if !offline {
-        let ctx = ctx.clone();
-        tokio::spawn(async move { archive_discussion(&ctx, &pull_request).await });
-    }
-    true
+    finish_open(ctx, item, Some(Arc::new(pull_request)), checkout, offline).await
 }
 
 /// A branch Perch cut, read against a pull request that was opened from
@@ -2583,23 +2745,30 @@ async fn open_own_checkout(
 
 /// Fetch what was said on a pull request and file it under the knowledge
 /// root. A fetch error is a line in the status bar, not a failed review.
-async fn archive_discussion(ctx: &Ctx, pr: &perch_github::PullRequest) {
+async fn archive_discussion(ctx: &Ctx, item_id: &str, pr: &perch_github::PullRequest) {
     let discussion = match ctx.github.fetch_discussion(&pr.repo_full_name, pr.number).await {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!(repo = %pr.repo_full_name, number = pr.number, error = %e, "could not fetch the discussion");
-            let _ = ctx.events.send(Event::Notice(format!("Could not archive the discussion: {e}")));
+            let _ = ctx.events.send(Event::Notice(format!("Could not fetch the discussion: {e}")));
             return;
         }
     };
 
+    // Kept whole, so the next open paints it before the network answers,
+    // and shown now if the item is still the one open.
+    ctx.with_cache(|c| c.store_discussion(item_id, &discussion));
     if let Ok(mut guard) = ctx.slot.lock() {
-        if let Some(open) = guard
-            .as_mut()
-            .filter(|c| c.pull_request.as_ref().is_some_and(|p| p.number == pr.number))
-        {
+        if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
             open.body = Some(discussion.body.clone());
         }
+    }
+    if ctx.is_open(item_id) {
+        ctx.want_avatars(discussion.comments.iter().map(|c| c.user_avatar_url.clone()));
+        let _ = ctx.events.send(Event::DiscussionReady {
+            item_id: item_id.to_string(),
+            discussion: Arc::new(discussion.clone()),
+        });
     }
 
     let project = ctx.config.project_for(&pr.repo_full_name);
@@ -2883,43 +3052,16 @@ async fn reopen_from_disk(
 }
 
 /// The pull request's file list, from a local diff rather than the API.
-async fn changed_files(
-    preparer: &Preparer,
-    checkout: &perch_git::Checkout,
-) -> Result<Vec<perch_git::ChangedFile>, perch_git::Error> {
-    let git = preparer.git();
-    let args = |mode: &str| {
-        [
-            "diff".to_string(),
-            "-M".to_string(),
-            mode.to_string(),
-            "-z".to_string(),
-            checkout.merge_base.clone(),
-            checkout.head_sha.clone(),
-        ]
-    };
-    let timeout = Duration::from_secs(60);
-
-    let name_status = git.run(Some(&checkout.bare), args("--name-status"), timeout).await?;
-    let numstat = git.run(Some(&checkout.bare), args("--numstat"), timeout).await?;
-
-    Ok(perch_git::diff::merge_file_lists(
-        perch_git::diff::parse_name_status(&name_status),
-        perch_git::diff::parse_numstat(&numstat),
-    ))
-}
-
-/// Read one file, diff it against the base, and highlight both sides.
 async fn open_file(
     preparer: Arc<Preparer>,
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     events: EventSender<Event>,
     path: String,
 ) {
-    let Some((checkout, changed)) = slot
+    let Some((checkout, changed, scope)) = slot
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|c| (c.checkout.clone(), c.files.clone())))
+        .and_then(|g| g.as_ref().map(|c| (c.checkout.clone(), c.files.clone(), c.scope.clone())))
     else {
         let _ = events.send(Event::FileFailed {
             path,
@@ -2929,49 +3071,37 @@ async fn open_file(
     };
 
     let entry = changed.iter().find(|f| f.path == path).cloned();
+    let (base_rev, head_rev) = scope.sides(&checkout.merge_base, &checkout.head_sha);
+    let git = preparer.git();
 
-    // The head side comes from the worktree, so a file the pull request never
-    // touched costs no git call at all.
+    // Both sides come from the scope: a commit's tree, the index, or the
+    // disk. A file outside the changed list has a head side only.
     let head = match &entry {
         Some(f) if f.status == perch_git::ChangeStatus::Deleted => String::new(),
-        _ => {
-            let full = checkout.worktree.join(&path);
-            match tokio::fs::read(&full).await {
-                Ok(bytes) if bytes.len() > MAX_FILE_BYTES => {
-                    let _ = events.send(Event::FileFailed {
-                        path,
-                        message: "file is too large to display".into(),
-                    });
-                    return;
-                }
-                Ok(bytes) => match String::from_utf8(bytes) {
-                    Ok(text) => text,
-                    Err(_) => {
-                        let _ = events.send(Event::FileFailed {
-                            path,
-                            message: "file is not text".into(),
-                        });
-                        return;
-                    }
-                },
-                Err(e) => {
-                    let _ = events.send(Event::FileFailed { path, message: e.to_string() });
-                    return;
-                }
+        _ => match perch_git::read_side(git, &checkout.worktree, &head_rev, &path).await {
+            Ok(Some(text)) if text.len() > MAX_FILE_BYTES => {
+                let _ = events.send(Event::FileFailed { path, message: "file is too large to display".into() });
+                return;
             }
-        }
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                let _ = events.send(Event::FileFailed { path, message: "file is not there".into() });
+                return;
+            }
+            Err(e) => {
+                let _ = events.send(Event::FileFailed { path, message: e.to_string() });
+                return;
+            }
+        },
     };
-
-    // The base side only exists for files the pull request changed.
     let base = match &entry {
-        None | Some(perch_git::ChangedFile { status: perch_git::ChangeStatus::Added, .. }) => {
-            String::new()
-        }
+        None | Some(perch_git::ChangedFile { status: perch_git::ChangeStatus::Added, .. }) => String::new(),
         Some(f) => {
             let source = f.old_path.clone().unwrap_or_else(|| f.path.clone());
-            preparer
-                .show_blob(&checkout.bare, &checkout.merge_base, &source)
+            perch_git::read_side(git, &checkout.worktree, &base_rev, &source)
                 .await
+                .ok()
+                .flatten()
                 .unwrap_or_default()
         }
     };
@@ -2982,7 +3112,7 @@ async fn open_file(
     // Parsing and diffing are CPU work; keep them off the async runtime's
     // reactor threads.
     let loaded = tokio::task::spawn_blocking(move || {
-        build_loaded_file(path, head, base, status, binary)
+        build_loaded_file(path, head, base, status, binary, scope)
     })
     .await;
 
@@ -2992,6 +3122,7 @@ async fn open_file(
                 path = %file.path,
                 lines = file.buffer.len(),
                 changes = file.buffer.change_starts.len(),
+                scope = %file.scope,
                 "file loaded"
             );
             let _ = events.send(Event::FileLoaded { path: file.path.clone(), file: Arc::new(file) });
@@ -3078,6 +3209,45 @@ async fn resolve(
     Some((client, worktree.join(path)))
 }
 
+/// Each location inside the worktree with its line's text, read here so
+/// the panel needs no file loads, and a count of those outside it, in a
+/// dependency, which the rail could not open. Files are read once each.
+async fn read_references(
+    worktree: &Path,
+    locations: &[perch_lsp::lsp_types::Location],
+) -> (Vec<crate::review::model::Reference>, usize) {
+    let mut texts: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    let mut elsewhere = 0;
+    for location in locations {
+        let target = perch_lsp::client::uri_to_path(&location.uri.to_string());
+        let Some(relative) = target
+            .and_then(|p| p.strip_prefix(worktree).ok().map(|r| r.to_string_lossy().into_owned()))
+        else {
+            elsewhere += 1;
+            continue;
+        };
+        if !texts.contains_key(&relative) {
+            let lines = tokio::fs::read_to_string(worktree.join(&relative))
+                .await
+                .map(|t| t.lines().map(str::to_string).collect())
+                .unwrap_or_default();
+            texts.insert(relative.clone(), lines);
+        }
+        let line = location.range.start.line as usize;
+        let text = texts[&relative].get(line).map(|l| l.trim().to_string()).unwrap_or_default();
+        out.push(crate::review::model::Reference {
+            path: relative,
+            line: line + 1,
+            character: location.range.start.character as usize,
+            text,
+        });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+    out.dedup();
+    (out, elsewhere)
+}
+
 /// Flatten a hover reply into the plain text the popup shows.
 fn render_hover(hover: &perch_lsp::lsp_types::Hover) -> String {
     use perch_lsp::lsp_types::{HoverContents, MarkedString};
@@ -3102,6 +3272,7 @@ pub(crate) fn build_loaded_file(
     base: String,
     status: Option<perch_git::ChangeStatus>,
     binary: bool,
+    scope: perch_git::Scope,
 ) -> crate::review::model::LoadedFile {
     use perch_git::{file_diff, DisplayBuffer};
     use perch_syntax::{highlight, Language, LineSpans};
@@ -3117,17 +3288,24 @@ pub(crate) fn build_loaded_file(
             base_spans: LineSpans::default(),
             status,
             truncated: true,
+            scope,
+            base_buffer: None,
+            alignment: Vec::new(),
         };
     }
 
-    let buffer = match status {
+    // A changed file is diffed for the stacked view, and the same diff
+    // gives the split view its base side and its row pairing. A file
+    // outside the list is shown plainly, which is what makes browsing the
+    // whole tree useful during a review.
+    let (buffer, base_buffer, alignment) = match status {
         Some(_) => {
             let diff = file_diff(&base, &head);
-            DisplayBuffer::unified(&head, &base, &diff)
+            let alignment = perch_git::alignment(&diff, &base, &head);
+            let base_buffer = (!base.is_empty()).then(|| DisplayBuffer::plain(&base));
+            (DisplayBuffer::unified(&head, &base, &diff), base_buffer, alignment)
         }
-        // A file outside the pull request is shown plainly, which is what
-        // makes browsing the whole tree useful during a review.
-        None => DisplayBuffer::plain(&head),
+        None => (DisplayBuffer::plain(&head), None, Vec::new()),
     };
 
     let spans_for = |text: &str, lang: Option<Language>| match lang {
@@ -3143,6 +3321,9 @@ pub(crate) fn build_loaded_file(
         buffer,
         status,
         truncated: false,
+        scope,
+        base_buffer,
+        alignment,
     }
 }
 

@@ -59,6 +59,10 @@ pub struct AppState {
     /// The review view's state, once the window has made it, so a menu
     /// that ends in something being opened can put the progress card up.
     pub review: RwSignal<Option<crate::review::model::ReviewState>>,
+    /// Files the view should ask the backend to load again, after a scope
+    /// change threw the loaded ones away. Drained by the window, which
+    /// holds the backend handle.
+    pub reload: RwSignal<Vec<String>>,
 
     /// The sidebar, or the inbox.
     pub screen: RwSignal<Screen>,
@@ -138,6 +142,7 @@ impl AppState {
             open_item: RwSignal::new(None),
             notice: RwSignal::new(None),
             review: RwSignal::new(None),
+            reload: RwSignal::new(Vec::new()),
             agent: RwSignal::new(AgentConfig::default()),
             screen: RwSignal::new(Screen::Sidebar),
             return_to: RwSignal::new(Screen::Sidebar),
@@ -172,7 +177,7 @@ impl AppState {
 
     /// Fold one backend event into the inbox or the review view.
     pub fn apply_with_review(&self, event: Event, review: crate::review::model::ReviewState) {
-        use crate::review::model::{Phase, Preparing};
+        use crate::review::model::{ItemTab, Phase, Preparing};
 
         match event {
             Event::ReviewProgress { message, percent } => {
@@ -194,6 +199,7 @@ impl AppState {
                 // The threads follow on their own event; whatever is here
                 // is the last item's.
                 review.comment_threads.set(Arc::new(Vec::new()));
+                review.restore_tab();
                 review.ready.set(true);
                 review.set_phase(Phase::Ready);
             }
@@ -209,6 +215,7 @@ impl AppState {
                 review.issue.set(Some(issue));
                 review.issue_comments.set(comments);
                 review.comment_threads.set(Arc::new(Vec::new()));
+                review.tab.set(ItemTab::Conversation);
                 review.ready.set(true);
                 review.set_phase(Phase::Issue);
             }
@@ -277,6 +284,49 @@ impl AppState {
             Event::FileFailed { path, message } => {
                 tracing::warn!(path, message, "could not open file");
                 review.fail_load(&path);
+            }
+            // Everything about the open item that arrives after it is
+            // ready. Each names its item, so a slow answer for the last
+            // one opened cannot land on the next.
+            Event::DiscussionReady { item_id, discussion } => {
+                if review.is_item(&item_id) {
+                    review.discussion.set(Some(discussion));
+                }
+            }
+            Event::ChecksReady { item_id, checks } => {
+                if review.is_item(&item_id) {
+                    review.checks.set(Some(checks));
+                }
+            }
+            Event::CommitsReady { item_id, commits, dirt } => {
+                if review.is_item(&item_id) {
+                    review.commits.set(commits);
+                    review.dirty.set(dirt);
+                }
+            }
+            Event::ScopeReady { item_id, scope, files } => {
+                if review.is_item(&item_id) {
+                    for path in review.change_scope(scope, files) {
+                        self.reload.update(|r| r.push(path));
+                    }
+                }
+            }
+            Event::ViewedReady { item_id, viewed } => {
+                if review.is_item(&item_id) {
+                    review.viewed.set(viewed);
+                }
+            }
+            Event::LspReferences { token, references, elsewhere } => {
+                if review.request_token.get() == token {
+                    review.references.update(|r| {
+                        if let Some(r) = r.as_mut() {
+                            let mut open = (**r).clone();
+                            open.locations = references;
+                            open.elsewhere = elsewhere;
+                            *r = Arc::new(open);
+                        }
+                    });
+                }
             }
             other => self.apply(other),
         }
@@ -347,6 +397,13 @@ impl AppState {
                 "collapsed_projects" => {
                     self.collapsed.set(value.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect())
                 }
+                "review.layout" => {
+                    if let (Some(layout), Some(review)) =
+                        (crate::review::model::Layout::parse(&value), self.review.get_untracked())
+                    {
+                        review.layout.set(layout);
+                    }
+                }
                 _ => {}
             },
             // An empty notice is the backend saying the last one has been
@@ -364,7 +421,13 @@ impl AppState {
             | Event::FileFailed { .. }
             | Event::LspStatus(_)
             | Event::LspHover { .. }
-            | Event::LspDefinition { .. } => {}
+            | Event::LspDefinition { .. }
+            | Event::DiscussionReady { .. }
+            | Event::ChecksReady { .. }
+            | Event::CommitsReady { .. }
+            | Event::ScopeReady { .. }
+            | Event::ViewedReady { .. }
+            | Event::LspReferences { .. } => {}
             Event::Status(status) => {
                 if let Status::Idle { at, .. } = &status {
                     self.now.set(*at);

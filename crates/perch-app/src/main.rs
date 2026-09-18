@@ -26,6 +26,7 @@ use crate::state::AppState;
 
 mod dump;
 mod scan_cli;
+mod scope_cli;
 
 fn main() {
     // A debugging mode that renders a file the way the editor would, without
@@ -51,6 +52,11 @@ fn main() {
     // What the root scan finds under each project's roots, without writing.
     if args.get(1).map(String::as_str) == Some("--scan") {
         scan_cli::run(&args[2..]);
+        return;
+    }
+    // The changed list under a scope, as the Files tab would show it.
+    if args.get(1).map(String::as_str) == Some("--scope") {
+        scope_cli::run(&args[2..]);
         return;
     }
 

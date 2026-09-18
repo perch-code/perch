@@ -91,6 +91,9 @@ mod tests {
             base_spans: LineSpans::default(),
             status: Some(perch_git::ChangeStatus::Modified),
             truncated: false,
+            scope: perch_git::Scope::Branch,
+            base_buffer: None,
+            alignment: Vec::new(),
         }
     }
 

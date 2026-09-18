@@ -104,6 +104,20 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
         });
     }
+    // Files thrown away by a scope change are asked for again here, for
+    // the same reason.
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            let paths = state.reload.get();
+            if !paths.is_empty() {
+                state.reload.set(Vec::new());
+                for path in paths {
+                    backend.open_file(&path);
+                }
+            }
+        });
+    }
 
     Stack::vertical((
         Stack::horizontal((

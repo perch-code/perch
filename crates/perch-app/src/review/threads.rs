@@ -1103,6 +1103,7 @@ mod column {
             String::new(),
             None,
             false,
+            perch_git::Scope::Branch,
         ));
         // One rebuild per write, as the window gets: the tab opens on a
         // click and the file lands from the backend a frame later.

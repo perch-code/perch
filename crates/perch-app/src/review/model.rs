@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
-use perch_git::{ChangeStatus, ChangedFile, DisplayBuffer, TreeEntry};
-use perch_github::{Anchor, CommentThread, Issue, IssueComment, Item, PullRequest};
+use perch_git::{ChangeStatus, ChangedFile, Commit, Dirt, DisplayBuffer, Scope, TreeEntry};
+use perch_github::{Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest};
 use perch_syntax::{Language, LineSpans};
 
 /// A file prepared for the editor: text to render, and everything needed to
@@ -23,6 +23,17 @@ pub struct LoadedFile {
     pub status: Option<ChangeStatus>,
     /// True when the file was too large or not valid text.
     pub truncated: bool,
+    /// The scope the two sides came from. A file loaded under another
+    /// scope is stale, and reloads rather than repaints.
+    pub scope: Scope,
+    /// The base side on its own, for the left of a split. `None` when the
+    /// file is not in the changed list, or was added.
+    pub base_buffer: Option<DisplayBuffer>,
+    /// Which base line sits beside which head line, both 1-based, for a
+    /// split: `(Some, Some)` is an unchanged or modified pair, `(Some,
+    /// None)` a removed line, `(None, Some)` an added one. Empty for a
+    /// file outside the changed list.
+    pub alignment: Vec<(Option<usize>, Option<usize>)>,
 }
 
 impl std::fmt::Debug for LoadedFile {
@@ -52,6 +63,64 @@ impl LoadedFile {
 pub enum RailMode {
     Changed,
     AllFiles,
+}
+
+/// The item view's two tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ItemTab {
+    #[default]
+    Conversation,
+    Files,
+}
+
+/// How Files draws a changed file: head with the removed lines spliced in,
+/// or base and head side by side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Layout {
+    #[default]
+    Stacked,
+    Split,
+}
+
+impl Layout {
+    /// The word `meta` stores.
+    pub fn name(self) -> &'static str {
+        match self {
+            Layout::Stacked => "stacked",
+            Layout::Split => "split",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "stacked" => Some(Layout::Stacked),
+            "split" => Some(Layout::Split),
+            _ => None,
+        }
+    }
+}
+
+/// One place a symbol is used, as rust-analyzer lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    /// Relative to the worktree.
+    pub path: String,
+    /// 1-based.
+    pub line: usize,
+    /// 0-based column of the symbol on that line.
+    pub character: usize,
+    /// The line's text, trimmed of its indent.
+    pub text: String,
+}
+
+/// The answer to Find references: what was asked about and where it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct References {
+    pub symbol: String,
+    pub locations: Vec<Reference>,
+    /// How many locations were outside the worktree, in a dependency, and
+    /// are not listed.
+    pub elsewhere: usize,
 }
 
 /// What the review view has on screen. One signal, written once per
@@ -131,6 +200,31 @@ pub struct ReviewState {
     pub opening: RwSignal<bool>,
     pub phase: RwSignal<Phase>,
     pub preparing: RwSignal<Preparing>,
+    /// Conversation or Files. Remembered per item in `tabs_by_item` for
+    /// the life of the app.
+    pub tab: RwSignal<ItemTab>,
+    pub tabs_by_item: RwSignal<HashMap<String, ItemTab>>,
+    /// Stacked or Split, remembered across items in `meta`.
+    pub layout: RwSignal<Layout>,
+    /// What the diff is over. Per item; Branch when the item opens.
+    pub scope: RwSignal<Scope>,
+    /// The commits over the base, newest first, for the scope menu.
+    pub commits: RwSignal<Arc<Vec<Commit>>>,
+    /// Whether the checkout has unstaged or staged work, for greying the
+    /// scope menu's entries.
+    pub dirty: RwSignal<Dirt>,
+    /// Everything said on the pull request on GitHub, once fetched or read
+    /// back from the cache.
+    pub discussion: RwSignal<Option<Arc<Discussion>>>,
+    /// The workflow runs' verdict for the head, once fetched. `None` means
+    /// unknown, and the header shows no pill.
+    pub checks: RwSignal<Option<Arc<Checks>>>,
+    /// The (path, blob) pairs the reader has checked as viewed.
+    pub viewed: RwSignal<Arc<std::collections::HashSet<(String, String)>>>,
+    /// The references panel's content, when it is open.
+    pub references: RwSignal<Option<Arc<References>>>,
+    /// The panel's height. Dragged.
+    pub references_height: RwSignal<f64>,
     pub changed_files: RwSignal<Arc<Vec<ChangedFile>>>,
     pub tree: RwSignal<Arc<Vec<TreeEntry>>>,
     pub rail_mode: RwSignal<RailMode>,
@@ -220,6 +314,17 @@ impl ReviewState {
             opening: RwSignal::new(false),
             phase: RwSignal::new(Phase::Preparing),
             preparing: RwSignal::new(Preparing::Idle),
+            tab: RwSignal::new(ItemTab::Conversation),
+            tabs_by_item: RwSignal::new(HashMap::new()),
+            layout: RwSignal::new(Layout::Stacked),
+            scope: RwSignal::new(Scope::Branch),
+            commits: RwSignal::new(Arc::new(Vec::new())),
+            dirty: RwSignal::new(Dirt::default()),
+            discussion: RwSignal::new(None),
+            checks: RwSignal::new(None),
+            viewed: RwSignal::new(Arc::new(std::collections::HashSet::new())),
+            references: RwSignal::new(None),
+            references_height: RwSignal::new(crate::theme::REFERENCES_HEIGHT),
             changed_files: RwSignal::new(Arc::new(Vec::new())),
             tree: RwSignal::new(Arc::new(Vec::new())),
             rail_mode: RwSignal::new(RailMode::Changed),
@@ -285,6 +390,14 @@ impl ReviewState {
         self.issue_comments.set(Arc::new(Vec::new()));
         self.stale_head.set(None);
         self.offline.set(false);
+        self.tab.set(ItemTab::Conversation);
+        self.scope.set(Scope::Branch);
+        self.commits.set(Arc::new(Vec::new()));
+        self.dirty.set(Dirt::default());
+        self.discussion.set(None);
+        self.checks.set(None);
+        self.viewed.set(Arc::new(std::collections::HashSet::new()));
+        self.references.set(None);
         self.changed_files.set(Arc::new(Vec::new()));
         self.tree.set(Arc::new(Vec::new()));
         self.tabs.set(Vec::new());
@@ -304,6 +417,30 @@ impl ReviewState {
         self.expanded.set(std::collections::HashSet::new());
         self.editor_epoch.update(|e| *e += 1);
         self.dismiss_hover();
+    }
+
+    /// Show a tab, and remember it for the item.
+    pub fn show_tab(&self, tab: ItemTab) {
+        self.tab.set(tab);
+        if let Some(id) = self.item.with(|i| i.as_ref().map(|i| i.id.clone())) {
+            self.tabs_by_item.update(|m| {
+                m.insert(id, tab);
+            });
+        }
+    }
+
+    /// The tab the item was on when it was last open, else Conversation.
+    pub fn restore_tab(&self) {
+        let tab = self
+            .item
+            .with(|i| i.as_ref().and_then(|i| self.tabs_by_item.with(|m| m.get(&i.id).copied())))
+            .unwrap_or_default();
+        self.tab.set(tab);
+    }
+
+    /// Whether the open item is this one.
+    pub fn is_item(&self, id: &str) -> bool {
+        self.item.with(|i| i.as_ref().is_some_and(|i| i.id == id))
     }
 
     /// Whether the review view should be on screen at all.
@@ -398,12 +535,76 @@ impl ReviewState {
         self.loading.update(|m| {
             m.remove(path);
         });
+        // A load from a scope since left is thrown away; the reload for
+        // the current one is on its way.
+        if self.scope.with(|s| *s != file.scope) {
+            return;
+        }
         self.files.update(|m| {
             m.insert(path.to_string(), file);
         });
         if self.active.with(|a| a.as_deref() == Some(path)) {
             self.editor_epoch.update(|e| *e += 1);
         }
+    }
+
+    /// The scope changed: every loaded file was diffed under the old one.
+    /// Forget them all and reload the open tabs, active one first, so the
+    /// editor repaints from the new sides rather than the stale ones.
+    /// Returns the paths to ask the backend for.
+    pub fn change_scope(&self, scope: Scope, files: Arc<Vec<ChangedFile>>) -> Vec<String> {
+        self.scope.set(scope);
+        self.changed_files.set(files);
+        self.files.set(HashMap::new());
+        self.loading.set(HashMap::new());
+        let mut paths: Vec<String> = self.tabs.with(|t| t.iter().map(|t| t.path.clone()).collect());
+        if let Some(active) = self.active.get() {
+            paths.retain(|p| *p != active);
+            paths.insert(0, active);
+        }
+        self.loading.update(|m| {
+            for p in &paths {
+                m.insert(p.clone(), ());
+            }
+        });
+        self.editor_epoch.update(|e| *e += 1);
+        paths
+    }
+
+    /// Whether a changed file's content has been marked viewed.
+    pub fn is_viewed(&self, file: &ChangedFile) -> bool {
+        match &file.head_blob {
+            Some(blob) => self.viewed.with(|v| v.contains(&(file.path.clone(), blob.clone()))),
+            None => false,
+        }
+    }
+
+    /// How many of the changed files are viewed, and how many there are.
+    pub fn viewed_count(&self) -> (usize, usize) {
+        self.changed_files.with(|files| {
+            let viewed = files.iter().filter(|f| self.is_viewed(f)).count();
+            (viewed, files.len())
+        })
+    }
+
+    /// The next changed file after `from` in rail order that is not viewed,
+    /// wrapping round; `None` when every file is viewed.
+    pub fn next_unviewed(&self, from: Option<&str>, forward: bool) -> Option<String> {
+        self.changed_files.with(|files| {
+            if files.is_empty() {
+                return None;
+            }
+            let n = files.len();
+            let start = from.and_then(|p| files.iter().position(|f| f.path == p));
+            let order: Vec<usize> = (1..=n)
+                .map(|k| {
+                    let base = start.map(|s| s as isize).unwrap_or(if forward { -1 } else { n as isize });
+                    let k = k as isize;
+                    ((base + if forward { k } else { -k }).rem_euclid(n as isize)) as usize
+                })
+                .collect();
+            order.into_iter().map(|i| &files[i]).find(|f| !self.is_viewed(f)).map(|f| f.path.clone())
+        })
     }
 
     pub fn fail_load(&self, path: &str) {

@@ -109,6 +109,7 @@ async fn dump(target: &str, path: &str) -> Result<(), String> {
         base,
         entry.as_ref().map(|f| f.status),
         entry.as_ref().map(|f| f.binary).unwrap_or(false),
+        perch_git::Scope::Branch,
     ));
 
     println!("file:     {}", file.path);
