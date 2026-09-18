@@ -112,8 +112,12 @@ pub fn item_row(
     let row_item = item.clone();
     let title_item = item.clone();
 
+    // The click and the context menu are on the row, and both land on the
+    // deepest view under the pointer, so everything drawn in the row lets
+    // the pointer through to it, except the controls: the rename box and
+    // the hover buttons.
     let content = Stack::horizontal((
-        glyph(&item),
+        glyph(&item).style(|s| s.pointer_events_none()),
         Stack::vertical((
             // The title, or a text box in its place while it is renamed.
             dyn_container(
@@ -133,6 +137,7 @@ pub fn item_row(
                                     .color(if archived { theme::FG_SUBTLE } else { theme::FG })
                                     .text_ellipsis()
                                     .max_width_full()
+                                    .pointer_events_none()
                             })
                             .into_any()
                     }
@@ -150,11 +155,11 @@ pub fn item_row(
                 }),
                 chips(state, &item),
             ))
-            .style(|s| s.items_center().width_full().min_width(0.0)),
+            .style(|s| s.items_center().width_full().min_width(0.0).pointer_events_none()),
         ))
         .style(|s| s.flex_col().flex_grow(1.0_f32).min_width(0.0).justify_center()),
         row_actions(state, actions_backend, row_item, placement),
-        trailing(attention, placement),
+        trailing(attention, placement).style(|s| s.pointer_events_none()),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0));
 
@@ -479,6 +484,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         menu = menu.item(label, move |m| {
             let (b, i) = (b.clone(), i.clone());
             m.enabled(can).accelerator(key(KeyCode::KeyF)).action(move || {
+                state.begin_open("Cutting a branch");
                 if is_issue {
                     b.start_work(&i)
                 } else {

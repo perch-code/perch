@@ -32,23 +32,26 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     // Narrowing the list drops the selection. This is the reactive scope, so
     // it is where that watch belongs.
     state.watch_filters();
+    state.review.set(Some(review));
 
     let review_backend = backend.clone();
     let open_thread: list::OpenThread = Rc::new({
         let backend = backend.clone();
-        move |repo: &str, number: u64, thread_id: &str| {
-            review.preparing.set(crate::review::model::Preparing::Working {
-                message: "Reading the pull request".into(),
-                percent: None,
-            });
+        move |repo: &str, kind: perch_github::ItemKind, number: u64, thread_id: &str| {
             // Showing the review view immediately, with its progress card,
             // beats leaving the inbox looking like the click did nothing.
-            state.begin_review(review);
+            state.begin_review(
+                review,
+                match kind {
+                    perch_github::ItemKind::PullRequest => "Reading the pull request",
+                    perch_github::ItemKind::Issue => "Reading the issue",
+                },
+            );
             // Which notification this came from, so finishing the review can
             // dismiss it. The backend never needs to know; the click already
             // has it, and a round trip would only be a way of forgetting.
             review.thread_id.set(Some(thread_id.to_string()).filter(|id| !id.is_empty()));
-            backend.open_subject(repo, perch_github::ItemKind::PullRequest, number);
+            backend.open_subject(repo, kind, number);
         }
     });
 
@@ -57,15 +60,13 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let open_item: items::OpenItem = Rc::new({
         let backend = backend.clone();
         move |item: &perch_github::Item| {
-            review.preparing.set(crate::review::model::Preparing::Working {
-                message: if item.is_archived() {
-                    "Checking out the files".into()
-                } else {
-                    "Reading the pull request".into()
-                },
-                percent: None,
-            });
-            state.begin_review(review);
+            let message = match &item.subject {
+                _ if item.is_archived() => "Checking out the files",
+                Some(perch_github::ItemSubject::Issue(_)) => "Reading the issue",
+                Some(perch_github::ItemSubject::PullRequest(_)) => "Reading the pull request",
+                None => "Reading the branch",
+            };
+            state.begin_review(review, message);
             state.open_item.set(Some(item.id.clone()));
             review.thread_id.set(None);
             if item.is_archived() {

@@ -1017,6 +1017,7 @@ mod column {
         });
         state.item.set(Some(Arc::new(item)));
         state.ready.set(true);
+        state.set_phase(crate::review::model::Phase::Ready);
         state.pull_request.set(Some(Arc::new(pr)));
         state.comment_threads.set(Arc::new(vec![thread()]));
         state.threads_open.set(true);

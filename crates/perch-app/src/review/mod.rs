@@ -22,7 +22,7 @@ use floem::views::{Decorators, Stack, dyn_container};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::model::{Preparing, ReviewState};
+use crate::review::model::{Phase, Preparing, ReviewState};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::centered_message;
@@ -82,9 +82,12 @@ pub fn review_view(
     });
 
     let header_backend = backend.clone();
+    // A memo, so the header is rebuilt when the kind of thing open changes
+    // and not on the way from Preparing to Ready.
+    let is_issue = floem::reactive::Memo::new(move |_| state.phase.get() == Phase::Issue);
     Stack::vertical((
         dyn_container(
-            move || state.issue.with(|i| i.is_some()),
+            move || is_issue.get(),
             move |is_issue| {
                 if is_issue {
                     header::issue_header(app, state, header_backend.clone()).into_any()
@@ -103,14 +106,7 @@ pub fn review_view(
         )
         .style(|s| s.width_full().flex_shrink(0.0_f32)),
         dyn_container(
-            move || match state.preparing.get() {
-                Preparing::Working { .. } => Phase::Preparing,
-                Preparing::Failed { .. } => Phase::Failed,
-                // Idle before the pull request lands still means preparing:
-                // the first event has simply not arrived yet.
-                Preparing::Idle if !state.is_open() => Phase::Preparing,
-                Preparing::Idle => Phase::Ready,
-            },
+            move || state.phase.get(),
             move |phase| match phase {
                 Phase::Preparing => header::preparing_card(
                     move || match state.preparing.get() {
@@ -132,7 +128,7 @@ pub fn review_view(
                     },
                 )
                 .into_any(),
-                Phase::Ready if state.issue.with(|i| i.is_some()) => {
+                Phase::Issue => {
                     issue_body_with_threads(app, state, body_backend.clone(), body_open_item.clone()).into_any()
                 }
                 Phase::Ready => {
@@ -173,13 +169,6 @@ fn issue_body_with_threads(
         ),
     ))
     .style(|s| s.size_full().min_height(0.0))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    Preparing,
-    Failed,
-    Ready,
 }
 
 fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Backend>) -> impl IntoView {

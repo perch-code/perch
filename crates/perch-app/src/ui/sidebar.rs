@@ -164,11 +164,17 @@ fn filter_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             f.status != d.status || f.kinds != d.kinds || f.group != d.group || f.sort != d.sort || f.show_empty
         })
     };
-    Container::new(dyn_container(narrowed, |on| {
-        sidebar_glyph(SidebarIcon::Filter, if on { theme::ACCENT } else { theme::FG_MUTED })
-            .style(|s| s.size(14.0, 14.0).pointer_events_none())
-            .into_any()
-    }))
+    // The menu is on the button, and a click lands on the deepest view
+    // under the pointer, so the glyph and the container that rebuilds it
+    // both let the click through.
+    Container::new(
+        dyn_container(narrowed, |on| {
+            sidebar_glyph(SidebarIcon::Filter, if on { theme::ACCENT } else { theme::FG_MUTED })
+                .style(|s| s.size(14.0, 14.0).pointer_events_none())
+                .into_any()
+        })
+        .style(|s| s.pointer_events_none()),
+    )
     .popout_menu(move || filter_menu(state, backend.clone()))
     .style(|s| {
         crate::ui::widgets::clickable(s)
@@ -314,7 +320,7 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
             section_header("Priority".into(), 0, None),
             dyn_stack(
                 move || state.item_sections().priority,
-                row_key,
+                move |item| row_key(state, item),
                 move |item| {
                     let project = state.project(&item.project_id);
                     item_row(state, b1.clone(), item, project, Placement::Priority, o1.clone())
@@ -345,7 +351,7 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
                     section_header("Pinned".into(), 0, None),
                     dyn_stack(
                         move || state.item_sections().pinned,
-                        row_key,
+                        move |item| row_key(state, item),
                         move |item| {
                             let project = state.project(&item.project_id);
                             item_row(state, b.clone(), item, project, Placement::Pinned, o.clone())
@@ -360,7 +366,14 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
         // One section per project, or per date.
         dyn_stack(
             move || state.item_sections().groups,
-            |section| (section.key.clone(), section.items.iter().map(row_key).collect::<Vec<_>>(), section.count),
+            move |section| {
+                (
+                    section.key.clone(),
+                    section.title.clone(),
+                    section.items.iter().map(|i| row_key(state, i)).collect::<Vec<_>>(),
+                    section.count,
+                )
+            },
             move |section| group_section(state, b3.clone(), section, o3.clone()),
         )
         .style(|s| s.flex_col().width_full().padding_bottom(12.0)),
@@ -370,20 +383,16 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
     .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
 }
 
-/// What a row is rebuilt on: everything it draws.
-type RowKey = (String, Option<jiff::Timestamp>, Option<jiff::Timestamp>, bool, Option<String>, String, bool, bool, Option<String>);
+/// What a row is rebuilt on: everything it draws, which is the whole row
+/// and the name of its project. Listing the fields by hand missed one
+/// every time a chip was added, so the row is its own key: its Debug form,
+/// which is every field.
+type RowKey = (String, Option<String>);
 
-fn row_key(item: &Item) -> RowKey {
+fn row_key(state: AppState, item: &Item) -> RowKey {
     (
-        item.id.clone(),
-        item.attention_at,
-        item.done_at,
-        item.saved,
-        item.name.clone(),
-        item.given_title().to_string(),
-        item.is_pinned(),
-        item.is_archived(),
-        item.checkout.as_ref().map(|c| format!("{}:{}", c.branch, c.on_disk)),
+        format!("{item:?}"),
+        state.project(&item.project_id).map(|p| p.name),
     )
 }
 
@@ -424,7 +433,7 @@ fn group_section(
             let project_id = project_id.clone();
             dyn_stack(
                 move || items.clone(),
-                row_key,
+                move |item| row_key(state, item),
                 move |item| {
                     let project = project_id
                         .as_deref()

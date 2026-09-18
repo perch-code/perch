@@ -18,15 +18,18 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread, on_mark: OnMark
     let hover_id = thread.id.clone();
     let leave_id = thread.id.clone();
 
-    // A pull request opens the review view. Everything else has no view of
-    // its own yet, so it opens where it lives.
-    let review_target = if thread.subject.kind == SubjectKind::PullRequest {
+    // A pull request or an issue opens in Perch. Everything else has no
+    // view of its own, so it opens where it lives.
+    let kind = match thread.subject.kind {
+        SubjectKind::PullRequest => Some(perch_github::ItemKind::PullRequest),
+        SubjectKind::Issue => Some(perch_github::ItemKind::Issue),
+        _ => None,
+    };
+    let review_target = kind.and_then(|kind| {
         thread
             .number_hint()
-            .map(|n| (thread.repository.full_name.clone(), n, thread.id.clone()))
-    } else {
-        None
-    };
+            .map(|n| (thread.repository.full_name.clone(), kind, n, thread.id.clone()))
+    });
     let web_url = thread.html_url();
     let click_id = thread.id.clone();
 
@@ -45,7 +48,7 @@ pub fn row(state: AppState, thread: Thread, on_open: OpenThread, on_mark: OnMark
         timestamp(state, thread),
     ))
     .on_event_stop(el::Click, move |_, _| match &review_target {
-        Some((repo, number, thread_id)) => on_open(repo, *number, thread_id),
+        Some((repo, kind, number, thread_id)) => on_open(repo, *kind, *number, thread_id),
         None => {
             // A workflow run's page is known only once its run is found;
             // the notification links to nothing better than the repository.

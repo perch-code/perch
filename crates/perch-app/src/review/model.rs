@@ -54,6 +54,19 @@ pub enum RailMode {
     AllFiles,
 }
 
+/// What the review view has on screen. One signal, written once per
+/// event after every field it depends on, so the view rebuilds when the
+/// shape changes and not once per field that changes on the way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Preparing,
+    Failed,
+    /// A checkout and its files, with or without a pull request.
+    Ready,
+    /// An issue, which has no files.
+    Issue,
+}
+
 /// How far along preparing a checkout is.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Preparing {
@@ -116,6 +129,7 @@ pub struct ReviewState {
     /// True from the click until the review view is left, so the progress
     /// card can show before the pull request itself has resolved.
     pub opening: RwSignal<bool>,
+    pub phase: RwSignal<Phase>,
     pub preparing: RwSignal<Preparing>,
     pub changed_files: RwSignal<Arc<Vec<ChangedFile>>>,
     pub tree: RwSignal<Arc<Vec<TreeEntry>>>,
@@ -204,6 +218,7 @@ impl ReviewState {
             offline: RwSignal::new(false),
             thread_id: RwSignal::new(None),
             opening: RwSignal::new(false),
+            phase: RwSignal::new(Phase::Preparing),
             preparing: RwSignal::new(Preparing::Idle),
             changed_files: RwSignal::new(Arc::new(Vec::new())),
             tree: RwSignal::new(Arc::new(Vec::new())),
@@ -242,6 +257,25 @@ impl ReviewState {
         self.ready.get()
     }
 
+    /// Move to a phase. A write of the same value would still rebuild the
+    /// view, so it is skipped.
+    pub fn set_phase(&self, phase: Phase) {
+        if self.phase.get_untracked() != phase {
+            self.phase.set(phase);
+        }
+    }
+
+    /// Start opening something: the progress card, over whatever was
+    /// showing, until the next Ready or Failed.
+    pub fn begin(&self, message: &str) {
+        self.preparing.set(Preparing::Working { message: message.into(), percent: None });
+        self.pull_request.set(None);
+        self.issue.set(None);
+        self.ready.set(false);
+        self.opening.set(true);
+        self.set_phase(Phase::Preparing);
+    }
+
     /// Whether the review view should be on screen at all.
     pub fn is_showing(&self) -> bool {
         self.opening.get() || self.is_open()
@@ -254,6 +288,7 @@ impl ReviewState {
         self.item.set(None);
         self.ready.set(false);
         self.issue.set(None);
+        self.set_phase(Phase::Preparing);
         self.issue_comments.set(Arc::new(Vec::new()));
         self.stale_head.set(None);
         self.offline.set(false);

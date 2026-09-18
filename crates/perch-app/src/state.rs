@@ -56,6 +56,9 @@ pub struct AppState {
     /// Something a worktree action could not do, for the status line.
     /// Cleared by the next thing that goes right.
     pub notice: RwSignal<Option<String>>,
+    /// The review view's state, once the window has made it, so a menu
+    /// that ends in something being opened can put the progress card up.
+    pub review: RwSignal<Option<crate::review::model::ReviewState>>,
 
     /// The sidebar, or the inbox.
     pub screen: RwSignal<Screen>,
@@ -134,6 +137,7 @@ impl AppState {
             items: RwSignal::new(Vec::new()),
             open_item: RwSignal::new(None),
             notice: RwSignal::new(None),
+            review: RwSignal::new(None),
             agent: RwSignal::new(AgentConfig::default()),
             screen: RwSignal::new(Screen::Sidebar),
             return_to: RwSignal::new(Screen::Sidebar),
@@ -168,12 +172,14 @@ impl AppState {
 
     /// Fold one backend event into the inbox or the review view.
     pub fn apply_with_review(&self, event: Event, review: crate::review::model::ReviewState) {
-        use crate::review::model::Preparing;
+        use crate::review::model::{Phase, Preparing};
 
         match event {
             Event::ReviewProgress { message, percent } => {
                 review.preparing.set(Preparing::Working { message, percent });
+                review.set_phase(Phase::Preparing);
             }
+            // The phase goes last, after every field the view will read.
             Event::ReviewReady { item, pull_request, files, tree, stale_head, offline } => {
                 review.preparing.set(Preparing::Idle);
                 review.changed_files.set(files);
@@ -183,7 +189,10 @@ impl AppState {
                 review.stale_head.set(stale_head);
                 review.offline.set(offline);
                 review.pull_request.set(pull_request);
+                review.issue.set(None);
+                review.issue_comments.set(Arc::new(Vec::new()));
                 review.ready.set(true);
+                review.set_phase(Phase::Ready);
             }
             Event::IssueReady { item, issue, comments, offline } => {
                 review.preparing.set(Preparing::Idle);
@@ -192,10 +201,12 @@ impl AppState {
                 self.open_item.set(Some(item.id.clone()));
                 review.item.set(Some(item));
                 review.pull_request.set(None);
+                review.stale_head.set(None);
                 review.offline.set(offline);
                 review.issue.set(Some(issue));
                 review.issue_comments.set(comments);
                 review.ready.set(true);
+                review.set_phase(Phase::Issue);
             }
             Event::CommentThreads { item_id, threads } => {
                 let open = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
@@ -242,6 +253,7 @@ impl AppState {
             }
             Event::ReviewFailed { message } => {
                 review.preparing.set(Preparing::Failed { message });
+                review.set_phase(Phase::Failed);
             }
             Event::LspStatus(status) => review.lsp_status.set(status),
             Event::LspHover { token, text } => {
@@ -318,7 +330,6 @@ impl AppState {
             }
             Event::Items(items) => {
                 self.items.set(items);
-                self.notice.set(None);
                 // A notification that has become an item leaves the inbox,
                 // and with it any check it had.
                 self.prune_selection();
@@ -597,11 +608,22 @@ impl AppState {
     // Screens and worktrees
     // -----------------------------------------------------------------
 
-    /// Note where a review is being opened from, so leaving it can go back.
-    pub fn begin_review(&self, review: crate::review::model::ReviewState) {
+    /// Note where a review is being opened from, so leaving it can go back,
+    /// and put the progress card up with `message` until the backend says
+    /// what it opened.
+    pub fn begin_review(&self, review: crate::review::model::ReviewState, message: &str) {
         self.return_to.set(self.screen.get());
-        review.pull_request.set(None);
-        review.opening.set(true);
+        review.begin(message);
+    }
+
+    /// The progress card, over the open review or the screen, for an act
+    /// that ends in another item being opened: Start work, Fork.
+    pub fn begin_open(&self, message: &str) {
+        let Some(review) = self.review.get_untracked() else { return };
+        if !review.is_showing() {
+            self.return_to.set(self.screen.get());
+        }
+        review.begin(message);
     }
 
     /// Leave the review view for the screen it was opened over.

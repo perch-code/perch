@@ -93,7 +93,7 @@ pub fn issue_header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> 
                 .style(|s| s.items_center().margin_top(2.0).min_width(0.0)),
             ))
             .style(|s| s.flex_col().min_width(0.0).flex_grow(1.0_f32).margin_left(10.0)),
-            start_work_button(state, backend),
+            start_work_button(app, state, backend),
         ))
         .style(|s| s.items_center().width_full().min_width(0.0))
         .into_any()
@@ -150,7 +150,7 @@ fn label_colors(hex: &str) -> (floem::peniko::Color, floem::peniko::Color) {
 
 /// Cut a branch from the default branch and open it. When one exists
 /// already, opens that.
-fn start_work_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+fn start_work_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     dyn_container(
         move || state.item.with(|i| i.as_ref().map(|i| i.id.clone())),
         move |id| {
@@ -158,7 +158,11 @@ fn start_work_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView 
                 return Empty::new().into_any();
             };
             let backend = backend.clone();
-            text_button(|| "Start work".to_string(), SidebarIcon::Branch, move || backend.start_work(&id)).into_any()
+            text_button(|| "Start work".to_string(), SidebarIcon::Branch, move || {
+                app.begin_open("Cutting a branch");
+                backend.start_work(&id)
+            })
+            .into_any()
         },
     )
     .style(|s| s.flex_shrink(0.0_f32).margin_left(12.0))
@@ -316,7 +320,7 @@ fn in_perch(app: AppState, state: ReviewState, backend: Rc<Backend>, open_item: 
             });
             let rows = dyn_stack(
                 children,
-                |i| (i.id.clone(), i.subject.as_ref().map(|s| s.number()), i.checkout.as_ref().map(|c| c.head_sha.clone())),
+                |i| format!("{i:?}"),
                 move |item| {
                     let project = app.project(&item.project_id);
                     item_row(app, b.clone(), item, project, Placement::Section(crate::items::ItemGroup::Project), o.clone())
