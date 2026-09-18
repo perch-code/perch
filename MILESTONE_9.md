@@ -2,17 +2,35 @@
 
 ## Goal
 
-Make every open pull request and issue in a declared repository an item,
-without anyone having to be notified about it, and fill knowledge with
-the whole of a repository's discussion, open and closed.
+Make the repository the unit of everything: what is declared, what is
+listed, what is synced, what is grouped, and where knowledge lands.
+Then make every open pull request and issue in a declared repository
+an item, without anyone having to be notified about it, and fill
+knowledge with the whole of a repository's discussion, open and closed.
 
-Today an item comes from one of three places: a checkout found under a
-root, a notification the reader opened, or a review request, which is
-the one notification that makes an item on its own. Everything else a
-repository is doing is in the inbox or nowhere. The sidebar for slatedb
-shows three items; github.com shows twenty-odd open pull requests.
-Knowledge holds the discussion of whatever was opened in Perch, and
-nothing else.
+Today there is a project between the reader and the repository. A
+project has a name, a list of repositories and a list of roots; an item
+belongs to a project; knowledge is filed under the project; a repository
+nobody declared gets an implicit project named after it; and declaring
+it later adopts the items. All of that exists so two repositories can
+share a sidebar heading. The knowledge skill does not need it: it is one
+file over the whole store, and an agent finds its way by matching `git
+remote` against an index. So the project is a grouping label carried as
+an entity, with a table, an id, an implicit flag, a Move to project
+menu, and a `project_for` lookup that every path runs through.
+
+After this milestone a repository is declared as `[[repo]]`, an item
+belongs to a repository, the sidebar groups by repository or by owner,
+knowledge is filed by `owner/repo`, and the word project is gone from
+the code.
+
+Then the sync. Today an item comes from one of three places: a
+checkout found under a root, a notification the reader opened, or a
+review request, which is the one notification that makes an item on
+its own. Everything else a repository is doing is in the inbox or
+nowhere. The sidebar for slatedb shows three items; github.com shows
+twenty-odd open pull requests. Knowledge holds the discussion of
+whatever was opened in Perch, and nothing else.
 
 After this milestone the backend lists the open pull requests and issues
 of every declared repository on each poll and keeps an item for each.
@@ -32,14 +50,24 @@ makes it removable.
 ## Non-goals
 
 - Removing the inbox, the bell, or the thread marks. Milestone 10.
+- A named group of repositories. Group by Owner is the way to see
+  `slatedb/slatedb` and `slatedb/slatedb-go` under one heading. If a
+  group with a name of the reader's own turns out to be wanted, it is a
+  `group` field on `[[repo]]` and a fourth grouping, and it waits until
+  someone wants it.
+- Keeping the old database. The `projects` table and `items.project_id`
+  go, the schema version bumps, and the database is recreated. Nobody
+  is running Perch against a database they need. Milestone 8 said the
+  next schema change would write a migration; it does not, and
+  Milestone 10 says the same.
 - Closed history in the sidebar. Closed pull requests and issues the
   reader never touched go to knowledge and not to `items`. The list is
   sent whole to the window on every change, and a repository's whole
   history in it would be thousands of rows serving a status filter.
 - Repositories that are not declared. An item in an undeclared
   repository, made by opening a notification or by a checkout under a
-  root, is refreshed on open as today. The list pass runs over
-  `project.repos` and nothing else.
+  root, is refreshed on open as today. The list pass runs over the
+  declared repositories and nothing else.
 - Workflow runs as items. A CI notification still refreshes the checks
   of the open pull request and does nothing else. A row for a failed
   run on the default branch is a later milestone, if at all.
@@ -56,6 +84,69 @@ makes it removable.
 
 ## Behaviour
 
+### The repository is the project
+
+Config:
+
+```toml
+[[repo]]
+name = "slatedb/slatedb"
+roots = ["~/Code/slatedb"]     # optional; checkouts you already have
+
+[[repo]]
+name = "slatedb/slatedb-go"
+```
+
+`name` is `owner/repo` and is the identity, compared case-insensitively.
+`roots` is what `project.roots` was, per repository. A directory that
+holds worktrees of two repositories is listed under both. `[[project]]`
+is a config error that names the new key.
+
+An item belongs to a repository by `repo_full_name`, which it already
+carries. `project_id` goes. An item in a repository nobody declared is
+still an item, and its repository appears in the sidebar as a section
+the same as a declared one, with no badge and no distinction, because
+there is nothing to distinguish: it is a repository with items in it.
+Declaring it later starts the list pass and the backfill for it and
+changes nothing about the rows that were there.
+
+The sidebar groups by **Repository**, by **Owner**, or by **Date**.
+Repository is the default and is one section per repository with items,
+declared ones first in config order, then the rest by name. Owner is one
+section per `owner`, repositories inside it in the same order, and a
+row's second line shows the repository since the heading no longer
+does. Date is what it is. Show Empty Projects becomes Show Empty
+Repositories and lists declared repositories with nothing to show.
+
+The row's second line under Repository is `#57 · branch`, since the
+heading says the repository. Under Owner and Date it is `owner/repo #57
+· branch`, as today.
+
+The row menu loses Move to project and New project. An item is in the
+repository its subject or its checkout is in, and that is not a choice.
+
+Knowledge loses the project level. The layout is:
+
+```
+~/.perch/knowledge/
+  index.md                          repositories, last updated
+  slatedb/slatedb/
+    index.md                        this repository's containers and how current
+    raw/github.jsonl                one record per line; the truth
+    raw/perch.jsonl                 your own threads, the same way
+    github/pulls/812.md             rendered from raw
+    github/issues/42.md
+    perch/pulls/812.md              what you asked an agent about 812
+```
+
+`Message.project` becomes `Message.repo`, `owner/repo`, and the
+container keeps its `owner/repo#812` form so ids do not change. The
+root index maps each repository to its directory and the skill's text
+says to match `git remote get-url origin` against `owner/repo`, which is
+what it says now with one fewer step. An existing knowledge directory in
+the old layout is left alone and a fresh one is written beside it; the
+README says to delete the old one.
+
 ### The list pass
 
 On every poll, before the notification poll, for each declared
@@ -69,7 +160,7 @@ repository in config order:
 2. Each pull request in the list is upserted as an item: found by
    `(repo, PullRequest, number)`, or by a checkout of the reader's own
    on its head branch, which takes the subject the way a review request
-   makes it take one today; else made new in the repository's project.
+   makes it take one today; else made new.
    The stored subject is replaced only when the incoming `updated_at`
    is not older than the stored one, so a detail fetch that landed
    between two list pages is not overwritten by the earlier page.
@@ -89,9 +180,9 @@ one did not. This is the one rule that keeps a partial failure from
 freezing the cache until something else changes upstream.
 
 An item the pass makes has no checkout, `created_at` and `last_opened_at`
-of now, and no attention. It is a row under its project, sorted by its
-subject's `updated_at`, and nothing marks it as new. Priority is still
-about attention.
+of now, and no attention. It is a row under its repository, sorted by
+its subject's `updated_at`, and nothing marks it as new. Priority is
+still about attention.
 
 The pass runs inline in the poll loop before `list_threads`, so a
 notification about a pull request the pass just made finds the item.
@@ -139,8 +230,8 @@ running beside the poll loop at the pace the rate limit allows:
    by `?state=closed&sort=updated&direction=asc`, then closed issues
    the same way, one page at a time, with the page number kept in
    `meta` so a restart resumes where it stopped. Each is fetched and
-   ingested into knowledge under the repository's project, and not
-   stored as an item. When the last page is reached the cursor records
+   ingested into knowledge under the repository, and not stored as an
+   item. When the last page is reached the cursor records
    the `updated_at` of the last entry, and later runs page from there
    with `since` for issues and by skipping older entries for pull
    requests, which have no `since`.
@@ -163,8 +254,8 @@ Nothing changes in what a discussion becomes. `to_messages` and the
 issue equivalent are what they are, `ingest` is idempotent by message
 id, and the raw file and the rendered markdown land where they land
 today. What changes is coverage: after the backfill has finished once,
-`knowledge/<project>/github/<owner>/<repo>/pulls/` holds every pull
-request the repository has had, and `issues/` every issue.
+`knowledge/<owner>/<repo>/github/pulls/` holds every pull request the
+repository has had, and `issues/` every issue.
 
 The skill text says so. "Discussion history for slatedb from GitHub pull
 requests and issues" becomes accurate rather than aspirational, and the
@@ -173,7 +264,38 @@ backfill has run and names the command that shows whether it has.
 
 ## Model
 
-`perch-github`:
+`perch-github`, the repository:
+
+- `RepoConfig { name: String, roots: Vec<String> }` replaces
+  `ProjectConfig`; `Config.repo: Vec<RepoConfig>` replaces
+  `Config.project`. `Config::is_declared(repo_full_name) -> bool` and
+  `Config::roots_for(repo_full_name) -> Vec<PathBuf>` replace
+  `project_for`. `KnowledgeConfig.project` goes.
+- `Project` goes, and `Cache::upsert_project`, `load_projects`, and the
+  `projects` table with it. `Item.project_id` goes. `Cache::repos() ->
+  Vec<String>` lists the distinct `repo_full_name` of every item, which
+  with the config's list is what the sidebar sections over.
+
+`perch-knowledge`:
+
+- `Message.project` becomes `Message.repo`. `RawKey` is `(repo,
+  source)`; the group was the repository and is now redundant. The
+  render paths, the two indexes and `rendered_relative` follow the
+  layout above. `SkillConfig.projects` becomes `repos`.
+
+`perch-app`:
+
+- `ItemGroup` is `Repository`, `Owner`, `Date`, keys `repo`, `owner`,
+  `date`. `sections` takes the declared list and the items and no
+  projects. `ItemSection.count` is the repository's active items under
+  Repository and Owner. `reference` takes the group.
+- `Command::MoveItem`, `new_project_for`, `new_project_box`, the Move to
+  project submenu, `sync_projects`, `drop_empty_implicit`, and
+  `Ctx::project_for` go. `scan_roots` walks `config.repo`.
+- `perch --items` keys: `group=repo|owner|date`; `show_empty` is
+  unchanged.
+
+`perch-github`, the sync:
 
 - `Client::list_open_pulls(repo, etag: Option<&str>) -> Listed<PullRequest>`
   and `list_open_issues(repo, etag) -> Listed<Issue>`, where
@@ -214,13 +336,18 @@ backfill has run and names the command that shows whether it has.
 
 ## Storage
 
+`projects` is dropped and `items` loses `project_id` and its index. The
+schema version bumps to 11 and the database is recreated. Items,
+threads with agents, marks, viewed sets and discussions are lost on
+first launch; the list pass and the backfill rebuild the items and the
+discussions within a poll, and knowledge on disk is untouched. Say so in
+the commit message.
+
 `meta` gains, per repository:
 
 - `etag:pulls:<owner/repo>`, `etag:issues:<owner/repo>`.
 - `backfill:pulls:<owner/repo>`, `backfill:issues:<owner/repo>`, each a
   page number while paging and `done:<updated_at>` after.
-
-No table changes. The schema version does not bump.
 
 ## Backend
 
@@ -252,35 +379,60 @@ No table changes. The schema version does not bump.
 
 ## Build order
 
-1. `perch-github`: `Listed`, `Page`, the four list methods, the
+1. `perch-github`: `RepoConfig` and the config parse, with `[[project]]`
+   refused by name. `Project` and its table gone, `project_id` gone,
+   `Cache::repos`, the schema bump. Tests: the config round-trips; an
+   old key is an error that names the new one. Commit.
+2. `perch-knowledge`: `repo` on `Message`, the layout, the indexes, the
+   skill text. Tests: a message renders to the new path; the root index
+   lists repositories; `rerender` over the new layout. Commit.
+3. `perch-app`: `ItemGroup` over repository and owner, `sections` with
+   no projects, `reference`, the row menu without Move, `scan_roots`
+   over repos, `perch --items`. Tests: declared repositories lead in
+   config order; an undeclared one follows by name; Owner nests; the
+   second line drops the repository under Repository only. Commit.
+4. README: the config section, the knowledge layout, the row menu, and
+   the note to delete an old knowledge directory. Commit.
+5. `perch-github`: `Listed`, `Page`, the four list methods, the
    allowance. Tests against recorded payloads: a 304 is `Unchanged`, a
    second page is unconditional, an issues page drops pull requests,
    `Link` yields `last_page`. Commit.
-2. `perch-github`: `open_subjects_in`, `discussion_stale`,
+6. `perch-github`: `open_subjects_in`, `discussion_stale`,
    `makes_attention`. Tests on a temporary cache. Commit.
-3. `perch-app`: `sync::list_pass` and the ETag rule. Tests with a fake
+7. `perch-app`: `sync::list_pass` and the ETag rule. Tests with a fake
    client: a new number makes an item; a known number updates its
    subject; an older `updated_at` does not; a missing number is fetched
    and stored closed; an upsert failure leaves the ETag alone. `perch
    --sync`. Commit.
-4. Backend: the pass in the poll loop, `attend` narrowed, closure
+8. Backend: the pass in the poll loop, `attend` narrowed, closure
    enqueues. Commit.
-5. `perch-app`: `sync::backfill`, the cursor, the allowance wait, the
+9. `perch-app`: `sync::backfill`, the cursor, the allowance wait, the
    event. `perch --backfill`. Tests with the fake client: step 1 before
    step 2; a restart resumes at the page; the wait triggers under the
    floor. Commit.
-6. Status bar line. Skill text. README: the projects section says
-   declared repositories are listed whole; the knowledge section says
-   what the backfill covers and names the command. Commit.
+10. Status bar line. README: the knowledge section says what the
+    backfill covers and names the command. Commit.
 
-Steps 1 and 2 are independent. Step 5 depends on 2 and 3, not on 4.
+Steps 1 through 4 are the model change and land before the sync.
+Steps 5 and 6 are independent. Step 9 depends on 6 and 7, not on 8.
 
 ## Acceptance
 
-- Declare slatedb in config with no items. Launch. Within one poll the
-  sidebar's slatedb section lists every open pull request and issue on
-  github.com, in `updated_at` order, with no Priority entries. `perch
-  --items` agrees with the window.
+- A config with `[[project]]` fails to load with a message naming
+  `[[repo]]`.
+- Declare `slatedb/slatedb` and `slatedb/slatedb-go` with no items.
+  Launch. Within one poll the sidebar has one section per repository,
+  in config order, listing every open pull request and issue on
+  github.com in `updated_at` order, with no Priority entries. Rows say
+  `#57 · branch`. Group by Owner; one `slatedb` section with both
+  inside and rows saying `slatedb/slatedb #57 · branch`. `perch --items`
+  agrees with the window.
+- Open a checkout under a root whose remote is a repository not in
+  config. Its section appears after the declared ones, looks the same,
+  and the row menu has no Move entry.
+- Ask an agent about a pull request. The thread lands under
+  `knowledge/slatedb/slatedb/perch/pulls/`, the root index lists the
+  repository, and the skill's `rg` example points at it.
 - Poll again with nothing changed upstream. `perch --sync` prints
   "unchanged" and the log shows two requests for the repository.
 - Merge a pull request on github.com. Next poll, its row shows Merged
@@ -291,7 +443,7 @@ Steps 1 and 2 are independent. Step 5 depends on 2 and 3, not on 4.
   threads intact.
 - Be mentioned on an issue. Priority shows the issue with "mentioned".
   Push to a pull request you are only subscribed to. Priority does not
-  change; the row moves up under its project.
+  change; the row moves up under its repository.
 - Kill Perch during a list pass after the 200. Relaunch. The next pass
   asks unconditionally and the items it was upserting are present.
 - Run `perch --backfill slatedb/slatedb --limit 20`. Twenty discussions
@@ -334,4 +486,10 @@ Steps 1 and 2 are independent. Step 5 depends on 2 and 3, not on 4.
   of `Ctx`; the loop does not await it.
 - Do not add GraphQL, a request budget, or an App. If the allowance is
   the problem, the floor is the knob.
-- Do not bump the schema. Four `meta` keys are enough.
+- Do not keep a project table, an implicit flag, or a name-to-id
+  lookup under another name. The repository's full name is the id.
+- Do not draw an undeclared repository differently. It is a repository
+  with items; declaring it adds the list pass, not a look.
+- Do not migrate the old knowledge layout. Write the new one beside it
+  and tell the reader to delete the old.
+- Do not migrate the database. Bump and recreate, and say what is lost.

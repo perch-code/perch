@@ -34,7 +34,7 @@ This is a deletion milestone. The measure of it is how much leaves.
   inbox feature and does not come to the sidebar. `e` and `s` on the
   row under the pointer, and Done on the item header, are the ways to
   mark.
-- A per-repository filter. The project sections are that.
+- A per-repository filter. The sections are that.
 - Unread as a state separate from attention. An item needs attention
   or it does not. "Mark unread" already sets attention with reason
   `manual`, and that is what unread means here.
@@ -51,7 +51,7 @@ from an item lands on the sidebar. `Cmd-2` does nothing and leaves the
 keys table.
 
 The sidebar's top is the search row and the filter button, then
-Priority, Pinned and the sections. The bell row between the search and
+Priority, Pinned and the repository sections. The bell row between the search and
 Priority is gone. The collapsed sidebar loses its bell glyph.
 
 ### The filter menu
@@ -69,7 +69,7 @@ The menu is what it is today with these changes:
   say two things at once.
 - **Needs attention**, a check item after Saved only. On, the sections
   show only items with attention newer than their Done, which is what
-  Priority shows, so the sections become Priority grouped. Priority
+  Priority shows, so the sections become Priority grouped by repository. Priority
   itself is unchanged under it.
 - **Reason**, a submenu after Needs attention: `Any`, `Review
   requested`, `Mentioned`, `Assigned`, `Commented`, `CI failed`,
@@ -166,9 +166,9 @@ Changed:
 `notifications_last_modified` key in `meta` is not read and is left to
 be dropped with the database.
 
-The schema version bumps to 11 and the database is recreated, as every
-schema change so far has done. Milestone 8 said the next change would
-write a migration. It does not. Nobody is running Perch against a
+The schema version bumps to 12 and the database is recreated, as every
+schema change so far has done, and as Milestone 9 did. Milestone 8 said
+the next change would write a migration. It does not. Nobody is running Perch against a
 database they need to keep, and a clean model is worth more than a
 migration nobody would exercise. Items, threads with agents, marks,
 viewed sets and discussions are lost on first launch; the list pass and
@@ -256,12 +256,12 @@ land first. Steps 3 and 4 are one change in two commits.
   "mentioned". Press `e` over it; it leaves Priority. Set Status to
   Done; it is listed. Set Status to Closed; it is not.
 - Set Reason to Review requested. Only items whose latest reason is a
-  review request are listed, under their projects, and Priority shows
+  review request are listed, under their repositories, and Priority shows
   only those too. Set Any; everything returns.
 - Save an item, set Saved only. The list is that item, and Priority and
   Pinned show only saved items. Turn it off; everything returns.
 - Set Needs attention. The sections hold exactly the Priority items,
-  grouped by project. Group by Date; grouped by date. Turn it off.
+  grouped by repository. Group by Date; grouped by date. Turn it off.
 - Sort by Last activity, Oldest first. The bottom row of each section
   is the newest, and under Group by Date the Older bucket is first.
   Quit and relaunch; the direction held.
@@ -269,10 +269,10 @@ land first. Steps 3 and 4 are one change in two commits.
   what the window shows with those settings.
 - Open an item, `Cmd-[`. The sidebar, with the item's row still
   selected. There is no other place to land.
-- `grep -r Inbox crates/` finds nothing but the README's history and
+- `grep -ri inbox crates/` finds nothing but the README's history and
   the milestone files. `grep -r Thread crates/perch-app` finds only
   `attend`, `refresh_open_checks` and the comment thread types.
-- Open the database. Three tables fewer, version 11.
+- Open the database. Three tables fewer, version 12.
 - `cargo test` green, `cargo clippy` clean, and the warning count for
   unused code is zero, because the deletion followed every error to the
   end.
@@ -285,7 +285,7 @@ land first. Steps 3 and 4 are one change in two commits.
 - Do not keep `Screen` with one variant. Remove it.
 - Do not move the reason filters into the sidebar as rows. They were
   rows in the inbox because the inbox had a nav column. The sidebar's
-  nav is the project list, and the filters are a menu.
+  nav is the repository list, and the filters are a menu.
 - Do not add a repository filter. Sections.
 - Do not add checkboxes to item rows. Bulk marking is not coming back.
 - Do not make `Done` a status that hides the item everywhere. It is a
