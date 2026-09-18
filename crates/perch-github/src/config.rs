@@ -49,7 +49,8 @@ fn default_effort() -> String {
     "medium".into()
 }
 fn default_models() -> Vec<String> {
-    vec!["sonnet".into(), "opus".into()]
+    // The aliases the CLI resolves to the latest of each tier.
+    vec!["fable".into(), "opus".into(), "sonnet".into(), "haiku".into()]
 }
 
 impl Default for AgentConfig {
@@ -213,7 +214,7 @@ mod tests {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.agent.binary, "claude");
         assert_eq!(c.agent.model, "sonnet");
-        assert_eq!(c.agent.models, vec!["sonnet", "opus"]);
+        assert_eq!(c.agent.models, vec!["fable", "opus", "sonnet", "haiku"]);
         let c: Config = toml::from_str("[agent]\nbinary = \"/opt/claude\"\neffort = \"high\"").unwrap();
         assert_eq!(c.agent.binary, "/opt/claude");
         assert_eq!(c.agent.effort, "high");

@@ -214,7 +214,7 @@ that skips permissions. A follow-up resumes the agent's own session with
 binary = "claude"              # optional; found on PATH by default
 model = "sonnet"               # optional; what the picker starts on
 effort = "medium"              # optional; low | medium | high | xhigh | max
-models = ["sonnet", "opus"]    # optional; what the picker offers
+models = ["fable", "opus", "sonnet", "haiku"]   # optional; what the picker offers
 ```
 
 `perch --ask owner/repo#N path:start-end "question"` runs one question
