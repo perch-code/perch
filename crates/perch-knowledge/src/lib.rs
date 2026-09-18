@@ -391,9 +391,15 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), Error> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(io(parent))?;
     }
+    // A name of this write's own, so two writers of one file, which can
+    // happen when a discussion is archived twice at once, do not rename
+    // each other's temporary away.
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default()
+        "{}.{}.{n}.tmp",
+        path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default(),
+        std::process::id()
     ));
     std::fs::write(&tmp, text).map_err(io(&tmp))?;
     std::fs::rename(&tmp, path).map_err(io(path))

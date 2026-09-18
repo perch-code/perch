@@ -255,8 +255,10 @@ impl AppState {
                         Some(i) if i.is_archived() => self.leave_review(review),
                         Some(i) => {
                             review.item.set(Some(Arc::new(i.clone())));
+                            // The snapshot, when it changed: a notification
+                            // refetches it, and the header reads this.
                             if let Some(pr) = i.pull_request() {
-                                if review.pull_request.with(|p| p.as_ref().map(|p| p.number) != Some(pr.number)) {
+                                if review.pull_request.with(|p| p.as_deref() != Some(pr)) {
                                     review.pull_request.set(Some(Arc::new(pr.clone())));
                                 }
                             }

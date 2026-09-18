@@ -357,12 +357,23 @@ pub fn line_thread_block(
     let line = first.line.or(first.original_line);
     let heading = first.location();
 
-    // The lines as the checkout has them, when the comment still lands on
-    // it and the file is loaded at the branch head; GitHub's hunk, as of
-    // the comment's commit, otherwise. The file is asked for when nothing
-    // has loaded it.
+    // The lines as the checkout has them, when the checkout is at the
+    // pull request's head, so GitHub's line numbers are its, and the file
+    // is loaded at the branch head; GitHub's hunk, as of the comment's
+    // commit, otherwise. A root ahead of the pull request, or a checkout
+    // left stale, would put the comment's number on another line. The
+    // file is asked for when nothing has loaded it. The window is the
+    // hunk's: the commented line and the few above it.
     let hunk = hunk_tail(&first.diff_hunk, theme::HUNK_LINES);
-    let anchor = anchor_for(state, &first);
+    let at_head = state.item.with_untracked(|i| {
+        let checkout = i.as_ref().and_then(|i| i.checkout.as_ref()).map(|c| c.head_sha.clone());
+        let pr = state.pull_request.with_untracked(|p| p.as_ref().map(|p| p.head_sha.clone()));
+        checkout.is_some() && checkout == pr
+    }) && state.stale_head.with_untracked(Option::is_none);
+    let anchor = anchor_for(state, &first).filter(|_| at_head).map(|a| Anchor {
+        start_line: a.line.saturating_sub(theme::HUNK_LINES as u32 - 1).max(1),
+        ..a
+    });
     let lines_path = first.path.clone();
     let loaded = Memo::new(move |_| state.files.with(|m| m.contains_key(&lines_path)));
     if anchor.is_some() && !loaded.get_untracked() && !state.is_loading(&first.path) {

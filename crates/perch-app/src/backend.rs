@@ -600,6 +600,7 @@ async fn run(
         runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         avatars: fetches.avatars.clone(),
         seen_ci: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     };
 
     // Who the reader is on GitHub, for their own byline: once per launch,
@@ -1016,6 +1017,8 @@ struct Ctx {
     /// CI notifications already acted on, by id and time, so one sitting
     /// in the inbox does not fetch the checks again on every poll.
     seen_ci: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
+    /// Items whose GitHub side is being fetched again right now.
+    refreshing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Ctx {
@@ -1634,7 +1637,7 @@ async fn finish_open(
             files: files.clone(),
             scope,
             since: since.clone(),
-            scope_gen: 0,
+            scope_gen: next_scope_gen(),
             item_id: item.id.clone(),
             pull_request: pull_request.clone(),
             body: None,
@@ -1773,11 +1776,12 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
     if !head.is_empty() && head != checkout.head_sha && checkout.stale.is_none() {
         checkout.head_sha = head.clone();
         if let Some(item) = ctx.item(item_id) {
-            if let Some(base) = base_rev_for(&item) {
+            for base in base_revs_for(&item) {
                 if let Ok(mb) = git.run(Some(&checkout.worktree), ["merge-base", &base, &head], Duration::from_secs(30)).await {
                     let mb = mb.trim().to_string();
                     if !mb.is_empty() {
                         checkout.merge_base = mb;
+                        break;
                     }
                 }
             }
@@ -1819,21 +1823,31 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
     send_commits(ctx, item_id, &checkout.worktree, &checkout.merge_base, &checkout.head_sha, since).await;
 }
 
-/// The revision an item's diff is taken against, as the opens find it:
-/// a pull request's fetched base, a branch Perch cut's home ref or the
-/// commit it was forked from, a root checkout's origin branch.
-fn base_rev_for(item: &Item) -> Option<String> {
-    let checkout = item.checkout.as_ref()?;
-    if let Some(pr) = item.pull_request() {
-        return Some(format!("refs/perch/base/{}", pr.number));
-    }
+/// A number no earlier review context or scope pick has had, so a look at
+/// the checkout that began under one cannot write into the next.
+fn next_scope_gen() -> u64 {
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The revisions an item's diff may be taken against, as the opens find
+/// them, best first: a root checkout's origin branch, since it is the
+/// reader's own clone and has none of Perch's refs; for a checkout in the
+/// store, a pull request's fetched base, then the home ref or the commit
+/// the branch was forked from. The first that resolves is the one.
+fn base_revs_for(item: &Item) -> Vec<String> {
+    let Some(checkout) = item.checkout.as_ref() else { return Vec::new() };
     let base = &checkout.base_ref;
     let is_sha = base.len() == 40 && base.chars().all(|c| c.is_ascii_hexdigit());
-    Some(match (checkout.owned, is_sha) {
-        (_, true) => base.clone(),
-        (true, false) => perch_git::home_ref(base),
-        (false, false) => format!("origin/{base}"),
-    })
+    if !checkout.owned {
+        return vec![format!("origin/{base}"), base.clone()];
+    }
+    let mut out = Vec::new();
+    if let Some(pr) = item.pull_request() {
+        out.push(format!("refs/perch/base/{}", pr.number));
+    }
+    out.push(if is_sha { base.clone() } else { perch_git::home_ref(base) });
+    out
 }
 
 /// One request for the workflow runs on the pull request's head, kept and
@@ -1868,7 +1882,7 @@ async fn set_scope(ctx: &Ctx, item_id: &str, scope: perch_git::Scope) {
                 if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
                     open.scope = scope.clone();
                     open.files = files.clone();
-                    open.scope_gen += 1;
+                    open.scope_gen = next_scope_gen();
                 }
             }
             let _ = ctx.events.send(Event::ScopeReady { item_id: item_id.to_string(), scope, files });
@@ -2223,6 +2237,19 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
 /// Fetch again what the open item shows from GitHub: the pull request and
 /// its discussion and checks, or the issue's comments.
 async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
+    // One at a time per item: two notifications in one poll would fetch
+    // and archive the same discussion twice, side by side.
+    let taken = ctx.refreshing.lock().map(|mut s| s.insert(item_id.to_string())).unwrap_or(false);
+    if !taken {
+        return;
+    }
+    refresh_open_item_inner(ctx, item_id).await;
+    if let Ok(mut s) = ctx.refreshing.lock() {
+        s.remove(item_id);
+    }
+}
+
+async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
     let open = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref().filter(|c| c.item_id == item_id).map(|c| (c.pull_request.clone(), c.issue.clone()))
     });
@@ -2256,6 +2283,12 @@ async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
         match ctx.github.fetch_issue_comments(&issue.repo_full_name, issue.number).await {
             Ok(comments) => {
                 keep_issue_comments(ctx, item_id, issue, &comments);
+                // A question asked next is prompted with these.
+                if let Ok(mut guard) = ctx.slot.lock() {
+                    if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+                        open.issue = Some(Arc::new((issue.clone(), comments.clone())));
+                    }
+                }
                 if ctx.is_open(item_id) {
                     ctx.want_avatars(comments.iter().map(|c| c.user_avatar_url.clone()));
                     let _ = ctx.events.send(Event::IssueComments { item_id: item_id.to_string(), comments: Arc::new(comments) });
@@ -2293,13 +2326,15 @@ async fn refresh_open_checks(ctx: &Ctx, thread: &Thread) {
         return;
     }
     // The snapshot is refetched on the way, so the checks are for the head
-    // the run was on, not the one the item opened at.
-    // Once per notification, not once per poll it is still in the inbox.
+    // the run was on, not the one the item opened at. Once per
+    // notification, not once per poll it is still in the inbox, and off
+    // the poll, which the command loop waits on.
     let key = (thread.id.clone(), thread.updated_at);
     if ctx.seen_ci.lock().map(|mut s| !s.insert(key)).unwrap_or(true) {
         return;
     }
-    refresh_open_item(ctx, &item_id).await;
+    let ctx = ctx.clone();
+    tokio::spawn(async move { refresh_open_item(&ctx, &item_id).await });
 }
 
 /// Rescan roots, then ask GitHub about subject-less branches.
@@ -2681,7 +2716,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
             files: Arc::new(Vec::new()),
             scope: perch_git::Scope::Branch,
             since: None,
-            scope_gen: 0,
+            scope_gen: next_scope_gen(),
             item_id: item.id.clone(),
             pull_request: None,
             body: None,
