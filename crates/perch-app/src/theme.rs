@@ -82,8 +82,11 @@ pub const RAIL_ENTRY_SIZE: f64 = 44.0;
 pub const ROW_HEIGHT: f64 = 66.0;
 pub const TOOLBAR_HEIGHT: f64 = 60.0;
 pub const STATUS_HEIGHT: f64 = 34.0;
-/// Height of the strip that replaces the title bar.
-pub const TITLEBAR_HEIGHT: f64 = 40.0;
+/// Room above the rail's first entry, where the traffic lights sit.
+///
+/// The lights end at y=23; this leaves a little air below them without
+/// the entry drifting down the rail.
+pub const TITLEBAR_HEIGHT: f64 = 36.0;
 pub const RADIUS: f64 = 6.0;
 /// Pills get a fixed height so their text can be centred by layout rather
 /// than by padding, which the font's uneven leading throws off.
