@@ -1024,6 +1024,8 @@ mod column {
         state.item.set(Some(Arc::new(item)));
         state.ready.set(true);
         state.set_phase(crate::review::model::Phase::Ready);
+        // These tests drive the thread column beside the editor, on Files.
+        state.tab.set(crate::review::model::ItemTab::Files);
         state.pull_request.set(Some(Arc::new(pr)));
         state.comment_threads.set(Arc::new(vec![thread()]));
         state.threads_open.set(true);
@@ -1040,10 +1042,10 @@ mod column {
     /// Where the header's close button sits: the last child of a header
     /// that is `TAB_HEIGHT` tall, `padding_right` 8, button 26 square, in
     /// a column `THREADS_WIDTH` wide against the window's right edge under
-    /// the review header.
+    /// the review header and the item view's tab strip.
     fn close_button_center() -> (f64, f64) {
         let x = 1400.0 - 8.0 - 13.0;
-        let y = crate::theme::REVIEW_HEADER_HEIGHT + crate::theme::TAB_HEIGHT / 2.0;
+        let y = crate::theme::REVIEW_HEADER_HEIGHT + crate::theme::TAB_HEIGHT + crate::theme::TAB_HEIGHT / 2.0;
         (x, y)
     }
 
@@ -1175,7 +1177,7 @@ mod column {
         // last thing on it. Card: 12 margin + 12 padding from the column's
         // right edge; button 22 wide with a -4 margin.
         let x = 1400.0 - 12.0 - 12.0 + 4.0 - 11.0;
-        let y = crate::theme::REVIEW_HEADER_HEIGHT + crate::theme::TAB_HEIGHT + 12.0 + 12.0 + 11.0;
+        let y = crate::theme::REVIEW_HEADER_HEIGHT + 2.0 * crate::theme::TAB_HEIGHT + 12.0 + 12.0 + 11.0;
         let under = harness.element_id_at(x, y);
         harness.click(x, y);
         harness.rebuild();

@@ -1,14 +1,16 @@
 //! The review view: a pull request, its files, and a read-only editor.
 
+pub mod composer_styling;
+pub mod conversation;
 pub mod editor;
 pub mod gutter;
-pub mod composer_styling;
-pub mod hover;
 pub mod header;
+pub mod hover;
 pub mod issue;
 pub mod markdown;
 pub mod model;
 pub mod rail;
+pub mod strip;
 pub mod styling;
 pub mod tabs;
 pub mod threads;
@@ -23,7 +25,7 @@ use floem::views::{Decorators, Stack, dyn_container};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::model::{Phase, Preparing, ReviewState};
+use crate::review::model::{ItemTab, Phase, Preparing, ReviewState};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::centered_message;
@@ -129,11 +131,8 @@ pub fn review_view(
                     },
                 )
                 .into_any(),
-                Phase::Issue => {
-                    issue_body_with_threads(app, state, body_backend.clone(), body_open_item.clone()).into_any()
-                }
-                Phase::Ready => {
-                    body(app, state, open_file.clone(), body_backend.clone()).into_any()
+                Phase::Issue | Phase::Ready => {
+                    item_view(app, state, open_file.clone(), body_backend.clone(), body_open_item.clone()).into_any()
                 }
             },
         )
@@ -142,34 +141,39 @@ pub fn review_view(
     .style(|s| s.size_full().flex_col().min_height(0.0).background(theme::CANVAS))
 }
 
-/// The issue view's body beside the thread column.
-fn issue_body_with_threads(
+/// The tab strip, then the tab: Conversation for every item, Files for one
+/// with a checkout. The strip is drawn for an issue too, with one tab, so
+/// the view keeps its shape when Start work adds a checkout.
+fn item_view(
     app: AppState,
     state: ReviewState,
+    open_file: OpenFile,
     backend: Rc<Backend>,
     open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
-    let column_backend = backend.clone();
-    let open_file: OpenFile = Rc::new(|_| {});
-    Stack::horizontal((
-        issue::issue_body(app, state, backend, open_item),
+    // An item without a checkout has no Files to show, whatever the tab
+    // remembered for it says.
+    let tab = floem::reactive::Memo::new(move |_| {
+        let has_files = state.item.with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
+        match state.tab.get() {
+            ItemTab::Files if has_files => ItemTab::Files,
+            _ => ItemTab::Conversation,
+        }
+    });
+    Stack::vertical((
+        strip::strip(state),
         dyn_container(
-            move || state.threads_open.get(),
-            move |open| {
-                if open {
-                    floem::views::Container::new(Stack::horizontal((
-                        threads::resize_handle(state),
-                        threads::thread_column(app, state, column_backend.clone(), open_file.clone()),
-                    )))
-                    .style(|s| s.height_full().flex_shrink(0.0_f32).position(floem::style::Position::Relative))
-                    .into_any()
-                } else {
-                    floem::views::Empty::new().into_any()
+            move || tab.get(),
+            move |tab| match tab {
+                ItemTab::Conversation => {
+                    conversation::view(app, state, backend.clone(), open_item.clone(), open_file.clone()).into_any()
                 }
+                ItemTab::Files => body(app, state, open_file.clone(), backend.clone()).into_any(),
             },
-        ),
+        )
+        .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
     ))
-    .style(|s| s.size_full().min_height(0.0))
+    .style(|s| s.size_full().flex_col().min_height(0.0))
 }
 
 fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Backend>) -> impl IntoView {

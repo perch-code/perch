@@ -334,6 +334,20 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 EventPropagation::Continue
             }
+            // Cmd-Shift-1 and Cmd-Shift-2 are the item view's tabs.
+            Code::Digit1 if key.modifiers.contains(Modifiers::SHIFT) => {
+                if review.is_open() {
+                    review.show_tab(crate::review::model::ItemTab::Conversation);
+                }
+                EventPropagation::Stop
+            }
+            Code::Digit2 if key.modifiers.contains(Modifiers::SHIFT) => {
+                let has_files = review.item.with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
+                if review.is_open() && has_files {
+                    review.show_tab(crate::review::model::ItemTab::Files);
+                }
+                EventPropagation::Stop
+            }
             // Cmd-1 is the sidebar's search; Cmd-2 is the inbox.
             Code::Digit1 => {
                 if state.sidebar_open.get() && (review.is_showing() || state.screen.get() == Screen::Sidebar) {
