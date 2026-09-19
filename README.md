@@ -8,9 +8,8 @@ on: a pull request someone opened, an issue, a branch of your own. Click one
 and the view that fits it opens: a read-only editor over the diff with
 rust-analyzer behind it, or the issue with its comments. Ask a coding
 agent about the lines on screen and the answer stays there as a thread. What
-needs looking at sits at the top, and every discussion is archived as
-markdown that a coding agent can search. Nothing in Perch writes to
-GitHub.
+needs looking at is marked, and every discussion is archived as markdown
+that a coding agent can search. Nothing in Perch writes to GitHub.
 
 ## What it does
 
@@ -28,22 +27,23 @@ GitHub.
   and it is the same row before and after, with the same threads. An item
   is in the repository its pull request, issue or checkout is in; there is
   nothing to move.
-- **Priority** at the top lists items with attention newer than their Done
-  mark, newest first, with why: review requested, mentioned, commented, CI
-  failed. **Pinned** holds what you pinned. Then the sections, with a
+- **Pinned** at the top holds what you pinned. Then the sections, with a
   count of active items each: one per repository, the declared ones first
   in config order and the rest by name; or one per owner, which is how
   `slatedb/slatedb` and `slatedb/slatedb-go` share a heading; or one per
   date. Under Repository a row's second line is `#57 · branch`, since the
-  heading says the repository. Under Owner and Date, and in Priority and
-  Pinned, it is `slatedb/slatedb #57 · branch`.
+  heading says the repository. Under Owner and Date, and in Pinned, it is
+  `slatedb/slatedb #57 · branch`.
 - Attention comes from your notifications, polled on GitHub's own
   `X-Poll-Interval`. One about an item that asks for you, a review
   request, a mention, an assignment or a comment, becomes the item's
   attention, and a CI notification about the open pull request fetches
   its checks again and is attention when they fail. One that only says
   the item moved does nothing; the row's date already shows that. One
-  about anything that has no row is dropped.
+  about anything that has no row is dropped. A row with attention has its
+  title in bold and a dot at its end, next to the pin under Pinned; Needs
+  attention in the filter menu narrows the list to those rows, and Reason
+  to why.
 - Each row has Save and Done on hover and a menu: Open in GitHub, Finder or
   Terminal, Pin, Mark unread, Rename, Fork or Start work, Archive, Delete.
   Every entry is on every row; the ones that cannot apply are greyed. The
@@ -52,12 +52,12 @@ GitHub.
   oldest first; the search box matches titles, numbers, branches and
   repository names.
 - Save and Done are marks on the item, set from the row, from the keyboard,
-  or from the header of the open item. Done takes the item out of Priority,
+  or from the header of the open item. Done clears the item's attention,
   and the next notification that asks for you brings it back, the way a
   done thread comes back on the web; Save does not expire. Status set to
-  Done lists what is done, and Saved only narrows every section, Priority
-  and Pinned included, to what is saved. Both marks are Perch's own and
-  stay on this machine. See below.
+  Done lists what is done, and Saved only narrows every section, Pinned
+  included, to what is saved. Both marks are Perch's own and stay on this
+  machine. See below.
 
 **The item view**
 

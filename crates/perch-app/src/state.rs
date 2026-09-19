@@ -451,7 +451,7 @@ impl AppState {
         self.items.with(|all| all.iter().find(|i| i.id == id).cloned())
     }
 
-    /// The sidebar as the filters cut it: Priority, Pinned, and the groups.
+    /// The sidebar as the filters cut it: Pinned and the groups.
     pub fn item_sections(&self) -> crate::items::Sections {
         let mut filters = self.item_filters.get();
         filters.query = self.item_query.get();

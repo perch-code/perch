@@ -88,12 +88,12 @@ impl Reason {
         }
     }
 
-    /// Whether a notification with this reason puts its item in Priority.
+    /// Whether a notification with this reason gives its item attention.
     /// Someone asked for the reader, or the reader is part of the
     /// conversation; anything else is the repository moving, which the
     /// list pass already shows by moving the row. Subscribed activity
-    /// in particular would put every push on every pull request the
-    /// reader watches into Priority, which is noise. The set is the web
+    /// in particular would give every push on every pull request the
+    /// reader watches attention, which is noise. The set is the web
     /// UI's "Participating" filter, and is its own rule so the two can
     /// part without either being wrong.
     pub fn makes_attention(&self) -> bool {

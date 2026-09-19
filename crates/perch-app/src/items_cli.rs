@@ -1,7 +1,7 @@
 //! `perch --items ["status=done;reason=mention;direction=oldest;query=fence"]`
 //!
-//! Prints the sidebar as text: Priority, Pinned, then each section and its
-//! rows, from the cache the app uses and the repositories config.toml
+//! Prints the sidebar as text: Pinned, then each section and its rows,
+//! from the cache the app uses and the repositories config.toml
 //! declares. The keys are the filter menu's, in `ItemFilters::to_meta`'s
 //! form: `status`, `kinds`, `group` (`repo`, `owner` or `date`), `sort`,
 //! `show_empty`, `show_pr_status`, `saved`, `attention`, `reason` and
@@ -76,26 +76,23 @@ fn print(filters: &ItemFilters) -> Result<(), String> {
     Ok(())
 }
 
+/// The blocks are set apart by a blank line, with none above the first;
+/// nothing at all when there is no block to print.
 fn render(out: &mut String, sections: &Sections, filters: &ItemFilters) {
-    out.push_str("Priority\n");
-    if sections.priority.is_empty() {
-        out.push_str("  Nothing needs attention\n");
-    }
-    // Priority and Pinned sit under no repository heading, so their rows
-    // name it whatever the grouping.
-    for item in &sections.priority {
-        row(out, item, &items::full_reference(item), filters, false);
-    }
-
     if !sections.pinned.is_empty() {
-        out.push_str("\nPinned\n");
+        out.push_str("Pinned\n");
+        // Pinned sits under no repository heading, so its rows name it
+        // whatever the grouping.
         for item in &sections.pinned {
             row(out, item, &items::full_reference(item), filters, true);
         }
     }
 
     for section in &sections.groups {
-        out.push_str(&format!("\n{} ({})\n", section.title, section.count));
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("{} ({})\n", section.title, section.count));
         for item in &section.items {
             row(out, item, &items::reference(item, section.group()), filters, false);
         }
@@ -231,9 +228,6 @@ mod tests {
     fn the_sidebar_prints_as_sections_of_rows() {
         let got = text(&ItemFilters::default());
         let want = [
-            "Priority",
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested  * review requested",
-            "",
             "Pinned",
             "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned",
             "",
@@ -255,7 +249,7 @@ mod tests {
         };
         let got = text(&f);
         assert!(got.contains("  P  Fence the manifest  [criccomini/perch #57 · fence]  * review requested\n"), "{got}");
-        assert!(got.contains("\nToday (1)\n"), "{got}");
+        assert!(got.starts_with("Today (1)\n"), "{got}");
         assert!(!got.contains("Pinned"), "{got}");
     }
 
@@ -267,10 +261,26 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_priority_says_so() {
+    fn a_pinned_row_that_needs_attention_says_both() {
+        let (declared, mut items) = fixture();
+        items[0].pinned_at = Some(at("2026-09-18T10:00:00Z"));
+        let sections = items::sections(&declared, &items, &ItemFilters::default(), at("2026-09-18T09:00:00Z"));
+        let mut out = String::new();
+        render(&mut out, &sections, &ItemFilters::default());
+        assert!(out.contains("  pinned  * review requested\n"), "{out}");
+    }
+
+    #[test]
+    fn the_first_block_has_no_blank_line_above_it() {
+        // Only the pinned branch matches, so Pinned is the whole list.
         let f = ItemFilters { query: "issue-42".into(), ..Default::default() };
         let got = text(&f);
-        assert!(got.starts_with("Priority\n  Nothing needs attention\n"), "{got}");
+        assert_eq!(got, "Pinned\n  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n");
+
+        // Only the pull request matches, so its repository's section is.
+        let f = ItemFilters { query: "fence".into(), ..Default::default() };
+        let got = text(&f);
+        assert!(got.starts_with("criccomini/perch (2)\n  P  Fence the manifest"), "{got}");
     }
 
     #[test]
@@ -278,16 +288,15 @@ mod tests {
         // The wanted pull request is a review request and the pinned branch
         // has no reason at all; a mention filter leaves nothing anywhere.
         let got = text(&ItemFilters::parse("reason=mention").unwrap());
-        assert_eq!(got, "Priority\n  Nothing needs attention\n");
+        assert_eq!(got, "");
 
         // Needs attention cuts the pinned branch, which has none.
         let got = text(&ItemFilters::parse("attention=1;reason=review_requested;direction=oldest").unwrap());
-        assert!(got.starts_with("Priority\n  P  Fence the manifest"), "{got}");
         assert!(!got.contains("Pinned"), "{got}");
-        assert!(got.contains("\ncriccomini/perch (2)\n  P  Fence the manifest"), "{got}");
+        assert_eq!(got, "criccomini/perch (2)\n  P  Fence the manifest  [#57 · fence]  ci:failure review requested  * review requested\n");
 
         // Nothing is saved.
         let got = text(&ItemFilters::parse("saved=1").unwrap());
-        assert_eq!(got, "Priority\n  Nothing needs attention\n");
+        assert_eq!(got, "");
     }
 }

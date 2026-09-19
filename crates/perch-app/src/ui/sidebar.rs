@@ -1,9 +1,9 @@
 //! The drawer on the left, which is the whole navigation.
 //!
 //! Top to bottom: a strip the traffic lights sit over, the search box and
-//! the filter button, then Priority, Pinned, and one section per
-//! repository, owner or date. Every row is an item, and the filter menu is
-//! how the list is narrowed.
+//! the filter button, then Pinned and one section per repository, owner
+//! or date. Every row is an item, and the filter menu is how the list is
+//! narrowed.
 
 use std::rc::Rc;
 
@@ -11,7 +11,7 @@ use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use floem::views::{
-    Container, Decorators, Empty, Label, ScrollExt, Stack, TextInput, dyn_container, dyn_stack,
+    Container, Decorators, Empty, ScrollExt, Stack, TextInput, dyn_container, dyn_stack,
 };
 
 use crate::backend::Backend;
@@ -112,7 +112,7 @@ fn repos_nav(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl I
 ///
 /// The box's edge is at x=10, four inside the row cards' edge, and its glyph
 /// sits at x=16 on the column the chevrons and row glyphs share. The row has
-/// no padding below, so Priority's header sits its own 14 under the box the
+/// no padding below, so the first header sits its own 14 under the box the
 /// way every header sits under what is above it.
 fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     use floem::style::Position;
@@ -341,50 +341,22 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
     menu
 }
 
-/// Priority, Pinned, and the groups, in one scrolling column.
+/// Pinned and the groups, in one scrolling column.
 fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
-    let (b1, b2, b3) = (backend.clone(), backend.clone(), backend);
-    let (o1, o2, o3) = (on_open.clone(), on_open.clone(), on_open);
+    let (b1, b2) = (backend.clone(), backend);
+    let (o1, o2) = (on_open.clone(), on_open);
 
     Stack::vertical((
-        // Priority
-        Stack::vertical((
-            // The header carries its count like every other header; it is
-            // the number that matters, and it changes, so the header is
-            // rebuilt on it.
-            dyn_container(
-                move || state.item_sections().priority.len(),
-                |count| section_header("Priority".into(), count, None).into_any(),
-            )
-            .style(|s| s.width_full()),
-            dyn_stack(
-                move || state.item_sections().priority,
-                row_key,
-                move |item| item_row(state, b1.clone(), item, Placement::Priority, o1.clone()),
-            )
-            .style(|s| s.flex_col().width_full().gap(1.0)),
-            dyn_container(
-                move || state.item_sections().priority.is_empty(),
-                |empty| {
-                    if empty {
-                        quiet_line("Nothing needs attention").into_any()
-                    } else {
-                        Empty::new().into_any()
-                    }
-                },
-            ),
-        ))
-        .style(|s| s.flex_col().width_full()),
         // Pinned, hidden when empty.
         // Keyed on the count rather than on emptiness so the header's
-        // number follows a pin or an unpin, as Priority's does.
+        // number follows a pin or an unpin.
         dyn_container(
             move || state.item_sections().pinned.len(),
             move |count| {
                 if count == 0 {
                     return Empty::new().into_any();
                 }
-                let (b, o) = (b2.clone(), o2.clone());
+                let (b, o) = (b1.clone(), o1.clone());
                 Stack::vertical((
                     section_header("Pinned".into(), count, None),
                     dyn_stack(
@@ -409,7 +381,7 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
                     section.count,
                 )
             },
-            move |section| group_section(state, b3.clone(), section, o3.clone()),
+            move |section| group_section(state, b2.clone(), section, o2.clone()),
         )
         .style(|s| s.flex_col().width_full().padding_bottom(12.0)),
     ))
@@ -469,23 +441,6 @@ fn group_section(
         }),
     ))
     .style(|s| s.flex_col().width_full())
-}
-
-/// A line under a header that has nothing to list. It hangs from the
-/// header's title at x=31, not from its chevron slot at 16, so it reads as
-/// belonging to the header above, and ends in an ellipsis in a narrow
-/// drawer the way the title does.
-fn quiet_line(text: &'static str) -> impl IntoView {
-    Label::derived(move || text.to_string()).style(|s| {
-        s.font_size(theme::TEXT_META)
-            .color(theme::FG_SUBTLE)
-            .text_ellipsis()
-            .min_width(0.0)
-            .padding_left(31.0)
-            .padding_right(16.0)
-            .padding_vert(6.0)
-            .selectable(false)
-    })
 }
 
 /// The strip along the panel's right edge that drags it wider or narrower.

@@ -46,8 +46,8 @@ fn main() {
         ask::run_cli(&args[2..]);
         return;
     }
-    // The sidebar as text, from the cache alone: Priority, Pinned, then each
-    // section and its rows.
+    // The sidebar as text, from the cache alone: Pinned, then each section
+    // and its rows.
     if args.get(1).map(String::as_str) == Some("--items") {
         items_cli::run(&args[2..]);
         return;

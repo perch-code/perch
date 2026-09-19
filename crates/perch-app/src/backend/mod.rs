@@ -1972,8 +1972,8 @@ async fn refresh(ctx: &Ctx, source: &str) -> Duration {
 /// everything open in a declared repository, and a subject with no row is
 /// let go. Nor is every reason attention: subscribed activity and a state
 /// change are the repository moving, which the pass already shows by
-/// moving the row, and putting every push on every watched pull request
-/// into Priority would be noise. A CI notification
+/// moving the row, and giving every push on every watched pull request
+/// attention would be noise. A CI notification
 /// fetches the open pull request's checks again instead, and it is the
 /// checks coming back red that is the attention.
 async fn attend(ctx: &Ctx, threads: &[Thread]) {
@@ -3836,7 +3836,7 @@ mod tests {
         attend(&ctx, &[with_reason(thread("7", "seven"), Reason::Subscribed)]).await;
 
         let item = ctx.item(&item.id).unwrap();
-        assert_eq!(item.attention_at, None, "a push on a watched pull request is not Priority");
+        assert_eq!(item.attention_at, None, "a push on a watched pull request is not attention");
         assert_eq!(item.attention_reason, None);
         assert_eq!(items_sent(&received), 0, "nothing changed, so the sidebar is not told");
     }

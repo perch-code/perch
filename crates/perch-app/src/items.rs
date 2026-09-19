@@ -36,10 +36,10 @@ impl ItemStatus {
         }
     }
 
-    /// Whether the status shows archived items. Priority and Pinned use
-    /// this rather than `accepts`: those sections ignore the status filter
-    /// otherwise, but an archived item was put away on purpose and should
-    /// not keep nagging from the top of the list.
+    /// Whether the status shows archived items. Pinned uses this rather
+    /// than `accepts`: that section ignores the status filter otherwise,
+    /// but an archived item was put away on purpose and should not keep
+    /// nagging from the top of the list.
     pub fn shows_archived(self) -> bool {
         matches!(self, ItemStatus::Archived | ItemStatus::All)
     }
@@ -276,7 +276,8 @@ impl AttentionReason {
         AttentionReason::Author,
     ];
 
-    /// The words a Priority row says next to its dot.
+    /// The reason in words, as `perch --items` prints it beside a row
+    /// that needs attention.
     pub fn label(self) -> &'static str {
         match self {
             AttentionReason::ReviewRequested => "review requested",
@@ -379,8 +380,7 @@ pub struct ItemFilters {
     pub show_pr_status: bool,
     /// Only saved items, whatever the status.
     pub saved_only: bool,
-    /// Only items with attention newer than their Done: the sections become
-    /// Priority grouped.
+    /// Only items with attention newer than their Done.
     pub attention_only: bool,
     /// Only items whose latest reason is this one; `None` is Any.
     pub reason: Option<AttentionReason>,
@@ -527,9 +527,6 @@ impl ItemSection {
 /// What the sidebar draws, top to bottom.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sections {
-    /// Items with attention newer than their Done mark, newest attention
-    /// first. These still appear under their repository.
-    pub priority: Vec<Item>,
     /// Pinned items, most recently pinned first. These do not appear under
     /// their repository.
     pub pinned: Vec<Item>,
@@ -539,30 +536,21 @@ pub struct Sections {
 /// Build the sidebar from the declared repositories, `owner/repo` in config
 /// order, and the cache's items.
 ///
-/// Priority and Pinned ignore the group, sort and kind settings and respect
-/// the search. Saved only, Needs attention and the reason narrow the
-/// searched set before Priority and Pinned are cut from it, so the three
-/// lists agree on what is in play. The status filter touches Priority and
-/// Pinned in one way only: archived items stay out of both unless the
-/// status shows archived items. Group sections take every filter. The
-/// direction reverses the rows and the date buckets and nothing else;
-/// attention order and pin order are not the sort.
+/// Pinned ignores the group, sort and kind settings and respects the
+/// search. Saved only, Needs attention and the reason narrow the searched
+/// set before Pinned is cut from it, so the two lists agree on what is in
+/// play. The status filter touches Pinned in one way only: archived items
+/// stay out of it unless the status shows archived items. Group sections
+/// take every filter. The direction reverses the rows and the date buckets
+/// and nothing else; pin order is not the sort.
 pub fn sections(declared: &[String], items: &[Item], filters: &ItemFilters, now: Timestamp) -> Sections {
     let searched: Vec<&Item> =
         items.iter().filter(|i| filters.matches_query(i) && filters.narrows_to(i)).collect();
     let top_level = |i: &Item| !i.is_archived() || filters.status.shows_archived();
 
-    let mut priority: Vec<Item> = searched
-        .iter()
-        .copied()
-        .filter(|i| i.needs_attention() && top_level(i))
-        .cloned()
-        .collect();
-    // Ties broken by id so the order never jitters between refreshes.
-    priority.sort_by(|a, b| b.attention_at.cmp(&a.attention_at).then_with(|| a.id.cmp(&b.id)));
-
     let mut pinned: Vec<Item> =
         searched.iter().copied().filter(|i| i.is_pinned() && top_level(i)).cloned().collect();
+    // Ties broken by id so the order never jitters between refreshes.
     pinned.sort_by(|a, b| b.pinned_at.cmp(&a.pinned_at).then_with(|| a.id.cmp(&b.id)));
     let in_pinned: HashSet<&str> = pinned.iter().map(|i| i.id.as_str()).collect();
 
@@ -580,7 +568,7 @@ pub fn sections(declared: &[String], items: &[Item], filters: &ItemFilters, now:
         ItemGroup::Date => by_date(&rows, filters.sort, filters.direction, now),
     };
 
-    Sections { priority, pinned, groups }
+    Sections { pinned, groups }
 }
 
 /// Newest first, ties by id so the order never jitters between refreshes,
@@ -772,14 +760,15 @@ pub fn reference(item: &Item, group: ItemGroup) -> String {
 }
 
 /// The second line with the repository in it, whatever the grouping. For
-/// Priority and Pinned rows, which sit under no heading that names one.
+/// Pinned rows, which sit under no heading that names one.
 pub fn full_reference(item: &Item) -> String {
     reference(item, ItemGroup::Date)
 }
 
-/// The words a Priority row says next to its dot, from the reason the
-/// attention was set with. A reason the menu does not know is still shown,
-/// with its underscores as spaces, rather than dropped from the row.
+/// The reason in words, from the string the attention was set with, as
+/// `perch --items` prints it beside a row that needs attention. A reason
+/// the menu does not know is still shown, with its underscores as spaces,
+/// rather than dropped from the row.
 pub fn attention_label(reason: &str) -> String {
     match AttentionReason::from_str(reason) {
         Some(known) => known.label().into(),
@@ -927,51 +916,29 @@ mod tests {
     }
 
     #[test]
-    fn priority_holds_only_items_with_attention_past_done() {
+    fn pinned_leaves_out_an_archived_item_unless_the_status_shows_archived() {
         let (declared, mut items) = fixture();
-        // A second wanted item, older attention, so the order is checked too.
-        let mut older = item("issue-mentioned", "criccomini/perch", "2026-09-12T10:00:00Z");
-        older.subject = Some(issue(43, "Mentioned issue", "open", "2026-09-15T10:00:00Z"));
-        older.attention_at = Some(at("2026-09-17T09:00:00Z"));
-        older.attention_reason = Some("mention".into());
-        items.push(older);
+        items[0].pinned_at = Some(at("2026-09-17T10:00:00Z"));
+        items[4].pinned_at = Some(at("2026-09-18T11:00:00Z"));
 
         let s = sections(&declared, &items, &ItemFilters::default(), now());
-        assert_eq!(ids(&s.priority), ["pr-wanted", "issue-mentioned"]);
-        // Done is not in there, and neither is anything without attention.
-        assert!(s.priority.iter().all(Item::needs_attention));
-    }
-
-    #[test]
-    fn priority_keeps_the_item_under_its_repository_too() {
-        let (declared, items) = fixture();
-        let s = sections(&declared, &items, &ItemFilters::default(), now());
-        assert!(section_ids(&s.groups[0]).contains(&"pr-wanted"));
-    }
-
-    #[test]
-    fn priority_leaves_out_an_archived_item_unless_the_status_shows_archived() {
-        let (declared, mut items) = fixture();
-        items[4].attention_at = Some(at("2026-09-18T11:00:00Z"));
-        items[4].attention_reason = Some("comment".into());
-
-        let s = sections(&declared, &items, &ItemFilters::default(), now());
-        assert_eq!(ids(&s.priority), ["pr-wanted"]);
+        assert_eq!(ids(&s.pinned), ["pr-wanted"]);
 
         let f = ItemFilters { status: ItemStatus::Archived, ..Default::default() };
         let s = sections(&declared, &items, &f, now());
-        assert_eq!(ids(&s.priority), ["branch-archived", "pr-wanted"]);
+        assert_eq!(ids(&s.pinned), ["branch-archived", "pr-wanted"]);
     }
 
     #[test]
-    fn priority_ignores_the_kind_filter() {
-        let (declared, items) = fixture();
+    fn pinned_ignores_the_kind_filter() {
+        let (declared, mut items) = fixture();
+        items[0].pinned_at = Some(at("2026-09-17T10:00:00Z"));
         let f = ItemFilters {
             kinds: ItemKinds { pull_requests: false, issues: true, branches: true },
             ..Default::default()
         };
         let s = sections(&declared, &items, &f, now());
-        assert_eq!(ids(&s.priority), ["pr-wanted"]);
+        assert_eq!(ids(&s.pinned), ["pr-wanted"]);
         assert!(!section_ids(&s.groups[0]).contains(&"pr-wanted"));
     }
 
@@ -1246,7 +1213,7 @@ mod tests {
         assert_eq!(reference(&items[5], ItemGroup::Repository), "perch/issue-42");
         assert_eq!(reference(&items[5], ItemGroup::Owner), "criccomini/perch · perch/issue-42");
         assert_eq!(reference(&items[5], ItemGroup::Date), "criccomini/perch · perch/issue-42");
-        // Priority and Pinned sit under no repository, so they always say it.
+        // Pinned sits under no repository, so it always says it.
         assert_eq!(full_reference(&items[0]), "criccomini/perch #57 · fence");
         assert_eq!(full_reference(&items[5]), "criccomini/perch · perch/issue-42");
     }
@@ -1265,8 +1232,6 @@ mod tests {
         let s = sections(&declared, &items, &f, now());
         assert_eq!(s.groups.len(), 1);
         assert_eq!(section_ids(&s.groups[0]), ["branch"]);
-        // The pull request with attention does not match, so Priority is empty.
-        assert!(s.priority.is_empty());
     }
 
     #[test]
@@ -1314,15 +1279,14 @@ mod tests {
     }
 
     #[test]
-    fn saved_only_narrows_priority_and_pinned_as_well_as_the_sections() {
+    fn saved_only_narrows_pinned_as_well_as_the_sections() {
         let (declared, mut items) = fixture();
-        // Two items with attention, one saved; two pinned, one saved.
-        let mut mentioned = item("issue-mentioned", "criccomini/perch", "2026-09-12T10:00:00Z");
-        mentioned.subject = Some(issue(43, "Mentioned issue", "open", "2026-09-15T10:00:00Z"));
-        mentioned.attention_at = Some(at("2026-09-17T09:00:00Z"));
-        mentioned.attention_reason = Some("mention".into());
-        mentioned.saved = true;
-        items.push(mentioned);
+        // A second open issue, saved; two pinned, one of them saved; and the
+        // done pull request saved.
+        let mut saved = item("issue-saved", "criccomini/perch", "2026-09-12T10:00:00Z");
+        saved.subject = Some(issue(43, "Saved issue", "open", "2026-09-15T10:00:00Z"));
+        saved.saved = true;
+        items.push(saved);
         items[3].saved = true;
         items[3].pinned_at = Some(at("2026-09-17T10:00:00Z"));
         items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
@@ -1330,10 +1294,9 @@ mod tests {
 
         let f = ItemFilters { saved_only: true, ..Default::default() };
         let s = sections(&declared, &items, &f, now());
-        assert_eq!(ids(&s.priority), ["issue-mentioned"], "the unsaved wanted item is cut");
         assert_eq!(ids(&s.pinned), ["issue"], "the unsaved pinned branch is cut");
         assert_eq!(titles(&s), ["criccomini/perch"]);
-        assert_eq!(section_ids(&s.groups[0]), ["issue-mentioned"]);
+        assert_eq!(section_ids(&s.groups[0]), ["issue-saved"]);
         // The badge is not narrowed.
         assert_eq!(s.groups[0].count, 4);
 
@@ -1341,31 +1304,27 @@ mod tests {
         let f = ItemFilters { saved_only: true, status: ItemStatus::Done, ..Default::default() };
         let s = sections(&declared, &items, &f, now());
         assert_eq!(section_ids(&s.groups[0]), ["pr-done"]);
-        assert_eq!(ids(&s.priority), ["issue-mentioned"]);
     }
 
     #[test]
-    fn attention_only_leaves_priority_alone_and_makes_the_sections_priority_grouped() {
+    fn attention_only_narrows_the_sections_to_what_needs_attention() {
         let (declared, mut items) = fixture();
         items[6].attention_at = Some(at("2026-09-17T12:00:00Z"));
         items[6].attention_reason = Some("comment".into());
         items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
 
-        let before = sections(&declared, &items, &ItemFilters::default(), now());
         let f = ItemFilters { attention_only: true, ..Default::default() };
         let s = sections(&declared, &items, &f, now());
-        assert_eq!(s.priority, before.priority);
-        assert_eq!(ids(&s.priority), ["pr-wanted", "slatedb-pr"]);
         assert!(s.pinned.is_empty(), "the pinned branch has no attention");
         assert_eq!(titles(&s), ["criccomini/perch", "slatedb/slatedb"]);
         assert_eq!(section_ids(&s.groups[0]), ["pr-wanted"]);
         assert_eq!(section_ids(&s.groups[1]), ["slatedb-pr"]);
         let listed: Vec<&str> = s.groups.iter().flat_map(section_ids).collect();
-        let mut wanted = ids(&s.priority);
+        let mut wanted: Vec<&str> = items.iter().filter(|i| i.needs_attention()).map(|i| i.id.as_str()).collect();
         wanted.sort_unstable();
         let mut listed_sorted = listed.clone();
         listed_sorted.sort_unstable();
-        assert_eq!(listed_sorted, wanted, "the sections hold exactly the Priority items");
+        assert_eq!(listed_sorted, wanted, "the sections hold exactly the items that need attention");
         assert_eq!(s.groups[0].count, 3, "the badge is not narrowed");
 
         // Under Group by Date the same items, bucketed.
@@ -1397,42 +1356,35 @@ mod tests {
         let under = |reason: Option<AttentionReason>, status: ItemStatus| {
             let f = ItemFilters { reason, status, ..Default::default() };
             let s = sections(&declared, &items, &f, now());
-            let rows: Vec<String> = s.groups.iter().flat_map(|g| g.items.iter().map(|i| i.id.clone())).collect();
-            (ids(&s.priority).into_iter().map(String::from).collect::<Vec<_>>(), rows)
+            s.groups.iter().flat_map(|g| g.items.iter().map(|i| i.id.clone())).collect::<Vec<String>>()
         };
 
-        let (priority, rows) = under(Some(AttentionReason::Mention), ItemStatus::Active);
-        assert_eq!(priority, ["issue-mentioned"]);
-        assert_eq!(rows, ["issue-mentioned"], "Priority and the sections narrow together");
+        let rows = under(Some(AttentionReason::Mention), ItemStatus::Active);
+        assert_eq!(rows, ["issue-mentioned"]);
 
-        let (priority, rows) = under(Some(AttentionReason::ReviewRequested), ItemStatus::Active);
-        assert_eq!(priority, ["pr-wanted"]);
+        let rows = under(Some(AttentionReason::ReviewRequested), ItemStatus::Active);
         assert_eq!(rows, ["pr-wanted"]);
 
-        let (priority, rows) = under(Some(AttentionReason::ReviewRequested), ItemStatus::Done);
-        assert!(priority.contains(&"pr-wanted".to_string()));
+        let rows = under(Some(AttentionReason::ReviewRequested), ItemStatus::Done);
         assert_eq!(rows, ["pr-done"], "done, and still a review request");
 
-        let (_, rows) = under(Some(AttentionReason::Comment), ItemStatus::Active);
+        let rows = under(Some(AttentionReason::Comment), ItemStatus::Active);
         assert_eq!(rows, ["slatedb-pr"]);
 
-        let (priority, rows) = under(None, ItemStatus::Active);
-        assert!(priority.contains(&"branch".to_string()));
+        let rows = under(None, ItemStatus::Active);
         assert!(rows.contains(&"branch".to_string()));
         for reason in AttentionReason::ALL {
-            let (priority, rows) = under(Some(reason), ItemStatus::All);
-            assert!(!priority.contains(&"branch".to_string()), "{reason:?}");
+            let rows = under(Some(reason), ItemStatus::All);
             assert!(!rows.contains(&"branch".to_string()), "{reason:?}");
         }
     }
 
     #[test]
-    fn oldest_first_reverses_rows_but_not_priority_or_pinned() {
+    fn oldest_first_reverses_rows_but_not_pinned() {
         let (declared, mut items) = fixture();
-        let mut older = item("issue-mentioned", "criccomini/perch", "2026-09-12T10:00:00Z");
-        older.subject = Some(issue(43, "Mentioned issue", "open", "2026-09-15T10:00:00Z"));
-        older.attention_at = Some(at("2026-09-17T09:00:00Z"));
-        older.attention_reason = Some("mention".into());
+        // A second row under the repository, so there is an order to turn.
+        let mut older = item("issue-older", "criccomini/perch", "2026-09-12T10:00:00Z");
+        older.subject = Some(issue(43, "Older issue", "open", "2026-09-15T10:00:00Z"));
         items.push(older);
         items[3].pinned_at = Some(at("2026-09-17T10:00:00Z"));
         items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
@@ -1440,11 +1392,9 @@ mod tests {
         let newest = sections(&declared, &items, &ItemFilters::default(), now());
         let f = ItemFilters { direction: Direction::Oldest, ..Default::default() };
         let oldest = sections(&declared, &items, &f, now());
-        assert_eq!(section_ids(&newest.groups[0]), ["pr-wanted", "issue-mentioned"]);
-        assert_eq!(section_ids(&oldest.groups[0]), ["issue-mentioned", "pr-wanted"]);
-        assert_eq!(oldest.priority, newest.priority, "attention order is not the sort");
+        assert_eq!(section_ids(&newest.groups[0]), ["pr-wanted", "issue-older"]);
+        assert_eq!(section_ids(&oldest.groups[0]), ["issue-older", "pr-wanted"]);
         assert_eq!(oldest.pinned, newest.pinned, "pin order is not the sort");
-        assert_eq!(ids(&oldest.priority), ["pr-wanted", "issue-mentioned"]);
         assert_eq!(ids(&oldest.pinned), ["branch", "issue"]);
         // The repository order is config order either way.
         assert_eq!(titles(&oldest), titles(&newest));

@@ -24,7 +24,7 @@ use perch_github::{CheckStatus, Item, ItemSubject, SubjectState};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::items::{attention_label, full_reference, reference, ItemGroup};
+use crate::items::{full_reference, reference, ItemGroup};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
@@ -35,11 +35,10 @@ use crate::ui::widgets::{
 /// Opening an item. Shared by every row.
 pub type OpenItem = Rc<dyn Fn(&Item)>;
 
-/// Where a row sits, which changes what it says beside the reference.
+/// Where a row sits, which decides whether its second line names the
+/// repository and what ends the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
-    /// Under Priority: the attention reason is shown.
-    Priority,
     /// Under Pinned: a pin glyph.
     Pinned,
     /// Under a repository, an owner or a date, which decides whether the
@@ -90,18 +89,13 @@ pub fn item_row(
     let attention = item.needs_attention();
     let mut reference_text = match placement {
         Placement::Section(group) => reference(&item, group),
-        // No heading above these names a repository, so the row does.
-        Placement::Priority | Placement::Pinned => full_reference(&item),
+        // No heading above Pinned names a repository, so the row does.
+        Placement::Pinned => full_reference(&item),
     };
     // A branch of the reader's own says how far it has gone from its base.
     if item.subject.is_none() {
         if let Some((a, d)) = item.checkout.as_ref().and_then(|c| c.churn) {
             reference_text = format!("{reference_text}  +{a} \u{2212}{d}");
-        }
-    }
-    if placement == Placement::Priority {
-        if let Some(reason) = item.attention_reason.as_deref() {
-            reference_text = format!("{reference_text} \u{00b7} {}", attention_label(reason));
         }
     }
 
@@ -289,19 +283,30 @@ fn chips(state: AppState, item: &Item) -> impl IntoView {
     )
 }
 
-/// The accent dot at the right edge of a row that needs looking at, or the
-/// pin under Pinned.
+/// The right edge of a row: the accent dot when it needs looking at, and
+/// under Pinned the pin before it. Every pinned row has the pin's slot, so
+/// the dot's column is the same in every section, and a pinned row that
+/// needs looking at says both.
 fn trailing(attention: bool, placement: Placement) -> impl IntoView {
-    Container::new(if placement == Placement::Pinned {
-        sidebar_glyph(SidebarIcon::Pin, theme::FG_SUBTLE).style(|s| s.size(11.0, 11.0)).into_any()
-    } else if attention {
-        Empty::new()
-            .style(|s| s.size(7.0, 7.0).border_radius(4.0).background(theme::ACCENT))
-            .into_any()
-    } else {
-        Empty::new().into_any()
-    })
-    .style(|s| s.width(14.0).items_center().justify_center().flex_shrink(0.0_f32))
+    let slot = |s: Style| s.width(14.0).items_center().justify_center().flex_shrink(0.0_f32);
+    Stack::horizontal((
+        if placement == Placement::Pinned {
+            Container::new(sidebar_glyph(SidebarIcon::Pin, theme::FG_SUBTLE).style(|s| s.size(11.0, 11.0)))
+                .style(slot)
+                .into_any()
+        } else {
+            Empty::new().into_any()
+        },
+        Container::new(if attention {
+            Empty::new()
+                .style(|s| s.size(7.0, 7.0).border_radius(4.0).background(theme::ACCENT))
+                .into_any()
+        } else {
+            Empty::new().into_any()
+        })
+        .style(slot),
+    ))
+    .style(|s| s.items_center().flex_shrink(0.0_f32))
 }
 
 /// Save, Done and the menu, on hover.
@@ -604,10 +609,10 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
 /// A section heading in the sidebar: a name, a count in the muted colour,
 /// and a chevron when it can fold.
 ///
-/// The chevron's slot is reserved on every header, so Priority and Pinned,
-/// which do not fold, keep their titles on the line the repository titles
-/// use (x=31: 16 of padding, the 10px chevron and its 5 of margin), and the
-/// chevron column sits at x=16 over the row glyphs.
+/// The chevron's slot is reserved on every header, so Pinned, which does
+/// not fold, keeps its title on the line the repository titles use (x=31:
+/// 16 of padding, the 10px chevron and its 5 of margin), and the chevron
+/// column sits at x=16 over the row glyphs.
 pub fn section_header(title: String, count: usize, collapsed: Option<bool>) -> impl IntoView {
     let slot = |s: Style| s.size(10.0, 10.0).margin_right(5.0).flex_shrink(0.0_f32);
     Stack::horizontal((
