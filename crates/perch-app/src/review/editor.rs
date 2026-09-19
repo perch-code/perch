@@ -509,7 +509,18 @@ fn divider_bar(
         let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
         scroll_delta.set(Vec2::new(-delta.x, -delta.y));
     })
-    .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().items_center().justify_center());
+    // The container carries the bar's colour as well as the row under it:
+    // the editor's text starts a gutter gap in from its box, and the row's
+    // own tint starts with the text, so without this a white notch the
+    // width of that gap would cut the bar off from the gutter's.
+    .style(|s| {
+        s.flex_grow(1.0_f32)
+            .min_width(0.0)
+            .height_full()
+            .items_center()
+            .justify_center()
+            .background(theme::DIFF_DIVIDER_BG)
+    });
     let label = records_hover(state, row, label);
 
     let bar = match bars {
@@ -517,16 +528,22 @@ fn divider_bar(
         // The outer stack's shape: two halves about a one-pixel rule, the
         // right one beginning with its gutter.
         Bars::HeadSide { base_delta } => {
-            let base = Empty::new()
-                .on_event_stop(el::PointerWheel, move |_, wheel| {
-                    let size = viewport.get_untracked().size();
-                    let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
-                    // Down the file is the head side's; across is the
-                    // base side's own.
-                    scroll_delta.set(Vec2::new(0.0, -delta.y));
-                    base_delta.set(Vec2::new(-delta.x, 0.0));
-                })
-                .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).height_full());
+            // The base half has the head half's shape, its gutter left bare
+            // so the gutter's own edge shows, and the rest tinted for the
+            // same reason the label's container is.
+            let base = Stack::horizontal((
+                Empty::new().style(|s| s.width(theme::GUTTER_WIDTH).height_full().flex_shrink(0.0_f32)),
+                Empty::new().style(|s| s.flex_grow(1.0_f32).height_full().background(theme::DIFF_DIVIDER_BG)),
+            ))
+            .on_event_stop(el::PointerWheel, move |_, wheel| {
+                let size = viewport.get_untracked().size();
+                let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
+                // Down the file is the head side's; across is the
+                // base side's own.
+                scroll_delta.set(Vec2::new(0.0, -delta.y));
+                base_delta.set(Vec2::new(-delta.x, 0.0));
+            })
+            .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).height_full());
             Stack::horizontal((
                 records_hover(state, row, base),
                 Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32)),
