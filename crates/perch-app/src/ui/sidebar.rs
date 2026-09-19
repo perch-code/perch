@@ -19,7 +19,7 @@ use crate::backend::Backend;
 use perch_github::Item;
 use crate::filter::{ReasonFilter, View};
 use crate::icons::SidebarIcon;
-use crate::items::{ItemGroup, ItemSort, ItemStatus};
+use crate::items::{AttentionReason, Direction, ItemGroup, ItemSort, ItemStatus};
 use crate::review::model::ReviewState;
 use crate::state::{AppState, Screen};
 use crate::theme;
@@ -158,10 +158,20 @@ fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 /// The filter menu, in the shape of a settings menu: one row per setting,
 /// each a submenu with its options checked.
 fn filter_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+    // Anything the list is narrowed by lights the button. Any reason and
+    // the newest-first direction are the defaults and do not.
     let narrowed = move || {
         state.item_filters.with(|f| {
             let d = crate::items::ItemFilters::default();
-            f.status != d.status || f.kinds != d.kinds || f.group != d.group || f.sort != d.sort || f.show_empty
+            f.status != d.status
+                || f.kinds != d.kinds
+                || f.group != d.group
+                || f.sort != d.sort
+                || f.show_empty
+                || f.saved_only
+                || f.attention_only
+                || f.reason.is_some()
+                || f.direction != d.direction
         })
     };
     // The menu is on the button, and a click lands on the deepest view
@@ -176,14 +186,18 @@ fn filter_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         .style(|s| s.pointer_events_none()),
     )
     .popout_menu(move || filter_menu(state, backend.clone()))
-    .style(|s| {
+    .style(move |s| {
+        // When narrowed the border takes the ring as well as the glyph the
+        // accent, so the button reads as set the way a focused search box
+        // reads as active.
+        let border = if narrowed() { theme::ACCENT_RING } else { theme::BORDER };
         crate::ui::widgets::clickable(s)
             .size(28.0, 28.0)
             .items_center()
             .justify_center()
             .background(theme::CANVAS)
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(border)
             .border_radius(theme::RADIUS)
             .hover(|s| s.background(theme::CANVAS_HOVER))
     })
@@ -231,6 +245,39 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
             })
         }
     });
+    // The separators group the menu: what is listed, what it is narrowed
+    // to, how it is arranged, and what is shown.
+    menu = menu.separator();
+    {
+        let set = set.clone();
+        menu = menu.item("Saved only", move |m| {
+            let set = set.clone();
+            m.checked(f.saved_only).action(move || set(Box::new(|f| f.saved_only = !f.saved_only)))
+        });
+    }
+    {
+        let set = set.clone();
+        menu = menu.item("Needs attention", move |m| {
+            let set = set.clone();
+            m.checked(f.attention_only).action(move || set(Box::new(|f| f.attention_only = !f.attention_only)))
+        });
+    }
+    menu = menu.submenu("Reason", {
+        let set = set.clone();
+        let current = f.reason;
+        move |mut sub| {
+            // Any first, as the one that is not a reason.
+            for reason in std::iter::once(None).chain(AttentionReason::ALL.into_iter().map(Some)) {
+                let set = set.clone();
+                sub = sub.item(reason.map_or("Any", AttentionReason::title), move |m| {
+                    let set = set.clone();
+                    m.checked(reason == current).action(move || set(Box::new(move |f| f.reason = reason)))
+                });
+            }
+            sub
+        }
+    });
+    menu = menu.separator();
     menu = menu.submenu("Group By", {
         let set = set.clone();
         let current = f.group;
@@ -248,12 +295,22 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
     menu = menu.submenu("Sort By", {
         let set = set.clone();
         let current = f.sort;
+        let direction = f.direction;
         move |mut sub| {
             for sort in ItemSort::ALL {
                 let set = set.clone();
                 sub = sub.item(sort.label(), move |m| {
                     let set = set.clone();
                     m.checked(sort == current).action(move || set(Box::new(move |f| f.sort = sort)))
+                });
+            }
+            // The direction is its own choice under the sort it applies to.
+            sub = sub.separator();
+            for d in Direction::ALL {
+                let set = set.clone();
+                sub = sub.item(d.label(), move |m| {
+                    let set = set.clone();
+                    m.checked(d == direction).action(move || set(Box::new(move |f| f.direction = d)))
                 });
             }
             sub

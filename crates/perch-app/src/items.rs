@@ -291,9 +291,7 @@ impl AttentionReason {
     }
 
     /// The menu's wording, sentence case, since a menu item is a title and
-    /// a row's suffix is not. The Reason submenu is its caller; until that
-    /// lands the allow keeps the build clean.
-    #[allow(dead_code)]
+    /// a row's suffix is not.
     pub fn title(self) -> &'static str {
         match self {
             AttentionReason::ReviewRequested => "Review requested",
