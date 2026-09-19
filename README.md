@@ -35,15 +35,15 @@ that a coding agent can search. Nothing in Perch writes to GitHub.
   heading says the repository. Under Owner and Date, and in Pinned, it is
   `slatedb/slatedb #57 · branch`.
 - Attention comes from your notifications, polled on GitHub's own
-  `X-Poll-Interval`. One about an item that asks for you, a review
-  request, a mention, an assignment or a comment, becomes the item's
-  attention, and a CI notification about the open pull request fetches
-  its checks again and is attention when they fail. One that only says
-  the item moved does nothing; the row's date already shows that. One
-  about anything that has no row is dropped. A row with attention has its
-  title in bold and a dot at its end, next to the pin under Pinned; Needs
-  attention in the filter menu narrows the list to those rows, and Reason
-  to why.
+  `X-Poll-Interval`. Every notification about an item becomes the item's
+  attention, with its reason, so Needs attention in the filter menu is
+  your inbox on the web, row for row: a review request, a mention, an
+  assignment, a comment, a push to something you are subscribed to. The
+  one exception is CI, which fetches the open pull request's checks
+  again and is attention when they fail. One about anything that has no
+  row is dropped. A row with attention has its title in bold and a dot at
+  its end, next to the pin under Pinned; Reason narrows to why, which is
+  where to leave subscribed activity out if it is noise to you.
 - Each row has Save and Done on hover and a menu: Open in GitHub, Finder or
   Terminal, Pin, Mark unread, Rename, Fork or Start work, Archive, Delete.
   Every entry is on every row; the ones that cannot apply are greyed. The

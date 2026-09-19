@@ -263,10 +263,15 @@ pub enum AttentionReason {
     /// The reader opened the pull request or issue. The poll writes it and
     /// it makes attention, so a reader can narrow to their own.
     Author,
+    /// Something happened on a thread the reader watches: a push, a
+    /// review, a comment by somebody else. Most of an inbox.
+    Subscribed,
+    /// Merged, closed, or reopened.
+    StateChange,
 }
 
 impl AttentionReason {
-    pub const ALL: [AttentionReason; 7] = [
+    pub const ALL: [AttentionReason; 9] = [
         AttentionReason::ReviewRequested,
         AttentionReason::Mention,
         AttentionReason::Assign,
@@ -274,6 +279,8 @@ impl AttentionReason {
         AttentionReason::CiFailed,
         AttentionReason::Manual,
         AttentionReason::Author,
+        AttentionReason::Subscribed,
+        AttentionReason::StateChange,
     ];
 
     /// The reason in words, as `perch --items` prints it beside a row
@@ -287,6 +294,8 @@ impl AttentionReason {
             AttentionReason::CiFailed => "CI failed",
             AttentionReason::Manual => "manual",
             AttentionReason::Author => "authored",
+            AttentionReason::Subscribed => "subscribed",
+            AttentionReason::StateChange => "state changed",
         }
     }
 
@@ -301,6 +310,8 @@ impl AttentionReason {
             AttentionReason::CiFailed => "CI failed",
             AttentionReason::Manual => "Manual",
             AttentionReason::Author => "Authored",
+            AttentionReason::Subscribed => "Subscribed",
+            AttentionReason::StateChange => "State changed",
         }
     }
 
@@ -314,6 +325,8 @@ impl AttentionReason {
             AttentionReason::CiFailed => "ci_failed",
             AttentionReason::Manual => "manual",
             AttentionReason::Author => "author",
+            AttentionReason::Subscribed => "subscribed",
+            AttentionReason::StateChange => "state_change",
         }
     }
 
@@ -1351,7 +1364,7 @@ mod tests {
         items[6].attention_reason = Some("comment".into());
         // A reason the menu does not offer matches only Any.
         items[5].attention_at = Some(at("2026-09-17T13:00:00Z"));
-        items[5].attention_reason = Some("state_change".into());
+        items[5].attention_reason = Some("security_alert".into());
 
         let under = |reason: Option<AttentionReason>, status: ItemStatus| {
             let f = ItemFilters { reason, status, ..Default::default() };
@@ -1546,12 +1559,15 @@ mod tests {
         assert_eq!(attention_label("comment"), "commented");
         assert_eq!(attention_label("manual"), "manual");
         assert_eq!(attention_label("ci_failed"), "CI failed");
-        assert_eq!(attention_label("state_change"), "state change");
+        assert_eq!(attention_label("state_change"), "state changed");
+        assert_eq!(attention_label("subscribed"), "subscribed");
 
         assert_eq!(AttentionReason::from_str("team_mention"), Some(AttentionReason::Mention));
         assert_eq!(AttentionReason::from_str("mention"), Some(AttentionReason::Mention));
         assert_eq!(AttentionReason::from_str("author"), Some(AttentionReason::Author));
-        assert_eq!(AttentionReason::from_str("state_change"), None, "matches only Any");
+        assert_eq!(AttentionReason::from_str("state_change"), Some(AttentionReason::StateChange));
+        assert_eq!(AttentionReason::from_str("subscribed"), Some(AttentionReason::Subscribed));
+        assert_eq!(AttentionReason::from_str("security_alert"), None, "matches only Any");
         assert_eq!(AttentionReason::from_str(""), None);
     }
 

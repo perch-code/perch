@@ -89,29 +89,13 @@ impl Reason {
     }
 
     /// Whether a notification with this reason gives its item attention.
-    /// Someone asked for the reader, or the reader is part of the
-    /// conversation; anything else is the repository moving, which the
-    /// list pass already shows by moving the row. Subscribed activity
-    /// in particular would give every push on every pull request the
-    /// reader watches attention, which is noise. The set is the web
-    /// UI's "Participating" filter, and is its own rule so the two can
-    /// part without either being wrong.
+    /// Every reason github.com's inbox lists does, so the sidebar under
+    /// Needs attention and the inbox on the web agree row for row; the
+    /// Reason filter is where a reader who finds subscribed activity
+    /// noisy leaves it out. The one exception goes through the checks
+    /// instead, and is attention only when they come back red.
     pub fn makes_attention(&self) -> bool {
-        match self {
-            Reason::ReviewRequested
-            | Reason::Mention
-            | Reason::TeamMention
-            | Reason::Assign
-            | Reason::Comment
-            | Reason::Author => true,
-            Reason::CiActivity
-            | Reason::Invitation
-            | Reason::Manual
-            | Reason::SecurityAlert
-            | Reason::StateChange
-            | Reason::Subscribed
-            | Reason::Other(_) => false,
-        }
+        !matches!(self, Reason::CiActivity)
     }
 }
 
@@ -322,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn attention_comes_from_being_asked_for_or_in_the_conversation() {
+    fn every_reason_the_inbox_lists_is_attention_but_ci_which_the_checks_decide() {
         for reason in [
             Reason::ReviewRequested,
             Reason::Mention,
@@ -330,20 +314,14 @@ mod tests {
             Reason::Assign,
             Reason::Comment,
             Reason::Author,
+            Reason::Subscribed,
+            Reason::StateChange,
+            Reason::Manual,
+            Reason::Other("brand_new_reason".into()),
         ] {
             assert!(reason.makes_attention(), "{}", reason.wire());
         }
-        for reason in [
-            Reason::CiActivity,
-            Reason::Invitation,
-            Reason::Manual,
-            Reason::SecurityAlert,
-            Reason::StateChange,
-            Reason::Subscribed,
-            Reason::Other("brand_new_reason".into()),
-        ] {
-            assert!(!reason.makes_attention(), "{}", reason.wire());
-        }
+        assert!(!Reason::CiActivity.makes_attention());
     }
 
     #[test]

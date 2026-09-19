@@ -195,14 +195,19 @@ item. What remains is the attention rule, and it narrows:
 
 | Reason | Effect |
 |---|---|
-| `review_requested`, `mention`, `team_mention`, `assign`, `comment`, `author` | attention, with that reason |
 | `ci_activity` | refresh the open pull request's checks, as today; attention with reason `ci_failed` when the checks fail |
-| `subscribed`, `state_change`, everything else | nothing |
+| everything else: `review_requested`, `mention`, `team_mention`, `assign`, `comment`, `author`, `subscribed`, `state_change`, ... | attention, with that reason |
 
-Subscribed activity on a repository the reader follows is already
-reflected by the list pass moving the item's `updated_at`, which the
-default sort shows. Making it attention would put every push on every
-pull request into Priority.
+Every reason github.com's inbox lists makes attention, so Needs
+attention in the sidebar is the inbox on the web, row for row. (An
+earlier draft left `subscribed` and `state_change` out, to keep every
+push on every watched pull request out of Priority; Priority is gone,
+and a reader who finds subscribed activity noisy leaves it out with the
+Reason filter instead.)
+
+A notification about a branch row that gains its pull request later in
+the same poll is applied to the row then, from the poll's list, rather
+than a poll later.
 
 An item in an undeclared repository still gets attention from its
 notification, as today, when the item exists. A notification about a
@@ -441,9 +446,10 @@ Steps 5 and 6 are independent. Step 9 depends on 6 and 7, not on 8.
 - Open a pull request on a branch that has a checkout under a root. The
   branch row becomes the pull request row on the next poll, with its
   threads intact.
-- Be mentioned on an issue. Priority shows the issue with "mentioned".
-  Push to a pull request you are only subscribed to. Priority does not
-  change; the row moves up under its repository.
+- Be mentioned on an issue. Needs attention shows the issue with
+  "mentioned". Push to a pull request you are only subscribed to. The
+  row moves up under its repository and shows "subscribed", as the inbox
+  on the web does.
 - Kill Perch during a list pass after the 200. Relaunch. The next pass
   asks unconditionally and the items it was upserting are present.
 - Run `perch --backfill slatedb/slatedb --limit 20`. Twenty discussions
@@ -473,8 +479,6 @@ Steps 5 and 6 are independent. Step 9 depends on 6 and 7, not on 8.
   that way.
 - Do not give a new item attention, a Priority row, or a badge. It is a
   row. The reader declared the repository and asked to see it.
-- Do not make attention from `subscribed`. That is the whole reason the
-  inbox was noisy.
 - Do not add a per-item refresh cadence. Open, notification, and the
   backfill's staleness check are the three triggers.
 - Do not sort the backfill newest first for history. Oldest first means

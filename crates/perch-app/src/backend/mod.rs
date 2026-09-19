@@ -534,6 +534,7 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
         avatars,
         seen_ci: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        inbox: Arc::new(std::sync::Mutex::new(Vec::new())),
         passes: Arc::new(tokio::sync::Notify::new()),
     };
 
@@ -909,6 +910,10 @@ struct Ctx {
     seen_ci: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
     /// Items whose GitHub side is being fetched again right now.
     refreshing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// The inbox as the last poll saw it. A notification about a branch
+    /// that gains its pull request later in the poll is applied to the
+    /// row then, from here, rather than a poll later.
+    inbox: Arc<std::sync::Mutex<Vec<Thread>>>,
     /// Notified after every poll's list passes. The backfill sleeps on it
     /// between rounds, so it starts a round on the rows a pass just
     /// wrote rather than on a clock of its own. `notify_one` keeps a
@@ -1941,8 +1946,12 @@ async fn refresh(ctx: &Ctx, source: &str) -> Duration {
                 .max(Duration::from_secs(config.poll_interval_secs.max(1)));
             tracing::info!(count = result.threads.len(), "notifications polled");
 
-            // A notification about an item is the item's attention, when
-            // its reason asks for the reader.
+            // A notification about an item is the item's attention. The
+            // list is kept, so a row that gains its subject later in this
+            // poll can take its notification then.
+            if let Ok(mut inbox) = ctx.inbox.lock() {
+                *inbox = result.threads.clone();
+            }
             attend(ctx, &result.threads).await;
 
             let _ = events.send(Event::Status(Status::Idle {
@@ -1965,17 +1974,14 @@ async fn refresh(ctx: &Ctx, source: &str) -> Duration {
     }
 }
 
-/// Set attention on the items these notifications are about, for the
-/// reasons that ask for the reader.
+/// Set attention on the items these notifications are about, with the
+/// notification's reason, so Needs attention here is the inbox on the
+/// web, row for row.
 ///
 /// A notification makes no item. The list pass has made the row for
 /// everything open in a declared repository, and a subject with no row is
-/// let go. Nor is every reason attention: subscribed activity and a state
-/// change are the repository moving, which the pass already shows by
-/// moving the row, and giving every push on every watched pull request
-/// attention would be noise. A CI notification
-/// fetches the open pull request's checks again instead, and it is the
-/// checks coming back red that is the attention.
+/// let go. A CI notification fetches the open pull request's checks again
+/// instead, and it is the checks coming back red that is the attention.
 async fn attend(ctx: &Ctx, threads: &[Thread]) {
     let mut changed = false;
     for thread in threads {
@@ -2151,7 +2157,17 @@ async fn refresh_items(ctx: &Ctx) {
     }
     if attach_pull_requests(ctx).await {
         ctx.send_items();
+        attend_again(ctx).await;
     }
+}
+
+/// Apply the last poll's inbox once more. A branch that just became its
+/// pull request's row may have had a notification waiting in the list the
+/// poll read before the attach; applied again, the row gets it now rather
+/// than a poll later.
+async fn attend_again(ctx: &Ctx) {
+    let inbox = ctx.inbox.lock().map(|i| i.clone()).unwrap_or_default();
+    attend(ctx, &inbox).await;
 }
 
 /// Every worktree under a declared repository's roots is an item, and one
@@ -3773,6 +3789,7 @@ mod tests {
             avatars: Arc::new(Semaphore::new(1)),
             seen_ci: Default::default(),
             refreshing: Default::default(),
+            inbox: Default::default(),
             passes: Arc::new(tokio::sync::Notify::new()),
         };
         (ctx, received)
@@ -3828,7 +3845,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_subscribed_notification_about_an_item_is_not_attention() {
+    async fn a_subscribed_notification_about_an_item_is_attention_as_on_the_web() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
         let item = store_pull(&ctx, 7);
@@ -3836,9 +3853,58 @@ mod tests {
         attend(&ctx, &[with_reason(thread("7", "seven"), Reason::Subscribed)]).await;
 
         let item = ctx.item(&item.id).unwrap();
-        assert_eq!(item.attention_at, None, "a push on a watched pull request is not attention");
-        assert_eq!(item.attention_reason, None);
-        assert_eq!(items_sent(&received), 0, "nothing changed, so the sidebar is not told");
+        assert_eq!(item.attention_at, Some("2026-09-17T18:00:00Z".parse().unwrap()));
+        assert_eq!(item.attention_reason.as_deref(), Some("subscribed"));
+        assert_eq!(items_sent(&received), 1);
+    }
+
+    #[tokio::test]
+    async fn a_notification_that_came_before_the_branch_s_pull_request_lands_once_it_attaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        // The reader's branch, not yet its pull request's row.
+        let mut branch = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        branch.checkout = Some(ItemCheckout {
+            branch: "branch-7".into(),
+            base_ref: "main".into(),
+            head_sha: "h7".into(),
+            path: dir.path().join("branch-7"),
+            owned: false,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+        });
+        ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
+
+        // The poll reads the inbox: the pull request's own notification
+        // finds no row for #7, and is kept.
+        let inbox = vec![with_reason(thread("7", "seven"), Reason::Author)];
+        *ctx.inbox.lock().unwrap() = inbox.clone();
+        attend(&ctx, &inbox).await;
+        assert_eq!(ctx.item(&branch.id).unwrap().attention_at, None, "no row for #7 yet");
+
+        // The attach, later in the same poll, gives the branch its subject.
+        let mut attached = branch.clone();
+        attached.subject = Some(ItemSubject::PullRequest(pull_request(7)));
+        ctx.with_cache(|c| c.update_item(&attached)).unwrap().unwrap();
+
+        attend_again(&ctx).await;
+        let row = ctx.item(&branch.id).unwrap();
+        assert_eq!(row.attention_at, Some("2026-09-17T18:00:00Z".parse().unwrap()));
+        assert_eq!(row.attention_reason.as_deref(), Some("author"));
+    }
+
+    #[tokio::test]
+    async fn a_ci_notification_is_not_attention_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+
+        attend(&ctx, &[with_reason(thread("7", "seven"), Reason::CiActivity)]).await;
+
+        let item = ctx.item(&item.id).unwrap();
+        assert_eq!(item.attention_at, None, "the checks decide, once they are fetched");
+        assert_eq!(items_sent(&received), 0);
     }
 
     #[tokio::test]
