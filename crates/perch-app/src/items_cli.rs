@@ -1,8 +1,11 @@
-//! `perch --items ["status=closed;group=date;query=fence"]`
+//! `perch --items ["status=done;reason=mention;direction=oldest;query=fence"]`
 //!
 //! Prints the sidebar as text: Priority, Pinned, then each section and its
 //! rows, from the cache the app uses and the repositories config.toml
-//! declares. `group` is `repo`, `owner` or `date`. It is how
+//! declares. The keys are the filter menu's, in `ItemFilters::to_meta`'s
+//! form: `status`, `kinds`, `group` (`repo`, `owner` or `date`), `sort`,
+//! `show_empty`, `show_pr_status`, `saved`, `attention`, `reason` and
+//! `direction`, plus `query` for the search box. It is how
 //! `items::sections` is checked against real data without a window.
 
 use jiff::Timestamp;
@@ -17,7 +20,12 @@ pub fn run(args: &[String]) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("bad filters: {e}");
-                eprintln!("keys: status, kinds, group (repo, owner, date), sort, show_empty, show_pr_status, query");
+                eprintln!(
+                    "keys: status (active, closed, done, archived, all), kinds, group (repo, owner, date), \
+                     sort, show_empty, show_pr_status, saved, attention, \
+                     reason (any, review_requested, mention, assign, comment, ci_failed, manual, author), \
+                     direction (newest, oldest), query"
+                );
                 std::process::exit(2);
             }
         },
@@ -263,5 +271,23 @@ mod tests {
         let f = ItemFilters { query: "issue-42".into(), ..Default::default() };
         let got = text(&f);
         assert!(got.starts_with("Priority\n  Nothing needs attention\n"), "{got}");
+    }
+
+    #[test]
+    fn the_new_keys_narrow_the_printed_list_the_way_the_window_does() {
+        // The wanted pull request is a review request and the pinned branch
+        // has no reason at all; a mention filter leaves nothing anywhere.
+        let got = text(&ItemFilters::parse("reason=mention").unwrap());
+        assert_eq!(got, "Priority\n  Nothing needs attention\n");
+
+        // Needs attention cuts the pinned branch, which has none.
+        let got = text(&ItemFilters::parse("attention=1;reason=review_requested;direction=oldest").unwrap());
+        assert!(got.starts_with("Priority\n  P  Fence the manifest"), "{got}");
+        assert!(!got.contains("Pinned"), "{got}");
+        assert!(got.contains("\ncriccomini/perch (2)\n  P  Fence the manifest"), "{got}");
+
+        // Nothing is saved.
+        let got = text(&ItemFilters::parse("saved=1").unwrap());
+        assert_eq!(got, "Priority\n  Nothing needs attention\n");
     }
 }

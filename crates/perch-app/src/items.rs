@@ -18,18 +18,20 @@ pub enum ItemStatus {
     #[default]
     Active,
     Closed,
+    Done,
     Archived,
     All,
 }
 
 impl ItemStatus {
-    pub const ALL: [ItemStatus; 4] =
-        [ItemStatus::Active, ItemStatus::Closed, ItemStatus::Archived, ItemStatus::All];
+    pub const ALL: [ItemStatus; 5] =
+        [ItemStatus::Active, ItemStatus::Closed, ItemStatus::Done, ItemStatus::Archived, ItemStatus::All];
 
     pub fn label(self) -> &'static str {
         match self {
             ItemStatus::Active => "Active",
             ItemStatus::Closed => "Closed",
+            ItemStatus::Done => "Done",
             ItemStatus::Archived => "Archived",
             ItemStatus::All => "All",
         }
@@ -43,10 +45,14 @@ impl ItemStatus {
         matches!(self, ItemStatus::Archived | ItemStatus::All)
     }
 
+    /// Closed and Done do not overlap. `Item::is_closed` counts a done item
+    /// as closed, which is right for Active, so Closed subtracts Done here
+    /// rather than the item changing what closed means.
     fn accepts(self, item: &Item) -> bool {
         match self {
             ItemStatus::Active => item.is_active(),
-            ItemStatus::Closed => item.is_closed() && !item.is_archived(),
+            ItemStatus::Closed => item.is_closed() && !item.is_done() && !item.is_archived(),
+            ItemStatus::Done => item.is_done() && !item.is_archived(),
             ItemStatus::Archived => item.is_archived(),
             ItemStatus::All => true,
         }
@@ -56,6 +62,7 @@ impl ItemStatus {
         match self {
             ItemStatus::Active => "active",
             ItemStatus::Closed => "closed",
+            ItemStatus::Done => "done",
             ItemStatus::Archived => "archived",
             ItemStatus::All => "all",
         }
@@ -242,6 +249,128 @@ impl std::fmt::Display for ItemSort {
     }
 }
 
+/// Why an item was given attention: the strings `attention_reason` holds,
+/// as the Reason submenu offers them. A `team_mention` is a mention; a
+/// string not here matches only Any and is shown by `attention_label`'s
+/// fallback rather than lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttentionReason {
+    ReviewRequested,
+    Mention,
+    Assign,
+    Comment,
+    CiFailed,
+    Manual,
+    /// The reader opened the pull request or issue. The poll writes it and
+    /// it makes attention, so a reader can narrow to their own.
+    Author,
+}
+
+impl AttentionReason {
+    pub const ALL: [AttentionReason; 7] = [
+        AttentionReason::ReviewRequested,
+        AttentionReason::Mention,
+        AttentionReason::Assign,
+        AttentionReason::Comment,
+        AttentionReason::CiFailed,
+        AttentionReason::Manual,
+        AttentionReason::Author,
+    ];
+
+    /// The words a Priority row says next to its dot.
+    pub fn label(self) -> &'static str {
+        match self {
+            AttentionReason::ReviewRequested => "review requested",
+            AttentionReason::Mention => "mentioned",
+            AttentionReason::Assign => "assigned",
+            AttentionReason::Comment => "commented",
+            AttentionReason::CiFailed => "CI failed",
+            AttentionReason::Manual => "manual",
+            AttentionReason::Author => "authored",
+        }
+    }
+
+    /// The menu's wording, sentence case, since a menu item is a title and
+    /// a row's suffix is not. The Reason submenu is its caller; until that
+    /// lands the allow keeps the build clean.
+    #[allow(dead_code)]
+    pub fn title(self) -> &'static str {
+        match self {
+            AttentionReason::ReviewRequested => "Review requested",
+            AttentionReason::Mention => "Mentioned",
+            AttentionReason::Assign => "Assigned",
+            AttentionReason::Comment => "Commented",
+            AttentionReason::CiFailed => "CI failed",
+            AttentionReason::Manual => "Manual",
+            AttentionReason::Author => "Authored",
+        }
+    }
+
+    /// The wire string the poll stores, which is also the persisted form.
+    fn key(self) -> &'static str {
+        match self {
+            AttentionReason::ReviewRequested => "review_requested",
+            AttentionReason::Mention => "mention",
+            AttentionReason::Assign => "assign",
+            AttentionReason::Comment => "comment",
+            AttentionReason::CiFailed => "ci_failed",
+            AttentionReason::Manual => "manual",
+            AttentionReason::Author => "author",
+        }
+    }
+
+    /// The reason a stored string names, or `None` for one the menu does
+    /// not offer.
+    pub fn from_str(s: &str) -> Option<Self> {
+        if s == "team_mention" {
+            return Some(AttentionReason::Mention);
+        }
+        Self::ALL.into_iter().find(|v| v.key() == s)
+    }
+}
+
+impl std::fmt::Display for AttentionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Which end of the sort the rows start from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Direction {
+    #[default]
+    Newest,
+    Oldest,
+}
+
+impl Direction {
+    pub const ALL: [Direction; 2] = [Direction::Newest, Direction::Oldest];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Direction::Newest => "Newest first",
+            Direction::Oldest => "Oldest first",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Direction::Newest => "newest",
+            Direction::Oldest => "oldest",
+        }
+    }
+
+    fn from_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.key() == s)
+    }
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// Everything the filter menu and the search box hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemFilters {
@@ -251,6 +380,14 @@ pub struct ItemFilters {
     pub sort: ItemSort,
     pub show_empty: bool,
     pub show_pr_status: bool,
+    /// Only saved items, whatever the status.
+    pub saved_only: bool,
+    /// Only items with attention newer than their Done: the sections become
+    /// Priority grouped.
+    pub attention_only: bool,
+    /// Only items whose latest reason is this one; `None` is Any.
+    pub reason: Option<AttentionReason>,
+    pub direction: Direction,
     pub query: String,
 }
 
@@ -263,6 +400,10 @@ impl Default for ItemFilters {
             sort: ItemSort::LastActivity,
             show_empty: false,
             show_pr_status: true,
+            saved_only: false,
+            attention_only: false,
+            reason: None,
+            direction: Direction::Newest,
             query: String::new(),
         }
     }
@@ -271,16 +412,21 @@ impl Default for ItemFilters {
 impl ItemFilters {
     /// The form kept in the `meta` table: `key=value;` pairs. The search is
     /// left out on purpose; a search box that comes back full at launch is
-    /// a surprise, and the inbox's does not persist either.
+    /// a surprise. The six original keys keep their names and order so a
+    /// stored string from before the last four still reads.
     pub fn to_meta(&self) -> String {
         format!(
-            "status={};kinds={};group={};sort={};show_empty={};show_pr_status={}",
+            "status={};kinds={};group={};sort={};show_empty={};show_pr_status={};saved={};attention={};reason={};direction={}",
             self.status.key(),
             self.kinds.key(),
             self.group.key(),
             self.sort.key(),
             u8::from(self.show_empty),
             u8::from(self.show_pr_status),
+            u8::from(self.saved_only),
+            u8::from(self.attention_only),
+            self.reason.map_or("any", AttentionReason::key),
+            self.direction.key(),
         )
     }
 
@@ -301,6 +447,11 @@ impl ItemFilters {
                 "sort" => out.sort = ItemSort::from_key(value).ok_or_else(bad)?,
                 "show_empty" => out.show_empty = parse_flag(value).ok_or_else(bad)?,
                 "show_pr_status" => out.show_pr_status = parse_flag(value).ok_or_else(bad)?,
+                "saved" => out.saved_only = parse_flag(value).ok_or_else(bad)?,
+                "attention" => out.attention_only = parse_flag(value).ok_or_else(bad)?,
+                "reason" if value == "any" => out.reason = None,
+                "reason" => out.reason = Some(AttentionReason::from_str(value).ok_or_else(bad)?),
+                "direction" => out.direction = Direction::from_key(value).ok_or_else(bad)?,
                 "query" => out.query = value.to_string(),
                 _ => return Err(format!("unknown key {key:?}")),
             }
@@ -327,6 +478,18 @@ impl ItemFilters {
         ]
         .iter()
         .any(|hay| !hay.is_empty() && hay.to_lowercase().contains(&needle))
+    }
+
+    /// The narrowings that apply to every section alike: saved, needing
+    /// attention, and the reason. An item matches the reason on the latest
+    /// one it was given, done or not, so a done review request is still a
+    /// review request under Done.
+    fn narrows_to(&self, item: &Item) -> bool {
+        (!self.saved_only || item.saved)
+            && (!self.attention_only || item.needs_attention())
+            && self.reason.is_none_or(|wanted| {
+                item.attention_reason.as_deref().and_then(AttentionReason::from_str) == Some(wanted)
+            })
     }
 }
 
@@ -380,11 +543,16 @@ pub struct Sections {
 /// order, and the cache's items.
 ///
 /// Priority and Pinned ignore the group, sort and kind settings and respect
-/// the search. The status filter touches them in one way only: archived
-/// items stay out of both unless the status shows archived items. Group
-/// sections take every filter.
+/// the search. Saved only, Needs attention and the reason narrow the
+/// searched set before Priority and Pinned are cut from it, so the three
+/// lists agree on what is in play. The status filter touches Priority and
+/// Pinned in one way only: archived items stay out of both unless the
+/// status shows archived items. Group sections take every filter. The
+/// direction reverses the rows and the date buckets and nothing else;
+/// attention order and pin order are not the sort.
 pub fn sections(declared: &[String], items: &[Item], filters: &ItemFilters, now: Timestamp) -> Sections {
-    let searched: Vec<&Item> = items.iter().filter(|i| filters.matches_query(i)).collect();
+    let searched: Vec<&Item> =
+        items.iter().filter(|i| filters.matches_query(i) && filters.narrows_to(i)).collect();
     let top_level = |i: &Item| !i.is_archived() || filters.status.shows_archived();
 
     let mut priority: Vec<Item> = searched
@@ -407,19 +575,26 @@ pub fn sections(declared: &[String], items: &[Item], filters: &ItemFilters, now:
         .filter(|i| !in_pinned.contains(i.id.as_str()))
         .filter(|i| filters.status.accepts(i) && filters.kinds.accepts(i))
         .collect();
-    sort_items(&mut rows, filters.sort);
+    sort_items(&mut rows, filters.sort, filters.direction);
 
     let groups = match filters.group {
         ItemGroup::Repository => by_repository(by_repository_order(declared, items, &rows), filters.show_empty),
         ItemGroup::Owner => by_owner(by_repository_order(declared, items, &rows), filters.show_empty),
-        ItemGroup::Date => by_date(&rows, filters.sort, now),
+        ItemGroup::Date => by_date(&rows, filters.sort, filters.direction, now),
     };
 
     Sections { priority, pinned, groups }
 }
 
-fn sort_items(items: &mut [&Item], sort: ItemSort) {
+/// Newest first, ties by id so the order never jitters between refreshes,
+/// then the whole thing turned over for Oldest first. Reversing after the
+/// sort rather than flipping the comparison keeps one ordering to reason
+/// about, and the reversed tiebreak is the price.
+fn sort_items(items: &mut [&Item], sort: ItemSort, direction: Direction) {
     items.sort_by(|a, b| sort.time(b).cmp(&sort.time(a)).then_with(|| a.id.cmp(&b.id)));
+    if direction == Direction::Oldest {
+        items.reverse();
+    }
 }
 
 /// One repository's rows, on the way to becoming a section of its own or
@@ -540,16 +715,20 @@ fn by_owner(buckets: Vec<RepoBucket>, show_empty: bool) -> Vec<ItemSection> {
         .collect()
 }
 
-/// Today, Yesterday, and the buckets the inbox uses, newest first. Rows are
-/// bucketed on the time the sort orders by, so a section and its rows tell
-/// the same story.
-fn by_date(rows: &[&Item], sort: ItemSort, now: Timestamp) -> Vec<ItemSection> {
+/// Today, Yesterday, This week and Earlier, in the sort's direction. Rows
+/// are bucketed on the time the sort orders by, so a section and its rows
+/// tell the same story, and the rows already carry the direction from
+/// `sort_items`.
+fn by_date(rows: &[&Item], sort: ItemSort, direction: Direction, now: Timestamp) -> Vec<ItemSection> {
     let mut by_bucket: HashMap<DateBucket, Vec<Item>> = HashMap::new();
     for item in rows {
         by_bucket.entry(bucket(sort.time(item), now)).or_default().push((*item).clone());
     }
     let mut buckets: Vec<DateBucket> = by_bucket.keys().copied().collect();
     buckets.sort();
+    if direction == Direction::Oldest {
+        buckets.reverse();
+    }
     buckets
         .into_iter()
         .map(|b| {
@@ -602,16 +781,12 @@ pub fn full_reference(item: &Item) -> String {
 }
 
 /// The words a Priority row says next to its dot, from the reason the
-/// attention was set with.
+/// attention was set with. A reason the menu does not know is still shown,
+/// with its underscores as spaces, rather than dropped from the row.
 pub fn attention_label(reason: &str) -> String {
-    match reason {
-        "review_requested" => "review requested".into(),
-        "mention" | "team_mention" => "mentioned".into(),
-        "assign" => "assigned".into(),
-        "author" => "authored".into(),
-        "comment" => "commented".into(),
-        "ci_failed" => "CI failed".into(),
-        other => other.replace('_', " "),
+    match AttentionReason::from_str(reason) {
+        Some(known) => known.label().into(),
+        None => reason.replace('_', " "),
     }
 }
 
@@ -820,14 +995,45 @@ mod tests {
     }
 
     #[test]
-    fn closed_holds_merged_and_done_but_not_archived() {
+    fn closed_holds_merged_but_not_done_or_archived() {
         let (declared, items) = fixture();
         let f = ItemFilters { status: ItemStatus::Closed, ..Default::default() };
         let s = sections(&declared, &items, &f, now());
         assert_eq!(s.groups.len(), 1);
-        assert_eq!(section_ids(&s.groups[0]), ["pr-done", "pr-merged"]);
+        assert_eq!(section_ids(&s.groups[0]), ["pr-merged"]);
         // The badge still counts what is active there.
         assert_eq!(s.groups[0].count, 3);
+    }
+
+    #[test]
+    fn done_and_closed_do_not_overlap() {
+        let (declared, mut items) = fixture();
+        // A done item whose subject has since been merged is done, not
+        // closed: Done is the reader's mark and wins over the subject.
+        let mut merged_done = item("pr-merged-done", "criccomini/perch", "2026-09-03T10:00:00Z");
+        merged_done.subject = Some(pr(51, "Merged and done", "md", "merged", "2026-09-04T10:00:00Z"));
+        merged_done.attention_at = Some(at("2026-09-04T10:00:00Z"));
+        merged_done.done_at = Some(at("2026-09-04T10:00:00Z"));
+        items.push(merged_done);
+        // A done item that was then archived is under Archived alone.
+        let mut archived_done = items[1].clone();
+        archived_done.id = "pr-done-archived".into();
+        archived_done.archived_at = Some(at("2026-09-17T10:00:00Z"));
+        items.push(archived_done);
+
+        let under = |status: ItemStatus| {
+            let f = ItemFilters { status, ..Default::default() };
+            let s = sections(&declared, &items, &f, now());
+            s.groups.iter().flat_map(|g| g.items.iter().map(|i| i.id.clone())).collect::<Vec<_>>()
+        };
+        let done = under(ItemStatus::Done);
+        let closed = under(ItemStatus::Closed);
+        assert_eq!(done, ["pr-done", "pr-merged-done"]);
+        assert_eq!(closed, ["pr-merged"]);
+        assert!(done.iter().all(|id| !closed.contains(id)));
+        assert_eq!(under(ItemStatus::Archived), ["pr-done-archived", "branch-archived"]);
+        // Active is what it was: done is still not active.
+        assert!(!under(ItemStatus::Active).contains(&"pr-done".to_string()));
     }
 
     #[test]
@@ -1111,6 +1317,177 @@ mod tests {
     }
 
     #[test]
+    fn saved_only_narrows_priority_and_pinned_as_well_as_the_sections() {
+        let (declared, mut items) = fixture();
+        // Two items with attention, one saved; two pinned, one saved.
+        let mut mentioned = item("issue-mentioned", "criccomini/perch", "2026-09-12T10:00:00Z");
+        mentioned.subject = Some(issue(43, "Mentioned issue", "open", "2026-09-15T10:00:00Z"));
+        mentioned.attention_at = Some(at("2026-09-17T09:00:00Z"));
+        mentioned.attention_reason = Some("mention".into());
+        mentioned.saved = true;
+        items.push(mentioned);
+        items[3].saved = true;
+        items[3].pinned_at = Some(at("2026-09-17T10:00:00Z"));
+        items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
+        items[1].saved = true;
+
+        let f = ItemFilters { saved_only: true, ..Default::default() };
+        let s = sections(&declared, &items, &f, now());
+        assert_eq!(ids(&s.priority), ["issue-mentioned"], "the unsaved wanted item is cut");
+        assert_eq!(ids(&s.pinned), ["issue"], "the unsaved pinned branch is cut");
+        assert_eq!(titles(&s), ["criccomini/perch"]);
+        assert_eq!(section_ids(&s.groups[0]), ["issue-mentioned"]);
+        // The badge is not narrowed.
+        assert_eq!(s.groups[0].count, 4);
+
+        // Across whatever status is set: the saved done item under Done.
+        let f = ItemFilters { saved_only: true, status: ItemStatus::Done, ..Default::default() };
+        let s = sections(&declared, &items, &f, now());
+        assert_eq!(section_ids(&s.groups[0]), ["pr-done"]);
+        assert_eq!(ids(&s.priority), ["issue-mentioned"]);
+    }
+
+    #[test]
+    fn attention_only_leaves_priority_alone_and_makes_the_sections_priority_grouped() {
+        let (declared, mut items) = fixture();
+        items[6].attention_at = Some(at("2026-09-17T12:00:00Z"));
+        items[6].attention_reason = Some("comment".into());
+        items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
+
+        let before = sections(&declared, &items, &ItemFilters::default(), now());
+        let f = ItemFilters { attention_only: true, ..Default::default() };
+        let s = sections(&declared, &items, &f, now());
+        assert_eq!(s.priority, before.priority);
+        assert_eq!(ids(&s.priority), ["pr-wanted", "slatedb-pr"]);
+        assert!(s.pinned.is_empty(), "the pinned branch has no attention");
+        assert_eq!(titles(&s), ["criccomini/perch", "slatedb/slatedb"]);
+        assert_eq!(section_ids(&s.groups[0]), ["pr-wanted"]);
+        assert_eq!(section_ids(&s.groups[1]), ["slatedb-pr"]);
+        let listed: Vec<&str> = s.groups.iter().flat_map(section_ids).collect();
+        let mut wanted = ids(&s.priority);
+        wanted.sort_unstable();
+        let mut listed_sorted = listed.clone();
+        listed_sorted.sort_unstable();
+        assert_eq!(listed_sorted, wanted, "the sections hold exactly the Priority items");
+        assert_eq!(s.groups[0].count, 3, "the badge is not narrowed");
+
+        // Under Group by Date the same items, bucketed.
+        let f = ItemFilters { attention_only: true, group: ItemGroup::Date, ..Default::default() };
+        let s = sections(&declared, &items, &f, now());
+        let by_date: Vec<&str> = s.groups.iter().flat_map(section_ids).collect();
+        assert_eq!(by_date, ["pr-wanted", "slatedb-pr"]);
+    }
+
+    #[test]
+    fn a_reason_matches_the_latest_reason_and_team_mention_is_mentioned() {
+        let (declared, mut items) = fixture();
+        let mut mentioned = item("issue-mentioned", "criccomini/perch", "2026-09-12T10:00:00Z");
+        mentioned.subject = Some(issue(43, "Mentioned issue", "open", "2026-09-15T10:00:00Z"));
+        mentioned.attention_at = Some(at("2026-09-17T09:00:00Z"));
+        mentioned.attention_reason = Some("team_mention".into());
+        items.push(mentioned);
+        // The done pull request was a review request; done or not, that is
+        // its latest reason.
+        items[1].attention_reason = Some("review_requested".into());
+        // A reason was a review request once and is a comment now: only the
+        // latest counts.
+        items[6].attention_at = Some(at("2026-09-17T12:00:00Z"));
+        items[6].attention_reason = Some("comment".into());
+        // A reason the menu does not offer matches only Any.
+        items[5].attention_at = Some(at("2026-09-17T13:00:00Z"));
+        items[5].attention_reason = Some("state_change".into());
+
+        let under = |reason: Option<AttentionReason>, status: ItemStatus| {
+            let f = ItemFilters { reason, status, ..Default::default() };
+            let s = sections(&declared, &items, &f, now());
+            let rows: Vec<String> = s.groups.iter().flat_map(|g| g.items.iter().map(|i| i.id.clone())).collect();
+            (ids(&s.priority).into_iter().map(String::from).collect::<Vec<_>>(), rows)
+        };
+
+        let (priority, rows) = under(Some(AttentionReason::Mention), ItemStatus::Active);
+        assert_eq!(priority, ["issue-mentioned"]);
+        assert_eq!(rows, ["issue-mentioned"], "Priority and the sections narrow together");
+
+        let (priority, rows) = under(Some(AttentionReason::ReviewRequested), ItemStatus::Active);
+        assert_eq!(priority, ["pr-wanted"]);
+        assert_eq!(rows, ["pr-wanted"]);
+
+        let (priority, rows) = under(Some(AttentionReason::ReviewRequested), ItemStatus::Done);
+        assert!(priority.contains(&"pr-wanted".to_string()));
+        assert_eq!(rows, ["pr-done"], "done, and still a review request");
+
+        let (_, rows) = under(Some(AttentionReason::Comment), ItemStatus::Active);
+        assert_eq!(rows, ["slatedb-pr"]);
+
+        let (priority, rows) = under(None, ItemStatus::Active);
+        assert!(priority.contains(&"branch".to_string()));
+        assert!(rows.contains(&"branch".to_string()));
+        for reason in AttentionReason::ALL {
+            let (priority, rows) = under(Some(reason), ItemStatus::All);
+            assert!(!priority.contains(&"branch".to_string()), "{reason:?}");
+            assert!(!rows.contains(&"branch".to_string()), "{reason:?}");
+        }
+    }
+
+    #[test]
+    fn oldest_first_reverses_rows_but_not_priority_or_pinned() {
+        let (declared, mut items) = fixture();
+        let mut older = item("issue-mentioned", "criccomini/perch", "2026-09-12T10:00:00Z");
+        older.subject = Some(issue(43, "Mentioned issue", "open", "2026-09-15T10:00:00Z"));
+        older.attention_at = Some(at("2026-09-17T09:00:00Z"));
+        older.attention_reason = Some("mention".into());
+        items.push(older);
+        items[3].pinned_at = Some(at("2026-09-17T10:00:00Z"));
+        items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
+
+        let newest = sections(&declared, &items, &ItemFilters::default(), now());
+        let f = ItemFilters { direction: Direction::Oldest, ..Default::default() };
+        let oldest = sections(&declared, &items, &f, now());
+        assert_eq!(section_ids(&newest.groups[0]), ["pr-wanted", "issue-mentioned"]);
+        assert_eq!(section_ids(&oldest.groups[0]), ["issue-mentioned", "pr-wanted"]);
+        assert_eq!(oldest.priority, newest.priority, "attention order is not the sort");
+        assert_eq!(oldest.pinned, newest.pinned, "pin order is not the sort");
+        assert_eq!(ids(&oldest.priority), ["pr-wanted", "issue-mentioned"]);
+        assert_eq!(ids(&oldest.pinned), ["branch", "issue"]);
+        // The repository order is config order either way.
+        assert_eq!(titles(&oldest), titles(&newest));
+    }
+
+    #[test]
+    fn oldest_first_puts_the_earlier_date_bucket_first() {
+        let now = Timestamp::now();
+        let ago = |h: i64| now - jiff::SignedDuration::from_hours(h);
+        let (declared, _) = fixture();
+        let mut a = item("a", "criccomini/perch", "2026-09-01T10:00:00Z");
+        a.checkout = Some(checkout("a"));
+        a.attention_at = Some(ago(2));
+        let mut b = item("b", "criccomini/perch", "2026-09-01T10:00:00Z");
+        b.checkout = Some(checkout("b"));
+        b.attention_at = Some(ago(26));
+        let mut c = item("c", "slatedb/slatedb", "2026-09-01T10:00:00Z");
+        c.checkout = Some(checkout("c"));
+        c.attention_at = Some(ago(24 * 40));
+        let items = vec![c, b, a];
+
+        let f = ItemFilters { group: ItemGroup::Date, direction: Direction::Oldest, ..Default::default() };
+        let s = sections(&declared, &items, &f, now);
+        assert_eq!(titles(&s), ["Earlier", "Yesterday", "Today"]);
+        assert_eq!(section_ids(&s.groups[0]), ["c"]);
+
+        // Created puts all three in one bucket; the rows inside it turn over
+        // too, tiebreak included.
+        let f = ItemFilters {
+            group: ItemGroup::Date,
+            sort: ItemSort::Created,
+            direction: Direction::Oldest,
+            ..Default::default()
+        };
+        let s = sections(&declared, &items, &f, now);
+        assert_eq!(s.groups.len(), 1);
+        assert_eq!(section_ids(&s.groups[0]), ["c", "b", "a"]);
+    }
+
+    #[test]
     fn filter_settings_round_trip_through_the_string_form() {
         let f = ItemFilters {
             status: ItemStatus::Closed,
@@ -1119,18 +1496,39 @@ mod tests {
             sort: ItemSort::LastOpened,
             show_empty: true,
             show_pr_status: false,
+            saved_only: true,
+            attention_only: true,
+            reason: Some(AttentionReason::Mention),
+            direction: Direction::Oldest,
             query: String::new(),
         };
         let s = f.to_meta();
         assert_eq!(
             s,
-            "status=closed;kinds=pr,branch;group=date;sort=last_opened;show_empty=1;show_pr_status=0"
+            "status=closed;kinds=pr,branch;group=date;sort=last_opened;show_empty=1;show_pr_status=0;saved=1;attention=1;reason=mention;direction=oldest"
         );
         assert_eq!(ItemFilters::parse(&s).unwrap(), f);
 
         let d = ItemFilters::default();
         assert_eq!(ItemFilters::parse(&d.to_meta()).unwrap(), d);
         assert_eq!(ItemFilters::parse("").unwrap(), d, "nothing stored means the defaults");
+        assert!(d.to_meta().ends_with(";saved=0;attention=0;reason=any;direction=newest"));
+
+        // A string from before the last four keys still reads, at the defaults.
+        let old = "status=done;kinds=pr;group=owner;sort=created;show_empty=0;show_pr_status=1";
+        let f = ItemFilters::parse(old).unwrap();
+        assert_eq!(f.status, ItemStatus::Done);
+        assert!(!f.saved_only && !f.attention_only && f.reason.is_none());
+        assert_eq!(f.direction, Direction::Newest);
+
+        // The harness form from the acceptance list.
+        let f = ItemFilters::parse("status=done;reason=mention;direction=oldest").unwrap();
+        assert_eq!(f.status, ItemStatus::Done);
+        assert_eq!(f.reason, Some(AttentionReason::Mention));
+        assert_eq!(f.direction, Direction::Oldest);
+        assert_eq!(ItemFilters::parse("reason=any").unwrap().reason, None);
+        assert_eq!(ItemFilters::parse("reason=team_mention").unwrap().reason, Some(AttentionReason::Mention));
+        assert!(ItemFilters::parse("saved=1;attention=on").unwrap().saved_only);
 
         // The three groupings by their keys, the default first.
         assert!(d.to_meta().contains(";group=repo;"));
@@ -1158,6 +1556,10 @@ mod tests {
         assert!(ItemFilters::parse("colour=red").unwrap_err().contains("colour"));
         assert!(ItemFilters::parse("kinds=pr,tags").unwrap_err().contains("kinds"));
         assert!(ItemFilters::parse("show_empty=maybe").unwrap_err().contains("show_empty"));
+        assert!(ItemFilters::parse("saved=yes").unwrap_err().contains("saved"));
+        assert!(ItemFilters::parse("attention=maybe").unwrap_err().contains("attention"));
+        assert!(ItemFilters::parse("reason=bogus").unwrap_err().contains("reason"));
+        assert!(ItemFilters::parse("direction=sideways").unwrap_err().contains("direction"));
         assert!(ItemFilters::parse("nonsense").unwrap_err().contains("key=value"));
     }
 
@@ -1175,6 +1577,16 @@ mod tests {
             assert_eq!(ItemSort::from_key(v.key()), Some(v));
             assert_eq!(v.to_string(), v.label());
         }
+        for v in AttentionReason::ALL {
+            assert_eq!(AttentionReason::from_str(v.key()), Some(v));
+            assert_eq!(v.to_string(), v.label());
+            assert_eq!(v.title().to_lowercase(), v.label().to_lowercase(), "the menu says what the row says");
+            assert!(v.title().starts_with(|c: char| c.is_uppercase()));
+        }
+        for v in Direction::ALL {
+            assert_eq!(Direction::from_key(v.key()), Some(v));
+            assert_eq!(v.to_string(), v.label());
+        }
     }
 
     #[test]
@@ -1188,6 +1600,12 @@ mod tests {
         assert_eq!(attention_label("manual"), "manual");
         assert_eq!(attention_label("ci_failed"), "CI failed");
         assert_eq!(attention_label("state_change"), "state change");
+
+        assert_eq!(AttentionReason::from_str("team_mention"), Some(AttentionReason::Mention));
+        assert_eq!(AttentionReason::from_str("mention"), Some(AttentionReason::Mention));
+        assert_eq!(AttentionReason::from_str("author"), Some(AttentionReason::Author));
+        assert_eq!(AttentionReason::from_str("state_change"), None, "matches only Any");
+        assert_eq!(AttentionReason::from_str(""), None);
     }
 
     #[test]
