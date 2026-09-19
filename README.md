@@ -103,6 +103,42 @@ Files, shaped like a pull request's page on GitHub.
   rust-analyzer says what it is; go-to-definition and find references
   are in the same panel, and references open in a panel under the
   editor.
+- A changed file opens folded to its changes, the way git and GitHub show
+  a diff: each change with three lines of context, and a divider across
+  the code where the unchanged run between two is hidden, saying how many
+  lines it hides; a run so short that a divider would be worse than the
+  lines stays in view. Hover a divider and its gutter offers Up and Down,
+  twenty lines at a time, or All when the run is forty lines or fewer,
+  and Reset once some of it has been opened. What you open is a reveal,
+  remembered per worktree and per version of the file, the way Viewed is:
+  a push that changes the file opens it folded again, and checking the
+  old head out brings the reveals back. A jump into a fold, from go to
+  definition, a reference or a thread's label in the column, opens it
+  three lines either side and is remembered the same way. Show whole, the
+  tile left of Stacked and Split in the file tab bar, shows the worktree's
+  files whole with no divider and is remembered per worktree, while
+  Stacked and Split are per app: a reader folds one review and not
+  another, but reads every review stacked or every one split. The status
+  line says how many lines are hidden, and clicking the count is Show
+  whole. A file outside the changed list has nothing to fold around and
+  opens whole.
+- Every thread anchored in the open file is drawn in the code under its
+  lines, in the stacked layout and across both sides of the split: your
+  own with the dashed face Conversation gives them, GitHub's review
+  threads with the solid one, so neither can be taken for the other. The
+  lines a thread is about are never folded; it keeps them in view the way
+  a change does. A chevron at the card's left collapses it to one row,
+  who wrote it, its first line and how many messages follow, and a thread
+  that is Outdated starts collapsed; the marker in the gutter, solid for
+  yours and hollow for GitHub's, scrolls the card into view. The composer
+  opened with `+` or `a` is a card under the selected lines, and a
+  follow-up is written in the thread's card. A card longer than forty
+  rows scrolls inside itself, so a long conversation cannot push the code
+  off the screen. The column stays as the list of every thread in the
+  worktree, the ones in other files included, and does not open itself
+  for a thread drawn in the code; `Cmd-Shift-\` shows it. A GitHub card
+  has no resolved state, because the REST payload carries none, so it
+  starts open.
 - An issue has Conversation alone, until Start work gives it a checkout. A
   branch of your own has a Conversation of its threads and a Files of its
   diff against its base.
@@ -176,10 +212,10 @@ Files, shaped like a pull request's page on GitHub.
 **Threads**
 
 - Select lines in the editor and press `a`, or click the `+` in the gutter,
-  to ask a coding agent about them. The answer appears beside the code as
-  a thread anchored to those lines, with a marker in the gutter, and takes
-  follow-ups. Press `a` with no file open, or the `+` at the top of the
-  column, to ask about the pull request as a whole.
+  to ask a coding agent about them. The answer appears under those lines
+  as a thread, with a marker in the gutter, and takes follow-ups. Press
+  `a` with no file open, or the `+` at the top of the column, to ask about
+  the pull request as a whole.
 - Each question picks its model and effort. The model picks the agent:
   Claude Code, or Codex when its models are configured. The thread shows
   what the agent did, one line per file read or command run, then its
@@ -192,10 +228,10 @@ Files, shaped like a pull request's page on GitHub.
 - Threads belong to the item. Archiving keeps them; deleting removes them.
   When the pull request moves on and the anchored file changes, the thread
   says Outdated.
-- A thread shows in the column on Files and as a card on Conversation.
-  They are one thread; a follow-up from either shows in both. An answered
-  thread is filed under knowledge beside the item's discussion, marked as
-  yours and not GitHub's.
+- A thread shows under its lines and in the column on Files, and as a
+  card on Conversation. They are one thread; a follow-up from either
+  shows in both. An answered thread is filed under knowledge beside the
+  item's discussion, marked as yours and not GitHub's.
 
 ## What it deliberately does not do
 
@@ -295,7 +331,7 @@ Everything Perch keeps is under one directory, `$PERCH_HOME` if set, else
 ```
 ~/.perch/
   config.toml        repositories, token, agent, knowledge settings
-  perch.db           items, threads, marks, where the backfill is
+  perch.db           items, threads, marks, reveals, where the backfill is
   avatars/
   repos/             one bare clone per repository
   worktrees/         one checkout per branch Perch made, <owner>__<repo>__<branch>
@@ -522,11 +558,16 @@ cargo run -p perch-git --example checkout -- slatedb/slatedb#2091
 cargo run -p perch-lsp --example hover -- <worktree> src/lib.rs 10 4
 ```
 
-`perch --dump-file owner/repo#N path` renders a file the way the editor would,
-gutter numbers and change bars included, as text. `perch --timeline
-<item-id>` prints an item's Conversation one card per line, and `perch
---scope <item-id> <scope>` prints the changed list under a scope
-(`branch`, `commit:<sha>`, `since:<sha>`, `uncommitted`, `staged`,
+`perch --dump-file owner/repo#N path` renders a file the way the editor
+would, as text: gutter numbers and change bars, a divider row for each run
+folded away, and a spacer row for each row a thread's card takes, under
+the reveals and Show whole the cache holds for the item. `--whole` renders
+the file whole, with nothing folded and no card; `--split` renders both
+sides of the split one after the other and ends in their row counts, so
+the two being the same height can be checked by eye and by test. `perch
+--timeline <item-id>` prints an item's Conversation one card per line,
+and `perch --scope <item-id> <scope>` prints the changed list under a
+scope (`branch`, `commit:<sha>`, `since:<sha>`, `uncommitted`, `staged`,
 `unstaged`) with each file's viewed mark; `perch --items` names the ids.
 
 Two environment variables open a pull request at launch instead of by
