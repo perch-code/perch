@@ -290,6 +290,37 @@ fn a_repository_that_is_not_owner_and_repo_is_refused_before_anything_is_written
 }
 
 #[test]
+fn a_repository_named_with_a_leading_dot_comes_back_under_its_own_name() {
+    // `acme/.github` is a real repository, and `acme/github` may be another.
+    // Each gets its own directory, and the root index names both as they are.
+    let tmp = tempfile::tempdir().unwrap();
+    let k = Knowledge::open(tmp.path());
+    let mut m = other_repository();
+    m.repo = "acme/.github".into();
+    m.container = "acme/.github#3".into();
+    k.ingest(&[m]).unwrap();
+    let mut m = other_repository();
+    m.repo = "acme/github".into();
+    m.container = "acme/github#3".into();
+    m.body = "# The other one".into();
+    k.ingest(&[m]).unwrap();
+
+    assert!(tmp.path().join("acme/.github/raw/github.jsonl").is_file());
+    assert!(tmp.path().join("acme/.github/github/pulls/3.md").is_file());
+    assert!(tmp.path().join("acme/github/github/pulls/3.md").is_file());
+    assert_eq!(k.repos().unwrap(), ["acme/.github", "acme/github"]);
+    let root = std::fs::read_to_string(tmp.path().join("index.md")).unwrap();
+    assert!(root.contains("| acme/.github | acme/.github/ | 1 |"), "{root}");
+    assert!(root.contains("| acme/github | acme/github/ | 1 |"), "{root}");
+
+    // A rerender finds the same repositories and rewrites the same files.
+    k.rerender().unwrap();
+    assert_eq!(k.repos().unwrap(), ["acme/.github", "acme/github"]);
+    let page = std::fs::read_to_string(tmp.path().join("acme/.github/github/pulls/3.md")).unwrap();
+    assert!(page.contains("Group by owner"), "{page}");
+}
+
+#[test]
 fn the_skill_lands_in_every_directory_named() {
     let tmp = tempfile::tempdir().unwrap();
     let k = Knowledge::open(tmp.path().join("knowledge"));

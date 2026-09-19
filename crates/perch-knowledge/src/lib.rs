@@ -375,13 +375,16 @@ fn branched(container: &str) -> Option<&str> {
 }
 
 /// Keep a path segment to characters safe everywhere, and never `..`.
+///
+/// Only the segments that would climb or vanish are replaced: `.`, `..`
+/// and the empty string. A leading dot is kept, since `.github` is a
+/// repository name and must come back as one from `repos()`.
 fn safe(segment: &str) -> String {
     let out: String = segment
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' })
         .collect();
-    let trimmed = out.trim_matches('.');
-    if trimmed.is_empty() { "-".to_string() } else { trimmed.to_string() }
+    if out.is_empty() || out == "." || out == ".." { "-".to_string() } else { out }
 }
 
 fn sorted(mut messages: Vec<Message>) -> Vec<Message> {
@@ -491,6 +494,9 @@ mod tests {
         let rel = Knowledge::rendered_relative(Source::Perch, "../x@../..");
         assert!(rel.components().all(|c| c.as_os_str() != ".."), "{rel:?}");
         assert_eq!(safe(".."), "-");
+        assert_eq!(safe("."), "-");
+        assert_eq!(safe(""), "-");
+        assert_eq!(safe("../.."), "..-..");
 
         // A repository is two segments and no more; each is made safe, and
         // a third segment is refused rather than joined.
@@ -502,5 +508,14 @@ mod tests {
         for repo in ["../x/../y", "../../etc", "slatedb", "/slatedb", "slatedb/", ""] {
             assert!(matches!(k.repo_dir(repo), Err(Error::Repo(_))), "{repo:?}");
         }
+    }
+
+    #[test]
+    fn a_repository_named_with_a_leading_dot_keeps_it() {
+        // `.github` is a real repository name. Only `.` and `..` climb.
+        let k = Knowledge::open("/k");
+        assert_eq!(k.repo_dir("acme/.github").unwrap(), PathBuf::from("/k/acme/.github"));
+        assert_eq!(k.repo_dir("acme/.").unwrap(), PathBuf::from("/k/acme/-"));
+        assert_eq!(k.repo_dir("./x").unwrap(), PathBuf::from("/k/-/x"));
     }
 }

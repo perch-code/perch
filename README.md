@@ -333,16 +333,15 @@ name = "slatedb/slatedb-go"
 
 `name` is the repository's `owner/repo`, compared without regard to case.
 `roots` says where you already work on it, and each root's worktrees
-become items; a root whose origin is some other repository is skipped,
-and the status line says so. A directory that holds worktrees of two
-repositories is listed under both.
+become items. A root belongs to the one repository its `origin` names, so
+a checkout of each repository goes under its own `[[repo]]`; a root whose
+origin is some other repository is skipped, and the status line says so.
 
-Declaring a repository is what makes Perch list it whole: its open pull
-requests and issues become rows, whether or not anyone told you about
-them. A repository you did not declare shows only what you opened. Its
-section looks the same, and declaring it later changes nothing about the
-rows already there. A file that still declares `[[project]]` is not
-loaded, and the notice says to write `[[repo]]` instead.
+Declaring a repository puts it in the sidebar in config order and gives
+its `roots` a home. A repository you did not declare shows what you
+opened, and its section looks the same. A file that still declares
+`[[project]]` is not loaded, and the notice says to write `[[repo]]`
+instead.
 
 ## Threads
 

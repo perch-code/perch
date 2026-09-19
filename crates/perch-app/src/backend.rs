@@ -2242,8 +2242,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                 ctx.notice(format!("{}: origin is not a GitHub repository", root.display()));
                 continue;
             };
-            // A root is listed under the repository its origin names; one
-            // that holds worktrees of two is listed under both.
+            // A root belongs to the one repository its origin names.
             if !repo.eq_ignore_ascii_case(&declared.name) {
                 ctx.notice(format!("{}: origin is {repo}, not {}", root.display(), declared.name));
                 continue;

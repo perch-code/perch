@@ -307,14 +307,32 @@ impl Config {
     /// naming it. Everything downstream splits the name on its one slash,
     /// and a name that does not split would be a section nothing could
     /// list or file under. The rest of the file loads.
+    ///
+    /// A name declared twice, in any case, is one repository: the name is
+    /// the identity. The later entry's roots join the first's, with a
+    /// warning, so the sidebar makes one section and the list pass one
+    /// request rather than one per entry.
     fn keep_well_formed_names(&mut self) {
-        let (kept, dropped): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.repo).into_iter().partition(|r| is_full_name(&r.name));
-        for r in dropped {
-            self.warnings.push(format!(
-                "config.toml: [[repo]] name = {:?} is not owner/repo; the entry was skipped",
-                r.name
-            ));
+        let mut kept: Vec<RepoConfig> = Vec::new();
+        for r in std::mem::take(&mut self.repo) {
+            if !is_full_name(&r.name) {
+                self.warnings.push(format!(
+                    "config.toml: [[repo]] name = {:?} is not owner/repo; the entry was skipped",
+                    r.name
+                ));
+            } else if let Some(first) = kept.iter_mut().find(|k| k.name.eq_ignore_ascii_case(&r.name)) {
+                self.warnings.push(format!(
+                    "config.toml: [[repo]] name = {:?} repeats {:?}; its roots were added to the first entry",
+                    r.name, first.name
+                ));
+                for root in r.roots {
+                    if !first.roots.contains(&root) {
+                        first.roots.push(root);
+                    }
+                }
+            } else {
+                kept.push(r);
+            }
         }
         self.repo = kept;
     }
@@ -548,6 +566,35 @@ mod tests {
         assert_eq!(c.warnings.len(), 2);
         assert!(c.warnings[0].contains("\"slatedb\""), "{}", c.warnings[0]);
         assert!(c.warnings[1].contains("\"a/b/c\""), "{}", c.warnings[1]);
+    }
+
+    #[test]
+    fn a_name_declared_twice_is_one_entry_with_the_roots_of_both() {
+        let c = Config::parse(
+            r#"
+            [[repo]]
+            name = "slatedb/slatedb"
+            roots = ["~/Code/slatedb"]
+
+            [[repo]]
+            name = "slatedb/slatedb-go"
+
+            [[repo]]
+            name = "SlateDB/slatedb"
+            roots = ["~/Code/slatedb", "~/Code/slatedb-fork"]
+
+            [[repo]]
+            name = "slatedb/slatedb-go"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.declared(), vec!["slatedb/slatedb", "slatedb/slatedb-go"], "the first spelling, once");
+        assert_eq!(c.repo[0].roots, vec!["~/Code/slatedb", "~/Code/slatedb-fork"]);
+        assert!(c.repo[1].roots.is_empty());
+        assert_eq!(c.roots_for("SLATEDB/SLATEDB").len(), 2);
+        assert_eq!(c.warnings.len(), 2);
+        assert!(c.warnings[0].contains("\"SlateDB/slatedb\" repeats \"slatedb/slatedb\""), "{}", c.warnings[0]);
+        assert!(c.warnings[1].contains("\"slatedb/slatedb-go\" repeats"), "{}", c.warnings[1]);
     }
 
     #[test]

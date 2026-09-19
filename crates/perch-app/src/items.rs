@@ -441,33 +441,38 @@ struct RepoBucket {
 /// so a checkout of a fork sits under the fork whatever its pull request
 /// is against, the same repository the row's second line names. A declared
 /// repository with no rows is still here, empty, for Show Empty.
+///
+/// Every repository with an item gets a bucket, whether or not any of its
+/// items survive the filters, so its active count reaches its owner's
+/// badge the same as a declared repository's does. The callers drop an
+/// undeclared bucket with no rows.
 fn by_repository_order(declared: &[String], all: &[Item], rows: &[&Item]) -> Vec<RepoBucket> {
     let mut buckets: Vec<RepoBucket> = declared
         .iter()
         .map(|name| RepoBucket { key: name.to_lowercase(), name: name.clone(), declared: true, items: Vec::new(), active: 0 })
         .collect();
     let mut extra: Vec<RepoBucket> = Vec::new();
-    for item in rows {
+    for item in all {
         let key = item.repo_full_name.to_lowercase();
-        let bucket = match buckets.iter().chain(extra.iter()).position(|b| b.key == key) {
-            Some(i) if i < buckets.len() => &mut buckets[i],
-            Some(i) => &mut extra[i - buckets.len()],
-            None => {
-                extra.push(RepoBucket {
-                    key,
-                    name: item.repo_full_name.clone(),
-                    declared: false,
-                    items: Vec::new(),
-                    active: 0,
-                });
-                let last = extra.len() - 1;
-                &mut extra[last]
-            }
-        };
-        bucket.items.push((*item).clone());
+        if !buckets.iter().chain(extra.iter()).any(|b| b.key == key) {
+            extra.push(RepoBucket {
+                key,
+                name: item.repo_full_name.clone(),
+                declared: false,
+                items: Vec::new(),
+                active: 0,
+            });
+        }
     }
     extra.sort_by(|a, b| a.key.cmp(&b.key));
     buckets.extend(extra);
+
+    for item in rows {
+        let key = item.repo_full_name.to_lowercase();
+        if let Some(bucket) = buckets.iter_mut().find(|b| b.key == key) {
+            bucket.items.push((*item).clone());
+        }
+    }
 
     let mut active: HashMap<String, usize> = HashMap::new();
     for item in all.iter().filter(|i| i.is_active()) {
@@ -938,6 +943,43 @@ mod tests {
         let s = sections(&declared, &items, &f, now());
         assert_eq!(titles(&s), ["slatedb", "criccomini", "x"]);
         assert!(s.groups[2].items.is_empty());
+    }
+
+    #[test]
+    fn the_owner_badge_counts_an_undeclared_repository_whose_rows_are_filtered_out() {
+        // slatedb/slatedb is declared with one open issue and one open pull
+        // request; slatedb/slatedb-go is not declared and has two open pull
+        // requests. Under Issues only, the owner's badge still says four,
+        // the same as it would with slatedb-go declared.
+        let (_, mut items) = fixture();
+        let two = declared(&["slatedb/slatedb", "criccomini/perch"]);
+        let mut bug = item("slatedb-issue", "slatedb/slatedb", "2026-09-12T10:00:00Z");
+        bug.subject = Some(issue(7, "Flaky test", "open", "2026-09-15T10:00:00Z"));
+        items.push(bug);
+        for (id, n) in [("go-pr", 12), ("go-old", 11)] {
+            let mut go = item(id, "slatedb/slatedb-go", "2026-09-13T10:00:00Z");
+            go.subject = Some(pr(n, "Go bindings", "bindings", "open", "2026-09-17T11:00:00Z"));
+            items.push(go);
+        }
+
+        let kinds = ItemKinds { pull_requests: false, issues: true, branches: false };
+        let f = ItemFilters { group: ItemGroup::Owner, kinds, ..Default::default() };
+        let s = sections(&two, &items, &f, now());
+        assert_eq!(titles(&s), ["slatedb", "criccomini"]);
+        assert_eq!(section_ids(&s.groups[0]), ["slatedb-issue"]);
+        assert_eq!(s.groups[0].count, 4, "the badge is not narrowed by the kind filter");
+
+        // Declaring it changes nothing about the count.
+        let three = declared(&["slatedb/slatedb", "slatedb/slatedb-go", "criccomini/perch"]);
+        let s = sections(&three, &items, &f, now());
+        assert_eq!(s.groups[0].count, 4);
+
+        // Under Repository, an undeclared repository with no rows is not a
+        // section, with or without Show Empty.
+        let f = ItemFilters { kinds, show_empty: true, ..Default::default() };
+        let s = sections(&two, &items, &f, now());
+        assert_eq!(titles(&s), ["slatedb/slatedb", "criccomini/perch"]);
+        assert_eq!(s.groups[0].count, 2);
     }
 
     #[test]
