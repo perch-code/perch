@@ -20,7 +20,7 @@ pub use comments::{
     Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStatus, RunStep, Side,
     ThreadOrigin,
 };
-pub use client::{Error, GitHub, ListResult, PullLookup};
+pub use client::{Allowance, Error, GitHub, ListResult, Listed, Page, PullLookup};
 pub use config::{AgentConfig, CodexConfig, Config, KnowledgeConfig, RepoConfig, CLAUDE_CODE, CODEX};
 pub use discussion::{Discussion, IssueComment, PullEvent, PullEventKind, Review, ReviewComment};
 pub use items::{Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind};
