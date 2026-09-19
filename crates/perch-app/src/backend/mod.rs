@@ -29,7 +29,9 @@ pub(crate) mod sync;
 
 /// How many avatar downloads may be in flight at once.
 const AVATAR_CONCURRENCY: usize = 6;
-/// Settings the UI keeps between launches. Sent back at startup.
+/// Settings the UI keeps between launches. Sent back at startup. Show
+/// whole is not here: its key is per item, `review.folded.<item_id>`, so
+/// it is read when the item opens and carried on `ViewedReady`.
 pub const UI_META_KEYS: [&str; 5] =
     ["item_filters", "collapsed_sections", "review.layout", "viewer.login", "viewer.avatar_url"];
 
@@ -57,6 +59,11 @@ pub enum Command {
     RefreshScope { item_id: String },
     /// Check or uncheck a file's content as viewed.
     SetViewed { item_id: String, path: String, blob: String, viewed: bool },
+    /// Remember that head lines `first` to `last` of a file's content were
+    /// opened out of a fold, and forget every reveal overlapping a range:
+    /// a divider's Reset. Both keyed as Viewed is.
+    Reveal { item_id: String, path: String, blob: String, first: u32, last: u32 },
+    ResetReveals { item_id: String, path: String, blob: String, first: u32, last: u32 },
     /// Ask the language server about a position. `token` lets the UI drop an
     /// answer that arrives after the pointer has moved on.
     Hover { token: u64, path: String, line: u32, character: u32 },
@@ -171,8 +178,17 @@ pub enum Event {
     CommitsReady { item_id: String, commits: Arc<Vec<perch_git::Commit>>, dirt: perch_git::Dirt, since: Option<String> },
     /// The changed list under a scope, after `SetScope`.
     ScopeReady { item_id: String, scope: perch_git::Scope, files: Arc<Vec<perch_git::ChangedFile>> },
-    /// Every (path, blob) the reader has viewed on the item. Whole.
-    ViewedReady { item_id: String, viewed: Arc<std::collections::HashSet<(String, String)>> },
+    /// What the reader marked on the item's files, whole, in the one query
+    /// pass when the item opens and again after each write: every (path,
+    /// blob) viewed, every run of head lines revealed out of a fold by
+    /// (path, blob), and whether the item's files are folded to their
+    /// changes, which they are unless the reader asked for them whole.
+    ViewedReady {
+        item_id: String,
+        viewed: Arc<std::collections::HashSet<(String, String)>>,
+        reveals: Arc<perch_github::StoredReveals>,
+        folded: bool,
+    },
 
     LspStatus(perch_lsp::Status),
     LspHover { token: u64, text: String },
@@ -237,6 +253,26 @@ impl Backend {
             path: path.to_string(),
             blob: blob.to_string(),
             viewed,
+        });
+    }
+
+    pub fn reveal(&self, item_id: &str, path: &str, blob: &str, first: u32, last: u32) {
+        let _ = self.commands.send(Command::Reveal {
+            item_id: item_id.to_string(),
+            path: path.to_string(),
+            blob: blob.to_string(),
+            first,
+            last,
+        });
+    }
+
+    pub fn reset_reveals(&self, item_id: &str, path: &str, blob: &str, first: u32, last: u32) {
+        let _ = self.commands.send(Command::ResetReveals {
+            item_id: item_id.to_string(),
+            path: path.to_string(),
+            blob: blob.to_string(),
+            first,
+            last,
         });
     }
 
@@ -765,6 +801,18 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
             Some(Command::SetViewed { item_id, path, blob, viewed }) => {
                 if let Some(Err(e)) = ctx.with_cache(|c| c.set_viewed(&item_id, &path, &blob, viewed)) {
                     tracing::warn!(error = %e, "could not record viewed");
+                }
+                send_viewed(&ctx, &item_id);
+            }
+            Some(Command::Reveal { item_id, path, blob, first, last }) => {
+                if let Some(Err(e)) = ctx.with_cache(|c| c.set_reveal(&item_id, &path, &blob, first, last)) {
+                    tracing::warn!(error = %e, "could not record the reveal");
+                }
+                send_viewed(&ctx, &item_id);
+            }
+            Some(Command::ResetReveals { item_id, path, blob, first, last }) => {
+                if let Some(Err(e)) = ctx.with_cache(|c| c.remove_reveals(&item_id, &path, &blob, first, last)) {
+                    tracing::warn!(error = %e, "could not forget the reveals");
                 }
                 send_viewed(&ctx, &item_id);
             }
@@ -1414,7 +1462,8 @@ async fn finish_open(
         offline,
     });
 
-    // What was viewed is small and local; it goes straight away.
+    // What was viewed and revealed, and whether the files are folded, is
+    // small and local; it goes straight away.
     send_viewed(ctx, &item.id);
 
     // The outdated check is a git call per moved thread; the log and the
@@ -1479,10 +1528,27 @@ async fn scoped_files(
     perch_git::changed_files(preparer.git(), &checkout.worktree, scope, &checkout.merge_base, &checkout.head_sha).await
 }
 
-/// Every (path, blob) the reader has viewed on an item.
+/// What the reader marked on an item's files: every (path, blob) viewed,
+/// every reveal, and whether the files are folded, in one pass over the
+/// cache. Absent, or with no cache, the files are folded: that is the
+/// default, and the key is only ever written once the tile is clicked.
 fn send_viewed(ctx: &Ctx, item_id: &str) {
-    let viewed = ctx.with_cache(|c| c.load_viewed(item_id).unwrap_or_default()).unwrap_or_default();
-    let _ = ctx.events.send(Event::ViewedReady { item_id: item_id.to_string(), viewed: Arc::new(viewed) });
+    use crate::review::model::{folded_from_meta, folded_meta_key};
+    let (viewed, reveals, folded) = ctx
+        .with_cache(|c| {
+            (
+                c.load_viewed(item_id).unwrap_or_default(),
+                c.load_reveals(item_id).unwrap_or_default(),
+                folded_from_meta(c.meta(&folded_meta_key(item_id)).ok().flatten().as_deref()),
+            )
+        })
+        .unwrap_or_else(|| (Default::default(), Default::default(), folded_from_meta(None)));
+    let _ = ctx.events.send(Event::ViewedReady {
+        item_id: item_id.to_string(),
+        viewed: Arc::new(viewed),
+        reveals: Arc::new(reveals),
+        folded,
+    });
 }
 
 /// The commits over the base and whether there is work in the checkout,
@@ -3217,11 +3283,16 @@ async fn open_file(
 
     let status = entry.as_ref().map(|f| f.status);
     let binary = entry.as_ref().map(|f| f.binary).unwrap_or(false);
+    // The head blob keys the reveals, as it keys Viewed. A file outside
+    // the changed list has none, and neither has a deletion or a working
+    // tree file git has not hashed; their reveals live and die with the
+    // window.
+    let blob = entry.as_ref().and_then(|f| f.head_blob.clone()).unwrap_or_default();
 
     // Parsing and diffing are CPU work; keep them off the async runtime's
     // reactor threads.
     let loaded = tokio::task::spawn_blocking(move || {
-        build_loaded_file(path, head, base, status, binary, scope)
+        build_loaded_file(path, head, base, status, binary, scope, blob)
     })
     .await;
 
@@ -3375,6 +3446,9 @@ fn render_hover(hover: &perch_lsp::lsp_types::Hover) -> String {
     }
 }
 
+/// A file as the editor wants it: the two sides diffed and highlighted,
+/// with the head blob the reveals are keyed by, empty when the file has
+/// none.
 pub(crate) fn build_loaded_file(
     path: String,
     head: String,
@@ -3382,6 +3456,7 @@ pub(crate) fn build_loaded_file(
     status: Option<perch_git::ChangeStatus>,
     binary: bool,
     scope: perch_git::Scope,
+    blob: String,
 ) -> crate::review::model::LoadedFile {
     use perch_git::{file_diff, DisplayBuffer};
     use perch_syntax::{highlight, Language, LineSpans};
@@ -3400,7 +3475,7 @@ pub(crate) fn build_loaded_file(
             scope,
             base_buffer: None,
             alignment: Vec::new(),
-            blob: String::new(),
+            blob,
         };
     }
 
@@ -3434,7 +3509,7 @@ pub(crate) fn build_loaded_file(
         scope,
         base_buffer,
         alignment,
-        blob: String::new(),
+        blob,
     }
 }
 

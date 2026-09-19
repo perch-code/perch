@@ -16,7 +16,8 @@ use floem::views::{
 };
 
 use crate::icons::SidebarIcon;
-use crate::review::model::{Layout, ReviewState};
+use crate::review::cards::tip_with;
+use crate::review::model::{folded_meta_key, folded_meta_value, Layout, ReviewState};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::icon_in;
@@ -242,21 +243,36 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
         })
 }
 
-/// Stacked or Split, as two tiles at the strip's right end. The chosen one
-/// is filled; the other is only a glyph until the pointer is over it.
+/// The tiles at the strip's right end: Show whole, then a rule, then
+/// Stacked and Split. A chosen tile is filled; the others are only a glyph
+/// until the pointer is over one.
 ///
-/// The choice outlives the item: it is a way of reading, not a fact about
-/// a file, so it goes to `meta` and comes back at the next launch.
+/// The rule is there because the two groups are two kinds of preference.
+/// The layout outlives the item: it is a way of reading, not a fact about
+/// a file, so it goes to `meta` under one key and comes back at the next
+/// launch. Show whole is the item's: a reader folds one review and not
+/// another, so it goes to `meta` under the item's key and comes back when
+/// the item opens.
 fn layout_toggle(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
-        layout_tile(app, state, Layout::Stacked, SidebarIcon::Stacked),
-        layout_tile(app, state, Layout::Split, SidebarIcon::Split),
+        fold_tile(app, state),
+        Empty::new().style(|s| {
+            s.width(1.0)
+                .height(theme::TILE_RULE_HEIGHT)
+                .margin_horiz(theme::TILE_RULE_GAP)
+                .flex_shrink(0.0_f32)
+                .background(theme::BORDER_MUTED)
+        }),
+        Stack::horizontal((
+            layout_tile(app, state, Layout::Stacked, SidebarIcon::Stacked),
+            layout_tile(app, state, Layout::Split, SidebarIcon::Split),
+        ))
+        .style(|s| s.items_center().gap(2.0)),
     ))
     .style(|s| {
         s.flex_shrink(0.0_f32)
             .height_full()
             .items_center()
-            .gap(2.0)
             .padding_horiz(8.0)
             .border_bottom(1.0)
             .border_color(theme::BORDER)
@@ -265,17 +281,46 @@ fn layout_toggle(app: AppState, state: ReviewState) -> impl IntoView {
 
 fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: SidebarIcon) -> impl IntoView {
     let active = move || state.layout.get() == layout;
+    tile(glyph, active, move || {
+        // A write of the same value would still rebuild the editor.
+        if state.layout.get_untracked() == layout {
+            return;
+        }
+        state.layout.set(layout);
+        app.pending_meta.set(Some(("review.layout".into(), layout.name().into())));
+    })
+}
+
+/// Folded to the changes, which is the default and is drawn filled, or
+/// the files whole.
+fn fold_tile(app: AppState, state: ReviewState) -> impl IntoView {
+    tip_with(tile(SidebarIcon::Fold, move || state.folded.get(), move || toggle_folded(app, state)), move || {
+        if state.folded.get() {
+            "Folded to the changes. Click to show files whole.".to_string()
+        } else {
+            "Files shown whole. Click to fold to the changes.".to_string()
+        }
+    })
+}
+
+/// Show whole for the open item: fold its files to their changes, or show
+/// them whole, and remember which under the item's `meta` key. The folds
+/// come back with the reveals as they were; showing the files whole does
+/// not throw the reveals away.
+pub fn toggle_folded(app: AppState, state: ReviewState) {
+    let folded = !state.folded.get_untracked();
+    state.folded.set(folded);
+    if let Some(id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) {
+        app.pending_meta.set(Some((folded_meta_key(&id), folded_meta_value(folded).to_string())));
+    }
+}
+
+/// One `LAYOUT_TILE` square: filled while `active`, a glyph otherwise.
+fn tile(glyph: SidebarIcon, active: impl Fn() -> bool + Copy + 'static, on_click: impl Fn() + 'static) -> impl IntoView {
     let color = move || if active() { theme::FG } else { theme::FG_MUTED };
 
     Container::new(icon_in(move || crate::icons::sidebar_icon(glyph, color()), color))
-        .on_event_stop(el::Click, move |_, _| {
-            // A write of the same value would still rebuild the editor.
-            if state.layout.get_untracked() == layout {
-                return;
-            }
-            state.layout.set(layout);
-            app.pending_meta.set(Some(("review.layout".into(), layout.name().into())));
-        })
+        .on_event_stop(el::Click, move |_, _| on_click())
         .style(move |s| {
             let base = crate::ui::widgets::clickable(s)
                 .size(theme::LAYOUT_TILE, theme::LAYOUT_TILE)
@@ -288,4 +333,28 @@ fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: Sidebar
                 base.hover(|s| s.background(theme::CANVAS_HOVER))
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn show_whole_flips_the_fold_and_writes_it_under_the_items_key() {
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut item = perch_github::Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
+        item.id = "wt".into();
+        state.item.set(Some(Arc::new(item)));
+        assert!(state.folded.get(), "folded by default");
+
+        toggle_folded(app, state);
+        assert!(!state.folded.get());
+        assert_eq!(app.pending_meta.get(), Some(("review.folded.wt".to_string(), "0".to_string())));
+
+        toggle_folded(app, state);
+        assert!(state.folded.get());
+        assert_eq!(app.pending_meta.get(), Some(("review.folded.wt".to_string(), "1".to_string())));
+    }
 }

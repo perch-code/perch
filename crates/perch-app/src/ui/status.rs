@@ -37,7 +37,7 @@ pub fn status_bar(
             move || review.pull_request.with(|p| p.is_some()),
             move |open| {
                 if open {
-                    crate::review::review_status(review).into_any()
+                    crate::review::review_status(state, review).into_any()
                 } else {
                     Label::derived(move || {
                         let (active, archived) = state.items.with(|all| {
@@ -140,7 +140,7 @@ fn archiving_line(archiving: &Archiving) -> String {
 }
 
 /// A count with a comma every three digits, so 2140 reads as 2,140.
-fn with_thousands(n: usize) -> String {
+pub(crate) fn with_thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {

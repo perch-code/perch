@@ -5,7 +5,7 @@
 //! launch. Avatars are cached as files rather than blobs, keyed by a hash
 //! of their URL.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
@@ -19,7 +19,11 @@ use crate::workflow_runs::Checks;
 /// The shape of the tables. A database with an older number, or none, is
 /// deleted and recreated: there is no migration, and nothing before the
 /// number was written has shipped to anyone.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
+
+/// An item's reveals as the store holds them: the head line ranges the
+/// reader opened out of a fold, inclusive, by `(path, blob)`.
+pub type StoredReveals = HashMap<(String, String), Vec<(u32, u32)>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
@@ -180,6 +184,14 @@ impl Cache {
                 blob       TEXT NOT NULL,
                 viewed_at  TEXT NOT NULL,
                 PRIMARY KEY (item_id, path, blob)
+            );
+            CREATE TABLE IF NOT EXISTS reveals (
+                item_id    TEXT NOT NULL,
+                path       TEXT NOT NULL,
+                blob       TEXT NOT NULL,
+                first      INTEGER NOT NULL,
+                last       INTEGER NOT NULL,
+                PRIMARY KEY (item_id, path, blob, first, last)
             );
             "#,
         )?;
@@ -710,6 +722,7 @@ impl Cache {
         tx.execute("DELETE FROM discussions WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM checks WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM viewed WHERE item_id = ?1", params![id])?;
+        tx.execute("DELETE FROM reveals WHERE item_id = ?1", params![id])?;
         tx.execute("UPDATE items SET from_item_id = NULL WHERE from_item_id = ?1", params![id])?;
         tx.execute("DELETE FROM items WHERE id = ?1", params![id])?;
         tx.commit()?;
@@ -803,6 +816,46 @@ impl Cache {
         let mut out = HashSet::new();
         for row in rows {
             out.insert(row?);
+        }
+        Ok(out)
+    }
+
+    /// Remember that the reader opened head lines `first` to `last` of a
+    /// file's content, inclusive. Keyed by the blob as Viewed is, for the
+    /// same reason: a push that changes the file starts it folded again,
+    /// and a file that comes back to the blob opens as it was left. Asking
+    /// for the same range twice is one row.
+    pub fn set_reveal(&self, item_id: &str, path: &str, blob: &str, first: u32, last: u32) -> Result<(), CacheError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO reveals (item_id, path, blob, first, last) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![item_id, path, blob, first, last],
+        )?;
+        Ok(())
+    }
+
+    /// Forget every reveal on a file's content that overlaps `first` to
+    /// `last`, inclusive: a divider's Reset, which folds its run back to
+    /// the default by taking every reveal the run has a piece of.
+    pub fn remove_reveals(&self, item_id: &str, path: &str, blob: &str, first: u32, last: u32) -> Result<(), CacheError> {
+        self.conn.execute(
+            "DELETE FROM reveals WHERE item_id = ?1 AND path = ?2 AND blob = ?3 AND first <= ?5 AND last >= ?4",
+            params![item_id, path, blob, first, last],
+        )?;
+        Ok(())
+    }
+
+    /// Every reveal on an item, by `(path, blob)`, each file's in order.
+    pub fn load_reveals(&self, item_id: &str) -> Result<StoredReveals, CacheError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, blob, first, last FROM reveals WHERE item_id = ?1 ORDER BY path, blob, first, last")?;
+        let rows = stmt.query_map(params![item_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, u32>(2)?, r.get::<_, u32>(3)?))
+        })?;
+        let mut out = StoredReveals::new();
+        for row in rows {
+            let (path, blob, first, last) = row?;
+            out.entry((path, blob)).or_default().push((first, last));
         }
         Ok(out)
     }
@@ -1525,6 +1578,53 @@ mod tests {
     }
 
     #[test]
+    fn reveals_round_trip_by_path_and_blob_and_a_new_blob_has_none() {
+        let c = Cache::open_in_memory().unwrap();
+        assert!(c.load_reveals("item-pr-7").unwrap().is_empty());
+
+        c.set_reveal("item-pr-7", "src/x.rs", "blob-a", 40, 59).unwrap();
+        c.set_reveal("item-pr-7", "src/x.rs", "blob-a", 4, 23).unwrap();
+        c.set_reveal("item-pr-7", "src/y.rs", "blob-y", 0, 19).unwrap();
+        // Asking for the same range twice is one row.
+        c.set_reveal("item-pr-7", "src/x.rs", "blob-a", 4, 23).unwrap();
+        let reveals = c.load_reveals("item-pr-7").unwrap();
+        assert_eq!(reveals.len(), 2);
+        assert_eq!(reveals[&("src/x.rs".into(), "blob-a".into())], vec![(4, 23), (40, 59)], "each file's in order");
+        assert_eq!(reveals[&("src/y.rs".into(), "blob-y".into())], vec![(0, 19)]);
+        // The file was pushed to: a new blob, and no rows for it.
+        assert!(!reveals.contains_key(&("src/x.rs".to_string(), "blob-b".to_string())));
+        assert!(c.load_reveals("item-pr-8").unwrap().is_empty(), "keyed by item");
+    }
+
+    #[test]
+    fn removing_reveals_takes_those_overlapping_the_range_and_no_other() {
+        let c = Cache::open_in_memory().unwrap();
+        let key = ("src/x.rs".to_string(), "blob-a".to_string());
+        for (first, last) in [(0, 9), (10, 29), (30, 30), (31, 50), (60, 79)] {
+            c.set_reveal("item-pr-7", "src/x.rs", "blob-a", first, last).unwrap();
+        }
+        c.set_reveal("item-pr-7", "src/x.rs", "blob-b", 10, 29).unwrap();
+        c.set_reveal("other", "src/x.rs", "blob-a", 10, 29).unwrap();
+
+        // A run of 10 to 30: the reveal that ends on its first line and the
+        // one that begins on its last both overlap it; the ones either side
+        // of those do not.
+        c.remove_reveals("item-pr-7", "src/x.rs", "blob-a", 10, 30).unwrap();
+        let reveals = c.load_reveals("item-pr-7").unwrap();
+        assert_eq!(reveals[&key], vec![(0, 9), (31, 50), (60, 79)]);
+        assert_eq!(reveals[&("src/x.rs".into(), "blob-b".into())], vec![(10, 29)], "another blob's rows stay");
+        assert_eq!(c.load_reveals("other").unwrap().len(), 1, "another item's rows stay");
+
+        // A range that touches a reveal's edge takes it.
+        c.remove_reveals("item-pr-7", "src/x.rs", "blob-a", 50, 60).unwrap();
+        let reveals = c.load_reveals("item-pr-7").unwrap();
+        assert_eq!(reveals[&key], vec![(0, 9)]);
+        // A file with nothing left has no entry at all.
+        c.remove_reveals("item-pr-7", "src/x.rs", "blob-a", 0, 0).unwrap();
+        assert!(!c.load_reveals("item-pr-7").unwrap().contains_key(&key));
+    }
+
+    #[test]
     fn deleting_an_item_takes_what_was_fetched_and_marked_for_it() {
         use crate::workflow_runs::CheckState;
         let c = Cache::open_in_memory().unwrap();
@@ -1534,12 +1634,16 @@ mod tests {
         c.store_checks(&id, "abc123", &Checks { state: CheckState::Passing, url: None }).unwrap();
         c.set_viewed(&id, "src/x.rs", "blob-a", true).unwrap();
         c.set_viewed("other", "src/x.rs", "blob-a", true).unwrap();
+        c.set_reveal(&id, "src/x.rs", "blob-a", 4, 23).unwrap();
+        c.set_reveal("other", "src/x.rs", "blob-a", 4, 23).unwrap();
 
         c.delete_item(&id).unwrap();
         assert_eq!(c.load_discussion(&id).unwrap(), None);
         assert_eq!(c.load_checks(&id, "abc123").unwrap(), None);
         assert!(c.load_viewed(&id).unwrap().is_empty());
         assert_eq!(c.load_viewed("other").unwrap().len(), 1, "another item's rows stay");
+        assert!(c.load_reveals(&id).unwrap().is_empty());
+        assert_eq!(c.load_reveals("other").unwrap().len(), 1, "and its reveals");
     }
 
     #[test]

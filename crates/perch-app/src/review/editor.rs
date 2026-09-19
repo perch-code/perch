@@ -832,6 +832,7 @@ mod tests {
             Some(perch_git::ChangeStatus::Added),
             false,
             perch_git::Scope::Branch,
+            String::new(),
         );
         assert!(split_of(&added).is_none(), "an added file has nothing on the left");
 
@@ -842,6 +843,7 @@ mod tests {
             None,
             false,
             perch_git::Scope::Branch,
+            String::new(),
         );
         assert!(split_of(&plain).is_none(), "a file outside the changed list is shown plainly");
 
@@ -852,6 +854,7 @@ mod tests {
             Some(perch_git::ChangeStatus::Modified),
             true,
             perch_git::Scope::Branch,
+            String::new(),
         );
         assert!(split_of(&binary).is_none());
 
@@ -862,6 +865,7 @@ mod tests {
             Some(perch_git::ChangeStatus::Modified),
             false,
             perch_git::Scope::Branch,
+            String::new(),
         );
         let (left, right) = split_of(&changed).expect("a changed file has both sides");
         assert_eq!(lines(&left), vec!["fn a() {}", ""]);
@@ -880,6 +884,7 @@ mod tests {
             Some(perch_git::ChangeStatus::Modified),
             false,
             perch_git::Scope::Branch,
+            String::new(),
         );
         let (_, right) = split_of(&file).unwrap();
         assert_eq!(right.display_line(1), Some(2));
@@ -950,6 +955,7 @@ mod window {
             Some(perch_git::ChangeStatus::Modified),
             false,
             perch_git::Scope::Branch,
+            String::new(),
         ));
         state.open_tab("src/x.rs");
         state.finish_load("src/x.rs", file);
@@ -1113,6 +1119,91 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.layout.get(), Layout::Stacked);
+    }
+
+    /// The Show whole tile is left of Stacked, past the rule and the room
+    /// on either side of it.
+    fn fold_tile_center() -> (f64, f64) {
+        let (stacked, y) = tile_center(Layout::Stacked);
+        let tile = crate::theme::LAYOUT_TILE;
+        (stacked - tile / 2.0 - crate::theme::TILE_RULE_GAP - 1.0 - crate::theme::TILE_RULE_GAP - tile / 2.0, y)
+    }
+
+    /// A pull request for the item, so the status bar draws the review's
+    /// line rather than the item count.
+    fn pull_request() -> perch_github::PullRequest {
+        perch_github::PullRequest {
+            number: 812,
+            title: "Fold the diff".into(),
+            author_login: "octocat".into(),
+            author_avatar_url: String::new(),
+            head_sha: "h".into(),
+            head_ref: "fold".into(),
+            base_sha: "m".into(),
+            base_ref: "main".into(),
+            draft: false,
+            merged: false,
+            state: "open".into(),
+            additions: 1,
+            deletions: 1,
+            changed_files: 1,
+            repo_full_name: "slatedb/slatedb".into(),
+            head_repo_full_name: None,
+            updated_at: None,
+            review_requested: false,
+            checks: None,
+            review_decision: None,
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: Vec::new(),
+            milestone: None,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn show_whole_unfolds_every_run_and_folding_again_keeps_the_reveals() {
+        let (mut harness, state) = one_long_run();
+        let live = stacked(state);
+        // With a pull request open the status bar carries the review's
+        // line, and with it the hidden count.
+        state.pull_request.set(Some(Arc::new(pull_request())));
+        harness.rebuild();
+        harness.paint();
+        assert!(state.folded.get(), "folded by default");
+        assert_eq!(state.hidden_lines(), 54);
+
+        // Twenty lines at the bottom of the run, to be kept through Show
+        // whole and back.
+        let run = live.doc.get().run_of(5).expect("row 5 is the divider");
+        let (first, last) = run.bottom();
+        state.reveal("src/x.rs", "", first, last);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(live.doc.get().len(), 103);
+        assert_eq!(state.hidden_lines(), 34);
+
+        let (x, y) = fold_tile_center();
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.folded.get(), "click at ({x}, {y}) over {under:?} did not show the files whole");
+        let doc = live.doc.get();
+        assert_eq!(doc.len(), 64 + 72, "every line, no divider");
+        assert!(doc.folds.is_empty());
+        assert_eq!(state.hidden_lines(), 0, "nothing hidden, so the status line says nothing");
+        assert_eq!(laid_out_text(&live), doc.text);
+
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(state.folded.get());
+        assert_eq!(live.doc.get().len(), 103, "folded again, with the reveal as it was");
+        assert_eq!(state.hidden_lines(), 34);
+        assert_eq!(laid_out_text(&live), live.doc.get().text);
     }
 
     // Folds.

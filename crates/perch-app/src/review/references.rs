@@ -770,6 +770,7 @@ mod window {
             None,
             false,
             perch_git::Scope::Branch,
+            String::new(),
         )
     }
 

@@ -84,6 +84,33 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
         });
     }
+    // And the runs the reader opened out of a fold, or folded again, go
+    // to the store from here too. The item is read as the write is sent:
+    // the effect runs on the write, before anything else can open another.
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            use crate::review::model::RevealWrite;
+            let writes = review.pending_reveals.get();
+            if writes.is_empty() {
+                return;
+            }
+            review.pending_reveals.set(Vec::new());
+            let Some(item_id) = review.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
+                return;
+            };
+            for write in writes {
+                match write {
+                    RevealWrite::Reveal { path, blob, first, last } => {
+                        backend.reveal(&item_id, &path, &blob, first, last)
+                    }
+                    RevealWrite::Reset { path, blob, first, last } => {
+                        backend.reset_reveals(&item_id, &path, &blob, first, last)
+                    }
+                }
+            }
+        });
+    }
 
     Stack::vertical((
         Stack::horizontal((

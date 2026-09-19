@@ -5,20 +5,21 @@
 //! capture under each token, and a divider where a run of unchanged lines
 //! is folded away. Lets the data path be checked without a window. The
 //! folds are around the changes and the anchors of the item's threads,
-//! read from the cache the app uses; `--whole` renders the buffer whole,
-//! with nothing folded. `--split` renders both sides of the split, one
-//! after the other, each with its dividers, and ends in the two row
-//! counts, so that the sides being the same height can be checked by eye
-//! and by test.
+//! less the reveals stored for the file's blob, and none at all when Show
+//! whole is off for the item, all read from the cache the app uses;
+//! `--whole` renders the buffer whole, with nothing folded. `--split`
+//! renders both sides of the split, one after the other, each with its
+//! dividers, and ends in the two row counts, so that the sides being the
+//! same height can be checked by eye and by test.
 
 use std::sync::Arc;
 
-use perch_git::{ChangeStatus, Preparer, RepoId, Row, Store};
+use perch_git::{ChangeStatus, Preparer, RepoId, Row, Scope, Store};
 use perch_github::{resolve_token, Cache, Config, GitHub, ItemKind};
 
 use crate::review::doc::{self, Doc, DocRow, Reveals, Tint};
 use crate::review::editor::{self, Side};
-use crate::review::model::LoadedFile;
+use crate::review::model::{folded_from_meta, folded_meta_key, LoadedFile};
 
 pub fn run(args: &[String]) {
     let mut positional = Vec::new();
@@ -72,60 +73,38 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
         .await
         .map_err(|e| e.to_string())?;
 
-    let name_status = preparer
-        .git()
-        .run(
-            Some(&checkout.bare),
-            [
-                "diff",
-                "-M",
-                "--name-status",
-                "-z",
-                &checkout.merge_base,
-                &checkout.head_sha,
-            ],
-            std::time::Duration::from_secs(60),
-        )
+    // The changed list the window reads, which carries each file's head
+    // blob, and the two sides read the way the window reads them.
+    let scope = Scope::Branch;
+    let git = preparer.git();
+    let files = perch_git::changed_files(git, &checkout.worktree, &scope, &checkout.merge_base, &checkout.head_sha)
         .await
         .map_err(|e| e.to_string())?;
-    let numstat = preparer
-        .git()
-        .run(
-            Some(&checkout.bare),
-            [
-                "diff",
-                "-M",
-                "--numstat",
-                "-z",
-                &checkout.merge_base,
-                &checkout.head_sha,
-            ],
-            std::time::Duration::from_secs(60),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let files = perch_git::diff::merge_file_lists(
-        perch_git::diff::parse_name_status(&name_status),
-        perch_git::diff::parse_numstat(&numstat),
-    );
     let entry = files.iter().find(|f| f.path == path).cloned();
+    let (base_rev, head_rev) = scope.sides(&checkout.merge_base, &checkout.head_sha);
 
-    let head = if entry.as_ref().map(|f| f.status) == Some(ChangeStatus::Deleted) {
-        String::new()
-    } else {
-        std::fs::read_to_string(checkout.worktree.join(path)).unwrap_or_default()
+    let head = match &entry {
+        Some(f) if f.status == ChangeStatus::Deleted => String::new(),
+        Some(_) => perch_git::read_side(git, &checkout.worktree, &head_rev, path)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("{path} is not there"))?,
+        // A file outside the changed list is read from disk, as the
+        // window reads it.
+        None => std::fs::read_to_string(checkout.worktree.join(path)).map_err(|e| e.to_string())?,
     };
     let base = match &entry {
         Some(f) if f.status != ChangeStatus::Added => {
             let source = f.old_path.clone().unwrap_or_else(|| f.path.clone());
-            preparer
-                .show_blob(&checkout.bare, &checkout.merge_base, &source)
+            perch_git::read_side(git, &checkout.worktree, &base_rev, &source)
                 .await
+                .ok()
+                .flatten()
                 .unwrap_or_default()
         }
         _ => String::new(),
     };
+    let blob = entry.as_ref().and_then(|f| f.head_blob.clone()).unwrap_or_default();
 
     let file = Arc::new(crate::backend::build_loaded_file(
         path.to_string(),
@@ -133,16 +112,17 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
         base,
         entry.as_ref().map(|f| f.status),
         entry.as_ref().map(|f| f.binary).unwrap_or(false),
-        perch_git::Scope::Branch,
+        scope,
+        blob,
     ));
 
-    // The documents as the window would build them: the reveals are not
-    // stored yet, so the folds are the defaults. A file with no base side
-    // is stacked in the window whatever the layout, and here too.
-    let anchors = if whole { Vec::new() } else { anchors_from_cache(full_name, number, path) };
-    let reveals = Reveals::default();
+    // The documents as the window would build them, from what the cache
+    // holds for the item. A file with no base side is stacked in the
+    // window whatever the layout, and here too.
+    let Kept { anchors, reveals, folded } = if whole { Kept::none() } else { kept_for(full_name, number, &file) };
+    let folded = folded && !whole;
     let sides = if split {
-        let sides = editor::split_doc(&file, !whole, &anchors, &reveals);
+        let sides = editor::split_doc(&file, folded, &anchors, &reveals);
         if sides.is_none() {
             eprintln!("note: {path} has no base side; the window shows it stacked, and so does this");
         }
@@ -152,7 +132,7 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     };
     let rendered = match sides {
         Some((left, right)) => Rendered::Split(left, right),
-        None => Rendered::Stacked(editor::stacked_doc(&file, !whole, &anchors, &reveals)),
+        None => Rendered::Stacked(editor::stacked_doc(&file, folded, &anchors, &reveals)),
     };
 
     println!("file:     {}", file.path);
@@ -160,8 +140,11 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     println!("status:   {:?}", file.status);
     println!("lines:    {}", file.buffer.len());
     println!("changes:  {}", file.buffer.change_starts.len());
+    println!("blob:     {}", if file.blob.is_empty() { "none" } else { &file.blob });
     if !whole {
         println!("anchors:  {}", anchors.len());
+        println!("reveals:  {}", reveals_line(&reveals));
+        println!("folded:   {}", if folded { "yes" } else { "no, the item's files are shown whole" });
         println!("hidden:   {}", rendered.hidden_lines());
     }
 
@@ -265,38 +248,57 @@ fn card_name(card: &doc::CardId) -> String {
     }
 }
 
-/// The head lines the item's threads are anchored on in a file, from the
-/// cache: the reader's own and GitHub's review comments, as the window
-/// counts them. None when there is no cache or the item is not in it, and
-/// a note on stderr says so, so stdout stays the document alone.
-fn anchors_from_cache(full_name: &str, number: u64, path: &str) -> Vec<(usize, usize)> {
+/// The reveals as the gutter numbers them: `5-24, 44-63`, or `none`.
+fn reveals_line(reveals: &Reveals) -> String {
+    if reveals.is_empty() {
+        return "none".to_string();
+    }
+    reveals.iter().map(|(first, last)| format!("{}-{}", first + 1, last + 1)).collect::<Vec<_>>().join(", ")
+}
+
+/// What the cache holds for an item that shapes a file's document: the
+/// head lines its threads are anchored on, the reader's own and GitHub's
+/// review comments, as the window counts them; the reveals stored for the
+/// file's blob; and whether the item's files are folded at all.
+struct Kept {
+    anchors: Vec<(usize, usize)>,
+    reveals: Reveals,
+    folded: bool,
+}
+
+impl Kept {
+    /// Nothing kept: folded around the changes alone, as a new item is.
+    fn none() -> Self {
+        Self { anchors: Vec::new(), reveals: Reveals::default(), folded: true }
+    }
+}
+
+/// What is kept for the item, or nothing when there is no cache or the
+/// item is not in it, with a note on stderr saying so, so stdout stays
+/// the document alone.
+fn kept_for(full_name: &str, number: u64, file: &LoadedFile) -> Kept {
     let Some(db) = perch_github::config::db_path() else {
-        return Vec::new();
+        return Kept::none();
     };
     if !db.exists() {
         eprintln!("note: no cache at {}; folding around the changes alone", db.display());
-        return Vec::new();
+        return Kept::none();
     }
-    match anchors_in(&db, full_name, number, path) {
-        Ok(Some(anchors)) => anchors,
+    match kept_in(&db, full_name, number, file) {
+        Ok(Some(kept)) => kept,
         Ok(None) => {
             eprintln!("note: {full_name}#{number} is not in the cache; folding around the changes alone");
-            Vec::new()
+            Kept::none()
         }
         Err(e) => {
             eprintln!("note: could not read the cache ({e}); folding around the changes alone");
-            Vec::new()
+            Kept::none()
         }
     }
 }
 
 /// `None` when the item is not in the cache.
-fn anchors_in(
-    db: &std::path::Path,
-    full_name: &str,
-    number: u64,
-    path: &str,
-) -> Result<Option<Vec<(usize, usize)>>, String> {
+fn kept_in(db: &std::path::Path, full_name: &str, number: u64, file: &LoadedFile) -> Result<Option<Kept>, String> {
     let cache = Cache::open(db, None).map_err(|e| e.to_string())?;
     let Some(item) = cache
         .find_item_by_subject(full_name, ItemKind::PullRequest, number)
@@ -306,5 +308,20 @@ fn anchors_in(
     };
     let threads = cache.load_comment_threads(&item.id).map_err(|e| e.to_string())?;
     let discussion = cache.load_discussion(&item.id).map_err(|e| e.to_string())?.map(|(_, d)| d);
-    Ok(Some(crate::review::model::anchors_of(&threads, discussion.as_ref(), path)))
+    let anchors = crate::review::model::anchors_of(&threads, discussion.as_ref(), &file.path);
+    // A file with no blob has no rows, as in the window.
+    let reveals = if file.blob.is_empty() {
+        Reveals::default()
+    } else {
+        cache
+            .load_reveals(&item.id)
+            .map_err(|e| e.to_string())?
+            .remove(&(file.path.clone(), file.blob.clone()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(a, b)| (a as usize, b as usize))
+            .collect()
+    };
+    let folded = folded_from_meta(cache.meta(&folded_meta_key(&item.id)).map_err(|e| e.to_string())?.as_deref());
+    Ok(Some(Kept { anchors, reveals, folded }))
 }

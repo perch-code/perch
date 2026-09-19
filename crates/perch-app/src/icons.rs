@@ -237,6 +237,15 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                      stroke="{c}" stroke-width="1.4"/>
                <path d="M8 2.7 V13.3" stroke="{c}" stroke-width="1.4"/>"#
         ),
+        // A rule with a chevron pointing at it from each side: the diff
+        // folded to its changes, the shape github.com folds with.
+        SidebarIcon::Fold => format!(
+            r#"<path d="M2.5 8 H13.5" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+               <path d="M8 2 V5.6 M5.9 3.7 L8 5.8 L10.1 3.7" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M8 14 V10.4 M5.9 12.3 L8 10.2 L10.1 12.3" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
     };
     svg16(&body)
 }
@@ -282,19 +291,23 @@ pub enum SidebarIcon {
     Stacked,
     /// A frame cut down: base beside head.
     Split,
+    /// A rule with a chevron pointing at it from above and below: a diff
+    /// folded to its changes.
+    Fold,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 28] = [
+    pub const ALL: [SidebarIcon; 29] = [
         SidebarIcon::Link,
         SidebarIcon::ThreadHollow,
         SidebarIcon::ChangesRequested,
         SidebarIcon::Milestone,
         SidebarIcon::Stacked,
         SidebarIcon::Split,
+        SidebarIcon::Fold,
         SidebarIcon::Pin,
         SidebarIcon::Filter,
         SidebarIcon::Plus,

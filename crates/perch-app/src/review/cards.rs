@@ -186,9 +186,15 @@ fn track_hover<V: IntoView + 'static>(view: V, hovered: RwSignal<bool>) -> impl 
 /// A view with a line of explanation on hover, in the window's overlay so
 /// nothing drawn after it can cover it.
 pub fn tip<V: IntoView + 'static>(view: V, text: String) -> impl IntoView {
+    tip_with(view, move || text.clone())
+}
+
+/// The same, with an explanation that follows what it explains: read
+/// each time the tip is shown.
+pub fn tip_with<V: IntoView + 'static>(view: V, text: impl Fn() -> String + Clone + 'static) -> impl IntoView {
     view.tooltip(move || {
         let text = text.clone();
-        Label::derived(move || text.clone()).style(|s| {
+        Label::derived(text).style(|s| {
             s.font_size(theme::TEXT_BADGE)
                 .color(theme::FG)
                 .padding_vert(5.0)
@@ -964,6 +970,7 @@ mod tests {
             Some(perch_git::ChangeStatus::Modified),
             false,
             perch_git::Scope::Branch,
+            String::new(),
         );
         let anchor = |start, line| Anchor { path: "src/x.rs".into(), start_line: start, line, side: perch_github::Side::Right, commit_sha: "h".into() };
         let (lines, more) = anchored_lines(&file, &anchor(1, 3), 8);

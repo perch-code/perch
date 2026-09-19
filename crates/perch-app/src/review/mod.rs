@@ -207,48 +207,138 @@ fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Back
     .style(|s| s.size_full().min_height(0.0))
 }
 
-/// One line under the review view, in the status bar's right-hand slot.
-pub fn review_status(state: ReviewState) -> impl IntoView {
-    use floem::views::Label;
+/// The separator between the status line's parts.
+const STATUS_SEPARATOR: &str = "  \u{00b7}  ";
 
-    Label::derived(move || {
-        let server = state.lsp_status.get();
-        let server = if matches!(server, perch_lsp::Status::Absent) {
-            String::new()
-        } else {
-            format!("  \u{00b7}  {}", server.describe())
-        };
-        let archived = match state.archived.get() {
-            Some(0) => "  \u{00b7}  discussion up to date".to_string(),
-            Some(1) => "  \u{00b7}  1 message archived".to_string(),
-            Some(n) => format!("  \u{00b7}  {n} messages archived"),
-            None => String::new(),
-        };
-        let server = format!("{server}{archived}");
+/// The status line's text in three parts, so that the hidden count can be
+/// a view of its own: up to the change count; how many lines the open
+/// file's folds hide, when they hide any; and the cursor's line, then the
+/// language server's state and what the archive took in. A line that is
+/// not about a file is all `before`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusLine {
+    before: String,
+    hidden: Option<String>,
+    after: String,
+}
 
-        if let Some(issue) = state.issue.get() {
-            return format!("{}{server}", issue::describe(&issue));
-        }
-        let Some(file) = state.active_file() else {
-            let n = state.changed_files.with(|f| f.len());
-            return format!("{n} changed files{server}");
-        };
-        if file.truncated {
-            return format!("{}  \u{00b7}  not shown as text{server}", file.path);
-        }
-        let language = file.language.map(|l| l.name()).unwrap_or("Plain text");
-        let changes = file.change_count();
-        let line = state.cursor_line.get() + 1;
-        format!(
-            "{}  \u{00b7}  {language}  \u{00b7}  {} lines  \u{00b7}  {changes} changes  \u{00b7}  ln {line}{server}",
+fn status_line(state: ReviewState, hidden: usize) -> StatusLine {
+    let server = state.lsp_status.get();
+    let server = if matches!(server, perch_lsp::Status::Absent) {
+        String::new()
+    } else {
+        format!("{STATUS_SEPARATOR}{}", server.describe())
+    };
+    let archived = match state.archived.get() {
+        Some(0) => format!("{STATUS_SEPARATOR}discussion up to date"),
+        Some(1) => format!("{STATUS_SEPARATOR}1 message archived"),
+        Some(n) => format!("{STATUS_SEPARATOR}{n} messages archived"),
+        None => String::new(),
+    };
+    let server = format!("{server}{archived}");
+    let whole = |before: String| StatusLine { before: format!("{before}{server}"), hidden: None, after: String::new() };
+
+    if let Some(issue) = state.issue.get() {
+        return whole(issue::describe(&issue));
+    }
+    let Some(file) = state.active_file() else {
+        let n = state.changed_files.with(|f| f.len());
+        return whole(format!("{n} changed files"));
+    };
+    if file.truncated {
+        return whole(format!("{}{STATUS_SEPARATOR}not shown as text", file.path));
+    }
+    let language = file.language.map(|l| l.name()).unwrap_or("Plain text");
+    let changes = file.change_count();
+    let line = state.cursor_line.get() + 1;
+    StatusLine {
+        before: format!(
+            "{}{STATUS_SEPARATOR}{language}{STATUS_SEPARATOR}{} lines{STATUS_SEPARATOR}{changes} changes",
             file.path,
             file.line_count()
-        )
-    })
-    .style(|s| {
-        s.font_size(theme::TEXT_META)
-            .color(theme::FG_MUTED)
-            .text_ellipsis()
-            .min_width(0.0)
-    })
+        ),
+        hidden: (hidden > 0).then(|| hidden_lines_label(hidden)),
+        after: format!("{STATUS_SEPARATOR}ln {line}{server}"),
+    }
+}
+
+/// `312 lines hidden`, with the thousands separated as the backfill's
+/// count is.
+fn hidden_lines_label(hidden: usize) -> String {
+    if hidden == 1 {
+        "1 line hidden".to_string()
+    } else {
+        format!("{} lines hidden", crate::ui::status::with_thousands(hidden))
+    }
+}
+
+/// One line under the review view, in the status bar's right-hand slot.
+/// The hidden count is a label of its own between the others: clicking it
+/// is Show whole for the item, and it is gone rather than blank when the
+/// file has nothing folded, so the line reads as it did without folds.
+pub fn review_status(app: AppState, state: ReviewState) -> impl IntoView {
+    use floem::views::{Empty, Label};
+
+    let muted = |s: floem::style::Style| s.font_size(theme::TEXT_META).color(theme::FG_MUTED);
+    let line = move || status_line(state, state.hidden_lines());
+    Stack::horizontal((
+        Label::derived(move || line().before).style(move |s| muted(s).text_ellipsis().min_width(0.0)),
+        dyn_container(
+            move || line().hidden,
+            move |hidden| match hidden {
+                None => Empty::new().into_any(),
+                Some(text) => Stack::horizontal((
+                    Label::derived(|| STATUS_SEPARATOR.to_string()).style(muted),
+                    cards::tip(
+                        Label::derived(move || text.clone())
+                            .on_event_stop(el::Click, move |_, _| tabs::toggle_folded(app, state))
+                            .style(move |s| {
+                                crate::ui::widgets::clickable(muted(s)).hover(|s| s.color(theme::ACCENT))
+                            }),
+                        "Show this worktree's files whole".to_string(),
+                    ),
+                ))
+                .style(|s| s.items_center().flex_shrink(0.0_f32))
+                .into_any(),
+            },
+        ),
+        Label::derived(move || line().after).style(move |s| muted(s).flex_shrink(0.0_f32)),
+    ))
+    .style(|s| s.items_center().min_width(0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_status_line_names_the_hidden_lines_only_when_the_file_has_some() {
+        let state = ReviewState::new();
+        let file = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "fn a() {}\nfn b() {}\n".into(),
+            "fn a() {}\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            "b1".into(),
+        );
+        state.open_tab("src/x.rs");
+        state.finish_load("src/x.rs", std::sync::Arc::new(file));
+
+        let before = format!("src/x.rs{STATUS_SEPARATOR}Rust{STATUS_SEPARATOR}2 lines{STATUS_SEPARATOR}1 changes");
+        let after = format!("{STATUS_SEPARATOR}ln 1");
+        assert_eq!(status_line(state, 0), StatusLine { before: before.clone(), hidden: None, after: after.clone() });
+        assert_eq!(
+            status_line(state, 312),
+            StatusLine { before, hidden: Some("312 lines hidden".into()), after }
+        );
+        assert_eq!(status_line(state, 12_000).hidden.as_deref(), Some("12,000 lines hidden"));
+        assert_eq!(status_line(state, 1).hidden.as_deref(), Some("1 line hidden"));
+
+        // A line that is not about a file has no count, whatever it is
+        // given: there is no document to have folds.
+        state.close_tab("src/x.rs");
+        assert_eq!(status_line(state, 312), StatusLine { before: "0 changed files".into(), hidden: None, after: String::new() });
+    }
 }

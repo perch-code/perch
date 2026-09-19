@@ -562,7 +562,7 @@ impl Reveals {
         self.0.is_empty()
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "the reveals are written to the store from step 4 of milestone 11"))]
+    /// The ranges, first line first.
     pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.0.iter().copied()
     }
@@ -600,6 +600,17 @@ impl Reveals {
                     default_heads: run.default_heads,
                 });
             }
+        }
+        out
+    }
+}
+
+/// The set the store holds for a file, as it was loaded.
+impl FromIterator<(usize, usize)> for Reveals {
+    fn from_iter<I: IntoIterator<Item = (usize, usize)>>(ranges: I) -> Self {
+        let mut out = Self::default();
+        for (first, last) in ranges {
+            out.add(first, last);
         }
         out
     }

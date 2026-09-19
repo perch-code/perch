@@ -292,9 +292,33 @@ impl AppState {
                     }
                 }
             }
-            Event::ViewedReady { item_id, viewed } => {
+            Event::ViewedReady { item_id, viewed, reveals, folded } => {
                 if review.is_item(&item_id) {
                     review.viewed.set(viewed);
+                    // The store's reveals replace what is held for the
+                    // files it has rows for. A file with no blob has none
+                    // there and keeps its own, under the empty blob. The
+                    // writes are skipped when nothing changed: each would
+                    // rebuild the open file's document for nothing.
+                    let loaded: HashMap<(String, String), crate::review::doc::Reveals> = reveals
+                        .iter()
+                        .map(|(key, ranges)| {
+                            (key.clone(), ranges.iter().map(|&(a, b)| (a as usize, b as usize)).collect())
+                        })
+                        .collect();
+                    let changed = review.reveals.with_untracked(|held| {
+                        held.iter().filter(|((_, blob), _)| !blob.is_empty()).count() != loaded.len()
+                            || loaded.iter().any(|(key, set)| held.get(key) != Some(set))
+                    });
+                    if changed {
+                        review.reveals.update(|held| {
+                            held.retain(|(_, blob), _| blob.is_empty());
+                            held.extend(loaded);
+                        });
+                    }
+                    if review.folded.get_untracked() != folded {
+                        review.folded.set(folded);
+                    }
                 }
             }
             Event::LspReferences { token, references, elsewhere } => {
@@ -427,5 +451,60 @@ impl AppState {
             return None;
         }
         self.avatars.with(|m| m.get(url).cloned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review::model::ReviewState;
+
+    /// A review with an item open, by id.
+    fn review_of(id: &str) -> ReviewState {
+        let review = ReviewState::new();
+        let mut item = Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
+        item.id = id.into();
+        review.item.set(Some(Arc::new(item)));
+        review
+    }
+
+    /// What the backend sends for an item: `src/x.rs` at `b1` viewed, with
+    /// two runs revealed in it.
+    fn viewed_ready(item_id: &str, reveals: Vec<(u32, u32)>, folded: bool) -> Event {
+        let key = ("src/x.rs".to_string(), "b1".to_string());
+        Event::ViewedReady {
+            item_id: item_id.into(),
+            viewed: Arc::new([key.clone()].into_iter().collect()),
+            reveals: Arc::new(if reveals.is_empty() { HashMap::new() } else { [(key, reveals)].into_iter().collect() }),
+            folded,
+        }
+    }
+
+    #[test]
+    fn viewed_ready_carries_the_reveals_and_the_folded_flag_into_the_open_item() {
+        let app = AppState::new();
+        let review = review_of("wt");
+        // A file with no blob has reveals the store never sees.
+        review.reveal("untracked.rs", "", 0, 9);
+
+        // Another item's answer, arriving late, lands nowhere.
+        app.apply_with_review(viewed_ready("other", vec![(4, 23)], false), review);
+        assert!(review.folded.get());
+        assert!(review.viewed.get().is_empty());
+        assert!(review.reveals_for("src/x.rs", "b1").is_empty());
+
+        app.apply_with_review(viewed_ready("wt", vec![(4, 23), (40, 59)], false), review);
+        assert!(!review.folded.get(), "the item's files were left whole");
+        assert!(review.viewed.get().contains(&("src/x.rs".into(), "b1".into())));
+        assert_eq!(review.reveals_for("src/x.rs", "b1").iter().collect::<Vec<_>>(), vec![(4, 23), (40, 59)]);
+        assert!(review.reveals_for("untracked.rs", "").overlaps(0, 9), "the store has no row to replace it with");
+
+        // After a Reset the store has fewer rows, and the state follows.
+        app.apply_with_review(viewed_ready("wt", vec![(40, 59)], true), review);
+        assert!(review.folded.get());
+        assert_eq!(review.reveals_for("src/x.rs", "b1").iter().collect::<Vec<_>>(), vec![(40, 59)]);
+        app.apply_with_review(viewed_ready("wt", Vec::new(), true), review);
+        assert!(review.reveals_for("src/x.rs", "b1").is_empty());
+        assert!(review.reveals_for("untracked.rs", "").overlaps(0, 9), "still kept");
     }
 }

@@ -39,8 +39,10 @@ pub struct LoadedFile {
     /// file outside the changed list.
     pub alignment: Vec<(Option<usize>, Option<usize>)>,
     /// The head blob, which the reveals are keyed by, as Viewed is: a new
-    /// blob is new content and starts folded again. Empty until the load
-    /// records it, and for a file outside the changed list.
+    /// blob is new content and starts folded again. Empty for a file that
+    /// has none: one outside the changed list, a deletion, or a working
+    /// tree file git has not hashed. Such a file's reveals are kept for
+    /// the window's life and never stored.
     pub blob: String,
 }
 
@@ -201,7 +203,6 @@ pub struct LiveDoc {
 /// A reader checks the epoch against `editor_epoch` first: an entry from an
 /// editor since rebuilt is stale.
 #[derive(Clone)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the cards read the open editors' documents from step 5 of milestone 11"))]
 pub struct LiveDocs {
     pub epoch: u64,
     pub layout: LiveLayout,
@@ -209,10 +210,57 @@ pub struct LiveDocs {
 
 /// Which editors are open: the stacked one, or a split's two.
 #[derive(Clone)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the cards read the open editors' documents from step 5 of milestone 11"))]
 pub enum LiveLayout {
     Stacked(LiveDoc),
-    Split { left: LiveDoc, right: LiveDoc },
+    Split {
+        #[cfg_attr(not(test), expect(dead_code, reason = "the cards span both sides from step 5 of milestone 11"))]
+        left: LiveDoc,
+        right: LiveDoc,
+    },
+}
+
+impl LiveLayout {
+    /// The document the folds are counted from: the stacked one, or the
+    /// head side of a split, whose dividers the base side mirrors.
+    pub fn head(&self) -> &LiveDoc {
+        match self {
+            LiveLayout::Stacked(live) => live,
+            LiveLayout::Split { right, .. } => right,
+        }
+    }
+}
+
+/// A write to the store's reveals, waiting for the backend. The state has
+/// no handle to it, so a reveal queues one of these and the root view,
+/// which has the handle, sends it on, as it sends a setting on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevealWrite {
+    /// Head lines `first` to `last` of a file's content were opened.
+    Reveal { path: String, blob: String, first: u32, last: u32 },
+    /// Every reveal overlapping `first` to `last` is forgotten: a Reset.
+    Reset { path: String, blob: String, first: u32, last: u32 },
+}
+
+/// The `meta` key that remembers Show whole for an item. Per item rather
+/// than in the list the launch reads, because a reader folds one review
+/// and not another; the backend reads it when the item opens.
+pub fn folded_meta_key(item_id: &str) -> String {
+    format!("review.folded.{item_id}")
+}
+
+/// What is written under the key: `1` folded, `0` whole.
+pub fn folded_meta_value(folded: bool) -> &'static str {
+    if folded {
+        "1"
+    } else {
+        "0"
+    }
+}
+
+/// What a value read from under the key means. Absent is folded: the
+/// default, which only turning Show whole off ever writes over.
+pub fn folded_from_meta(value: Option<&str>) -> bool {
+    value.map(str::trim) != Some("0")
 }
 
 /// Everything the review view renders from. All fields are signals, so the
@@ -271,8 +319,13 @@ pub struct ReviewState {
     /// worktree: a reader folds one review and not another.
     pub folded: RwSignal<bool>,
     /// The runs the reader asked to see, by (path, blob), in head lines,
-    /// so a reveal made in one layout holds in the other.
+    /// so a reveal made in one layout holds in the other. Loaded with the
+    /// viewed set when the item opens; a file with no blob keeps its
+    /// reveals here under `(path, "")` and nowhere else.
     pub reveals: RwSignal<HashMap<(String, String), Reveals>>,
+    /// Reveals and resets not yet sent to the store, drained by the root
+    /// view, which holds the backend handle.
+    pub pending_reveals: RwSignal<Vec<RevealWrite>>,
     /// The references panel's content, when it is open.
     pub references: RwSignal<Option<Arc<References>>>,
     /// The panel's height. Dragged.
@@ -392,6 +445,7 @@ impl ReviewState {
             viewed: RwSignal::new(Arc::new(std::collections::HashSet::new())),
             folded: RwSignal::new(true),
             reveals: RwSignal::new(HashMap::new()),
+            pending_reveals: RwSignal::new(Vec::new()),
             references: RwSignal::new(None),
             references_height: RwSignal::new(crate::theme::REFERENCES_HEIGHT),
             changed_files: RwSignal::new(Arc::new(Vec::new())),
@@ -475,8 +529,16 @@ impl ReviewState {
         self.discussion.set(None);
         self.checks.set(None);
         self.viewed.set(Arc::new(std::collections::HashSet::new()));
-        self.folded.set(true);
-        self.reveals.set(HashMap::new());
+        // Folded until the open's ViewedReady says what the item has. Only
+        // written when they change: the open editor rebuilds its document
+        // on either, and it is about to go.
+        if !self.folded.get_untracked() {
+            self.folded.set(true);
+        }
+        if !self.reveals.with_untracked(HashMap::is_empty) {
+            self.reveals.set(HashMap::new());
+        }
+        self.pending_reveals.set(Vec::new());
         self.references.set(None);
         self.changed_files.set(Arc::new(Vec::new()));
         self.tree.set(Arc::new(Vec::new()));
@@ -747,24 +809,59 @@ impl ReviewState {
     }
 
     /// Show head lines `first` to `last` of a file, inclusive, whatever
-    /// fold they are in.
+    /// fold they are in, and remember it for the file's content.
     pub fn reveal(&self, path: &str, blob: &str, first: usize, last: usize) {
         self.reveals.update(|m| {
             m.entry((path.to_string(), blob.to_string())).or_default().add(first, last);
         });
+        self.queue_reveal_write(blob, RevealWrite::Reveal {
+            path: path.to_string(),
+            blob: blob.to_string(),
+            first: first as u32,
+            last: last as u32,
+        });
     }
 
     /// Fold a run back to its default: forget every reveal in the run
-    /// this is a piece of.
+    /// this is a piece of, here and in the store.
     pub fn reset(&self, path: &str, blob: &str, run: &Run) {
+        let (first, last) = run.default_heads;
         self.reveals.update(|m| {
             if let Some(reveals) = m.get_mut(&(path.to_string(), blob.to_string())) {
-                reveals.remove_overlapping(run.default_heads.0, run.default_heads.1);
+                reveals.remove_overlapping(first, last);
                 if reveals.is_empty() {
                     m.remove(&(path.to_string(), blob.to_string()));
                 }
             }
         });
+        self.queue_reveal_write(blob, RevealWrite::Reset {
+            path: path.to_string(),
+            blob: blob.to_string(),
+            first: first as u32,
+            last: last as u32,
+        });
+    }
+
+    /// Hand a write to the root view for the backend. A file with no blob
+    /// has nothing to key a row by, so its reveals stay in memory.
+    fn queue_reveal_write(&self, blob: &str, write: RevealWrite) {
+        if blob.is_empty() {
+            return;
+        }
+        self.pending_reveals.update(|w| w.push(write));
+    }
+
+    /// How many lines the open file's dividers hide between them, from the
+    /// document the editor is laying out: the stacked one, or the head
+    /// side of a split. Nothing when no editor is open, when the file is
+    /// shown whole, or when the entry is an editor's since rebuilt.
+    pub fn hidden_lines(&self) -> usize {
+        self.docs.with(|docs| {
+            let docs = docs.as_ref().filter(|d| d.epoch == self.editor_epoch.get())?;
+            // The document's signal lives with its editor; see `LiveDoc`.
+            docs.layout.head().doc.try_with(|doc| doc.map(|d| d.hidden_lines()))
+        })
+        .unwrap_or(0)
     }
 
     pub fn fail_load(&self, path: &str) {
@@ -1122,6 +1219,24 @@ mod tests {
         assert!(state.reveals_for("src/x.rs", "b2").overlaps(50, 60), "and no other");
         let key = ("src/x.rs".to_string(), "b1".to_string());
         assert!(!state.reveals.get().contains_key(&key), "an empty set is dropped");
+
+        // Each went to the store as it happened, the reset over the whole
+        // run the piece was cut from.
+        assert_eq!(
+            state.pending_reveals.get(),
+            vec![
+                RevealWrite::Reveal { path: "src/x.rs".into(), blob: "b1".into(), first: 4, last: 23 },
+                RevealWrite::Reveal { path: "src/x.rs".into(), blob: "b2".into(), first: 50, last: 60 },
+                RevealWrite::Reset { path: "src/x.rs".into(), blob: "b1".into(), first: 4, last: 37 },
+            ]
+        );
+
+        // A file with no blob keeps its reveals here and sends nothing.
+        state.pending_reveals.set(Vec::new());
+        state.reveal("untracked.rs", "", 0, 9);
+        state.reset("untracked.rs", "", &piece);
+        assert!(state.pending_reveals.get().is_empty());
+        assert!(state.reveals_for("untracked.rs", "").is_empty(), "the reset still took in memory");
     }
 
     #[test]
