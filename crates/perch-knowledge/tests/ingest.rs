@@ -396,3 +396,30 @@ fn a_branch_with_nothing_on_github_files_its_threads_under_branches() {
     let index = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/index.md")).unwrap();
     assert!(index.contains("| slatedb/slatedb@chris/fence | perch/branches/chris-fence.md | 2 |"), "{index}");
 }
+
+#[test]
+fn two_stores_over_one_root_ingesting_at_once_lose_nothing() {
+    // The app and `perch --backfill` each open the root and file into the
+    // same raw file, each ingest a read, a merge and a write. Two handles
+    // on two threads stand in for the two processes: every record either
+    // filed is in the raw file at the end.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let writer = |name: &'static str| {
+        let k = Knowledge::open(root.clone());
+        std::thread::spawn(move || {
+            for n in 0..120 {
+                let m = msg(&format!("{name}-{n}"), "2026-09-15T09:14:00Z", &format!("{name} says {n}"));
+                k.ingest(&[m]).unwrap();
+            }
+        })
+    };
+    let (app, harness) = (writer("app"), writer("harness"));
+    app.join().unwrap();
+    harness.join().unwrap();
+
+    let raw = std::fs::read_to_string(tmp.path().join("slatedb/slatedb/raw/github.jsonl")).unwrap();
+    assert_eq!(raw.lines().count(), 240, "a record written over by the other writer would be missing");
+    let k = Knowledge::open(tmp.path());
+    assert_eq!(k.repos().unwrap(), vec!["slatedb/slatedb"], "the lock file at the root is not a repository");
+}

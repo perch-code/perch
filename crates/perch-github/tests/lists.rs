@@ -368,16 +368,26 @@ async fn the_closed_queries_carry_sort_direction_and_since() {
 }
 
 #[tokio::test]
-async fn a_closed_issues_page_drops_pull_requests_too() {
-    let (base, _) = spawn(|_| {
-        ok(RATE, page(vec![issue_json(1), pull_as_issue_json(2), issue_json(3)]))
-    });
+async fn a_closed_issues_page_drops_pull_requests_too_but_its_newest_counts_them() {
+    // The pull request is the page's last entry, updated after both issues.
+    let later = pull_as_issue_json(2).replace("2026-09-16T11:40:00Z", "2026-09-17T08:00:00Z");
+    let (base, _) = spawn(move |_| ok(RATE, page(vec![issue_json(1), later.clone(), issue_json(3)])));
     let gh = GitHub::with_base_uri("token", &base).expect("client");
 
     let listed = gh.list_closed_issues("a/b", 1, None).await.expect("issues");
 
     let numbers: Vec<u64> = listed.items.iter().map(|i| i.number).collect();
     assert_eq!(numbers, [1, 3], "history has no place for a pull request filed as an issue");
+    assert_eq!(
+        listed.newest,
+        Some("2026-09-17T08:00:00Z".parse().unwrap()),
+        "but the page was read past it, and a since cursor short of it would list it every time"
+    );
+
+    let (base, _) = spawn(|_| ok(RATE, page(vec![pull_json(4, "closed"), pull_json(5, "closed")])));
+    let gh = GitHub::with_base_uri("token", &base).expect("client");
+    let pulls = gh.list_closed_pulls("a/b", 1).await.expect("pulls");
+    assert_eq!(pulls.newest, pulls.items[1].updated_at, "a pull request page's newest is its entries'");
 }
 
 #[tokio::test]

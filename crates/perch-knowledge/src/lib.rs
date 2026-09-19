@@ -143,6 +143,7 @@ impl Knowledge {
             split_repo(&m.repo)?;
             by_file.entry(raw_key(m)).or_default().push(m);
         }
+        let _held = self.hold()?;
 
         let mut result = Ingested::default();
         let mut touched_repos = std::collections::BTreeSet::new();
@@ -183,6 +184,21 @@ impl Knowledge {
             self.render_root_index()?;
         }
         Ok(result)
+    }
+
+    /// The store held for one ingest, against any other process's. An
+    /// ingest reads a raw file, merges and writes it back, and the app and
+    /// `perch --backfill` file into the same files at the same time; one
+    /// begun while the other's was under way would write over what it
+    /// added. A lock on a file at the root serialises them across
+    /// processes, as a lock in memory can only within one. It is released
+    /// when the handle is dropped.
+    fn hold(&self) -> Result<std::fs::File, Error> {
+        std::fs::create_dir_all(&self.root).map_err(io(&self.root))?;
+        let path = self.root.join(".lock");
+        let lock = std::fs::File::create(&path).map_err(io(&path))?;
+        lock.lock().map_err(io(&path))?;
+        Ok(lock)
     }
 
     /// Rebuild every rendered file and index from the raw files.

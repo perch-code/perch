@@ -463,7 +463,11 @@ since it was last kept, newest first, then walks the repository's closed
 pull requests and issues oldest first, a page at a time. It keeps its
 place in `perch.db`, so a restart goes on from the page it was on, and
 once the walk has reached the end it picks up only what has changed
-since. It paces itself by GitHub's rate limit: with fewer than a thousand
+since. The list is read by page number, so a closed pull request or
+issue that is commented on or relabelled while the walk is past it moves
+to the end of the list and shifts the rest back one, and the walk can
+miss one entry; it is archived when it next moves or is opened in Perch.
+It paces itself by GitHub's rate limit: with fewer than a thousand
 requests left it waits for the reset, and neither the poll nor anything
 you do is held by it. The status bar shows how far it is, "Archiving
 slatedb/slatedb, 312 of about 2,140", and the line goes when every

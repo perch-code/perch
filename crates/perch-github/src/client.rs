@@ -88,6 +88,12 @@ pub struct Page<T> {
     /// The page the `Link` header names as `rel="last"`. Absent on the last
     /// page itself, and when the whole list fits in one.
     pub last_page: Option<u32>,
+    /// The newest `updated_at` among everything the page listed, the pull
+    /// requests an issues page carried and dropped included. The list is
+    /// oldest updated first, so this is where the page was consumed to,
+    /// and where a later `since` must start from, whether or not the last
+    /// entry survived into `items`.
+    pub newest: Option<Timestamp>,
 }
 
 /// The rate limit as the last response reported it.
@@ -383,6 +389,7 @@ impl GitHub {
         let payloads: Vec<PullPayload> =
             serde_json::from_str(&fetched.body).map_err(|e| Error::Decode(e.to_string()))?;
         Ok(Page {
+            newest: payloads.iter().filter_map(|p| p.updated_at).max(),
             items: payloads
                 .into_iter()
                 .map(|p| p.into_pull_request(repo_full_name))
@@ -412,6 +419,10 @@ impl GitHub {
         let payloads: Vec<IssuePayload> =
             serde_json::from_str(&fetched.body).map_err(|e| Error::Decode(e.to_string()))?;
         Ok(Page {
+            // Before the pull requests are dropped: they count toward the
+            // page and toward `since`, so a cursor that stopped short of
+            // them would list them again on every catch-up.
+            newest: payloads.iter().map(|p| p.updated_at).max(),
             items: issues_only(payloads, repo_full_name),
             last_page: last_page_of(&fetched.headers),
         })

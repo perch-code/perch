@@ -119,9 +119,29 @@ pub(super) fn changed<T>(etag: Option<&str>, items: Vec<T>) -> Listed<T> {
     Listed::Changed { etag: etag.map(str::to_string), items }
 }
 
-/// One closed page, with the page the `Link` header would name as last.
-pub(super) fn page<T>(items: Vec<T>, last_page: Option<u32>) -> Page<T> {
-    Page { items, last_page }
+/// When a list entry was last updated, for a page's `newest`.
+pub(super) trait Updated {
+    fn updated(&self) -> Option<Timestamp>;
+}
+
+impl Updated for PullRequest {
+    fn updated(&self) -> Option<Timestamp> {
+        self.updated_at
+    }
+}
+
+impl Updated for Issue {
+    fn updated(&self) -> Option<Timestamp> {
+        Some(self.updated_at)
+    }
+}
+
+/// One closed page, with the page the `Link` header would name as last,
+/// its newest the newest of its entries. A test of a page that listed
+/// pull requests among issues builds the `Page` itself.
+pub(super) fn page<T: Updated>(items: Vec<T>, last_page: Option<u32>) -> Page<T> {
+    let newest = items.iter().filter_map(Updated::updated).max();
+    Page { items, last_page, newest }
 }
 
 pub(super) fn down() -> perch_github::Error {

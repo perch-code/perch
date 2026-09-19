@@ -175,6 +175,11 @@ impl<S: Source, W: Sleeper> Backfill<'_, S, W> {
             progress.expect(subject.repo_full_name(), 1);
         }
         for (id, subject) in stale {
+            // The wait for the reset comes before the guard is taken. Held
+            // across it, the guard would turn away the refresh of an item
+            // the reader opened during the wait, and that refresh is not
+            // asked for again.
+            self.await_floor().await;
             if (self.is_open)(&id) {
                 tracing::debug!(item = id, "open in the window; its own path archives it");
                 continue;
@@ -188,7 +193,18 @@ impl<S: Source, W: Sleeper> Backfill<'_, S, W> {
             if let Ok(mut s) = self.refreshing.lock() {
                 s.remove(&id);
             }
-            let added = outcome?;
+            let added = match outcome {
+                Ok(added) => added,
+                // Deleted, or in a repository the token can no longer see:
+                // GitHub will answer the same way every round, so the row
+                // is settled rather than left to stop every round here.
+                Err(Error::GitHub(perch_github::Error::Status { status: status @ (404 | 410), .. })) => {
+                    tracing::warn!(item = id, status, "GitHub no longer answers for it; what is kept stands");
+                    self.settle(&id, &subject)?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             progress.archived(subject.repo_full_name(), &subject, added);
             if progress.full() {
                 return Ok(());
@@ -197,17 +213,41 @@ impl<S: Source, W: Sleeper> Backfill<'_, S, W> {
         Ok(())
     }
 
-    /// One item's discussion fetched, kept on its row and filed. The row
-    /// is looked for again before the write: an item deleted from the
-    /// sidebar while GitHub answered has no row for a discussion to hang
-    /// on, and its records are still worth filing.
+    /// One item's discussion fetched, filed, and then kept on its row. The
+    /// filing comes first: it is the row's `fetched_at` that makes the
+    /// item stale, and a filing that failed must leave it stale so the
+    /// next round does it again. The row is looked for again before the
+    /// write: an item deleted from the sidebar while GitHub answered has
+    /// no row for a discussion to hang on, and its records are still
+    /// worth filing.
     async fn archive_item(&self, id: &str, subject: &ItemSubject) -> Result<usize, Error> {
         let (discussion, messages) = self.fetch(subject).await?;
+        let added = self.file(messages).await?;
         with(self.cache, |c| match c.load_item(id)? {
             Some(_) => c.store_discussion(id, &discussion),
             None => Ok(()),
         })?;
-        self.file(messages).await
+        Ok(added)
+    }
+
+    /// A row for a subject GitHub no longer answers for, made current: the
+    /// discussion kept on it stands, and a row with none gets an empty one,
+    /// dated now, so the row is no longer stale and is not asked for every
+    /// round. Nothing is filed; there is nothing to file.
+    fn settle(&self, id: &str, subject: &ItemSubject) -> Result<(), Error> {
+        with(self.cache, |c| {
+            if c.load_item(id)?.is_none() {
+                return Ok(());
+            }
+            let kept = match c.load_discussion(id)? {
+                Some((_, kept)) => kept,
+                None => match subject {
+                    ItemSubject::Issue(issue) => super::issue_discussion(issue, &[]),
+                    ItemSubject::PullRequest(_) => perch_github::Discussion::default(),
+                },
+            };
+            c.store_discussion(id, &kept)
+        })
     }
 
     /// Step two, one list of a repository's history: closed pull requests
@@ -218,135 +258,191 @@ impl<S: Source, W: Sleeper> Backfill<'_, S, W> {
         let key = cursor_key(kind, repo);
         let cursor = with(self.cache, |c| c.meta(&key))?;
         match Cursor::parse(cursor.as_deref()) {
-            Cursor::Page(from) => self.walk(repo, kind, from, &key, progress).await,
-            Cursor::Done(since) => self.catch_up(repo, kind, since, &key, progress).await,
+            Cursor::Page { page, skip } => self.walk(repo, kind, page, skip, HashMap::new(), progress).await,
+            Cursor::Done(since) => match kind {
+                ItemKind::PullRequest => self.catch_up_pulls(repo, since, progress).await,
+                ItemKind::Issue => self.catch_up_issues(repo, since, progress).await,
+            },
         }
     }
 
-    /// The first walk over a list, oldest updated first, a page at a
-    /// time. The page number is written to the cursor before each next
-    /// page is asked, so a run stopped part way starts again at the page
-    /// it was on, and a discussion or two from that page are archived
-    /// twice, which ingest does not mind. After the last page the cursor
-    /// records the newest `updated_at` seen, which is where the catch-up
-    /// starts from.
+    /// A walk over a list from a page, oldest updated first, a page at a
+    /// time: the first walk, and the tail of the pull requests a catch-up
+    /// found new. The page number is written to the cursor before each
+    /// next page is asked, so a run stopped part way starts again at the
+    /// page it was on, and a discussion or two from that page are archived
+    /// twice, which ingest does not mind. A run the harness's limit stops
+    /// inside a page writes how far into it, and the next run skips that
+    /// many. After the last page the cursor records the newest
+    /// `updated_at` seen, which is where the catch-up starts from. Pages
+    /// in `read` were fetched already and are taken from there.
+    ///
+    /// The list is read by page number, so an entry updated while the
+    /// walk is past it moves to the end and shifts what follows back by
+    /// one, and the next page starts one entry late. That entry is missed
+    /// until it moves again or is opened; the milestone's page cursor
+    /// cannot express anything else, and the README says so.
     async fn walk(
         &self,
         repo: &str,
         kind: ItemKind,
         from: u32,
-        key: &str,
+        skip: usize,
+        mut read: HashMap<u32, Page<ItemSubject>>,
         progress: &mut Progress<'_>,
     ) -> Result<(), Error> {
+        let key = cursor_key(kind, repo);
         let mut page = from;
+        let mut skip = skip;
         let mut newest: Option<Timestamp> = None;
         loop {
-            let listed = self.page(repo, kind, page, None).await?;
+            let listed = match read.remove(&page) {
+                Some(listed) => listed,
+                None => self.page(repo, kind, page, None).await?,
+            };
             if page == from {
                 // About how many there are: the `Link` header's last page
                 // at a hundred a page, or, on the last page itself, the
                 // pages before it and what is on it. The pages before
-                // this one were done in an earlier session.
+                // this one, and the skipped entries of this one, were done
+                // in an earlier run.
                 let before = (from as usize - 1) * 100;
                 let closed = listed.last_page.map(|l| l as usize * 100).unwrap_or(before + listed.items.len());
                 progress.expect(repo, closed);
-                progress.skip(repo, before);
+                progress.skip(repo, before + skip);
             }
             let last = listed.last_page.is_none();
-            for subject in listed.items {
-                newest = newest.max(subject.updated_at());
+            // Over everything on the page, the skipped entries included, so
+            // a walk resumed at the end of the last page still ends where
+            // the list does.
+            newest = newest.max(listed.newest);
+            let count = listed.items.len();
+            for (i, subject) in listed.items.into_iter().enumerate().skip(skip) {
                 let added = self.file(self.fetch(&subject).await?.1).await?;
                 progress.archived(repo, &subject, added);
-                if progress.full() {
+                if progress.full() && i + 1 < count {
+                    with(self.cache, |c| c.set_meta(&key, &within(page, i + 1)))?;
                     return Ok(());
                 }
             }
+            skip = 0;
             if last {
                 break;
             }
             page += 1;
-            with(self.cache, |c| c.set_meta(key, &page.to_string()))?;
+            with(self.cache, |c| c.set_meta(&key, &page.to_string()))?;
+            if progress.full() {
+                return Ok(());
+            }
         }
         let newest = newest.unwrap_or(Timestamp::UNIX_EPOCH);
-        with(self.cache, |c| c.set_meta(key, &done(newest)))?;
+        with(self.cache, |c| c.set_meta(&key, &done(newest)))?;
         tracing::info!(repo, kind = kind.column(), newest = %newest, "history walked to the end");
         Ok(())
     }
 
-    /// What has been updated since the walk ended. Issues take `since`,
-    /// so the list is only what is new, paged through whole. Pull
-    /// requests have no `since`: the first page says how many pages there
-    /// are, and since the list is oldest first, what is new is at its
-    /// end, read from the last page back to the first page that holds an
-    /// entry already archived. Nothing is written to the cursor until the
-    /// end, so a catch-up stopped part way is done again next round.
-    async fn catch_up(
-        &self,
-        repo: &str,
-        kind: ItemKind,
-        since: Timestamp,
-        key: &str,
-        progress: &mut Progress<'_>,
-    ) -> Result<(), Error> {
-        let mut newest = since;
-        let first = self.page(repo, kind, 1, Some(since)).await?;
-        let last = first.last_page;
-        self.catch_up_page(repo, first, since, &mut newest, progress).await?;
-        match (kind, last) {
-            (_, None) => {}
-            (ItemKind::Issue, Some(last)) => {
-                for page in 2..=last {
-                    if progress.full() {
-                        break;
-                    }
-                    let listed = self.page(repo, kind, page, Some(since)).await?;
-                    self.catch_up_page(repo, listed, since, &mut newest, progress).await?;
-                }
-            }
-            (ItemKind::PullRequest, Some(last)) => {
-                for page in (2..=last).rev() {
-                    if progress.full() {
-                        break;
-                    }
-                    let listed = self.page(repo, kind, page, None).await?;
-                    if self.catch_up_page(repo, listed, since, &mut newest, progress).await? {
-                        break;
-                    }
+    /// What has been updated since the walk over the pull requests ended.
+    /// They have no `since`, but the list is oldest first, so what is new
+    /// is its tail: the first page says how many pages there are, and the
+    /// pages are read from the last back to the first that holds an entry
+    /// already archived, which is where the tail begins. The tail is then
+    /// walked forward from there, oldest first, as a first walk is, with
+    /// the pages just read taken from memory rather than asked again, and
+    /// the cursor a page number while it goes, so a run stopped part way
+    /// goes on from where it stopped rather than over again.
+    async fn catch_up_pulls(&self, repo: &str, since: Timestamp, progress: &mut Progress<'_>) -> Result<(), Error> {
+        let kind = ItemKind::PullRequest;
+        let fresh = |s: &ItemSubject| s.updated_at().is_some_and(|t| t > since);
+        let mut read = HashMap::new();
+        let mut page = 1;
+        let mut listed = self.page(repo, kind, page, None).await?;
+        if let Some(last) = listed.last_page.filter(|l| *l > 1) {
+            if !listed.items.iter().any(fresh) {
+                page = last;
+                listed = self.page(repo, kind, page, None).await?;
+                // A page with nothing old on it began after the tail did;
+                // page one, read already, was all old.
+                while page > 2 && listed.items.iter().all(fresh) {
+                    read.insert(page, listed);
+                    page -= 1;
+                    listed = self.page(repo, kind, page, None).await?;
                 }
             }
         }
-        if newest > since && !progress.full() {
-            with(self.cache, |c| c.set_meta(key, &done(newest)))?;
+        let (start, skip) = match listed.items.iter().position(fresh) {
+            Some(skip) => {
+                read.insert(page, listed);
+                (page, skip)
+            }
+            // Nothing new on this page: the tail begins on the one after
+            // it, when there is one, and there is nothing new at all when
+            // there is not.
+            None if read.contains_key(&(page + 1)) => (page + 1, 0),
+            None => return Ok(()),
+        };
+        self.walk(repo, kind, start, skip, read, progress).await
+    }
+
+    /// What has been updated since the walk over the issues ended. They
+    /// take `since`, so the list is only what is new, oldest first, paged
+    /// through whole. The cursor is written at the end, or, when the
+    /// harness's limit stops the catch-up part way, to the newest second
+    /// every entry of which has been passed: an entry sharing a second
+    /// with the last one archived may be next, and `since` under a cursor
+    /// at that second would leave it out. A limit smaller than the number
+    /// of entries updated in one second cannot get past that second; a
+    /// round without a limit, which is what the app runs, does not stop.
+    async fn catch_up_issues(&self, repo: &str, since: Timestamp, progress: &mut Progress<'_>) -> Result<(), Error> {
+        let kind = ItemKind::Issue;
+        let key = cursor_key(kind, repo);
+        let mut seen = Seen { latest: since, behind: since };
+        let mut page = 1;
+        let mut last = None;
+        loop {
+            let listed = self.page(repo, kind, page, Some(since)).await?;
+            if page == 1 {
+                last = listed.last_page;
+            }
+            let fresh: Vec<_> =
+                listed.items.into_iter().filter(|s| s.updated_at().is_some_and(|t| t > since)).collect();
+            progress.expect(repo, fresh.len());
+            for (i, subject) in fresh.iter().enumerate() {
+                if let Some(t) = subject.updated_at() {
+                    seen.note(t);
+                }
+                let added = self.file(self.fetch(subject).await?.1).await?;
+                progress.archived(repo, subject, added);
+                if progress.full() && i + 1 < fresh.len() {
+                    let next = fresh[i + 1].updated_at();
+                    return self.stop_short(&key, seen.passed(next), since);
+                }
+            }
+            // The page was read past its last issue when a pull request
+            // came after it; the cursor moves past that too.
+            if let Some(t) = listed.newest {
+                seen.note(t);
+            }
+            if !last.is_some_and(|l| page < l) {
+                break;
+            }
+            if progress.full() {
+                return self.stop_short(&key, seen.passed(None), since);
+            }
+            page += 1;
+        }
+        if seen.latest > since {
+            with(self.cache, |c| c.set_meta(&key, &done(seen.latest)))?;
         }
         Ok(())
     }
 
-    /// The entries of one catch-up page newer than the cursor, archived.
-    /// Returns whether the page held one that was not, which for pull
-    /// requests, read from the end, means every page before it is older
-    /// still. For issues `since` has already left those out.
-    async fn catch_up_page(
-        &self,
-        repo: &str,
-        listed: Page<ItemSubject>,
-        since: Timestamp,
-        newest: &mut Timestamp,
-        progress: &mut Progress<'_>,
-    ) -> Result<bool, Error> {
-        let (fresh, stale): (Vec<_>, Vec<_>) =
-            listed.items.into_iter().partition(|s| s.updated_at().is_some_and(|t| t > since));
-        progress.expect(repo, fresh.len());
-        for subject in fresh {
-            if let Some(t) = subject.updated_at() {
-                *newest = (*newest).max(t);
-            }
-            let added = self.file(self.fetch(&subject).await?.1).await?;
-            progress.archived(repo, &subject, added);
-            if progress.full() {
-                return Ok(true);
-            }
+    /// The cursor after a catch-up the limit stopped, when it is past
+    /// where the catch-up started.
+    fn stop_short(&self, key: &str, passed: Timestamp, since: Timestamp) -> Result<(), Error> {
+        if passed > since {
+            with(self.cache, |c| c.set_meta(key, &done(passed)))?;
         }
-        Ok(!stale.is_empty())
+        Ok(())
     }
 
     /// One page of a list, as subjects, so the two lists go through one
@@ -361,11 +457,19 @@ impl<S: Source, W: Sleeper> Backfill<'_, S, W> {
         match kind {
             ItemKind::PullRequest => {
                 let p = self.paced(|| self.source.list_closed_pulls(repo, page)).await?;
-                Ok(Page { items: p.items.into_iter().map(ItemSubject::PullRequest).collect(), last_page: p.last_page })
+                Ok(Page {
+                    items: p.items.into_iter().map(ItemSubject::PullRequest).collect(),
+                    last_page: p.last_page,
+                    newest: p.newest,
+                })
             }
             ItemKind::Issue => {
                 let p = self.paced(|| self.source.list_closed_issues(repo, page, since)).await?;
-                Ok(Page { items: p.items.into_iter().map(ItemSubject::Issue).collect(), last_page: p.last_page })
+                Ok(Page {
+                    items: p.items.into_iter().map(ItemSubject::Issue).collect(),
+                    last_page: p.last_page,
+                    newest: p.newest,
+                })
             }
         }
     }
@@ -394,6 +498,19 @@ impl<S: Source, W: Sleeper> Backfill<'_, S, W> {
         super::ingest_into(self.knowledge.clone(), self.write_skill, messages).await.map_err(Error::Knowledge)
     }
 
+    /// The wait under the floor: until the reset the client last saw, and
+    /// a little past it. Nothing, when the allowance is not known or is
+    /// above the floor.
+    async fn await_floor(&self) {
+        if let Some(allowance) = self.source.allowance() {
+            if allowance.remaining < FLOOR {
+                let wait = until(allowance.reset_epoch);
+                tracing::info!(remaining = allowance.remaining, secs = wait.as_secs(), "under the floor; waiting for the reset");
+                self.sleeper.sleep(wait).await;
+            }
+        }
+    }
+
     /// One request at the pace the allowance allows. Under the floor, the
     /// wait for the reset comes first. A rate limit answer is waited out
     /// the same way, at least a minute, or for five minutes when GitHub
@@ -404,13 +521,7 @@ impl<S: Source, W: Sleeper> Backfill<'_, S, W> {
         Fut: Future<Output = Result<T, perch_github::Error>>,
     {
         loop {
-            if let Some(allowance) = self.source.allowance() {
-                if allowance.remaining < FLOOR {
-                    let wait = until(allowance.reset_epoch);
-                    tracing::info!(remaining = allowance.remaining, secs = wait.as_secs(), "under the floor; waiting for the reset");
-                    self.sleeper.sleep(wait).await;
-                }
-            }
+            self.await_floor().await;
             match ask().await {
                 Ok(answer) => return Ok(answer),
                 Err(perch_github::Error::RateLimited { reset_epoch }) => {
@@ -430,28 +541,71 @@ fn until(reset_epoch: i64) -> Duration {
     Duration::from_secs((reset_epoch - now).max(0) as u64) + GRACE
 }
 
-/// Where a list's walk is: the page to ask next, or done and the newest
+/// Where a list's walk is: the page to ask next and how many of its
+/// entries a run stopped inside it has done, or done and the newest
 /// `updated_at` seen, to catch up from. A cursor that does not read is
 /// the start, which costs a walk and loses nothing.
 #[derive(Debug, PartialEq, Eq)]
 enum Cursor {
-    Page(u32),
+    Page { page: u32, skip: usize },
     Done(Timestamp),
 }
 
 impl Cursor {
+    const START: Cursor = Cursor::Page { page: 1, skip: 0 };
+
     fn parse(cursor: Option<&str>) -> Cursor {
-        let Some(cursor) = cursor else { return Cursor::Page(1) };
-        match cursor.strip_prefix("done:") {
-            Some(newest) => newest.parse().map(Cursor::Done).unwrap_or(Cursor::Page(1)),
-            None => cursor.parse().map(Cursor::Page).unwrap_or(Cursor::Page(1)),
+        let Some(cursor) = cursor else { return Cursor::START };
+        if let Some(newest) = cursor.strip_prefix("done:") {
+            return newest.parse().map(Cursor::Done).unwrap_or(Cursor::START);
+        }
+        let (page, skip) = cursor.split_once('+').unwrap_or((cursor, "0"));
+        match (page.parse(), skip.parse()) {
+            (Ok(page), Ok(skip)) => Cursor::Page { page, skip },
+            _ => Cursor::START,
         }
     }
+}
+
+/// The cursor value for a walk stopped inside a page: the page, and how
+/// many of its entries are done.
+fn within(page: u32, skip: usize) -> String {
+    format!("{page}+{skip}")
 }
 
 /// The cursor value after a walk reached the end.
 fn done(newest: Timestamp) -> String {
     format!("done:{newest}")
+}
+
+/// The newest `updated_at` an issues catch-up has seen, and the newest
+/// before it. The list is oldest first, so once `latest` has moved on
+/// from `behind`, every entry updated at or before `behind` has been
+/// passed, whatever shares `latest`'s second further on.
+struct Seen {
+    latest: Timestamp,
+    behind: Timestamp,
+}
+
+impl Seen {
+    fn note(&mut self, t: Timestamp) {
+        if t > self.latest {
+            self.behind = self.latest;
+            self.latest = t;
+        }
+    }
+
+    /// The newest second every entry of which has been passed, given
+    /// when the next entry was updated: `latest` once the list has moved
+    /// on from it, and the one before while it has not, or when the next
+    /// entry is on a page not yet read.
+    fn passed(&self, next: Option<Timestamp>) -> Timestamp {
+        if next.is_some_and(|n| n > self.latest) {
+            self.latest
+        } else {
+            self.behind
+        }
+    }
 }
 
 /// The meta key a list's cursor is kept under: `backfill:pulls:<owner/repo>`
@@ -817,7 +971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_catch_up_over_many_pages_of_pulls_reads_the_end_back_to_the_first_old_entry() {
+    async fn a_catch_up_over_many_pages_of_pulls_reads_the_end_back_to_the_first_old_entry_then_archives_forward() {
         let bench = Bench::new(Fake {
             closed_pulls: HashMap::from([
                 (1, page(vec![merged(1, "2026-09-01T00:00:00Z")], Some(4))),
@@ -840,12 +994,46 @@ mod tests {
             vec![
                 "closed pulls page=1",
                 "closed pulls page=4",
-                "discussion 6",
                 "closed pulls page=3",
                 "discussion 5",
+                "discussion 6",
                 "closed issues page=1 since=2026-09-04T00:00:00Z",
             ],
-            "page two, older than the cursor throughout, is never asked for"
+            "page two, older than the cursor throughout, is never asked for; the tail is archived oldest first from the pages read"
+        );
+        assert_eq!(meta(&bench.cache, "backfill:pulls:a/b").as_deref(), Some("done:2026-09-06T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_whose_tail_begins_on_a_page_boundary_walks_from_that_page() {
+        // Page two is old throughout and page three new throughout: the
+        // tail is page three from its first entry.
+        let bench = Bench::new(Fake {
+            closed_pulls: HashMap::from([
+                (1, page(vec![merged(1, "2026-09-01T00:00:00Z")], Some(3))),
+                (2, page(vec![merged(2, "2026-09-02T00:00:00Z")], Some(3))),
+                (3, page(vec![merged(5, "2026-09-05T00:00:00Z"), merged(6, "2026-09-06T00:00:00Z")], None)),
+            ]),
+            closed_issues: HashMap::from([(1, page(vec![], None))]),
+            discussions: discussions([5, 6]),
+            ..Default::default()
+        });
+        bench.cache.lock().unwrap().set_meta("backfill:pulls:a/b", "done:2026-09-04T00:00:00Z").unwrap();
+        bench.cache.lock().unwrap().set_meta("backfill:issues:a/b", "done:2026-09-04T00:00:00Z").unwrap();
+
+        let archived = bench.round().await;
+
+        assert_eq!(archived, 2);
+        assert_eq!(
+            bench.calls(),
+            vec![
+                "closed pulls page=1",
+                "closed pulls page=3",
+                "closed pulls page=2",
+                "discussion 5",
+                "discussion 6",
+                "closed issues page=1 since=2026-09-04T00:00:00Z",
+            ]
         );
         assert_eq!(meta(&bench.cache, "backfill:pulls:a/b").as_deref(), Some("done:2026-09-06T00:00:00Z"));
     }
@@ -929,6 +1117,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_subject_github_no_longer_answers_for_is_settled_and_the_round_goes_on() {
+        // Issue #42, the newest stale item, was deleted on GitHub; #7 and
+        // the history behind it are still archived, and #42 is not asked
+        // for again next round.
+        let bench = Bench::new(Fake {
+            closed_pulls: HashMap::from([(1, page(vec![merged(3, "2026-09-01T00:00:00Z")], None))]),
+            closed_issues: HashMap::from([(1, page(vec![], None))]),
+            discussions: discussions([3, 7]),
+            refused: HashMap::from([(42, 404)]),
+            ..Default::default()
+        });
+        store_pull(&bench.cache, pull(7, "2026-09-16T11:40:00Z"));
+        let gone = store_issue(&bench.cache, issue(42, "2026-09-16T20:00:00Z"));
+
+        let archived = bench.round().await;
+
+        assert_eq!(archived, 2, "the two that answered");
+        assert_eq!(bench.calls(), vec!["comments 42", "discussion 7", "closed pulls page=1", "discussion 3", "closed issues page=1 since=-"]);
+        let stale = bench.cache.lock().unwrap().discussion_stale().unwrap();
+        assert!(stale.is_empty(), "settled: {stale:?}");
+        let (_, kept) = bench.cache.lock().unwrap().load_discussion(&gone.id).unwrap().unwrap();
+        assert!(kept.comments.is_empty(), "nothing invented for it");
+        assert!(bench.filed("issues", 42).is_none(), "and nothing filed");
+
+        bench.fake.calls.lock().unwrap().clear();
+        bench.round().await;
+        assert!(!bench.calls().iter().any(|c| c == "comments 42"), "{:?}", bench.calls());
+    }
+
+    #[tokio::test]
+    async fn a_discussion_that_could_not_be_filed_stays_stale_and_is_done_again_next_round() {
+        let bench = Bench::new(no_history(Fake { discussions: discussions([7]), ..Default::default() }));
+        let item = store_pull(&bench.cache, pull(7, "2026-09-16T11:40:00Z"));
+        // A regular file where the knowledge root should be: nothing can
+        // be written under it.
+        std::fs::write(bench.knowledge.root(), "").unwrap();
+
+        let err = bench.backfill().round(None).await.unwrap_err();
+
+        assert!(matches!(err, Error::Knowledge(_)), "{err}");
+        assert_eq!(bench.cache.lock().unwrap().discussion_stale().unwrap(), vec![item.id.clone()], "not kept as current");
+        assert!(bench.cache.lock().unwrap().load_discussion(&item.id).unwrap().is_none());
+
+        // With the root writable again, the next round files it.
+        std::fs::remove_file(bench.knowledge.root()).unwrap();
+        let archived = bench.round().await;
+
+        assert_eq!(archived, 1);
+        assert_eq!(bench.calls()[..2], ["discussion 7".to_string(), "discussion 7".to_string()]);
+        assert!(bench.filed("pulls", 7).unwrap().contains("comment on 7"));
+        assert!(bench.cache.lock().unwrap().discussion_stale().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_wait_for_the_reset_comes_before_the_guard_so_an_open_during_it_is_left_to_its_own_path() {
+        // A sleeper that, while the wait goes on, has the reader open the
+        // item the backfill was about to archive.
+        struct Opens {
+            fake: Arc<Fake>,
+            open: Arc<Mutex<Option<String>>>,
+            id: String,
+        }
+        impl Sleeper for Opens {
+            async fn sleep(&self, wait: Duration) {
+                self.fake.note(format!("sleep {}s", wait.as_secs()));
+                *self.open.lock().unwrap() = Some(self.id.clone());
+                self.fake.set_allowance(5000, Timestamp::now().as_second() + 3600);
+            }
+        }
+
+        let bench = Bench::new(no_history(Fake { discussions: discussions([7]), ..Default::default() }));
+        let item = store_pull(&bench.cache, pull(7, "2026-09-16T11:40:00Z"));
+        bench.fake.set_allowance(FLOOR - 1, Timestamp::now().as_second() + 100);
+        let open = Arc::new(Mutex::new(None));
+        let backfill = Backfill {
+            source: bench.fake.as_ref(),
+            cache: &bench.cache,
+            knowledge: bench.knowledge.clone(),
+            write_skill: false,
+            declared: vec![REPO.to_string()],
+            events: bench.events.clone(),
+            refreshing: bench.refreshing.clone(),
+            is_open: Arc::new({
+                let open = open.clone();
+                move |id: &str| open.lock().unwrap().as_deref() == Some(id)
+            }),
+            sleeper: Opens { fake: bench.fake.clone(), open, id: item.id.clone() },
+            limit: None,
+        };
+
+        let archived = backfill.round(None).await.unwrap();
+
+        assert_eq!(archived, 0, "left to the open path");
+        assert_eq!(bench.calls()[0], "sleep 105s");
+        assert!(!bench.calls().iter().any(|c| c == "discussion 7"), "not fetched: {:?}", bench.calls());
+        assert!(bench.refreshing.lock().unwrap().is_empty(), "the guard was never taken, so a refresh of the open item was not turned away");
+    }
+
+    #[tokio::test]
     async fn an_item_being_refreshed_is_skipped_and_one_open_in_the_window_is_left_to_its_own_path() {
         let bench = Bench::new(no_history(Fake { discussions: discussions([7, 8, 9]), ..Default::default() }));
         let refreshing = store_pull(&bench.cache, pull(7, "2026-09-16T11:40:00Z"));
@@ -996,25 +1283,208 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_harness_limit_stops_the_round_and_leaves_the_cursor_on_the_page() {
+    async fn the_harness_limit_stops_the_round_and_the_next_run_goes_on_from_where_it_stopped() {
         let bench = Bench::new(Fake {
             closed_pulls: HashMap::from([
-                (1, page(vec![merged(1, "2026-09-01T00:00:00Z"), merged(2, "2026-09-02T00:00:00Z")], Some(2))),
-                (2, page(vec![merged(3, "2026-09-03T00:00:00Z")], None)),
+                (
+                    1,
+                    page(
+                        vec![merged(1, "2026-09-01T00:00:00Z"), merged(2, "2026-09-02T00:00:00Z"), merged(3, "2026-09-03T00:00:00Z")],
+                        Some(2),
+                    ),
+                ),
+                (2, page(vec![merged(4, "2026-09-04T00:00:00Z")], None)),
             ]),
             closed_issues: HashMap::from([(1, page(vec![], None))]),
-            discussions: discussions([1, 2, 3, 7]),
+            discussions: discussions([1, 2, 3, 4, 7]),
             ..Default::default()
         });
         store_pull(&bench.cache, pull(7, "2026-09-16T11:40:00Z"));
         let bench = Bench { limit: Some(2), ..bench };
 
+        // The open item and the first closed entry: stopped inside page one.
         let archived = bench.round().await;
 
         assert_eq!(archived, 2);
         assert_eq!(bench.calls(), vec!["discussion 7", "closed pulls page=1", "discussion 1"]);
-        assert_eq!(meta(&bench.cache, "backfill:pulls:a/b"), None, "page one, to be read again");
+        assert_eq!(meta(&bench.cache, "backfill:pulls:a/b").as_deref(), Some("1+1"), "one entry into page one");
         assert_eq!(bench.backfill_events().last(), Some(&(String::new(), 0, 0)), "the line comes down");
+
+        // The next run skips that entry and finishes the page, and is
+        // stopped at its end: the cursor is the next page.
+        bench.fake.calls.lock().unwrap().clear();
+        let archived = bench.round().await;
+
+        assert_eq!(archived, 2, "nothing open is stale any more, and #1 is not archived again");
+        assert_eq!(bench.calls(), vec!["closed pulls page=1", "discussion 2", "discussion 3"]);
+        assert_eq!(meta(&bench.cache, "backfill:pulls:a/b").as_deref(), Some("2"));
+        assert_eq!(bench.backfill_events()[0], (REPO.to_string(), 2, 200), "the skipped entry counts as done");
+
+        // And the run after reaches the end.
+        bench.fake.calls.lock().unwrap().clear();
+        let archived = bench.round().await;
+
+        assert_eq!(archived, 1);
+        assert_eq!(bench.calls(), vec!["closed pulls page=2", "discussion 4", "closed issues page=1 since=-"]);
+        assert_eq!(meta(&bench.cache, "backfill:pulls:a/b").as_deref(), Some("done:2026-09-04T00:00:00Z"));
+        assert!(bench.filed("pulls", 4).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_walk_resumed_past_the_last_entry_of_the_last_page_still_ends_where_the_list_does() {
+        // The limit stopped an earlier run on page two's first entry, of
+        // which there is only one, and nothing has changed since; the
+        // page's newest is the cursor even though nothing on it is walked.
+        let bench = Bench::new(Fake {
+            closed_pulls: HashMap::from([(2, page(vec![merged(3, "2026-09-03T00:00:00Z")], None))]),
+            closed_issues: HashMap::from([(1, page(vec![], None))]),
+            ..Default::default()
+        });
+        bench.cache.lock().unwrap().set_meta("backfill:pulls:a/b", "2+1").unwrap();
+
+        let archived = bench.round().await;
+
+        assert_eq!(archived, 0);
+        assert_eq!(meta(&bench.cache, "backfill:pulls:a/b").as_deref(), Some("done:2026-09-03T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn a_limited_catch_up_over_pulls_goes_on_from_where_it_stopped_next_run() {
+        // Three merged since the cursor, across the last two pages, and a
+        // limit of one: three runs, each one further, none over again.
+        let bench = Bench::new(Fake {
+            closed_pulls: HashMap::from([
+                (1, page(vec![merged(1, "2026-09-01T00:00:00Z")], Some(3))),
+                (2, page(vec![merged(2, "2026-09-02T00:00:00Z"), merged(5, "2026-09-05T00:00:00Z")], Some(3))),
+                (3, page(vec![merged(6, "2026-09-06T00:00:00Z"), merged(7, "2026-09-07T00:00:00Z")], None)),
+            ]),
+            closed_issues: HashMap::from([(1, page(vec![], None))]),
+            discussions: discussions([5, 6, 7]),
+            ..Default::default()
+        });
+        bench.cache.lock().unwrap().set_meta("backfill:pulls:a/b", "done:2026-09-04T00:00:00Z").unwrap();
+        bench.cache.lock().unwrap().set_meta("backfill:issues:a/b", "done:2026-09-04T00:00:00Z").unwrap();
+        let bench = Bench { limit: Some(1), ..bench };
+
+        assert_eq!(bench.round().await, 1);
+        assert_eq!(
+            bench.calls(),
+            vec!["closed pulls page=1", "closed pulls page=3", "closed pulls page=2", "discussion 5"],
+            "the end read back to the first old entry, then the tail walked from there, oldest first"
+        );
+        assert_eq!(meta(&bench.cache, "backfill:pulls:a/b").as_deref(), Some("3"), "page two was finished");
+
+        bench.fake.calls.lock().unwrap().clear();
+        assert_eq!(bench.round().await, 1);
+        assert_eq!(bench.calls(), vec!["closed pulls page=3", "discussion 6"]);
+        assert_eq!(meta(&bench.cache, "backfill:pulls:a/b").as_deref(), Some("3+1"));
+
+        bench.fake.calls.lock().unwrap().clear();
+        assert_eq!(bench.round().await, 1);
+        assert_eq!(bench.calls(), vec!["closed pulls page=3", "discussion 7"], "the limit is met at the end, so the issues wait");
+        assert_eq!(meta(&bench.cache, "backfill:pulls:a/b").as_deref(), Some("done:2026-09-07T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn a_limited_catch_up_over_issues_moves_the_cursor_to_the_last_whole_second_behind_it() {
+        // Four closed since the cursor, two of them in one second, and a
+        // limit of two. The first run stops after the first of the pair:
+        // the cursor is the second before, since the other of the pair
+        // would be left out by `since` under a cursor at its own time.
+        let bench = Bench::new(Fake {
+            closed_pulls: HashMap::from([(1, page(vec![], None))]),
+            closed_issues: HashMap::from([(
+                1,
+                page(
+                    vec![
+                        closed_issue(2, "2026-09-02T00:00:00Z"),
+                        closed_issue(5, "2026-09-05T00:00:00Z"),
+                        closed_issue(6, "2026-09-06T00:00:00Z"),
+                        closed_issue(7, "2026-09-06T00:00:00Z"),
+                        closed_issue(8, "2026-09-08T00:00:00Z"),
+                    ],
+                    None,
+                ),
+            )]),
+            comments: comments([5, 6, 7, 8]),
+            ..Default::default()
+        });
+        bench.cache.lock().unwrap().set_meta("backfill:pulls:a/b", "done:2026-09-02T00:00:00Z").unwrap();
+        bench.cache.lock().unwrap().set_meta("backfill:issues:a/b", "done:2026-09-02T00:00:00Z").unwrap();
+        let bench = Bench { limit: Some(2), ..bench };
+
+        assert_eq!(bench.round().await, 2);
+        assert_eq!(bench.calls(), vec!["closed pulls page=1", "closed issues page=1 since=2026-09-02T00:00:00Z", "comments 5", "comments 6"]);
+        assert_eq!(meta(&bench.cache, "backfill:issues:a/b").as_deref(), Some("done:2026-09-05T00:00:00Z"));
+
+        // The next run lists from there: #5 is the boundary and is not
+        // fetched again, #6 is, and #7 is reached.
+        bench.fake.calls.lock().unwrap().clear();
+        assert_eq!(bench.round().await, 2);
+        assert_eq!(bench.calls(), vec!["closed pulls page=1", "closed issues page=1 since=2026-09-05T00:00:00Z", "comments 6", "comments 7"]);
+        assert_eq!(meta(&bench.cache, "backfill:issues:a/b").as_deref(), Some("done:2026-09-06T00:00:00Z"));
+
+        bench.fake.calls.lock().unwrap().clear();
+        assert_eq!(bench.round().await, 1);
+        assert_eq!(bench.calls(), vec!["closed pulls page=1", "closed issues page=1 since=2026-09-06T00:00:00Z", "comments 8"]);
+        assert_eq!(meta(&bench.cache, "backfill:issues:a/b").as_deref(), Some("done:2026-09-08T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn the_issues_cursor_moves_past_the_pull_requests_the_issues_list_carried() {
+        // The issues endpoint lists pull requests too and the client drops
+        // them, but they count toward the page and toward `since`. Here
+        // every entry of the closed list is a pull request but one, and the
+        // pull requests were updated after it.
+        let mut only_pulls = page(vec![], None);
+        only_pulls.newest = Some(at("2026-09-09T00:00:00Z"));
+        let bench = Bench::new(Fake {
+            closed_pulls: HashMap::from([(1, page(vec![], None))]),
+            closed_issues: HashMap::from([
+                (1, page(vec![closed_issue(2, "2026-09-02T00:00:00Z")], Some(2))),
+                (2, only_pulls.clone()),
+            ]),
+            comments: comments([2]),
+            ..Default::default()
+        });
+
+        bench.round().await;
+
+        assert_eq!(
+            meta(&bench.cache, "backfill:issues:a/b").as_deref(),
+            Some("done:2026-09-09T00:00:00Z"),
+            "the walk ended past the pull requests, not at the last issue"
+        );
+
+        // Catching up from there lists nothing, and the cursor stays. Were
+        // it at the issue, every page of pull requests since would be read
+        // on every round.
+        let bench = Bench {
+            fake: Arc::new(Fake {
+                closed_pulls: HashMap::from([(1, page(vec![], None))]),
+                closed_issues: HashMap::from([(1, page(vec![], None))]),
+                ..Default::default()
+            }),
+            ..bench
+        };
+        assert_eq!(bench.round().await, 0);
+        assert_eq!(bench.calls(), vec!["closed pulls page=1", "closed issues page=1 since=2026-09-09T00:00:00Z"]);
+        assert_eq!(meta(&bench.cache, "backfill:issues:a/b").as_deref(), Some("done:2026-09-09T00:00:00Z"));
+
+        // A catch-up whose page ends in a pull request moves past it too.
+        let mut with_pull = page(vec![closed_issue(3, "2026-09-10T00:00:00Z")], None);
+        with_pull.newest = Some(at("2026-09-11T00:00:00Z"));
+        let bench = Bench {
+            fake: Arc::new(Fake {
+                closed_pulls: HashMap::from([(1, page(vec![], None))]),
+                closed_issues: HashMap::from([(1, with_pull)]),
+                comments: comments([3]),
+                ..Default::default()
+            }),
+            ..bench
+        };
+        assert_eq!(bench.round().await, 1);
+        assert_eq!(meta(&bench.cache, "backfill:issues:a/b").as_deref(), Some("done:2026-09-11T00:00:00Z"));
     }
 
     #[tokio::test]
@@ -1083,11 +1553,13 @@ mod tests {
 
     #[test]
     fn a_cursor_reads_as_a_page_or_as_done_and_anything_else_as_the_start() {
-        assert_eq!(Cursor::parse(None), Cursor::Page(1));
-        assert_eq!(Cursor::parse(Some("7")), Cursor::Page(7));
+        assert_eq!(Cursor::parse(None), Cursor::Page { page: 1, skip: 0 });
+        assert_eq!(Cursor::parse(Some("7")), Cursor::Page { page: 7, skip: 0 });
+        assert_eq!(Cursor::parse(Some("3+17")), Cursor::Page { page: 3, skip: 17 }, "stopped inside page three");
         assert_eq!(Cursor::parse(Some("done:2026-09-01T00:00:00Z")), Cursor::Done(at("2026-09-01T00:00:00Z")));
-        assert_eq!(Cursor::parse(Some("done:soon")), Cursor::Page(1));
-        assert_eq!(Cursor::parse(Some("page three")), Cursor::Page(1));
+        assert_eq!(Cursor::parse(Some("done:soon")), Cursor::START);
+        assert_eq!(Cursor::parse(Some("page three")), Cursor::START);
+        assert_eq!(Cursor::parse(Some("3+some")), Cursor::START);
         assert_eq!(cursor_key(ItemKind::Issue, "SlateDB/SlateDB"), "backfill:issues:slatedb/slatedb");
     }
 }
