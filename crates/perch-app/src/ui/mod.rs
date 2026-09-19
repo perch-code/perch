@@ -237,13 +237,17 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
             }
 
-            // `v` checks the open file as viewed, `}` and `{` open the next and
-            // previous unviewed file. Files only. The braces are shifted
-            // brackets: the physical codes with Shift alone, so Cmd-[ stays
-            // back.
+            // `v` checks the open file as viewed, `]` and `[` go to the next
+            // and previous change, `}` and `{` open the next and previous
+            // unviewed file. Files only. The braces are shifted brackets:
+            // the physical codes with Shift alone, so Cmd-[ stays back.
             if review.tab.get() == crate::review::model::ItemTab::Files {
                 let shifted = key.modifiers == Modifiers::SHIFT;
                 match key.code {
+                    Code::BracketRight | Code::BracketLeft if key.modifiers.is_empty() => {
+                        crate::review::tabs::jump_to_change(review, key.code == Code::BracketRight);
+                        return EventPropagation::Stop;
+                    }
                     Code::KeyV if key.modifiers.is_empty() => {
                         let item_id = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
                         let file = review.active.get().and_then(|path| {

@@ -100,7 +100,7 @@ impl PerchStyling {
     }
 
     fn line_len(&self, row: usize) -> usize {
-        self.doc.with_untracked(|d| d.text.lines().nth(row).map(str::len).unwrap_or(0))
+        self.doc.with_untracked(|d| d.line(row).len())
     }
 }
 

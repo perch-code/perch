@@ -12,26 +12,32 @@
 //! Every editor's document is held live on the review state, the handle
 //! the editor lays out from beside the row table over it, so that what the
 //! editor shows can be edited in place when the document changes under it.
+//! A reveal, Show whole, and a thread appearing or going are all that one
+//! edit: the inputs change, the builder makes the new document, and
+//! `apply` turns the old text into it with the one region that differs,
+//! so the scroll position and the layout cache survive.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use floem::event::PointerScrollEventExt;
-use floem::kurbo::{Size, Vec2};
+use floem::kurbo::{Rect, Size, Vec2};
 use floem::prelude::*;
-use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::CursorStyle;
+use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::style::{CursorStyle, Position};
 use floem::text::FontWeight;
-use floem::views::editor::core::cursor::Cursor;
+use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
+use floem::views::editor::core::editor::EditType;
+use floem::views::editor::core::selection::Selection;
 use floem::views::scroll::ScrollCustomStyle;
 use floem::views::{
-    Container, Decorators, Empty, Label, ScrollExt, Stack, TextEditor, dyn_container, text_editor,
+    ClipExt, Container, Decorators, Empty, Label, ScrollExt, Stack, TextEditor, dyn_container, dyn_stack, text_editor,
 };
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::doc::{self, Doc};
-use crate::review::gutter::{diff_gutter, side_gutter};
+use crate::review::doc::{self, Doc, Reveals, Run};
+use crate::review::gutter::{diff_gutter, side_gutter, visible_lines};
 use crate::review::hover;
 use crate::review::model::{Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState};
 use crate::review::references;
@@ -126,23 +132,242 @@ fn stacked_view(
     epoch: u64,
     backend: Rc<Backend>,
 ) -> impl IntoView {
-    let built = doc::build(&file.buffer, &[], &[]);
+    let anchors = Memo::new({
+        let file = file.clone();
+        move |_| state.anchors_in(&file.path)
+    });
+    // Untracked: the view is built once, and what changes under it edits
+    // the document rather than building another editor.
+    let built = Effect::untrack(|| {
+        stacked_doc(&file, state.folded.get(), &anchors.get(), &state.reveals_for(&file.path, &file.blob))
+    });
     let text = built.text.clone();
     let doc = RwSignal::new(Arc::new(built));
     let editor = code_editor(text, PerchStyling::new(file.clone(), doc, epoch));
-    state.docs.set(Some(LiveDocs {
-        epoch,
-        layout: LiveLayout::Stacked(LiveDoc { handle: editor.doc(), doc }),
-    }));
-    wire_cursor(state, backend, file.clone(), doc, editor.editor().cursor);
-    wire_jump(state, doc, editor.editor().scroll_to, epoch);
+    let live = LiveDoc { handle: editor.doc(), doc };
+    state.docs.set(Some(LiveDocs { epoch, layout: LiveLayout::Stacked(live.clone()) }));
 
-    // The gutter tracks the same signals the editor lays out from, so the two
-    // stay aligned without any scroll plumbing of their own.
+    // The gutter and the divider layer track the same signals the editor
+    // lays out from, so they stay aligned without any scroll plumbing of
+    // their own.
     let viewport = editor.editor().viewport;
     let scroll_delta = editor.editor().scroll_delta;
-    Stack::horizontal((diff_gutter(state, app, file, doc, viewport, scroll_delta), editor))
-        .style(|s| s.size_full().min_height(0.0))
+    let scroll_to = editor.editor().scroll_to;
+    let cursor = editor.editor().cursor;
+    #[cfg(test)]
+    STACKED_VIEWPORT.with(|v| v.set(Some(viewport)));
+
+    // The folds are wired before the jump: a jump into a fold reveals it,
+    // and the reveal has to reach the editor before the jump looks for the
+    // row to scroll to.
+    wire_folds(state, file.clone(), anchors, live, epoch, viewport, scroll_to, cursor);
+    wire_cursor(state, backend, file.clone(), doc, cursor);
+    wire_jump(state, file.clone(), doc, scroll_to, epoch);
+
+    Stack::horizontal((
+        diff_gutter(state, app, file, doc, viewport, scroll_delta),
+        // The layer is placed against this box, so it takes the relative
+        // position; the editor fills it.
+        Stack::vertical((editor, divider_layer(state, doc, viewport, scroll_delta)))
+            .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().position(Position::Relative)),
+    ))
+    .style(|s| s.size_full().min_height(0.0))
+}
+
+/// The stacked document of a file: folded to the changes and the anchors
+/// less the reveals, or whole.
+fn stacked_doc(file: &LoadedFile, folded: bool, anchors: &[(usize, usize)], reveals: &Reveals) -> Doc {
+    let folds = if folded { reveals.apply(&doc::runs(&file.buffer, anchors)) } else { Vec::new() };
+    doc::build(&file.buffer, &folds, &[])
+}
+
+/// Rebuilds the document whenever what it is built from changes, and edits
+/// the editor to match. The inputs are read tracked, so the effect runs
+/// on each of them: Show whole, the file's reveals, and the anchors, which
+/// are a memo so that a thread's messages changing under it, as they do
+/// every line of a streaming answer, do not rebuild a document whose
+/// anchors are the same.
+#[allow(clippy::too_many_arguments)]
+fn wire_folds(
+    state: ReviewState,
+    file: Arc<LoadedFile>,
+    anchors: Memo<Vec<(usize, usize)>>,
+    live: LiveDoc,
+    epoch: u64,
+    viewport: RwSignal<Rect>,
+    scroll_to: RwSignal<Option<Vec2>>,
+    cursor: RwSignal<Cursor>,
+) {
+    Effect::new(move |first: Option<bool>| {
+        let folded = state.folded.get();
+        let anchors = anchors.get();
+        let reveals = state.reveals_for(&file.path, &file.blob);
+        // The editor was just built from these; nothing to do but subscribe.
+        if first.is_none() {
+            return true;
+        }
+        if state.editor_epoch.get_untracked() != epoch {
+            return true;
+        }
+        apply(&live, stacked_doc(&file, folded, &anchors, &reveals), viewport, scroll_to, cursor);
+        true
+    });
+}
+
+/// Turns what the editor shows into `new`, in place.
+///
+/// The one region that differs between the two documents is replaced in
+/// the editor's text, and the row table is set to the new document, so
+/// everything reading rows through it is right from here on. The editor
+/// keeps its scroll offset in pixels, so when the region begins above the
+/// first visible row the offset is moved by the rows added or taken away
+/// and the visible lines stay where they were; when it begins at or below
+/// the top, nothing is moved and the code below the region moves. The
+/// cursor's byte offset stays put through an edit, which would leave it on
+/// other text, so an offset at or after the region is moved by the bytes
+/// the edit added or took away.
+fn apply(
+    live: &LiveDoc,
+    new: Doc,
+    viewport: RwSignal<Rect>,
+    scroll_to: RwSignal<Option<Vec2>>,
+    cursor: RwSignal<Cursor>,
+) {
+    let old = live.doc.get_untracked();
+    let region = doc::changed_region(&old, &new);
+    if *old != new {
+        live.doc.set(Arc::new(new.clone()));
+    }
+    let Some(region) = region else {
+        return;
+    };
+    let replacement = new.text[region.new_bytes.clone()].to_string();
+    live.handle.edit_single(
+        Selection::region(region.old_bytes.start, region.old_bytes.end, CursorAffinity::Backward),
+        &replacement,
+        EditType::Other,
+    );
+
+    let start = region.old_bytes.start;
+    let delta = region.byte_delta();
+    if cursor.with_untracked(|c| c.regions_iter().any(|(a, b, _)| a.max(b) >= start)) {
+        cursor.update(|c| shift_cursor(c, start, delta));
+    }
+
+    // Set whether or not the offset moves: moving the cursor asks the
+    // editor to scroll it into view, and this, asked for after that, is
+    // what the editor does last. Setting it also clamps the offset to the
+    // new height, which a document that shrank under the scroll needs.
+    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let vp = viewport.get_untracked();
+    let first_visible = (vp.y0 / line_height).floor() as usize;
+    let y = if region.old_rows.start < first_visible {
+        vp.y0 + region.row_delta() as f64 * line_height
+    } else {
+        vp.y0
+    };
+    scroll_to.set(Some(Vec2::new(vp.x0, y.max(0.0))));
+}
+
+/// Move every offset of the cursor at or after `start` by `delta`, and
+/// no further back than `start`: an offset inside the region the edit took
+/// away lands at the region's beginning.
+fn shift_cursor(cursor: &mut Cursor, start: usize, delta: isize) {
+    let shift = |offset: &mut usize| {
+        if *offset >= start {
+            *offset = (*offset as isize + delta).max(start as isize) as usize;
+        }
+    };
+    match &mut cursor.mode {
+        CursorMode::Normal { offset, .. } => shift(offset),
+        CursorMode::Visual { start, end, .. } => {
+            shift(start);
+            shift(end);
+        }
+        CursorMode::Insert(selection) => {
+            for region in selection.regions_mut() {
+                shift(&mut region.start);
+                shift(&mut region.end);
+            }
+        }
+    }
+}
+
+/// The dividers' labels, drawn over the editor at their rows: `47
+/// unchanged lines` centred across the bar the row's own background
+/// paints. Placed the way the gutter's column is, from the viewport, with
+/// each bar carrying its own offset because the bars are sparse. The layer
+/// takes no pointer events; each bar does, to record the hover that shows
+/// the gutter's controls, and hands the wheel on to the editor.
+fn divider_layer(
+    state: ReviewState,
+    doc: RwSignal<Arc<Doc>>,
+    viewport: RwSignal<Rect>,
+    scroll_delta: RwSignal<Vec2>,
+) -> impl IntoView {
+    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let visible = move || {
+        let vp = viewport.get();
+        doc.with(|d| {
+            visible_lines(vp.y0, vp.height(), line_height, d.len())
+                .into_iter()
+                .filter_map(|row| d.run_of(row).map(|run| (row, run)))
+                .collect::<Vec<_>>()
+        })
+    };
+    let bars = dyn_stack(visible, |(row, run)| (*row, *run), move |(row, run)| {
+        divider_bar(state, row, run, viewport, scroll_delta)
+    })
+    .style(|s| s.size_full());
+
+    Container::new(bars)
+        .style(|s| s.size_full().position(Position::Relative))
+        .clip()
+        .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none())
+}
+
+/// One divider's label over its row.
+fn divider_bar(
+    state: ReviewState,
+    row: usize,
+    run: Run,
+    viewport: RwSignal<Rect>,
+    scroll_delta: RwSignal<Vec2>,
+) -> impl IntoView {
+    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let label = doc::divider_label(run.len());
+    Container::new(Label::derived(move || label.clone()).style(|s| {
+        s.selectable(false)
+            .font_family(theme::CODE_FONT_STACK.to_string())
+            .font_size(theme::CODE_FONT_SIZE - 1.0)
+            .color(theme::DIFF_DIVIDER_FG)
+    }))
+    .on_event_cont(el::PointerEnter, move |_, _| state.hovered_line.set(Some(row)))
+    .on_event_cont(el::PointerLeave, move |_, _| {
+        state.hovered_line.update(|h| {
+            if *h == Some(row) {
+                *h = None;
+            }
+        })
+    })
+    .on_event_stop(el::PointerWheel, move |_, wheel| {
+        let size = viewport.get_untracked().size();
+        let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
+        scroll_delta.set(Vec2::new(-delta.x, -delta.y));
+    })
+    .style(move |s| {
+        // Read live, as the gutter reads its offset: the bar outlives a
+        // scroll, and a position captured when it was built would not.
+        let top = row as f64 * line_height - viewport.get().y0;
+        s.absolute()
+            .inset_top(top)
+            .inset_left(0.0)
+            .width_full()
+            .height(line_height)
+            .items_center()
+            .justify_center()
+            .pointer_events_auto()
+    })
 }
 
 /// Base on the left, head on the right, over one scroll position.
@@ -185,7 +410,7 @@ fn split_view(
     }));
 
     wire_cursor(state, backend, file.clone(), right_doc, right.editor().cursor);
-    wire_jump(state, right_doc, right.editor().scroll_to, epoch);
+    wire_jump(state, file.clone(), right_doc, right.editor().scroll_to, epoch);
 
     let (left_viewport, left_scroll_to, left_delta) =
         (left.editor().viewport, left.editor().scroll_to, left.editor().scroll_delta);
@@ -235,8 +460,11 @@ fn split_view(
 thread_local! {
     /// The viewports of the last split built, left and right, so a test can
     /// watch the two scroll together.
-    static SPLIT_VIEWPORTS: std::cell::Cell<Option<(RwSignal<floem::kurbo::Rect>, RwSignal<floem::kurbo::Rect>)>> =
+    static SPLIT_VIEWPORTS: std::cell::Cell<Option<(RwSignal<Rect>, RwSignal<Rect>)>> =
         const { std::cell::Cell::new(None) };
+    /// The viewport of the last stacked editor built, so a test can see
+    /// that an edit left it where it was.
+    static STACKED_VIEWPORT: std::cell::Cell<Option<RwSignal<Rect>>> = const { std::cell::Cell::new(None) };
 }
 
 /// A read-only editor over one document, drawn as code.
@@ -318,8 +546,16 @@ fn wire_cursor(
 /// A definition inside the worktree opens its file, then asks to be
 /// scrolled to. The head line has to be translated through the row table
 /// first, because the spliced diff shifts everything below a removal, and a
-/// split's fillers do the same.
-fn wire_jump(state: ReviewState, doc: RwSignal<Arc<Doc>>, scroll_to: RwSignal<Option<Vec2>>, epoch: u64) {
+/// split's fillers do the same. A line inside a fold is on no row: the
+/// fold is revealed around it first, like any other reveal, and Reset
+/// undoes it like any other.
+fn wire_jump(
+    state: ReviewState,
+    file: Arc<LoadedFile>,
+    doc: RwSignal<Arc<Doc>>,
+    scroll_to: RwSignal<Option<Vec2>>,
+    epoch: u64,
+) {
     Effect::new(move |_| {
         let Some(head_line) = state.jump_to_line.get() else {
             return;
@@ -332,7 +568,20 @@ fn wire_jump(state: ReviewState, doc: RwSignal<Arc<Doc>>, scroll_to: RwSignal<Op
             return;
         }
         state.jump_to_line.set(None);
-        let row = doc.with_untracked(|d| d.row_of_head(head_line)).unwrap_or(head_line);
+        let mut row = doc.with_untracked(|d| d.row_of_head(head_line));
+        if row.is_none() && state.folded.get_untracked() && file.buffer.display_line(head_line).is_some() {
+            // The reveal reaches the editor before this returns: the
+            // effect that rebuilds the document runs on the write.
+            state.reveal(
+                &file.path,
+                &file.blob,
+                head_line.saturating_sub(doc::CONTEXT_LINES),
+                head_line + doc::CONTEXT_LINES,
+            );
+            row = doc.with_untracked(|d| d.row_of_head(head_line));
+        }
+        // A line the file does not have lands at the end of it.
+        let row = row.unwrap_or_else(|| doc.with_untracked(|d| d.len().saturating_sub(1)));
         // Land the target a few lines below the top rather than flush
         // against it, so its context is visible.
         let target = row.saturating_sub(4) as f64;
@@ -574,8 +823,18 @@ mod window {
     use crate::state::AppState;
 
     /// The whole window on Files with one changed file open, so the split
-    /// is built where it lives: under the tab bar, beside the rail.
+    /// is built where it lives: under the tab bar, beside the rail. The
+    /// file is a 90-line one changed every third line, so nothing in it
+    /// folds and a row is its head line.
     fn harness() -> (HeadlessHarness, ReviewState) {
+        harness_with(
+            "fn a() {}\nfn b() {}\nfn c() {}\n".repeat(30),
+            "fn a() {}\nfn old() {}\nfn c() {}\n".repeat(30),
+        )
+    }
+
+    /// The window with a changed file of the given head and base open.
+    fn harness_with(head: String, base: String) -> (HeadlessHarness, ReviewState) {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = ReviewState::new();
@@ -601,8 +860,8 @@ mod window {
 
         let file = Arc::new(crate::backend::build_loaded_file(
             "src/x.rs".into(),
-            "fn a() {}\nfn b() {}\nfn c() {}\n".repeat(30),
-            "fn a() {}\nfn old() {}\nfn c() {}\n".repeat(30),
+            head,
+            base,
             Some(perch_git::ChangeStatus::Modified),
             false,
             perch_git::Scope::Branch,
@@ -770,4 +1029,199 @@ mod window {
         harness.paint();
         assert_eq!(state.layout.get(), Layout::Stacked);
     }
+
+    // Folds.
+
+    /// `n` lines of context, numbered from `from`.
+    fn context(from: usize, n: usize) -> String {
+        (from..from + n).map(|i| format!("line {i}\n")).collect()
+    }
+
+    /// A changed first line, sixty unchanged, a changed last line, and
+    /// then twelve changes four lines apart so the document is long
+    /// enough to scroll: one run of fifty-four behind a divider at row 5,
+    /// with Up and Down, and nothing else folded.
+    fn one_long_run() -> (HeadlessHarness, ReviewState) {
+        let blocks = |word: &str| (0..12).map(|i| format!("{word}{i}\n{}", context(60 + i * 4, 4))).collect::<String>();
+        harness_with(
+            format!("new top\n{}new bottom\n{}", context(0, 60), blocks("new")),
+            format!("old top\n{}old bottom\n{}", context(0, 60), blocks("old")),
+        )
+    }
+
+    /// The stacked editor's live document.
+    fn stacked(state: ReviewState) -> LiveDoc {
+        match state.docs.get().expect("an editor is open").layout {
+            LiveLayout::Stacked(live) => live,
+            LiveLayout::Split { .. } => panic!("the layout is stacked"),
+        }
+    }
+
+    /// Where the code pane starts: after the open drawer and the file
+    /// rail, under the header and the two strips.
+    fn pane_origin() -> (f64, f64) {
+        (
+            crate::theme::SIDEBAR_WIDTH + crate::theme::RAIL_WIDTH,
+            crate::theme::REVIEW_HEADER_HEIGHT + 2.0 * crate::theme::TAB_HEIGHT,
+        )
+    }
+
+    #[test]
+    fn a_divider_row_exists_and_down_on_its_gutter_grows_the_document_without_moving_the_viewport() {
+        let (mut harness, state) = one_long_run();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        // Display: ghost, new top, line 0..59 at 2 to 61, ghost, new
+        // bottom, then the twelve blocks of six. The run is display lines
+        // 5 to 58, head lines 4 to 57.
+        let doc = live.doc.get();
+        assert_eq!(doc.len(), 64 + 72 - 54 + 1);
+        let run = doc.run_of(5).expect("row 5 is the divider");
+        assert_eq!(run.len(), 54);
+        assert_eq!(laid_out_text(&live), doc.text);
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        let y0 = viewport.get().y0;
+
+        // The controls show while the row is hovered: Up and Down, 16
+        // wide with 2 between, centred in the gutter's 70. Down's centre
+        // is 44 from the gutter's left.
+        let (left, top) = pane_origin();
+        let (x, y) = (left + 44.0, top + 5.0 * line_height + line_height / 2.0);
+        harness.pointer_move(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.hovered_line.get(), Some(5), "the divider's gutter row records the pointer");
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+
+        let doc = live.doc.get();
+        assert_eq!(doc.len(), 83 + 20, "click at ({x}, {y}) over {under:?} did not reveal twenty lines");
+        assert_eq!(doc.run_of(5).map(|r| r.len()), Some(34), "the divider stays, hiding twenty fewer");
+        assert_eq!(doc.row_of_head(38), Some(6), "the first revealed line follows the divider");
+        assert_eq!(laid_out_text(&live), doc.text, "the editor's text is the document's");
+        assert_eq!(viewport.get().y0, y0, "the viewport did not move");
+        assert!(state.reveals_for("src/x.rs", "").overlaps(run.default_heads.0, run.default_heads.1));
+    }
+
+    /// An unshifted bracket key, as the window receives it.
+    fn bracket(right: bool) -> floem::event::Event {
+        use floem::prelude::{Code, Key, KeyState, KeyboardEvent, Modifiers};
+        floem::event::Event::Key(KeyboardEvent {
+            state: KeyState::Down,
+            key: Key::Character(if right { "]" } else { "[" }.into()),
+            code: if right { Code::BracketRight } else { Code::BracketLeft },
+            location: Default::default(),
+            modifiers: Modifiers::empty(),
+            repeat: false,
+            is_composing: false,
+        })
+    }
+
+    #[test]
+    fn the_bracket_keys_go_between_the_changes() {
+        let (mut harness, state) = one_long_run();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
+        assert_eq!(state.cursor_line.get(), 0);
+
+        // A bare key goes to whatever has the keyboard, and the window's
+        // handler catches it on the way down. A click in the code would
+        // give it to the editor, which cannot be focused headlessly; a
+        // click on the gutter gives it to the gutter. The divider's row,
+        // at its left edge, away from the controls.
+        let (left, top) = pane_origin();
+        harness.click(left + 5.0, top + 5.0 * line_height + line_height / 2.0);
+        harness.rebuild();
+
+        // The next change after the top starts at the ghost of old bottom,
+        // display line 62; the first head line from there, new bottom, is
+        // head line 61, on row 11 of the folded document after the two
+        // ghosts of the rewritten pair.
+        harness.dispatch_event(bracket(true));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.cursor_line.get(), 62);
+        assert!(state.jump_to_line.get().is_none(), "the editor took the jump");
+        assert_eq!(live.doc.get().row_of_head(61), Some(11));
+        assert_eq!(viewport.get().y0, (11.0 - 4.0) * line_height);
+        assert_eq!(live.doc.get().len(), 83, "a change is never folded, so nothing was revealed");
+
+        harness.dispatch_event(bracket(false));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.cursor_line.get(), 0);
+        assert_eq!(viewport.get().y0, 0.0);
+    }
+
+    #[test]
+    fn a_reveal_above_the_viewport_moves_the_scroll_so_the_visible_lines_stay() {
+        // A hundred unchanged lines, then eight changes four lines apart:
+        // the run at the top folds from line one, and the rest is long
+        // enough to scroll.
+        let blocks = |word: &str| (0..8).map(|i| format!("{word}{i}\n{}", context(100 + i * 4, 4))).collect::<String>();
+        let (head, base) = (format!("{}{}", context(0, 100), blocks("new")), format!("{}{}", context(0, 100), blocks("old")));
+        let (mut harness, state) = harness_with(head, base);
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let run = live.doc.get().run_of(0).expect("the top run folds from line one");
+        assert_eq!(run.len(), 97);
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
+
+        let (left, top) = pane_origin();
+        harness.scroll_down(left + 300.0, top + 300.0, 200.0);
+        harness.rebuild();
+        harness.paint();
+        let before = viewport.get().y0;
+        assert!(before >= line_height, "the editor did not scroll past the divider");
+        let first_row = (before / line_height).floor() as usize;
+        let first_line = live.doc.get().display_line(first_row);
+
+        let (first, last) = run.bottom();
+        state.reveal("src/x.rs", "", first, last);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(live.doc.get().len(), 52 + 20);
+        assert_eq!(viewport.get().y0, before + 20.0 * line_height, "the scroll moved by the rows added above it");
+        let doc = live.doc.get();
+        assert_eq!(doc.display_line(first_row + 20), first_line, "the same line is first in view");
+    }
+
+    #[test]
+    fn a_jump_into_a_fold_reveals_around_the_target_before_scrolling() {
+        let (mut harness, state) = one_long_run();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        assert_eq!(live.doc.get().row_of_head(30), None, "head line 30 is folded");
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
+
+        state.jump_to_line.set(Some(30));
+        harness.rebuild();
+        harness.paint();
+        assert!(state.jump_to_line.get().is_none(), "the editor took the jump");
+        let doc = live.doc.get();
+        // Three lines each side: head lines 27 to 33 are shown between
+        // two dividers, and the run is two runs.
+        assert!(state.reveals_for("src/x.rs", "").overlaps(27, 33));
+        assert_eq!(doc.folds.len(), 2);
+        for head in 27..=33 {
+            assert!(doc.row_of_head(head).is_some(), "head line {head} is in view");
+        }
+        assert_eq!(doc.row_of_head(26), None);
+        assert_eq!(doc.row_of_head(34), None);
+        let row = doc.row_of_head(30).unwrap();
+        assert_eq!(row, 9);
+        assert_eq!(laid_out_text(&live), doc.text);
+        assert_eq!(viewport.get().y0, (row as f64 - 4.0) * line_height, "scrolled to the target");
+
+        // Reset on the divider above folds it again.
+        state.reset("src/x.rs", "", &doc.run_of(5).unwrap());
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(live.doc.get().len(), 83);
+        assert_eq!(laid_out_text(&live), live.doc.get().text);
+    }
 }
+

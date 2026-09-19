@@ -20,7 +20,10 @@
 //!
 //! The rows are the document's, not the buffer's: a row that is a line is
 //! numbered and barred from the buffer's row table, a divider is tinted as
-//! one, and a spacer under a card is blank.
+//! one and holds the controls that open its run, and a spacer under a card
+//! is blank. The document is edited in place under the editor, so a row is
+//! keyed by what it is as well as where it is: a row that is the same thing
+//! after an edit keeps its view, and one that is not is built again.
 
 use std::sync::Arc;
 
@@ -34,13 +37,14 @@ use floem::style::Position;
 use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, dyn_stack};
 use perch_git::Row;
 
-use crate::icons::SidebarIcon;
-use crate::review::doc::{Doc, DocRow, Tint};
+use crate::icons::{self, SidebarIcon};
+use crate::review::cards::tip;
+use crate::review::doc::{self, Doc, DocRow, Run, Tint};
 use crate::review::editor::Side;
 use crate::review::model::{LoadedFile, ReviewState};
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::sidebar_glyph;
+use crate::ui::widgets::{clickable, icon_in, sidebar_glyph};
 
 /// Extra rows rendered past the viewport, so a partially visible line at
 /// either edge is still numbered.
@@ -51,7 +55,7 @@ const OVERSCAN: usize = 2;
 /// Pure, because this is the arithmetic most likely to be wrong and the
 /// hardest to see wrong: an off-by-one here shifts every number in the
 /// gutter against the code beside it.
-fn visible_lines(scroll_top: f64, height: f64, line_height: f64, total: usize) -> Vec<usize> {
+pub(crate) fn visible_lines(scroll_top: f64, height: f64, line_height: f64, total: usize) -> Vec<usize> {
     if height <= 0.0 || line_height <= 0.0 || total == 0 {
         return Vec::new();
     }
@@ -81,7 +85,7 @@ pub fn diff_gutter(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, move |row| gutter_row(state, app, file.clone(), doc, row))
+    column(viewport, scroll_delta, doc, move |row, entry| gutter_row(state, app, file.clone(), doc, row, entry))
 }
 
 /// One side of a split. `scroll_delta` is the editor a wheel over the
@@ -95,27 +99,34 @@ pub fn side_gutter(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, move |row| side_row(state, app, file.clone(), side, doc, row))
+    column(viewport, scroll_delta, doc, move |row, entry| side_row(state, app, file.clone(), side, doc, row, entry))
 }
 
 /// The rows in view, slid to the scroll, in a column beside the editor.
+/// Each row's view is built from its index and what the document says the
+/// row is, and keyed by both, so an edit to the document rebuilds the rows
+/// it changed and no other.
 fn column<V: IntoView + 'static>(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
     doc: RwSignal<Arc<Doc>>,
-    row: impl Fn(usize) -> V + 'static,
+    row: impl Fn(usize, DocRow) -> V + 'static,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
 
     let visible = move || {
         let vp = viewport.get();
-        // The document's length is read here, tracked, so a document that
-        // grows or shrinks under the editor moves the column's end with it.
-        let total = doc.with(|d| d.len());
-        visible_lines(vp.y0, vp.height(), line_height, total)
+        // The document is read here, tracked, so one that changes under
+        // the editor changes the column with it.
+        doc.with(|d| {
+            visible_lines(vp.y0, vp.height(), line_height, d.len())
+                .into_iter()
+                .map(|row| (row, d.rows[row].clone()))
+                .collect::<Vec<_>>()
+        })
     };
 
-    let column = dyn_stack(visible, |line| *line, row)
+    let column = dyn_stack(visible, |(row, entry)| (*row, entry.clone()), move |(index, entry)| row(index, entry))
         .style(move |s| {
             // The whole column slides by the sub-line remainder of the
             // scroll. Reading the viewport here, in a style closure, is what
@@ -141,6 +152,10 @@ fn column<V: IntoView + 'static>(
             let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
             scroll_delta.set(Vec2::new(0.0, -delta.y));
         })
+        // A bare key goes to the view that has the keyboard, and the
+        // window's handler catches it on the way down. A click in the code
+        // gives the editor the keyboard; a click here gives it to the
+        // gutter, so `]` works after either.
         .style(|s| {
             s.width(theme::GUTTER_WIDTH)
                 .height_full()
@@ -148,6 +163,7 @@ fn column<V: IntoView + 'static>(
                 .background(theme::GUTTER_BG)
                 .border_right(1.0)
                 .border_color(theme::BORDER_MUTED)
+                .focusable()
         })
 }
 
@@ -166,10 +182,10 @@ fn gutter_row(
     file: Arc<LoadedFile>,
     doc: RwSignal<Arc<Doc>>,
     row: usize,
+    entry: DocRow,
 ) -> AnyView {
-    let entry = doc.with_untracked(|d| d.rows.get(row).cloned());
-    let Some(DocRow::Line { display, tint }) = entry else {
-        return other_row(state, app, file, row, entry);
+    let DocRow::Line { display, tint } = entry else {
+        return other_row(state, app, file, doc, row, entry, true);
     };
     let buffer_row = file.buffer.row(display);
 
@@ -193,10 +209,12 @@ fn side_row(
     side: Side,
     doc: RwSignal<Arc<Doc>>,
     row: usize,
+    entry: DocRow,
 ) -> AnyView {
-    let entry = doc.with_untracked(|d| d.rows.get(row).cloned());
-    let Some(DocRow::Line { display, tint }) = entry else {
-        return other_row(state, app, file, row, entry);
+    let DocRow::Line { display, tint } = entry else {
+        // The divider's controls are on the head side, with the label;
+        // the base side's row is the tint alone.
+        return other_row(state, app, file, doc, row, entry, side == Side::Head);
     };
 
     // The base side's document is over the base file, so its line is its
@@ -211,29 +229,149 @@ fn side_row(
     row_view(state, app, file, row, number, false, change_bar_color(tint), slot)
 }
 
-/// A row that is no line: a divider is a bar in its colour, and a filler,
-/// a spacer or a row past the end is blank. None of them records the
-/// pointer, so nothing lights a `+`.
-fn other_row(state: ReviewState, app: AppState, file: Arc<LoadedFile>, row: usize, entry: Option<DocRow>) -> AnyView {
+/// A row that is no line: a divider is a bar in its colour, with its
+/// controls when this gutter holds them, and a filler or a spacer is
+/// blank. A blank row records no pointer, so nothing lights a `+`.
+fn other_row(
+    state: ReviewState,
+    app: AppState,
+    file: Arc<LoadedFile>,
+    doc: RwSignal<Arc<Doc>>,
+    row: usize,
+    entry: DocRow,
+    controls: bool,
+) -> AnyView {
     match entry {
-        Some(DocRow::Divider { .. }) => divider_row(),
-        Some(DocRow::Line { .. } | DocRow::Filler | DocRow::Spacer { .. }) | None => {
+        DocRow::Divider { .. } if controls => divider_row(state, file, doc, row),
+        DocRow::Divider { .. } => Empty::new()
+            .style(|s| {
+                s.width_full()
+                    .height(theme::CODE_LINE_HEIGHT as f64)
+                    .flex_shrink(0.0_f32)
+                    .background(theme::DIFF_DIVIDER_BG)
+            })
+            .into_any(),
+        DocRow::Line { .. } | DocRow::Filler | DocRow::Spacer { .. } => {
             row_view(state, app, file, row, None, false, None, Slot::Blank)
         }
     }
 }
 
 /// The gutter's row beside a divider: the whole width in the divider's
-/// colour, with no number and no bar.
-fn divider_row() -> AnyView {
-    Empty::new()
+/// colour, with no number and no bar, and while the pointer is on the row
+/// or on the bar beside it, the controls that open the run, centred. The
+/// run is read from the document as it is now, not as it was when the row
+/// was built: a reveal that leaves the divider where it is changes what
+/// the divider hides.
+fn divider_row(state: ReviewState, file: Arc<LoadedFile>, doc: RwSignal<Arc<Doc>>, key: usize) -> AnyView {
+    let reveal_file = file.clone();
+    let controls = dyn_container(
+        move || {
+            let hovered = state.hovered_line.get() == Some(key);
+            let run = doc.with(|d| d.run_of(key)).filter(|_| hovered);
+            let revealed = run.is_some_and(|r| {
+                state.reveals_for(&reveal_file.path, &reveal_file.blob).overlaps(r.default_heads.0, r.default_heads.1)
+            });
+            (run, revealed)
+        },
+        move |(run, revealed)| match run {
+            Some(run) => divider_controls(state, file.clone(), run, revealed),
+            None => Empty::new().into_any(),
+        },
+    );
+
+    Container::new(controls)
+        .on_event_cont(el::PointerEnter, move |_, _| state.hovered_line.set(Some(key)))
+        .on_event_cont(el::PointerLeave, move |_, _| {
+            state.hovered_line.update(|h| {
+                if *h == Some(key) {
+                    *h = None;
+                }
+            })
+        })
         .style(|s| {
             s.width_full()
                 .height(theme::CODE_LINE_HEIGHT as f64)
                 .flex_shrink(0.0_f32)
+                .items_center()
+                .justify_center()
                 .background(theme::DIFF_DIVIDER_BG)
         })
         .into_any()
+}
+
+/// Up and Down, or All when two clicks would do it anyway, and Reset
+/// when the run has a reveal in it to undo.
+fn divider_controls(state: ReviewState, file: Arc<LoadedFile>, run: Run, revealed: bool) -> AnyView {
+    let reveal = {
+        let file = file.clone();
+        move |(first, last): (usize, usize)| state.reveal(&file.path, &file.blob, first, last)
+    };
+    let open: AnyView = if run.reveals_whole() {
+        let reveal = reveal.clone();
+        let n = run.len();
+        all_control(format!("Show all {n} line{}", if n == 1 { "" } else { "s" }), move || reveal(run.whole()))
+            .into_any()
+    } else {
+        let (up, down) = (reveal.clone(), reveal);
+        let step = doc::REVEAL_STEP;
+        Stack::horizontal((
+            glyph_control(SidebarIcon::ChevronUp, format!("Show {step} lines above"), move || up(run.top())),
+            glyph_control(SidebarIcon::ChevronDown, format!("Show {step} lines below"), move || down(run.bottom())),
+        ))
+        .style(|s| s.items_center().gap(2.0))
+        .into_any()
+    };
+    if !revealed {
+        return open;
+    }
+    let reset = glyph_control(SidebarIcon::Undo, "Fold again".to_string(), move || {
+        state.reset(&file.path, &file.blob, &run)
+    });
+    Stack::horizontal((open, reset)).style(|s| s.items_center().gap(2.0)).into_any()
+}
+
+/// A 16px slot holding a 12px glyph, muted until the pointer is on it.
+fn glyph_control(glyph: SidebarIcon, explanation: String, on_click: impl Fn() + 'static) -> impl IntoView {
+    let hovered = RwSignal::new(false);
+    let color = move || if hovered.get() { theme::ACCENT } else { theme::FG_MUTED };
+    tip(
+        Container::new(
+            icon_in(move || icons::sidebar_icon(glyph, color()), color).style(|s| s.size(12.0, 12.0)),
+        )
+        .on_event_stop(el::Click, move |_, _| on_click())
+        .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
+        .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
+        .style(|s| {
+            clickable(s)
+                .size(16.0, 16.0)
+                .items_center()
+                .justify_center()
+                .border_radius(3.0)
+                .hover(|s| s.background(theme::BADGE_BG))
+        }),
+        explanation,
+    )
+}
+
+/// "All", as a word in a box the height of a slot.
+fn all_control(explanation: String, on_click: impl Fn() + 'static) -> impl IntoView {
+    tip(
+        Label::derived(|| "All".to_string())
+            .on_event_stop(el::Click, move |_, _| on_click())
+            .style(|s| {
+                clickable(s)
+                    .font_size(theme::TEXT_SECTION)
+                    .font_weight(floem::text::FontWeight::MEDIUM)
+                    .color(theme::FG_MUTED)
+                    .height(16.0)
+                    .padding_horiz(5.0)
+                    .items_center()
+                    .border_radius(3.0)
+                    .hover(|s| s.color(theme::ACCENT).background(theme::BADGE_BG))
+            }),
+        explanation,
+    )
 }
 
 fn change_bar_color(tint: Tint) -> Option<Color> {

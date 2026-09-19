@@ -24,8 +24,15 @@ use crate::review::hover;
 /// divider hiding two lines is worse than the two lines.
 pub const CONTEXT_LINES: usize = 3;
 
+/// How many lines a divider's Up or Down reveals at one end of its run.
+pub const REVEAL_STEP: usize = 20;
+
+/// A run of this many lines or fewer offers All instead of Up and Down,
+/// since two clicks would do it anyway.
+pub const REVEAL_ALL_AT: usize = 40;
+
 /// How a line is painted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tint {
     Plain,
     Added,
@@ -57,8 +64,10 @@ pub struct Card {
     pub rows: usize,
 }
 
-/// One row of the document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One row of the document. Hashed, because the gutter keys its rows on
+/// what they are as well as where, so a row that is the same thing after
+/// an edit keeps its view and one that is not is rebuilt.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DocRow {
     /// A display line of the buffer the document is over.
     Line { display: usize, tint: Tint },
@@ -81,9 +90,13 @@ pub enum DocRow {
 pub struct Doc {
     pub text: String,
     pub rows: Vec<DocRow>,
+    /// The folds the document was built with, which a divider row indexes.
+    pub folds: Vec<Run>,
     /// The head line each row is, for the rows that are one. A ghost, a
     /// filler, a divider and a spacer are none.
     heads: Vec<Option<usize>>,
+    /// The byte offset each row's text starts at.
+    starts: Vec<usize>,
     /// The row each display line of the buffer is on, by display line;
     /// `None` inside a fold.
     display_rows: Vec<Option<usize>>,
@@ -99,6 +112,45 @@ impl Doc {
 
     pub fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    /// The text of one row, without its newline.
+    pub fn line(&self, row: usize) -> &str {
+        let start = self.offset_of_row(row);
+        let end = self.offset_of_row(row + 1);
+        self.text[start..end].trim_end_matches('\n')
+    }
+
+    /// The byte offset a row's text starts at; the text's length for the
+    /// row past the last, so a row's bytes are from its start to the next.
+    pub fn offset_of_row(&self, row: usize) -> usize {
+        self.starts.get(row).copied().unwrap_or(self.text.len())
+    }
+
+    /// The run a divider row stands for, if the row is one.
+    pub fn run_of(&self, row: usize) -> Option<Run> {
+        match self.rows.get(row)? {
+            DocRow::Divider { run } => self.folds.get(*run).copied(),
+            _ => None,
+        }
+    }
+
+    /// How many lines the dividers hide between them.
+    pub fn hidden_lines(&self) -> usize {
+        self.folds.iter().map(Run::len).sum()
+    }
+
+    /// Whether a row is the same thing, with the same text, as a row of
+    /// another document. A divider is the same when the run behind it is,
+    /// wherever it sits in either document's folds.
+    fn same_row(&self, row: usize, other: &Doc, other_row: usize) -> bool {
+        if self.line(row) != other.line(other_row) {
+            return false;
+        }
+        match (&self.rows[row], &other.rows[other_row]) {
+            (DocRow::Divider { run: a }, DocRow::Divider { run: b }) => self.folds.get(*a) == other.folds.get(*b),
+            (a, b) => a == b,
+        }
     }
 
     /// The display line a row is. `None` for a filler, a divider or a
@@ -149,18 +201,27 @@ impl Doc {
 struct Builder {
     text: String,
     rows: Vec<DocRow>,
+    folds: Vec<Run>,
     heads: Vec<Option<usize>>,
+    starts: Vec<usize>,
 }
 
 impl Builder {
-    fn with_capacity(rows: usize) -> Self {
-        Self { text: String::new(), rows: Vec::with_capacity(rows), heads: Vec::with_capacity(rows) }
+    fn with_capacity(rows: usize, folds: &[Run]) -> Self {
+        Self {
+            text: String::new(),
+            rows: Vec::with_capacity(rows),
+            folds: folds.to_vec(),
+            heads: Vec::with_capacity(rows),
+            starts: Vec::with_capacity(rows),
+        }
     }
 
     fn push(&mut self, row: DocRow, line: &str, head: Option<usize>) {
         if !self.rows.is_empty() {
             self.text.push('\n');
         }
+        self.starts.push(self.text.len());
         self.text.push_str(line);
         self.rows.push(row);
         self.heads.push(head);
@@ -199,7 +260,15 @@ impl Builder {
                 head_rows[*head] = Some(row);
             }
         }
-        Doc { text: self.text, rows: self.rows, heads: self.heads, display_rows, head_rows }
+        Doc {
+            text: self.text,
+            rows: self.rows,
+            folds: self.folds,
+            heads: self.heads,
+            starts: self.starts,
+            display_rows,
+            head_rows,
+        }
     }
 }
 
@@ -226,7 +295,7 @@ fn display_of_heads(buffer: &DisplayBuffer) -> Vec<usize> {
 pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card]) -> Doc {
     let lines: Vec<&str> = buffer.text.lines().collect();
     let reserved: usize = cards.iter().map(|c| c.rows).sum();
-    let mut out = Builder::with_capacity(buffer.len() + reserved);
+    let mut out = Builder::with_capacity(buffer.len() + reserved, folds);
     let mut next_fold = 0;
 
     let mut display = 0;
@@ -281,8 +350,8 @@ pub fn build_split(
     }
 
     let reserved: usize = cards.iter().map(|c| c.rows).sum();
-    let mut left = Builder::with_capacity(alignment.len() + reserved);
-    let mut right = Builder::with_capacity(alignment.len() + reserved);
+    let mut left = Builder::with_capacity(alignment.len() + reserved, folds);
+    let mut right = Builder::with_capacity(alignment.len() + reserved, folds);
     let mut next_fold = 0;
     // The last display line of the fold being skipped, while one is.
     let mut skip_to: Option<usize> = None;
@@ -348,19 +417,64 @@ pub fn build_split(
 /// ghost in it, so its head lines are as consecutive as its display lines,
 /// and `first_head` places it in the head file for the reveals, which are
 /// in head lines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Run {
     /// First and last display line hidden, inclusive.
     pub first: usize,
     pub last: usize,
     /// The head line `first` is.
     pub first_head: usize,
+    /// The head lines of the run as the folds have it by default, which
+    /// this is a piece of once the reveals have cut it: what Reset folds
+    /// back to, and what a reveal has to overlap for Reset to be offered,
+    /// so that the divider above a run revealed in the middle offers it.
+    pub default_heads: (usize, usize),
 }
 
 impl Run {
+    /// A run of the default folds, which is its own default.
+    pub fn new(first: usize, last: usize, first_head: usize) -> Self {
+        let last_head = first_head + (last - first);
+        Self { first, last, first_head, default_heads: (first_head, last_head) }
+    }
+
     /// The head line `last` is.
     pub fn last_head(&self) -> usize {
         self.first_head + (self.last - self.first)
+    }
+
+    /// How many lines the run hides.
+    pub fn len(&self) -> usize {
+        self.last - self.first + 1
+    }
+
+    /// Whether the run's divider offers All rather than Up and Down.
+    pub fn reveals_whole(&self) -> bool {
+        self.len() <= REVEAL_ALL_AT
+    }
+
+    /// The head lines Up reveals: the first `REVEAL_STEP` of the run.
+    pub fn top(&self) -> (usize, usize) {
+        (self.first_head, (self.first_head + REVEAL_STEP - 1).min(self.last_head()))
+    }
+
+    /// The head lines Down reveals: the last `REVEAL_STEP` of the run.
+    pub fn bottom(&self) -> (usize, usize) {
+        ((self.last_head() + 1).saturating_sub(REVEAL_STEP).max(self.first_head), self.last_head())
+    }
+
+    /// The head lines All reveals: every one.
+    pub fn whole(&self) -> (usize, usize) {
+        (self.first_head, self.last_head())
+    }
+}
+
+/// What a divider says: `47 unchanged lines`.
+pub fn divider_label(hidden: usize) -> String {
+    if hidden == 1 {
+        "1 unchanged line".to_string()
+    } else {
+        format!("{hidden} unchanged lines")
     }
 }
 
@@ -375,7 +489,6 @@ impl Run {
 /// `anchors`, which are inclusive head line ranges, zero based: the
 /// reader's threads from their first line to their last, and GitHub's
 /// review comments. A line an anchor sits on is never folded.
-#[cfg_attr(not(test), expect(dead_code, reason = "the stacked layout folds from step 2 of milestone 11"))]
 pub fn runs(buffer: &DisplayBuffer, anchors: &[(usize, usize)]) -> Vec<Run> {
     let len = buffer.len();
     let display_of_head = display_of_heads(buffer);
@@ -419,7 +532,7 @@ pub fn runs(buffer: &DisplayBuffer, anchors: &[(usize, usize)]) -> Vec<Run> {
             continue;
         }
         let Some(first_head) = buffer.head_line(first) else { continue };
-        out.push(Run { first, last, first_head });
+        out.push(Run::new(first, last, first_head));
     }
     out
 }
@@ -428,15 +541,9 @@ pub fn runs(buffer: &DisplayBuffer, anchors: &[(usize, usize)]) -> Vec<Run> {
 /// Kept as they were added rather than merged, so the set here is the set
 /// the store has, and a reset removes the same rows from both.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the stacked layout folds from step 2 of milestone 11"))]
 pub struct Reveals(BTreeSet<(usize, usize)>);
 
-#[cfg_attr(not(test), expect(dead_code, reason = "the stacked layout folds from step 2 of milestone 11"))]
 impl Reveals {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn add(&mut self, first: usize, last: usize) {
         self.0.insert((first.min(last), first.max(last)));
     }
@@ -455,6 +562,7 @@ impl Reveals {
         self.0.is_empty()
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "the reveals are written to the store from step 4 of milestone 11"))]
     pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.0.iter().copied()
     }
@@ -489,11 +597,68 @@ impl Reveals {
                     first: run.first + (p0 - run.first_head),
                     last: run.first + (p1 - run.first_head),
                     first_head: p0,
+                    default_heads: run.default_heads,
                 });
             }
         }
         out
     }
+}
+
+// ---------------------------------------------------------------------------
+// The edit from one document to the next
+// ---------------------------------------------------------------------------
+
+/// What changes between one document and the next, as one region: the
+/// rows after the longest common prefix and before the longest common
+/// suffix, in both, and the same as bytes of each text, whole rows with
+/// their newlines. Replacing the old bytes with the new is the one edit
+/// that turns the old text into the new.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Region {
+    pub old_rows: std::ops::Range<usize>,
+    pub new_rows: std::ops::Range<usize>,
+    pub old_bytes: std::ops::Range<usize>,
+    pub new_bytes: std::ops::Range<usize>,
+}
+
+impl Region {
+    /// How many rows the edit adds, negative when it takes some away.
+    pub fn row_delta(&self) -> isize {
+        self.new_rows.len() as isize - self.old_rows.len() as isize
+    }
+
+    /// How many bytes the edit adds, negative when it takes some away.
+    pub fn byte_delta(&self) -> isize {
+        self.new_bytes.len() as isize - self.old_bytes.len() as isize
+    }
+}
+
+/// The region that turns `old` into `new`, or `None` when the two read the
+/// same. Rows are compared as what they are and what they say, so a
+/// divider that moved is not taken for the line now in its place, and a
+/// divider whose run is the same is the same row wherever the run sits
+/// in the folds.
+pub fn changed_region(old: &Doc, new: &Doc) -> Option<Region> {
+    let shorter = old.len().min(new.len());
+    let mut prefix = 0;
+    while prefix < shorter && old.same_row(prefix, new, prefix) {
+        prefix += 1;
+    }
+    if prefix == old.len() && prefix == new.len() {
+        return None;
+    }
+    let mut suffix = 0;
+    while suffix < shorter - prefix && old.same_row(old.len() - 1 - suffix, new, new.len() - 1 - suffix) {
+        suffix += 1;
+    }
+    let (old_end, new_end) = (old.len() - suffix, new.len() - suffix);
+    Some(Region {
+        old_rows: prefix..old_end,
+        new_rows: prefix..new_end,
+        old_bytes: old.offset_of_row(prefix)..old.offset_of_row(old_end),
+        new_bytes: new.offset_of_row(prefix)..new.offset_of_row(new_end),
+    })
 }
 
 #[cfg(test)]
@@ -694,7 +859,7 @@ mod tests {
     fn a_fold_is_one_divider_row_and_its_lines_are_on_no_row() {
         let b = two_changes(20);
         // Hide display lines 5 to 10.
-        let fold = Run { first: 5, last: 10, first_head: 4 };
+        let fold = Run::new(5, 10, 4);
         let doc = build(&b, &[fold], &[]);
         assert_eq!(doc.len(), b.len() - 6 + 1);
         assert_eq!(doc.rows[5], DocRow::Divider { run: 0 });
@@ -733,7 +898,7 @@ mod tests {
         let b = DisplayBuffer::unified(head, base, &diff);
         // Display: ghost(old), new, l1..l10, ghost(old end), new end. Fold
         // l4 to l7, and put a card under l2.
-        let fold = Run { first: 5, last: 8, first_head: 4 };
+        let fold = Run::new(5, 8, 4);
         let card = Card { id: CardId::GitHub(7), after_display_line: 3, rows: 2 };
         let (left, right) = build_split(&alignment, base, &b, &[fold], &[card]);
         assert_eq!(left.len(), right.len());
@@ -782,7 +947,7 @@ mod tests {
         // Display: ghost, new top, line 0..39 at display 2 to 41, ghost,
         // new bottom.
         let runs = runs(&b, &[]);
-        assert_eq!(runs, vec![Run { first: 5, last: 38, first_head: 4 }]);
+        assert_eq!(runs, vec![Run::new(5, 38, 4)]);
         assert_eq!(runs[0].last_head(), 37);
     }
 
@@ -790,7 +955,7 @@ mod tests {
     fn a_run_of_six_is_no_run_and_a_run_of_seven_hides_one_line() {
         assert!(runs(&two_changes(6), &[]).is_empty());
         let seven = runs(&two_changes(7), &[]);
-        assert_eq!(seven, vec![Run { first: 5, last: 5, first_head: 4 }]);
+        assert_eq!(seven, vec![Run::new(5, 5, 4)]);
     }
 
     #[test]
@@ -799,15 +964,15 @@ mod tests {
         // Head line 20 is "line 19", display line 21.
         let runs = runs(&b, &[(20, 20)]);
         assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0], Run { first: 5, last: 17, first_head: 4 }, "18, 19 and 20 stay before the anchor");
-        assert_eq!(runs[1], Run { first: 25, last: 38, first_head: 24 }, "22, 23 and 24 stay after it");
+        assert_eq!(runs[0], Run::new(5, 17, 4), "18, 19 and 20 stay before the anchor");
+        assert_eq!(runs[1], Run::new(25, 38, 24), "22, 23 and 24 stay after it");
     }
 
     #[test]
     fn an_anchor_over_several_lines_keeps_them_all() {
         let b = two_changes(40);
         let runs = runs(&b, &[(10, 30)]);
-        assert_eq!(runs, vec![Run { first: 5, last: 7, first_head: 4 }, Run { first: 35, last: 38, first_head: 34 }]);
+        assert_eq!(runs, vec![Run::new(5, 7, 4), Run::new(35, 38, 34)]);
     }
 
     #[test]
@@ -816,7 +981,7 @@ mod tests {
         // line 20..39 at 22 to 41.
         let b = one_change(20, 20);
         let runs = runs(&b, &[]);
-        assert_eq!(runs, vec![Run { first: 0, last: 16, first_head: 0 }, Run { first: 25, last: 41, first_head: 24 }]);
+        assert_eq!(runs, vec![Run::new(0, 16, 0), Run::new(25, 41, 24)]);
     }
 
     #[test]
@@ -841,64 +1006,89 @@ mod tests {
     // Reveals.
 
     fn two_runs() -> Vec<Run> {
-        vec![Run { first: 5, last: 38, first_head: 4 }, Run { first: 45, last: 60, first_head: 43 }]
+        vec![Run::new(5, 38, 4), Run::new(45, 60, 43)]
+    }
+
+    /// A piece of the first of `two_runs`, which folds back to head lines
+    /// 4 to 37.
+    fn piece(first: usize, last: usize, first_head: usize) -> Run {
+        Run { first, last, first_head, default_heads: (4, 37) }
     }
 
     #[test]
     fn a_reveal_cuts_a_run_back_to_what_it_leaves() {
-        let mut reveals = Reveals::new();
+        let mut reveals = Reveals::default();
         // Up on the first run: its first twenty head lines, 4 to 23.
         reveals.add(4, 23);
-        assert_eq!(
-            reveals.apply(&two_runs()),
-            vec![Run { first: 25, last: 38, first_head: 24 }, Run { first: 45, last: 60, first_head: 43 }]
-        );
+        assert_eq!(reveals.apply(&two_runs()), vec![piece(25, 38, 24), Run::new(45, 60, 43)]);
         // Down on the second, its last twenty, is more than it has: it
         // is gone.
         reveals.add(39, 58);
-        assert_eq!(reveals.apply(&two_runs()), vec![Run { first: 25, last: 38, first_head: 24 }]);
+        assert_eq!(reveals.apply(&two_runs()), vec![piece(25, 38, 24)]);
     }
 
     #[test]
-    fn a_reveal_inside_a_run_leaves_a_piece_on_each_side() {
-        let mut reveals = Reveals::new();
+    fn a_reveal_inside_a_run_leaves_a_piece_on_each_side_and_both_fold_back_to_the_whole() {
+        let mut reveals = Reveals::default();
         reveals.add(10, 12);
-        assert_eq!(
-            reveals.apply(&two_runs()[..1]),
-            vec![Run { first: 5, last: 10, first_head: 4 }, Run { first: 14, last: 38, first_head: 13 }]
-        );
+        let pieces = reveals.apply(&two_runs()[..1]);
+        assert_eq!(pieces, vec![piece(5, 10, 4), piece(14, 38, 13)]);
+        // Either piece's Reset undoes the reveal between them.
+        for p in &pieces {
+            assert!(reveals.overlaps(p.default_heads.0, p.default_heads.1));
+            let mut after = reveals.clone();
+            after.remove_overlapping(p.default_heads.0, p.default_heads.1);
+            assert!(after.is_empty());
+        }
     }
 
     #[test]
     fn a_reveal_that_covers_a_run_removes_it() {
-        let mut reveals = Reveals::new();
+        let mut reveals = Reveals::default();
         reveals.add(0, 100);
         assert!(reveals.apply(&two_runs()).is_empty());
-        let mut exact = Reveals::new();
+        let mut exact = Reveals::default();
         exact.add(4, 37);
-        assert_eq!(exact.apply(&two_runs()), vec![Run { first: 45, last: 60, first_head: 43 }]);
+        assert_eq!(exact.apply(&two_runs()), vec![Run::new(45, 60, 43)]);
     }
 
     #[test]
     fn a_reveal_that_straddles_two_runs_cuts_both() {
-        let mut reveals = Reveals::new();
+        let mut reveals = Reveals::default();
         reveals.add(30, 50);
         assert_eq!(
             reveals.apply(&two_runs()),
-            vec![Run { first: 5, last: 30, first_head: 4 }, Run { first: 53, last: 60, first_head: 51 }]
+            vec![piece(5, 30, 4), Run { first: 53, last: 60, first_head: 51, default_heads: (43, 58) }]
         );
     }
 
     #[test]
     fn no_reveals_leave_the_runs_as_they_were() {
-        let reveals = Reveals::new();
+        let reveals = Reveals::default();
         assert!(reveals.is_empty());
         assert_eq!(reveals.apply(&two_runs()), two_runs());
     }
 
     #[test]
+    fn a_runs_reveal_ranges_are_its_ends_and_the_whole_of_it() {
+        let run = Run::new(5, 45, 4);
+        assert_eq!(run.len(), 41);
+        assert!(!run.reveals_whole(), "forty-one lines is Up and Down");
+        assert_eq!(run.top(), (4, 23));
+        assert_eq!(run.bottom(), (25, 44));
+        assert_eq!(run.whole(), (4, 44));
+        let short = Run::new(5, 44, 4);
+        assert!(short.reveals_whole(), "forty lines is All");
+        let tiny = Run::new(5, 9, 4);
+        assert_eq!(tiny.top(), (4, 8), "a step never reaches past the run");
+        assert_eq!(tiny.bottom(), (4, 8));
+        assert_eq!(divider_label(47), "47 unchanged lines");
+        assert_eq!(divider_label(1), "1 unchanged line");
+    }
+
+    #[test]
     fn reset_forgets_the_reveals_overlapping_a_run_and_no_other() {
-        let mut reveals = Reveals::new();
+        let mut reveals = Reveals::default();
         reveals.add(4, 23);
         reveals.add(43, 62);
         reveals.add(23, 4);
@@ -908,5 +1098,158 @@ mod tests {
         reveals.remove_overlapping(4, 37);
         assert_eq!(reveals.iter().collect::<Vec<_>>(), vec![(43, 62)]);
         assert!(!reveals.overlaps(4, 37));
+    }
+
+    // The builder over the folds the reveals leave.
+
+    /// The stacked document of a buffer folded around its changes, less
+    /// the reveals.
+    fn folded(b: &DisplayBuffer, reveals: &Reveals) -> Doc {
+        build(b, &reveals.apply(&runs(b, &[])), &[])
+    }
+
+    #[test]
+    fn the_builder_hides_the_runs_and_shows_what_a_reveal_asks_for() {
+        // Display: ghost, new top, line 0..39 at 2 to 41, ghost, new
+        // bottom: 44 rows, and one run of 34 behind a divider at row 5.
+        let b = two_changes(40);
+        let run = runs(&b, &[])[0];
+        let doc = folded(&b, &Reveals::default());
+        assert_eq!(doc.len(), 44 - 34 + 1);
+        assert_eq!(doc.run_of(5), Some(run));
+        assert_eq!(doc.run_of(4), None);
+        assert_eq!(doc.hidden_lines(), 34);
+        assert_eq!(doc.line(5), "", "the divider's text is blank");
+        assert_eq!(doc.line(6), "line 37", "display line 39 follows the divider");
+        assert_eq!(doc.offset_of_row(6), doc.offset_of_row(5) + 1, "the divider is one newline");
+        assert_eq!(doc.offset_of_row(doc.len()), doc.text.len());
+
+        // Down: the last twenty head lines of the run, 18 to 37, come
+        // back, and the divider hides fourteen.
+        let mut reveals = Reveals::default();
+        let (a, z) = run.bottom();
+        reveals.add(a, z);
+        let doc = folded(&b, &reveals);
+        assert_eq!(doc.len(), 11 + 20);
+        assert_eq!(doc.run_of(5), Some(Run { first: 5, last: 18, first_head: 4, default_heads: (4, 37) }));
+        assert_eq!(doc.hidden_lines(), 14);
+        assert_eq!(doc.row_of_head(18), Some(6));
+        assert_eq!(doc.row_of_head(17), None);
+
+        // All: no divider, and the document is the buffer.
+        let (a, z) = run.whole();
+        reveals.add(a, z);
+        let doc = folded(&b, &reveals);
+        assert_eq!(doc.hidden_lines(), 0);
+        assert_eq!(doc.text, b.text);
+        assert_eq!(doc.len(), b.len());
+
+        // Reset: back to the default.
+        reveals.remove_overlapping(run.first_head, run.last_head());
+        assert_eq!(folded(&b, &reveals), folded(&b, &Reveals::default()));
+    }
+
+    #[test]
+    fn a_line_an_anchor_sits_on_stays_in_view_with_its_context() {
+        let b = two_changes(40);
+        let doc = build(&b, &runs(&b, &[(20, 20)]), &[]);
+        // Two dividers, with head lines 17 to 23 between them.
+        let dividers: Vec<usize> = (0..doc.len()).filter(|r| doc.run_of(*r).is_some()).collect();
+        assert_eq!(dividers.len(), 2);
+        for head in 17..=23 {
+            assert!(doc.row_of_head(head).is_some(), "head line {head} is shown");
+        }
+        assert_eq!(doc.row_of_head(16), None);
+        assert_eq!(doc.row_of_head(24), None);
+    }
+
+    // The region an edit replaces.
+
+    /// The text after replacing the region's old bytes with the new.
+    fn edited(old: &Doc, new: &Doc, region: &Region) -> String {
+        let mut text = old.text.clone();
+        text.replace_range(region.old_bytes.clone(), &new.text[region.new_bytes.clone()]);
+        text
+    }
+
+    #[test]
+    fn a_down_reveal_is_one_divider_row_replaced_by_twenty_lines_and_a_divider() {
+        let b = two_changes(40);
+        let run = runs(&b, &[])[0];
+        let old = folded(&b, &Reveals::default());
+        let mut reveals = Reveals::default();
+        let (a, z) = run.bottom();
+        reveals.add(a, z);
+        let new = folded(&b, &reveals);
+
+        let region = changed_region(&old, &new).expect("the documents differ");
+        assert_eq!(region.old_rows, 5..6);
+        assert_eq!(region.new_rows, 5..26);
+        assert_eq!(region.row_delta(), 20);
+        assert_eq!(new.rows[5], DocRow::Divider { run: 0 });
+        assert_eq!(new.rows[6], line(19, Tint::Plain));
+        assert_eq!(new.rows[25], line(38, Tint::Plain));
+        assert_eq!(region.old_bytes.len(), 1, "the divider's blank line and its newline");
+        assert_eq!(region.byte_delta() as usize, region.new_bytes.len() - 1);
+        assert_eq!(edited(&old, &new, &region), new.text);
+    }
+
+    #[test]
+    fn a_reset_is_the_same_region_the_other_way_round() {
+        let b = two_changes(40);
+        let run = runs(&b, &[])[0];
+        let mut reveals = Reveals::default();
+        let (a, z) = run.bottom();
+        reveals.add(a, z);
+        let old = folded(&b, &reveals);
+        let new = folded(&b, &Reveals::default());
+
+        let region = changed_region(&old, &new).expect("the documents differ");
+        assert_eq!(region.old_rows, 5..26);
+        assert_eq!(region.new_rows, 5..6);
+        assert_eq!(region.row_delta(), -20);
+        assert_eq!(region.new_bytes.len(), 1);
+        assert_eq!(edited(&old, &new, &region), new.text);
+    }
+
+    #[test]
+    fn the_same_document_twice_has_no_region() {
+        let b = two_changes(40);
+        let doc = folded(&b, &Reveals::default());
+        assert_eq!(changed_region(&doc, &doc.clone()), None);
+        let empty = build(&DisplayBuffer::plain(""), &[], &[]);
+        assert_eq!(changed_region(&empty, &empty.clone()), None);
+        // From nothing to something is everything.
+        let region = changed_region(&empty, &doc).unwrap();
+        assert_eq!(region.old_rows, 0..0);
+        assert_eq!(region.new_rows, 0..doc.len());
+        assert_eq!(edited(&empty, &doc, &region), doc.text);
+    }
+
+    #[test]
+    fn a_divider_whose_run_moved_in_the_folds_is_still_the_same_row() {
+        // Three changes, two runs. Revealing the whole of the first run
+        // takes its divider out of the folds, so the second run becomes
+        // run 0; the divider standing for it is the same divider.
+        let context = |n: usize| (0..n).map(|i| format!("line {i}\n")).collect::<String>();
+        let base = format!("old top\n{}old mid\n{}old bottom\n", context(20), context(20));
+        let head = format!("new top\n{}new mid\n{}new bottom\n", context(20), context(20));
+        let b = buffer(&base, &head);
+        let all = runs(&b, &[]);
+        assert_eq!(all.len(), 2);
+        let old = build(&b, &all, &[]);
+        let mut reveals = Reveals::default();
+        let (a, z) = all[0].whole();
+        reveals.add(a, z);
+        let new = build(&b, &reveals.apply(&all), &[]);
+        assert_eq!(new.folds, vec![all[1]]);
+
+        let region = changed_region(&old, &new).unwrap();
+        assert_eq!(region.old_rows, 5..6, "the first divider alone");
+        assert_eq!(region.new_rows, 5..(5 + all[0].len()));
+        assert_eq!(edited(&old, &new, &region), new.text);
+        let second = (0..new.len()).find(|r| new.run_of(*r).is_some()).unwrap();
+        assert_eq!(new.rows[second], DocRow::Divider { run: 0 });
+        assert!(second >= region.new_rows.end, "the second divider is in the common suffix");
     }
 }

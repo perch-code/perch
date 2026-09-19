@@ -10,7 +10,7 @@ use perch_git::{ChangeStatus, ChangedFile, Commit, Dirt, DisplayBuffer, Scope, T
 use perch_github::{Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest};
 use perch_syntax::{Language, LineSpans};
 
-use crate::review::doc::Doc;
+use crate::review::doc::{Doc, Reveals, Run};
 
 /// A file prepared for the editor: text to render, and everything needed to
 /// colour it and map a rendered line back to a real one.
@@ -38,6 +38,10 @@ pub struct LoadedFile {
     /// None)` a removed line, `(None, Some)` an added one. Empty for a
     /// file outside the changed list.
     pub alignment: Vec<(Option<usize>, Option<usize>)>,
+    /// The head blob, which the reveals are keyed by, as Viewed is: a new
+    /// blob is new content and starts folded again. Empty until the load
+    /// records it, and for a file outside the changed list.
+    pub blob: String,
 }
 
 impl std::fmt::Debug for LoadedFile {
@@ -188,7 +192,6 @@ pub struct Tab {
 /// editor is torn down, so a reader that can run after that, on another
 /// tab, reads it with the `try_` variants.
 #[derive(Clone)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the folds edit the document in place from step 2 of milestone 11"))]
 pub struct LiveDoc {
     pub handle: Rc<dyn Document>,
     pub doc: RwSignal<Arc<Doc>>,
@@ -198,7 +201,7 @@ pub struct LiveDoc {
 /// A reader checks the epoch against `editor_epoch` first: an entry from an
 /// editor since rebuilt is stale.
 #[derive(Clone)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the folds edit the document in place from step 2 of milestone 11"))]
+#[cfg_attr(not(test), expect(dead_code, reason = "the cards read the open editors' documents from step 5 of milestone 11"))]
 pub struct LiveDocs {
     pub epoch: u64,
     pub layout: LiveLayout,
@@ -206,7 +209,7 @@ pub struct LiveDocs {
 
 /// Which editors are open: the stacked one, or a split's two.
 #[derive(Clone)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the folds edit the document in place from step 2 of milestone 11"))]
+#[cfg_attr(not(test), expect(dead_code, reason = "the cards read the open editors' documents from step 5 of milestone 11"))]
 pub enum LiveLayout {
     Stacked(LiveDoc),
     Split { left: LiveDoc, right: LiveDoc },
@@ -263,6 +266,13 @@ pub struct ReviewState {
     pub checks: RwSignal<Option<Arc<Checks>>>,
     /// The (path, blob) pairs the reader has checked as viewed.
     pub viewed: RwSignal<Arc<std::collections::HashSet<(String, String)>>>,
+    /// Whether the worktree's changed files are folded to their changes,
+    /// which they are unless the reader asked for them whole. Per
+    /// worktree: a reader folds one review and not another.
+    pub folded: RwSignal<bool>,
+    /// The runs the reader asked to see, by (path, blob), in head lines,
+    /// so a reveal made in one layout holds in the other.
+    pub reveals: RwSignal<HashMap<(String, String), Reveals>>,
     /// The references panel's content, when it is open.
     pub references: RwSignal<Option<Arc<References>>>,
     /// The panel's height. Dragged.
@@ -380,6 +390,8 @@ impl ReviewState {
             discussion: RwSignal::new(None),
             checks: RwSignal::new(None),
             viewed: RwSignal::new(Arc::new(std::collections::HashSet::new())),
+            folded: RwSignal::new(true),
+            reveals: RwSignal::new(HashMap::new()),
             references: RwSignal::new(None),
             references_height: RwSignal::new(crate::theme::REFERENCES_HEIGHT),
             changed_files: RwSignal::new(Arc::new(Vec::new())),
@@ -463,6 +475,8 @@ impl ReviewState {
         self.discussion.set(None);
         self.checks.set(None);
         self.viewed.set(Arc::new(std::collections::HashSet::new()));
+        self.folded.set(true);
+        self.reveals.set(HashMap::new());
         self.references.set(None);
         self.changed_files.set(Arc::new(Vec::new()));
         self.tree.set(Arc::new(Vec::new()));
@@ -719,6 +733,40 @@ impl ReviewState {
         })
     }
 
+    /// The head lines a file's threads are anchored on, for the folds to
+    /// keep in view. Tracked, so a document built from them follows the
+    /// threads and the discussion.
+    pub fn anchors_in(&self, path: &str) -> Vec<(usize, usize)> {
+        self.comment_threads.with(|threads| self.discussion.with(|d| anchors_of(threads, d.as_deref(), path)))
+    }
+
+    /// The reveals for a file's content, tracked, so a document built from
+    /// them is rebuilt when they change.
+    pub fn reveals_for(&self, path: &str, blob: &str) -> Reveals {
+        self.reveals.with(|m| m.get(&(path.to_string(), blob.to_string())).cloned().unwrap_or_default())
+    }
+
+    /// Show head lines `first` to `last` of a file, inclusive, whatever
+    /// fold they are in.
+    pub fn reveal(&self, path: &str, blob: &str, first: usize, last: usize) {
+        self.reveals.update(|m| {
+            m.entry((path.to_string(), blob.to_string())).or_default().add(first, last);
+        });
+    }
+
+    /// Fold a run back to its default: forget every reveal in the run
+    /// this is a piece of.
+    pub fn reset(&self, path: &str, blob: &str, run: &Run) {
+        self.reveals.update(|m| {
+            if let Some(reveals) = m.get_mut(&(path.to_string(), blob.to_string())) {
+                reveals.remove_overlapping(run.default_heads.0, run.default_heads.1);
+                if reveals.is_empty() {
+                    m.remove(&(path.to_string(), blob.to_string()));
+                }
+            }
+        });
+    }
+
     pub fn fail_load(&self, path: &str) {
         self.loading.update(|m| {
             m.remove(path);
@@ -828,15 +876,7 @@ impl ReviewState {
     /// order. Only those on the head side with a line GitHub still places:
     /// one on a removed line, or outdated, has nowhere in the file to be.
     pub fn github_threads_in(&self, path: &str) -> Vec<crate::review::timeline::LineThread> {
-        self.discussion.with(|d| {
-            let Some(d) = d.as_ref() else { return Vec::new() };
-            let on_file: Vec<perch_github::ReviewComment> =
-                d.review_comments.iter().filter(|c| c.path == path).cloned().collect();
-            crate::review::timeline::line_threads(&on_file)
-                .into_iter()
-                .filter(|t| t.comment.side == perch_github::Side::Right && t.comment.line.is_some())
-                .collect()
-        })
+        self.discussion.with(|d| github_threads_of(d.as_deref(), path))
     }
 
     /// The GitHub review comment that starts on a display line of the open
@@ -876,6 +916,43 @@ impl ReviewState {
         self.changed_files
             .with(|files| files.iter().find(|f| f.path == path).map(|f| f.status))
     }
+}
+
+/// GitHub's review comment threads on a file that the head places: on
+/// the head side, with a line. See `ReviewState::github_threads_in`.
+pub fn github_threads_of(discussion: Option<&Discussion>, path: &str) -> Vec<crate::review::timeline::LineThread> {
+    let Some(d) = discussion else { return Vec::new() };
+    let on_file: Vec<perch_github::ReviewComment> =
+        d.review_comments.iter().filter(|c| c.path == path).cloned().collect();
+    crate::review::timeline::line_threads(&on_file)
+        .into_iter()
+        .filter(|t| t.comment.side == perch_github::Side::Right && t.comment.line.is_some())
+        .collect()
+}
+
+/// The head lines threads are anchored on in a file, as inclusive
+/// zero-based ranges, which the folds keep in view: the reader's own from
+/// their first line to their last, outdated or not, and GitHub's review
+/// comments on the head side that still have a line. One on the base
+/// side, or without a line, has nowhere in the head to be and does not
+/// count.
+pub fn anchors_of(threads: &[CommentThread], discussion: Option<&Discussion>, path: &str) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = threads
+        .iter()
+        .filter_map(|t| t.anchor.as_ref())
+        .filter(|a| a.path == path)
+        .map(|a| {
+            let (first, last) = (a.start_line.min(a.line), a.start_line.max(a.line));
+            (first.saturating_sub(1) as usize, last.saturating_sub(1) as usize)
+        })
+        .collect();
+    out.extend(
+        github_threads_of(discussion, path)
+            .into_iter()
+            .filter_map(|t| t.comment.line)
+            .map(|line| (line.saturating_sub(1) as usize, line.saturating_sub(1) as usize)),
+    );
+    out
 }
 
 #[cfg(test)]
@@ -964,6 +1041,87 @@ mod tests {
         let expanded = state.expanded.get();
         assert!(expanded.contains("docs"));
         assert!(!expanded.contains("src/ui"));
+    }
+
+    #[test]
+    fn the_anchors_in_a_file_are_its_threads_lines_and_githubs_head_side_comments() {
+        use perch_github::{CommentThread, Discussion, ReviewComment, Side, ThreadOrigin};
+        let at = "2026-09-18T09:59:00Z".parse().unwrap();
+        let thread = |id: &str, path: &str, start_line: u32, line: u32, outdated: bool| CommentThread {
+            id: id.into(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::Local,
+            anchor: Some(Anchor { path: path.into(), start_line, line, side: Side::Right, commit_sha: "h".into() }),
+            outdated,
+            resolved: false,
+            created_at: at,
+            messages: Vec::new(),
+        };
+        let comment = |id: u64, path: &str, line: Option<u64>, side: Side| ReviewComment {
+            id,
+            pull_request_review_id: None,
+            in_reply_to_id: None,
+            user: "chris".into(),
+            body: String::new(),
+            path: path.into(),
+            line,
+            original_line: None,
+            diff_hunk: String::new(),
+            side,
+            created_at: at,
+            updated_at: None,
+            html_url: String::new(),
+        };
+        let mut worktree = thread("w", "", 0, 0, false);
+        worktree.anchor = None;
+        let threads = vec![
+            thread("a", "src/x.rs", 41, 58, false),
+            thread("b", "src/x.rs", 7, 7, true),
+            thread("c", "src/y.rs", 1, 3, false),
+            worktree,
+        ];
+        let discussion = Discussion {
+            opened_at: None,
+            body: String::new(),
+            comments: Vec::new(),
+            reviews: Vec::new(),
+            review_comments: vec![
+                comment(1, "src/x.rs", Some(100), Side::Right),
+                comment(2, "src/x.rs", Some(200), Side::Left),
+                comment(3, "src/x.rs", None, Side::Right),
+                comment(4, "src/y.rs", Some(9), Side::Right),
+            ],
+            events: Vec::new(),
+        };
+        // Zero based and inclusive: the thread over 41 to 58, the outdated
+        // one on 7, and GitHub's on 100. Not the base side, not the one
+        // without a line, and nothing from the other file or the worktree.
+        assert_eq!(anchors_of(&threads, Some(&discussion), "src/x.rs"), vec![(40, 57), (6, 6), (99, 99)]);
+        assert_eq!(anchors_of(&threads, None, "src/x.rs"), vec![(40, 57), (6, 6)]);
+        assert_eq!(anchors_of(&threads, Some(&discussion), "src/z.rs"), Vec::<(usize, usize)>::new());
+
+        let state = ReviewState::new();
+        state.comment_threads.set(Arc::new(threads));
+        state.discussion.set(Some(Arc::new(discussion)));
+        assert_eq!(state.anchors_in("src/y.rs"), vec![(0, 2), (8, 8)]);
+    }
+
+    #[test]
+    fn a_reveal_is_kept_by_path_and_blob_and_reset_forgets_the_run_it_is_in() {
+        let state = ReviewState::new();
+        assert!(state.reveals_for("src/x.rs", "b1").is_empty());
+        state.reveal("src/x.rs", "b1", 4, 23);
+        state.reveal("src/x.rs", "b2", 50, 60);
+        assert!(state.reveals_for("src/x.rs", "b1").overlaps(4, 37));
+        assert!(!state.reveals_for("src/x.rs", "b1").overlaps(50, 60), "another blob's reveal is another file's");
+        // Reset on a piece of the run folds the whole run: the piece
+        // remembers the run it was cut from.
+        let piece = Run { first: 25, last: 38, first_head: 24, default_heads: (4, 37) };
+        state.reset("src/x.rs", "b1", &piece);
+        assert!(state.reveals_for("src/x.rs", "b1").is_empty());
+        assert!(state.reveals_for("src/x.rs", "b2").overlaps(50, 60), "and no other");
+        let key = ("src/x.rs".to_string(), "b1".to_string());
+        assert!(!state.reveals.get().contains_key(&key), "an empty set is dropped");
     }
 
     #[test]

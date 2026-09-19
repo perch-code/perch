@@ -3400,6 +3400,7 @@ pub(crate) fn build_loaded_file(
             scope,
             base_buffer: None,
             alignment: Vec::new(),
+            blob: String::new(),
         };
     }
 
@@ -3433,6 +3434,7 @@ pub(crate) fn build_loaded_file(
         scope,
         base_buffer,
         alignment,
+        blob: String::new(),
     }
 }
 

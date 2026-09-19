@@ -291,6 +291,9 @@ pub const DIFF_FILLER_BG: Color = Color::from_rgb8(0xf1, 0xf3, 0xf5);
 /// A divider row, standing for a run of unchanged lines folded away: the
 /// accent's wash, which is what github.com paints its expand rows in.
 pub const DIFF_DIVIDER_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
+/// The divider's count, muted like the gutter's numbers so the bar reads
+/// as a seam in the file and not as a line of it.
+pub const DIFF_DIVIDER_FG: Color = FG_MUTED;
 /// The Stacked and Split tiles at the right end of the file tab bar.
 pub const LAYOUT_TILE: f64 = 22.0;
 /// The references panel under the editor: its header, a file's heading

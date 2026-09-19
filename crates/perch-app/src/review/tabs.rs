@@ -209,34 +209,30 @@ fn change_nav(state: ReviewState) -> impl IntoView {
     })
 }
 
+/// Scroll to the next or previous change after the cursor's line, as the
+/// strip's chevrons and the `]` and `[` keys both do. A change is never
+/// folded, so the jump reveals nothing; it goes the one way every jump
+/// goes so that there is one.
+pub fn jump_to_change(state: ReviewState, forward: bool) {
+    let Some(file) = state.active_file() else { return };
+    let from = state.cursor_line.get();
+    let target = if forward { file.buffer.next_change(from) } else { file.buffer.previous_change(from) };
+    if let Some(display_line) = target {
+        state.cursor_line.set(display_line);
+        // The editor scrolls by head line, so translate back through the
+        // row table; a ghost line has none, so use the line after.
+        let head = file.buffer.rows.iter().skip(display_line).find_map(|r| r.head_line()).unwrap_or(display_line);
+        state.jump_to_line.set(Some(head));
+    }
+}
+
 fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
     use crate::ui::widgets::sidebar_glyph;
 
     let glyph = if forward { SidebarIcon::ChevronDown } else { SidebarIcon::ChevronUp };
 
     Container::new(sidebar_glyph(glyph, theme::FG_MUTED))
-        .on_event_stop(el::Click, move |_, _| {
-            let Some(file) = state.active_file() else { return };
-            let from = state.cursor_line.get();
-            let target = if forward {
-                file.buffer.next_change(from)
-            } else {
-                file.buffer.previous_change(from)
-            };
-            if let Some(display_line) = target {
-                state.cursor_line.set(display_line);
-                // The editor scrolls by head line, so translate back through
-                // the row table; a ghost line has none, so use the line after.
-                let head = file
-                    .buffer
-                    .rows
-                    .iter()
-                    .skip(display_line)
-                    .find_map(|r| r.head_line())
-                    .unwrap_or(display_line);
-                state.jump_to_line.set(Some(head));
-            }
-        })
+        .on_event_stop(el::Click, move |_, _| jump_to_change(state, forward))
         .style(|s| {
             s.size(20.0, 20.0)
                 .items_center()
