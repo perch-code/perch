@@ -376,15 +376,17 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
         ))
         .style(|s| s.flex_col().width_full()),
         // Pinned, hidden when empty.
+        // Keyed on the count rather than on emptiness so the header's
+        // number follows a pin or an unpin, as Priority's does.
         dyn_container(
-            move || state.item_sections().pinned.is_empty(),
-            move |empty| {
-                if empty {
+            move || state.item_sections().pinned.len(),
+            move |count| {
+                if count == 0 {
                     return Empty::new().into_any();
                 }
                 let (b, o) = (b2.clone(), o2.clone());
                 Stack::vertical((
-                    section_header("Pinned".into(), 0, None),
+                    section_header("Pinned".into(), count, None),
                     dyn_stack(
                         move || state.item_sections().pinned,
                         row_key,

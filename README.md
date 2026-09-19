@@ -52,7 +52,7 @@ GitHub.
   oldest first; the search box matches titles, numbers, branches and
   repository names.
 - Save and Done are marks on the item, set from the row, from the keyboard,
-  or from the header of an open issue. Done takes the item out of Priority,
+  or from the header of the open item. Done takes the item out of Priority,
   and the next notification that asks for you brings it back, the way a
   done thread comes back on the web; Save does not expire. Status set to
   Done lists what is done, and Saved only narrows every section, Priority

@@ -41,6 +41,7 @@ pub fn header(
         checks_pill(state),
         directory(state, on_archive),
         churn(state),
+        item_marks(state, backend.clone()),
     )))
     .style(bar_style);
     Stack::vertical((bar, metadata_strip(app, state, backend, open_item))).style(|s| s.flex_col().width_full())
@@ -77,7 +78,9 @@ fn bar_style(s: floem::style::Style) -> floem::style::Style {
 }
 
 
-/// Save and Done for the open item, as the sidebar rows have.
+/// Save and Done for the open item, as the sidebar rows have. Every
+/// item's bar ends in them, so a pull request read to the end is marked
+/// where the reader is looking.
 fn item_marks(state: ReviewState, backend: std::rc::Rc<crate::backend::Backend>) -> impl IntoView {
     dyn_container(
         move || state.item.with(|i| i.as_ref().map(|i| (i.id.clone(), i.saved, i.is_done()))),
