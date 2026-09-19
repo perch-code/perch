@@ -265,6 +265,13 @@ impl AppState {
                 tracing::warn!(path, message, "could not open file");
                 review.fail_load(&path);
             }
+            // A complaint may be about the send a sent question's card is
+            // waiting on, whose thread is then not coming; the card's
+            // rows go with it. The notice itself is the status bar's.
+            Event::Notice(message) => {
+                review.drop_sent_placeholder();
+                self.apply(Event::Notice(message));
+            }
             // Everything about the open item that arrives after it is
             // ready. Each names its item, so a slow answer for the last
             // one opened cannot land on the next.
@@ -541,5 +548,41 @@ mod tests {
         assert!(review.viewed.get().contains(&("src/x.rs".into(), "b1".into())));
         assert_eq!(review.reveals_for("src/x.rs", "b1").iter().collect::<Vec<_>>(), vec![(4, 23)]);
         assert!(!review.folded.get(), "Show whole is not undone by a write that came before it");
+    }
+
+    #[test]
+    fn a_notice_reaches_the_status_bar_and_gives_up_a_sent_questions_rows() {
+        let app = AppState::new();
+        let review = review_of("wt");
+        let file = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "a\nB\nc\n".into(),
+            "a\nb\nc\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        review.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(file));
+        });
+        review.active.set(Some("src/x.rs".into()));
+        let anchor = perch_github::Anchor {
+            path: "src/x.rs".into(),
+            start_line: 3,
+            line: 3,
+            side: perch_github::Side::Right,
+            commit_sha: "h".into(),
+        };
+        review.open_composer(None, Some(anchor.clone()), String::new(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
+        review.composer_sent();
+        assert_eq!(review.sent_composer.get(), Some(anchor));
+
+        // The send failed: the complaint shows, and the blank rows under
+        // the lines go.
+        app.apply_with_review(Event::Notice("Could not save the question: disk full".into()), review);
+        assert_eq!(app.notice.get().as_deref(), Some("Could not save the question: disk full"));
+        assert!(review.sent_composer.get().is_none());
+        assert!(review.cards_in("src/x.rs").is_empty());
     }
 }

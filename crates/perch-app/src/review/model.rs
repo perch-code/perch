@@ -673,6 +673,7 @@ impl ReviewState {
         self.active.set(Some(path.to_string()));
         self.cursor_line.set(0);
         self.editor_epoch.update(|e| *e += 1);
+        self.keep_composer_in_view();
 
         let needs_load = self.file(path).is_none() && !self.is_loading(path);
         if needs_load {
@@ -681,6 +682,18 @@ impl ReviewState {
             });
         }
         needs_load
+    }
+
+    /// The open file changed under an open composer. One drawn in the
+    /// code of the file that was open is drawn nowhere now, so the column
+    /// is shown for it: its slot takes a composer that is not in the
+    /// code, and a follow-up sits under its thread there. Untracked, as
+    /// `show_threads` reads, since a caller can be an effect.
+    fn keep_composer_in_view(&self) {
+        let hidden = floem::reactive::Effect::untrack(|| self.composer.with(Option::is_some) && !self.composer_in_code());
+        if hidden {
+            self.show_threads();
+        }
     }
 
     pub fn close_tab(&self, path: &str) {
@@ -702,6 +715,7 @@ impl ReviewState {
             self.active.set(neighbour);
             self.cursor_line.set(0);
             self.editor_epoch.update(|e| *e += 1);
+            self.keep_composer_in_view();
         }
     }
 
@@ -827,10 +841,18 @@ impl ReviewState {
     }
 
     /// The head lines a file's threads are anchored on, for the folds to
-    /// keep in view. Tracked, so a document built from them follows the
-    /// threads and the discussion.
+    /// keep in view, and the composer card's while it has one: the thread
+    /// being written keeps its lines in view as a written one does, so a
+    /// run folded again cannot close over the card. Tracked, so a document
+    /// built from them follows the threads, the discussion and the
+    /// composer.
     pub fn anchors_in(&self, path: &str) -> Vec<(usize, usize)> {
-        self.comment_threads.with(|threads| self.discussion.with(|d| anchors_of(threads, d.as_deref(), path)))
+        let mut out = self.comment_threads.with(|threads| self.discussion.with(|d| anchors_of(threads, d.as_deref(), path)));
+        if let Some(a) = self.composer_card_anchor(path) {
+            let (first, last) = (a.start_line.min(a.line), a.start_line.max(a.line));
+            out.push((first.saturating_sub(1) as usize, last.saturating_sub(1) as usize));
+        }
+        out
     }
 
     /// The cards of a file: the reader's threads anchored in it, GitHub's
@@ -878,6 +900,45 @@ impl ReviewState {
                 .and_then(|c| c.anchor.as_ref())
                 .is_some_and(|a| a.path == file.path && card_line(&file, a).is_some())
         })
+    }
+
+    /// Whether a follow-up on a thread is drawn inside the thread's card
+    /// in the code: the thread has a card in the active file, which is
+    /// loaded and has its lines. The column's card shows its plain
+    /// follow-up line then, so the follow-up's box is in one place.
+    /// Tracked.
+    pub fn follow_up_is_inline(&self, thread_id: &str) -> bool {
+        let Some(file) = self.active_file() else {
+            return false;
+        };
+        self.comment_threads.with(|threads| {
+            threads
+                .iter()
+                .find(|t| t.id == thread_id)
+                .and_then(|t| t.anchor.as_ref())
+                .is_some_and(|a| a.path == file.path && card_line(&file, a).is_some())
+        })
+    }
+
+    /// Whether the open composer is drawn in the code rather than the
+    /// column: a new thread's as a card under its lines, a follow-up's
+    /// inside its thread's card. Tracked.
+    pub fn composer_in_code(&self) -> bool {
+        match self.composer.with(|c| c.as_ref().map(|c| c.thread_id.clone())) {
+            Some(Some(thread_id)) => self.follow_up_is_inline(&thread_id),
+            Some(None) => self.composer_is_inline(),
+            None => false,
+        }
+    }
+
+    /// Open a card drawn as one row, so what is inside it can be seen.
+    /// Nothing is written for a card that is open already.
+    pub fn expand_card(&self, card: &CardId) {
+        if self.collapsed_cards.with_untracked(|c| c.contains(card)) {
+            self.collapsed_cards.update(|c| {
+                c.remove(card);
+            });
+        }
     }
 
     /// Whether a card is drawn as one row.
@@ -1074,13 +1135,19 @@ impl ReviewState {
         })
     }
 
-    /// Open a composer, for a new thread on `anchor` or the worktree.
+    /// Open a composer, for a new thread on `anchor` or the worktree, or
+    /// a follow-up in `thread_id`.
     ///
     /// The column opens for it, unless it is drawn in the code: a
-    /// composer on lines of the open file is a card under them, and the
-    /// column's slot for it is empty, so opening the column would only
-    /// narrow the code. A sent question's card gives way to the new
-    /// composer, since there is one composer card at a time.
+    /// composer on lines of the open file is a card under them, and a
+    /// follow-up on a thread with a card in the open file sits inside
+    /// that card; the column's slot and line for either are empty, so
+    /// opening the column would only narrow the code. A card the
+    /// follow-up sits inside is opened if it was collapsed, so the box is
+    /// seen. A sent question's card gives way to the new composer, since
+    /// there is one composer card at a time, and whatever rows the last
+    /// composer's card had are forgotten: they were that card's, and this
+    /// one starts on the estimate.
     pub fn open_composer(&self, thread_id: Option<String>, anchor: Option<Anchor>, draft: String, defaults: AgentChoice) {
         let (backend, model, effort) = self.agent_last.get().unwrap_or(defaults);
         self.composer_draft.set(draft.clone());
@@ -1089,14 +1156,17 @@ impl ReviewState {
         floem::reactive::Effect::batch(|| {
             if self.sent_composer.with_untracked(Option::is_some) {
                 self.sent_composer.set(None);
-                self.forget_composer_rows();
             }
+            self.forget_composer_rows();
             self.composer.set(Some(Composer { thread_id, anchor, backend, model, effort, draft, opening }));
         });
         // Untracked, as `show_threads` reads: a caller that is an effect
         // must not come to depend on the file or the composer through this.
-        if !floem::reactive::Effect::untrack(|| self.composer_is_inline()) {
+        let in_code = floem::reactive::Effect::untrack(|| self.composer_in_code());
+        if !in_code {
             self.show_threads();
+        } else if let Some(id) = self.composer.with_untracked(|c| c.as_ref().and_then(|c| c.thread_id.clone())) {
+            self.expand_card(&CardId::Thread(id));
         }
     }
 
@@ -1112,10 +1182,10 @@ impl ReviewState {
     /// floem then registers the dead view anyway, and the next box tree
     /// commit asks it for a window origin it no longer has.
     ///
-    /// The read is untracked. Two of the callers are effects, and a tracked
-    /// read would subscribe them to the very signal the close button
-    /// writes: closing the column would re-run the effect that opens it
-    /// for a file with threads, and the column would come straight back.
+    /// The read is untracked. A caller can be an effect, and a tracked
+    /// read would subscribe it to the very signal the close button
+    /// writes: closing the column would re-run the effect that opened it,
+    /// and the column would come straight back.
     pub fn show_threads(&self) {
         if !self.threads_open.get_untracked() {
             self.threads_open.set(true);
@@ -1152,6 +1222,20 @@ impl ReviewState {
         });
         self.composer_draft.set(String::new());
         self.composer_focused.set(false);
+    }
+
+    /// The backend complained about something, which may be the send
+    /// whose thread a sent question's card is waiting for. The card's rows
+    /// are given up, so a failed send does not leave blank rows under the
+    /// lines; a thread that does arrive after all brings its own card.
+    pub fn drop_sent_placeholder(&self) {
+        if self.sent_composer.with_untracked(Option::is_none) {
+            return;
+        }
+        floem::reactive::Effect::batch(|| {
+            self.sent_composer.set(None);
+            self.forget_composer_rows();
+        });
     }
 
     /// The thread whose anchor starts on a display line of the open file.
@@ -1686,14 +1770,177 @@ mod tests {
         assert_eq!(state.composer_card_anchor("src/y.rs"), None);
         assert_eq!(state.cards_in("src/x.rs").len(), 5);
         // A follow-up is inside its thread's card, not a card of its own,
-        // and a question about the worktree is the column's.
+        // and the column is not opened for one on a thread with a card in
+        // the open file; a question about the worktree is the column's.
         state.open_composer(Some("mine".into()), Some(composer.clone()), String::new(), choice.clone());
         assert!(!state.composer_is_inline());
+        assert!(state.follow_up_is_inline("mine"));
+        assert!(!state.follow_up_is_inline("elsewhere"), "no such thread in the file");
+        assert!(state.composer_in_code());
+        assert!(!state.threads_open.get(), "the column is not opened for a follow-up drawn in the code");
         assert_eq!(state.cards_in("src/x.rs").len(), 4);
-        state.open_composer(None, None, String::new(), choice);
+        state.open_composer(None, None, String::new(), choice.clone());
         assert!(!state.composer_is_inline());
+        assert!(!state.composer_in_code());
         assert!(state.threads_open.get(), "the column opens for a composer it draws");
         assert_eq!(state.cards_in("src/x.rs").len(), 4);
+
+        // A follow-up on a thread whose card is collapsed opens the card,
+        // so the box it sits inside is seen.
+        state.threads_open.set(false);
+        state.toggle_card(&CardId::Thread("mine".into()));
+        state.open_composer(Some("mine".into()), Some(composer), String::new(), choice);
+        assert!(!state.is_collapsed(&CardId::Thread("mine".into())));
+        assert!(!state.threads_open.get());
+    }
+
+    #[test]
+    fn the_composers_card_anchor_counts_among_the_files_anchors_until_its_thread_arrives() {
+        use perch_github::Side;
+        let state = ReviewState::new();
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(spliced_file()));
+        });
+        state.active.set(Some("src/x.rs".into()));
+        let anchor = Anchor { path: "src/x.rs".into(), start_line: 2, line: 3, side: Side::Right, commit_sha: "h".into() };
+        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        assert!(state.anchors_in("src/x.rs").is_empty());
+
+        // Open on lines 2 to 3, the composer's card keeps them out of the
+        // folds as a thread's would; the other file has nothing.
+        state.open_composer(None, Some(anchor.clone()), String::new(), choice.clone());
+        assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
+        assert!(state.anchors_in("src/y.rs").is_empty());
+
+        // Sent, the placeholder keeps them until the thread's own anchor
+        // takes over, and the thread is then the one anchor.
+        state.composer_sent();
+        assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
+        state.set_comment_threads(Arc::new(vec![anchored("new", 2, 3, "2026-09-18T10:00:00Z", false)]));
+        assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
+
+        // Escape gives the lines back; a follow-up is no card and adds
+        // none; a composer in the column adds none.
+        state.open_composer(None, Some(anchor.clone()), String::new(), choice.clone());
+        assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2), (1, 2)]);
+        state.close_composer();
+        assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
+        state.open_composer(Some("new".into()), Some(anchor), String::new(), choice.clone());
+        assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
+        state.open_composer(None, None, String::new(), choice);
+        assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
+    }
+
+    #[test]
+    fn a_composer_replacing_an_open_one_starts_on_the_estimate() {
+        use perch_github::Side;
+        let state = ReviewState::new();
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(spliced_file()));
+        });
+        state.active.set(Some("src/x.rs".into()));
+        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        let on = |start: u32, line: u32| Anchor { path: "src/x.rs".into(), start_line: start, line, side: Side::Right, commit_sha: "h".into() };
+
+        // A composer typed into grows to fourteen rows; `a` on other
+        // lines replaces it with an empty one, which is the estimate's
+        // height, not the last box's.
+        state.open_composer(None, Some(on(3, 3)), String::new(), choice.clone());
+        state.set_card_rows(&CardId::Composer, 14);
+        assert_eq!(state.cards_in("src/x.rs")[0].rows, 14);
+        state.open_composer(None, Some(on(1, 2)), String::new(), choice.clone());
+        assert!(!state.card_rows.get().contains_key(&CardId::Composer), "the last card's rows are not this one's");
+        assert_eq!(state.cards_in("src/x.rs"), vec![Card { id: CardId::Composer, after_display_line: 2, rows: doc::COMPOSER_ROWS }]);
+
+        // A follow-up replacing it leaves nothing behind for the next
+        // new composer either.
+        state.set_card_rows(&CardId::Composer, 12);
+        state.set_comment_threads(Arc::new(vec![anchored("t", 3, 3, "2026-09-18T10:00:00Z", false)]));
+        state.open_composer(Some("t".into()), Some(on(3, 3)), String::new(), choice.clone());
+        assert!(!state.card_rows.get().contains_key(&CardId::Composer));
+        state.open_composer(None, Some(on(1, 2)), String::new(), choice);
+        assert_eq!(state.cards_in("src/x.rs").iter().find(|c| c.id == CardId::Composer).map(|c| c.rows), Some(doc::COMPOSER_ROWS));
+    }
+
+    #[test]
+    fn a_composer_drawn_in_the_code_is_shown_in_the_column_when_the_open_file_changes_under_it() {
+        use perch_github::Side;
+        let state = ReviewState::new();
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(spliced_file()));
+        });
+        state.open_tab("src/x.rs");
+        let anchor = Anchor { path: "src/x.rs".into(), start_line: 3, line: 3, side: Side::Right, commit_sha: "h".into() };
+        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+
+        // Opened on lines of the open file, the composer is a card there
+        // and the column stays shut. Another file opened over it has no
+        // card for it, so the column opens with it in its slot; back on
+        // its own file it is the card again, and the column is left as
+        // it is.
+        state.open_composer(None, Some(anchor.clone()), "why?".into(), choice.clone());
+        assert!(state.composer_in_code());
+        assert!(!state.threads_open.get());
+        state.open_tab("src/y.rs");
+        assert!(!state.composer_in_code());
+        assert!(state.threads_open.get(), "the composer is drawn nowhere without the column");
+        assert_eq!(state.composer_draft.get(), "why?");
+        state.threads_open.set(false);
+        state.open_tab("src/x.rs");
+        assert!(state.composer_in_code());
+        assert!(!state.threads_open.get());
+
+        // Closing the composer's file for its neighbour does the same.
+        state.threads_open.set(false);
+        state.close_tab("src/x.rs");
+        assert_eq!(state.active.get().as_deref(), Some("src/y.rs"));
+        assert!(state.threads_open.get());
+
+        // A follow-up inside a card of the open file likewise.
+        state.close_composer();
+        state.threads_open.set(false);
+        state.open_tab("src/x.rs");
+        state.set_comment_threads(Arc::new(vec![anchored("t", 3, 3, "2026-09-18T10:00:00Z", false)]));
+        state.open_composer(Some("t".into()), Some(anchor), String::new(), choice.clone());
+        assert!(state.composer_in_code());
+        assert!(!state.threads_open.get());
+        state.open_tab("src/y.rs");
+        assert!(state.threads_open.get());
+
+        // No composer, no column.
+        state.close_composer();
+        state.threads_open.set(false);
+        state.open_tab("src/x.rs");
+        state.open_tab("src/y.rs");
+        assert!(!state.threads_open.get());
+    }
+
+    #[test]
+    fn a_notice_gives_up_a_sent_questions_rows() {
+        use perch_github::Side;
+        let state = ReviewState::new();
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(spliced_file()));
+        });
+        state.active.set(Some("src/x.rs".into()));
+        let anchor = Anchor { path: "src/x.rs".into(), start_line: 3, line: 3, side: Side::Right, commit_sha: "h".into() };
+        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+
+        // Nothing sent: nothing to give up.
+        state.drop_sent_placeholder();
+        assert!(state.sent_composer.get().is_none());
+
+        // Sent and laid out at ten rows, the send fails: the rows go, and
+        // the composer that was already closed stays closed.
+        state.open_composer(None, Some(anchor.clone()), String::new(), choice);
+        state.set_card_rows(&CardId::Composer, 10);
+        state.composer_sent();
+        assert_eq!(state.sent_composer.get(), Some(anchor));
+        state.drop_sent_placeholder();
+        assert!(state.sent_composer.get().is_none());
+        assert!(state.cards_in("src/x.rs").is_empty(), "the placeholder's rows went with it");
+        assert!(!state.card_rows.get().contains_key(&CardId::Composer));
+        assert!(state.composer.get().is_none());
     }
 
     #[test]

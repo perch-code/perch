@@ -24,7 +24,7 @@ pub mod tree;
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{Effect, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use floem::views::{Decorators, Stack, dyn_container};
 
 use crate::backend::Backend;
@@ -164,17 +164,11 @@ fn item_view(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc
     .style(|s| s.size_full().flex_col().min_height(0.0))
 }
 
+/// The rail, the code and the thread column. The column stays where the
+/// reader put it: a file's threads are drawn in the code as cards, so
+/// nothing opens the column for them, and `open_composer` opens it only
+/// for a composer it draws.
 fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Backend>) -> impl IntoView {
-    // The column opens itself when a file with threads is opened, and
-    // stays where it was put otherwise.
-    Effect::new(move |_| {
-        if let Some(path) = state.active.get() {
-            if !state.threads_in(&path).is_empty() {
-                state.show_threads();
-            }
-        }
-    });
-
     let column_backend = backend.clone();
     let column_open = open_file.clone();
     Stack::horizontal((

@@ -5,7 +5,8 @@
 //! then the worktree's others under a divider. A composer sits at the top
 //! for a new thread, unless the thread is on lines of the open file, when
 //! the composer is a card in the code under them instead; a follow-up's
-//! composer sits under its thread.
+//! composer sits under its thread, in the code when the thread is drawn
+//! there and in the column otherwise.
 //!
 //! The same thread is also a card on Conversation, and a card in the code
 //! under the lines it is about. The message, the run's steps and footer,
@@ -460,6 +461,7 @@ pub fn composer_view(
         ))
         .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0)),
     ))
+    .debug_name("composer-box")
     .style(move |s| {
         let base = s
             .flex_col()
@@ -890,7 +892,7 @@ fn chevron(state: ReviewState, card_id: CardId, open: bool) -> impl IntoView {
         crate::ui::widgets::icon_in(move || crate::icons::sidebar_icon(SidebarIcon::ChevronRight, color()), color).style(
             move |s| {
                 let base = s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH);
-                if open { base.rotate(90.0) } else { base }
+                if open { base.rotate(floem::style::Angle::QUARTER_TURN) } else { base }
             },
         ),
     )
@@ -1066,6 +1068,12 @@ pub fn messages_view(
 
 /// The follow-up composer under a thread when one is open for it, else the
 /// line that opens one.
+///
+/// The composer is drawn in one place. A thread with a card in the open
+/// file takes it inside that card, and the column's card for the thread
+/// keeps its line, whose click points the reader at the card; a thread
+/// without one takes it in the column. Conversation's card is the only
+/// place the thread is drawn there, and always takes it.
 pub fn follow_up(
     app: AppState,
     state: ReviewState,
@@ -1088,7 +1096,12 @@ pub fn follow_up(
             let composer = state
                 .composer
                 .with(|c| c.as_ref().filter(|c| c.thread_id.as_deref() == Some(composer_thread.as_str())).cloned());
-            (composer, running.get())
+            let drawn_here = match face {
+                ThreadFace::Inline => state.follow_up_is_inline(&composer_thread),
+                ThreadFace::Column => !state.follow_up_is_inline(&composer_thread),
+                ThreadFace::Card => true,
+            };
+            (composer.filter(|_| drawn_here), running.get())
         },
         move |(composer, _)| match composer {
             Some(c) => composer_view(app, state, backend.clone(), c, face).into_any(),
@@ -1253,7 +1266,7 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
             Stack::horizontal((
                 sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE).style(move |s| {
                     let base = s.size(10.0, 10.0).margin_right(5.0);
-                    if expanded_chevron() { base.rotate(90.0) } else { base }
+                    if expanded_chevron() { base.rotate(floem::style::Angle::QUARTER_TURN) } else { base }
                 }),
                 Label::derived(move || {
                     if running && steps.is_empty() { "Working…".to_string() } else { summary.clone() }
@@ -1325,7 +1338,10 @@ pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
     text
 }
 
-/// The one-line invitation at the bottom of a thread.
+/// The one-line invitation at the bottom of a thread. In the column, for a
+/// thread whose follow-up is drawn inside its card in the code, the click
+/// points the reader at that card rather than opening a second box: the
+/// card is opened if collapsed, scrolled to and flashed.
 pub fn reply_line(app: AppState, state: ReviewState, thread: CommentThread, face: ThreadFace) -> impl IntoView {
     let running = thread.running_run().is_some();
     if running {
@@ -1335,7 +1351,16 @@ pub fn reply_line(app: AppState, state: ReviewState, thread: CommentThread, face
     let anchor = thread.anchor.clone();
     Label::derived(|| "Follow up…".to_string())
         .on_event_stop(el::Click, move |_, _| {
-            state.open_composer(Some(id.clone()), anchor.clone(), String::new(), defaults(app));
+            let already =
+                state.composer.with_untracked(|c| c.as_ref().is_some_and(|c| c.thread_id.as_deref() == Some(id.as_str())));
+            if !already {
+                state.open_composer(Some(id.clone()), anchor.clone(), String::new(), defaults(app));
+            }
+            if face == ThreadFace::Column && Effect::untrack(|| state.follow_up_is_inline(&id)) {
+                let card = CardId::Thread(id.clone());
+                state.expand_card(&card);
+                state.focus_card.set(Some(card));
+            }
         })
         .style(move |s| {
             let base = clickable(s)
@@ -1700,8 +1725,8 @@ mod column {
     #[test]
     fn the_close_button_hides_the_column_when_the_open_file_has_threads() {
         let (mut harness, state) = app_harness();
-        // The thread is anchored in src/x.rs; make that the open file, as
-        // the effect that opens the column for a file with threads sees it.
+        // The thread is anchored in src/x.rs; make that the open file, so
+        // the thread is drawn in the code as well as in the column.
         let file = Arc::new(crate::backend::build_loaded_file(
             "src/x.rs".into(),
             "fn a() {}\n".repeat(80),

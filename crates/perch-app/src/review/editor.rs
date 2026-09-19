@@ -734,7 +734,13 @@ fn inline_card(
 /// card. Never fewer than one, and never more than a card may take: the
 /// card scrolls inside itself at that height, so the rows it is given
 /// stop where the estimate's cap does.
+///
+/// The height is read to a hundredth of a pixel first. It comes from the
+/// layout's single-precision sum of the card's lines, whose fractional
+/// heights can land one float step over a row multiple, and rounding
+/// that step up would give the card a blank row under it.
 fn rows_for_height(height: f64, line_height: f64, inset: f64) -> usize {
+    let height = (height * 100.0).round() / 100.0;
     let rows = ((height + 2.0 * inset) / line_height).ceil().max(1.0) as usize;
     rows.min(doc::CARD_MAX_ROWS)
 }
@@ -1322,6 +1328,14 @@ mod tests {
         assert_eq!(rows_for_height(five + 1.0, lh, inset), 6);
         assert_eq!(rows_for_height(five - 1.0, lh, inset), 5);
         assert_eq!(rows_for_height(five - lh, lh, inset), 4);
+        // The layout sums the card's lines in single precision, so a card
+        // that is five rows can arrive one float step over it: still five,
+        // and eleven for one step over eleven rows.
+        let step_over = |px: f64| f64::from(f32::from_bits((px as f32).to_bits() + 1));
+        assert!(step_over(five) > five);
+        assert_eq!(rows_for_height(step_over(five), lh, inset), 5);
+        assert_eq!(rows_for_height(step_over(11.0 * lh - 2.0 * inset), lh, inset), 11);
+        assert_eq!(rows_for_height(five + 0.01, lh, inset), 6, "a hundredth of a pixel is a real height");
         // Never fewer than one, however little is there.
         assert_eq!(rows_for_height(0.0, lh, inset), 1);
         assert_eq!(rows_for_height(lh - 2.0 * inset, lh, inset), 1);
@@ -2208,6 +2222,12 @@ mod window {
         id.children().into_iter().find_map(|c| find(c, text))
     }
 
+    /// How many views under `id`, itself included, have `text` in their
+    /// debug name.
+    fn count(id: floem::ViewId, text: &str) -> usize {
+        usize::from(id.debug_name().contains(text)) + id.children().into_iter().map(|c| count(c, text)).sum::<usize>()
+    }
+
     /// The card layer's card for a thread: its box, relative to the layer,
     /// which sits over the editor at the code pane's origin past the
     /// gutter.
@@ -2315,12 +2335,9 @@ mod window {
         harness.rebuild();
         harness.paint();
         let card = CardId::Thread("t1".into());
-        // The column opens itself for a file with threads, as it did
-        // before the cards; shut, it stays shut through the click.
-        assert!(state.threads_open.get());
-        state.threads_open.set(false);
-        harness.rebuild();
-        harness.paint();
+        // The thread is drawn in the code, so the column is not opened
+        // for it, and it stays shut through the click.
+        assert!(!state.threads_open.get(), "the column opened itself for a thread drawn in the code");
 
         // The marker sits in the gutter's slot on the anchor's first line,
         // head line 5, display line 6, on row 6 of a document with nothing
@@ -2363,11 +2380,9 @@ mod window {
         state.layout.set(Layout::Split);
         harness.rebuild();
         harness.paint();
-        // The column opened itself for the thread; shut, the pane is the
+        // The column is not opened for the thread, so the pane is the
         // rest of the window.
-        state.threads_open.set(false);
-        harness.rebuild();
-        harness.paint();
+        assert!(!state.threads_open.get());
         let (left, right) = sides(state);
         let card = CardId::Thread("t1".into());
         // The card over the outer stack corrects both sides' rows.
@@ -2576,6 +2591,129 @@ mod window {
         assert_eq!(doc.len(), len);
         assert_eq!(laid_out_text(&live), doc.text);
         assert_eq!(state.card_rows.get().get(&card), Some(&rows));
+    }
+
+    #[test]
+    fn a_follow_up_composer_is_drawn_in_the_cards_card_alone_and_the_columns_line_points_at_it() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        let thread = thread_with("t1", 5, 7, &["why?", "because"]);
+        state.set_comment_threads(Arc::new(vec![thread.clone()]));
+        state.threads_open.set(true);
+        harness.rebuild();
+        harness.paint();
+        // The thread is drawn twice, as the card in the code and the
+        // column's card, each with its follow-up line and no box.
+        assert_eq!(count(harness.root_id(), "composer-box"), 0);
+        assert_eq!(count(harness.root_id(), "Follow up…"), 2);
+
+        // Following up puts one box inside the card in the code; the
+        // column's card keeps its line. The box is never focused here;
+        // see `composer_autofocus`.
+        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        state.open_composer(Some("t1".into()), thread.anchor.clone(), String::new(), choice);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(count(harness.root_id(), "composer-box"), 1, "one box, not one per face");
+        let card = find(harness.root_id(), "inline-card:t1").expect("the card is in the layer");
+        assert_eq!(count(card, "composer-box"), 1, "inside the card in the code");
+        assert_eq!(count(harness.root_id(), "Follow up…"), 1, "the column's card keeps its line");
+
+        // The column's line, clicked, points at the card rather than
+        // opening a second box: the composer stays the one it was, so
+        // what is typed in it stays too.
+        let opening = state.composer.get().expect("the follow-up is open").opening;
+        let line = find(harness.root_id(), "Follow up…").expect("the column's line");
+        let rect = line.get_visual_rect();
+        let (x, y) = (rect.center().x, rect.center().y);
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(
+            state.focus_card.get(),
+            Some(CardId::Thread("t1".into())),
+            "click at ({x}, {y}) over {under:?} did not point at the card"
+        );
+        assert_eq!(state.composer.get().map(|c| c.opening), Some(opening), "the composer was opened again");
+        assert_eq!(count(harness.root_id(), "composer-box"), 1);
+
+        // With the thread's file closed there is no card in the code, so
+        // the column's card takes the box.
+        state.close_tab("src/x.rs");
+        harness.rebuild();
+        harness.paint();
+        assert!(state.threads_open.get());
+        assert!(find(harness.root_id(), "inline-card:").is_none());
+        assert_eq!(count(harness.root_id(), "composer-box"), 1);
+        assert_eq!(count(harness.root_id(), "Follow up…"), 0);
+    }
+
+    #[test]
+    fn a_run_folded_again_keeps_the_composers_lines_and_its_card_in_view() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = one_long_run();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let run = live.doc.get().run_of(5).expect("row 5 is the divider");
+
+        // Down on the divider shows the run's last twenty lines, as the
+        // divider's own test has it: display line 46, `line 44`, is row 13.
+        let (left, top) = pane_origin();
+        let (x, y) = (left + 44.0, top + 5.0 * line_height + line_height / 2.0);
+        harness.pointer_move(x, y);
+        harness.rebuild();
+        harness.paint();
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(live.doc.get().row_of_display(46), Some(13));
+
+        // A question on it: its card is under it, and its line is an
+        // anchor as a thread's would be.
+        let anchor = perch_github::Anchor {
+            path: "src/x.rs".into(),
+            start_line: 46,
+            line: 46,
+            side: perch_github::Side::Right,
+            commit_sha: "h".into(),
+        };
+        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        state.open_composer(None, Some(anchor), "why?".into(), choice);
+        harness.rebuild();
+        harness.paint();
+        let doc = live.doc.get();
+        let rows = doc.card_span(&CardId::Composer).expect("the composer is a card").len();
+        assert_eq!(doc.card_span(&CardId::Composer), Some(14..14 + rows));
+        assert!(find(harness.root_id(), "inline-card:composer").is_some());
+        assert_eq!(state.anchors_in("src/x.rs"), vec![(45, 45)]);
+
+        // Reset folds the run back to its default, which is cut around
+        // the composer's line as it would be around a thread's: the line,
+        // its context and the card stay in view, with a divider either
+        // side, rather than the run closing over the card.
+        state.reset("src/x.rs", "", &[run.default_heads]);
+        harness.rebuild();
+        harness.paint();
+        let doc = live.doc.get();
+        assert_eq!(doc.run_of(5).map(|r| (r.first, r.last)), Some((5, 42)), "the run above, to the context before the line");
+        assert_eq!(doc.row_of_display(46), Some(9));
+        assert_eq!(doc.card_span(&CardId::Composer), Some(10..10 + rows));
+        assert_eq!(doc.run_of(10 + rows + 3).map(|r| (r.first, r.last)), Some((50, 58)), "the run below, from the context after it");
+        assert_eq!(laid_out_text(&live), doc.text);
+        assert!(find(harness.root_id(), "inline-card:composer").is_some(), "the card is drawn");
+        assert!(state.composer_is_inline());
+        assert_eq!(state.composer_draft.get(), "why?");
+
+        // Sent, the placeholder holds the line open the same way until
+        // the thread arrives with an anchor of its own.
+        state.composer_sent();
+        harness.rebuild();
+        harness.paint();
+        let doc = live.doc.get();
+        assert_eq!(doc.row_of_display(46), Some(9));
+        assert_eq!(doc.card_span(&CardId::Composer), Some(10..10 + rows));
+        assert_eq!(doc.run_of(5).map(|r| (r.first, r.last)), Some((5, 42)));
     }
 
     // GitHub's threads and the composer as cards.
