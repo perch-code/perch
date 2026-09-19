@@ -1,45 +1,8 @@
-//! Relative timestamps and date bucketing, matching the web UI's wording.
+//! Relative timestamps, matching the web UI's wording.
 
 use jiff::{Timestamp, Unit, Zoned};
 
-/// Buckets used by "Group by: Date".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum DateBucket {
-    Today,
-    Yesterday,
-    ThisWeek,
-    Earlier,
-}
-
-impl DateBucket {
-    pub fn label(self) -> &'static str {
-        match self {
-            DateBucket::Today => "Today",
-            DateBucket::Yesterday => "Yesterday",
-            DateBucket::ThisWeek => "This week",
-            DateBucket::Earlier => "Earlier",
-        }
-    }
-}
-
-/// Which bucket `when` falls into, relative to `now`, in the local zone.
-pub fn bucket(when: Timestamp, now: Timestamp) -> DateBucket {
-    let tz = jiff::tz::TimeZone::system();
-    let when_local = when.to_zoned(tz.clone());
-    let now_local = now.to_zoned(tz);
-
-    let days = days_between(&when_local, &now_local);
-    match days {
-        d if d <= 0 => DateBucket::Today,
-        1 => DateBucket::Yesterday,
-        2..=6 => DateBucket::ThisWeek,
-        _ => DateBucket::Earlier,
-    }
-}
-
-/// Whole calendar days from `when` to `now`. Negative values clamp to 0, which
-/// keeps a timestamp a few seconds in the future in the Today bucket rather
-/// than in a bucket of its own.
+/// Whole calendar days from `when` to `now` in the local zone.
 fn days_between(when: &Zoned, now: &Zoned) -> i64 {
     let a = when.date();
     let b = now.date();
@@ -151,41 +114,6 @@ pub(crate) mod tests {
     fn a_previous_year_keeps_the_year() {
         let now = ts("2026-09-17T12:00:00Z");
         assert_eq!(relative(ts("2025-01-03T12:00:00Z"), now), "Jan 3, 2025");
-    }
-
-    /// Today at noon in the system zone. Offsets of a few hours from it stay
-    /// inside today, which an offset from the real instant does not in the
-    /// hour after midnight.
-    pub(crate) fn noon_today() -> Timestamp {
-        Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::system())
-            .with()
-            .hour(12)
-            .minute(0)
-            .second(0)
-            .subsec_nanosecond(0)
-            .build()
-            .expect("noon exists on every date")
-            .timestamp()
-    }
-
-    #[test]
-    fn buckets_split_today_yesterday_and_the_week() {
-        // Offsets from local noon, so the assertions hold in any zone and at
-        // any hour.
-        let now = noon_today();
-        let ago = |h: i64| now - jiff::SignedDuration::from_hours(h);
-        assert_eq!(bucket(ago(1), now), DateBucket::Today);
-        assert_eq!(bucket(ago(26), now), DateBucket::Yesterday);
-        assert_eq!(bucket(ago(24 * 3 + 2), now), DateBucket::ThisWeek);
-        assert_eq!(bucket(ago(24 * 40), now), DateBucket::Earlier);
-    }
-
-    #[test]
-    fn buckets_sort_newest_first() {
-        let mut v = vec![DateBucket::Earlier, DateBucket::Today, DateBucket::ThisWeek];
-        v.sort();
-        assert_eq!(v, vec![DateBucket::Today, DateBucket::ThisWeek, DateBucket::Earlier]);
     }
 
     #[test]

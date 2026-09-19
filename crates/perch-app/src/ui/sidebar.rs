@@ -1,9 +1,7 @@
 //! The drawer on the left, which is the whole navigation.
 //!
-//! Top to bottom: a strip the traffic lights sit over, the search box and
-//! the filter button, then Pinned and one section per repository, owner
-//! or date. Every row is an item, and the filter menu is how the list is
-//! narrowed.
+//! Top to bottom: the title strip, All / Notifications / Authored, search
+//! and filters, then one flat list with pinned items first.
 
 use std::rc::Rc;
 
@@ -11,24 +9,24 @@ use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use floem::views::{
-    Container, Decorators, Empty, ScrollExt, Stack, TextInput, dyn_container, dyn_stack,
+    dyn_container, dyn_stack, Button, Container, Decorators, Empty, Label, ScrollExt, Stack, TextInput,
 };
 
 use crate::backend::Backend;
-use perch_github::Item;
 use crate::icons::SidebarIcon;
-use crate::items::{AttentionReason, Direction, ItemGroup, ItemSort, ItemStatus};
+use crate::items::{AttentionReason, Direction, ItemScope, ItemSort, ItemStatus};
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::items::{item_row, section_header, OpenItem, Placement};
+use crate::ui::items::{item_row, OpenItem};
 use crate::ui::titlebar::title_bar;
 use crate::ui::widgets::sidebar_glyph;
+use perch_github::Item;
 
 /// The drawer, open.
 pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
     Stack::vertical((
         lights_strip(state),
-        repos_nav(state, backend, on_open)
+        items_nav(state, backend, on_open)
             .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0).flex_col()),
     ))
     .style(move |s| {
@@ -65,11 +63,8 @@ pub fn collapsed_sidebar(state: AppState) -> impl IntoView {
 /// right edge.
 fn lights_strip(state: AppState) -> impl IntoView {
     title_bar(
-        Stack::horizontal((
-            Empty::new().style(|s| s.flex_grow(1.0_f32)),
-            toggle_button(state),
-        ))
-        .style(|s| s.items_center().width_full().padding_right(8.0)),
+        Stack::horizontal((Empty::new().style(|s| s.flex_grow(1.0_f32)), toggle_button(state)))
+            .style(|s| s.items_center().width_full().padding_right(8.0)),
     )
     .style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().flex_shrink(0.0_f32).items_center())
 }
@@ -97,24 +92,59 @@ fn toggle_button(state: AppState) -> impl IntoView {
 }
 
 // ---------------------------------------------------------------------
-// The repositories navigation
+// The item navigation
 // ---------------------------------------------------------------------
 
-fn repos_nav(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
-    Stack::vertical((
-        search_row(state, backend.clone()),
-        sections(state, backend, on_open),
-    ))
-    .style(|s| s.size_full().flex_col())
+fn items_nav(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
+    Stack::vertical((scope_tabs(state), search_row(state), item_list(state, backend, on_open)))
+        .style(|s| s.size_full().flex_col())
+}
+
+/// The three inbox scopes. Selection uses the same persistence path as
+/// the filter menu, so changing tabs leaves the other filters intact.
+fn scope_tabs(state: AppState) -> impl IntoView {
+    dyn_stack(
+        || ItemScope::ALL,
+        |scope| scope.label(),
+        move |scope| {
+            Button::new(Label::new(scope.label()).style(|s| s.pointer_events_none()))
+                .action(move || set_filters(state, move |f| f.scope = scope))
+                .debug_name(format!("scope:{}", scope.label()))
+                .style(move |s| {
+                    let selected = state.item_filters.with(|f| f.scope == scope);
+                    crate::ui::widgets::clickable(s)
+                        .height(28.0)
+                        .padding_horiz(8.0)
+                        .padding_vert(0.0)
+                        .border(0.0)
+                        .border_radius(theme::RADIUS)
+                        .font_size(theme::TEXT_META)
+                        .color(if selected { theme::FG } else { theme::FG_MUTED })
+                        .background(if selected { theme::BADGE_BG } else { theme::CANVAS_SIDEBAR })
+                        .flex_shrink(0.0_f32)
+                        .hover(|s| s.background(theme::CANVAS_HOVER))
+                        .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT))
+                })
+        },
+    )
+    .style(|s| {
+        s.width_full()
+            .flex_row()
+            .items_center()
+            .gap(2.0)
+            .padding_horiz(10.0)
+            .padding_bottom(2.0)
+            .flex_shrink(0.0_f32)
+    })
+}
+
+fn set_filters(state: AppState, edit: impl FnOnce(&mut crate::items::ItemFilters)) {
+    state.item_filters.update(edit);
+    state.pending_meta.set(Some(("item_filters".into(), state.item_filters.get_untracked().to_meta())));
 }
 
 /// The search box and the filter button.
-///
-/// The box's edge is at x=10, four inside the row cards' edge, and its glyph
-/// sits at x=16 on the column the chevrons and row glyphs share. The row has
-/// no padding below, so the first header sits its own 14 under the box the
-/// way every header sits under what is above it.
-fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+fn search_row(state: AppState) -> impl IntoView {
     use floem::style::Position;
 
     let input = TextInput::new(state.item_query)
@@ -149,22 +179,18 @@ fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     // The glyph is laid over the box rather than beside the text, the way
     // the filter button's is, and lets the pointer through: a click on it
     // is a click in the box. Six in from the box's edge puts it at x=16.
-    let glyph = sidebar_glyph(SidebarIcon::Search, theme::FG_SUBTLE).style(|s| {
-        s.size(14.0, 14.0)
-            .position(Position::Absolute)
-            .inset_left(6.0)
-            .pointer_events_none()
-    });
-    let search_box = Stack::horizontal((input, glyph))
-        .style(|s| s.items_center().flex_grow(1.0_f32).min_width(0.0));
+    let glyph = sidebar_glyph(SidebarIcon::Search, theme::FG_SUBTLE)
+        .style(|s| s.size(14.0, 14.0).position(Position::Absolute).inset_left(6.0).pointer_events_none());
+    let search_box =
+        Stack::horizontal((input, glyph)).style(|s| s.items_center().flex_grow(1.0_f32).min_width(0.0));
 
-    Stack::horizontal((search_box, filter_button(state, backend)))
+    Stack::horizontal((search_box, filter_button(state)))
         .style(|s| s.items_center().width_full().gap(6.0).padding_horiz(10.0).padding_top(6.0))
 }
 
 /// The filter menu, in the shape of a settings menu: one row per setting,
 /// each a submenu with its options checked.
-fn filter_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+fn filter_button(state: AppState) -> impl IntoView {
     // Anything the list is narrowed by lights the button. Any reason and
     // the newest-first direction are the defaults and do not.
     let narrowed = move || {
@@ -172,11 +198,9 @@ fn filter_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             let d = crate::items::ItemFilters::default();
             f.status != d.status
                 || f.kinds != d.kinds
-                || f.group != d.group
+                || f.repository.is_some()
                 || f.sort != d.sort
-                || f.show_empty
                 || f.saved_only
-                || f.attention_only
                 || f.reason.is_some()
                 || f.direction != d.direction
         })
@@ -192,7 +216,7 @@ fn filter_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         })
         .style(|s| s.pointer_events_none()),
     )
-    .popout_menu(move || filter_menu(state, backend.clone()))
+    .popout_menu(move || filter_menu(state))
     .style(move |s| {
         // When narrowed the border takes the ring as well as the glyph the
         // accent, so the button reads as set the way a focused search box
@@ -210,12 +234,11 @@ fn filter_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     })
 }
 
-fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
+fn filter_menu(state: AppState) -> Menu {
     let f = state.item_filters.get_untracked();
     // One writer, so every change lands in the meta table the same way.
     let set = Rc::new(move |edit: Box<dyn Fn(&mut crate::items::ItemFilters)>| {
-        state.item_filters.update(|f| edit(f));
-        backend.set_meta("item_filters", &state.item_filters.get_untracked().to_meta());
+        set_filters(state, |f| edit(f));
     });
 
     let mut menu = Menu::new();
@@ -233,6 +256,40 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
             sub
         }
     });
+    menu = menu.submenu("Repository", {
+        let set = set.clone();
+        let current = f.repository.clone();
+        let mut repositories = state
+            .repos
+            .with(|repos| state.items.with(|items| crate::items::repository_options(repos, items)));
+        // A saved selection remains visible even if its repository no longer
+        // has cached items or a config entry, so it can always be cleared.
+        if let Some(selected) = current.as_ref() {
+            if !repositories.iter().any(|repo| repo.eq_ignore_ascii_case(selected)) {
+                repositories.push(selected.clone());
+                repositories.sort_by_key(|repo| repo.to_lowercase());
+            }
+        }
+        move |mut sub| {
+            let all = set.clone();
+            let all_selected = current.is_none();
+            sub = sub.item("All repositories", move |m| {
+                m.checked(all_selected).action(move || all(Box::new(|f| f.repository = None)))
+            });
+            for repo in &repositories {
+                let set = set.clone();
+                let repo = repo.clone();
+                let selected = current.as_ref().is_some_and(|current| current.eq_ignore_ascii_case(&repo));
+                sub = sub.item(repo.clone(), move |m| {
+                    m.checked(selected).action(move || {
+                        let repo = repo.clone();
+                        set(Box::new(move |f| f.repository = Some(repo.clone())))
+                    })
+                });
+            }
+            sub
+        }
+    });
     menu = menu.submenu("Kind", {
         let set = set.clone();
         let kinds = f.kinds;
@@ -240,7 +297,8 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
             let (a, b, c) = (set.clone(), set.clone(), set.clone());
             sub.item("Pull Requests", move |m| {
                 let a = a.clone();
-                m.checked(kinds.pull_requests).action(move || a(Box::new(|f| f.kinds.pull_requests = !f.kinds.pull_requests)))
+                m.checked(kinds.pull_requests)
+                    .action(move || a(Box::new(|f| f.kinds.pull_requests = !f.kinds.pull_requests)))
             })
             .item("Issues", move |m| {
                 let b = b.clone();
@@ -248,7 +306,8 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
             })
             .item("Branches", move |m| {
                 let c = c.clone();
-                m.checked(kinds.branches).action(move || c(Box::new(|f| f.kinds.branches = !f.kinds.branches)))
+                m.checked(kinds.branches)
+                    .action(move || c(Box::new(|f| f.kinds.branches = !f.kinds.branches)))
             })
         }
     });
@@ -260,13 +319,6 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
         menu = menu.item("Saved only", move |m| {
             let set = set.clone();
             m.checked(f.saved_only).action(move || set(Box::new(|f| f.saved_only = !f.saved_only)))
-        });
-    }
-    {
-        let set = set.clone();
-        menu = menu.item("Needs attention", move |m| {
-            let set = set.clone();
-            m.checked(f.attention_only).action(move || set(Box::new(|f| f.attention_only = !f.attention_only)))
         });
     }
     menu = menu.submenu("Reason", {
@@ -285,20 +337,6 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
         }
     });
     menu = menu.separator();
-    menu = menu.submenu("Group By", {
-        let set = set.clone();
-        let current = f.group;
-        move |mut sub| {
-            for group in ItemGroup::ALL {
-                let set = set.clone();
-                sub = sub.item(group.label(), move |m| {
-                    let set = set.clone();
-                    m.checked(group == current).action(move || set(Box::new(move |f| f.group = group)))
-                });
-            }
-            sub
-        }
-    });
     menu = menu.submenu("Sort By", {
         let set = set.clone();
         let current = f.sort;
@@ -326,121 +364,41 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
     menu = menu.separator();
     {
         let set = set.clone();
-        menu = menu.item("Show Empty Repositories", move |m| {
-            let set = set.clone();
-            m.checked(f.show_empty).action(move || set(Box::new(|f| f.show_empty = !f.show_empty)))
-        });
-    }
-    {
-        let set = set.clone();
         menu = menu.item("Show PR Status", move |m| {
             let set = set.clone();
-            m.checked(f.show_pr_status).action(move || set(Box::new(|f| f.show_pr_status = !f.show_pr_status)))
+            m.checked(f.show_pr_status)
+                .action(move || set(Box::new(|f| f.show_pr_status = !f.show_pr_status)))
         });
     }
     menu
 }
 
-/// Pinned and the groups, in one scrolling column.
-fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
-    let (b1, b2) = (backend.clone(), backend);
-    let (o1, o2) = (on_open.clone(), on_open);
-
+/// One scrolling list. Pinning changes order and the row's pin indicator,
+/// without adding a separate heading or hiding the repository identity.
+fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
     Stack::vertical((
-        // Pinned, hidden when empty.
-        // Keyed on the count rather than on emptiness so the header's
-        // number follows a pin or an unpin.
         dyn_container(
-            move || state.item_sections().pinned.len(),
-            move |count| {
-                if count == 0 {
-                    return Empty::new().into_any();
+            move || state.visible_items().is_empty(),
+            |empty| {
+                if empty {
+                    Label::new("No matching items")
+                        .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE).padding(16.0))
+                        .into_any()
+                } else {
+                    Empty::new().into_any()
                 }
-                let (b, o) = (b1.clone(), o1.clone());
-                Stack::vertical((
-                    section_header("Pinned".into(), count, None),
-                    dyn_stack(
-                        move || state.item_sections().pinned,
-                        row_key,
-                        move |item| item_row(state, b.clone(), item, Placement::Pinned, o.clone()),
-                    )
-                    .style(|s| s.flex_col().width_full().gap(1.0)),
-                ))
-                .style(|s| s.flex_col().width_full())
-                .into_any()
             },
         ),
-        // One section per repository, owner or date.
         dyn_stack(
-            move || state.item_sections().groups,
-            move |section| {
-                (
-                    section.key.clone(),
-                    section.title.clone(),
-                    section.items.iter().map(row_key).collect::<Vec<_>>(),
-                    section.count,
-                )
-            },
-            move |section| group_section(state, b2.clone(), section, o2.clone()),
+            move || state.visible_items(),
+            |item: &Item| item.clone(),
+            move |item| item_row(state, backend.clone(), item, on_open.clone()),
         )
-        .style(|s| s.flex_col().width_full().padding_bottom(12.0)),
+        .style(|s| s.flex_col().width_full().gap(1.0)),
     ))
-    .style(|s| s.flex_col().width_full())
+    .style(|s| s.flex_col().width_full().padding_top(10.0).padding_bottom(12.0))
     .scroll()
     .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
-}
-
-/// What a row is rebuilt on: everything it draws, which is the whole row.
-/// Listing the fields by hand missed one every time a chip was added, so
-/// the row is its own key. The grouping, which the second line also
-/// depends on, is in the section's key above, and a section is rebuilt
-/// whole when it changes.
-fn row_key(item: &Item) -> Item {
-    item.clone()
-}
-
-fn group_section(
-    state: AppState,
-    backend: Rc<Backend>,
-    section: crate::items::ItemSection,
-    on_open: OpenItem,
-) -> impl IntoView {
-    let (key_a, key_b) = (section.key.clone(), section.key.clone());
-    let toggle_key = section.key.clone();
-    let collapsed = move || state.collapsed.with(|c| c.contains(&key_a));
-    let collapsed_body = move || state.collapsed.with(|c| c.contains(&key_b));
-    let items = section.items.clone();
-    let title = section.title.clone();
-    let count = section.count;
-    let placement = Placement::Section(section.group());
-
-    Stack::vertical((
-        dyn_container(collapsed, move |c| section_header(title.clone(), count, Some(c)).into_any())
-            .on_event_stop(el::Click, move |_, _| {
-                state.collapsed.update(|c| {
-                    if !c.remove(&toggle_key) {
-                        c.insert(toggle_key.clone());
-                    }
-                });
-                let joined: Vec<String> = state.collapsed.get_untracked().into_iter().collect();
-                state.pending_meta.set(Some(("collapsed_sections".to_string(), joined.join(","))));
-            })
-            .style(|s| s.width_full()),
-        dyn_container(collapsed_body, move |c| {
-            if c {
-                return Empty::new().into_any();
-            }
-            let (b, o, items) = (backend.clone(), on_open.clone(), items.clone());
-            dyn_stack(
-                move || items.clone(),
-                row_key,
-                move |item| item_row(state, b.clone(), item, placement, o.clone()),
-            )
-            .style(|s| s.flex_col().width_full().gap(1.0))
-            .into_any()
-        }),
-    ))
-    .style(|s| s.flex_col().width_full())
 }
 
 /// The strip along the panel's right edge that drags it wider or narrower.
@@ -525,3 +483,123 @@ pub fn resize_cursor_sheet(state: AppState) -> impl IntoView {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floem::headless::{HeadlessHarness, TestRoot};
+    use perch_github::{Issue, ItemSubject};
+
+    fn issue(id: &str, repo: &str, author: &str, attention: bool) -> Item {
+        let now = "2026-09-19T12:00:00Z".parse().unwrap();
+        let mut item = Item::new(repo, now);
+        item.id = id.into();
+        item.subject = Some(ItemSubject::Issue(Issue {
+            number: 1,
+            title: format!("Issue {id}"),
+            body: String::new(),
+            state: "open".into(),
+            state_reason: None,
+            author_login: author.into(),
+            author_avatar_url: String::new(),
+            labels: vec![],
+            assignees: vec![],
+            repo_full_name: repo.into(),
+            comments: 0,
+            created_at: Some(now),
+            updated_at: now,
+        }));
+        if attention {
+            item.attention_at = Some(now);
+            item.attention_reason = Some("mention".into());
+        }
+        item
+    }
+
+    fn harness() -> (HeadlessHarness, AppState) {
+        let root = TestRoot::new();
+        let state = AppState::new();
+        state.sidebar_width.set(theme::SIDEBAR_MIN_WIDTH);
+        state.viewer.set(Some(("me".into(), String::new())));
+        state.items.set(vec![
+            issue("mine", "org/one", "me", false),
+            issue("notification", "org/one", "someone", true),
+            issue("elsewhere", "org/two", "me", true),
+        ]);
+        state.item_filters.update(|f| f.repository = Some("org/one".into()));
+        let view = sidebar(state, Rc::new(Backend::detached()), Rc::new(|_| {}));
+        let mut harness = HeadlessHarness::new_with_size(root, view, theme::SIDEBAR_MIN_WIDTH, 600.0);
+        harness.rebuild();
+        harness.paint();
+        (harness, state)
+    }
+
+    fn find(id: floem::ViewId, text: &str) -> Option<floem::ViewId> {
+        if id.debug_name().contains(text) {
+            return Some(id);
+        }
+        id.children().into_iter().find_map(|child| find(child, text))
+    }
+
+    fn click_scope(harness: &mut HeadlessHarness, scope: ItemScope) {
+        let id = find(harness.root_id(), &format!("scope:{}", scope.label())).unwrap();
+        let rect = id.get_visual_rect_no_clip();
+        assert!(rect.width() > 0.0 && rect.height() > 0.0);
+        assert!(
+            rect.x0 >= 0.0 && rect.x1 <= theme::SIDEBAR_MIN_WIDTH,
+            "{} must fit at minimum sidebar width: {rect:?}",
+            scope.label()
+        );
+        let center = rect.center();
+        harness.click(center.x, center.y);
+        harness.rebuild();
+        harness.paint();
+    }
+
+    #[test]
+    fn tabs_filter_rendered_rows_and_persist_without_clearing_repository() {
+        let (mut harness, state) = harness();
+        assert!(find(harness.root_id(), "Issue mine").is_some());
+        assert!(find(harness.root_id(), "Issue notification").is_some());
+        assert!(find(harness.root_id(), "Issue elsewhere").is_none());
+
+        click_scope(&mut harness, ItemScope::Notifications);
+        assert_eq!(state.item_filters.get().scope, ItemScope::Notifications);
+        assert!(find(harness.root_id(), "Issue mine").is_none());
+        assert!(find(harness.root_id(), "Issue notification").is_some());
+        let (key, value) = state.pending_meta.get().unwrap();
+        assert_eq!(key, "item_filters");
+        let restored = crate::items::ItemFilters::parse(&value).unwrap();
+        assert_eq!(restored.scope, ItemScope::Notifications);
+        assert_eq!(restored.repository.as_deref(), Some("org/one"));
+
+        click_scope(&mut harness, ItemScope::Authored);
+        assert_eq!(state.item_filters.get().scope, ItemScope::Authored);
+        assert!(find(harness.root_id(), "Issue mine").is_some());
+        assert!(find(harness.root_id(), "Issue notification").is_none());
+        assert!(find(harness.root_id(), "Issue elsewhere").is_none());
+
+        click_scope(&mut harness, ItemScope::All);
+        assert!(find(harness.root_id(), "Issue mine").is_some());
+        assert!(find(harness.root_id(), "Issue notification").is_some());
+    }
+
+    #[test]
+    fn authored_list_updates_when_viewer_arrives_and_empty_filters_show_feedback() {
+        let (mut harness, state) = harness();
+        state.viewer.set(None);
+        click_scope(&mut harness, ItemScope::Authored);
+        assert_eq!(state.item_filters.get().scope, ItemScope::Authored);
+        assert!(find(harness.root_id(), "No matching items").is_some());
+        state.viewer.set(Some(("ME".into(), String::new())));
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Issue mine").is_some());
+        assert!(find(harness.root_id(), "No matching items").is_none());
+
+        state.item_query.set("no such item".into());
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "No matching items").is_some());
+        assert!(find(harness.root_id(), "Issue mine").is_none());
+    }
+}

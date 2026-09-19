@@ -32,8 +32,8 @@ const AVATAR_CONCURRENCY: usize = 6;
 /// Settings the UI keeps between launches. Sent back at startup. Show
 /// whole is not here: its key is per item, `review.folded.<item_id>`, so
 /// it is read when the item opens and carried on `ViewedReady`.
-pub const UI_META_KEYS: [&str; 5] =
-    ["item_filters", "collapsed_sections", "review.layout", "viewer.login", "viewer.avatar_url"];
+pub const UI_META_KEYS: [&str; 4] =
+    ["item_filters", "review.layout", "viewer.login", "viewer.avatar_url"];
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -112,10 +112,8 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub enum Event {
     Avatar { url: String, bytes: Vec<u8> },
-    /// The repositories config.toml declares, each as the identity its
-    /// items carry and the name its section shows, in config order, which
-    /// is the order the sidebar lists them in. Sent once at startup; the
-    /// file is read once.
+    /// Declared repository identities and display names for filters and
+    /// item context. Sent once at startup; the file is read once.
     Repos(Vec<perch_github::DeclaredRepo>),
     /// Every item, active and archived. Whole, for the same reason.
     Items(Vec<Item>),
@@ -421,7 +419,7 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
     let mut config = Config::load();
     // A `[[repo]]` with roots and no `github` is whatever its first root
     // is, which takes a look at the directory. Before anything reads the
-    // declared list: the sidebar's sections, the passes and the backfill
+    // declared list: the repository filter, the passes and the backfill
     // all come from it. No token yet, and none needed: the scan reads
     // the root's own config and fetches nothing.
     crate::repos::resolve(&mut config, &perch_git::cmd::Git::new(None)).await;

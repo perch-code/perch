@@ -1,5 +1,5 @@
 //! Item rows: a pull request, an issue, or a branch of the reader's own,
-//! under its repository in the sidebar.
+//! in the sidebar's flat list.
 //!
 //! One row draws every shape an item can have. The glyph and the reference
 //! line come from which parts the item has, never from a stored kind. The
@@ -24,7 +24,7 @@ use perch_github::{CheckStatus, Item, ItemSubject, SubjectState};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::items::{full_reference, reference, ItemGroup};
+use crate::items::full_reference;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
@@ -34,17 +34,6 @@ use crate::ui::widgets::{
 
 /// Opening an item. Shared by every row.
 pub type OpenItem = Rc<dyn Fn(&Item)>;
-
-/// Where a row sits, which decides whether its second line names the
-/// repository and what ends the row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Placement {
-    /// Under Pinned: a pin glyph.
-    Pinned,
-    /// Under a repository, an owner or a date, which decides whether the
-    /// second line names the repository.
-    Section(ItemGroup),
-}
 
 /// The state glyph an item shows: the pull request or issue state icon,
 /// or a branch for a checkout with no subject.
@@ -75,7 +64,6 @@ pub fn item_row(
     state: AppState,
     backend: Rc<Backend>,
     item: Item,
-    placement: Placement,
     on_open: OpenItem,
 ) -> impl IntoView {
     let hover_id = item.id.clone();
@@ -87,11 +75,7 @@ pub fn item_row(
     };
     let archived = item.is_archived();
     let attention = item.needs_attention();
-    let mut reference_text = match placement {
-        Placement::Section(group) => reference(&item, group),
-        // No heading above Pinned names a repository, so the row does.
-        Placement::Pinned => full_reference(&item),
-    };
+    let mut reference_text = full_reference(&item);
     // A branch of the reader's own says how far it has gone from its base.
     if item.subject.is_none() {
         if let Some((a, d)) = item.checkout.as_ref().and_then(|c| c.churn) {
@@ -152,8 +136,8 @@ pub fn item_row(
             .style(|s| s.items_center().width_full().min_width(0.0)),
         ))
         .style(|s| s.flex_col().flex_grow(1.0_f32).min_width(0.0).justify_center()),
-        row_actions(state, actions_backend, row_item, placement).style(|s| s.pointer_events_auto()),
-        trailing(attention, placement),
+        row_actions(state, actions_backend, row_item).style(|s| s.pointer_events_auto()),
+        trailing(attention, item.is_pinned()),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0).pointer_events_none());
 
@@ -283,14 +267,11 @@ fn chips(state: AppState, item: &Item) -> impl IntoView {
     )
 }
 
-/// The right edge of a row: the accent dot when it needs looking at, and
-/// under Pinned the pin before it. Every pinned row has the pin's slot, so
-/// the dot's column is the same in every section, and a pinned row that
-/// needs looking at says both.
-fn trailing(attention: bool, placement: Placement) -> impl IntoView {
+/// The right edge shows the pin and the attention dot independently.
+fn trailing(attention: bool, pinned: bool) -> impl IntoView {
     let slot = |s: Style| s.width(14.0).items_center().justify_center().flex_shrink(0.0_f32);
     Stack::horizontal((
-        if placement == Placement::Pinned {
+        if pinned {
             Container::new(sidebar_glyph(SidebarIcon::Pin, theme::FG_SUBTLE).style(|s| s.size(11.0, 11.0)))
                 .style(slot)
                 .into_any()
@@ -310,12 +291,11 @@ fn trailing(attention: bool, placement: Placement) -> impl IntoView {
 }
 
 /// Save, Done and the menu, on hover.
-fn row_actions(state: AppState, backend: Rc<Backend>, item: Item, placement: Placement) -> impl IntoView {
+fn row_actions(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoView {
     let id = item.id.clone();
     let hovering = move || state.hovered_item.with(|h| h.as_deref() == Some(id.as_str()));
     let saved = item.saved;
     let done = item.is_done();
-    let _ = placement;
 
     dyn_container(
         move || (hovering(), saved),
@@ -603,56 +583,6 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
             .border(1.0)
             .border_color(theme::NOTICE_BORDER)
             .border_radius(theme::RADIUS)
-    })
-}
-
-/// A section heading in the sidebar: a name, a count in the muted colour,
-/// and a chevron when it can fold.
-///
-/// The chevron's slot is reserved on every header, so Pinned, which does
-/// not fold, keeps its title on the line the repository titles use (x=31:
-/// 16 of padding, the 10px chevron and its 5 of margin), and the chevron
-/// column sits at x=16 over the row glyphs.
-pub fn section_header(title: String, count: usize, collapsed: Option<bool>) -> impl IntoView {
-    let slot = |s: Style| s.size(10.0, 10.0).margin_right(5.0).flex_shrink(0.0_f32);
-    Stack::horizontal((
-        match collapsed {
-            Some(c) => sidebar_glyph(
-                if c { SidebarIcon::ChevronRight } else { SidebarIcon::ChevronDown },
-                theme::FG_SUBTLE,
-            )
-            .style(slot)
-            .into_any(),
-            None => Empty::new().style(slot).into_any(),
-        },
-        Label::derived(move || title.clone()).style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .color(theme::FG_SUBTLE)
-                .text_ellipsis()
-                .min_width(0.0)
-                .selectable(false)
-        }),
-        Label::derived(move || if count == 0 { String::new() } else { count.to_string() }).style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .color(theme::FG_SUBTLE)
-                .margin_left(6.0)
-                .selectable(false)
-        }),
-    ))
-    .style(move |s| {
-        let base = s
-            .items_center()
-            .width_full()
-            .padding_horiz(16.0)
-            .padding_top(14.0)
-            .padding_bottom(4.0)
-            .selectable(false);
-        if collapsed.is_some() {
-            base.hover(|s| s.cursor(CursorStyle::Pointer))
-        } else {
-            base
-        }
     })
 }
 

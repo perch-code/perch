@@ -3,9 +3,9 @@
 A native macOS tool for reviewing code, written entirely in Rust with
 [floem](https://github.com/lapce/floem).
 
-The sidebar lists your repositories, and under each the things being worked
-on: a pull request someone opened, an issue, a branch of your own. Click one
-and the view that fits it opens: a read-only editor over the diff with
+The sidebar lists pull requests, issues, and branches together, with tabs
+for All, Notifications, and Authored. Click one and the view that fits it
+opens: a read-only editor over the diff with
 rust-analyzer behind it, or the issue with its comments. Ask a coding
 agent about the lines on screen and the answer stays there as a thread. What
 needs looking at is marked, and every discussion is archived as markdown
@@ -21,43 +21,44 @@ that a coding agent can search. Nothing in Perch writes to GitHub.
   local repository when they have none. Declaring a GitHub repository
   lists it whole: every open pull request and issue is a row, kept current
   on every poll, and one that merges or closes says so. A repository
-  nobody declares still gets a section the first time something from it
-  is opened, and the section looks the same.
-- Under a repository, an *item* is one row with up to three parts: a
-  GitHub pull request or issue, a checkout on disk, and attention. A
+  nobody declares appears in the Repository filter the first time an item
+  from it is opened.
+- An *item* is one row with up to three parts: a GitHub pull request or
+  issue, a checkout on disk, and attention. A
   branch of your own becomes a pull request when GitHub opens one on it,
   and it is the same row before and after, with the same threads. An item
   is in the repository its pull request, issue or checkout is in; there is
   nothing to move.
-- **Pinned** at the top holds what you pinned. Then the sections, with a
-  count of active items each: one per repository, the declared ones first
-  in config order and the rest by name; or one per owner, which is how
-  `slatedb/slatedb` and `slatedb/slatedb-go` share a heading; or one per
-  date. Under Repository a row's second line is `#57 · branch`, since the
-  heading says the repository. Under Owner and Date, and in Pinned, it is
-  `slatedb/slatedb #57 · branch`.
+- The list is flat across repositories, with pinned items first, then the
+  remaining items in the selected sort order. Every row's second line
+  names its repository, such as `slatedb/slatedb #57 · branch`.
+- **All**, **Notifications**, and **Authored** select the list's scope.
+  Notifications shows items that need attention; Authored shows pull
+  requests and issues opened by your signed-in GitHub account, even when
+  their latest notification has a different reason. Repository, status,
+  kind, saved state, reason, and search further narrow the selected tab.
+  The tab and filter settings are remembered between launches.
 - Attention comes from your notifications, polled on GitHub's own
   `X-Poll-Interval`. Every notification about an item becomes the item's
-  attention, with its reason, so Needs attention in the filter menu is
-  your inbox on the web, row for row: a review request, a mention, an
-  assignment, a comment, a push to something you are subscribed to. The
+  attention, with its reason. The Notifications tab collects review
+  requests, mentions, assignments, comments, and pushes to threads you
+  subscribe to. The
   one exception is CI, which fetches the open pull request's checks
   again and is attention when they fail. One about anything that has no
   row is dropped. A row with attention has its title in bold and a dot at
-  its end, next to the pin under Pinned; Reason narrows to why, which is
+  its end, next to the pin on pinned rows; Reason narrows to why, which is
   where to leave subscribed activity out if it is noise to you.
 - Each row has Save and Done on hover and a menu: Open in GitHub, Finder or
   Terminal, Pin, Mark unread, Rename, Fork or Start work, Archive, Delete.
   Every entry is on every row; the ones that cannot apply are greyed. The
-  filter button narrows the list by status, kind, saved, needs attention
-  and reason, and sets the grouping, the sort and its direction, newest or
-  oldest first; the search box matches titles, numbers, branches and
-  repository names.
+  filter button narrows the list by status, repository, kind, saved state
+  and reason, and sets the sort and its direction, newest or oldest first.
+  The search box matches titles, numbers, branches and repository names.
 - Save and Done are marks on the item, set from the row, from the keyboard,
   or from the header of the open item. Done clears the item's attention,
   and the next notification that asks for you brings it back, the way a
   done thread comes back on the web; Save does not expire. Status set to
-  Done lists what is done, and Saved only narrows every section, Pinned
+  Done lists what is done, and Saved only narrows the list, pinned items
   included, to what is saved. Both marks are Perch's own and stay on this
   machine. See below.
 
@@ -485,8 +486,8 @@ from a terminal and prints the prompt, every event, and the answer. Leave
 the path out to ask about the pull request as a whole, or name an issue
 to ask about it from the home checkout. `perch --items` prints the sidebar
 as text, under the filter menu's settings when given them as
-`"status=done;reason=mention;direction=oldest"`, and `perch --scan` what
-the root scan finds.
+`"scope=notifications;repository=slatedb/slatedb;reason=mention"`.
+`perch --scan` prints what the root scan finds.
 
 ## Knowledge
 

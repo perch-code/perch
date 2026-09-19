@@ -4,7 +4,7 @@
 //! view closure without lifetime plumbing. Derived lists are plain functions
 //! over these signals, recomputed by whichever effect reads them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
@@ -34,11 +34,8 @@ pub struct Archiving {
 pub struct AppState {
     /// Encoded image bytes, shared so a clone is a refcount bump.
     pub avatars: RwSignal<HashMap<String, Arc<Vec<u8>>>>,
-    /// The repositories config.toml declares, each as the identity its
-    /// items carry and the name its section shows, in config order, which
-    /// is the order the sidebar lists them in. A repository with items
-    /// that nobody declared is a section all the same; only the items say
-    /// so.
+    /// Declared repository identities and display names, also offered by
+    /// the sidebar's Repository filter when they have no cached items.
     pub repos: RwSignal<Vec<DeclaredRepo>>,
     /// Every item, active and archived.
     pub items: RwSignal<Vec<Item>>,
@@ -70,9 +67,6 @@ pub struct AppState {
     pub hovered_item: RwSignal<Option<String>>,
     /// The sidebar's filter menu settings and search.
     pub item_filters: RwSignal<crate::items::ItemFilters>,
-    /// Sections folded shut, by section key: `repo:`, `owner:` or `date:`
-    /// and the lower-cased name or the label.
-    pub collapsed: RwSignal<HashSet<String>>,
     /// The item whose title is a text box right now.
     pub renaming: RwSignal<Option<String>>,
     /// The item with a Delete confirmation open under it.
@@ -128,7 +122,6 @@ impl AppState {
             agent: RwSignal::new(AgentConfig::default()),
             hovered_item: RwSignal::new(None),
             item_filters: RwSignal::new(crate::items::ItemFilters::default()),
-            collapsed: RwSignal::new(HashSet::new()),
             renaming: RwSignal::new(None),
             confirm_delete: RwSignal::new(None),
             search_box: RwSignal::new(None),
@@ -369,9 +362,6 @@ impl AppState {
                     Ok(f) => self.item_filters.set(f),
                     Err(e) => tracing::warn!(error = %e, "ignoring saved item filters"),
                 },
-                "collapsed_sections" => {
-                    self.collapsed.set(value.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect())
-                }
                 "review.layout" => {
                     if let (Some(layout), Some(review)) =
                         (crate::review::model::Layout::parse(&value), self.review.get_untracked())
@@ -468,12 +458,14 @@ impl AppState {
         })
     }
 
-        /// The sidebar as the filters cut it: Pinned and the groups.
-    pub fn item_sections(&self) -> crate::items::Sections {
+    /// The flat sidebar under the current scope, filters and search.
+    pub fn visible_items(&self) -> Vec<Item> {
         let mut filters = self.item_filters.get();
         filters.query = self.item_query.get();
-        self.repos.with(|repos| {
-            self.items.with(|items| crate::items::sections(repos, items, &filters, self.now.get()))
+        self.viewer.with(|viewer| {
+            self.items.with(|items| {
+                crate::items::visible_items(items, &filters, viewer.as_ref().map(|(login, _)| login.as_str()))
+            })
         })
     }
 

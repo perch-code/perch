@@ -75,8 +75,8 @@ pub const OPTICAL_TEXT_LIFT: f64 = 1.0;
 
 /// Layout constants.
 /// The navigation panel beside the activity rail.
-pub const SIDEBAR_WIDTH: f64 = 212.0;
-pub const SIDEBAR_MIN_WIDTH: f64 = 160.0;
+pub const SIDEBAR_WIDTH: f64 = 260.0;
+pub const SIDEBAR_MIN_WIDTH: f64 = 240.0;
 pub const SIDEBAR_MAX_WIDTH: f64 = 520.0;
 /// The always-present rail of destination icons.
 ///

@@ -5,7 +5,7 @@
 //! GitHub remote is that repository, and one with none lives on this
 //! machine alone and is `local/<name>`. What decides is the root's
 //! remotes, one git command over one directory, so it runs once, at
-//! startup before the sidebar is told its sections, and again in every
+//! startup before the sidebar is told its repositories, and again in every
 //! harness command that reads the file. Until it has run, a roots-only
 //! entry has no identity and nothing lists it, which is why every reader
 //! of `[[repo]]` loads through here rather than through `Config::load`
@@ -48,17 +48,6 @@ pub async fn resolve(config: &mut Config, git: &Git) {
         }
     }
     config.drop_repeated_identities();
-}
-
-/// `Config::load()` with every entry resolved, for the harness commands
-/// that have no runtime of their own. The scan is a few git commands, so
-/// a runtime on this thread is enough.
-pub fn load_resolved() -> Config {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    runtime.block_on(load_resolved_async())
 }
 
 /// `Config::load()` with every entry resolved, for a caller already on a
