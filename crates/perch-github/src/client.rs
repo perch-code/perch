@@ -73,8 +73,10 @@ pub enum Listed<T> {
     /// A 304 on the first page: nothing opened, closed, or moved since the
     /// tag was taken, so the rows made from the last answer still stand.
     Unchanged,
-    /// The whole list, and the tag to ask with next time. The tag is the
-    /// first page's, because only the first page is asked conditionally.
+    /// The whole list, and the tag to ask with next time: the first
+    /// page's when the list fit on one page, because only the first page
+    /// is asked conditionally and its tag vouches for that page alone;
+    /// `None` when the list ran on, so the next ask is unconditional.
     Changed { etag: Option<String>, items: Vec<T> },
 }
 
@@ -535,10 +537,14 @@ impl GitHub {
     ///
     /// Only the first page carries `If-None-Match`: a tag belongs to one
     /// response, and a later page has a tag of its own that nobody stored.
-    /// The first page's tag is what comes back, since it is the one the
-    /// next pass asks with. Paging is `list_all`'s: stop at the first short
-    /// page, cap at a hundred. The short-page test is on what the server
-    /// sent, before the caller drops anything from it.
+    /// The first page's tag is what comes back when the list fit on it,
+    /// since a tag vouches for one page's body and nothing beyond: a list
+    /// that ran to a second page hands back no tag, so the next pass asks
+    /// unconditionally and sees a closure on the later pages that would
+    /// have left the first page's body, and its tag, exactly as they were.
+    /// Paging is `list_all`'s: stop at the first short page, cap at a
+    /// hundred. The short-page test is on what the server sent, before
+    /// the caller drops anything from it.
     async fn list_open<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -546,6 +552,7 @@ impl GitHub {
     ) -> Result<Listed<T>, Error> {
         let mut all = Vec::new();
         let mut first_etag = None;
+        let mut pages = 0;
         for page in 1..=LIST_MAX_PAGES {
             let headers = if page == 1 { conditional(etag) } else { None };
             let fetched = self
@@ -557,6 +564,7 @@ impl GitHub {
                 }
                 first_etag = header_str(&fetched.headers, ETAG.as_str());
             }
+            pages = page;
             let items: Vec<T> = serde_json::from_str(&fetched.body)
                 .map_err(|e| Error::Decode(e.to_string()))?;
             let short = items.len() < LIST_PER_PAGE;
@@ -565,7 +573,8 @@ impl GitHub {
                 break;
             }
         }
-        Ok(Listed::Changed { etag: first_etag, items: all })
+        let etag = if pages == 1 { first_etag } else { None };
+        Ok(Listed::Changed { etag, items: all })
     }
 
     /// Every page of a list endpoint, concatenated.

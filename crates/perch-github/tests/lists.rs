@@ -184,13 +184,14 @@ async fn a_304_is_unchanged_and_still_updates_the_allowance() {
 }
 
 #[tokio::test]
-async fn the_first_page_carries_the_tag_and_later_pages_do_not() {
-    // 250 open pull requests: two full pages and a short third.
+async fn only_the_first_page_is_conditional_and_a_list_past_one_page_leaves_no_tag() {
+    // 250 open pull requests: two full pages and a short third, each with
+    // a tag of its own, as GitHub sends them.
     let (base, requests) = spawn(|req| {
         let n = page_of(&req.path);
         let start = (n - 1) * 100;
         let end = (start + 100).min(250);
-        let extra = if n == 1 { format!("ETag: {ETAG}\r\n{RATE}") } else { RATE.to_string() };
+        let extra = if n == 1 { format!("ETag: {ETAG}\r\n{RATE}") } else { format!("ETag: W/\"page-{n}\"\r\n{RATE}") };
         ok(extra, page((start..end).map(|i| pull_json(i + 1, "open")).collect()))
     });
     let gh = GitHub::with_base_uri("token", &base).expect("client");
@@ -205,7 +206,10 @@ async fn the_first_page_carries_the_tag_and_later_pages_do_not() {
     };
     assert_eq!(items.len(), 250, "every page is read to the first short one");
     assert_eq!(items[0].repo_full_name, "a/b");
-    assert_eq!(etag.as_deref(), Some(ETAG), "the tag to store is the first page's");
+    // A tag vouches for one page's body. A closure on page 2 leaves page
+    // 1 as it was, so page 1's tag would answer 304 over it; a list that
+    // ran past one page hands back no tag, and the next pass asks whole.
+    assert_eq!(etag, None, "no page's tag vouches for a list longer than that page");
 
     assert_eq!(
         paths(&requests),
@@ -225,6 +229,21 @@ async fn the_first_page_carries_the_tag_and_later_pages_do_not() {
         requests[1..].iter().all(|r| r.if_none_match.is_none()),
         "a later page is never conditional: {requests:?}"
     );
+}
+
+#[tokio::test]
+async fn a_list_that_fits_on_one_page_hands_back_that_page_s_tag() {
+    let (base, requests) = spawn(|_| ok(format!("ETag: {ETAG}\r\n{RATE}"), page(vec![pull_json(1, "open")])));
+    let gh = GitHub::with_base_uri("token", &base).expect("client");
+
+    let listed = gh.list_open_pulls("a/b", None).await.expect("list pulls");
+
+    let Listed::Changed { etag, items } = listed else {
+        panic!("a 200 is a change");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(etag.as_deref(), Some(ETAG), "one page is the whole list, and its tag vouches for all of it");
+    assert_eq!(requests.lock().unwrap().len(), 1, "a short first page is the last");
 }
 
 #[tokio::test]
@@ -257,7 +276,7 @@ async fn an_issues_page_drops_pull_requests_without_shortening_the_page() {
                     .collect(),
             ),
         ),
-        _ => ok(RATE, page(vec![issue_json(101)])),
+        n => ok(format!("ETag: W/\"page-{n}\"\r\n{RATE}"), page(vec![issue_json(101)])),
     });
     let gh = GitHub::with_base_uri("token", &base).expect("client");
 
@@ -266,7 +285,7 @@ async fn an_issues_page_drops_pull_requests_without_shortening_the_page() {
     let Listed::Changed { etag, items } = listed else {
         panic!("a 200 is a change");
     };
-    assert_eq!(etag.as_deref(), Some(ETAG));
+    assert_eq!(etag, None, "two pages were read, so no one tag vouches for the list");
     assert_eq!(items.len(), 81, "eighty issues from page 1 and one from page 2");
     assert!(
         items.iter().all(|i| i.number % 5 != 0),

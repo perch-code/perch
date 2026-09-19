@@ -264,32 +264,71 @@ async fn pass_list<S: Source>(
     tracing::info!(repo, kind = kind.column(), count = items.len(), "open list read");
 
     let mut named: HashSet<u64> = HashSet::new();
-    with(cache, |c| {
+    // The rows are keyed by the repository as the payload names it, and a
+    // repository since renamed or transferred answers the old name with
+    // the new one in every entry. Both are looked in for what closed, and
+    // the new name is remembered, so a list that came back empty because
+    // the last of them closed still leads to the rows.
+    let alias = alias_key(repo);
+    let repos: Vec<String> = with(cache, |c| {
+        let mut repos = vec![repo.to_string()];
+        repos.extend(c.meta(&alias)?);
         for subject in items {
             named.insert(subject.number());
+            let reported = subject.repo_full_name();
+            if !repos.iter().any(|r| r.eq_ignore_ascii_case(reported)) {
+                c.set_meta(&alias, reported)?;
+                repos.push(reported.to_string());
+            }
             upsert(c, repo, subject, now, report)?;
         }
-        Ok(())
+        Ok(repos)
     })?;
 
     // What the cache still holds open that GitHub no longer lists. Read
     // after the upserts, so a row the list just made cannot be judged.
     let missing: Vec<(u64, String)> = with(cache, |c| {
-        Ok(c.open_subjects_in(repo)?
-            .into_iter()
-            .filter(|(k, number, _)| *k == kind && !named.contains(number))
-            .map(|(_, number, id)| (number, id))
-            .collect())
+        let mut missing = Vec::new();
+        for r in &repos {
+            missing.extend(
+                c.open_subjects_in(r)?
+                    .into_iter()
+                    .filter(|(k, number, _)| *k == kind && !named.contains(number))
+                    .map(|(_, number, id)| (number, id)),
+            );
+        }
+        Ok(missing)
     })?;
     for (number, id) in missing {
-        let subject = match kind {
-            ItemKind::PullRequest => ItemSubject::PullRequest(source.fetch_pull_request(repo, number).await?),
-            ItemKind::Issue => ItemSubject::Issue(source.fetch_issue(repo, number).await?),
+        let fetched = match kind {
+            ItemKind::PullRequest => source.fetch_pull_request(repo, number).await.map(ItemSubject::PullRequest),
+            ItemKind::Issue => source.fetch_issue(repo, number).await.map(ItemSubject::Issue),
         };
-        let open = subject.is_open();
+        let subject = match fetched {
+            // Deleted, or transferred where the token cannot follow: GitHub
+            // will never answer for this number again, so asking again next
+            // pass would fail the same way for good. The row closes.
+            Err(perch_github::Error::Status { status: status @ (404 | 410), .. }) => {
+                tracing::warn!(repo, number, status, "the open list no longer names it and GitHub has no such subject; stored closed");
+                None
+            }
+            Err(e) => return Err(e.into()),
+            // Transferred to another repository: the redirect was followed
+            // and what came back is the subject at its new home, under a
+            // new number. It is not this row's any more.
+            Ok(subject) if subject.number() != number => {
+                tracing::warn!(repo, number, renumbered = subject.number(), "the subject was transferred away; stored closed");
+                None
+            }
+            Ok(subject) => Some(subject),
+        };
+        let open = subject.as_ref().is_some_and(ItemSubject::is_open);
         with(cache, |c| {
             let Some(mut item) = c.load_item(&id)? else { return Ok(()) };
-            item.subject = Some(subject);
+            item.subject = match subject {
+                Some(subject) => Some(subject),
+                None => item.subject.take().map(closed),
+            };
             c.update_item(&item)
         })?;
         tracing::info!(repo, number, open, "fetched a subject the open list no longer names");
@@ -312,6 +351,10 @@ async fn pass_list<S: Source>(
 
 /// One listed subject into the cache: the row that has it, else a checkout
 /// of the reader's own on a pull request's head branch, else a new row.
+/// The row is found by the repository the subject names, which is the
+/// name it is stored under: a list asked under a name GitHub has since
+/// redirected answers with the new name in every entry, and a find by the
+/// declared name would miss the row and insert beside it.
 fn upsert(
     cache: &Cache,
     repo: &str,
@@ -322,7 +365,7 @@ fn upsert(
     let number = subject.number();
     let label = format!("{repo}#{number}");
 
-    if let Some(mut item) = cache.find_item_by_subject(repo, subject.kind(), number)? {
+    if let Some(mut item) = cache.find_item_by_subject(subject.repo_full_name(), subject.kind(), number)? {
         let stored = item.subject.take();
         if !newer(subject.updated_at(), stored.as_ref().and_then(ItemSubject::updated_at)) {
             return Ok(());
@@ -389,6 +432,28 @@ fn newer(incoming: Option<Timestamp>, stored: Option<Timestamp>) -> bool {
     }
 }
 
+/// Whether a subject already in the row is strictly newer than one an
+/// open or a refresh fetched, so a write that crossed a pass keeps what
+/// the pass stored: an open fetches, then clones, and a pass that listed
+/// the pull request while the clone ran has stored a later entry and a
+/// tag that vouches for it. Written over, the older snapshot would stand
+/// until the first page of the list moved for some other reason. Only
+/// two dated subjects compare; anything else is written as fetched.
+pub(super) fn stored_is_newer(stored: Option<Timestamp>, fetched: Option<Timestamp>) -> bool {
+    matches!((stored, fetched), (Some(stored), Some(fetched)) if stored > fetched)
+}
+
+/// The stored subject marked closed, for one GitHub no longer answers
+/// for. Nothing else about it is invented: the times stay what the last
+/// answer said.
+fn closed(mut subject: ItemSubject) -> ItemSubject {
+    match &mut subject {
+        ItemSubject::PullRequest(pr) => pr.state = "closed".into(),
+        ItemSubject::Issue(issue) => issue.state = "closed".into(),
+    }
+    subject
+}
+
 /// A list entry carries no additions, deletions, changed files or merger,
 /// because the list endpoint leaves them out. The stored subject's are
 /// kept where the entry's are at their defaults, so a row does not lose
@@ -416,6 +481,13 @@ fn etag_key(kind: ItemKind, repo: &str) -> String {
         ItemKind::Issue => "issues",
     };
     format!("etag:{list}:{}", repo.to_lowercase())
+}
+
+/// The meta key that remembers the name GitHub answers a declared
+/// repository under when it is not the declared one: `alias:<owner/repo>`,
+/// the declared name lower-cased.
+fn alias_key(repo: &str) -> String {
+    format!("alias:{}", repo.to_lowercase())
 }
 
 /// A list of one subject type as a list of subjects, so the two lists go
@@ -524,14 +596,17 @@ mod tests {
     }
 
     /// A GitHub that answers from what the test put in it. A list left
-    /// `None` fails; a number nobody put in fails; every call is written
-    /// down so a test can say what was asked.
+    /// `None` fails; a number nobody put in fails, or answers the status
+    /// the test gave it; every call is written down so a test can say
+    /// what was asked.
     #[derive(Default)]
     struct Fake {
         pulls: Option<Listed<PullRequest>>,
         issues: Option<Listed<Issue>>,
         pulls_by_number: HashMap<u64, PullRequest>,
         issues_by_number: HashMap<u64, Issue>,
+        /// A number GitHub refuses, and with what status.
+        refused: HashMap<u64, u16>,
         calls: Mutex<Vec<String>>,
     }
 
@@ -542,6 +617,13 @@ mod tests {
 
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
+        }
+
+        fn refusal(&self, number: u64) -> perch_github::Error {
+            match self.refused.get(&number) {
+                Some(status) => perch_github::Error::Status { status: *status, body: "{}".into() },
+                None => down(),
+            }
         }
     }
 
@@ -579,12 +661,12 @@ mod tests {
 
         async fn fetch_pull_request(&self, _repo: &str, number: u64) -> Result<PullRequest, perch_github::Error> {
             self.note(format!("pull {number}"));
-            self.pulls_by_number.get(&number).cloned().ok_or_else(down)
+            self.pulls_by_number.get(&number).cloned().ok_or_else(|| self.refusal(number))
         }
 
         async fn fetch_issue(&self, _repo: &str, number: u64) -> Result<Issue, perch_github::Error> {
             self.note(format!("issue {number}"));
-            self.issues_by_number.get(&number).cloned().ok_or_else(down)
+            self.issues_by_number.get(&number).cloned().ok_or_else(|| self.refusal(number))
         }
 
         async fn fetch_discussion(&self, _repo: &str, _number: u64) -> Result<Discussion, perch_github::Error> {
@@ -931,5 +1013,128 @@ mod tests {
         assert_eq!(report.updated, vec!["a/b#7"]);
         assert!(report.closed.is_empty());
         assert!(pull_item(&cache, 7).unwrap().pull_request().unwrap().is_open());
+    }
+
+    /// A pull request as a repository since renamed lists it: asked under
+    /// `a/b`, every entry names `c/d`.
+    fn pull_moved(n: u64, updated: &str) -> PullRequest {
+        let mut pr = pull(n, updated);
+        pr.repo_full_name = "c/d".into();
+        pr.head_repo_full_name = Some("c/d".into());
+        pr
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_answers_under_another_name_is_one_row_found_and_closed_by_that_name() {
+        let (_dir, cache) = cache();
+        let fake = Fake {
+            pulls: Some(changed(Some("W/\"p1\""), vec![pull_moved(7, "2026-09-16T11:40:00Z")])),
+            issues: Some(changed(None, vec![])),
+            ..Default::default()
+        };
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+        assert_eq!(report.added, vec!["a/b#7"]);
+        let stored = cache.lock().unwrap().find_item_by_subject("c/d", ItemKind::PullRequest, 7).unwrap();
+        let stored = stored.expect("keyed by the name the payload gives");
+
+        // The next 200 finds the row where it is rather than inserting
+        // beside it and failing on the subject index for good.
+        let fake = Fake {
+            pulls: Some(changed(Some("W/\"p2\""), vec![pull_moved(7, "2026-09-17T09:00:00Z")])),
+            issues: Some(changed(None, vec![])),
+            ..Default::default()
+        };
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+        assert_eq!(report.updated, vec!["a/b#7"]);
+        assert_eq!(cache.lock().unwrap().load_items().unwrap().len(), 1, "one row, not two");
+        assert_eq!(meta(&cache, "etag:pulls:a/b").as_deref(), Some("W/\"p2\""), "the tag moved on");
+
+        // And when it merges, and the list comes back empty, the closure
+        // step still looks under the name the row is keyed by, which the
+        // earlier lists taught it.
+        assert_eq!(meta(&cache, "alias:a/b").as_deref(), Some("c/d"));
+        let mut done = merged(7, "2026-09-18T08:00:00Z");
+        done.repo_full_name = "c/d".into();
+        let fake = Fake {
+            pulls: Some(changed(Some("W/\"p3\""), vec![])),
+            issues: Some(changed(None, vec![])),
+            pulls_by_number: HashMap::from([(7, done)]),
+            ..Default::default()
+        };
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+        assert_eq!(report.closed, vec!["a/b#7"]);
+        assert_eq!(fake.calls(), vec!["pulls etag=W/\"p2\"", "pull 7", "issues etag=-"]);
+        let item = cache.lock().unwrap().load_item(&stored.id).unwrap().unwrap();
+        assert!(item.pull_request().unwrap().merged, "stored as GitHub reports it");
+    }
+
+    #[tokio::test]
+    async fn a_number_github_no_longer_answers_for_is_stored_closed_and_the_pass_goes_on() {
+        let (_dir, cache) = cache();
+        cache.lock().unwrap().set_meta("etag:issues:a/b", "W/\"old\"").unwrap();
+        // Deleted by a maintainer: 410 from now until the end of time. A
+        // pass that failed on it would fail the same way every poll, and
+        // the tag would never move.
+        let deleted = store_issue(&cache, issue(42, "2026-09-16T11:40:00Z"));
+        let gone = store_pull(&cache, pull(7, "2026-09-16T11:40:00Z"));
+        // Closed after the deleted one, by number, which the pass must
+        // still reach.
+        let closed_after = store_issue(&cache, issue(43, "2026-09-16T11:40:00Z"));
+        let mut done = issue(43, "2026-09-18T08:00:00Z");
+        done.state = "closed".into();
+        let fake = Fake {
+            pulls: Some(changed(Some("W/\"p\""), vec![])),
+            issues: Some(changed(Some("W/\"i\""), vec![])),
+            issues_by_number: HashMap::from([(43, done)]),
+            refused: HashMap::from([(42, 410), (7, 404)]),
+            ..Default::default()
+        };
+
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        assert_eq!(report.closed, vec!["a/b#7", "a/b#42", "a/b#43"]);
+        assert_eq!(fake.calls(), vec!["pulls etag=-", "pull 7", "issues etag=W/\"old\"", "issue 42", "issue 43"]);
+        let item = cache.lock().unwrap().load_item(&deleted.id).unwrap().unwrap();
+        let stored = item.issue().unwrap();
+        assert!(!stored.is_open(), "closed, so the next pass does not ask again");
+        assert_eq!(stored.title, "issue 42", "the rest of the snapshot is as it was");
+        assert!(!cache.lock().unwrap().load_item(&gone.id).unwrap().unwrap().pull_request().unwrap().is_open());
+        assert!(!cache.lock().unwrap().load_item(&closed_after.id).unwrap().unwrap().issue().unwrap().is_open());
+        assert_eq!(meta(&cache, "etag:issues:a/b").as_deref(), Some("W/\"i\""), "the pass finished, so the tag is written");
+        assert!(cache.lock().unwrap().open_subjects_in(REPO).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_subject_transferred_away_answers_under_a_new_number_and_is_stored_closed_here() {
+        let (_dir, cache) = cache();
+        let moved = store_issue(&cache, issue(5, "2026-09-16T11:40:00Z"));
+        // The redirect was followed to the issue's new home, where it is
+        // #9 and still open. It is not a/b#5 any more.
+        let fake = Fake {
+            pulls: Some(changed(None, vec![])),
+            issues: Some(changed(None, vec![])),
+            issues_by_number: HashMap::from([(5, issue(9, "2026-09-18T08:00:00Z"))]),
+            ..Default::default()
+        };
+
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        assert_eq!(report.closed, vec!["a/b#5"]);
+        let item = cache.lock().unwrap().load_item(&moved.id).unwrap().unwrap();
+        let stored = item.issue().unwrap();
+        assert_eq!(stored.number, 5, "the row keeps its own number");
+        assert!(!stored.is_open());
+        assert!(issue_item(&cache, 9).is_none(), "the other repository's issue is not filed under this one");
+    }
+
+    #[test]
+    fn a_stored_subject_is_kept_only_when_it_is_dated_and_strictly_newer() {
+        let earlier = Some(at("2026-09-16T11:40:00Z"));
+        let later = Some(at("2026-09-17T09:00:00Z"));
+        assert!(stored_is_newer(later, earlier), "a pass stored a later entry while the open cloned");
+        assert!(!stored_is_newer(earlier, later), "what was fetched is the newer");
+        assert!(!stored_is_newer(later, later), "equal writes: the detail carries what the list omits");
+        assert!(!stored_is_newer(None, later), "a row with no subject takes anything");
+        assert!(!stored_is_newer(later, None), "an undated fetch is still written");
     }
 }

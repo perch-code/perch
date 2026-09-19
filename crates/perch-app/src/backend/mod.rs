@@ -15,9 +15,9 @@ use std::time::Duration;
 use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, Store};
 use perch_github::{
-    resolve_token, Anchor, Author, Cache, CommentMessage, CommentThread, Config, DetailSource,
-    GitHub, Item, ItemCheckout, ItemKind, ItemSubject, Mark, PullRequest, RunRecord,
-    RunStatus, SubjectDetail, SubjectKind, Thread, ThreadOrigin,
+    resolve_token, Anchor, Author, Cache, CacheError, CommentMessage, CommentThread, Config,
+    DetailSource, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, Mark, PullRequest,
+    RunRecord, RunStatus, SubjectDetail, SubjectKind, Thread, ThreadOrigin,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
@@ -635,11 +635,24 @@ async fn run(
         tokio::spawn(async move { sweep_items(&ctx).await });
     }
 
+    // The roots inline as well, before the first list pass: the pass gives
+    // a pull request to a checkout of the reader's own on its head branch
+    // only when the branch row is already there, and a scan spawned beside
+    // the pass would lose that race for every branch it had not reached,
+    // leaving a row for the pull request and a row for the branch. The
+    // sidebar has painted from the cache already, and a scan is git over
+    // a few directories. The lookups behind subject-less branches are
+    // requests, and go off the loop.
+    if scan_roots(&ctx).await {
+        ctx.send_items();
+    }
     {
-        // Roots and the pull requests behind subject-less branches, after
-        // the cache has painted and off the loop.
         let ctx = ctx.clone();
-        tokio::spawn(async move { refresh_items(&ctx).await });
+        tokio::spawn(async move {
+            if attach_pull_requests(&ctx).await {
+                ctx.send_items();
+            }
+        });
     }
 
     // A refresh happens immediately, then on whatever cadence the server asks
@@ -685,8 +698,8 @@ async fn run(
                 // A pass that failed is what the status bar shows, whatever
                 // the inbox poll said: the sidebar is missing rows, and
                 // `refresh` has just reported a healthy inbox over it.
-                if let Some(e) = pass_failure {
-                    let _ = ctx.events.send(Event::Status(describe_pass_error(&e)));
+                if let Some((repo, e)) = pass_failure {
+                    let _ = ctx.events.send(Event::Status(describe_pass_error(&repo, &e)));
                 }
                 let open = ctx.slot.lock().ok().and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
                 if let Some(item_id) = open {
@@ -1480,6 +1493,44 @@ fn branch_item_for(ctx: &Ctx, pr: &PullRequest) -> Option<Item> {
     ctx.with_cache(|c| sync::branch_item_for(c, pr)).flatten()
 }
 
+/// Write the row an open made or brought up to date. A row the open took
+/// for new is looked for once more, under the lock it is written under:
+/// the open found nothing, then fetched and cloned, and a list pass that
+/// ran meanwhile may have made a row for the same subject. Inserted
+/// beside it, the open's row would be refused by the subject index and
+/// the review would run under an id no row has, its threads and marks
+/// written to nothing. When a row has appeared, what the open set goes
+/// onto it, and its id is the one the review runs as.
+fn record_open(cache: &Cache, item: &mut Item, is_new: bool) -> Result<(), CacheError> {
+    if !is_new {
+        return cache.update_item(item);
+    }
+    let found = match item.subject.as_ref() {
+        Some(s) => cache.find_item_by_subject(s.repo_full_name(), s.kind(), s.number())?,
+        None => None,
+    };
+    let Some(mut found) = found else {
+        return cache.insert_item(item);
+    };
+    tracing::info!(id = %found.id, "a pass made the row while the open ran; opening as that row");
+    // The pass's subject may be the later one, and its tag vouches for it.
+    let fetched = item.subject.take();
+    let stored = found.subject.as_ref().and_then(ItemSubject::updated_at);
+    if !sync::stored_is_newer(stored, fetched.as_ref().and_then(ItemSubject::updated_at)) {
+        found.subject = fetched;
+    }
+    found.checkout = item.checkout.take();
+    found.archived_at = None;
+    found.last_opened_at = item.last_opened_at;
+    if item.attention_at.is_some() {
+        found.attention_at = item.attention_at;
+        found.attention_reason = item.attention_reason.take();
+    }
+    cache.update_item(&found)?;
+    *item = found;
+    Ok(())
+}
+
 /// The branches items already hold in a repository, which a cut must not
 /// take: `items_branch` allows one row per branch.
 fn branches_in(ctx: &Ctx, repo_full_name: &str) -> Vec<String> {
@@ -1961,8 +2012,11 @@ struct ReviewContext {
 /// the order the sidebar shows them in. A repository whose pass failed is
 /// logged and the next is tried: one being unreachable says nothing about
 /// the rest, and a pass that stopped part way has usually written rows
-/// before it did. The first failure is returned for the status bar.
-async fn list_passes(ctx: &Ctx) -> Option<sync::Error> {
+/// before it did. The first failure is returned for the status bar, with
+/// the repository whose pass it was: a pass has as many endpoints as
+/// there are declared repositories, and GitHub's answer names none of
+/// them.
+async fn list_passes(ctx: &Ctx) -> Option<(String, sync::Error)> {
     let mut first_failure = None;
     for repo in ctx.config.declared() {
         match sync::list_pass_for(ctx, &repo).await {
@@ -1977,7 +2031,7 @@ async fn list_passes(ctx: &Ctx) -> Option<sync::Error> {
             Err(e) => {
                 tracing::warn!(repo, error = %e, "list pass failed");
                 if first_failure.is_none() {
-                    first_failure = Some(e);
+                    first_failure = Some((repo, e));
                 }
             }
         }
@@ -2170,9 +2224,14 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str, ci_at: Option<Timesta
                     }
                 }
                 if let Some(mut item) = ctx.item(item_id) {
-                    item.subject = Some(ItemSubject::PullRequest((*fresh).clone()));
-                    ctx.with_cache(|c| c.update_item(&item));
-                    ctx.send_items();
+                    // Unless a pass stored a later one while this was
+                    // asked, and its tag now vouches for the row.
+                    let stored = item.subject.as_ref().and_then(ItemSubject::updated_at);
+                    if !sync::stored_is_newer(stored, fresh.updated_at) {
+                        item.subject = Some(ItemSubject::PullRequest((*fresh).clone()));
+                        ctx.with_cache(|c| c.update_item(&item));
+                        ctx.send_items();
+                    }
                 }
                 fresh
             }
@@ -2433,38 +2492,30 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
                         }
                         continue;
                     };
-                    // A pull request some other row has already, opened in
-                    // Perch before the branch was checked out in a root,
-                    // stays with that row; this one stays a branch.
-                    let held = ctx
-                        .with_cache(|c| c.find_item_by_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number).ok().flatten())
-                        .flatten()
-                        .is_some_and(|other| other.id != item.id);
-                    if held {
-                        if let Some(etag) = etag {
-                            ctx.with_cache(|c| c.set_meta(&key, &etag));
-                        }
-                        break;
-                    }
-                    tracing::info!(item = %item.id, number = pr.number, "branch gained a pull request");
                     // The row as it is now, not as it was when the loop
                     // began: a click may have opened it since.
                     let Some(mut item) = ctx.item(&item.id) else { break };
                     if item.subject.is_some() {
                         break;
                     }
-                    if let Some(c) = item.checkout.as_mut() {
-                        c.base_ref = pr.base_ref.clone();
-                    }
-                    item.subject = Some(ItemSubject::PullRequest(*pr));
-                    match ctx.with_cache(|c| c.update_item(&item)) {
-                        Some(Err(e)) => tracing::warn!(error = %e, "could not attach the pull request"),
-                        _ => {
+                    let number = pr.number;
+                    match ctx.with_cache(|c| take_pull_request(c, &mut item, *pr)) {
+                        Some(Ok(true)) => {
+                            tracing::info!(item = %item.id, number, "branch gained a pull request");
                             if let Some(etag) = etag {
                                 ctx.with_cache(|c| c.set_meta(&key, &etag));
                             }
                             changed = true;
                         }
+                        // Held by a row with a checkout of its own: that
+                        // row keeps it, and this one stays a branch.
+                        Some(Ok(false)) => {
+                            if let Some(etag) = etag {
+                                ctx.with_cache(|c| c.set_meta(&key, &etag));
+                            }
+                        }
+                        Some(Err(e)) => tracing::warn!(error = %e, "could not attach the pull request"),
+                        None => {}
                     }
                     break;
                 }
@@ -2476,6 +2527,49 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
         }
     }
     changed
+}
+
+/// Give a branch row its pull request, under the one lock. `Ok(false)`
+/// when another row has the pull request and a checkout of its own, one
+/// opened in Perch before the branch was checked out in a root: that row
+/// keeps it, and the branch stays a branch. A row with the subject and
+/// nothing else is the list pass's, made when the pass listed the pull
+/// request before the scan had seen its branch, at launch or in the poll
+/// after the branch was pushed; the branch row is the reader's, with its
+/// threads, so it takes the subject and the pass's row goes, its marks
+/// carried across. The subject index allows one row per pull request, so
+/// the pass's row goes first.
+fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<bool, CacheError> {
+    let holder = cache
+        .find_item_by_subject(&pr.repo_full_name, ItemKind::PullRequest, pr.number)?
+        .filter(|other| other.id != item.id);
+    if let Some(holder) = holder {
+        if holder.checkout.is_some() {
+            return Ok(false);
+        }
+        tracing::info!(item = %item.id, from = %holder.id, number = pr.number, "the branch takes the pull request from the row the pass made");
+        item.saved |= holder.saved;
+        if item.pinned_at.is_none() {
+            item.pinned_at = holder.pinned_at;
+        }
+        if item.done_at.is_none() {
+            item.done_at = holder.done_at;
+        }
+        if item.attention_at.is_none() {
+            item.attention_at = holder.attention_at;
+            item.attention_reason = holder.attention_reason;
+        }
+        if item.name.is_none() {
+            item.name = holder.name;
+        }
+        cache.delete_item(&holder.id)?;
+    }
+    if let Some(c) = item.checkout.as_mut() {
+        c.base_ref = pr.base_ref.clone();
+    }
+    item.subject = Some(ItemSubject::PullRequest(pr));
+    cache.update_item(item)?;
+    Ok(true)
 }
 
 /// Find or make the item for a pull request or issue, and open it.
@@ -2539,7 +2633,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
     item.subject = Some(ItemSubject::Issue(issue.clone()));
     item.archived_at = None;
     item.last_opened_at = now;
-    let written = ctx.with_cache(|c| if is_new { c.insert_item(&item) } else { c.update_item(&item) });
+    let written = ctx.with_cache(|c| record_open(c, &mut item, is_new));
     if let Some(Err(e)) = written {
         tracing::warn!(id = %item.id, error = %e, "could not record the item");
     }
@@ -2818,7 +2912,13 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     // CI turning red is attention. Nothing else about the snapshot is.
     let ci_failed_now = pull_request.checks == Some(perch_github::CheckStatus::Failure)
         && item.pull_request().and_then(|p| p.checks) != Some(perch_github::CheckStatus::Failure);
-    item.subject = Some(ItemSubject::PullRequest(pull_request.clone()));
+    // The snapshot was fetched before the clone, and a list pass that ran
+    // during the clone may have stored a later one and a tag vouching for
+    // it. The pass's rule applies here too: what is newer stays.
+    let stored = item.subject.as_ref().and_then(ItemSubject::updated_at);
+    if !sync::stored_is_newer(stored, pull_request.updated_at) {
+        item.subject = Some(ItemSubject::PullRequest(pull_request.clone()));
+    }
     item.checkout = Some(ItemCheckout {
         branch: branch.clone(),
         base_ref: pull_request.base_ref.clone(),
@@ -2838,7 +2938,7 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         item.attention_at = Some(now);
         item.attention_reason = Some("ci_failed".into());
     }
-    let written = ctx.with_cache(|c| if is_new { c.insert_item(&item) } else { c.update_item(&item) });
+    let written = ctx.with_cache(|c| record_open(c, &mut item, is_new));
     if let Some(Err(e)) = written {
         tracing::warn!(id = %item.id, error = %e, "could not record the item");
     }
@@ -3736,9 +3836,16 @@ fn describe_error(e: &perch_github::Error) -> Status {
 
 /// A list pass's failure as the status bar shows it: GitHub's the way a
 /// failed poll is described, so a rate limit reads as one, and the
-/// cache's in its own words.
-fn describe_pass_error(e: &sync::Error) -> Status {
+/// cache's in its own words. An answer GitHub gave about the repository,
+/// a 404 for a `[[repo]]` mistyped or a body that would not parse, is
+/// prefixed with the repository, since with several declared the reader
+/// cannot otherwise tell which one to fix. A network failure, a rejected
+/// token or a rate limit is about every repository, and names none.
+fn describe_pass_error(repo: &str, e: &sync::Error) -> Status {
     match e {
+        sync::Error::GitHub(e @ (perch_github::Error::Status { .. } | perch_github::Error::Decode(_))) => {
+            Status::Error { message: format!("{repo}: {e}") }
+        }
         sync::Error::GitHub(e) => describe_error(e),
         other => Status::Error { message: other.to_string() },
     }
@@ -3880,11 +3987,18 @@ mod tests {
     use std::sync::mpsc::Receiver;
     use std::sync::Mutex;
 
-    /// A GitHub of one thread that answers every request the same way and
-    /// writes down the paths it was asked, so a test can say what the
-    /// code asked for and what it did not. The listener lives as long as
-    /// the test binary does.
+    /// A GitHub that answers every request the same way and writes down
+    /// the paths it was asked, so a test can say what the code asked for
+    /// and what it did not. The listener lives as long as the test binary
+    /// does.
     fn serve(status: &'static str, body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        serve_by_path(move |_| (status, body.to_string()))
+    }
+
+    /// A GitHub that answers each request by its path.
+    fn serve_by_path(
+        answer: impl Fn(&str) -> (&'static str, String) + Send + 'static,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let paths = Arc::new(Mutex::new(Vec::new()));
@@ -3892,9 +4006,9 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
-                if let Some(path) = request_path(&mut stream) {
-                    seen.lock().unwrap().push(path);
-                }
+                let Some(path) = request_path(&mut stream) else { continue };
+                let (status, body) = answer(&path);
+                seen.lock().unwrap().push(path);
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -4035,18 +4149,29 @@ mod tests {
         assert_eq!(items_sent(&received), 1);
     }
 
+    /// `a/b#7` as `GET /repos/a/b/pulls/7` sends it, so an `attend` that
+    /// still fetched and made a row could, and would be seen to.
+    const PULL_7: &str = r#"{"number":7,"title":"seven","state":"open","draft":false,
+        "user":{"login":"u","avatar_url":""},
+        "head":{"sha":"h7","ref":"branch-7","repo":{"full_name":"a/b"}},
+        "base":{"sha":"m","ref":"main","repo":{"full_name":"a/b"}},
+        "updated_at":"2026-09-16T11:40:00Z"}"#;
+
     #[tokio::test]
     async fn a_review_request_with_no_item_makes_none() {
         let dir = tempfile::tempdir().unwrap();
-        // Any request would be refused, and none is made: the list pass
-        // is what makes rows now, and the inbox keeps the notification.
-        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        // A GitHub that would answer for the pull request, so a fetch
+        // could not fail its way to the same outcome: the list pass is
+        // what makes rows now, and the inbox keeps the notification.
+        let (base, paths) = serve("200 OK", PULL_7);
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
 
         attend(&ctx, &[with_reason(thread("7", "seven"), Reason::ReviewRequested)]).await;
 
         let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
         assert!(items.is_empty(), "a notification does not decide what exists");
         assert_eq!(items_sent(&received), 0);
+        assert!(paths.lock().unwrap().is_empty(), "and nothing was asked to find out");
     }
 
     const FAILING_RUN: &str = r#"{"workflow_runs":[{"name":"ci","run_number":1,"status":"completed","conclusion":"failure","head_branch":"branch-7","html_url":"https://github.com/a/b/actions/runs/1","created_at":"2026-09-18T11:00:00Z","updated_at":"2026-09-18T11:05:00Z"}]}"#;
@@ -4087,13 +4212,26 @@ mod tests {
     #[tokio::test]
     async fn a_failed_pass_does_not_stop_the_next_repository_and_the_first_failure_is_kept() {
         let dir = tempfile::tempdir().unwrap();
-        // Not found rather than a server error, which the client retries.
-        let (base, paths) = serve("404 Not Found", "{}");
+        // Each repository fails in its own way, and neither with a server
+        // error, which the client retries. Not found for the first, gone
+        // for the second, so which failure was kept can be told.
+        let (base, paths) = serve_by_path(|path| {
+            if path.starts_with("/repos/a/b/") {
+                ("404 Not Found", r#"{"message":"a/b is not there"}"#.to_string())
+            } else {
+                ("410 Gone", r#"{"message":"c/d is gone"}"#.to_string())
+            }
+        });
         let (ctx, _received) = ctx(dir.path(), &base, &["a/b", "c/d"]);
 
         let failure = list_passes(&ctx).await;
 
-        assert!(matches!(failure, Some(sync::Error::GitHub(perch_github::Error::Status { status: 404, .. }))));
+        let (repo, error) = failure.expect("a failure");
+        assert_eq!(repo, "a/b", "the first repository's failure is the one kept");
+        assert!(
+            matches!(&error, sync::Error::GitHub(perch_github::Error::Status { status: 404, body }) if body.contains("a/b")),
+            "{error}"
+        );
         // Both repositories were asked, each for its pull requests and no
         // further, since a list that failed ends its pass.
         assert_eq!(
@@ -4105,10 +4243,125 @@ mod tests {
     #[test]
     fn a_pass_failure_is_described_the_way_a_poll_failure_is() {
         let limited = sync::Error::GitHub(perch_github::Error::RateLimited { reset_epoch: None });
-        assert!(matches!(describe_pass_error(&limited), Status::RateLimited { .. }));
-        match describe_pass_error(&sync::Error::NoCache) {
+        assert!(matches!(describe_pass_error("a/b", &limited), Status::RateLimited { .. }));
+        match describe_pass_error("a/b", &sync::Error::NoCache) {
             Status::Error { message } => assert!(message.contains("no cache"), "{message}"),
             other => panic!("expected an error status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_answer_about_one_repository_names_it_and_a_failure_about_all_of_them_does_not() {
+        let not_found = sync::Error::GitHub(perch_github::Error::Status { status: 404, body: "{}".into() });
+        match describe_pass_error("slatedb/slatedb", &not_found) {
+            Status::Error { message } => {
+                assert_eq!(message, "slatedb/slatedb: GitHub returned 404: {}", "which [[repo]] to fix");
+            }
+            other => panic!("expected an error status, got {other:?}"),
+        }
+        let offline = sync::Error::GitHub(perch_github::Error::Network("no route".into()));
+        match describe_pass_error("slatedb/slatedb", &offline) {
+            Status::Error { message } => assert!(!message.contains("slatedb"), "not one repository's fault: {message}"),
+            other => panic!("expected an error status, got {other:?}"),
+        }
+    }
+
+    /// A checkout under a root on `branch`, as the scan records it.
+    fn root_checkout(branch: &str) -> ItemCheckout {
+        ItemCheckout {
+            branch: branch.into(),
+            base_ref: "develop".into(),
+            head_sha: "h7".into(),
+            path: "/x/b".into(),
+            owned: false,
+            on_disk: true,
+            churn: Some((3, 1)),
+            last_seen_head: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_branch_takes_its_pull_request_from_the_row_the_pass_made_and_carries_the_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        // The pass listed #7 before the scan saw the branch; the reader
+        // then pinned the pass's row.
+        let mut listed = store_pull(&ctx, 7);
+        listed.pinned_at = Some("2026-09-17T09:00:00Z".parse().unwrap());
+        ctx.with_cache(|c| c.update_item(&listed)).unwrap().unwrap();
+        let mut branch = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        branch.checkout = Some(root_checkout("branch-7"));
+        ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
+
+        let taken = ctx.with_cache(|c| take_pull_request(c, &mut branch, pull_request(7))).unwrap().unwrap();
+
+        assert!(taken);
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        assert_eq!(items.len(), 1, "one row for the branch and its pull request");
+        assert_eq!(items[0].id, branch.id, "the reader's row, with its threads, is the one kept");
+        assert_eq!(items[0].pull_request().map(|p| p.number), Some(7));
+        assert_eq!(items[0].checkout.as_ref().map(|c| c.base_ref.as_str()), Some("main"), "the pull request's base");
+        assert_eq!(items[0].pinned_at, listed.pinned_at, "the pin on the pass's row came across");
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_held_by_a_row_with_its_own_checkout_stays_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        // Opened in Perch first, so the pull request's row has a checkout
+        // Perch cut for it.
+        let mut opened = store_pull(&ctx, 7);
+        opened.checkout = Some(ItemCheckout { branch: "perch/pr-7".into(), owned: true, ..root_checkout("perch/pr-7") });
+        ctx.with_cache(|c| c.update_item(&opened)).unwrap().unwrap();
+        let mut branch = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        branch.checkout = Some(root_checkout("branch-7"));
+        ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
+
+        let taken = ctx.with_cache(|c| take_pull_request(c, &mut branch, pull_request(7))).unwrap().unwrap();
+
+        assert!(!taken, "the row that has it keeps it");
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        assert_eq!(items.len(), 2, "and the branch stays a branch");
+        assert!(ctx.item(&branch.id).unwrap().subject.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_open_that_found_no_row_writes_onto_one_a_pass_made_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        // Nothing when the open looked; then, while it cloned, the pass
+        // listed #7 with a later snapshot.
+        let mut listed = store_pull(&ctx, 7);
+        let mut later = pull_request(7);
+        later.title = "seven, renamed".into();
+        later.updated_at = Some("2026-09-17T09:00:00Z".parse().unwrap());
+        listed.subject = Some(ItemSubject::PullRequest(later));
+        ctx.with_cache(|c| c.update_item(&listed)).unwrap().unwrap();
+        let now: Timestamp = "2026-09-18T12:00:00Z".parse().unwrap();
+        let mut opened = Item::new("a/b", now);
+        opened.subject = Some(ItemSubject::PullRequest(pull_request(7)));
+        opened.checkout = Some(ItemCheckout { branch: "perch/pr-7".into(), owned: true, ..root_checkout("perch/pr-7") });
+
+        ctx.with_cache(|c| record_open(c, &mut opened, true)).unwrap().expect("no collision on the subject index");
+
+        assert_eq!(opened.id, listed.id, "the review runs as the row that exists");
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].checkout.as_ref().map(|c| c.branch.as_str()), Some("perch/pr-7"), "with the open's checkout");
+        assert_eq!(items[0].last_opened_at, now);
+        assert_eq!(items[0].title(), "seven, renamed", "the pass's later snapshot stands over the one fetched before the clone");
+    }
+
+    #[tokio::test]
+    async fn an_open_that_found_no_row_and_still_finds_none_inserts_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut opened = Item::new("a/b", "2026-09-18T12:00:00Z".parse().unwrap());
+        opened.subject = Some(ItemSubject::PullRequest(pull_request(7)));
+        opened.checkout = Some(ItemCheckout { branch: "perch/pr-7".into(), owned: true, ..root_checkout("perch/pr-7") });
+
+        ctx.with_cache(|c| record_open(c, &mut opened, true)).unwrap().unwrap();
+
+        assert_eq!(ctx.item(&opened.id).unwrap(), opened);
     }
 }
