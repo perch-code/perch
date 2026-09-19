@@ -3,8 +3,8 @@
 A native macOS tool for reviewing code, written entirely in Rust with
 [floem](https://github.com/lapce/floem).
 
-The sidebar lists your projects, and under each the things being worked on:
-a pull request someone opened, an issue, a branch of your own. Click one
+The sidebar lists your repositories, and under each the things being worked
+on: a pull request someone opened, an issue, a branch of your own. Click one
 and the view that fits it opens: a read-only editor over the diff with
 rust-analyzer behind it, or the issue with its comments. Ask a coding
 agent about the lines on screen and the answer stays there as a thread. What
@@ -14,26 +14,32 @@ GitHub.
 
 ## What it does
 
-**Projects and items**
+**Repositories and items**
 
-- A project is a name, the repositories that belong to it, and the
-  directories where you already work on them, declared in `config.toml`.
-  A repository nobody declares gets a project named after it the first
-  time something from it is opened.
-- Under a project, an *item* is one row with up to three parts: a GitHub
-  pull request or issue, a checkout on disk, and attention. A branch of
-  your own becomes a pull request when GitHub opens one on it, and it is
-  the same row before and after, with the same threads.
+- A repository is declared in `config.toml` as `[[repo]]`: its
+  `owner/repo` name and, optionally, the directories where you already
+  work on it. A repository nobody declares still gets a section the first
+  time something from it is opened, and the section looks the same.
+- Under a repository, an *item* is one row with up to three parts: a
+  GitHub pull request or issue, a checkout on disk, and attention. A
+  branch of your own becomes a pull request when GitHub opens one on it,
+  and it is the same row before and after, with the same threads. An item
+  is in the repository its pull request, issue or checkout is in; there is
+  nothing to move.
 - **Priority** at the top lists items with attention newer than their Done
   mark, newest first, with why: review requested, mentioned, commented, CI
-  failed. **Pinned** holds what you pinned. Then one section per project,
-  or one per date, with a count of active items.
+  failed. **Pinned** holds what you pinned. Then the sections, with a
+  count of active items each: one per repository, the declared ones first
+  in config order and the rest by name; or one per owner, which is how
+  `slatedb/slatedb` and `slatedb/slatedb-go` share a heading; or one per
+  date. Under Repository a row's second line is `#57 · branch`, since the
+  heading says the repository. Under Owner and Date, and in Priority and
+  Pinned, it is `slatedb/slatedb #57 · branch`.
 - Each row has Save and Done on hover and a menu: Open in GitHub, Finder or
-  Terminal, Pin, Mark unread, Rename, Fork or Start work, Move to project,
-  Archive, Delete. Every entry is on every row; the ones that cannot apply
-  are greyed. The filter button narrows the list by status, kind, grouping
-  and sort, and the search box matches titles, numbers, branches and
-  project names.
+  Terminal, Pin, Mark unread, Rename, Fork or Start work, Archive, Delete.
+  Every entry is on every row; the ones that cannot apply are greyed. The
+  filter button narrows the list by status, kind, grouping and sort, and
+  the search box matches titles, numbers, branches and repository names.
 
 **The inbox**
 
@@ -115,7 +121,8 @@ Files, shaped like a pull request's page on GitHub.
   changed. A second pull request from the same repository costs a fetch
   rather than a clone. Opening the same one again finds the same directory.
   A pull request whose head branch you already have checked out under a
-  project root, or on a branch Perch cut, opens in that checkout instead.
+  root you declared, or on a branch Perch cut, opens in that checkout
+  instead.
 
 **Issues**
 
@@ -132,7 +139,7 @@ Files, shaped like a pull request's page on GitHub.
 
 **Branches, roots, and checkouts**
 
-- Declare `roots` on a project and every git worktree under them on a
+- Declare `roots` on a repository and every git worktree under them on a
   branch other than the default becomes an item, with lines added and
   removed against the base on the row. Perch never touches a directory it
   did not make: Archive and Delete on such a row act on the row. Switch a
@@ -162,7 +169,7 @@ Files, shaped like a pull request's page on GitHub.
 
 - Opening a pull request also archives its discussion: the description,
   the conversation, each review and the line comments under it, as plain
-  markdown under `~/.perch/knowledge/<project>/github/<owner>/<repo>/pulls/`.
+  markdown under `~/.perch/knowledge/<owner>/<repo>/github/pulls/`.
   Every message carries its author, time and a permalink.
 - A skill is written for Claude Code and Codex that says where the files are
   and how to search them, so an agent working in one of those repositories
@@ -285,8 +292,8 @@ Everything Perch keeps is under one directory, `$PERCH_HOME` if set, else
 
 ```
 ~/.perch/
-  config.toml        projects, token, agent, knowledge settings
-  perch.db           items, projects, threads, marks, the inbox cache
+  config.toml        repositories, token, agent, knowledge settings
+  perch.db           items, threads, marks, the inbox cache
   avatars/
   repos/             one bare clone per repository
   worktrees/         one checkout per branch Perch made, <owner>__<repo>__<branch>
@@ -313,20 +320,29 @@ Optional, at `~/.perch/config.toml`:
 token = "ghp_..."        # only when env vars and gh are unavailable
 poll_interval_secs = 60  # a floor; X-Poll-Interval may raise it
 
-[[project]]
-name = "perch"
-repos = ["criccomini/perch"]
+[[repo]]
+name = "criccomini/perch"
 roots = ["~/Code/perch"]         # optional; checkouts you already have
 
-[[project]]
-name = "slatedb"
-repos = ["slatedb/slatedb", "slatedb/slatedb-go"]
+[[repo]]
+name = "slatedb/slatedb"
+
+[[repo]]
+name = "slatedb/slatedb-go"
 ```
 
-`repos` says which GitHub repositories belong to a project; `roots` says
-where you already work on them, and each root's worktrees become items.
-A repository no project claims gets an implicit project named after it
-when an item needs one, and declaring it later adopts the items.
+`name` is the repository's `owner/repo`, compared without regard to case.
+`roots` says where you already work on it, and each root's worktrees
+become items; a root whose origin is some other repository is skipped,
+and the status line says so. A directory that holds worktrees of two
+repositories is listed under both.
+
+Declaring a repository is what makes Perch list it whole: its open pull
+requests and issues become rows, whether or not anyone told you about
+them. A repository you did not declare shows only what you opened. Its
+section looks the same, and declaring it later changes nothing about the
+rows already there. A file that still declares `[[project]]` is not
+loaded, and the notice says to write `[[repo]]` instead.
 
 ## Threads
 
@@ -391,9 +407,9 @@ as text, and `perch --scan` what the root scan finds.
 
 ## Knowledge
 
-Discussion lands under `knowledge/` in the Perch home. Change it with
-`knowledge.root`. Which project a repository's files go under follows the
-same `[[project]]` list as the sidebar:
+Discussion lands under `knowledge/` in the Perch home, one directory per
+repository, `owner/repo`, whether or not the repository is declared.
+Change the root with `knowledge.root`:
 
 ```toml
 [knowledge]
@@ -401,19 +417,25 @@ root = "~/.perch/knowledge"   # optional; this is the default
 skills = true                 # optional; write the two SKILL.md files
 ```
 
-The layout, per project:
+The layout, per repository:
 
 ```
 ~/.perch/knowledge/
-  index.md                          projects, their repositories, last updated
-  slatedb/
-    index.md                        this project's containers and how current
-    raw/github/slatedb-slatedb.jsonl  one record per line; the truth
-    raw/perch/slatedb-slatedb.jsonl   your own threads, the same way
-    github/slatedb/slatedb/pulls/812.md   rendered from raw
-    github/slatedb/slatedb/issues/42.md   an issue, the same way
-    perch/slatedb/slatedb/pulls/812.md    what you asked an agent about 812
+  index.md                          repositories, their directories, last updated
+  slatedb/slatedb/
+    index.md                        this repository's containers and how current
+    raw/github.jsonl                one record per line; the truth
+    raw/perch.jsonl                 your own threads, the same way
+    github/pulls/812.md             rendered from raw
+    github/issues/42.md             an issue, the same way
+    perch/pulls/812.md              what you asked an agent about 812
+    perch/branches/fence.md         what you asked about a branch with no pull request
 ```
+
+The root `index.md` is a table of every repository the store holds and
+the directory it is under, so an agent can go from `git remote get-url
+origin` to the right files without a lookup. Each repository's `index.md`
+lists its containers and how current each is.
 
 The `perch/` files are your own threads: each question, its answer, the
 lines it was about and the model that answered, with front matter that
@@ -426,11 +448,17 @@ pull request is opened. Deleting `raw/` too only loses what has not been
 opened since; a pull request is archived again whenever it is opened, and
 re-opening one that has not changed writes nothing.
 
+A knowledge directory written before this layout has `<project>/raw/`;
+delete those project directories, and the files come back under
+`<owner>/<repo>/` as pull requests are opened. Perch neither reads nor
+migrates the old layout.
+
 The skill goes to `~/.claude/skills/perch/SKILL.md` for Claude Code and
-`~/.agents/skills/perch/SKILL.md` for Codex. It names every project the
-store holds and the root, and tells the agent to start from `index.md` and
-search with `rg`. Nothing else is needed to point an agent at the files;
-ask it why a change was made in a checkout of one of those repositories.
+`~/.agents/skills/perch/SKILL.md` for Codex. It names every repository
+the store holds and the root, and tells the agent to start from `index.md`
+and search with `rg`. Nothing else is needed to point an agent at the
+files; ask it why a change was made in a checkout of one of those
+repositories.
 
 Only pull requests opened in Perch are archived. There is no backfill and
 no timer.
