@@ -19,11 +19,15 @@
 //!
 //! A thread's card is drawn over the rows the document reserves for it,
 //! by a layer over the editor that places each card from the live
-//! document and the viewport, the way the gutter places its rows.
+//! document and the viewport, the way the gutter places its rows. The
+//! rows are an estimate until the card has been laid out; then the card
+//! says how tall it is, and when that is not the rows it has, the rows
+//! are set and the document is edited like any other change to it.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
+use floem::context::LayoutChanged;
 use floem::event::PointerScrollEventExt;
 use floem::kurbo::{Rect, Size, Vec2};
 use floem::prelude::*;
@@ -587,6 +591,15 @@ fn card_layer(
 ///
 /// A gutter marker click on the thread scrolls the editor so that the
 /// card is in view, with the line above it; the card flashes itself.
+///
+/// The card's rows are an estimate until it has been laid out. Every
+/// layout tells the card its box, and when the rows that box needs are
+/// not the rows the document has for it, the rows are set and the
+/// document follows, as it follows any other change to its inputs. Only
+/// when they differ: an absolutely placed card is laid out again on
+/// every scroll, and a write on each would edit the document, lay the
+/// card out again and write again without end. A collapsed card is its
+/// one row whatever it measures, so it says nothing.
 #[allow(clippy::too_many_arguments)]
 fn inline_card(
     app: AppState,
@@ -620,8 +633,19 @@ fn inline_card(
         }
     });
 
+    let measured_id = card_id.clone();
     threads::thread_card(app, state, backend, open_file, thread, ThreadFace::Inline)
         .debug_name(name)
+        .on_event_stop(LayoutChanged::listener(), move |_, LayoutChanged { new_box, .. }| {
+            if state.is_collapsed(&measured_id) {
+                return;
+            }
+            let rows = rows_for_height(new_box.height(), line_height, theme::CARD_INSET);
+            let has = doc.with_untracked(|d| d.card_span(&measured_id).map(|span| span.len()));
+            if has.is_some_and(|has| has != rows) {
+                state.set_card_rows(&measured_id, rows);
+            }
+        })
         .on_event_stop(el::PointerWheel, move |_, wheel| {
             let size = viewport.get_untracked().size();
             let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
@@ -640,6 +664,17 @@ fn inline_card(
                 .inset_right(theme::CODE_GUTTER_GAP)
                 .pointer_events_auto()
         })
+}
+
+/// How many rows a card laid out `height` tall takes: the height with the
+/// inset the card sits inside its first and last rows put back, in whole
+/// rows, rounded up, so the border never touches the line after the
+/// card. Never fewer than one, and never more than a card may take: the
+/// card scrolls inside itself at that height, so the rows it is given
+/// stop where the estimate's cap does.
+fn rows_for_height(height: f64, line_height: f64, inset: f64) -> usize {
+    let rows = ((height + 2.0 * inset) / line_height).ceil().max(1.0) as usize;
+    rows.min(doc::CARD_MAX_ROWS)
 }
 
 /// Where the editor scrolls to so that a card from `top` to `bottom` is
@@ -1211,6 +1246,27 @@ mod tests {
         // Taller than the view: its beginning, with the line above it.
         let (top, bottom) = card(40.0, 40.0);
         assert_eq!(scroll_for_card(vp, top, bottom, lh), Some(39.0 * lh));
+    }
+
+    #[test]
+    fn a_cards_rows_are_its_height_with_the_inset_in_whole_rows_up_to_the_cap() {
+        let (lh, inset) = (21.0, 3.0);
+        // A card that fills five rows less the inset at each end is five;
+        // a pixel more spills into a sixth; a pixel less is still five.
+        let five = 5.0 * lh - 2.0 * inset;
+        assert_eq!(rows_for_height(five, lh, inset), 5);
+        assert_eq!(rows_for_height(five + 1.0, lh, inset), 6);
+        assert_eq!(rows_for_height(five - 1.0, lh, inset), 5);
+        assert_eq!(rows_for_height(five - lh, lh, inset), 4);
+        // Never fewer than one, however little is there.
+        assert_eq!(rows_for_height(0.0, lh, inset), 1);
+        assert_eq!(rows_for_height(lh - 2.0 * inset, lh, inset), 1);
+        // A card as tall as its rows at the cap allow is the cap, not a
+        // row over it, and nothing taller is more.
+        let cap = doc::CARD_MAX_ROWS as f64 * lh - 2.0 * inset;
+        assert_eq!(rows_for_height(cap, lh, inset), doc::CARD_MAX_ROWS);
+        assert_eq!(rows_for_height(cap - lh, lh, inset), doc::CARD_MAX_ROWS - 1);
+        assert_eq!(rows_for_height(cap + 100.0 * lh, lh, inset), doc::CARD_MAX_ROWS);
     }
 }
 
@@ -2036,6 +2092,40 @@ mod window {
         }
     }
 
+    /// A thread of the given message bodies, the reader's and the agent's
+    /// in turn with no runs, on head lines `start` to `line` of the open
+    /// file, one-based.
+    fn thread_with(id: &str, start: u32, line: u32, bodies: &[&str]) -> perch_github::CommentThread {
+        use perch_github::{Anchor, Author, CommentMessage, CommentThread, Side, ThreadOrigin};
+        let created_at = "2026-09-18T09:59:00Z".parse().unwrap();
+        CommentThread {
+            id: id.into(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::Local,
+            anchor: Some(Anchor { path: "src/x.rs".into(), start_line: start, line, side: Side::Right, commit_sha: "h".into() }),
+            outdated: false,
+            resolved: false,
+            created_at,
+            messages: bodies
+                .iter()
+                .enumerate()
+                .map(|(i, body)| CommentMessage {
+                    id: format!("{id}-m{i}"),
+                    thread_id: id.into(),
+                    origin: ThreadOrigin::Local,
+                    author: if i % 2 == 0 {
+                        Author::User
+                    } else {
+                        Author::Agent { backend: "claude-code".into(), model: "sonnet".into() }
+                    },
+                    body: body.to_string(),
+                    created_at,
+                    run: None,
+                })
+                .collect(),
+        }
+    }
+
     /// The first view whose debug name contains `text`.
     fn find(id: floem::ViewId, text: &str) -> Option<floem::ViewId> {
         if id.debug_name().contains(text) {
@@ -2050,6 +2140,14 @@ mod window {
     fn card_rect(harness: &HeadlessHarness, thread_id: &str) -> floem::kurbo::Rect {
         let id = find(harness.root_id(), &format!("inline-card:{thread_id}")).expect("the card is in the layer");
         harness.get_layout_rect(id)
+    }
+
+    /// The rows a thread's card takes as it has been laid out: what the
+    /// correction gives it from its box, which the document is checked
+    /// against.
+    fn laid_out_rows(harness: &HeadlessHarness, thread_id: &str) -> usize {
+        let rect = card_rect(harness, thread_id);
+        super::rows_for_height(rect.height(), crate::theme::CODE_LINE_HEIGHT as f64, crate::theme::CARD_INSET)
     }
 
     #[test]
@@ -2070,18 +2168,21 @@ mod window {
         let card = CardId::Thread("t1".into());
         let estimate = crate::review::doc::estimate_rows(&thread, false);
         state.set_comment_threads(Arc::new(vec![thread]));
+        assert_eq!(live.doc.get().card_span(&card), Some(9..9 + estimate), "the estimate, until the card is laid out");
         harness.rebuild();
         harness.paint();
+        // Laid out, the card has the rows its height takes.
+        let rows = laid_out_rows(&harness, "t1");
         let doc = live.doc.get();
-        assert_eq!(doc.len(), 120 + estimate, "the card's rows were spliced in place");
+        assert_eq!(doc.len(), 120 + rows, "the card's rows were spliced in place");
         assert_eq!(doc.display_line(8), Some(8));
         assert_eq!(state.active_file().unwrap().buffer.head_line(8), Some(6));
         assert_eq!(state.active_file().unwrap().buffer.head_line(9), None, "display line 9 is the ghost");
-        assert_eq!(doc.card_span(&card), Some(9..9 + estimate));
-        for row in 9..9 + estimate {
+        assert_eq!(doc.card_span(&card), Some(9..9 + rows));
+        for row in 9..9 + rows {
             assert_eq!(doc.rows[row], DocRow::Spacer { card: card.clone(), row: row - 9 });
         }
-        assert_eq!(doc.display_line(9 + estimate), Some(9), "the code goes on under the card");
+        assert_eq!(doc.display_line(9 + rows), Some(9), "the code goes on under the card");
         assert_eq!(laid_out_text(&live), doc.text);
         assert_eq!(viewport.get().y0, 0.0);
 
@@ -2118,7 +2219,7 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert!(!state.is_collapsed(&card), "click at ({x}, {y}) over {under:?} did not open the card");
-        assert_eq!(live.doc.get().len(), 120 + estimate);
+        assert_eq!(live.doc.get().len(), 120 + rows, "open again at the rows the layout gave it, not the estimate");
         assert_eq!(laid_out_text(&live), live.doc.get().text);
 
         // The thread going takes its rows with it.
@@ -2184,7 +2285,6 @@ mod window {
         let (mut harness, state) = harness();
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
         let thread = thread_on("t1", 5, 7, false);
-        let estimate = crate::review::doc::estimate_rows(&thread, false);
         state.set_comment_threads(Arc::new(vec![thread]));
         state.layout.set(Layout::Split);
         harness.rebuild();
@@ -2196,15 +2296,17 @@ mod window {
         harness.paint();
         let (left, right) = sides(state);
         let card = CardId::Thread("t1".into());
+        // The card over the outer stack corrects both sides' rows.
+        let rows = laid_out_rows(&harness, "t1");
         let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
         assert_eq!(left_doc.len(), right_doc.len());
-        assert_eq!(right_doc.len(), 90 + estimate);
+        assert_eq!(right_doc.len(), 90 + rows);
         // The split pairs each ghost with its line, so display line 9,
         // the ghost, is on the next line's row: head line 7 is row 6, and
         // the card follows it on both sides, before that row, as it is
         // before the ghost in the stacked layout.
         assert_eq!(right_doc.row_of_head(6), Some(6));
-        assert_eq!(right_doc.card_span(&card), Some(7..7 + estimate));
+        assert_eq!(right_doc.card_span(&card), Some(7..7 + rows));
         assert_eq!(left_doc.card_span(&card), right_doc.card_span(&card));
         assert_eq!(laid_out_text(&left), left_doc.text);
         assert_eq!(laid_out_text(&right), right_doc.text);
@@ -2226,5 +2328,181 @@ mod window {
         assert_eq!(laid_out_text(&left), left.doc.get().text);
         assert_eq!(laid_out_text(&right), right.doc.get().text);
     }
+
+    // The height correction.
+
+    /// A question alone is estimated at five rows: its one line, the
+    /// byline and the gap, the first row and the follow-up line. On the
+    /// screen the first row, the padding and the follow-up line are more
+    /// than the two rows the estimate charges, so the laid-out card is
+    /// always taller than five rows; here, with the fonts on this
+    /// machine, it is seven. The assertions are on the rows the layout
+    /// gave, so they hold wherever the fonts put it.
+    #[test]
+    fn a_card_laid_out_taller_than_its_rows_moves_the_lines_below_it_and_nothing_else() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        let card = CardId::Thread("t1".into());
+
+        // The thread arrives, and the document is built from the estimate
+        // before anything is laid out: the card is under row 8, and the
+        // line under the card is five rows on.
+        let thread = thread_with("t1", 5, 7, &["why?"]);
+        let estimate = crate::review::doc::estimate_rows(&thread, false);
+        assert_eq!(estimate, 5);
+        state.set_comment_threads(Arc::new(vec![thread]));
+        let before = live.doc.get();
+        assert_eq!(before.len(), 120 + estimate);
+        assert_eq!(before.card_span(&card), Some(9..9 + estimate));
+        assert_eq!(before.row_of_display(9), Some(9 + estimate));
+        assert!(state.card_rows.get().is_empty(), "nothing has been laid out");
+
+        // Laid out, the card says how tall it is, and the document has
+        // the rows that takes: the lines above the card are where they
+        // were, the lines below it are further down by the difference,
+        // and the view, which the card is inside, did not move.
+        harness.rebuild();
+        harness.paint();
+        let rows = laid_out_rows(&harness, "t1");
+        assert!(rows > estimate, "the chrome is more than two rows: {rows} rows for {}px", card_rect(&harness, "t1").height());
+        let grew = rows - estimate;
+        let after = live.doc.get();
+        assert_eq!(state.card_rows.get().get(&card), Some(&rows), "the layout's answer is kept");
+        assert_eq!(after.len(), 120 + rows);
+        assert_eq!(after.card_span(&card), Some(9..9 + rows));
+        assert_eq!(after.rows[..9], before.rows[..9], "the lines above the card are where they were");
+        assert_eq!(after.row_of_display(9), Some(9 + estimate + grew), "the line under the card is {grew} rows further down");
+        assert_eq!(after.row_of_display(119), Some(119 + estimate + grew));
+        assert_eq!(laid_out_text(&live), after.text);
+        assert_eq!(viewport.get().y0, 0.0, "the card is in view, so the view did not move");
+        let rect = card_rect(&harness, "t1");
+        assert_eq!(rect.y0, 9.0 * line_height + crate::theme::CARD_INSET, "the card is where it was");
+
+        // Every scroll lays the card out again at the same height, and
+        // it says nothing new: the document is the one it was.
+        let (left, top) = pane_origin();
+        harness.scroll_down(left + 300.0, top + 300.0, 3.0 * line_height);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(viewport.get().y0, 3.0 * line_height, "the editor scrolled");
+        assert!(Arc::ptr_eq(&live.doc.get(), &after), "the document was not built again");
+        assert_eq!(state.card_rows.get().get(&card), Some(&rows));
+    }
+
+    #[test]
+    fn a_card_above_the_viewport_growing_keeps_the_same_first_visible_line() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        let card = CardId::Thread("t1".into());
+
+        // The question arrives and is laid out; then the editor is
+        // scrolled well past its card.
+        state.set_comment_threads(Arc::new(vec![thread_with("t1", 5, 7, &["why?"])]));
+        harness.rebuild();
+        harness.paint();
+        let rows = live.doc.get().card_span(&card).expect("the card has rows").len();
+        assert_eq!(rows, laid_out_rows(&harness, "t1"));
+        let (left, top) = pane_origin();
+        harness.scroll_down(left + 300.0, top + 300.0, 40.0 * line_height);
+        harness.rebuild();
+        harness.paint();
+        let before = viewport.get().y0;
+        let first_row = (before / line_height).floor() as usize;
+        assert!(first_row > 9 + rows, "the editor did not scroll past the card: row {first_row} is first in view");
+        let first_line = live.doc.get().display_line(first_row).expect("a line is first in view");
+
+        // The answer lands: the card is built again for the thread's two
+        // messages and is a line and a gap taller, which is more than a
+        // row. The rows it gains are above the view, so the scroll moves
+        // by them and the same line is first in view.
+        state.set_comment_threads(Arc::new(vec![thread_with("t1", 5, 7, &["why?", "because"])]));
+        harness.rebuild();
+        harness.paint();
+        let grown = laid_out_rows(&harness, "t1");
+        assert!(grown > rows, "the answer did not grow the card: {rows} rows to {grown}");
+        let grew = grown - rows;
+        let doc = live.doc.get();
+        assert_eq!(doc.card_span(&card), Some(9..9 + grown));
+        assert_eq!(doc.len(), 120 + grown);
+        assert_eq!(viewport.get().y0, before + grew as f64 * line_height, "the scroll moved by the rows added above it");
+        assert_eq!(doc.display_line(first_row + grew), Some(first_line), "the same line is first in view");
+        assert_eq!(laid_out_text(&live), doc.text);
+    }
+
+    #[test]
+    fn a_card_is_never_taller_than_the_cap_and_the_estimate_agrees_with_it_there() {
+        use crate::review::doc::{CARD_MAX_ROWS, CardId};
+        let (mut harness, state) = harness();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let card = CardId::Thread("t1".into());
+
+        // A hundred-line answer is far more than forty rows of card, so
+        // the estimate is the cap, and so is the card: its messages
+        // scroll inside it, and its box stops where the rows do.
+        let answer = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let thread = thread_with("t1", 5, 7, &["why?", &answer]);
+        assert_eq!(crate::review::doc::estimate_rows(&thread, false), CARD_MAX_ROWS);
+        state.set_comment_threads(Arc::new(vec![thread]));
+        harness.rebuild();
+        harness.paint();
+        let rect = card_rect(&harness, "t1");
+        assert_eq!(rect.height(), CARD_MAX_ROWS as f64 * line_height - 2.0 * crate::theme::CARD_INSET);
+        assert_eq!(laid_out_rows(&harness, "t1"), CARD_MAX_ROWS);
+        let doc = live.doc.get();
+        assert_eq!(doc.card_span(&card), Some(9..9 + CARD_MAX_ROWS));
+        assert_eq!(doc.len(), 120 + CARD_MAX_ROWS);
+        assert!(!state.card_rows.get().contains_key(&card), "the estimate was right, so nothing was written");
+        assert_eq!(laid_out_text(&live), doc.text);
+    }
+
+    #[test]
+    fn a_follow_up_composer_grows_the_card_and_closing_it_gives_the_rows_back() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        let live = stacked(state);
+        let card = CardId::Thread("t1".into());
+        let thread = thread_with("t1", 5, 7, &["why?", "because"]);
+        state.set_comment_threads(Arc::new(vec![thread.clone()]));
+        harness.rebuild();
+        harness.paint();
+        let doc = live.doc.get();
+        let rows = doc.card_span(&card).expect("the card has rows").len();
+        assert_eq!(rows, laid_out_rows(&harness, "t1"));
+        let len = doc.len();
+
+        // Follow up: the composer's box takes the follow-up line's place
+        // inside the card, which grows around it, and the document with
+        // it. The box is never focused here; see `composer_autofocus`.
+        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        state.open_composer(Some("t1".into()), thread.anchor.clone(), String::new(), choice);
+        harness.rebuild();
+        harness.paint();
+        let grown = laid_out_rows(&harness, "t1");
+        assert!(grown > rows, "the box is taller than the line it replaced: {rows} rows to {grown}");
+        let doc = live.doc.get();
+        assert_eq!(doc.card_span(&card), Some(9..9 + grown));
+        assert_eq!(doc.len(), len + (grown - rows));
+        assert_eq!(laid_out_text(&live), doc.text);
+
+        // Put away, the line is back, and the rows with it: the document
+        // is as long as it was.
+        state.close_composer();
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(laid_out_rows(&harness, "t1"), rows);
+        let doc = live.doc.get();
+        assert_eq!(doc.card_span(&card), Some(9..9 + rows));
+        assert_eq!(doc.len(), len);
+        assert_eq!(laid_out_text(&live), doc.text);
+        assert_eq!(state.card_rows.get().get(&card), Some(&rows));
+    }
 }
+
 

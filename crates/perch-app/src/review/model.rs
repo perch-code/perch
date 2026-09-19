@@ -844,6 +844,19 @@ impl ReviewState {
         self.collapsed_cards.with(|c| c.contains(card))
     }
 
+    /// A card has been laid out, and its height takes `rows`: what the
+    /// document built from the cards gives it from here on, in place of
+    /// the estimate. Nothing is written when that is what it already
+    /// says, since the write rebuilds the open file's document.
+    pub fn set_card_rows(&self, card: &CardId, rows: usize) {
+        if self.card_rows.with_untracked(|r| r.get(card) == Some(&rows)) {
+            return;
+        }
+        self.card_rows.update(|r| {
+            r.insert(card.clone(), rows);
+        });
+    }
+
     /// The chevron was clicked: a collapsed card opens, an open one
     /// collapses.
     pub fn toggle_card(&self, card: &CardId) {
@@ -1434,6 +1447,34 @@ mod tests {
         assert_eq!(state.cards_in("src/x.rs")[1].rows, 1);
         state.toggle_card(&CardId::Thread("later".into()));
         assert_eq!(state.cards_in("src/x.rs")[1].rows, estimate);
+    }
+
+    #[test]
+    fn a_cards_laid_out_rows_are_written_when_they_change_and_not_otherwise() {
+        use floem::reactive::{Effect, SignalTrack};
+        let state = ReviewState::new();
+        let card = CardId::Thread("t1".into());
+        // Every write rebuilds the open file's document, so the writes
+        // are counted through what a write runs.
+        let writes = RwSignal::new(0);
+        Effect::new(move |_| {
+            state.card_rows.track();
+            writes.update(|w| *w += 1);
+        });
+        assert_eq!(writes.get(), 1, "the effect's first run");
+
+        state.set_card_rows(&card, 8);
+        assert_eq!(state.card_rows.get().get(&card), Some(&8));
+        assert_eq!(writes.get(), 2);
+        state.set_card_rows(&card, 8);
+        assert_eq!(writes.get(), 2, "the same rows again is no write");
+        state.set_card_rows(&card, 5);
+        assert_eq!(state.card_rows.get().get(&card), Some(&5));
+        assert_eq!(writes.get(), 3);
+        // Another card's rows are its own.
+        state.set_card_rows(&CardId::Thread("t2".into()), 5);
+        assert_eq!(writes.get(), 4);
+        assert_eq!(state.card_rows.get().len(), 2);
     }
 
     #[test]
