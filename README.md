@@ -37,43 +37,27 @@ GitHub.
   date. Under Repository a row's second line is `#57 · branch`, since the
   heading says the repository. Under Owner and Date, and in Priority and
   Pinned, it is `slatedb/slatedb #57 · branch`.
+- Attention comes from your notifications, polled on GitHub's own
+  `X-Poll-Interval`. One about an item that asks for you, a review
+  request, a mention, an assignment or a comment, becomes the item's
+  attention, and a CI notification about the open pull request fetches
+  its checks again and is attention when they fail. One that only says
+  the item moved does nothing; the row's date already shows that. One
+  about anything that has no row is dropped.
 - Each row has Save and Done on hover and a menu: Open in GitHub, Finder or
   Terminal, Pin, Mark unread, Rename, Fork or Start work, Archive, Delete.
   Every entry is on every row; the ones that cannot apply are greyed. The
-  filter button narrows the list by status, kind, grouping and sort, and
-  the search box matches titles, numbers, branches and repository names.
-
-**The inbox**
-
-- Behind the bell, with a count: the notifications that are not about any
-  item. A notification about an item is handled there instead: one that
-  asks for you, a review request, a mention, an assignment or a comment,
-  becomes the item's attention, and a CI notification about the open
-  pull request fetches its checks again and is attention when they fail.
-  One that only says the item moved does nothing; the row's date already
-  shows that.
-- Lists your notification inbox, grouped by repository or date.
-- Sidebar filters: Assigned, Participating, Mentioned, Team mentioned,
-  Review requested, plus a per-repository filter with counts.
-- All / Unread toggle, substring search over title and repository.
-- Sort newest or oldest first.
-- Issue and pull request state icons: open, closed, not planned, draft,
-  merged, and closed.
-- Caches the inbox in SQLite so a cold start paints before the network
-  answers, and works offline against the last known state.
-- Polls on GitHub's own `X-Poll-Interval`, with conditional requests so an
-  unchanged inbox costs one cheap 304.
-
-**Saved and Done**
-
-- Bookmark a notification into Saved, or dismiss it into Done, from the row,
-  from the keyboard, or from the header of a pull request you have finished
-  reading.
-- Check rows and act on them together, or dismiss a whole repository from its
-  group header.
-- A dismissed thread comes back to the inbox when somebody comments on it,
-  the way it does on the web. A bookmark does not expire.
-- Both flags are Perch's own and stay on this machine. See below.
+  filter button narrows the list by status, kind, saved, needs attention
+  and reason, and sets the grouping, the sort and its direction, newest or
+  oldest first; the search box matches titles, numbers, branches and
+  repository names.
+- Save and Done are marks on the item, set from the row, from the keyboard,
+  or from the header of the open item. Done takes the item out of Priority,
+  and the next notification that asks for you brings it back, the way a
+  done thread comes back on the web; Save does not expire. Status set to
+  Done lists what is done, and Saved only narrows every section, Priority
+  and Pinned included, to what is saved. Both marks are Perch's own and
+  stay on this machine. See below.
 
 **The item view**
 
@@ -218,25 +202,31 @@ Files, shaped like a pull request's page on GitHub.
 Nothing in Perch writes to GitHub. There is no mark as read and no
 unsubscribe.
 
-Saved and Done do not sync, in either direction. Dismissing a thread in Perch
-leaves it in your inbox on github.com, and dismissing one on github.com does
-not dismiss it here. This is not an oversight. The REST API can mark a thread
-done, but nothing lists done threads back, and Saved has no endpoint at all,
-so a Done view built on the API could only ever show what this copy of Perch
-put there. It shows exactly that, and says so, rather than pretending to be
-the same inbox you see in a browser.
+There is no inbox, because every open pull request and issue in a declared
+repository is already a row and a notification is a reason on one of them;
+what a list of notifications would add is subscribed activity in
+repositories you did not declare, CI on default branches, discussions,
+releases and security alerts, and none of that is what Perch is for.
+
+Saved and Done do not sync, in either direction. Marking an item done in
+Perch leaves its notification where it is on github.com, and marking the
+thread done there does not mark the item done here. This is not an
+oversight. The REST API can mark a thread done, but nothing lists done
+threads back, and Saved has no endpoint at all, so a Done status built on
+the API could only ever show what this copy of Perch put there. It shows
+exactly that, and says so, rather than pretending to be the same list you
+see in a browser.
 
 ## Keys
 
 | Key | What it does |
 |---|---|
-| `e` | Mark done, or restore, the row under the pointer, in the sidebar or the inbox. |
+| `e` | Mark done, or restore, the row under the pointer, or else the open item. |
 | `s` | Save or unsave, the same way. |
-| `Escape` | Drop the selection, or put away a rename or a confirmation. |
+| `Escape` | Put away a rename or a confirmation. |
 | `Cmd-\` | Show or hide the sidebar. |
-| `Cmd-[` | Back from an item to wherever it was opened from. |
+| `Cmd-[` | Back from an item to the sidebar. |
 | `Cmd-1` | The sidebar's search box. |
-| `Cmd-2` | The inbox. |
 | `Cmd-Shift-1` `Cmd-Shift-2` | Conversation, Files. |
 | `Cmd-W` | Close the open file. |
 | `P` `U` `R` `F` `A` `D` | Inside an open row menu: Pin, Mark unread, Rename, Fork, Archive, Delete. |
@@ -305,7 +295,7 @@ Everything Perch keeps is under one directory, `$PERCH_HOME` if set, else
 ```
 ~/.perch/
   config.toml        repositories, token, agent, knowledge settings
-  perch.db           items, threads, marks, the inbox cache, where the backfill is
+  perch.db           items, threads, marks, where the backfill is
   avatars/
   repos/             one bare clone per repository
   worktrees/         one checkout per branch Perch made, <owner>__<repo>__<branch>
@@ -417,7 +407,9 @@ cannot be read, the one model Codex itself is set to run is offered.
 from a terminal and prints the prompt, every event, and the answer. Leave
 the path out to ask about the pull request as a whole, or name an issue
 to ask about it from the home checkout. `perch --items` prints the sidebar
-as text, and `perch --scan` what the root scan finds.
+as text, under the filter menu's settings when given them as
+`"status=done;reason=mention;direction=oldest"`, and `perch --scan` what
+the root scan finds.
 
 ## Knowledge
 
