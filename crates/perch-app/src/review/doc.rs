@@ -16,6 +16,7 @@
 use std::collections::BTreeSet;
 
 use perch_git::{DisplayBuffer, LineStatus, Row};
+use perch_github::CommentThread;
 
 use crate::review::hover;
 
@@ -31,6 +32,29 @@ pub const REVEAL_STEP: usize = 20;
 /// since two clicks would do it anyway.
 pub const REVEAL_ALL_AT: usize = 40;
 
+/// The most rows a card takes. A thread longer than that scrolls inside
+/// its card, so a long conversation cannot push the code off the screen;
+/// the column is there for reading one at length.
+pub const CARD_MAX_ROWS: usize = 40;
+
+/// A collapsed card is one row: the first author, the first line, and how
+/// many messages follow.
+pub const COLLAPSED_ROWS: usize = 1;
+
+/// The column a message body is taken to wrap at for the estimate. The
+/// card is wider or narrower than this, and the estimate only has to be
+/// near enough that the first paint is not a jump.
+const ESTIMATE_COLUMNS: usize = 80;
+
+/// The rows a message takes besides its lines: the byline above and the
+/// gap below.
+const ROWS_PER_MESSAGE: usize = 2;
+
+/// The rows a card takes besides its messages: the first row, with the
+/// chevron and the menu where the anchor's label is in the column, and
+/// the follow-up line.
+const CARD_CHROME_ROWS: usize = 2;
+
 /// How a line is painted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tint {
@@ -42,14 +66,33 @@ pub enum Tint {
 
 /// Which thread a card is for.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(not(test), expect(dead_code, reason = "the cards are drawn from step 5 of milestone 11"))]
 pub enum CardId {
     /// The reader's own, by thread id.
     Thread(String),
     /// One of GitHub's review comment threads, by its first comment's id.
     GitHub(u64),
     /// The one being written.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the composer is a card from step 7 of milestone 11"))]
     Composer,
+}
+
+/// How many rows a thread's card is given before it has been laid out:
+/// one per line of every message body, wrapped at eighty columns, plus
+/// the byline and the gap for each message, the first row and the
+/// follow-up line, and never more than `CARD_MAX_ROWS`. Collapsed, it is
+/// one row whatever the thread holds. The estimate can be wrong by a few
+/// rows; it only has to be near enough that the first paint is not a
+/// jump, and the card's laid-out height corrects it.
+pub fn estimate_rows(thread: &CommentThread, collapsed: bool) -> usize {
+    if collapsed {
+        return COLLAPSED_ROWS;
+    }
+    let lines: usize = thread
+        .messages
+        .iter()
+        .map(|m| m.body.lines().map(|l| l.chars().count().div_ceil(ESTIMATE_COLUMNS).max(1)).sum::<usize>() + ROWS_PER_MESSAGE)
+        .sum();
+    (lines + CARD_CHROME_ROWS).min(CARD_MAX_ROWS)
 }
 
 /// A card's place in the document: the display line it sits under, and how
@@ -103,6 +146,10 @@ pub struct Doc {
     /// The row each head line is on, by head line; `None` inside a fold,
     /// and for every line of a base side, which has no head lines.
     head_rows: Vec<Option<usize>>,
+    /// Each card the document has rows for, with the row its first
+    /// spacer is on, in the order they appear. Built once, so the layer
+    /// that draws the cards is not scanning the rows every frame.
+    cards: Vec<(CardId, usize)>,
 }
 
 impl Doc {
@@ -112,6 +159,28 @@ impl Doc {
 
     pub fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    /// The cards the document has rows for, each with the row its first
+    /// spacer is on, in order down the document.
+    pub fn cards(&self) -> &[(CardId, usize)] {
+        &self.cards
+    }
+
+    /// The row a card's first spacer is on, if the document has rows for
+    /// it. A card under a folded line has none.
+    pub fn first_spacer_row(&self, card: &CardId) -> Option<usize> {
+        self.cards.iter().find(|(c, _)| c == card).map(|(_, row)| *row)
+    }
+
+    /// The rows a card has, from its first spacer to past its last.
+    pub fn card_span(&self, card: &CardId) -> Option<std::ops::Range<usize>> {
+        let first = self.first_spacer_row(card)?;
+        let count = self.rows[first..]
+            .iter()
+            .take_while(|r| matches!(r, DocRow::Spacer { card: c, .. } if c == card))
+            .count();
+        Some(first..first + count)
     }
 
     /// The text of one row, without its newline.
@@ -259,6 +328,15 @@ impl Builder {
                 head_rows[*head] = Some(row);
             }
         }
+        let cards = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row, entry)| match entry {
+                DocRow::Spacer { card, row: 0 } => Some((card.clone(), row)),
+                _ => None,
+            })
+            .collect();
         Doc {
             text: self.text,
             rows: self.rows,
@@ -267,6 +345,7 @@ impl Builder {
             starts: self.starts,
             display_rows,
             head_rows,
+            cards,
         }
     }
 }
@@ -932,6 +1011,97 @@ mod tests {
         assert_eq!(doc.rows[6], line(3, Tint::Plain));
         assert_eq!(doc.row_of_display(3), Some(6));
         assert_eq!(doc.nearest_display_line(4), Some(3));
+        assert_eq!(doc.cards(), &[(card.id.clone(), 3)]);
+        assert_eq!(doc.first_spacer_row(&card.id), Some(3));
+        assert_eq!(doc.card_span(&card.id), Some(3..6));
+        assert_eq!(doc.first_spacer_row(&CardId::Thread("t2".into())), None);
+        assert_eq!(doc.card_span(&CardId::Thread("t2".into())), None);
+    }
+
+    #[test]
+    fn two_cards_under_one_line_stack_in_the_order_they_were_given() {
+        let b = two_changes(4);
+        let first = Card { id: CardId::Thread("t1".into()), after_display_line: 2, rows: 2 };
+        let second = Card { id: CardId::Thread("t2".into()), after_display_line: 2, rows: 1 };
+        let doc = build(&b, &[], &[first.clone(), second.clone()]);
+        assert_eq!(doc.len(), b.len() + 3);
+        assert_eq!(doc.rows[2], line(2, Tint::Plain));
+        assert_eq!(doc.rows[3], DocRow::Spacer { card: first.id.clone(), row: 0 });
+        assert_eq!(doc.rows[4], DocRow::Spacer { card: first.id.clone(), row: 1 });
+        assert_eq!(doc.rows[5], DocRow::Spacer { card: second.id.clone(), row: 0 });
+        assert_eq!(doc.rows[6], line(3, Tint::Plain));
+        assert_eq!(doc.cards(), &[(first.id.clone(), 3), (second.id.clone(), 5)]);
+        // Given the other way round, they stack the other way round.
+        let doc = build(&b, &[], &[second.clone(), first.clone()]);
+        assert_eq!(doc.cards(), &[(second.id, 3), (first.id, 4)]);
+        // A card under a folded line is not placed, and is not a card of
+        // the document.
+        let folded = Card { id: CardId::Thread("t3".into()), after_display_line: 7, rows: 2 };
+        let doc = build(&two_changes(20), &[Run::new(5, 10, 4)], std::slice::from_ref(&folded));
+        assert!(doc.cards().is_empty());
+        assert_eq!(doc.first_spacer_row(&folded.id), None);
+    }
+
+    // The estimate.
+
+    /// A thread of the given message bodies, with nothing else about it
+    /// mattering to the estimate.
+    fn thread_of(bodies: &[&str]) -> CommentThread {
+        use perch_github::{Author, CommentMessage, ThreadOrigin};
+        let at = "2026-09-18T09:59:00Z".parse().unwrap();
+        CommentThread {
+            id: "t1".into(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::Local,
+            anchor: None,
+            outdated: false,
+            resolved: false,
+            created_at: at,
+            messages: bodies
+                .iter()
+                .enumerate()
+                .map(|(i, body)| CommentMessage {
+                    id: format!("m{i}"),
+                    thread_id: "t1".into(),
+                    origin: ThreadOrigin::Local,
+                    author: if i % 2 == 0 { Author::User } else { Author::Agent { backend: "claude-code".into(), model: "sonnet".into() } },
+                    body: body.to_string(),
+                    created_at: at,
+                    run: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_short_thread_is_its_lines_plus_the_chrome() {
+        // One line, its byline and gap, the first row and the follow-up.
+        assert_eq!(estimate_rows(&thread_of(&["why?"]), false), 1 + 2 + 2);
+        // A question and a three-line answer with a blank line in it:
+        // every line counts, blank ones too, since they are gaps.
+        assert_eq!(estimate_rows(&thread_of(&["why?", "because\n\nof this"]), false), (1 + 2) + (3 + 2) + 2);
+        // A line wraps at eighty columns: 200 characters are three rows.
+        let long_line = "x".repeat(200);
+        assert_eq!(estimate_rows(&thread_of(&[&long_line]), false), 3 + 2 + 2);
+        assert_eq!(estimate_rows(&thread_of(&[&"y".repeat(80)]), false), 1 + 2 + 2, "eighty fit on one");
+        // A thread with no messages yet is the chrome alone.
+        assert_eq!(estimate_rows(&thread_of(&[]), false), CARD_CHROME_ROWS);
+    }
+
+    #[test]
+    fn a_long_thread_is_capped_at_forty_rows() {
+        let hundred_lines = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        assert_eq!(estimate_rows(&thread_of(&["why?", &hundred_lines]), false), CARD_MAX_ROWS);
+        let thirty = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        assert_eq!(estimate_rows(&thread_of(&["why?", &thirty]), false), (1 + 2) + (30 + 2) + 2, "under the cap it is what it is");
+    }
+
+    #[test]
+    fn a_collapsed_thread_is_one_row_whatever_it_holds() {
+        let hundred_lines = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        assert_eq!(estimate_rows(&thread_of(&["why?", &hundred_lines]), true), COLLAPSED_ROWS);
+        assert_eq!(estimate_rows(&thread_of(&["why?"]), true), 1);
+        assert_eq!(estimate_rows(&thread_of(&[]), true), 1);
     }
 
     #[test]

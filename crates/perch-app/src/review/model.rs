@@ -1,16 +1,16 @@
 //! What the review view holds about a pull request and its files.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::editor::text::Document;
-use perch_git::{ChangeStatus, ChangedFile, Commit, Dirt, DisplayBuffer, Scope, TreeEntry};
+use perch_git::{ChangeStatus, ChangedFile, Commit, Dirt, DisplayBuffer, LineStatus, Row, Scope, TreeEntry};
 use perch_github::{Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest};
 use perch_syntax::{Language, LineSpans};
 
-use crate::review::doc::{Doc, Reveals};
+use crate::review::doc::{self, Card, CardId, Doc, Reveals};
 
 /// A file prepared for the editor: text to render, and everything needed to
 /// colour it and map a rendered line back to a real one.
@@ -213,7 +213,7 @@ pub struct LiveDocs {
 pub enum LiveLayout {
     Stacked(LiveDoc),
     Split {
-        #[cfg_attr(not(test), expect(dead_code, reason = "the cards span both sides from step 5 of milestone 11"))]
+        #[cfg_attr(not(test), expect(dead_code, reason = "the view edits the base side through its own handle; only the tests read it here"))]
         left: LiveDoc,
         right: LiveDoc,
     },
@@ -366,14 +366,31 @@ pub struct ReviewState {
     pub composer_opened: RwSignal<u64>,
     /// The editor's selection as display lines, first and last inclusive.
     pub selection: RwSignal<Option<(usize, usize)>>,
-    /// A gutter marker was clicked: the thread to scroll the column to.
-    pub focus_thread: RwSignal<Option<String>>,
+    /// A gutter marker was clicked: the card to scroll the editor to and
+    /// flash, and the column's card for the same thread flashes too. Left
+    /// as it was set rather than taken by whichever card sees it first,
+    /// since more than one does; a write always runs the effects that
+    /// read it, so a second click on the same marker is a second flash,
+    /// and a card built after the click ignores what it finds here.
+    pub focus_card: RwSignal<Option<CardId>>,
     /// A thread whose Delete is waiting for a yes, under its byline.
     pub confirm_thread: RwSignal<Option<String>>,
     /// How wide the thread column is. Dragged.
     pub threads_width: RwSignal<f64>,
     /// Runs whose step list the reader opened.
     pub expanded_runs: RwSignal<std::collections::HashSet<String>>,
+    /// The rows each card has now: the estimate until the card has been
+    /// laid out, and what the layout said after. Empty for a card whose
+    /// rows are the estimate.
+    pub card_rows: RwSignal<HashMap<CardId, usize>>,
+    /// The cards drawn as one row. Kept for the app's life and not per
+    /// item, as `expanded_runs` is: a card's ids are unique across items.
+    pub collapsed_cards: RwSignal<HashSet<CardId>>,
+    /// Every card that has arrived since launch. A thread's card starts
+    /// collapsed when the thread is outdated, and that default is applied
+    /// once, when the thread first arrives; after that the reader's own
+    /// choice stands, through closing the item and opening it again.
+    pub known_cards: RwSignal<HashSet<CardId>>,
     /// The backend, model and effort last sent, which the next composer
     /// starts on.
     pub agent_last: RwSignal<Option<AgentChoice>>,
@@ -464,10 +481,13 @@ impl ReviewState {
             composer: RwSignal::new(None),
             composer_opened: RwSignal::new(0),
             selection: RwSignal::new(None),
-            focus_thread: RwSignal::new(None),
+            focus_card: RwSignal::new(None),
             confirm_thread: RwSignal::new(None),
             threads_width: RwSignal::new(crate::theme::THREADS_WIDTH),
             expanded_runs: RwSignal::new(std::collections::HashSet::new()),
+            card_rows: RwSignal::new(HashMap::new()),
+            collapsed_cards: RwSignal::new(HashSet::new()),
+            known_cards: RwSignal::new(HashSet::new()),
             agent_last: RwSignal::new(None),
             hovered_line: RwSignal::new(None),
             composer_focused: RwSignal::new(false),
@@ -552,8 +572,11 @@ impl ReviewState {
         self.comment_threads.set(Arc::new(Vec::new()));
         self.composer.set(None);
         self.selection.set(None);
-        self.focus_thread.set(None);
+        self.focus_card.set(None);
         self.confirm_thread.set(None);
+        // The rows are the next item's cards' to fill; whether a card is
+        // open is the reader's and stays, as `collapsed_cards` says.
+        self.card_rows.set(HashMap::new());
         self.hovered_line.set(None);
         self.composer_focused.set(false);
         self.composer_draft.set(String::new());
@@ -802,6 +825,59 @@ impl ReviewState {
         self.comment_threads.with(|threads| self.discussion.with(|d| anchors_of(threads, d.as_deref(), path)))
     }
 
+    /// The cards of a file: the reader's threads anchored in it, each with
+    /// the rows it has now. Tracked on the threads, the rows and which
+    /// cards are collapsed, so a document built from them follows all
+    /// three; the file itself is read as it is, since a file's content
+    /// is fixed for the editor built over it.
+    pub fn cards_in(&self, path: &str) -> Vec<Card> {
+        let Some(file) = self.files.with_untracked(|m| m.get(path).cloned()) else {
+            return Vec::new();
+        };
+        self.comment_threads.with(|threads| {
+            self.collapsed_cards.with(|collapsed| self.card_rows.with(|rows| cards_of(threads, &file, collapsed, rows)))
+        })
+    }
+
+    /// Whether a card is drawn as one row.
+    pub fn is_collapsed(&self, card: &CardId) -> bool {
+        self.collapsed_cards.with(|c| c.contains(card))
+    }
+
+    /// The chevron was clicked: a collapsed card opens, an open one
+    /// collapses.
+    pub fn toggle_card(&self, card: &CardId) {
+        self.collapsed_cards.update(|c| {
+            if !c.remove(card) {
+                c.insert(card.clone());
+            }
+        });
+    }
+
+    /// The worktree's threads, as the backend sent them. A thread arriving
+    /// for the first time since launch starts its card collapsed when it
+    /// is outdated, and open otherwise; one seen before keeps whatever the
+    /// reader left it as. The cards are settled before the threads are
+    /// written, so the document built from the threads is built once.
+    pub fn set_comment_threads(&self, threads: Arc<Vec<CommentThread>>) {
+        let new: Vec<(CardId, bool)> = self.known_cards.with_untracked(|known| {
+            threads
+                .iter()
+                .filter(|t| t.anchor.is_some())
+                .map(|t| (CardId::Thread(t.id.clone()), t.outdated))
+                .filter(|(id, _)| !known.contains(id))
+                .collect()
+        });
+        if !new.is_empty() {
+            let collapsed: Vec<CardId> = new.iter().filter(|(_, outdated)| *outdated).map(|(id, _)| id.clone()).collect();
+            if !collapsed.is_empty() {
+                self.collapsed_cards.update(|c| c.extend(collapsed));
+            }
+            self.known_cards.update(|k| k.extend(new.into_iter().map(|(id, _)| id)));
+        }
+        self.comment_threads.set(threads);
+    }
+
     /// The reveals for a file's content, tracked, so a document built from
     /// them is rebuilt when they change.
     pub fn reveals_for(&self, path: &str, blob: &str) -> Reveals {
@@ -1032,6 +1108,56 @@ pub fn github_threads_of(discussion: Option<&Discussion>, path: &str) -> Vec<cra
         .collect()
 }
 
+/// The reader's threads anchored in a file as cards, oldest first, so two
+/// under one line stack in the order they were asked. A card sits under
+/// the last line of its anchor, after any ghost spliced under that line,
+/// and takes the rows in `rows` when the card has been laid out, else the
+/// estimate, and one row when collapsed. A thread whose last line the
+/// file does not have, because its anchor has gone stale past the end,
+/// has nowhere to sit and gets no card.
+pub fn cards_of(
+    threads: &[CommentThread],
+    file: &LoadedFile,
+    collapsed: &HashSet<CardId>,
+    rows: &HashMap<CardId, usize>,
+) -> Vec<Card> {
+    let mut anchored: Vec<&CommentThread> = threads
+        .iter()
+        .filter(|t| t.anchor.as_ref().is_some_and(|a| a.path == file.path))
+        .collect();
+    anchored.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+    anchored
+        .into_iter()
+        .filter_map(|t| {
+            let anchor = t.anchor.as_ref()?;
+            let last = anchor.start_line.max(anchor.line).saturating_sub(1) as usize;
+            let after_display_line = display_line_with_ghosts(&file.buffer, last)?;
+            let id = CardId::Thread(t.id.clone());
+            let is_collapsed = collapsed.contains(&id);
+            let rows = match rows.get(&id) {
+                Some(&rows) if !is_collapsed => rows,
+                _ => doc::estimate_rows(t, is_collapsed),
+            };
+            Some(Card { id, after_display_line, rows })
+        })
+        .collect()
+}
+
+/// The display line a card under a head line goes after: the line's own,
+/// or the last of the ghosts spliced under it. The buffer splices a run
+/// of removed lines above the head line that follows them, so the run
+/// after a line is under it when that next line is unchanged, or there
+/// is none: lines removed and nothing put in their place. When the next
+/// line is changed, the run is its rewrite's old side, which the split
+/// pairs with it, and the card goes before the run on both layouts.
+fn display_line_with_ghosts(buffer: &DisplayBuffer, head_line: usize) -> Option<usize> {
+    let display = buffer.display_line(head_line)?;
+    let ghosts = (display + 1..).take_while(|&d| matches!(buffer.row(d), Some(Row::Deleted { .. }))).count();
+    let next = buffer.row(display + 1 + ghosts);
+    let under = next.is_none_or(|r| r.status() == Some(LineStatus::Unchanged));
+    Some(if under { display + ghosts } else { display })
+}
+
 /// The head lines threads are anchored on in a file, as inclusive
 /// zero-based ranges, which the folds keep in view: the reader's own from
 /// their first line to their last, outdated or not, and GitHub's review
@@ -1206,6 +1332,139 @@ mod tests {
         state.comment_threads.set(Arc::new(threads));
         state.discussion.set(Some(Arc::new(discussion)));
         assert_eq!(state.anchors_in("src/y.rs"), vec![(0, 2), (8, 8)]);
+    }
+
+    /// A thread of the reader's own anchored on head lines `start` to
+    /// `line` of `src/x.rs`, one-based, asked at `at`.
+    fn anchored(id: &str, start: u32, line: u32, at: &str, outdated: bool) -> CommentThread {
+        use perch_github::{Author, CommentMessage, Side, ThreadOrigin};
+        let at = at.parse().unwrap();
+        CommentThread {
+            id: id.into(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::Local,
+            anchor: Some(Anchor { path: "src/x.rs".into(), start_line: start, line, side: Side::Right, commit_sha: "h".into() }),
+            outdated,
+            resolved: false,
+            created_at: at,
+            messages: vec![CommentMessage {
+                id: format!("{id}-m1"),
+                thread_id: id.into(),
+                origin: ThreadOrigin::Local,
+                author: Author::User,
+                body: "why?".into(),
+                created_at: at,
+                run: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_files_cards_sit_under_their_anchors_last_line_past_its_ghosts_oldest_first() {
+        // base a b c d e f g; head a B c e F g: b and f rewritten, d
+        // removed. Display: a, ghost(b), B, c, ghost(d), e, ghost(f), F, g.
+        let file = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "a\nB\nc\ne\nF\ng\n".into(),
+            "a\nb\nc\nd\ne\nf\ng\n".into(),
+            Some(ChangeStatus::Modified),
+            false,
+            Scope::Branch,
+            String::new(),
+        );
+        let threads = vec![
+            // Asked later, on c, whose ghost of d is spliced under it:
+            // nothing took d's place, so the card goes after the ghost.
+            anchored("later", 3, 3, "2026-09-18T10:00:00Z", false),
+            // Asked first, over a to B; B's ghost is above it, not under.
+            anchored("first", 1, 2, "2026-09-18T09:00:00Z", false),
+            // Asked last, on e: the ghost after it is F's old side, which
+            // the split pairs with F, so the card goes before it.
+            anchored("last", 4, 4, "2026-09-18T11:00:00Z", false),
+            // Past the end of the file: nowhere to sit.
+            anchored("gone", 9, 9, "2026-09-18T09:30:00Z", true),
+        ];
+        let mut elsewhere = anchored("elsewhere", 1, 1, "2026-09-18T08:00:00Z", false);
+        elsewhere.anchor.as_mut().unwrap().path = "src/y.rs".into();
+        let mut worktree = anchored("worktree", 1, 1, "2026-09-18T08:00:00Z", false);
+        worktree.anchor = None;
+        let threads = [threads, vec![elsewhere, worktree]].concat();
+
+        let cards = cards_of(&threads, &file, &HashSet::new(), &HashMap::new());
+        let estimate = doc::estimate_rows(&threads[0], false);
+        assert_eq!(
+            cards,
+            vec![
+                Card { id: CardId::Thread("first".into()), after_display_line: 2, rows: estimate },
+                Card { id: CardId::Thread("later".into()), after_display_line: 4, rows: estimate },
+                Card { id: CardId::Thread("last".into()), after_display_line: 5, rows: estimate },
+            ]
+        );
+        // A run removed from the end of the file is under the last line.
+        let cut = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "a\n".into(),
+            "a\nb\nc\n".into(),
+            Some(ChangeStatus::Modified),
+            false,
+            Scope::Branch,
+            String::new(),
+        );
+        let on_a = [anchored("end", 1, 1, "2026-09-18T10:00:00Z", false)];
+        assert_eq!(cards_of(&on_a, &cut, &HashSet::new(), &HashMap::new())[0].after_display_line, 2);
+
+        // Collapsed, a card is one row; laid out, it has the rows the
+        // layout gave it, unless it is collapsed.
+        let collapsed: HashSet<CardId> = [CardId::Thread("first".into())].into_iter().collect();
+        let rows: HashMap<CardId, usize> =
+            [(CardId::Thread("first".into()), 9), (CardId::Thread("later".into()), 7)].into_iter().collect();
+        let cards = cards_of(&threads, &file, &collapsed, &rows);
+        assert_eq!(cards[0].rows, doc::COLLAPSED_ROWS);
+        assert_eq!(cards[1].rows, 7);
+
+        let state = ReviewState::new();
+        assert!(state.cards_in("src/x.rs").is_empty(), "no file, no cards");
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(file));
+        });
+        state.comment_threads.set(Arc::new(threads));
+        assert_eq!(state.cards_in("src/x.rs").len(), 3);
+        state.toggle_card(&CardId::Thread("later".into()));
+        assert!(state.is_collapsed(&CardId::Thread("later".into())));
+        assert_eq!(state.cards_in("src/x.rs")[1].rows, 1);
+        state.toggle_card(&CardId::Thread("later".into()));
+        assert_eq!(state.cards_in("src/x.rs")[1].rows, estimate);
+    }
+
+    #[test]
+    fn a_thread_arriving_outdated_starts_collapsed_once_and_the_readers_choice_stands_after() {
+        let state = ReviewState::new();
+        let stale = CardId::Thread("stale".into());
+        let fresh = CardId::Thread("fresh".into());
+        state.set_comment_threads(Arc::new(vec![
+            anchored("stale", 1, 1, "2026-09-18T09:00:00Z", true),
+            anchored("fresh", 2, 2, "2026-09-18T09:00:00Z", false),
+        ]));
+        assert!(state.is_collapsed(&stale));
+        assert!(!state.is_collapsed(&fresh));
+        assert_eq!(state.comment_threads.get().len(), 2);
+
+        // Opened by the reader, it stays open when the threads come again,
+        // as they do every time the item is opened.
+        state.toggle_card(&stale);
+        state.begin("Reading the pull request");
+        assert!(state.comment_threads.get().is_empty());
+        assert!(!state.is_collapsed(&stale), "the reader's choice outlives the item");
+        state.set_comment_threads(Arc::new(vec![anchored("stale", 1, 1, "2026-09-18T09:00:00Z", true)]));
+        assert!(!state.is_collapsed(&stale));
+
+        // A thread with no anchor is no card, and a new outdated one is
+        // collapsed as the first was.
+        let mut worktree = anchored("worktree", 1, 1, "2026-09-18T09:00:00Z", true);
+        worktree.anchor = None;
+        state.set_comment_threads(Arc::new(vec![worktree, anchored("another", 3, 3, "2026-09-18T09:00:00Z", true)]));
+        assert!(!state.is_collapsed(&CardId::Thread("worktree".into())));
+        assert!(state.is_collapsed(&CardId::Thread("another".into())));
     }
 
     #[test]

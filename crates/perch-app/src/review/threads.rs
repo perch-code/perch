@@ -5,10 +5,11 @@
 //! then the worktree's others under a divider. A composer sits at the top
 //! for a new thread, or under a thread for a follow-up.
 //!
-//! The same thread is also a card on Conversation. The message, the run's
-//! steps and footer, the follow-up line and the composer are one set of
-//! views here, taking a [`ThreadFace`] for the sizes that differ, so the
-//! two places cannot drift apart.
+//! The same thread is also a card on Conversation, and a card in the code
+//! under the lines it is about. The message, the run's steps and footer,
+//! the follow-up line and the composer are one set of views here, taking
+//! a [`ThreadFace`] for the sizes that differ, so the places cannot drift
+//! apart.
 
 use std::rc::Rc;
 
@@ -23,6 +24,7 @@ use perch_github::{Author, CommentMessage, CommentThread, RunRecord, RunStatus};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
+use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, Composer, ReviewState};
 use crate::review::OpenFile;
 use crate::state::AppState;
@@ -113,20 +115,22 @@ fn default_choice(agent: &perch_github::AgentConfig) -> AgentChoice {
     (crate::ask::backend_for(agent, &model), model.clone(), nearest_effort(agent, &model, effort))
 }
 
-/// Where a thread is drawn: in the column beside the editor, or as a card
-/// on Conversation. The views are the same; the face picks the room they
-/// take and the surface they sit on.
+/// Where a thread is drawn: in the column beside the editor, as a card on
+/// Conversation, or inline in the code under the lines it is about. The
+/// views are the same; the face picks the room they take and the surface
+/// they sit on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadFace {
     Column,
     Card,
+    Inline,
 }
 
 impl ThreadFace {
     /// Room between a thread's messages.
     fn message_gap(self) -> f64 {
         match self {
-            ThreadFace::Column => 10.0,
+            ThreadFace::Column | ThreadFace::Inline => theme::THREAD_GAP,
             ThreadFace::Card => theme::CARD_GAP,
         }
     }
@@ -172,7 +176,9 @@ fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: Open
                 Row::GitHub(t) => format!("github:{}:{}", t.comment.id, t.replies.len()),
             },
             move |row| match row {
-                Row::Thread(t) => thread_card(app, state, here_backend.clone(), here_open.clone(), t).into_any(),
+                Row::Thread(t) => {
+                    thread_card(app, state, here_backend.clone(), here_open.clone(), t, ThreadFace::Column).into_any()
+                }
                 Row::Divider => group_heading("Elsewhere in this worktree").into_any(),
                 Row::GitHubDivider => group_heading("On GitHub").into_any(),
                 Row::GitHub(t) => {
@@ -383,6 +389,9 @@ pub fn composer_view(
                 return;
             }
             let Some(id) = inner.get_untracked() else { return };
+            // The box `a` finds again is Conversation's; a follow-up's box
+            // inside an inline card is under its thread, where the reader
+            // just clicked.
             if face == ThreadFace::Card {
                 registered.set(Some(id));
                 state.composer_box.set(Some(id));
@@ -437,8 +446,8 @@ pub fn composer_view(
             .border_color(theme::ACCENT_RING)
             .border_radius(theme::RADIUS_LG);
         match face {
-            ThreadFace::Column => base.margin(12.0).margin_bottom(0.0),
-            ThreadFace::Card => base,
+            ThreadFace::Column => base.margin(theme::THREAD_PADDING).margin_bottom(0.0),
+            ThreadFace::Card | ThreadFace::Inline => base,
         }
     })
 }
@@ -598,35 +607,63 @@ pub fn outdated_pill(outdated: bool) -> impl IntoView {
 // Threads
 // ---------------------------------------------------------------------
 
-fn thread_card(
+/// A thread of the reader's own: in the column, a white card led by its
+/// anchor's label; inline in the code, Conversation's dashed chrome at
+/// the column's density, led by a chevron that collapses it to one row,
+/// with no label, since it is under the lines the label would name. Both
+/// hold the messages, the run under an agent's answer with its steps on
+/// one line, and the follow-up line. A gutter marker click on the thread
+/// flashes the border of either.
+pub fn thread_card(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     open_file: OpenFile,
     thread: CommentThread,
+    face: ThreadFace,
 ) -> impl IntoView {
-    let id = thread.id.clone();
-    let flash_id = thread.id.clone();
+    let card_id = CardId::Thread(thread.id.clone());
     let flashing = RwSignal::new(false);
 
-    let card = Stack::vertical((
-        anchor_line(state, open_file, thread.clone()),
-        delete_confirmation(state, backend.clone(), thread.id.clone()),
-        messages_view(app, state, backend.clone(), thread.id.clone(), ThreadFace::Column),
-        follow_up(app, state, backend, thread.id.clone(), ThreadFace::Column),
-    ))
+    // Only a card in the code collapses; the column lists every thread
+    // whole, as it did.
+    let collapsed = {
+        let card_id = card_id.clone();
+        Memo::new(move |_| face == ThreadFace::Inline && state.is_collapsed(&card_id))
+    };
+    let open_thread = thread.clone();
+    let open_backend = backend.clone();
+    let card = dyn_container(
+        move || collapsed.get(),
+        move |collapsed| {
+            if collapsed {
+                collapsed_row(app, state, open_thread.clone()).into_any()
+            } else {
+                open_card(app, state, open_backend.clone(), open_file.clone(), open_thread.clone(), face).into_any()
+            }
+        },
+    )
     .style(move |s| {
-        let base = s
-            .flex_col()
-            .width_full()
-            .padding(12.0)
-            .gap(10.0)
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_radius(theme::RADIUS_LG)
-            .box_shadow_blur(4.0)
-            .box_shadow_v_offset(1.0)
-            .box_shadow_color(theme::SHADOW);
+        let base = match face {
+            // A card in the code is the page grey inside a dashed border,
+            // as it is on Conversation, so it cannot be taken for a line
+            // of GitHub's; collapsed, it is its one row exactly. Its
+            // width is the layer's to set, from the edges it is placed
+            // against, so it takes none here.
+            ThreadFace::Inline => s
+                .background(theme::CANVAS_SUBTLE)
+                .border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
+                .border_radius(theme::RADIUS_LG)
+                .apply_if(collapsed.get(), |s| s.height(theme::CODE_LINE_HEIGHT as f64)),
+            ThreadFace::Column | ThreadFace::Card => s
+                .width_full()
+                .background(theme::CANVAS)
+                .border(1.0)
+                .border_radius(theme::RADIUS_LG)
+                .box_shadow_blur(4.0)
+                .box_shadow_v_offset(1.0)
+                .box_shadow_color(theme::SHADOW),
+        };
         if flashing.get() {
             base.border_color(theme::ACCENT)
         } else {
@@ -634,21 +671,181 @@ fn thread_card(
         }
     });
 
-    // A gutter marker was clicked: scroll here and flash the border.
-    let card_id = card.view_id();
-    Effect::new(move |_| {
-        if state.focus_thread.get().as_deref() == Some(flash_id.as_str()) {
-            state.focus_thread.set(None);
-            state.show_threads();
-            card_id.scroll_to(None);
-            flashing.set(true);
-            floem::action::exec_after(std::time::Duration::from_millis(900), move |_| {
-                flashing.set(false);
-            });
+    // A gutter marker was clicked: flash the border, and in the column
+    // scroll to the card; the editor is scrolled to the card in the code
+    // by the layer that places it. The first run only subscribes: a card
+    // built after a click must not take the click for its own.
+    let view_id = card.view_id();
+    Effect::new(move |first: Option<()>| {
+        let focused = state.focus_card.with(|f| f.as_ref() == Some(&card_id));
+        if first.is_none() || !focused {
+            return;
         }
+        if face == ThreadFace::Column {
+            view_id.scroll_to(None);
+        }
+        flashing.set(true);
+        floem::action::exec_after(std::time::Duration::from_millis(theme::CARD_FLASH_MILLIS), move |_| {
+            flashing.set(false);
+        });
     });
-    let _ = id;
     card
+}
+
+/// A thread's card open: its first row, the delete confirmation when one
+/// is asked for, the messages and the follow-up. In the code the messages
+/// scroll inside the card once it is as tall as a card may be, so a long
+/// thread cannot push the code off the screen.
+fn open_card(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_file: OpenFile,
+    thread: CommentThread,
+    face: ThreadFace,
+) -> impl IntoView {
+    let first_row = match face {
+        ThreadFace::Inline => chevron_row(state, thread.clone()).into_any(),
+        ThreadFace::Column | ThreadFace::Card => anchor_line(state, open_file, thread.clone()).into_any(),
+    };
+    let messages = messages_view(app, state, backend.clone(), thread.id.clone(), face);
+    let messages = match face {
+        ThreadFace::Inline => messages
+            .scroll()
+            .style(|s| s.width_full().flex_shrink(1.0_f32).min_height(0.0))
+            .into_any(),
+        ThreadFace::Column | ThreadFace::Card => messages.into_any(),
+    };
+    Stack::vertical((
+        first_row.style(|s| s.flex_shrink(0.0_f32)),
+        delete_confirmation(state, backend.clone(), thread.id.clone()).style(|s| s.flex_shrink(0.0_f32)),
+        messages,
+        follow_up(app, state, backend, thread.id.clone(), face).style(|s| s.flex_shrink(0.0_f32)),
+    ))
+    .style(move |s| {
+        let base = s.flex_col().width_full().padding(theme::THREAD_PADDING).gap(theme::THREAD_GAP);
+        match face {
+            ThreadFace::Inline => base.max_height(inline_card_max_height()),
+            ThreadFace::Column | ThreadFace::Card => base,
+        }
+    })
+}
+
+/// How tall a card in the code may be: its rows at the cap, less the
+/// inset inside its first and last rows and its border.
+fn inline_card_max_height() -> f64 {
+    crate::review::doc::CARD_MAX_ROWS as f64 * theme::CODE_LINE_HEIGHT as f64 - 2.0 * theme::CARD_INSET - 2.0
+}
+
+/// The first row of a card in the code, where the column's card has its
+/// anchor's label: the chevron that collapses it, Outdated, and the `...`
+/// menu.
+fn chevron_row(state: ReviewState, thread: CommentThread) -> impl IntoView {
+    let card_id = CardId::Thread(thread.id.clone());
+    Stack::horizontal((
+        chevron(state, card_id, true),
+        outdated_pill(thread.outdated),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        thread_menu(state, thread.id, theme::THREAD_MENU),
+    ))
+    .style(|s| s.items_center().width_full())
+}
+
+/// A card in the code collapsed to its one row: the chevron, who asked,
+/// the first line of what they asked, how many messages follow, Outdated,
+/// and the `...` menu, smaller than the open card's so it fits the row.
+fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
+    let card_id = CardId::Thread(thread.id.clone());
+    let first = thread.messages.first();
+    let author = first.map(|m| m.author.clone()).unwrap_or(Author::User);
+    let line = first.map(|m| crate::review::timeline::first_line(&m.body)).unwrap_or_default();
+    let more = thread.messages.len().saturating_sub(1);
+    Stack::horizontal((
+        chevron(state, card_id, false),
+        Label::derived(move || author_name(app, &author)).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .color(theme::FG)
+                .selectable(false)
+                .margin_left(6.0)
+                .flex_shrink(0.0_f32)
+        }),
+        Label::derived(move || line.clone()).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::FG_MUTED)
+                .selectable(false)
+                .margin_left(6.0)
+                .text_ellipsis()
+                .min_width(0.0)
+                .flex_grow(1.0_f32)
+        }),
+        more_pill(more),
+        outdated_pill(thread.outdated),
+        thread_menu(state, thread.id, theme::COLLAPSED_CARD_MENU),
+    ))
+    .style(|s| s.items_center().width_full().height_full().padding_horiz(theme::COLLAPSED_CARD_PADDING))
+}
+
+/// Who wrote a message, as a collapsed card names them: the reader by
+/// their login once GitHub has said it, the agent by its model.
+fn author_name(app: AppState, author: &Author) -> String {
+    match author {
+        Author::User => app.viewer.get().map(|(login, _)| login).filter(|l| !l.is_empty()).unwrap_or_else(|| "You".into()),
+        Author::Agent { model, .. } => model_label(model),
+        Author::GitHubUser(login) => login.clone(),
+    }
+}
+
+/// "3 more": how many messages a collapsed card's first line stands in
+/// for. Nothing when none do.
+fn more_pill(more: usize) -> impl IntoView {
+    if more == 0 {
+        return Empty::new().into_any();
+    }
+    Label::derived(move || format!("{more} more"))
+        .style(|s| {
+            s.font_size(theme::TEXT_SECTION)
+                .font_weight(FontWeight::MEDIUM)
+                .color(theme::FG_SUBTLE)
+                .background(theme::BADGE_BG)
+                .height(theme::COLLAPSED_CARD_PILL)
+                .border_radius(theme::COLLAPSED_CARD_PILL / 2.0)
+                .padding_horiz(6.0)
+                .margin_left(8.0)
+                .items_center()
+                .justify_center()
+                .selectable(false)
+                .flex_shrink(0.0_f32)
+        })
+        .into_any()
+}
+
+/// The chevron at a card's left: pointing right while the card is
+/// collapsed and down while it is open, as a run's steps have it, in a
+/// slot the size of the gutter's controls. Click toggles the card.
+fn chevron(state: ReviewState, card_id: CardId, open: bool) -> impl IntoView {
+    let hovered = RwSignal::new(false);
+    let color = move || if hovered.get() { theme::ACCENT } else { theme::FG_SUBTLE };
+    Container::new(
+        crate::ui::widgets::icon_in(move || crate::icons::sidebar_icon(SidebarIcon::ChevronRight, color()), color).style(
+            move |s| {
+                let base = s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH);
+                if open { base.rotate(90.0) } else { base }
+            },
+        ),
+    )
+    .on_event_stop(el::Click, move |_, _| state.toggle_card(&card_id))
+    .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
+    .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
+    .style(|s| {
+        clickable(s)
+            .size(theme::CHEVRON_SLOT, theme::CHEVRON_SLOT)
+            .items_center()
+            .justify_center()
+            .border_radius(3.0)
+            .flex_shrink(0.0_f32)
+            .hover(|s| s.background(theme::BADGE_BG))
+    })
 }
 
 /// `src/x.rs:41–58`, clickable, with Outdated and the `...` menu.
@@ -687,12 +884,11 @@ fn anchor_line(state: ReviewState, open_file: OpenFile, thread: CommentThread) -
             }),
         outdated_pill(thread.outdated),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        thread_menu(state, delete_id),
+        thread_menu(state, delete_id, theme::THREAD_MENU),
     ))
     .style(|s| s.items_center().width_full())
 }
 
-/// The `...` at the end of a thread's first row, and the menu under it.
 /// A small heading over a group of the column's rows.
 fn group_heading(text: &'static str) -> impl IntoView {
     Label::derived(move || text.to_string()).style(|s| {
@@ -750,7 +946,9 @@ pub fn delete_confirmation(state: ReviewState, backend: Rc<Backend>, thread_id: 
     .style(|s| s.width_full())
 }
 
-pub fn thread_menu(state: ReviewState, thread_id: String) -> impl IntoView {
+/// The `...` at the end of a thread's first row, and the menu under it,
+/// in a round button `size` across.
+pub fn thread_menu(state: ReviewState, thread_id: String, size: f64) -> impl IntoView {
     use floem::menu::Menu;
 
     Container::new(
@@ -765,12 +963,13 @@ pub fn thread_menu(state: ReviewState, thread_id: String) -> impl IntoView {
             item.action(move || state.confirm_thread.set(Some(id.clone())))
         })
     })
-    .style(|s| {
+    .style(move |s| {
         clickable(s)
-            .size(22.0, 22.0)
+            .size(size, size)
             .items_center()
             .justify_center()
-            .border_radius(11.0)
+            .border_radius(size / 2.0)
+            .flex_shrink(0.0_f32)
             .hover(|s| s.background(theme::BADGE_BG))
     })
 }
@@ -904,14 +1103,16 @@ pub fn run_block(
 }
 
 /// The box a run's lines sit in. The column's cards are white, so the run
-/// sits on the page grey; a thread card is the page grey, so the run sits
-/// on white.
+/// sits on the page grey; a thread card on Conversation and a card in the
+/// code are the page grey, so the run sits on white.
 fn run_surface(inner: impl IntoView + 'static, face: ThreadFace) -> impl IntoView {
     Container::new(inner).style(move |s| {
         let base = s.width_full().padding(8.0).border_radius(theme::RADIUS);
         match face {
             ThreadFace::Column => base.background(theme::CANVAS_SUBTLE),
-            ThreadFace::Card => base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER_MUTED),
+            ThreadFace::Card | ThreadFace::Inline => {
+                base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER_MUTED)
+            }
         }
     })
 }
@@ -937,9 +1138,13 @@ fn run_footer(
             let secs = run.duration_ms.unwrap_or(0) as f64 / 1000.0;
             let cost = run.cost_usd.map(|c| format!(" \u{00b7} ${c:.2}")).unwrap_or_default();
             let effort = perch_agent::Effort::parse(&run.effort).map(|e| e.label().to_string()).unwrap_or_else(|| run.effort.clone());
-            // A card's byline already names the model and the effort.
+            // A Conversation card's byline already names the model and the
+            // effort; the column's card and the one in the code have no
+            // byline, so the footer says.
             match face {
-                ThreadFace::Column => format!("{} \u{00b7} {effort} \u{00b7} {secs:.0}s{cost}", model_label(&run.model)),
+                ThreadFace::Column | ThreadFace::Inline => {
+                    format!("{} \u{00b7} {effort} \u{00b7} {secs:.0}s{cost}", model_label(&run.model))
+                }
                 ThreadFace::Card => format!("{secs:.0}s{cost}"),
             }
         })
@@ -1079,10 +1284,12 @@ pub fn reply_line(app: AppState, state: ReviewState, thread: CommentThread, face
                 .width_full()
                 .padding_vert(4.0)
                 .hover(|s| s.color(theme::ACCENT));
-            // On a card the line stands where the composer's box will be,
-            // and takes the box's shape.
+            // On a Conversation card the line stands where the composer's
+            // box will be, and takes the box's shape. In the code it is
+            // the column's bare line, which is one row of the code, the
+            // row the card's estimate gives it.
             match face {
-                ThreadFace::Column => base,
+                ThreadFace::Column | ThreadFace::Inline => base,
                 ThreadFace::Card => base
                     .padding_horiz(12.0)
                     .height(theme::ASK_BOX_HEIGHT - 12.0)

@@ -12,10 +12,14 @@
 //! Every editor's document is held live on the review state, the handle
 //! the editor lays out from beside the row table over it, so that what the
 //! editor shows can be edited in place when the document changes under it.
-//! A reveal, Show whole, and a thread appearing or going are all that one
-//! edit: the inputs change, the builder makes the new document, and
-//! `apply` turns the old text into it with the one region that differs,
-//! so the scroll position and the layout cache survive.
+//! A reveal, Show whole, and a thread appearing, going or collapsing are
+//! all that one edit: the inputs change, the builder makes the new
+//! document, and `apply` turns the old text into it with the one region
+//! that differs, so the scroll position and the layout cache survive.
+//!
+//! A thread's card is drawn over the rows the document reserves for it,
+//! by a layer over the editor that places each card from the live
+//! document and the viewport, the way the gutter places its rows.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -33,15 +37,17 @@ use floem::views::scroll::ScrollCustomStyle;
 use floem::views::{
     ClipExt, Container, Decorators, Empty, Label, ScrollExt, Stack, TextEditor, dyn_container, dyn_stack, text_editor,
 };
+use perch_github::CommentThread;
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::doc::{self, Doc, Reveals, Run};
+use crate::review::doc::{self, Card, CardId, Doc, Reveals, Run};
 use crate::review::gutter::{diff_gutter, side_gutter, visible_lines};
 use crate::review::hover;
 use crate::review::model::{Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState};
 use crate::review::references;
 use crate::review::styling::PerchStyling;
+use crate::review::threads::{self, ThreadFace};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
@@ -67,6 +73,7 @@ pub fn editor_pane(
     }
 
     let code_backend = backend.clone();
+    let code_open = open_file.clone();
 
     Stack::vertical((
         dyn_container(
@@ -90,7 +97,7 @@ pub fn editor_pane(
                     .into_any(),
                     Some(path) => match state.file(&path) {
                         Some(file) => {
-                            code_view(app, state, file, epoch, layout, code_backend.clone()).into_any()
+                            code_view(app, state, file, epoch, layout, code_backend.clone(), code_open.clone()).into_any()
                         }
                         None => loading_view(path).into_any(),
                     },
@@ -104,15 +111,55 @@ pub fn editor_pane(
     .style(|s| s.size_full().flex_col().min_height(0.0))
 }
 
+/// What a file's document is built from besides the file: whether the
+/// worktree is folded, the head lines its threads are anchored on, the
+/// reveals for its content, and its cards with the rows each has. Read
+/// tracked, so an effect over them runs when any changes, or untracked
+/// for the document an editor is built from.
+struct Inputs {
+    folded: bool,
+    anchors: Vec<(usize, usize)>,
+    reveals: Reveals,
+    cards: Vec<Card>,
+}
+
+/// The anchors and the cards of a file, as memos: a thread's messages
+/// change every line of a streaming answer, and a memo only tells its
+/// readers when what it holds has changed, so the document is not built
+/// again for a thread whose lines and rows are what they were.
+#[derive(Clone, Copy)]
+struct Memos {
+    anchors: Memo<Vec<(usize, usize)>>,
+    cards: Memo<Vec<Card>>,
+}
+
+impl Memos {
+    fn new(state: ReviewState, file: &Arc<LoadedFile>) -> Self {
+        let anchors_file = file.clone();
+        let cards_file = file.clone();
+        Self {
+            anchors: Memo::new(move |_| state.anchors_in(&anchors_file.path)),
+            cards: Memo::new(move |_| state.cards_in(&cards_file.path)),
+        }
+    }
+
+    fn inputs(&self, state: ReviewState, file: &LoadedFile) -> Inputs {
+        Inputs {
+            folded: state.folded.get(),
+            anchors: self.anchors.get(),
+            reveals: state.reveals_for(&file.path, &file.blob),
+            cards: self.cards.get(),
+        }
+    }
+}
+
 /// The file, stacked or split. A file with nothing to put on the left,
 /// because it was added, is outside the changed list or is binary, is
 /// stacked whatever the toggle says.
 ///
 /// The documents are built here from the signals as they are, untracked:
 /// the view is built once, and what changes under it edits the document
-/// rather than building another editor. The anchors are a memo so that a
-/// thread's messages changing, as they do every line of a streaming
-/// answer, do not rebuild a document whose anchors are the same.
+/// rather than building another editor.
 fn code_view(
     app: AppState,
     state: ReviewState,
@@ -120,33 +167,35 @@ fn code_view(
     epoch: u64,
     layout: Layout,
     backend: Rc<Backend>,
+    open_file: OpenFile,
 ) -> impl IntoView {
-    let anchors = Memo::new({
-        let file = file.clone();
-        move |_| state.anchors_in(&file.path)
-    });
+    let memos = Memos::new(state, &file);
     let split = Effect::untrack(|| match layout {
         Layout::Split => {
-            split_doc(&file, state.folded.get(), &anchors.get(), &state.reveals_for(&file.path, &file.blob))
+            let inputs = memos.inputs(state, &file);
+            split_doc(&file, inputs.folded, &inputs.anchors, &inputs.reveals, &inputs.cards)
         }
         Layout::Stacked => None,
     });
     match split {
-        Some(split) => split_view(app, state, file, anchors, split, epoch, backend).into_any(),
-        None => stacked_view(app, state, file, anchors, epoch, backend).into_any(),
+        Some(split) => split_view(app, state, file, memos, split, epoch, backend, open_file).into_any(),
+        None => stacked_view(app, state, file, memos, epoch, backend, open_file).into_any(),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stacked_view(
     app: AppState,
     state: ReviewState,
     file: Arc<LoadedFile>,
-    anchors: Memo<Vec<(usize, usize)>>,
+    memos: Memos,
     epoch: u64,
     backend: Rc<Backend>,
+    open_file: OpenFile,
 ) -> impl IntoView {
     let built = Effect::untrack(|| {
-        stacked_doc(&file, state.folded.get(), &anchors.get(), &state.reveals_for(&file.path, &file.blob))
+        let inputs = memos.inputs(state, &file);
+        stacked_doc(&file, inputs.folded, &inputs.anchors, &inputs.reveals, &inputs.cards)
     });
     let text = built.text.clone();
     let doc = RwSignal::new(Arc::new(built));
@@ -171,21 +220,27 @@ fn stacked_view(
     // The folds are wired before the jump: a jump into a fold reveals it,
     // and the reveal has to reach the editor before the jump looks for the
     // row to scroll to.
-    wire_folds(state, file.clone(), anchors, epoch, {
+    wire_folds(state, file.clone(), memos, epoch, {
         let file = file.clone();
-        move |folded, anchors, reveals| {
-            apply(&live, stacked_doc(&file, folded, anchors, reveals), viewport, scroll_to, cursor, shifted)
+        move |inputs: &Inputs| {
+            let new = stacked_doc(&file, inputs.folded, &inputs.anchors, &inputs.reveals, &inputs.cards);
+            apply(&live, new, viewport, scroll_to, cursor, shifted)
         }
     });
-    wire_cursor(state, backend, file.clone(), doc, cursor, shifted);
+    wire_cursor(state, backend.clone(), file.clone(), doc, cursor, shifted);
     wire_jump(state, file.clone(), doc, scroll_to, epoch);
 
     Stack::horizontal((
         diff_gutter(state, app, file, doc, viewport, scroll_delta),
-        // The layer is placed against this box, so it takes the relative
-        // position; the editor fills it.
-        Stack::vertical((editor, divider_layer(state, doc, viewport, scroll_delta, Bars::Editor)))
-            .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().position(Position::Relative)),
+        // The layers are placed against this box, so it takes the
+        // relative position; the editor fills it. The cards are over the
+        // dividers, since a card is never in a divider.
+        Stack::vertical((
+            editor,
+            divider_layer(state, doc, viewport, scroll_delta, Bars::Editor),
+            card_layer(app, state, backend, open_file, doc, viewport, scroll_delta, scroll_to, theme::CODE_GUTTER_GAP),
+        ))
+        .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().position(Position::Relative)),
     ))
     .style(|s| s.size_full().min_height(0.0))
 }
@@ -204,48 +259,48 @@ fn folds_of(file: &LoadedFile, folded: bool, anchors: &[(usize, usize)], reveals
 }
 
 /// The stacked document of a file: folded to the changes and the anchors
-/// less the reveals, or whole.
-pub(crate) fn stacked_doc(file: &LoadedFile, folded: bool, anchors: &[(usize, usize)], reveals: &Reveals) -> Doc {
-    doc::build(&file.buffer, &folds_of(file, folded, anchors, reveals), &[])
+/// less the reveals, or whole, with each card's rows reserved under its
+/// line.
+pub(crate) fn stacked_doc(
+    file: &LoadedFile,
+    folded: bool,
+    anchors: &[(usize, usize)],
+    reveals: &Reveals,
+    cards: &[Card],
+) -> Doc {
+    doc::build(&file.buffer, &folds_of(file, folded, anchors, reveals), cards)
 }
 
 /// The two documents of a file's split, folded as the stacked one is, or
 /// `None` when there is no base to put on the left. The head's text and
 /// statuses, and where each head line is displayed, come out of the
 /// unified buffer, which has every head line in order with the ghosts
-/// between; the folds are in its display lines, and a divider goes into
-/// both sides at the same row.
+/// between; the folds are in its display lines, and a divider or a
+/// card's rows go into both sides at the same row.
 pub(crate) fn split_doc(
     file: &LoadedFile,
     folded: bool,
     anchors: &[(usize, usize)],
     reveals: &Reveals,
+    cards: &[Card],
 ) -> Option<(Doc, Doc)> {
     let base = file.base_buffer.as_ref()?;
     if file.truncated || file.alignment.is_empty() {
         return None;
     }
     let folds = folds_of(file, folded, anchors, reveals);
-    Some(doc::build_split(&file.alignment, &base.text, &file.buffer, &folds, &[]))
+    Some(doc::build_split(&file.alignment, &base.text, &file.buffer, &folds, cards))
 }
 
 /// Runs `rebuild` whenever what a document is built from changes, so it
 /// can build the new document and edit the editor to match. The inputs
 /// are read tracked, so the effect runs on each of them: Show whole, the
-/// file's reveals, and the anchors, which are a memo so that a thread's
-/// messages changing under it, as they do every line of a streaming
-/// answer, do not rebuild a document whose anchors are the same.
-fn wire_folds(
-    state: ReviewState,
-    file: Arc<LoadedFile>,
-    anchors: Memo<Vec<(usize, usize)>>,
-    epoch: u64,
-    rebuild: impl Fn(bool, &[(usize, usize)], &Reveals) + 'static,
-) {
+/// file's reveals, and the anchors and the cards, which are memos so that
+/// a thread's messages changing under them, as they do every line of a
+/// streaming answer, do not rebuild a document that would be the same.
+fn wire_folds(state: ReviewState, file: Arc<LoadedFile>, memos: Memos, epoch: u64, rebuild: impl Fn(&Inputs) + 'static) {
     Effect::new(move |first: Option<bool>| {
-        let folded = state.folded.get();
-        let anchors = anchors.get();
-        let reveals = state.reveals_for(&file.path, &file.blob);
+        let inputs = memos.inputs(state, &file);
         // The editor was just built from these; nothing to do but subscribe.
         if first.is_none() {
             return true;
@@ -253,7 +308,7 @@ fn wire_folds(
         if state.editor_epoch.get_untracked() != epoch {
             return true;
         }
-        rebuild(folded, &anchors, &reveals);
+        rebuild(&inputs);
         true
     });
 }
@@ -468,6 +523,142 @@ fn divider_bar(
     })
 }
 
+/// The cards of the open file, drawn over the rows the document reserves
+/// for them: the reader's threads anchored in it, as the document has
+/// them. A layer over the editor, or over both panes of a split, that
+/// takes no pointer events itself; each card does, and is placed at its
+/// first spacer row from the live document and the viewport in its own
+/// style closure, as the divider bars are, because the cards are sparse
+/// and a card outlives the scroll. `left` is where a card's edge sits:
+/// the first code column, past the gutter in a split.
+///
+/// A card is keyed on its thread and on what changes what it is built
+/// from: whether the thread is outdated, which its first row and its
+/// starting state show, and how many messages it has. The messages
+/// themselves are read live inside it, so a streaming answer redraws in
+/// place.
+#[allow(clippy::too_many_arguments)]
+fn card_layer(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_file: OpenFile,
+    doc: RwSignal<Arc<Doc>>,
+    viewport: RwSignal<Rect>,
+    scroll_delta: RwSignal<Vec2>,
+    scroll_to: RwSignal<Option<Vec2>>,
+    left: f64,
+) -> impl IntoView {
+    let cards = move || {
+        // The document says which cards have rows: a thread whose line is
+        // not shown has no card. The threads are read tracked so a card's
+        // key follows the thread.
+        let ids: Vec<CardId> = doc.with(|d| d.cards().iter().map(|(id, _)| id.clone()).collect());
+        state.comment_threads.with(|threads| {
+            ids.into_iter()
+                .filter_map(|id| match &id {
+                    CardId::Thread(thread_id) => threads.iter().find(|t| t.id == *thread_id).cloned(),
+                    CardId::GitHub(_) | CardId::Composer => None,
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let stack = dyn_stack(
+        cards,
+        |t| (t.id.clone(), t.outdated, t.messages.len()),
+        move |thread| {
+            inline_card(app, state, backend.clone(), open_file.clone(), doc, viewport, scroll_delta, scroll_to, thread, left)
+        },
+    )
+    .style(|s| s.size_full());
+
+    Container::new(stack)
+        .style(|s| s.size_full().position(Position::Relative))
+        .clip()
+        .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none())
+}
+
+/// One thread's card in the layer, over its rows: the card the column
+/// draws in its inline face, set into its first spacer row a little way
+/// in, so its border never touches a tinted line, from the first code
+/// column to the right edge less the same margin. Collapsed, it is its
+/// one row whole. The wheel over it scrolls the code, as it does over
+/// the gutter, unless the messages inside it take it first.
+///
+/// A gutter marker click on the thread scrolls the editor so that the
+/// card is in view, with the line above it; the card flashes itself.
+#[allow(clippy::too_many_arguments)]
+fn inline_card(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_file: OpenFile,
+    doc: RwSignal<Arc<Doc>>,
+    viewport: RwSignal<Rect>,
+    scroll_delta: RwSignal<Vec2>,
+    scroll_to: RwSignal<Option<Vec2>>,
+    thread: CommentThread,
+    left: f64,
+) -> impl IntoView {
+    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let card_id = CardId::Thread(thread.id.clone());
+    let name = format!("inline-card:{}", thread.id);
+
+    let focus_id = card_id.clone();
+    Effect::new(move |first: Option<()>| {
+        let focused = state.focus_card.with(|f| f.as_ref() == Some(&focus_id));
+        if first.is_none() || !focused {
+            return;
+        }
+        let Some(span) = doc.with_untracked(|d| d.card_span(&focus_id)) else {
+            return;
+        };
+        let vp = viewport.get_untracked();
+        let (top, bottom) = (span.start as f64 * line_height, span.end as f64 * line_height);
+        if let Some(y) = scroll_for_card(vp, top, bottom, line_height) {
+            scroll_to.set(Some(Vec2::new(vp.x0, y)));
+        }
+    });
+
+    threads::thread_card(app, state, backend, open_file, thread, ThreadFace::Inline)
+        .debug_name(name)
+        .on_event_stop(el::PointerWheel, move |_, wheel| {
+            let size = viewport.get_untracked().size();
+            let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
+            scroll_delta.set(Vec2::new(-delta.x, -delta.y));
+        })
+        .style(move |s| {
+            // Read live, as the gutter reads its offset: the card outlives
+            // a scroll and an edit above it, and a position captured when
+            // it was built would not.
+            let row = doc.with(|d| d.first_spacer_row(&card_id)).unwrap_or(0);
+            let inset = if state.is_collapsed(&card_id) { 0.0 } else { theme::CARD_INSET };
+            let top = row as f64 * line_height - viewport.get().y0 + inset;
+            s.absolute()
+                .inset_top(top)
+                .inset_left(left)
+                .inset_right(theme::CODE_GUTTER_GAP)
+                .pointer_events_auto()
+        })
+}
+
+/// Where the editor scrolls to so that a card from `top` to `bottom` is
+/// in view, with the line above it, or `None` when it is in view already:
+/// a card above the view comes down to the top of it, and one below comes
+/// up to the bottom, but no further than puts its top out of view, so a
+/// card taller than the view shows its beginning.
+fn scroll_for_card(vp: Rect, top: f64, bottom: f64, line_height: f64) -> Option<f64> {
+    if top >= vp.y0 && bottom <= vp.y1 {
+        return None;
+    }
+    let with_line_above = (top - line_height).max(0.0);
+    if top < vp.y0 {
+        Some(with_line_above)
+    } else {
+        Some((bottom - vp.height()).min(with_line_above).max(0.0))
+    }
+}
+
 /// Base on the left, head on the right, over one scroll position.
 ///
 /// Both editors keep a scroll of their own, so the two are tied together:
@@ -476,17 +667,20 @@ fn divider_bar(
 /// right. The left's scrollbar is hidden, so there is one.
 ///
 /// The two documents are edited in the same pass, from the pair the
-/// builder returns, so the two stay the same height: the dividers are on
-/// both sides at the same rows, and the divider layer over the outer stack
-/// draws their labels on the head side from the one scroll.
+/// builder returns, so the two stay the same height: the dividers and the
+/// cards' rows are on both sides at the same rows, and the layers over
+/// the outer stack draw the labels on the head side and the cards across
+/// both sides from the one scroll.
+#[allow(clippy::too_many_arguments)]
 fn split_view(
     app: AppState,
     state: ReviewState,
     file: Arc<LoadedFile>,
-    anchors: Memo<Vec<(usize, usize)>>,
+    memos: Memos,
     split: (Doc, Doc),
     epoch: u64,
     backend: Rc<Backend>,
+    open_file: OpenFile,
 ) -> impl IntoView {
     let (left_text, right_text) = (split.0.text.clone(), split.1.text.clone());
     let (left_doc, right_doc) = (RwSignal::new(Arc::new(split.0)), RwSignal::new(Arc::new(split.1)));
@@ -522,17 +716,19 @@ fn split_view(
 
     // The folds are wired before the jump, as in the stacked layout. The
     // right is edited first: it owns the scroll, and the left follows.
-    wire_folds(state, file.clone(), anchors, epoch, {
+    wire_folds(state, file.clone(), memos, epoch, {
         let file = file.clone();
-        move |folded, anchors, reveals| {
-            let Some((new_left, new_right)) = split_doc(&file, folded, anchors, reveals) else {
+        move |inputs: &Inputs| {
+            let Some((new_left, new_right)) =
+                split_doc(&file, inputs.folded, &inputs.anchors, &inputs.reveals, &inputs.cards)
+            else {
                 return;
             };
             apply(&right_live, new_right, right_viewport, right_scroll_to, right_cursor, right_shifted);
             apply(&left_live, new_left, left_viewport, left_scroll_to, left_cursor, left_shifted);
         }
     });
-    wire_cursor(state, backend, file.clone(), right_doc, right_cursor, right_shifted);
+    wire_cursor(state, backend.clone(), file.clone(), right_doc, right_cursor, right_shifted);
     wire_jump(state, file.clone(), right_doc, right_scroll_to, epoch);
 
     // The left follows the right down the file. Sideways it keeps its own
@@ -567,13 +763,26 @@ fn split_view(
     ))
     .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0).height_full());
 
-    // The layer is placed against the outer stack, so it takes the
-    // relative position; the bars are set into it where the head side is.
+    // The layers are placed against the outer stack, so it takes the
+    // relative position; the bars are set into it where the head side is,
+    // and a card spans both sides from the base side's first code column,
+    // past its gutter.
     Stack::horizontal((
         left_pane,
         Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32).background(theme::BORDER)),
         right_pane,
         divider_layer(state, right_doc, right_viewport, right_delta, Bars::HeadSide),
+        card_layer(
+            app,
+            state,
+            backend,
+            open_file,
+            right_doc,
+            right_viewport,
+            right_delta,
+            right_scroll_to,
+            theme::GUTTER_WIDTH + theme::CODE_GUTTER_GAP,
+        ),
     ))
     .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
 }
@@ -866,7 +1075,7 @@ mod tests {
 
     /// A file's split shown whole, with nothing folded.
     fn split_of(file: &LoadedFile) -> Option<(Doc, Doc)> {
-        split_doc(file, false, &[], &Reveals::default())
+        split_doc(file, false, &[], &Reveals::default(), &[])
     }
 
     #[test]
@@ -960,7 +1169,7 @@ mod tests {
         // a changed file; there is no change to fold around, so it is not.
         let anchors = [(10, 10)];
         assert_eq!(doc::runs(&plain.buffer, &anchors).len(), 2, "the runs are there to fold");
-        let doc = stacked_doc(&plain, true, &anchors, &Reveals::default());
+        let doc = stacked_doc(&plain, true, &anchors, &Reveals::default(), &[]);
         assert!(doc.folds.is_empty());
         assert_eq!(doc.hidden_lines(), 0);
         assert_eq!(doc.text, text);
@@ -976,9 +1185,32 @@ mod tests {
             perch_git::Scope::Branch,
             String::new(),
         );
-        let doc = stacked_doc(&changed, true, &anchors, &Reveals::default());
+        let doc = stacked_doc(&changed, true, &anchors, &Reveals::default(), &[]);
         assert_eq!(doc.folds.len(), 2);
         assert!(doc.hidden_lines() > 0);
+    }
+
+    #[test]
+    fn a_card_scrolls_into_view_only_when_it_is_out_of_it() {
+        let lh = 21.0;
+        // A view of twenty rows, from row 10.
+        let vp = Rect::new(0.0, 10.0 * lh, 800.0, 30.0 * lh);
+        let card = |first: f64, rows: f64| (first * lh, (first + rows) * lh);
+        let (top, bottom) = card(12.0, 5.0);
+        assert_eq!(scroll_for_card(vp, top, bottom, lh), None, "wholly in view");
+        // Above: down to the top, with the line above it.
+        let (top, bottom) = card(4.0, 5.0);
+        assert_eq!(scroll_for_card(vp, top, bottom, lh), Some(3.0 * lh));
+        let (top, bottom) = card(0.0, 5.0);
+        assert_eq!(scroll_for_card(vp, top, bottom, lh), Some(0.0), "never above the file");
+        // Below, or hanging out of the bottom: up to the bottom.
+        let (top, bottom) = card(40.0, 5.0);
+        assert_eq!(scroll_for_card(vp, top, bottom, lh), Some(25.0 * lh));
+        let (top, bottom) = card(28.0, 5.0);
+        assert_eq!(scroll_for_card(vp, top, bottom, lh), Some(13.0 * lh));
+        // Taller than the view: its beginning, with the line above it.
+        let (top, bottom) = card(40.0, 40.0);
+        assert_eq!(scroll_for_card(vp, top, bottom, lh), Some(39.0 * lh));
     }
 }
 
@@ -1751,6 +1983,248 @@ mod window {
         harness.paint();
         assert_eq!(live.doc.get().len(), 83);
         assert_eq!(laid_out_text(&live), live.doc.get().text);
+    }
+
+    // Cards.
+
+    /// A question and its answer on head lines `start` to `line` of the
+    /// open file, one-based, both finished.
+    fn thread_on(id: &str, start: u32, line: u32, outdated: bool) -> perch_github::CommentThread {
+        use perch_github::{Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStatus, RunStep, Side, ThreadOrigin};
+        let created_at = "2026-09-18T09:59:00Z".parse().unwrap();
+        let run = RunRecord {
+            id: format!("{id}-run"),
+            thread_id: id.into(),
+            backend: "claude-code".into(),
+            model: "sonnet".into(),
+            effort: "medium".into(),
+            session_id: Some("sess".into()),
+            status: RunStatus::Finished,
+            cost_usd: Some(0.03),
+            duration_ms: Some(14_000),
+            steps: vec![RunStep { summary: "Read src/x.rs".into(), ok: true }],
+            error: None,
+            started_at: "2026-09-18T10:00:00Z".parse().unwrap(),
+            ended_at: Some("2026-09-18T10:00:14Z".parse().unwrap()),
+        };
+        let message = |suffix: &str, author: Author, body: &str, run: Option<RunRecord>| CommentMessage {
+            id: format!("{id}-{suffix}"),
+            thread_id: id.into(),
+            origin: ThreadOrigin::Local,
+            author,
+            body: body.into(),
+            created_at,
+            run,
+        };
+        CommentThread {
+            id: id.into(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::Local,
+            anchor: Some(Anchor { path: "src/x.rs".into(), start_line: start, line, side: Side::Right, commit_sha: "h".into() }),
+            outdated,
+            resolved: false,
+            created_at,
+            messages: vec![
+                message("m1", Author::User, "why?", None),
+                message(
+                    "m2",
+                    Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                    "because\n\n```rust\nfn x() {}\n```\n\n- one\n- two",
+                    Some(run),
+                ),
+            ],
+        }
+    }
+
+    /// The first view whose debug name contains `text`.
+    fn find(id: floem::ViewId, text: &str) -> Option<floem::ViewId> {
+        if id.debug_name().contains(text) {
+            return Some(id);
+        }
+        id.children().into_iter().find_map(|c| find(c, text))
+    }
+
+    /// The card layer's card for a thread: its box, relative to the layer,
+    /// which sits over the editor at the code pane's origin past the
+    /// gutter.
+    fn card_rect(harness: &HeadlessHarness, thread_id: &str) -> floem::kurbo::Rect {
+        let id = find(harness.root_id(), &format!("inline-card:{thread_id}")).expect("the card is in the layer");
+        harness.get_layout_rect(id)
+    }
+
+    #[test]
+    fn a_thread_in_the_open_file_reserves_rows_under_its_lines_and_its_card_sits_on_them() {
+        use crate::review::doc::{CardId, DocRow};
+        let (mut harness, state) = harness();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        assert_eq!(live.doc.get().len(), 120, "the buffer, with a ghost under every rewritten line");
+        assert!(find(harness.root_id(), "inline-card:").is_none(), "no thread, no card");
+
+        // A thread on head lines 5 to 7 arrives, as the backend sends it.
+        // Line 7 is an `fn a`, display line 8; the ghost at 9 is the old
+        // side of the rewritten line 8 after it, not something removed
+        // under line 7, so the card goes between the two.
+        let thread = thread_on("t1", 5, 7, false);
+        let card = CardId::Thread("t1".into());
+        let estimate = crate::review::doc::estimate_rows(&thread, false);
+        state.set_comment_threads(Arc::new(vec![thread]));
+        harness.rebuild();
+        harness.paint();
+        let doc = live.doc.get();
+        assert_eq!(doc.len(), 120 + estimate, "the card's rows were spliced in place");
+        assert_eq!(doc.display_line(8), Some(8));
+        assert_eq!(state.active_file().unwrap().buffer.head_line(8), Some(6));
+        assert_eq!(state.active_file().unwrap().buffer.head_line(9), None, "display line 9 is the ghost");
+        assert_eq!(doc.card_span(&card), Some(9..9 + estimate));
+        for row in 9..9 + estimate {
+            assert_eq!(doc.rows[row], DocRow::Spacer { card: card.clone(), row: row - 9 });
+        }
+        assert_eq!(doc.display_line(9 + estimate), Some(9), "the code goes on under the card");
+        assert_eq!(laid_out_text(&live), doc.text);
+        assert_eq!(viewport.get().y0, 0.0);
+
+        // The card is drawn over its rows: its top is its first spacer
+        // row's, set in by the inset, and its left edge the first code
+        // column's.
+        let rect = card_rect(&harness, "t1");
+        assert_eq!(rect.y0, 9.0 * line_height + crate::theme::CARD_INSET);
+        assert_eq!(rect.x0, crate::theme::CODE_GUTTER_GAP);
+        assert!(rect.height() > line_height, "an open card is more than one row");
+        assert!(!state.is_collapsed(&card), "a thread that is not outdated starts open");
+
+        // Collapsed, the card is one row, and the document is shorter by
+        // the rows the card gave back.
+        state.toggle_card(&card);
+        harness.rebuild();
+        harness.paint();
+        let doc = live.doc.get();
+        assert_eq!(doc.len(), 120 + 1, "shrunk by the difference");
+        assert_eq!(doc.card_span(&card), Some(9..10));
+        assert_eq!(doc.display_line(10), Some(9));
+        assert_eq!(laid_out_text(&live), doc.text);
+        let rect = card_rect(&harness, "t1");
+        assert_eq!(rect.y0, 9.0 * line_height, "a collapsed card takes its row whole");
+        assert_eq!(rect.height(), line_height);
+
+        // The chevron at the row's left opens it again: past the gutter,
+        // the margin, the border and the row's padding, in its slot.
+        let (left, top) = pane_origin();
+        let x = left + crate::theme::GUTTER_WIDTH + rect.x0 + 1.0 + crate::theme::COLLAPSED_CARD_PADDING + crate::theme::CHEVRON_SLOT / 2.0;
+        let y = top + rect.y0 + line_height / 2.0;
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.is_collapsed(&card), "click at ({x}, {y}) over {under:?} did not open the card");
+        assert_eq!(live.doc.get().len(), 120 + estimate);
+        assert_eq!(laid_out_text(&live), live.doc.get().text);
+
+        // The thread going takes its rows with it.
+        state.set_comment_threads(Arc::new(Vec::new()));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(live.doc.get().len(), 120);
+        assert!(find(harness.root_id(), "inline-card:").is_none());
+    }
+
+    #[test]
+    fn a_marker_click_focuses_the_card_and_scrolls_it_into_view_without_opening_the_column() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
+        state.set_comment_threads(Arc::new(vec![thread_on("t1", 5, 7, false)]));
+        harness.rebuild();
+        harness.paint();
+        let card = CardId::Thread("t1".into());
+        // The column opens itself for a file with threads, as it did
+        // before the cards; shut, it stays shut through the click.
+        assert!(state.threads_open.get());
+        state.threads_open.set(false);
+        harness.rebuild();
+        harness.paint();
+
+        // The marker sits in the gutter's slot on the anchor's first line,
+        // head line 5, display line 6, on row 6 of a document with nothing
+        // folded above it.
+        let (left, top) = pane_origin();
+        assert_eq!(live.doc.get().row_of_head(4), Some(6));
+        let (x, y) = (left + 3.0 + 8.0, top + 6.0 * line_height + line_height / 2.0);
+        // The slot is rebuilt when the pointer arrives on its row, so the
+        // pointer settles there before the click, as it would in a hand.
+        harness.pointer_move(x, y);
+        harness.rebuild();
+        harness.paint();
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.focus_card.get(), Some(card.clone()), "click at ({x}, {y}) over {under:?} did not focus the card");
+        assert!(!state.threads_open.get(), "the column is not opened for it");
+        assert_eq!(viewport.get().y0, 0.0, "the card is in view, so nothing scrolled");
+
+        // Scrolled past the card, a click on its marker brings it back
+        // into view with the line above it.
+        harness.scroll_down(left + 300.0, top + 300.0, 40.0 * line_height);
+        harness.rebuild();
+        harness.paint();
+        assert!(viewport.get().y0 > 20.0 * line_height, "the editor did not scroll past the card");
+        state.focus_card.set(Some(card));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(viewport.get().y0, 8.0 * line_height, "the anchor's last line, above the card, is the first row in view");
+    }
+
+    #[test]
+    fn a_split_reserves_the_cards_rows_on_both_sides_and_the_card_spans_them() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let thread = thread_on("t1", 5, 7, false);
+        let estimate = crate::review::doc::estimate_rows(&thread, false);
+        state.set_comment_threads(Arc::new(vec![thread]));
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        // The column opened itself for the thread; shut, the pane is the
+        // rest of the window.
+        state.threads_open.set(false);
+        harness.rebuild();
+        harness.paint();
+        let (left, right) = sides(state);
+        let card = CardId::Thread("t1".into());
+        let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
+        assert_eq!(left_doc.len(), right_doc.len());
+        assert_eq!(right_doc.len(), 90 + estimate);
+        // The split pairs each ghost with its line, so display line 9,
+        // the ghost, is on the next line's row: head line 7 is row 6, and
+        // the card follows it on both sides, before that row, as it is
+        // before the ghost in the stacked layout.
+        assert_eq!(right_doc.row_of_head(6), Some(6));
+        assert_eq!(right_doc.card_span(&card), Some(7..7 + estimate));
+        assert_eq!(left_doc.card_span(&card), right_doc.card_span(&card));
+        assert_eq!(laid_out_text(&left), left_doc.text);
+        assert_eq!(laid_out_text(&right), right_doc.text);
+
+        // The card is over the outer stack, from the base side's first
+        // code column, past its gutter.
+        let rect = card_rect(&harness, "t1");
+        assert_eq!(rect.y0, 7.0 * line_height + crate::theme::CARD_INSET);
+        assert_eq!(rect.x0, crate::theme::GUTTER_WIDTH + crate::theme::CODE_GUTTER_GAP);
+        let (pane_left, _) = pane_origin();
+        assert_eq!(rect.x1, 1400.0 - pane_left - crate::theme::CODE_GUTTER_GAP, "to the right edge, less the margin");
+
+        // Collapsing it shrinks both sides by the difference.
+        state.toggle_card(&card);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(right.doc.get().len(), 90 + 1);
+        assert_eq!(left.doc.get().len(), 90 + 1);
+        assert_eq!(laid_out_text(&left), left.doc.get().text);
+        assert_eq!(laid_out_text(&right), right.doc.get().text);
     }
 }
 

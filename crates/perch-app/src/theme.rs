@@ -277,6 +277,32 @@ pub const REPLY_RULE: f64 = 2.0;
 /// A local thread's border is dashed, so it cannot be taken for a
 /// GitHub comment's.
 pub const THREAD_DASH: [f64; 2] = [4.0, 3.0];
+/// A thread in the column, and inline in the code: the room inside its
+/// border and between its parts. Denser than a Conversation card, since
+/// it sits beside or among the code.
+pub const THREAD_PADDING: f64 = 12.0;
+pub const THREAD_GAP: f64 = 10.0;
+/// The `...` at the end of a thread's first row, and the smaller one on
+/// a collapsed card, whose one row a 22px button would not fit.
+pub const THREAD_MENU: f64 = 22.0;
+pub const COLLAPSED_CARD_MENU: f64 = 18.0;
+/// A card drawn over its spacer rows in the code sits this far inside
+/// its first and last rows, so its border never touches a tinted line
+/// above or a second card below. A collapsed card is one row, which has
+/// no room to spare, and takes its row whole.
+pub const CARD_INSET: f64 = 3.0;
+/// The collapsed card's row: the room at either end, and the pill that
+/// says how many messages follow the first, two pixels shorter than the
+/// strip's count pill so it sits inside the borders.
+pub const COLLAPSED_CARD_PADDING: f64 = 8.0;
+pub const COLLAPSED_CARD_PILL: f64 = 16.0;
+/// The slot the card's chevron sits in, and the glyph inside it, the
+/// sizes the gutter's controls use.
+pub const CHEVRON_SLOT: f64 = 16.0;
+pub const CHEVRON_GLYPH: f64 = 12.0;
+/// How long a card's border stays in the accent after its marker is
+/// clicked.
+pub const CARD_FLASH_MILLIS: u64 = 900;
 /// The box that opens the composer, and the composer in its place.
 pub const ASK_BOX_HEIGHT: f64 = 48.0;
 /// The scope button at the top of the rail, and the Viewed count row

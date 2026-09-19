@@ -2,22 +2,25 @@
 //!
 //! Renders a file exactly as the review view would, as text: the document
 //! the editor draws, with gutter numbers, change bars, the highlight
-//! capture under each token, and a divider where a run of unchanged lines
-//! is folded away. Lets the data path be checked without a window. The
-//! folds are around the changes and the anchors of the item's threads,
-//! less the reveals stored for the file's blob, and none at all when Show
-//! whole is off for the item, all read from the cache the app uses;
-//! `--whole` renders the buffer whole, with nothing folded. `--split`
-//! renders both sides of the split, one after the other, each with its
-//! dividers, and ends in the two row counts, so that the sides being the
-//! same height can be checked by eye and by test.
+//! capture under each token, a divider where a run of unchanged lines is
+//! folded away, and a spacer for each row a thread's card takes. Lets the
+//! data path be checked without a window. The folds are around the
+//! changes and the anchors of the item's threads, less the reveals stored
+//! for the file's blob, and none at all when Show whole is off for the
+//! item; the cards are the item's threads anchored in the file, at their
+//! estimated heights, since nothing has laid them out; all read from the
+//! cache the app uses. `--whole` renders the buffer whole, with nothing
+//! folded and no card. `--split` renders both sides of the split, one
+//! after the other, each with its dividers and spacers, and ends in the
+//! two row counts, so that the sides being the same height can be
+//! checked by eye and by test.
 
 use std::sync::Arc;
 
 use perch_git::{ChangeStatus, Preparer, RepoId, Row, Scope, Store};
 use perch_github::{resolve_token, Cache, Config, GitHub, ItemKind};
 
-use crate::review::doc::{self, Doc, DocRow, Reveals, Tint};
+use crate::review::doc::{self, Card, Doc, DocRow, Reveals, Tint};
 use crate::review::editor::{self, Side};
 use crate::review::model::{folded_from_meta, folded_meta_key, LoadedFile};
 
@@ -119,10 +122,10 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     // The documents as the window would build them, from what the cache
     // holds for the item. A file with no base side is stacked in the
     // window whatever the layout, and here too.
-    let Kept { anchors, reveals, folded } = if whole { Kept::none() } else { kept_for(full_name, number, &file) };
+    let Kept { anchors, reveals, folded, cards } = if whole { Kept::none() } else { kept_for(full_name, number, &file) };
     let folded = folded && !whole;
     let sides = if split {
-        let sides = editor::split_doc(&file, folded, &anchors, &reveals);
+        let sides = editor::split_doc(&file, folded, &anchors, &reveals, &cards);
         if sides.is_none() {
             eprintln!("note: {path} has no base side; the window shows it stacked, and so does this");
         }
@@ -132,7 +135,7 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     };
     let rendered = match sides {
         Some((left, right)) => Rendered::Split(left, right),
-        None => Rendered::Stacked(editor::stacked_doc(&file, folded, &anchors, &reveals)),
+        None => Rendered::Stacked(editor::stacked_doc(&file, folded, &anchors, &reveals, &cards)),
     };
 
     println!("file:     {}", file.path);
@@ -146,6 +149,7 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
         println!("reveals:  {}", reveals_line(&reveals));
         println!("folded:   {}", if folded { "yes" } else { "no, the item's files are shown whole" });
         println!("hidden:   {}", rendered.hidden_lines());
+        println!("cards:    {}", cards.len());
     }
 
     match rendered {
@@ -259,17 +263,20 @@ fn reveals_line(reveals: &Reveals) -> String {
 /// What the cache holds for an item that shapes a file's document: the
 /// head lines its threads are anchored on, the reader's own and GitHub's
 /// review comments, as the window counts them; the reveals stored for the
-/// file's blob; and whether the item's files are folded at all.
+/// file's blob; whether the item's files are folded at all; and the
+/// reader's threads anchored in the file as cards, each at its estimate,
+/// open, since nothing has been collapsed or laid out here.
 struct Kept {
     anchors: Vec<(usize, usize)>,
     reveals: Reveals,
     folded: bool,
+    cards: Vec<Card>,
 }
 
 impl Kept {
     /// Nothing kept: folded around the changes alone, as a new item is.
     fn none() -> Self {
-        Self { anchors: Vec::new(), reveals: Reveals::default(), folded: true }
+        Self { anchors: Vec::new(), reveals: Reveals::default(), folded: true, cards: Vec::new() }
     }
 }
 
@@ -323,5 +330,6 @@ fn kept_in(db: &std::path::Path, full_name: &str, number: u64, file: &LoadedFile
             .collect()
     };
     let folded = folded_from_meta(cache.meta(&folded_meta_key(&item.id)).map_err(|e| e.to_string())?.as_deref());
-    Ok(Some(Kept { anchors, reveals, folded }))
+    let cards = crate::review::model::cards_of(&threads, file, &Default::default(), &Default::default());
+    Ok(Some(Kept { anchors, reveals, folded, cards }))
 }

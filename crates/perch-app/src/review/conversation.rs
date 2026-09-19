@@ -446,18 +446,23 @@ mod tests {
         let view = Stack::vertical((
             crate::review::threads::messages_view(app, state, backend.clone(), "t1".into(), ThreadFace::Column),
             crate::review::threads::messages_view(app, state, backend.clone(), "t1".into(), ThreadFace::Card),
+            crate::review::threads::messages_view(app, state, backend.clone(), "t1".into(), ThreadFace::Inline),
             crate::review::threads::follow_up(app, state, backend.clone(), "t1".into(), ThreadFace::Column),
             crate::review::threads::follow_up(app, state, backend.clone(), "t1".into(), ThreadFace::Card),
-            crate::review::cards::thread_card(app, state, backend, open_file, thread()),
+            crate::review::threads::follow_up(app, state, backend.clone(), "t1".into(), ThreadFace::Inline),
+            crate::review::cards::thread_card(app, state, backend.clone(), open_file.clone(), thread()),
+            crate::review::threads::thread_card(app, state, backend, open_file, thread(), ThreadFace::Inline),
         ));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 1200.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 1600.0);
         harness.rebuild();
         harness.paint();
         let mut all = Vec::new();
         names(harness.root_id(), &mut all);
         let text = all.join("\n");
-        assert_eq!(text.matches("Read 1 file, ran 1 command").count(), 6, "each face folds the run's steps to one line");
-        assert_eq!(text.matches("Follow up…").count(), 3);
+        assert_eq!(text.matches("Read 1 file, ran 1 command").count(), 10, "each face folds the run's steps to one line");
+        assert_eq!(text.matches("Follow up…").count(), 5);
+        // The inline card has no anchor label: it is under its lines.
+        assert_eq!(text.matches("src/manifest.rs:41").count(), 1, "Conversation's card names the lines; the inline one does not");
     }
 
     fn key_a() -> floem::event::Event {

@@ -824,7 +824,7 @@ fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> i
             .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_MUTED).margin_left(6.0).text_ellipsis().min_width(0.0)),
         local_chip(),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        threads::thread_menu(state, thread.id.clone()),
+        threads::thread_menu(state, thread.id.clone(), theme::THREAD_MENU),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0))
 }

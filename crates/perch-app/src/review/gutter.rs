@@ -39,7 +39,7 @@ use perch_git::Row;
 
 use crate::icons::{self, SidebarIcon};
 use crate::review::cards::tip;
-use crate::review::doc::{self, Doc, DocRow, Run, Tint};
+use crate::review::doc::{self, CardId, Doc, DocRow, Run, Tint};
 use crate::review::editor::Side;
 use crate::review::model::{LoadedFile, ReviewState};
 use crate::state::AppState;
@@ -471,16 +471,23 @@ fn anchor_slot(
         },
         move |(thread, github, hovered)| match (thread, github) {
             // A review comment from GitHub on this line, hollow where a
-            // thread of the reader's own is solid. Click opens the column,
-            // where it is listed under On GitHub.
-            (None, Some(_)) => Container::new(
+            // thread of the reader's own is solid. Click focuses its
+            // card, and opens the column, where it is listed under On
+            // GitHub, until the card is drawn in the code.
+            (None, Some(id)) => Container::new(
                 sidebar_glyph(SidebarIcon::ThreadHollow, theme::FG_MUTED).style(|s| s.size(12.0, 12.0)),
             )
-            .on_event_stop(el::Click, move |_, _| state.show_threads())
+            .on_event_stop(el::Click, move |_, _| {
+                state.focus_card.set(Some(CardId::GitHub(id)));
+                state.show_threads();
+            })
             .style(|s| {
                 crate::ui::widgets::clickable(s).size(16.0, 16.0).items_center().justify_center()
             })
             .into_any(),
+            // Click scrolls the editor to the thread's card and flashes
+            // it, and the column's card for it flashes too if the column
+            // is open; it is not opened for this.
             (Some((id, outdated)), _) => Container::new(
                 sidebar_glyph(
                     SidebarIcon::Thread,
@@ -488,7 +495,7 @@ fn anchor_slot(
                 )
                 .style(|s| s.size(12.0, 12.0)),
             )
-            .on_event_stop(el::Click, move |_, _| state.focus_thread.set(Some(id.clone())))
+            .on_event_stop(el::Click, move |_, _| state.focus_card.set(Some(CardId::Thread(id.clone()))))
             .style(|s| {
                 crate::ui::widgets::clickable(s).size(16.0, 16.0).items_center().justify_center()
             })

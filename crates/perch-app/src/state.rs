@@ -189,7 +189,7 @@ impl AppState {
             Event::CommentThreads { item_id, threads } => {
                 let open = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
                 if open.as_deref() == Some(item_id.as_str()) {
-                    review.comment_threads.set(Arc::new(threads));
+                    review.set_comment_threads(Arc::new(threads));
                 }
             }
             Event::AgentStep { run_id, thread_id, event } => {
