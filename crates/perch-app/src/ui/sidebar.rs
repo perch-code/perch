@@ -109,17 +109,27 @@ fn repos_nav(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl I
 }
 
 /// The search box and the filter button.
+///
+/// The box's edge is at x=10, four inside the row cards' edge, and its glyph
+/// sits at x=16 on the column the chevrons and row glyphs share. The row has
+/// no padding below, so Priority's header sits its own 14 under the box the
+/// way every header sits under what is above it.
 fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+    use floem::style::Position;
+
     let input = TextInput::new(state.item_query)
         .placeholder("Search")
         .on_event_cont(el::FocusGained, move |_, _| state.search_focused.set(true))
         .on_event_cont(el::FocusLost, move |_, _| state.search_focused.set(false))
         .style(|s| {
-            s.flex_grow(1.0_f32)
+            s.width_full()
                 .min_width(0.0)
                 .height(28.0)
                 .font_size(theme::TEXT_META)
-                .padding_horiz(8.0)
+                // The glyph takes the left padding, and the text starts at
+                // x=42 with the row titles: the row's 10, the border, and 31.
+                .padding_left(31.0)
+                .padding_right(6.0)
                 .background(theme::CANVAS)
                 .border(1.0)
                 .border_color(theme::BORDER)
@@ -136,9 +146,20 @@ fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             id.request_focus();
         }
     });
+    // The glyph is laid over the box rather than beside the text, the way
+    // the filter button's is, and lets the pointer through: a click on it
+    // is a click in the box. Six in from the box's edge puts it at x=16.
+    let glyph = sidebar_glyph(SidebarIcon::Search, theme::FG_SUBTLE).style(|s| {
+        s.size(14.0, 14.0)
+            .position(Position::Absolute)
+            .inset_left(6.0)
+            .pointer_events_none()
+    });
+    let search_box = Stack::horizontal((input, glyph))
+        .style(|s| s.items_center().flex_grow(1.0_f32).min_width(0.0));
 
-    Stack::horizontal((input, filter_button(state, backend)))
-        .style(|s| s.items_center().width_full().gap(6.0).padding_horiz(12.0).padding_vert(6.0))
+    Stack::horizontal((search_box, filter_button(state, backend)))
+        .style(|s| s.items_center().width_full().gap(6.0).padding_horiz(10.0).padding_top(6.0))
 }
 
 /// The filter menu, in the shape of a settings menu: one row per setting,
@@ -328,7 +349,14 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
     Stack::vertical((
         // Priority
         Stack::vertical((
-            section_header("Priority".into(), 0, None),
+            // The header carries its count like every other header; it is
+            // the number that matters, and it changes, so the header is
+            // rebuilt on it.
+            dyn_container(
+                move || state.item_sections().priority.len(),
+                |count| section_header("Priority".into(), count, None).into_any(),
+            )
+            .style(|s| s.width_full()),
             dyn_stack(
                 move || state.item_sections().priority,
                 row_key,
@@ -441,11 +469,15 @@ fn group_section(
     .style(|s| s.flex_col().width_full())
 }
 
+/// A line under a header that has nothing to list. It hangs from the
+/// header's title at x=31, not from its chevron slot at 16, so it reads as
+/// belonging to the header above.
 fn quiet_line(text: &'static str) -> impl IntoView {
     Label::derived(move || text.to_string()).style(|s| {
         s.font_size(theme::TEXT_META)
             .color(theme::FG_SUBTLE)
-            .padding_horiz(16.0)
+            .padding_left(31.0)
+            .padding_right(16.0)
             .padding_vert(6.0)
             .selectable(false)
     })

@@ -152,6 +152,8 @@ fn with_thousands(n: usize) -> String {
     out
 }
 
+/// The refresh glyph, in a square at the one radius everything else on
+/// the sidebar's side is drawn at.
 fn refresh_button(backend: std::rc::Rc<Backend>) -> impl IntoView {
     Container::new(sidebar_glyph(SidebarIcon::Refresh, theme::FG_MUTED))
         .on_event_stop(el::Click, move |_, _| backend.refresh())
@@ -159,7 +161,7 @@ fn refresh_button(backend: std::rc::Rc<Backend>) -> impl IntoView {
             s.size(22.0, 22.0)
                 .items_center()
                 .justify_center()
-                .border_radius(4.0)
+                .border_radius(theme::RADIUS)
                 .hover(|s| s.background(theme::CANVAS_HOVER).cursor(CursorStyle::Pointer))
         })
 }

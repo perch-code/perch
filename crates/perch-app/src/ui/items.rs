@@ -17,7 +17,7 @@ use floem::menu::Menu;
 use floem::muda::accelerator::{Accelerator, Code as KeyCode};
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::CursorStyle;
+use floem::style::{CursorStyle, Style};
 use floem::text::FontWeight;
 use floem::views::{Container, Decorators, Empty, Label, Stack, TextInput, dyn_container};
 use perch_github::{CheckStatus, Item, ItemSubject, SubjectState};
@@ -273,7 +273,8 @@ fn chips(state: AppState, item: &Item) -> impl IntoView {
                                 .color(color)
                                 .border(1.0)
                                 .border_color(color.with_alpha(0.4))
-                                .border_radius(8.0)
+                                // A pill, at the radius the review's chips use.
+                                .border_radius(theme::CHIP_HEIGHT / 2.0)
                                 .padding_horiz(5.0)
                                 .margin_left(5.0)
                                 .selectable(false)
@@ -542,7 +543,9 @@ fn rename_box(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoVie
                 .background(theme::CANVAS)
                 .border(1.0)
                 .border_color(theme::ACCENT)
-                .border_radius(4.0)
+                // The one radius: the box stands in for a title inside a
+                // row drawn at it, and a tighter one read as a foreign control.
+                .border_radius(theme::RADIUS)
         });
     let id = input.view_id();
     // Take the keyboard once the box is in the tree.
@@ -600,16 +603,22 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
 
 /// A section heading in the sidebar: a name, a count in the muted colour,
 /// and a chevron when it can fold.
+///
+/// The chevron's slot is reserved on every header, so Priority and Pinned,
+/// which do not fold, keep their titles on the line the repository titles
+/// use (x=31: 16 of padding, the 10px chevron and its 5 of margin), and the
+/// chevron column sits at x=16 over the row glyphs.
 pub fn section_header(title: String, count: usize, collapsed: Option<bool>) -> impl IntoView {
+    let slot = |s: Style| s.size(10.0, 10.0).margin_right(5.0).flex_shrink(0.0_f32);
     Stack::horizontal((
         match collapsed {
             Some(c) => sidebar_glyph(
                 if c { SidebarIcon::ChevronRight } else { SidebarIcon::ChevronDown },
                 theme::FG_SUBTLE,
             )
-            .style(|s| s.size(10.0, 10.0).margin_right(5.0))
+            .style(slot)
             .into_any(),
-            None => Empty::new().into_any(),
+            None => Empty::new().style(slot).into_any(),
         },
         Label::derived(move || title.clone()).style(|s| {
             s.font_size(theme::TEXT_SECTION)

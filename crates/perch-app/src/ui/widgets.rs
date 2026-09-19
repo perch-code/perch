@@ -263,7 +263,7 @@ pub fn centered_message(
                     .margin_bottom(14.0)
             }),
             Label::derived(title).style(|s| {
-                s.font_size(15.0)
+                s.font_size(theme::TEXT_TITLE)
                     .font_weight(FontWeight::SEMI_BOLD)
                     .color(theme::FG)
                     .margin_bottom(6.0)
