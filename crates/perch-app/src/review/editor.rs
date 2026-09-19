@@ -1,12 +1,17 @@
 //! The code pane: gutter, editor, symbol panel, and the states that stand in
 //! for them.
 //!
-//! Two layouts. Stacked is one editor over the unified buffer, the head with
-//! the removed lines spliced in. Split is two editors, base on the left and
-//! head on the right, each over a document with one line per aligned row so
-//! the two are the same height and a row on one side is the row beside it
-//! on the other. The right editor owns the scroll position and the left
-//! follows it; everything that reads the cursor is wired to the right one.
+//! Two layouts. Stacked is one editor over the document built from the
+//! unified buffer, the head with the removed lines spliced in. Split is two
+//! editors, base on the left and head on the right, each over a document
+//! with one line per aligned row so the two are the same height and a row
+//! on one side is the row beside it on the other. The right editor owns the
+//! scroll position and the left follows it; everything that reads the
+//! cursor is wired to the right one.
+//!
+//! Every editor's document is held live on the review state, the handle
+//! the editor lays out from beside the row table over it, so that what the
+//! editor shows can be edited in place when the document changes under it.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,13 +27,13 @@ use floem::views::scroll::ScrollCustomStyle;
 use floem::views::{
     Container, Decorators, Empty, Label, ScrollExt, Stack, TextEditor, dyn_container, text_editor,
 };
-use perch_git::LineStatus;
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
+use crate::review::doc::{self, Doc};
 use crate::review::gutter::{diff_gutter, side_gutter};
 use crate::review::hover;
-use crate::review::model::{Layout, LoadedFile, ReviewState};
+use crate::review::model::{Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState};
 use crate::review::references;
 use crate::review::styling::PerchStyling;
 use crate::review::OpenFile;
@@ -60,23 +65,30 @@ pub fn editor_pane(
     Stack::vertical((
         dyn_container(
             // The epoch changes whenever the active file or its content
-            // changes, and the layout when the toggle is clicked. Rebuilding
-            // beats mutating: the document is read-only, and a fresh editor
-            // also resets layout caches cleanly.
+            // changes, and the layout when the toggle is clicked. Another
+            // file or another layout is another editor: a fresh one resets
+            // the layout caches cleanly, and nothing of the old is worth
+            // keeping. What changes under the one file is for editing the
+            // document in place, through the live documents held below.
             move || (state.active.get(), state.editor_epoch.get(), state.layout.get()),
-            move |(path, epoch, layout)| match path {
-                None => centered_message(
-                    SidebarIcon::Search,
-                    || "No file open".to_string(),
-                    || "Pick a file from the list to read it.".to_string(),
-                )
-                .into_any(),
-                Some(path) => match state.file(&path) {
-                    Some(file) => {
-                        code_view(app, state, file, epoch, layout, code_backend.clone()).into_any()
-                    }
-                    None => loading_view(path).into_any(),
-                },
+            move |(path, epoch, layout)| {
+                // Whatever editor stood here is going with its documents;
+                // the one built below registers its own.
+                state.docs.set(None);
+                match path {
+                    None => centered_message(
+                        SidebarIcon::Search,
+                        || "No file open".to_string(),
+                        || "Pick a file from the list to read it.".to_string(),
+                    )
+                    .into_any(),
+                    Some(path) => match state.file(&path) {
+                        Some(file) => {
+                            code_view(app, state, file, epoch, layout, code_backend.clone()).into_any()
+                        }
+                        None => loading_view(path).into_any(),
+                    },
+                }
             },
         )
         .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full().background(theme::CODE_BG)),
@@ -114,16 +126,22 @@ fn stacked_view(
     epoch: u64,
     backend: Rc<Backend>,
 ) -> impl IntoView {
-    let editor = code_editor(file.buffer.text.clone(), PerchStyling::new(file.clone(), epoch));
-    let rows = Rows::Unified(file.clone());
-    wire_cursor(state, backend, rows.clone(), editor.editor().cursor);
-    wire_jump(state, rows, editor.editor().scroll_to, epoch);
+    let built = doc::build(&file.buffer, &[], &[]);
+    let text = built.text.clone();
+    let doc = RwSignal::new(Arc::new(built));
+    let editor = code_editor(text, PerchStyling::new(file.clone(), doc, epoch));
+    state.docs.set(Some(LiveDocs {
+        epoch,
+        layout: LiveLayout::Stacked(LiveDoc { handle: editor.doc(), doc }),
+    }));
+    wire_cursor(state, backend, file.clone(), doc, editor.editor().cursor);
+    wire_jump(state, doc, editor.editor().scroll_to, epoch);
 
     // The gutter tracks the same signals the editor lays out from, so the two
     // stay aligned without any scroll plumbing of their own.
     let viewport = editor.editor().viewport;
     let scroll_delta = editor.editor().scroll_delta;
-    Stack::horizontal((diff_gutter(state, app, file, viewport, scroll_delta), editor))
+    Stack::horizontal((diff_gutter(state, app, file, doc, viewport, scroll_delta), editor))
         .style(|s| s.size_full().min_height(0.0))
 }
 
@@ -137,30 +155,37 @@ fn split_view(
     app: AppState,
     state: ReviewState,
     file: Arc<LoadedFile>,
-    split: Split,
+    split: (Doc, Doc),
     epoch: u64,
     backend: Rc<Backend>,
 ) -> impl IntoView {
-    let (left_doc, right_doc) = (Arc::new(split.left), Arc::new(split.right));
+    let (left_text, right_text) = (split.0.text.clone(), split.1.text.clone());
+    let (left_doc, right_doc) = (RwSignal::new(Arc::new(split.0)), RwSignal::new(Arc::new(split.1)));
     let line_height = theme::CODE_LINE_HEIGHT as f64;
 
     // Distinct cache keys, in case the two ever share a layout cache.
     let left = code_editor(
-        left_doc.text.clone(),
-        PerchStyling::side(file.clone(), Side::Base, left_doc.clone(), epoch.wrapping_mul(2)),
+        left_text,
+        PerchStyling::side(file.clone(), Side::Base, left_doc, epoch.wrapping_mul(2)),
     )
     .style(|s| {
         s.pointer_events_none()
             .custom_style_class(|s: ScrollCustomStyle| s.hide_bars(true))
     });
     let right = code_editor(
-        right_doc.text.clone(),
-        PerchStyling::side(file.clone(), Side::Head, right_doc.clone(), epoch.wrapping_mul(2) + 1),
+        right_text,
+        PerchStyling::side(file.clone(), Side::Head, right_doc, epoch.wrapping_mul(2) + 1),
     );
+    state.docs.set(Some(LiveDocs {
+        epoch,
+        layout: LiveLayout::Split {
+            left: LiveDoc { handle: left.doc(), doc: left_doc },
+            right: LiveDoc { handle: right.doc(), doc: right_doc },
+        },
+    }));
 
-    let rows = Rows::Head(file.clone(), right_doc.clone());
-    wire_cursor(state, backend, rows.clone(), right.editor().cursor);
-    wire_jump(state, rows, right.editor().scroll_to, epoch);
+    wire_cursor(state, backend, file.clone(), right_doc, right.editor().cursor);
+    wire_jump(state, right_doc, right.editor().scroll_to, epoch);
 
     let (left_viewport, left_scroll_to, left_delta) =
         (left.editor().viewport, left.editor().scroll_to, left.editor().scroll_delta);
@@ -236,88 +261,29 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
         })
 }
 
-/// What the editor that takes the cursor is laying out: the unified buffer,
-/// or the head side of a split. Both are one line per row; they differ in
-/// which display line of the buffer a row is, and the rest of the view
-/// speaks display lines.
-#[derive(Clone)]
-enum Rows {
-    Unified(Arc<LoadedFile>),
-    Head(Arc<LoadedFile>, Arc<SideDoc>),
-}
-
-impl Rows {
-    fn file(&self) -> &LoadedFile {
-        match self {
-            Rows::Unified(file) | Rows::Head(file, _) => file,
-        }
-    }
-
-    fn text(&self) -> &str {
-        match self {
-            Rows::Unified(file) => &file.buffer.text,
-            Rows::Head(_, doc) => &doc.text,
-        }
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            Rows::Unified(file) => file.buffer.len(),
-            Rows::Head(_, doc) => doc.rows.len(),
-        }
-    }
-
-    /// The display line a row is. `None` for a filler row, which is no
-    /// line of anything.
-    fn display_line(&self, row: usize) -> Option<usize> {
-        match self {
-            Rows::Unified(_) => Some(row),
-            Rows::Head(file, doc) => file.buffer.display_line(doc.rows.get(row)?.line?),
-        }
-    }
-
-    /// Where a byte offset lands in the head file, as line and column, if
-    /// it lands in it at all: a ghost or a filler is nowhere.
-    fn head_position(&self, offset: usize) -> Option<(usize, usize)> {
-        match self {
-            Rows::Unified(file) => hover::head_position(file, offset),
-            Rows::Head(_, doc) => {
-                let (row, column) = hover::line_col_of_offset(&doc.text, offset);
-                Some((doc.rows.get(row)?.line?, column))
-            }
-        }
-    }
-
-    /// The row a head line is on.
-    fn row_of_head(&self, head_line: usize) -> Option<usize> {
-        match self {
-            Rows::Unified(file) => file.buffer.display_line(head_line),
-            Rows::Head(_, doc) => doc.rows.iter().position(|r| r.line == Some(head_line)),
-        }
-    }
-
-    /// The display line nearest a row, looking down the file first, for a
-    /// cursor that lands on a filler.
-    fn nearest_display_line(&self, row: usize) -> Option<usize> {
-        (row..self.len())
-            .find_map(|r| self.display_line(r))
-            .or_else(|| (0..row).rev().find_map(|r| self.display_line(r)))
-    }
-}
-
 /// Clicking a symbol asks the language server about it, and the selection
 /// becomes the lines a thread would be anchored on. Reading the editor's own
 /// cursor rather than the pointer means floem's hit-testing does the
-/// coordinate work.
-fn wire_cursor(state: ReviewState, backend: Rc<Backend>, rows: Rows, cursor: RwSignal<Cursor>) {
+/// coordinate work. The document is the one the editor that owns the
+/// cursor is laying out: the stacked one, or the head side of a split. It
+/// is read as it is when the cursor moves, not as it was when the editor
+/// was built, so a row is right after the document has been edited.
+fn wire_cursor(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    file: Arc<LoadedFile>,
+    doc: RwSignal<Arc<Doc>>,
+    cursor: RwSignal<Cursor>,
+) {
     Effect::new(move |previous: Option<usize>| {
         let offset = cursor.with(|c| c.offset());
         if previous == Some(offset) {
             return offset;
         }
+        let doc = doc.get_untracked();
 
-        let (row, _) = hover::line_col_of_offset(rows.text(), offset);
-        if let Some(display_line) = rows.nearest_display_line(row) {
+        let (row, _) = hover::line_col_of_offset(doc.text(), offset);
+        if let Some(display_line) = doc.nearest_display_line(row) {
             state.cursor_line.set(display_line);
         }
         state.hover_text.set(None);
@@ -331,17 +297,17 @@ fn wire_cursor(state: ReviewState, backend: Rc<Backend>, rows: Rows, cursor: RwS
             })
         });
         if lo != usize::MAX {
-            let (first_row, _) = hover::line_col_of_offset(rows.text(), lo);
-            let (last_row, _) = hover::line_col_of_offset(rows.text(), hi);
-            let first = (first_row..=last_row).find_map(|r| rows.display_line(r));
-            let last = (first_row..=last_row).rev().find_map(|r| rows.display_line(r));
+            let (first_row, _) = hover::line_col_of_offset(doc.text(), lo);
+            let (last_row, _) = hover::line_col_of_offset(doc.text(), hi);
+            let first = (first_row..=last_row).find_map(|r| doc.display_line(r));
+            let last = (first_row..=last_row).rev().find_map(|r| doc.display_line(r));
             state.selection.set(first.zip(last));
         }
 
-        if let Some((line, column)) = rows.head_position(offset) {
+        if let Some((line, column)) = doc.head_position(offset) {
             state.last_position.set(Some((line, column)));
             let token = state.next_token();
-            backend.hover(token, &rows.file().path, line as u32, column as u32);
+            backend.hover(token, &file.path, line as u32, column as u32);
         } else {
             state.last_position.set(None);
         }
@@ -353,7 +319,7 @@ fn wire_cursor(state: ReviewState, backend: Rc<Backend>, rows: Rows, cursor: RwS
 /// scrolled to. The head line has to be translated through the row table
 /// first, because the spliced diff shifts everything below a removal, and a
 /// split's fillers do the same.
-fn wire_jump(state: ReviewState, rows: Rows, scroll_to: RwSignal<Option<Vec2>>, epoch: u64) {
+fn wire_jump(state: ReviewState, doc: RwSignal<Arc<Doc>>, scroll_to: RwSignal<Option<Vec2>>, epoch: u64) {
     Effect::new(move |_| {
         let Some(head_line) = state.jump_to_line.get() else {
             return;
@@ -366,7 +332,7 @@ fn wire_jump(state: ReviewState, rows: Rows, scroll_to: RwSignal<Option<Vec2>>, 
             return;
         }
         state.jump_to_line.set(None);
-        let row = rows.row_of_head(head_line).unwrap_or(head_line);
+        let row = doc.with_untracked(|d| d.row_of_head(head_line)).unwrap_or(head_line);
         // Land the target a few lines below the top rather than flush
         // against it, so its context is visible.
         let target = row.saturating_sub(4) as f64;
@@ -386,122 +352,16 @@ pub enum Side {
     Head,
 }
 
-/// How a split row is painted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tint {
-    Plain,
-    Added,
-    Modified,
-    Deleted,
-    /// The other side has a line here and this one does not.
-    Filler,
-}
-
-/// One row of a split side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SideRow {
-    /// The line of this side's file, zero based; `None` on a filler.
-    pub line: Option<usize>,
-    pub tint: Tint,
-}
-
-/// One side of a split as the editor lays it out: a document with one line
-/// per aligned row, blank on the fillers, and what each row is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SideDoc {
-    pub text: String,
-    pub rows: Vec<SideRow>,
-}
-
-impl SideDoc {
-    fn with_capacity(rows: usize) -> Self {
-        Self { text: String::new(), rows: Vec::with_capacity(rows) }
-    }
-
-    fn push(&mut self, line: Option<usize>, text: &str, tint: Tint) {
-        if !self.rows.is_empty() {
-            self.text.push('\n');
-        }
-        self.text.push_str(text);
-        self.rows.push(SideRow { line, tint });
-    }
-
-    fn finish(mut self) -> Self {
-        if !self.rows.is_empty() {
-            self.text.push('\n');
-        }
-        self
-    }
-}
-
-/// The two sides of a split, the same number of rows each.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Split {
-    pub left: SideDoc,
-    pub right: SideDoc,
-}
-
-/// Lay the two sides out row for row along `alignment`, whose rows are
-/// one-based base and head lines with `None` where a side has nothing.
-///
-/// The left is the old file, so a line of it that the head replaced or
-/// dropped is tinted as removed, whichever it was; the right carries the
-/// head's own status, so a rewritten line and a new one keep the colours
-/// the stacked view gives them. `status` is per head line.
-pub fn split_docs(
-    alignment: &[(Option<usize>, Option<usize>)],
-    base: &str,
-    head: &str,
-    status: &[LineStatus],
-) -> Split {
-    let base_lines: Vec<&str> = base.lines().collect();
-    let head_lines: Vec<&str> = head.lines().collect();
-    let mut left = SideDoc::with_capacity(alignment.len());
-    let mut right = SideDoc::with_capacity(alignment.len());
-
-    for &(base_line, head_line) in alignment {
-        let base_line = base_line.and_then(|n| n.checked_sub(1));
-        let head_line = head_line.and_then(|n| n.checked_sub(1));
-        let head_status = head_line.map(|h| status.get(h).copied().unwrap_or(LineStatus::Unchanged));
-
-        let left_tint = match (base_line, head_status) {
-            (None, _) => Tint::Filler,
-            (Some(_), None) => Tint::Deleted,
-            (Some(_), Some(LineStatus::Modified)) => Tint::Deleted,
-            (Some(_), Some(_)) => Tint::Plain,
-        };
-        let right_tint = match head_status {
-            None => Tint::Filler,
-            Some(LineStatus::Added) => Tint::Added,
-            Some(LineStatus::Modified) => Tint::Modified,
-            Some(LineStatus::Unchanged) => Tint::Plain,
-        };
-
-        left.push(base_line, base_line.and_then(|b| base_lines.get(b).copied()).unwrap_or(""), left_tint);
-        right.push(head_line, head_line.and_then(|h| head_lines.get(h).copied()).unwrap_or(""), right_tint);
-    }
-
-    Split { left: left.finish(), right: right.finish() }
-}
-
 /// The split for a loaded file, or `None` when there is no base to put on
-/// the left. The head text and its statuses come back out of the unified
-/// buffer, which has every head line in order with the ghosts between.
-fn split_of(file: &LoadedFile) -> Option<Split> {
+/// the left. The head's text and statuses, and where each head line is
+/// displayed, come out of the unified buffer, which has every head line in
+/// order with the ghosts between.
+fn split_of(file: &LoadedFile) -> Option<(Doc, Doc)> {
     let base = file.base_buffer.as_ref()?;
     if file.truncated || file.alignment.is_empty() {
         return None;
     }
-    let mut head = String::with_capacity(file.buffer.text.len());
-    let mut status = Vec::with_capacity(file.buffer.len());
-    for (text, row) in file.buffer.text.lines().zip(&file.buffer.rows) {
-        if let Some(s) = row.status() {
-            head.push_str(text);
-            head.push('\n');
-            status.push(s);
-        }
-    }
-    Some(split_docs(&file.alignment, &base.text, &head, &status))
+    Some(doc::build_split(&file.alignment, &base.text, &file.buffer, &[], &[]))
 }
 
 /// What the language server says about the symbol under the cursor.
@@ -624,101 +484,9 @@ fn loading_view(path: String) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perch_git::file_diff;
 
-    /// Both sides of a split for a base and a head, as the view builds them.
-    fn split(base: &str, head: &str) -> Split {
-        let diff = file_diff(base, head);
-        let alignment = perch_git::alignment(&diff, base, head);
-        split_docs(&alignment, base, head, &diff.line_status)
-    }
-
-    fn lines(doc: &SideDoc) -> Vec<&str> {
+    fn lines(doc: &Doc) -> Vec<&str> {
         doc.text.lines().collect()
-    }
-
-    fn tints(doc: &SideDoc) -> Vec<Tint> {
-        doc.rows.iter().map(|r| r.tint).collect()
-    }
-
-    #[test]
-    fn the_two_sides_have_the_same_rows_and_an_unchanged_file_is_untinted() {
-        let s = split("a\nb\nc\n", "a\nb\nc\n");
-        assert_eq!(lines(&s.left), lines(&s.right));
-        assert_eq!(s.left.rows.len(), s.right.rows.len());
-        assert!(tints(&s.left).iter().all(|t| *t == Tint::Plain));
-        assert!(tints(&s.right).iter().all(|t| *t == Tint::Plain));
-        assert_eq!(s.left.rows[2].line, Some(2));
-        assert_eq!(s.right.rows[2].line, Some(2));
-    }
-
-    #[test]
-    fn an_added_line_leaves_a_filler_on_the_left() {
-        let s = split("a\nb\n", "a\nx\nb\n");
-        assert_eq!(lines(&s.left), vec!["a", "", "b"]);
-        assert_eq!(lines(&s.right), vec!["a", "x", "b"]);
-        assert_eq!(tints(&s.left), vec![Tint::Plain, Tint::Filler, Tint::Plain]);
-        assert_eq!(tints(&s.right), vec![Tint::Plain, Tint::Added, Tint::Plain]);
-        assert_eq!(s.left.rows[1].line, None, "a filler is no line of the base");
-        assert_eq!(s.left.rows[2].line, Some(1), "the base's second line is on the third row");
-    }
-
-    #[test]
-    fn a_removed_line_leaves_a_filler_on_the_right() {
-        let s = split("a\nb\nc\n", "a\nc\n");
-        assert_eq!(lines(&s.left), vec!["a", "b", "c"]);
-        assert_eq!(lines(&s.right), vec!["a", "", "c"]);
-        assert_eq!(tints(&s.left), vec![Tint::Plain, Tint::Deleted, Tint::Plain]);
-        assert_eq!(tints(&s.right), vec![Tint::Plain, Tint::Filler, Tint::Plain]);
-        assert_eq!(s.right.rows[1].line, None);
-        assert_eq!(s.right.rows[2].line, Some(1));
-    }
-
-    #[test]
-    fn a_rewritten_line_is_old_on_the_left_and_new_on_the_right() {
-        let s = split("a\nb\nc\n", "a\nB\nc\n");
-        assert_eq!(lines(&s.left), vec!["a", "b", "c"]);
-        assert_eq!(lines(&s.right), vec!["a", "B", "c"]);
-        assert_eq!(tints(&s.left)[1], Tint::Deleted);
-        assert_eq!(tints(&s.right)[1], Tint::Modified);
-    }
-
-    #[test]
-    fn a_modification_that_grew_pairs_what_it_can_and_fills_the_rest() {
-        // One line became three: the first is beside the old one, the other
-        // two sit against fillers.
-        let s = split("a\nb\nc\n", "a\nB\nB2\nB3\nc\n");
-        assert_eq!(lines(&s.left), vec!["a", "b", "", "", "c"]);
-        assert_eq!(lines(&s.right), vec!["a", "B", "B2", "B3", "c"]);
-        assert_eq!(tints(&s.left), vec![Tint::Plain, Tint::Deleted, Tint::Filler, Tint::Filler, Tint::Plain]);
-        assert_eq!(
-            tints(&s.right),
-            vec![Tint::Plain, Tint::Modified, Tint::Modified, Tint::Modified, Tint::Plain]
-        );
-    }
-
-    #[test]
-    fn every_line_of_each_side_appears_once_in_order() {
-        let base = "one\ntwo\nthree\nfour\nfive\n";
-        let head = "one\n2\nthree\nfour and a half\nfive\nsix\n";
-        let s = split(base, head);
-        let left: Vec<&str> = lines(&s.left).into_iter().filter(|l| !l.is_empty()).collect();
-        let right: Vec<&str> = lines(&s.right).into_iter().filter(|l| !l.is_empty()).collect();
-        assert_eq!(left, base.lines().collect::<Vec<_>>());
-        assert_eq!(right, head.lines().collect::<Vec<_>>());
-        let left_lines: Vec<usize> = s.left.rows.iter().filter_map(|r| r.line).collect();
-        assert_eq!(left_lines, (0..5).collect::<Vec<_>>());
-        let right_lines: Vec<usize> = s.right.rows.iter().filter_map(|r| r.line).collect();
-        assert_eq!(right_lines, (0..6).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn the_documents_end_with_a_newline_like_the_unified_buffer() {
-        let s = split("a\n", "a\nb\n");
-        assert_eq!(s.left.text, "a\n\n");
-        assert_eq!(s.right.text, "a\nb\n");
-        assert_eq!(s.left.text.lines().count(), s.left.rows.len());
-        assert_eq!(s.right.text.lines().count(), s.right.rows.len());
     }
 
     #[test]
@@ -761,30 +529,34 @@ mod tests {
             false,
             perch_git::Scope::Branch,
         );
-        let split = split_of(&changed).expect("a changed file has both sides");
-        assert_eq!(lines(&split.left), vec!["fn a() {}", ""]);
-        assert_eq!(lines(&split.right), vec!["fn a() {}", "fn b() {}"]);
+        let (left, right) = split_of(&changed).expect("a changed file has both sides");
+        assert_eq!(lines(&left), vec!["fn a() {}", ""]);
+        assert_eq!(lines(&right), vec!["fn a() {}", "fn b() {}"]);
     }
 
     #[test]
-    fn the_head_side_maps_rows_back_to_display_lines() {
-        // base a b c d; head a B c: b rewritten, d removed.
-        let file = Arc::new(crate::backend::build_loaded_file(
+    fn the_head_side_of_a_loaded_file_maps_rows_back_to_display_lines() {
+        // base a b c d; head a B c: b rewritten, d removed. The unified
+        // buffer is a, ghost(b), B, c, ghost(d): head line 1 is display
+        // line 2, and the split's fourth row is a filler.
+        let file = crate::backend::build_loaded_file(
             "x.rs".into(),
             "a\nB\nc\n".into(),
             "a\nb\nc\nd\n".into(),
             Some(perch_git::ChangeStatus::Modified),
             false,
             perch_git::Scope::Branch,
-        ));
-        let split = split_of(&file).unwrap();
-        let rows = Rows::Head(file.clone(), Arc::new(split.right));
-        // The unified buffer is a, ghost(b), B, c, ghost(d): head line 1 is
-        // display line 2, and the split's fourth row is a filler.
-        assert_eq!(rows.display_line(1), Some(2));
-        assert_eq!(rows.display_line(3), None);
-        assert_eq!(rows.nearest_display_line(3), Some(3), "the row above, c, when nothing follows");
-        assert_eq!(rows.row_of_head(2), Some(2));
+        );
+        let (_, right) = split_of(&file).unwrap();
+        assert_eq!(right.display_line(1), Some(2));
+        assert_eq!(right.display_line(3), None);
+        assert_eq!(right.nearest_display_line(3), Some(3), "the row above, c, when nothing follows");
+        assert_eq!(right.row_of_head(2), Some(2));
+        // And the stacked document over the same file is the buffer.
+        let stacked = doc::build(&file.buffer, &[], &[]);
+        assert_eq!(stacked.text, file.buffer.text);
+        assert_eq!(stacked.len(), file.buffer.len());
+        assert_eq!(stacked.row_of_head(1), Some(2));
     }
 }
 
@@ -798,7 +570,7 @@ mod window {
     use floem::reactive::{SignalGet, SignalUpdate};
     use perch_github::{Item, ItemCheckout};
 
-    use crate::review::model::{ItemTab, Layout, Phase, ReviewState};
+    use crate::review::model::{ItemTab, Layout, LiveDoc, LiveLayout, Phase, ReviewState};
     use crate::state::AppState;
 
     /// The whole window on Files with one changed file open, so the split
@@ -864,6 +636,46 @@ mod window {
         state.layout.set(Layout::Stacked);
         harness.rebuild();
         harness.paint();
+    }
+
+    /// The text an editor lays out is its document's, as the live entry
+    /// holds them.
+    fn laid_out_text(live: &LiveDoc) -> String {
+        String::from(&live.handle.text())
+    }
+
+    #[test]
+    fn every_editor_registers_its_live_document_for_the_epoch_it_was_built_in() {
+        let (mut harness, state) = harness();
+        let docs = state.docs.get().expect("the stacked editor registered its document");
+        assert_eq!(docs.epoch, state.editor_epoch.get());
+        let LiveLayout::Stacked(live) = docs.layout else {
+            panic!("the stacked layout holds one document");
+        };
+        let file = state.active_file().unwrap();
+        // The unified buffer has a ghost under every rewritten line.
+        assert_eq!(live.doc.get().len(), 120);
+        assert_eq!(live.doc.get().text, file.buffer.text);
+        assert_eq!(laid_out_text(&live), file.buffer.text);
+
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let docs = state.docs.get().expect("the split registered both documents");
+        assert_eq!(docs.epoch, state.editor_epoch.get());
+        let LiveLayout::Split { left, right } = docs.layout else {
+            panic!("the split layout holds two documents");
+        };
+        assert_eq!(left.doc.get().len(), right.doc.get().len(), "the two sides are the same height");
+        assert_eq!(right.doc.get().len(), 90);
+        assert_eq!(laid_out_text(&left), left.doc.get().text);
+        assert_eq!(laid_out_text(&right), right.doc.get().text);
+
+        // Closing the file takes the documents with it.
+        state.close_tab("src/x.rs");
+        harness.rebuild();
+        harness.paint();
+        assert!(state.docs.get().is_none(), "no editor, no document");
     }
 
     /// Where the two editors sit: the activity rail, the sidebar and the

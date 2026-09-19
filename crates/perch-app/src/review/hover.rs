@@ -4,11 +4,8 @@
 //! floem places the cursor with its own hit-testing, which already accounts
 //! for scrolling, the hidden gutter, and per-line heights; recomputing that
 //! from a pointer position would be duplicating logic that is easy to get
-//! subtly wrong and hard to see wrong.
-
-use perch_git::Row;
-
-use crate::review::model::LoadedFile;
+//! subtly wrong and hard to see wrong. Where the cursor's offset lands in
+//! the head file is the document's to say, in `review::doc`.
 
 /// A byte offset in the buffer, as line and column.
 ///
@@ -30,18 +27,6 @@ pub fn line_col_of_offset(text: &str, offset: usize) -> (usize, usize) {
     }
 
     (line, offset.saturating_sub(line_start))
-}
-
-/// Where a click lands in the real file, if it lands in one at all.
-///
-/// A click on a removed line has no position in the head file, so there is
-/// nothing to ask the language server about.
-pub fn head_position(file: &LoadedFile, offset: usize) -> Option<(usize, usize)> {
-    let (display_line, column) = line_col_of_offset(&file.buffer.text, offset);
-    match file.buffer.row(display_line)? {
-        Row::Head { head_line, .. } => Some((head_line, column)),
-        Row::Deleted { .. } => None,
-    }
 }
 
 /// Trim a hover reply to what fits in a popup.
@@ -78,24 +63,6 @@ pub fn condense(text: &str, max_lines: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perch_git::{file_diff, DisplayBuffer};
-    use perch_syntax::LineSpans;
-
-    fn file(head: &str, base: &str) -> LoadedFile {
-        let diff = file_diff(base, head);
-        LoadedFile {
-            path: "a.rs".into(),
-            language: None,
-            buffer: DisplayBuffer::unified(head, base, &diff),
-            head_spans: LineSpans::default(),
-            base_spans: LineSpans::default(),
-            status: Some(perch_git::ChangeStatus::Modified),
-            truncated: false,
-            scope: perch_git::Scope::Branch,
-            base_buffer: None,
-            alignment: Vec::new(),
-        }
-    }
 
     #[test]
     fn offsets_resolve_to_a_line_and_column() {
@@ -119,52 +86,6 @@ mod tests {
         let text = "let é = 1;\n";
         let (_, col) = line_col_of_offset(text, 6);
         assert_eq!(col, 6);
-    }
-
-    #[test]
-    fn a_click_on_a_real_line_maps_to_the_head_file() {
-        let f = file("a\nB\nc\n", "a\nb\nc\n");
-        // Display: a, ghost(b), B, c. Offset 0 is the first head line.
-        assert_eq!(head_position(&f, 0), Some((0, 0)));
-    }
-
-    #[test]
-    fn a_click_on_a_removed_line_asks_nothing() {
-        let f = file("a\nB\nc\n", "a\nb\nc\n");
-        let ghost = f
-            .buffer
-            .rows
-            .iter()
-            .position(|r| r.is_deleted())
-            .expect("a ghost line");
-        // The offset at the start of that display line.
-        let offset: usize = f
-            .buffer
-            .text
-            .lines()
-            .take(ghost)
-            .map(|l| l.len() + 1)
-            .sum();
-        assert_eq!(
-            head_position(&f, offset),
-            None,
-            "a deleted line has no position in the head file"
-        );
-    }
-
-    #[test]
-    fn head_positions_follow_the_splice() {
-        let f = file("a\nB\nc\n", "a\nb\nc\n");
-        // The line after the ghost is head line 1, not display line 2.
-        let display_of_head_1 = f.buffer.display_line(1).unwrap();
-        let offset: usize = f
-            .buffer
-            .text
-            .lines()
-            .take(display_of_head_1)
-            .map(|l| l.len() + 1)
-            .sum();
-        assert_eq!(head_position(&f, offset), Some((1, 0)));
     }
 
     #[test]

@@ -1,12 +1,16 @@
 //! What the review view holds about a pull request and its files.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::views::editor::text::Document;
 use perch_git::{ChangeStatus, ChangedFile, Commit, Dirt, DisplayBuffer, Scope, TreeEntry};
 use perch_github::{Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest};
 use perch_syntax::{Language, LineSpans};
+
+use crate::review::doc::Doc;
 
 /// A file prepared for the editor: text to render, and everything needed to
 /// colour it and map a rendered line back to a real one.
@@ -174,6 +178,40 @@ pub struct Tab {
     pub path: String,
 }
 
+/// One editor's document, live: the handle the editor lays out from, which
+/// a programmatic edit goes through, and the row table over it, which
+/// everything that reads the editor's rows goes through. The table is a
+/// signal so that a lookup after an edit sees the edited document rather
+/// than a snapshot taken when the editor was built.
+///
+/// Both live with the editor's view: the signal is disposed when the
+/// editor is torn down, so a reader that can run after that, on another
+/// tab, reads it with the `try_` variants.
+#[derive(Clone)]
+#[cfg_attr(not(test), expect(dead_code, reason = "the folds edit the document in place from step 2 of milestone 11"))]
+pub struct LiveDoc {
+    pub handle: Rc<dyn Document>,
+    pub doc: RwSignal<Arc<Doc>>,
+}
+
+/// The documents the open editors hold, for the epoch they were built in.
+/// A reader checks the epoch against `editor_epoch` first: an entry from an
+/// editor since rebuilt is stale.
+#[derive(Clone)]
+#[cfg_attr(not(test), expect(dead_code, reason = "the folds edit the document in place from step 2 of milestone 11"))]
+pub struct LiveDocs {
+    pub epoch: u64,
+    pub layout: LiveLayout,
+}
+
+/// Which editors are open: the stacked one, or a split's two.
+#[derive(Clone)]
+#[cfg_attr(not(test), expect(dead_code, reason = "the folds edit the document in place from step 2 of milestone 11"))]
+pub enum LiveLayout {
+    Stacked(LiveDoc),
+    Split { left: LiveDoc, right: LiveDoc },
+}
+
 /// Everything the review view renders from. All fields are signals, so the
 /// struct is `Copy` and can be handed to any view closure.
 #[derive(Clone, Copy)]
@@ -244,8 +282,13 @@ pub struct ReviewState {
     /// Display line the cursor sits on, for the status line.
     pub cursor_line: RwSignal<usize>,
     /// Bumped whenever the active file's content changes, to rebuild the
-    /// editor view rather than mutate a read-only document in place.
+    /// editor view: another file is another editor.
     pub editor_epoch: RwSignal<u64>,
+    /// The documents the open editors hold, set by the view that builds
+    /// them and `None` while no editor is open. What the editor lays out
+    /// is edited in place through these when the document changes under
+    /// it, rather than the editor being rebuilt.
+    pub docs: RwSignal<Option<LiveDocs>>,
 
     /// How many discussion records the archive took in, once it has.
     pub archived: RwSignal<Option<usize>>,
@@ -348,6 +391,7 @@ impl ReviewState {
             loading: RwSignal::new(HashMap::new()),
             cursor_line: RwSignal::new(0),
             editor_epoch: RwSignal::new(0),
+            docs: RwSignal::new(None),
             archived: RwSignal::new(None),
             comment_threads: RwSignal::new(Arc::new(Vec::new())),
             threads_open: RwSignal::new(false),
@@ -439,6 +483,7 @@ impl ReviewState {
         self.composer_draft.set(String::new());
         self.expanded.set(std::collections::HashSet::new());
         self.editor_epoch.update(|e| *e += 1);
+        self.docs.set(None);
         self.dismiss_hover();
     }
 

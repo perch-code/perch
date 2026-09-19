@@ -17,6 +17,10 @@
 //! on the left, head numbers on the right, and nothing on a filler. Only
 //! the right one carries thread markers and the `+`, because only the head
 //! can be anchored on.
+//!
+//! The rows are the document's, not the buffer's: a row that is a line is
+//! numbered and barred from the buffer's row table, a divider is tinted as
+//! one, and a spacer under a card is blank.
 
 use std::sync::Arc;
 
@@ -24,13 +28,15 @@ use floem::event::PointerScrollEventExt;
 use floem::kurbo::{Rect, Size, Vec2};
 use floem::peniko::Color;
 use floem::prelude::*;
-use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
+use floem::AnyView;
+use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::Position;
 use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, dyn_stack};
-use perch_git::{LineStatus, Row};
+use perch_git::Row;
 
 use crate::icons::SidebarIcon;
-use crate::review::editor::{Side, SideDoc, Tint};
+use crate::review::doc::{Doc, DocRow, Tint};
+use crate::review::editor::Side;
 use crate::review::model::{LoadedFile, ReviewState};
 use crate::state::AppState;
 use crate::theme;
@@ -65,15 +71,17 @@ fn column_offset(scroll_top: f64, line_height: f64) -> f64 {
     -(scroll_top.rem_euclid(line_height))
 }
 
+/// The gutter of the stacked layout, over the document the editor beside
+/// it is laying out.
 pub fn diff_gutter(
     state: ReviewState,
     app: AppState,
     file: Arc<LoadedFile>,
+    doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    let total = file.buffer.len();
-    column(viewport, scroll_delta, total, move |line| gutter_row(state, app, file.clone(), line))
+    column(viewport, scroll_delta, doc, move |row| gutter_row(state, app, file.clone(), doc, row))
 }
 
 /// One side of a split. `scroll_delta` is the editor a wheel over the
@@ -83,25 +91,27 @@ pub fn side_gutter(
     app: AppState,
     file: Arc<LoadedFile>,
     side: Side,
-    doc: Arc<SideDoc>,
+    doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    let total = doc.rows.len();
-    column(viewport, scroll_delta, total, move |line| side_row(state, app, file.clone(), side, doc.clone(), line))
+    column(viewport, scroll_delta, doc, move |row| side_row(state, app, file.clone(), side, doc, row))
 }
 
 /// The rows in view, slid to the scroll, in a column beside the editor.
 fn column<V: IntoView + 'static>(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
-    total: usize,
+    doc: RwSignal<Arc<Doc>>,
     row: impl Fn(usize) -> V + 'static,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
 
     let visible = move || {
         let vp = viewport.get();
+        // The document's length is read here, tracked, so a document that
+        // grows or shrinks under the editor moves the column's end with it.
+        let total = doc.with(|d| d.len());
         visible_lines(vp.y0, vp.height(), line_height, total)
     };
 
@@ -149,61 +159,90 @@ enum Slot {
     Blank,
 }
 
-fn gutter_row(state: ReviewState, app: AppState, file: Arc<LoadedFile>, line: usize) -> impl IntoView {
-    let row = file.buffer.row(line);
+/// A row of the stacked layout's gutter.
+fn gutter_row(
+    state: ReviewState,
+    app: AppState,
+    file: Arc<LoadedFile>,
+    doc: RwSignal<Arc<Doc>>,
+    row: usize,
+) -> AnyView {
+    let entry = doc.with_untracked(|d| d.rows.get(row).cloned());
+    let Some(DocRow::Line { display, tint }) = entry else {
+        return other_row(state, app, file, row, entry);
+    };
+    let buffer_row = file.buffer.row(display);
 
     // A ghost line shows the base file's number; a real line shows its own.
     // Both are one-based, as every other tool displays them.
-    let number = match row {
+    let number = match buffer_row {
         Some(Row::Head { head_line, .. }) => Some(head_line + 1),
         Some(Row::Deleted { base_line }) => Some(base_line + 1),
         None => None,
     };
+    let dimmed = matches!(buffer_row, Some(Row::Deleted { .. }));
 
-    let bar = match row {
-        Some(Row::Deleted { .. }) => Some(theme::DIFF_DELETED_BAR),
-        Some(Row::Head { status, .. }) => match status {
-            LineStatus::Added => Some(theme::DIFF_ADDED_BAR),
-            LineStatus::Modified => Some(theme::DIFF_MODIFIED_BAR),
-            LineStatus::Unchanged => None,
-        },
-        None => None,
-    };
-
-    let dimmed = matches!(row, Some(Row::Deleted { .. }));
-
-    row_view(state, app, file, line, number, dimmed, bar, Slot::Anchor(line))
+    row_view(state, app, file, row, number, dimmed, change_bar_color(tint), Slot::Anchor(display))
 }
 
+/// A row of one side's gutter in a split.
 fn side_row(
     state: ReviewState,
     app: AppState,
     file: Arc<LoadedFile>,
     side: Side,
-    doc: Arc<SideDoc>,
-    line: usize,
-) -> impl IntoView {
-    let row = doc.rows.get(line).copied();
-    let number = row.and_then(|r| r.line).map(|n| n + 1);
-
-    let bar = match row.map(|r| r.tint) {
-        Some(Tint::Added) => Some(theme::DIFF_ADDED_BAR),
-        Some(Tint::Modified) => Some(theme::DIFF_MODIFIED_BAR),
-        Some(Tint::Deleted) => Some(theme::DIFF_DELETED_BAR),
-        Some(Tint::Plain | Tint::Filler) | None => None,
+    doc: RwSignal<Arc<Doc>>,
+    row: usize,
+) -> AnyView {
+    let entry = doc.with_untracked(|d| d.rows.get(row).cloned());
+    let Some(DocRow::Line { display, tint }) = entry else {
+        return other_row(state, app, file, row, entry);
     };
 
-    // Anchors are on the head, so the marker and the `+` live on the right,
-    // keyed by the display line the row's head line is in the buffer.
-    let slot = match side {
-        Side::Head => row
-            .and_then(|r| r.line)
-            .and_then(|head| file.buffer.display_line(head))
-            .map_or(Slot::Blank, Slot::Anchor),
-        Side::Base => Slot::Blank,
+    // The base side's document is over the base file, so its line is its
+    // number; the head side's is over the unified buffer, and the number
+    // is the head line displayed there. Anchors are on the head, so the
+    // marker and the `+` live on the right, keyed by the display line.
+    let (number, slot) = match side {
+        Side::Base => (Some(display + 1), Slot::Blank),
+        Side::Head => (file.buffer.head_line(display).map(|h| h + 1), Slot::Anchor(display)),
     };
 
-    row_view(state, app, file, line, number, false, bar, slot)
+    row_view(state, app, file, row, number, false, change_bar_color(tint), slot)
+}
+
+/// A row that is no line: a divider is a bar in its colour, and a filler,
+/// a spacer or a row past the end is blank. None of them records the
+/// pointer, so nothing lights a `+`.
+fn other_row(state: ReviewState, app: AppState, file: Arc<LoadedFile>, row: usize, entry: Option<DocRow>) -> AnyView {
+    match entry {
+        Some(DocRow::Divider { .. }) => divider_row(),
+        Some(DocRow::Line { .. } | DocRow::Filler | DocRow::Spacer { .. }) | None => {
+            row_view(state, app, file, row, None, false, None, Slot::Blank)
+        }
+    }
+}
+
+/// The gutter's row beside a divider: the whole width in the divider's
+/// colour, with no number and no bar.
+fn divider_row() -> AnyView {
+    Empty::new()
+        .style(|s| {
+            s.width_full()
+                .height(theme::CODE_LINE_HEIGHT as f64)
+                .flex_shrink(0.0_f32)
+                .background(theme::DIFF_DIVIDER_BG)
+        })
+        .into_any()
+}
+
+fn change_bar_color(tint: Tint) -> Option<Color> {
+    match tint {
+        Tint::Added => Some(theme::DIFF_ADDED_BAR),
+        Tint::Modified => Some(theme::DIFF_MODIFIED_BAR),
+        Tint::Deleted => Some(theme::DIFF_DELETED_BAR),
+        Tint::Plain => None,
+    }
 }
 
 /// One row: the slot, the number, the change bar. `key` is what the
@@ -221,7 +260,7 @@ fn row_view(
     dimmed: bool,
     bar: Option<Color>,
     slot: Slot,
-) -> impl IntoView {
+) -> AnyView {
     let slot_view = match slot {
         Slot::Anchor(display_line) => anchor_slot(state, app, file, key, display_line).into_any(),
         Slot::Blank => Empty::new().into_any(),

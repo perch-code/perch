@@ -3,6 +3,7 @@
 pub mod cards;
 pub mod composer_styling;
 pub mod conversation;
+pub mod doc;
 pub mod editor;
 pub mod gutter;
 pub mod header;
