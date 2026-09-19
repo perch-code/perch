@@ -100,7 +100,7 @@ fn month_name(m: i8) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn ts(s: &str) -> Timestamp {
@@ -153,10 +153,27 @@ mod tests {
         assert_eq!(relative(ts("2025-01-03T12:00:00Z"), now), "Jan 3, 2025");
     }
 
+    /// Today at noon in the system zone. Offsets of a few hours from it stay
+    /// inside today, which an offset from the real instant does not in the
+    /// hour after midnight.
+    pub(crate) fn noon_today() -> Timestamp {
+        Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::system())
+            .with()
+            .hour(12)
+            .minute(0)
+            .second(0)
+            .subsec_nanosecond(0)
+            .build()
+            .expect("noon exists on every date")
+            .timestamp()
+    }
+
     #[test]
     fn buckets_split_today_yesterday_and_the_week() {
-        // Offsets from the real `now`, so the assertions hold in any zone.
-        let now = Timestamp::now();
+        // Offsets from local noon, so the assertions hold in any zone and at
+        // any hour.
+        let now = noon_today();
         let ago = |h: i64| now - jiff::SignedDuration::from_hours(h);
         assert_eq!(bucket(ago(1), now), DateBucket::Today);
         assert_eq!(bucket(ago(26), now), DateBucket::Yesterday);

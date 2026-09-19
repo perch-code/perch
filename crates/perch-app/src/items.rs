@@ -1206,7 +1206,7 @@ mod tests {
 
     #[test]
     fn group_by_date_buckets_on_the_sort_time_newest_first() {
-        let now = Timestamp::now();
+        let now = crate::timefmt::tests::noon_today();
         let ago = |h: i64| now - jiff::SignedDuration::from_hours(h);
         let (declared, _) = fixture();
         let mut a = item("a", "criccomini/perch", "2026-09-01T10:00:00Z");
@@ -1452,7 +1452,7 @@ mod tests {
 
     #[test]
     fn oldest_first_puts_the_earlier_date_bucket_first() {
-        let now = Timestamp::now();
+        let now = crate::timefmt::tests::noon_today();
         let ago = |h: i64| now - jiff::SignedDuration::from_hours(h);
         let (declared, _) = fixture();
         let mut a = item("a", "criccomini/perch", "2026-09-01T10:00:00Z");
