@@ -24,9 +24,6 @@ use super::Ctx;
 /// fake in for it. The closed lists, the discussion fetches and the
 /// allowance are the backfill's; they are here so it paces itself by the
 /// same source the pass reads.
-// The backfill is the step after the poll loop's; until it lands, its
-// half of the trait has no caller.
-#[allow(dead_code)]
 pub(crate) trait Source {
     async fn list_open_pulls(
         &self,
@@ -135,13 +132,16 @@ impl Source for GitHub {
     }
 }
 
-/// What stopped a pass: GitHub, the cache, or having no cache to write to.
+/// What stopped a pass or a backfill round: GitHub, the cache, having no
+/// cache to write to, or the knowledge root.
 #[derive(Debug)]
 pub(crate) enum Error {
     GitHub(perch_github::Error),
     Cache(CacheError),
     /// No cache was opened, or a panic poisoned its lock.
     NoCache,
+    /// A discussion could not be filed under the knowledge root.
+    Knowledge(String),
 }
 
 impl fmt::Display for Error {
@@ -150,6 +150,7 @@ impl fmt::Display for Error {
             Error::GitHub(e) => write!(f, "{e}"),
             Error::Cache(e) => write!(f, "cache: {e}"),
             Error::NoCache => write!(f, "there is no cache to write the items to"),
+            Error::Knowledge(e) => write!(f, "knowledge: {e}"),
         }
     }
 }
@@ -503,7 +504,7 @@ fn wrap<T>(listed: Listed<T>, into: impl Fn(T) -> ItemSubject) -> Listed<ItemSub
 
 /// One stretch of cache work under the lock. The guard never crosses an
 /// await, and a poisoned lock reads as no cache.
-fn with<T>(cache: &Mutex<Cache>, f: impl FnOnce(&Cache) -> Result<T, CacheError>) -> Result<T, Error> {
+pub(super) fn with<T>(cache: &Mutex<Cache>, f: impl FnOnce(&Cache) -> Result<T, CacheError>) -> Result<T, Error> {
     let guard = cache.lock().map_err(|_| Error::NoCache)?;
     f(&guard).map_err(Error::Cache)
 }
@@ -514,185 +515,10 @@ mod tests {
 
     use perch_github::ItemCheckout;
 
+    use super::super::fake::{
+        at, cache, changed, issue, merged, meta, pull, store_issue, store_pull, Fake, REPO,
+    };
     use super::*;
-
-    const REPO: &str = "a/b";
-
-    fn at(s: &str) -> Timestamp {
-        s.parse().unwrap()
-    }
-
-    /// A pull request as the list gives it: no stats, no merger.
-    fn pull(n: u64, updated: &str) -> PullRequest {
-        PullRequest {
-            number: n,
-            title: format!("pull {n}"),
-            author_login: format!("u{n}"),
-            author_avatar_url: String::new(),
-            head_sha: format!("h{n}"),
-            head_ref: format!("branch-{n}"),
-            base_sha: "m".into(),
-            base_ref: "main".into(),
-            draft: false,
-            merged: false,
-            state: "open".into(),
-            additions: 0,
-            deletions: 0,
-            changed_files: 0,
-            repo_full_name: REPO.into(),
-            head_repo_full_name: Some(REPO.into()),
-            updated_at: Some(at(updated)),
-            review_requested: false,
-            checks: None,
-            review_decision: None,
-            merged_at: None,
-            merged_by: None,
-            closed_at: None,
-            requested_reviewers: Vec::new(),
-            milestone: None,
-            labels: Vec::new(),
-            assignees: Vec::new(),
-        }
-    }
-
-    /// The same pull request as a detail fetch gives it, merged.
-    fn merged(n: u64, updated: &str) -> PullRequest {
-        let mut pr = pull(n, updated);
-        pr.state = "closed".into();
-        pr.merged = true;
-        pr.merged_at = Some(at(updated));
-        pr.merged_by = Some("rohan".into());
-        pr.closed_at = Some(at(updated));
-        pr.additions = 12;
-        pr.deletions = 3;
-        pr.changed_files = 2;
-        pr
-    }
-
-    fn issue(n: u64, updated: &str) -> Issue {
-        Issue {
-            number: n,
-            title: format!("issue {n}"),
-            body: String::new(),
-            state: "open".into(),
-            state_reason: None,
-            author_login: format!("u{n}"),
-            author_avatar_url: String::new(),
-            labels: Vec::new(),
-            assignees: Vec::new(),
-            comments: 0,
-            created_at: None,
-            updated_at: at(updated),
-            repo_full_name: REPO.into(),
-        }
-    }
-
-    fn changed<T>(etag: Option<&str>, items: Vec<T>) -> Listed<T> {
-        Listed::Changed { etag: etag.map(str::to_string), items }
-    }
-
-    fn down() -> perch_github::Error {
-        perch_github::Error::Network("the fake is down".into())
-    }
-
-    /// A GitHub that answers from what the test put in it. A list left
-    /// `None` fails; a number nobody put in fails, or answers the status
-    /// the test gave it; every call is written down so a test can say
-    /// what was asked.
-    #[derive(Default)]
-    struct Fake {
-        pulls: Option<Listed<PullRequest>>,
-        issues: Option<Listed<Issue>>,
-        pulls_by_number: HashMap<u64, PullRequest>,
-        issues_by_number: HashMap<u64, Issue>,
-        /// A number GitHub refuses, and with what status.
-        refused: HashMap<u64, u16>,
-        calls: Mutex<Vec<String>>,
-    }
-
-    impl Fake {
-        fn note(&self, call: String) {
-            self.calls.lock().unwrap().push(call);
-        }
-
-        fn calls(&self) -> Vec<String> {
-            self.calls.lock().unwrap().clone()
-        }
-
-        fn refusal(&self, number: u64) -> perch_github::Error {
-            match self.refused.get(&number) {
-                Some(status) => perch_github::Error::Status { status: *status, body: "{}".into() },
-                None => down(),
-            }
-        }
-    }
-
-    impl Source for Fake {
-        async fn list_open_pulls(
-            &self,
-            _repo: &str,
-            etag: Option<&str>,
-        ) -> Result<Listed<PullRequest>, perch_github::Error> {
-            self.note(format!("pulls etag={}", etag.unwrap_or("-")));
-            self.pulls.clone().ok_or_else(down)
-        }
-
-        async fn list_open_issues(
-            &self,
-            _repo: &str,
-            etag: Option<&str>,
-        ) -> Result<Listed<Issue>, perch_github::Error> {
-            self.note(format!("issues etag={}", etag.unwrap_or("-")));
-            self.issues.clone().ok_or_else(down)
-        }
-
-        async fn list_closed_pulls(&self, _repo: &str, _page: u32) -> Result<Page<PullRequest>, perch_github::Error> {
-            Err(down())
-        }
-
-        async fn list_closed_issues(
-            &self,
-            _repo: &str,
-            _page: u32,
-            _since: Option<Timestamp>,
-        ) -> Result<Page<Issue>, perch_github::Error> {
-            Err(down())
-        }
-
-        async fn fetch_pull_request(&self, _repo: &str, number: u64) -> Result<PullRequest, perch_github::Error> {
-            self.note(format!("pull {number}"));
-            self.pulls_by_number.get(&number).cloned().ok_or_else(|| self.refusal(number))
-        }
-
-        async fn fetch_issue(&self, _repo: &str, number: u64) -> Result<Issue, perch_github::Error> {
-            self.note(format!("issue {number}"));
-            self.issues_by_number.get(&number).cloned().ok_or_else(|| self.refusal(number))
-        }
-
-        async fn fetch_discussion(&self, _repo: &str, _number: u64) -> Result<Discussion, perch_github::Error> {
-            Err(down())
-        }
-
-        async fn fetch_issue_comments(
-            &self,
-            _repo: &str,
-            _number: u64,
-        ) -> Result<Vec<IssueComment>, perch_github::Error> {
-            Err(down())
-        }
-
-        fn allowance(&self) -> Option<Allowance> {
-            None
-        }
-    }
-
-    /// A cache in a directory of its own, with the directory kept so it
-    /// lives as long as the cache does.
-    fn cache() -> (tempfile::TempDir, Mutex<Cache>) {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(&dir.path().join("perch.db"), None).unwrap();
-        (dir, Mutex::new(cache))
-    }
 
     fn pull_item(cache: &Mutex<Cache>, n: u64) -> Option<Item> {
         cache.lock().unwrap().find_item_by_subject(REPO, ItemKind::PullRequest, n).unwrap()
@@ -700,24 +526,6 @@ mod tests {
 
     fn issue_item(cache: &Mutex<Cache>, n: u64) -> Option<Item> {
         cache.lock().unwrap().find_item_by_subject(REPO, ItemKind::Issue, n).unwrap()
-    }
-
-    fn meta(cache: &Mutex<Cache>, key: &str) -> Option<String> {
-        cache.lock().unwrap().meta(key).unwrap()
-    }
-
-    fn store_pull(cache: &Mutex<Cache>, pr: PullRequest) -> Item {
-        let mut item = Item::new(REPO, at("2026-09-10T00:00:00Z"));
-        item.subject = Some(ItemSubject::PullRequest(pr));
-        cache.lock().unwrap().insert_item(&item).unwrap();
-        item
-    }
-
-    fn store_issue(cache: &Mutex<Cache>, issue: Issue) -> Item {
-        let mut item = Item::new(REPO, at("2026-09-10T00:00:00Z"));
-        item.subject = Some(ItemSubject::Issue(issue));
-        cache.lock().unwrap().insert_item(&item).unwrap();
-        item
     }
 
     const NOW: &str = "2026-09-18T12:00:00Z";

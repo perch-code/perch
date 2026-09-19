@@ -36,6 +36,15 @@ pub enum Checked {
     Full,
 }
 
+/// The backfill's progress, as `Event::Backfill` reports it: `done`
+/// discussions of about `total` for `repo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Archiving {
+    pub repo: String,
+    pub done: usize,
+    pub total: usize,
+}
+
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub threads: RwSignal<Vec<Thread>>,
@@ -59,6 +68,10 @@ pub struct AppState {
     /// Something a worktree action could not do, for the status line.
     /// Cleared by the next act the reader takes.
     pub notice: RwSignal<Option<String>>,
+    /// Where the backfill is, for the status bar: the repository being
+    /// archived and how far along it is. `None` once every repository
+    /// is caught up.
+    pub archiving: RwSignal<Option<Archiving>>,
     /// The review view's state, once the window has made it, so a menu
     /// that ends in something being opened can put the progress card up.
     pub review: RwSignal<Option<crate::review::model::ReviewState>>,
@@ -146,6 +159,7 @@ impl AppState {
             items: RwSignal::new(Vec::new()),
             open_item: RwSignal::new(None),
             notice: RwSignal::new(None),
+            archiving: RwSignal::new(None),
             review: RwSignal::new(None),
             viewer: RwSignal::new(None),
             reload: RwSignal::new(Vec::new()),
@@ -234,7 +248,7 @@ impl AppState {
                 tracing::debug!(run_id, thread_id, ?event, "run event");
                 review.apply_run_event(&run_id, &event);
             }
-            Event::Archived { repo_full_name, number, added } => {
+            Event::Archived { repo_full_name, number, added, .. } => {
                 // Only for the review that is still open; a slow archive of
                 // a pull request since left has nothing to say.
                 let same = review.pull_request.with(|p| {
@@ -439,6 +453,10 @@ impl AppState {
             // An empty notice is the backend saying the last one has been
             // read: the reader has moved on to something else.
             Event::Notice(message) => self.notice.set(Some(message).filter(|m| !m.is_empty())),
+            // A total of zero is the backfill saying it is caught up.
+            Event::Backfill { repo, done, total } => {
+                self.archiving.set((total > 0).then_some(Archiving { repo, done, total }))
+            }
             Event::AgentConfig(agent) => self.agent.set(agent),
             Event::Archived { .. }
             | Event::CommentThreads { .. }

@@ -24,6 +24,7 @@ use floem::Application;
 
 use crate::state::AppState;
 
+mod backfill_cli;
 mod dump;
 mod scan_cli;
 mod scope_cli;
@@ -71,6 +72,12 @@ fn main() {
     // it added, updated or closed.
     if args.get(1).map(String::as_str) == Some("--sync") {
         sync_cli::run(&args[2..]);
+        return;
+    }
+    // One round of the backfill over a repository, in the foreground,
+    // and each discussion it archived.
+    if args.get(1).map(String::as_str) == Some("--backfill") {
+        backfill_cli::run(&args[2..]);
         return;
     }
 

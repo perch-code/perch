@@ -6,8 +6,10 @@
 //! `RUST_LOG`, as the app's does, so the requests a pass makes can be
 //! counted. How the pass is checked without a window.
 
+use std::sync::{Arc, Mutex};
+
 use jiff::Timestamp;
-use perch_github::{resolve_token, Config, GitHub};
+use perch_github::{resolve_token, Cache, Config, GitHub};
 
 use crate::backend::sync::list_pass;
 
@@ -16,13 +18,7 @@ pub fn run(args: &[String]) {
         eprintln!("usage: perch --sync owner/repo");
         std::process::exit(2);
     };
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "perch=info,warn".into()),
-        )
-        .init();
+    init_logging();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -33,13 +29,35 @@ pub fn run(args: &[String]) {
     }
 }
 
-async fn sync(repo: &str) -> Result<(), String> {
+/// The log to stderr under `RUST_LOG`, as the app's goes.
+pub(crate) fn init_logging() {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "perch=info,warn".into()),
+        )
+        .init();
+}
+
+/// What a harness command runs over: the config, a client on the
+/// resolved token, and the app's own cache.
+pub(crate) struct Setup {
+    pub config: Config,
+    pub github: GitHub,
+    pub cache: Arc<Mutex<Cache>>,
+}
+
+/// The app's setup without the window, for a command about one
+/// repository. The warnings go to stderr, and a repository config.toml
+/// does not declare is noted rather than refused: the app's poll runs
+/// over the declared repositories only, and the harness over whatever it
+/// is given.
+pub(crate) fn setup(repo: &str) -> Result<Setup, String> {
     let config = Config::load();
     for warning in &config.warnings {
         eprintln!("warning: {warning}");
     }
-    // The app's poll runs the pass over the declared repositories only;
-    // the harness runs it over whatever it is given, and says so.
     if !config.is_declared(repo) {
         eprintln!("note: {repo} is not a [[repo]] in config.toml, so the app does not list it");
     }
@@ -54,7 +72,11 @@ async fn sync(repo: &str) -> Result<(), String> {
         let path = perch_github::config::db_path().unwrap_or_default();
         return Err(format!("could not open the cache at {}; the log says why", path.display()));
     };
+    Ok(Setup { config, github, cache })
+}
 
+async fn sync(repo: &str) -> Result<(), String> {
+    let Setup { github, cache, .. } = setup(repo)?;
     let report = list_pass(&github, &cache, repo, Timestamp::now())
         .await
         .map_err(|e| e.to_string())?;

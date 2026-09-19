@@ -22,6 +22,9 @@ use perch_github::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
+pub(crate) mod backfill;
+#[cfg(test)]
+mod fake;
 pub(crate) mod sync;
 
 /// How many per-thread detail requests may be in flight at once.
@@ -169,11 +172,15 @@ pub enum Event {
         /// True when the fetch failed and this is the snapshot alone.
         offline: bool,
     },
-    /// A pull request's discussion was archived under the knowledge root.
-    /// `added` counts records that were new or changed.
-    Archived { repo_full_name: String, number: u64, added: usize },
+    /// A pull request's or an issue's discussion was archived under the
+    /// knowledge root. `added` counts records that were new or changed.
+    Archived { repo_full_name: String, kind: ItemKind, number: u64, added: usize },
     /// Something worth a line in the status bar and nothing more.
     Notice(String),
+    /// Where the backfill is: `done` discussions archived of about
+    /// `total` for `repo`, sent after each one. A `total` of 0 says every
+    /// repository is caught up and the line comes down.
+    Backfill { repo: String, done: usize, total: usize },
     /// What config.toml says about the agent, for the pickers.
     AgentConfig(perch_github::AgentConfig),
     /// Every thread on an item. Whole, like `Items`.
@@ -687,11 +694,11 @@ async fn run(
                 let pass_failure = list_passes(&ctx).await;
                 if !first_pass_done {
                     first_pass_done = true;
-                    // The backfill starts here, once: `tokio::spawn` over
-                    // `sync::backfill` with a clone of `ctx`, its handle
-                    // dropped and never awaited, so the loop is not held
-                    // by it. Until that lands, the first pass is only
-                    // noted.
+                    // Once, after the rows it reads exist. Its handle is
+                    // dropped, never awaited, so the loop is not held by
+                    // it; the permit sent next is what starts its first
+                    // round.
+                    backfill::spawn(ctx.clone());
                 }
                 ctx.passes.notify_one();
                 poll_after = refresh(&ctx, &source, &fetches).await;
@@ -2267,15 +2274,20 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str, ci_at: Option<Timesta
 /// in the same table, so the next open paints them before the network
 /// answers and the harness can print them.
 fn keep_issue_comments(ctx: &Ctx, item_id: &str, issue: &perch_github::Issue, comments: &[perch_github::IssueComment]) {
-    let discussion = perch_github::Discussion {
+    ctx.with_cache(|c| c.store_discussion(item_id, &issue_discussion(issue, comments)));
+}
+
+/// An issue and its comments in the shape a pull request's discussion
+/// has, which is the one shape the table keeps.
+pub(super) fn issue_discussion(issue: &perch_github::Issue, comments: &[perch_github::IssueComment]) -> perch_github::Discussion {
+    perch_github::Discussion {
         opened_at: issue.created_at,
         body: issue.body.clone(),
         comments: comments.to_vec(),
         reviews: Vec::new(),
         review_comments: Vec::new(),
         events: Vec::new(),
-    };
-    ctx.with_cache(|c| c.store_discussion(item_id, &discussion));
+    }
 }
 
 /// Fetch the checks again when a CI notification names the open pull
@@ -2738,7 +2750,12 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
             let messages = crate::knowledge::issue_to_messages(&issue, &comments);
             match ingest(&ctx, messages).await {
                 Ok(n) => {
-                    let _ = ctx.events.send(Event::Archived { repo_full_name: issue.repo_full_name.clone(), number, added: n });
+                    let _ = ctx.events.send(Event::Archived {
+                        repo_full_name: issue.repo_full_name.clone(),
+                        kind: ItemKind::Issue,
+                        number,
+                        added: n,
+                    });
                 }
                 Err(e) => ctx.notice(format!("Could not archive the discussion: {e}")),
             }
@@ -2750,10 +2767,23 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
 /// File records under the knowledge root and keep the skill current.
 /// Returns how many records were new or changed.
 async fn ingest(ctx: &Ctx, messages: Vec<perch_knowledge::Message>) -> Result<usize, String> {
-    let knowledge = ctx.knowledge.clone();
-    let write_skill = ctx.config.knowledge.skills;
+    ingest_into(ctx.knowledge.clone(), ctx.config.knowledge.skills, messages).await
+}
+
+/// The same over the store alone, for the backfill, which has no
+/// context. One ingest at a time across the process: an ingest reads a
+/// repository's raw file, merges and writes it back, and two at once on
+/// the same file would each write over what the other added. An open and
+/// the backfill archive into the same file all the time.
+pub(super) async fn ingest_into(
+    knowledge: Arc<perch_knowledge::Knowledge>,
+    write_skill: bool,
+    messages: Vec<perch_knowledge::Message>,
+) -> Result<usize, String> {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // File writes, off the runtime's threads.
     let outcome = tokio::task::spawn_blocking(move || {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
         let before = knowledge.repos()?;
         let ingested = knowledge.ingest(&messages)?;
         let after = knowledge.repos()?;
@@ -3071,6 +3101,7 @@ async fn archive_discussion(ctx: &Ctx, item_id: &str, pr: &perch_github::PullReq
             tracing::info!(repo = %pr.repo_full_name, number = pr.number, added, "discussion archived");
             let _ = ctx.events.send(Event::Archived {
                 repo_full_name: pr.repo_full_name.clone(),
+                kind: ItemKind::PullRequest,
                 number: pr.number,
                 added,
             });
@@ -3852,7 +3883,7 @@ fn describe_pass_error(repo: &str, e: &sync::Error) -> Status {
 }
 
 /// Wall-clock time in the user's zone, for the status bar.
-fn local_clock_time(epoch: i64) -> Option<String> {
+pub(crate) fn local_clock_time(epoch: i64) -> Option<String> {
     let ts = Timestamp::from_second(epoch).ok()?;
     let zoned = ts.to_zoned(jiff::tz::TimeZone::system());
     Some(format!("{:02}:{:02}", zoned.hour(), zoned.minute()))
