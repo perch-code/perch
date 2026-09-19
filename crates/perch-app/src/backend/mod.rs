@@ -178,16 +178,19 @@ pub enum Event {
     CommitsReady { item_id: String, commits: Arc<Vec<perch_git::Commit>>, dirt: perch_git::Dirt, since: Option<String> },
     /// The changed list under a scope, after `SetScope`.
     ScopeReady { item_id: String, scope: perch_git::Scope, files: Arc<Vec<perch_git::ChangedFile>> },
-    /// What the reader marked on the item's files, whole, in the one query
-    /// pass when the item opens and again after each write: every (path,
-    /// blob) viewed, every run of head lines revealed out of a fold by
-    /// (path, blob), and whether the item's files are folded to their
-    /// changes, which they are unless the reader asked for them whole.
+    /// What the reader marked on the item's files, whole: every (path,
+    /// blob) viewed, and, when the item opens, every run of head lines
+    /// revealed out of a fold by (path, blob) and whether the item's files
+    /// are folded to their changes, which they are unless the reader asked
+    /// for them whole. Sent again after a viewed write with the viewed set
+    /// alone: the reveals and the fold are the window's own, applied as
+    /// they are clicked, and an answer to an earlier write would put them
+    /// back as they were.
     ViewedReady {
         item_id: String,
         viewed: Arc<std::collections::HashSet<(String, String)>>,
-        reveals: Arc<perch_github::StoredReveals>,
-        folded: bool,
+        reveals: Option<Arc<perch_github::StoredReveals>>,
+        folded: Option<bool>,
     },
 
     LspStatus(perch_lsp::Status),
@@ -802,19 +805,19 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 if let Some(Err(e)) = ctx.with_cache(|c| c.set_viewed(&item_id, &path, &blob, viewed)) {
                     tracing::warn!(error = %e, "could not record viewed");
                 }
-                send_viewed(&ctx, &item_id);
+                send_viewed(&ctx, &item_id, false);
             }
+            // The window applied these as they were clicked; nothing is
+            // sent back.
             Some(Command::Reveal { item_id, path, blob, first, last }) => {
                 if let Some(Err(e)) = ctx.with_cache(|c| c.set_reveal(&item_id, &path, &blob, first, last)) {
                     tracing::warn!(error = %e, "could not record the reveal");
                 }
-                send_viewed(&ctx, &item_id);
             }
             Some(Command::ResetReveals { item_id, path, blob, first, last }) => {
                 if let Some(Err(e)) = ctx.with_cache(|c| c.remove_reveals(&item_id, &path, &blob, first, last)) {
                     tracing::warn!(error = %e, "could not forget the reveals");
                 }
-                send_viewed(&ctx, &item_id);
             }
             Some(Command::References { token, path, line, character }) => {
                 let checkout = checkout.clone();
@@ -1464,7 +1467,7 @@ async fn finish_open(
 
     // What was viewed and revealed, and whether the files are folded, is
     // small and local; it goes straight away.
-    send_viewed(ctx, &item.id);
+    send_viewed(ctx, &item.id, true);
 
     // The outdated check is a git call per moved thread; the log and the
     // status are two more. Off the open, on their own tasks.
@@ -1529,24 +1532,29 @@ async fn scoped_files(
 }
 
 /// What the reader marked on an item's files: every (path, blob) viewed,
-/// every reveal, and whether the files are folded, in one pass over the
-/// cache. Absent, or with no cache, the files are folded: that is the
-/// default, and the key is only ever written once the tile is clicked.
-fn send_viewed(ctx: &Ctx, item_id: &str) {
+/// and on the open, every reveal and whether the files are folded, in one
+/// pass over the cache. Absent, or with no cache, the files are folded:
+/// that is the default, and the key is only ever written once the tile is
+/// clicked. After a write only the viewed set is sent; see `ViewedReady`.
+fn send_viewed(ctx: &Ctx, item_id: &str, opening: bool) {
     use crate::review::model::{folded_from_meta, folded_meta_key};
-    let (viewed, reveals, folded) = ctx
+    let (viewed, folds) = ctx
         .with_cache(|c| {
-            (
-                c.load_viewed(item_id).unwrap_or_default(),
-                c.load_reveals(item_id).unwrap_or_default(),
-                folded_from_meta(c.meta(&folded_meta_key(item_id)).ok().flatten().as_deref()),
-            )
+            let viewed = c.load_viewed(item_id).unwrap_or_default();
+            let folds = opening.then(|| {
+                (
+                    c.load_reveals(item_id).unwrap_or_default(),
+                    folded_from_meta(c.meta(&folded_meta_key(item_id)).ok().flatten().as_deref()),
+                )
+            });
+            (viewed, folds)
         })
-        .unwrap_or_else(|| (Default::default(), Default::default(), folded_from_meta(None)));
+        .unwrap_or_else(|| (Default::default(), opening.then(|| (Default::default(), folded_from_meta(None)))));
+    let (reveals, folded) = folds.unzip();
     let _ = ctx.events.send(Event::ViewedReady {
         item_id: item_id.to_string(),
         viewed: Arc::new(viewed),
-        reveals: Arc::new(reveals),
+        reveals: reveals.map(Arc::new),
         folded,
     });
 }

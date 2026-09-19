@@ -262,20 +262,25 @@ fn other_row(
 /// or on the bar beside it, the controls that open the run, centred. The
 /// run is read from the document as it is now, not as it was when the row
 /// was built: a reveal that leaves the divider where it is changes what
-/// the divider hides.
+/// the divider hides. Reset is offered when a reveal overlaps the run's
+/// default, or the default of a run taken whole, divider and all, that
+/// this divider carries; see `doc::reset_ranges`.
 fn divider_row(state: ReviewState, file: Arc<LoadedFile>, doc: RwSignal<Arc<Doc>>, key: usize) -> AnyView {
     let reveal_file = file.clone();
     let controls = dyn_container(
         move || {
             let hovered = state.hovered_line.get() == Some(key);
             let run = doc.with(|d| d.run_of(key)).filter(|_| hovered);
-            let revealed = run.is_some_and(|r| {
-                state.reveals_for(&reveal_file.path, &reveal_file.blob).overlaps(r.default_heads.0, r.default_heads.1)
+            let reset = run.and_then(|r| {
+                let defaults = doc::runs(&reveal_file.buffer, &state.anchors_in(&reveal_file.path));
+                let ranges = doc.with(|d| doc::reset_ranges(&d.folds, &defaults, r));
+                let reveals = state.reveals_for(&reveal_file.path, &reveal_file.blob);
+                ranges.iter().any(|&(a, b)| reveals.overlaps(a, b)).then_some(ranges)
             });
-            (run, revealed)
+            (run, reset)
         },
-        move |(run, revealed)| match run {
-            Some(run) => divider_controls(state, file.clone(), run, revealed),
+        move |(run, reset)| match run {
+            Some(run) => divider_controls(state, file.clone(), run, reset),
             None => Empty::new().into_any(),
         },
     );
@@ -301,8 +306,9 @@ fn divider_row(state: ReviewState, file: Arc<LoadedFile>, doc: RwSignal<Arc<Doc>
 }
 
 /// Up and Down, or All when two clicks would do it anyway, and Reset
-/// when the run has a reveal in it to undo.
-fn divider_controls(state: ReviewState, file: Arc<LoadedFile>, run: Run, revealed: bool) -> AnyView {
+/// when there is a reveal to undo in the run or in one it carries:
+/// `reset` is then the head ranges Reset folds back.
+fn divider_controls(state: ReviewState, file: Arc<LoadedFile>, run: Run, reset: Option<Vec<(usize, usize)>>) -> AnyView {
     let reveal = {
         let file = file.clone();
         move |(first, last): (usize, usize)| state.reveal(&file.path, &file.blob, first, last)
@@ -322,11 +328,11 @@ fn divider_controls(state: ReviewState, file: Arc<LoadedFile>, run: Run, reveale
         .style(|s| s.items_center().gap(2.0))
         .into_any()
     };
-    if !revealed {
+    let Some(ranges) = reset else {
         return open;
-    }
+    };
     let reset = glyph_control(SidebarIcon::Undo, "Fold again".to_string(), move || {
-        state.reset(&file.path, &file.blob, &run)
+        state.reset(&file.path, &file.blob, &ranges)
     });
     Stack::horizontal((open, reset)).style(|s| s.items_center().gap(2.0)).into_any()
 }

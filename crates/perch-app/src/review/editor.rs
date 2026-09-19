@@ -161,8 +161,12 @@ fn stacked_view(
     let scroll_delta = editor.editor().scroll_delta;
     let scroll_to = editor.editor().scroll_to;
     let cursor = editor.editor().cursor;
+    // Where an edit last moved the cursor to; see `apply` and `wire_cursor`.
+    let shifted = RwSignal::new(None);
     #[cfg(test)]
     STACKED_VIEWPORT.with(|v| v.set(Some(viewport)));
+    #[cfg(test)]
+    STACKED_CURSOR.with(|c| c.set(Some(cursor)));
 
     // The folds are wired before the jump: a jump into a fold reveals it,
     // and the reveal has to reach the editor before the jump looks for the
@@ -170,10 +174,10 @@ fn stacked_view(
     wire_folds(state, file.clone(), anchors, epoch, {
         let file = file.clone();
         move |folded, anchors, reveals| {
-            apply(&live, stacked_doc(&file, folded, anchors, reveals), viewport, scroll_to, cursor)
+            apply(&live, stacked_doc(&file, folded, anchors, reveals), viewport, scroll_to, cursor, shifted)
         }
     });
-    wire_cursor(state, backend, file.clone(), doc, cursor);
+    wire_cursor(state, backend, file.clone(), doc, cursor, shifted);
     wire_jump(state, file.clone(), doc, scroll_to, epoch);
 
     Stack::horizontal((
@@ -187,9 +191,12 @@ fn stacked_view(
 }
 
 /// The folds of a file: the runs around its changes and anchors less the
-/// reveals, or none when the worktree's files are shown whole.
+/// reveals, or none when the worktree's files are shown whole. A file
+/// outside the changed list has no status and is never folded, whatever
+/// is anchored in it: there is no change to fold around, and it opens
+/// whole as it did before there were folds.
 fn folds_of(file: &LoadedFile, folded: bool, anchors: &[(usize, usize)], reveals: &Reveals) -> Vec<Run> {
-    if folded {
+    if folded && file.status.is_some() {
         reveals.apply(&doc::runs(&file.buffer, anchors))
     } else {
         Vec::new()
@@ -257,18 +264,22 @@ fn wire_folds(
 /// the editor's text, and the row table is set to the new document, so
 /// everything reading rows through it is right from here on. The editor
 /// keeps its scroll offset in pixels, so when the region begins above the
-/// first visible row the offset is moved by the rows added or taken away
-/// and the visible lines stay where they were; when it begins at or below
-/// the top, nothing is moved and the code below the region moves. The
-/// cursor's byte offset stays put through an edit, which would leave it on
-/// other text, so an offset at or after the region is moved by the bytes
-/// the edit added or took away.
+/// first visible row the offset is moved so that the first line in view
+/// the new document still shows keeps its place on the screen, whatever
+/// the region added or took away below it; when the region begins at or
+/// below the top, nothing is moved and the code below the region moves.
+/// The cursor's byte offset stays put through an edit, which would leave
+/// it on other text, so an offset at or after the region is moved by the
+/// bytes the edit added or took away, and the offset it lands on is left
+/// in `shifted` for the cursor's effect, so that it does not take the move
+/// for a click.
 fn apply(
     live: &LiveDoc,
     new: Doc,
     viewport: RwSignal<Rect>,
     scroll_to: RwSignal<Option<Vec2>>,
     cursor: RwSignal<Cursor>,
+    shifted: RwSignal<Option<usize>>,
 ) {
     let old = live.doc.get_untracked();
     let region = doc::changed_region(&old, &new);
@@ -288,6 +299,8 @@ fn apply(
     let start = region.old_bytes.start;
     let delta = region.byte_delta();
     if cursor.with_untracked(|c| c.regions_iter().any(|(a, b, _)| a.max(b) >= start)) {
+        // Said before the move, which runs the cursor's effect.
+        shifted.set(Some(shifted_offset(cursor.with_untracked(|c| c.offset()), start, delta)));
         cursor.update(|c| shift_cursor(c, start, delta));
     }
 
@@ -299,22 +312,36 @@ fn apply(
     let vp = viewport.get_untracked();
     let first_visible = (vp.y0 / line_height).floor() as usize;
     let y = if region.old_rows.start < first_visible {
-        vp.y0 + region.row_delta() as f64 * line_height
+        // The first line in view that the new document still shows keeps
+        // its place; a region that spans the viewport, as Show whole's
+        // does, adds and takes away below it too, and that is not counted.
+        // When no line from the top of the view down is still shown, the
+        // rows after the region keep their place instead.
+        let shift = (first_visible..old.len())
+            .find_map(|row| Some(new.row_of_display(old.display_line(row)?)? as isize - row as isize))
+            .unwrap_or_else(|| region.row_delta());
+        vp.y0 + shift as f64 * line_height
     } else {
         vp.y0
     };
     scroll_to.set(Some(Vec2::new(vp.x0, y.max(0.0))));
 }
 
-/// Move every offset of the cursor at or after `start` by `delta`, and
-/// no further back than `start`: an offset inside the region the edit took
-/// away lands at the region's beginning.
+/// Where an offset lands after an edit of `delta` bytes at `start`: moved
+/// by the delta when at or after it, and no further back than `start`, so
+/// an offset inside the region the edit took away lands at the region's
+/// beginning.
+fn shifted_offset(offset: usize, start: usize, delta: isize) -> usize {
+    if offset >= start {
+        (offset as isize + delta).max(start as isize) as usize
+    } else {
+        offset
+    }
+}
+
+/// Move every offset of the cursor as `shifted_offset` says.
 fn shift_cursor(cursor: &mut Cursor, start: usize, delta: isize) {
-    let shift = |offset: &mut usize| {
-        if *offset >= start {
-            *offset = (*offset as isize + delta).max(start as isize) as usize;
-        }
-    };
+    let shift = |offset: &mut usize| *offset = shifted_offset(*offset, start, delta);
     match &mut cursor.mode {
         CursorMode::Normal { offset, .. } => shift(offset),
         CursorMode::Visual { start, end, .. } => {
@@ -489,6 +516,9 @@ fn split_view(
         (left.editor().viewport, left.editor().scroll_to, left.editor().scroll_delta, left.editor().cursor);
     let (right_viewport, right_scroll_to, right_delta, right_cursor) =
         (right.editor().viewport, right.editor().scroll_to, right.editor().scroll_delta, right.editor().cursor);
+    // Where an edit last moved each cursor to; only the right's is read,
+    // since only the right's cursor is wired.
+    let (left_shifted, right_shifted) = (RwSignal::new(None), RwSignal::new(None));
 
     // The folds are wired before the jump, as in the stacked layout. The
     // right is edited first: it owns the scroll, and the left follows.
@@ -498,11 +528,11 @@ fn split_view(
             let Some((new_left, new_right)) = split_doc(&file, folded, anchors, reveals) else {
                 return;
             };
-            apply(&right_live, new_right, right_viewport, right_scroll_to, right_cursor);
-            apply(&left_live, new_left, left_viewport, left_scroll_to, left_cursor);
+            apply(&right_live, new_right, right_viewport, right_scroll_to, right_cursor, right_shifted);
+            apply(&left_live, new_left, left_viewport, left_scroll_to, left_cursor, left_shifted);
         }
     });
-    wire_cursor(state, backend, file.clone(), right_doc, right_cursor);
+    wire_cursor(state, backend, file.clone(), right_doc, right_cursor, right_shifted);
     wire_jump(state, file.clone(), right_doc, right_scroll_to, epoch);
 
     // The left follows the right down the file. Sideways it keeps its own
@@ -557,6 +587,9 @@ thread_local! {
     /// The viewport of the last stacked editor built, so a test can see
     /// that an edit left it where it was.
     static STACKED_VIEWPORT: std::cell::Cell<Option<RwSignal<Rect>>> = const { std::cell::Cell::new(None) };
+    /// The cursor of the last stacked editor built, so a test can place it
+    /// where a click would, since a headless editor cannot take a click.
+    static STACKED_CURSOR: std::cell::Cell<Option<RwSignal<Cursor>>> = const { std::cell::Cell::new(None) };
 }
 
 /// A read-only editor over one document, drawn as code.
@@ -588,15 +621,25 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
 /// cursor is laying out: the stacked one, or the head side of a split. It
 /// is read as it is when the cursor moves, not as it was when the editor
 /// was built, so a row is right after the document has been edited.
+///
+/// An edit above the cursor moves its offset to keep it on its text, and
+/// `apply` leaves the offset it moved it to in `shifted`. That move is no
+/// click: the line and the selection are read again, since their rows may
+/// have moved, but the symbol under the cursor is the one it was on, so
+/// the panel stays as it is, open or dismissed, and nothing is asked again.
 fn wire_cursor(
     state: ReviewState,
     backend: Rc<Backend>,
     file: Arc<LoadedFile>,
     doc: RwSignal<Arc<Doc>>,
     cursor: RwSignal<Cursor>,
+    shifted: RwSignal<Option<usize>>,
 ) {
     Effect::new(move |previous: Option<usize>| {
         let offset = cursor.with(|c| c.offset());
+        // Taken whichever way this run goes, so that a later click landing
+        // on the same offset is a click.
+        let by_edit = shifted.try_update(|s| s.take()).flatten() == Some(offset);
         if previous == Some(offset) {
             return offset;
         }
@@ -606,7 +649,6 @@ fn wire_cursor(
         if let Some(display_line) = doc.nearest_display_line(row) {
             state.cursor_line.set(display_line);
         }
-        state.hover_text.set(None);
 
         // The selection, as display lines, for a thread's anchor. A caret
         // is a one-line selection. Rows that are no line at all fall out,
@@ -624,6 +666,10 @@ fn wire_cursor(
             state.selection.set(first.zip(last));
         }
 
+        if by_edit {
+            return offset;
+        }
+        state.hover_text.set(None);
         if let Some((line, column)) = doc.head_position(offset) {
             state.last_position.set(Some((line, column)));
             let token = state.next_token();
@@ -897,6 +943,43 @@ mod tests {
         assert_eq!(stacked.len(), file.buffer.len());
         assert_eq!(stacked.row_of_head(1), Some(2));
     }
+
+    #[test]
+    fn a_file_outside_the_changed_list_is_whole_whatever_is_anchored_in_it() {
+        let text: String = (0..30).map(|i| format!("line {i}\n")).collect();
+        let plain = crate::backend::build_loaded_file(
+            "lib.rs".into(),
+            text.clone(),
+            String::new(),
+            None,
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        // A thread on line 11 would split the file into two runs, were it
+        // a changed file; there is no change to fold around, so it is not.
+        let anchors = [(10, 10)];
+        assert_eq!(doc::runs(&plain.buffer, &anchors).len(), 2, "the runs are there to fold");
+        let doc = stacked_doc(&plain, true, &anchors, &Reveals::default());
+        assert!(doc.folds.is_empty());
+        assert_eq!(doc.hidden_lines(), 0);
+        assert_eq!(doc.text, text);
+        assert_eq!(doc.len(), 30);
+
+        // A changed file with the same anchor folds around it.
+        let changed = crate::backend::build_loaded_file(
+            "lib.rs".into(),
+            text.clone(),
+            format!("{text}old end\n"),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        let doc = stacked_doc(&changed, true, &anchors, &Reveals::default());
+        assert_eq!(doc.folds.len(), 2);
+        assert!(doc.hidden_lines() > 0);
+    }
 }
 
 /// The split in a headless window.
@@ -907,6 +990,7 @@ mod window {
 
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::reactive::{SignalGet, SignalUpdate};
+    use floem::views::editor::core::cursor::CursorAffinity;
     use perch_github::{Item, ItemCheckout};
 
     use crate::review::model::{ItemTab, Layout, LiveDoc, LiveLayout, Phase, ReviewState};
@@ -1373,13 +1457,14 @@ mod window {
         assert_eq!(doc.display_line(first_row + 20), first_line, "the same line is first in view");
     }
 
-    #[test]
-    fn the_split_keeps_both_sides_the_same_height_through_a_down_click() {
-        // Three changes fifty lines apart, then twelve four lines apart so
-        // the document is long enough to scroll: three runs of forty-four,
-        // so each divider offers Up and Down.
+    /// Three changes fifty lines apart, then twelve four lines apart so
+    /// the document is long enough to scroll: three runs of forty-four,
+    /// so each divider offers Up and Down. Stacked, the runs are display
+    /// lines 5 to 48, 57 to 100 and 109 to 152 of 228, and the folded
+    /// document's dividers are at rows 5, 14 and 23 of 99.
+    fn three_runs() -> (HeadlessHarness, ReviewState) {
         let blocks = |word: &str| (0..12).map(|i| format!("{word}{i}\n{}", context(150 + i * 4, 4))).collect::<String>();
-        let (mut harness, state) = harness_with(
+        harness_with(
             format!(
                 "new top\n{}new mid\n{}new bottom\n{}{}",
                 context(0, 50),
@@ -1394,7 +1479,154 @@ mod window {
                 context(100, 50),
                 blocks("old")
             ),
-        );
+        )
+    }
+
+    #[test]
+    fn show_whole_with_dividers_above_and_below_the_viewport_keeps_the_same_line_in_view() {
+        let (mut harness, state) = three_runs();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        let doc = live.doc.get();
+        assert_eq!(doc.len(), 99);
+        for row in [5, 14, 23] {
+            assert!(doc.run_of(row).is_some(), "row {row} is a divider");
+        }
+
+        // Scroll to between the second divider and the third, so that
+        // Show whole opens runs above the view and below it.
+        let (left, top) = pane_origin();
+        harness.scroll_down(left + 300.0, top + 300.0, 16.0 * line_height);
+        harness.rebuild();
+        harness.paint();
+        let before = viewport.get().y0;
+        let first_row = (before / line_height).floor() as usize;
+        assert!((15..23).contains(&first_row), "the editor scrolled to row {first_row}, not between the dividers");
+        let first_line = doc.display_line(first_row).expect("a line is first in view");
+        let within = before - first_row as f64 * line_height;
+
+        state.folded.set(false);
+        harness.rebuild();
+        harness.paint();
+        let doc = live.doc.get();
+        assert_eq!(doc.len(), 228, "every line, no divider");
+        let row = doc.row_of_display(first_line).expect("every line is shown");
+        assert_eq!(row, first_line);
+        assert_eq!(viewport.get().y0, row as f64 * line_height + within, "the same line is first in view");
+        assert_eq!(laid_out_text(&live), doc.text);
+
+        state.folded.set(true);
+        harness.rebuild();
+        harness.paint();
+        let doc = live.doc.get();
+        assert_eq!(doc.len(), 99);
+        assert_eq!(doc.display_line(first_row), Some(first_line));
+        assert_eq!(viewport.get().y0, before, "folded again, the line is where it was");
+    }
+
+    #[test]
+    fn all_takes_the_divider_with_it_and_reset_is_on_the_divider_above() {
+        let (mut harness, state) = three_runs();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let doc = live.doc.get();
+        let second = doc.run_of(14).expect("row 14 is the second divider");
+        assert_eq!(second.len(), 44);
+
+        // All on the second run: its lines take its divider's row, and the
+        // document has two dividers left.
+        let (first, last) = second.whole();
+        state.reveal("src/x.rs", "", first, last);
+        harness.rebuild();
+        harness.paint();
+        let doc = live.doc.get();
+        assert_eq!(doc.len(), 99 - 1 + 44);
+        assert_eq!(doc.folds.len(), 2);
+        assert!(doc.run_of(14).is_none(), "the divider is gone");
+        assert!(doc.run_of(5).is_some(), "the one above is not");
+
+        // Hovered, the divider above offers Reset as a third slot after Up
+        // and Down: 52 wide centred in the gutter's 70, so Reset's centre
+        // is 53 from the gutter's left.
+        let (left, top) = pane_origin();
+        let (x, y) = (left + 53.0, top + 5.0 * line_height + line_height / 2.0);
+        harness.pointer_move(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.hovered_line.get(), Some(5));
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(live.doc.get().len(), 99, "click at ({x}, {y}) over {under:?} did not fold the run again");
+        assert!(state.reveals_for("src/x.rs", "").is_empty());
+        assert_eq!(laid_out_text(&live), live.doc.get().text);
+    }
+
+    #[test]
+    fn a_reveal_above_the_cursor_moves_it_without_asking_about_its_symbol_again() {
+        let (mut harness, state) = one_long_run();
+        let live = stacked(state);
+        let cursor = super::STACKED_CURSOR.with(|c| c.get()).expect("a stacked editor was built");
+        // The editor's cursor starts on row 0, a ghost, which is nowhere
+        // in the head file: nothing was asked.
+        assert_eq!(state.last_position.get(), None);
+        assert_eq!(state.request_token.get(), 0);
+
+        // The cursor placed as a click would place it: on "new bottom",
+        // head line 61, three columns in, below the divider at row 5.
+        let doc = live.doc.get();
+        let row = doc.row_of_head(61).expect("new bottom is shown");
+        assert_eq!(row, 11);
+        let offset = doc.offset_of_row(row) + 3;
+        cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.last_position.get(), Some((61, 3)));
+        assert_eq!(state.request_token.get(), 1, "the symbol under the cursor was asked about");
+        assert_eq!(state.cursor_line.get(), 64, "new bottom is display line 64, after the pair's two ghosts");
+        state.hover_text.set(Some("fn new_bottom()".into()));
+
+        // Down on the divider above: twenty lines come in above the cursor,
+        // which stays on its text, twenty rows down. The symbol under it is
+        // the one it was on, so nothing is asked again and the panel stays.
+        let run = doc.run_of(5).expect("row 5 is the divider");
+        let (first, last) = run.bottom();
+        state.reveal("src/x.rs", "", first, last);
+        harness.rebuild();
+        harness.paint();
+        let doc = live.doc.get();
+        assert_eq!(doc.len(), 103);
+        assert_eq!(doc.row_of_head(61), Some(31));
+        assert_eq!(cursor.get().offset(), doc.offset_of_row(31) + 3);
+        assert_eq!(state.cursor_line.get(), 64);
+        assert_eq!(state.last_position.get(), Some((61, 3)));
+        assert_eq!(state.request_token.get(), 1, "nothing was asked again");
+        assert_eq!(state.hover_text.get().as_deref(), Some("fn new_bottom()"), "the panel stays as it was");
+
+        // Reset folds them away again, moving the cursor back up: the same.
+        state.reset("src/x.rs", "", &[run.default_heads]);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(cursor.get().offset(), offset);
+        assert_eq!(state.request_token.get(), 1);
+        assert_eq!(state.hover_text.get().as_deref(), Some("fn new_bottom()"));
+
+        // A click somewhere else is still a click: the panel closes and
+        // the new symbol is asked about.
+        let elsewhere = live.doc.get().offset_of_row(12);
+        cursor.update(|c| c.set_offset(elsewhere, CursorAffinity::Backward, false, false));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.hover_text.get(), None);
+        assert_eq!(state.request_token.get(), 2);
+        assert_eq!(state.last_position.get(), Some((62, 0)));
+    }
+
+    #[test]
+    fn the_split_keeps_both_sides_the_same_height_through_a_down_click() {
+        let (mut harness, state) = three_runs();
         state.layout.set(Layout::Split);
         harness.rebuild();
         harness.paint();
@@ -1514,7 +1746,7 @@ mod window {
         assert_eq!(viewport.get().y0, (row as f64 - 4.0) * line_height, "scrolled to the target");
 
         // Reset on the divider above folds it again.
-        state.reset("src/x.rs", "", &doc.run_of(5).unwrap());
+        state.reset("src/x.rs", "", &[doc.run_of(5).unwrap().default_heads]);
         harness.rebuild();
         harness.paint();
         assert_eq!(live.doc.get().len(), 83);

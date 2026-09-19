@@ -163,7 +163,6 @@ impl Doc {
     }
 
     /// The row a display line is on. `None` when the line is folded away.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the jump into a fold, step 2 of milestone 11, looks rows up by display line"))]
     pub fn row_of_display(&self, display: usize) -> Option<usize> {
         self.display_rows.get(display).copied().flatten()
     }
@@ -399,8 +398,11 @@ pub fn build_split(
 
         // A card under this row's head line, or under the ghost this row's
         // base line is in the unified buffer, takes its rows on both sides.
-        let under = display.or_else(|| base_line.and_then(|b| display_of_ghost.get(&b).copied()));
-        if let Some(under) = under {
+        // A rewritten line pairs its ghost with the line, so a row can have
+        // both; the ghost's cards come first, as the stacked layout has
+        // them, since the ghost is spliced above the line.
+        let ghost = base_line.and_then(|b| display_of_ghost.get(&b).copied());
+        for under in ghost.into_iter().chain(display) {
             left.push_cards(cards, under);
             right.push_cards(cards, under);
         }
@@ -569,11 +571,15 @@ impl Reveals {
 
     /// The runs with the reveals cut out of them: a run a reveal overlaps
     /// is cut back to what the reveal leaves, on either side of it, and a
-    /// run a reveal covers is gone.
+    /// run a reveal covers is gone. A piece cut down to twice the context
+    /// or less is shown whole, as a run that short is by default: a
+    /// divider hiding two lines is worse than the two lines. A run no
+    /// reveal touched is as the folds gave it.
     pub fn apply(&self, runs: &[Run]) -> Vec<Run> {
         let mut out = Vec::with_capacity(runs.len());
         for run in runs {
-            let mut pieces = vec![(run.first_head, run.last_head())];
+            let whole = (run.first_head, run.last_head());
+            let mut pieces = vec![whole];
             for &(a, b) in &self.0 {
                 pieces = pieces
                     .into_iter()
@@ -593,6 +599,9 @@ impl Reveals {
                     .collect();
             }
             for (p0, p1) in pieces {
+                if (p0, p1) != whole && p1 - p0 < 2 * CONTEXT_LINES {
+                    continue;
+                }
                 out.push(Run {
                     first: run.first + (p0 - run.first_head),
                     last: run.first + (p1 - run.first_head),
@@ -603,6 +612,27 @@ impl Reveals {
         }
         out
     }
+}
+
+/// The runs a divider's Reset folds back, as the head ranges of their
+/// defaults: the run the divider is a piece of, and every run of
+/// `defaults` that the reveals took whole, divider and all, which this
+/// divider is the nearest one above, or the nearest below when none is
+/// above it. Reset is offered when a reveal overlaps any of them, and folds
+/// them all back. `folds` are the runs as the document has them, in order.
+/// With no divider left in the file nothing carries a run's Reset.
+pub fn reset_ranges(folds: &[Run], defaults: &[Run], divider: Run) -> Vec<(usize, usize)> {
+    let mut out = vec![divider.default_heads];
+    for run in defaults {
+        if folds.iter().any(|f| f.default_heads == run.default_heads) {
+            continue;
+        }
+        let carrier = folds.iter().rfind(|f| f.last < run.first).or_else(|| folds.first());
+        if carrier == Some(&divider) {
+            out.push(run.default_heads);
+        }
+    }
+    out
 }
 
 /// The set the store holds for a file, as it was loaded.
@@ -954,6 +984,38 @@ mod tests {
         assert_eq!(stacked.rows[3], DocRow::Spacer { card: CardId::Composer, row: 0 });
     }
 
+    #[test]
+    fn a_card_under_the_ghost_of_a_rewritten_line_is_kept_on_both_sides() {
+        // base a b c; head a B c: the split pairs b with B on one row. A
+        // card under b's ghost, display line 1, and one under B, display
+        // line 2, are both under that row, the ghost's first, as the
+        // stacked layout has them.
+        let base = "a\nb\nc\n";
+        let head = "a\nB\nc\n";
+        let diff = file_diff(base, head);
+        let alignment = perch_git::alignment(&diff, base, head);
+        let b = DisplayBuffer::unified(head, base, &diff);
+        let under_ghost = Card { id: CardId::Thread("t1".into()), after_display_line: 1, rows: 2 };
+        let under_line = Card { id: CardId::GitHub(9), after_display_line: 2, rows: 1 };
+        let spacers = [
+            DocRow::Spacer { card: CardId::Thread("t1".into()), row: 0 },
+            DocRow::Spacer { card: CardId::Thread("t1".into()), row: 1 },
+            DocRow::Spacer { card: CardId::GitHub(9), row: 0 },
+        ];
+        let (left, right) = build_split(&alignment, base, &b, &[], &[under_ghost.clone(), under_line.clone()]);
+        assert_eq!(left.rows[..2], [line(0, Tint::Plain), line(1, Tint::Deleted)]);
+        assert_eq!(left.rows[2..5], spacers[..]);
+        assert_eq!(left.rows[5], line(2, Tint::Plain));
+        assert_eq!(right.rows[..2], [line(0, Tint::Plain), line(2, Tint::Modified)]);
+        assert_eq!(right.rows[2..5], spacers[..]);
+        assert_eq!(right.rows[5], line(3, Tint::Plain));
+        assert_eq!(left.len(), right.len());
+        let stacked = build(&b, &[], &[under_ghost, under_line]);
+        assert_eq!(stacked.rows[2..4], spacers[..2]);
+        assert_eq!(stacked.rows[4], line(2, Tint::Modified));
+        assert_eq!(stacked.rows[5], spacers[2]);
+    }
+
     // Runs.
 
     #[test]
@@ -1045,9 +1107,9 @@ mod tests {
     #[test]
     fn a_reveal_inside_a_run_leaves_a_piece_on_each_side_and_both_fold_back_to_the_whole() {
         let mut reveals = Reveals::default();
-        reveals.add(10, 12);
+        reveals.add(11, 12);
         let pieces = reveals.apply(&two_runs()[..1]);
-        assert_eq!(pieces, vec![piece(5, 10, 4), piece(14, 38, 13)]);
+        assert_eq!(pieces, vec![piece(5, 11, 4), piece(14, 38, 13)]);
         // Either piece's Reset undoes the reveal between them.
         for p in &pieces {
             assert!(reveals.overlaps(p.default_heads.0, p.default_heads.1));
@@ -1055,6 +1117,31 @@ mod tests {
             after.remove_overlapping(p.default_heads.0, p.default_heads.1);
             assert!(after.is_empty());
         }
+    }
+
+    #[test]
+    fn a_piece_a_reveal_leaves_of_six_lines_or_fewer_is_shown_whole() {
+        // Down on a run of twenty-six leaves six: shown, no divider. On a
+        // run of twenty-seven, seven stay behind the divider.
+        let run = Run::new(5, 30, 4);
+        assert_eq!(run.len(), 26);
+        let mut reveals = Reveals::default();
+        let (a, z) = run.bottom();
+        reveals.add(a, z);
+        assert!(reveals.apply(&[run]).is_empty());
+        let run = Run::new(5, 31, 4);
+        let mut reveals = Reveals::default();
+        let (a, z) = run.bottom();
+        reveals.add(a, z);
+        assert_eq!(reveals.apply(&[run]), vec![Run { first: 5, last: 11, first_head: 4, default_heads: (4, 30) }]);
+        // A jump's worth near the top of a run leaves a short piece above
+        // it, which is shown, and the rest below, which is not.
+        let mut reveals = Reveals::default();
+        reveals.add(10, 12);
+        assert_eq!(reveals.apply(&two_runs()[..1]), vec![piece(14, 38, 13)]);
+        // A run no reveal touched is as the folds gave it, however short.
+        let short = Run::new(5, 5, 4);
+        assert_eq!(Reveals::default().apply(&[short]), vec![short]);
     }
 
     #[test]
@@ -1113,6 +1200,46 @@ mod tests {
         reveals.remove_overlapping(4, 37);
         assert_eq!(reveals.iter().collect::<Vec<_>>(), vec![(43, 62)]);
         assert!(!reveals.overlaps(4, 37));
+    }
+
+    #[test]
+    fn a_run_revealed_whole_has_its_reset_on_the_nearest_divider_above_or_else_the_first() {
+        let defaults = vec![Run::new(5, 38, 4), Run::new(45, 60, 43), Run::new(70, 90, 68)];
+        // Nothing revealed: each divider stands for its own run alone.
+        for run in &defaults {
+            assert_eq!(reset_ranges(&defaults, &defaults, *run), vec![run.default_heads]);
+        }
+        // All on the second run: the first run's divider carries it, and
+        // the third's does not.
+        let mut reveals = Reveals::default();
+        let (a, z) = defaults[1].whole();
+        reveals.add(a, z);
+        let folds = reveals.apply(&defaults);
+        assert_eq!(folds, vec![defaults[0], defaults[2]]);
+        assert_eq!(reset_ranges(&folds, &defaults, folds[0]), vec![(4, 37), (43, 58)]);
+        assert_eq!(reset_ranges(&folds, &defaults, folds[1]), vec![(68, 88)]);
+        // All on the first run: nothing is above it, so the divider below
+        // carries it.
+        let mut reveals = Reveals::default();
+        let (a, z) = defaults[0].whole();
+        reveals.add(a, z);
+        let folds = reveals.apply(&defaults);
+        assert_eq!(reset_ranges(&folds, &defaults, folds[0]), vec![(43, 58), (4, 37)]);
+        assert_eq!(reset_ranges(&folds, &defaults, folds[1]), vec![(68, 88)]);
+        // The first run cut in two by a jump, and the second taken whole:
+        // the lower piece is the nearest divider above the second.
+        let mut reveals = Reveals::default();
+        let (a, z) = defaults[1].whole();
+        reveals.add(a, z);
+        reveals.add(15, 21);
+        let folds = reveals.apply(&defaults);
+        assert_eq!(folds.len(), 3);
+        assert_eq!(folds[0].default_heads, (4, 37));
+        assert_eq!(folds[1].default_heads, (4, 37));
+        assert_eq!(reset_ranges(&folds, &defaults, folds[0]), vec![(4, 37)]);
+        assert_eq!(reset_ranges(&folds, &defaults, folds[1]), vec![(4, 37), (43, 58)]);
+        // Every run revealed: no divider, and nothing to carry a Reset.
+        assert!(Reveals::from_iter([(0, 100)]).apply(&defaults).is_empty());
     }
 
     // The builder over the folds the reveals leave.

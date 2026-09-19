@@ -10,7 +10,7 @@ use perch_git::{ChangeStatus, ChangedFile, Commit, Dirt, DisplayBuffer, Scope, T
 use perch_github::{Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest};
 use perch_syntax::{Language, LineSpans};
 
-use crate::review::doc::{Doc, Reveals, Run};
+use crate::review::doc::{Doc, Reveals};
 
 /// A file prepared for the editor: text to render, and everything needed to
 /// colour it and map a rendered line back to a real one.
@@ -822,24 +822,29 @@ impl ReviewState {
         });
     }
 
-    /// Fold a run back to its default: forget every reveal in the run
-    /// this is a piece of, here and in the store.
-    pub fn reset(&self, path: &str, blob: &str, run: &Run) {
-        let (first, last) = run.default_heads;
+    /// Fold runs back to their default: forget every reveal overlapping
+    /// each of `ranges`, the head lines of a run as the folds have it by
+    /// default, here and in the store. A divider's Reset gives its own
+    /// run's and those of the runs it carries; see `doc::reset_ranges`.
+    pub fn reset(&self, path: &str, blob: &str, ranges: &[(usize, usize)]) {
         self.reveals.update(|m| {
             if let Some(reveals) = m.get_mut(&(path.to_string(), blob.to_string())) {
-                reveals.remove_overlapping(first, last);
+                for &(first, last) in ranges {
+                    reveals.remove_overlapping(first, last);
+                }
                 if reveals.is_empty() {
                     m.remove(&(path.to_string(), blob.to_string()));
                 }
             }
         });
-        self.queue_reveal_write(blob, RevealWrite::Reset {
-            path: path.to_string(),
-            blob: blob.to_string(),
-            first: first as u32,
-            last: last as u32,
-        });
+        for &(first, last) in ranges {
+            self.queue_reveal_write(blob, RevealWrite::Reset {
+                path: path.to_string(),
+                blob: blob.to_string(),
+                first: first as u32,
+                last: last as u32,
+            });
+        }
     }
 
     /// Hand a write to the root view for the backend. A file with no blob
@@ -1213,8 +1218,8 @@ mod tests {
         assert!(!state.reveals_for("src/x.rs", "b1").overlaps(50, 60), "another blob's reveal is another file's");
         // Reset on a piece of the run folds the whole run: the piece
         // remembers the run it was cut from.
-        let piece = Run { first: 25, last: 38, first_head: 24, default_heads: (4, 37) };
-        state.reset("src/x.rs", "b1", &piece);
+        let piece = crate::review::doc::Run { first: 25, last: 38, first_head: 24, default_heads: (4, 37) };
+        state.reset("src/x.rs", "b1", &[piece.default_heads]);
         assert!(state.reveals_for("src/x.rs", "b1").is_empty());
         assert!(state.reveals_for("src/x.rs", "b2").overlaps(50, 60), "and no other");
         let key = ("src/x.rs".to_string(), "b1".to_string());
@@ -1234,9 +1239,24 @@ mod tests {
         // A file with no blob keeps its reveals here and sends nothing.
         state.pending_reveals.set(Vec::new());
         state.reveal("untracked.rs", "", 0, 9);
-        state.reset("untracked.rs", "", &piece);
+        state.reset("untracked.rs", "", &[piece.default_heads]);
         assert!(state.pending_reveals.get().is_empty());
         assert!(state.reveals_for("untracked.rs", "").is_empty(), "the reset still took in memory");
+
+        // A divider carrying a run taken whole resets both, one write each.
+        state.reveal("src/x.rs", "b1", 4, 23);
+        state.reveal("src/x.rs", "b1", 43, 58);
+        state.reveal("src/x.rs", "b1", 70, 79);
+        state.pending_reveals.set(Vec::new());
+        state.reset("src/x.rs", "b1", &[(4, 37), (43, 58)]);
+        assert_eq!(state.reveals_for("src/x.rs", "b1").iter().collect::<Vec<_>>(), vec![(70, 79)]);
+        assert_eq!(
+            state.pending_reveals.get(),
+            vec![
+                RevealWrite::Reset { path: "src/x.rs".into(), blob: "b1".into(), first: 4, last: 37 },
+                RevealWrite::Reset { path: "src/x.rs".into(), blob: "b1".into(), first: 43, last: 58 },
+            ]
+        );
     }
 
     #[test]

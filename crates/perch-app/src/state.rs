@@ -295,29 +295,36 @@ impl AppState {
             Event::ViewedReady { item_id, viewed, reveals, folded } => {
                 if review.is_item(&item_id) {
                     review.viewed.set(viewed);
-                    // The store's reveals replace what is held for the
-                    // files it has rows for. A file with no blob has none
-                    // there and keeps its own, under the empty blob. The
-                    // writes are skipped when nothing changed: each would
-                    // rebuild the open file's document for nothing.
-                    let loaded: HashMap<(String, String), crate::review::doc::Reveals> = reveals
-                        .iter()
-                        .map(|(key, ranges)| {
-                            (key.clone(), ranges.iter().map(|&(a, b)| (a as usize, b as usize)).collect())
-                        })
-                        .collect();
-                    let changed = review.reveals.with_untracked(|held| {
-                        held.iter().filter(|((_, blob), _)| !blob.is_empty()).count() != loaded.len()
-                            || loaded.iter().any(|(key, set)| held.get(key) != Some(set))
-                    });
-                    if changed {
-                        review.reveals.update(|held| {
-                            held.retain(|(_, blob), _| blob.is_empty());
-                            held.extend(loaded);
+                    // The open's answer carries the store's reveals, which
+                    // replace what is held for the files it has rows for. A
+                    // file with no blob has none there and keeps its own,
+                    // under the empty blob. A write's answer carries none,
+                    // and what is held stays: it was applied as it was
+                    // clicked. The writes are skipped when nothing changed:
+                    // each would rebuild the open file's document for
+                    // nothing.
+                    if let Some(reveals) = reveals {
+                        let loaded: HashMap<(String, String), crate::review::doc::Reveals> = reveals
+                            .iter()
+                            .map(|(key, ranges)| {
+                                (key.clone(), ranges.iter().map(|&(a, b)| (a as usize, b as usize)).collect())
+                            })
+                            .collect();
+                        let changed = review.reveals.with_untracked(|held| {
+                            held.iter().filter(|((_, blob), _)| !blob.is_empty()).count() != loaded.len()
+                                || loaded.iter().any(|(key, set)| held.get(key) != Some(set))
                         });
+                        if changed {
+                            review.reveals.update(|held| {
+                                held.retain(|(_, blob), _| blob.is_empty());
+                                held.extend(loaded);
+                            });
+                        }
                     }
-                    if review.folded.get_untracked() != folded {
-                        review.folded.set(folded);
+                    if let Some(folded) = folded {
+                        if review.folded.get_untracked() != folded {
+                            review.folded.set(folded);
+                        }
                     }
                 }
             }
@@ -468,15 +475,19 @@ mod tests {
         review
     }
 
-    /// What the backend sends for an item: `src/x.rs` at `b1` viewed, with
-    /// two runs revealed in it.
+    /// What the backend sends for an item on the open: `src/x.rs` at `b1`
+    /// viewed, with two runs revealed in it.
     fn viewed_ready(item_id: &str, reveals: Vec<(u32, u32)>, folded: bool) -> Event {
         let key = ("src/x.rs".to_string(), "b1".to_string());
         Event::ViewedReady {
             item_id: item_id.into(),
             viewed: Arc::new([key.clone()].into_iter().collect()),
-            reveals: Arc::new(if reveals.is_empty() { HashMap::new() } else { [(key, reveals)].into_iter().collect() }),
-            folded,
+            reveals: Some(Arc::new(if reveals.is_empty() {
+                HashMap::new()
+            } else {
+                [(key, reveals)].into_iter().collect()
+            })),
+            folded: Some(folded),
         }
     }
 
@@ -499,12 +510,36 @@ mod tests {
         assert_eq!(review.reveals_for("src/x.rs", "b1").iter().collect::<Vec<_>>(), vec![(4, 23), (40, 59)]);
         assert!(review.reveals_for("untracked.rs", "").overlaps(0, 9), "the store has no row to replace it with");
 
-        // After a Reset the store has fewer rows, and the state follows.
+        // Opened again with fewer rows in the store, the state follows.
         app.apply_with_review(viewed_ready("wt", vec![(40, 59)], true), review);
         assert!(review.folded.get());
         assert_eq!(review.reveals_for("src/x.rs", "b1").iter().collect::<Vec<_>>(), vec![(40, 59)]);
         app.apply_with_review(viewed_ready("wt", Vec::new(), true), review);
         assert!(review.reveals_for("src/x.rs", "b1").is_empty());
         assert!(review.reveals_for("untracked.rs", "").overlaps(0, 9), "still kept");
+    }
+
+    #[test]
+    fn a_writes_answer_carries_only_the_viewed_set_and_leaves_the_reveals_and_the_fold_alone() {
+        let app = AppState::new();
+        let review = review_of("wt");
+        // Down, then Show whole, both applied as they were clicked.
+        review.reveal("src/x.rs", "b1", 4, 23);
+        review.folded.set(false);
+
+        // A viewed write's answer, read from the store before either
+        // reached it, changes neither.
+        app.apply_with_review(
+            Event::ViewedReady {
+                item_id: "wt".into(),
+                viewed: Arc::new([("src/x.rs".to_string(), "b1".to_string())].into_iter().collect()),
+                reveals: None,
+                folded: None,
+            },
+            review,
+        );
+        assert!(review.viewed.get().contains(&("src/x.rs".into(), "b1".into())));
+        assert_eq!(review.reveals_for("src/x.rs", "b1").iter().collect::<Vec<_>>(), vec![(4, 23)]);
+        assert!(!review.folded.get(), "Show whole is not undone by a write that came before it");
     }
 }
