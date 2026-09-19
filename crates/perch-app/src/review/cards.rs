@@ -509,9 +509,7 @@ fn open_github_card(app: AppState, state: ReviewState, thread: LineThread) -> im
     let card_id = CardId::GitHub(thread.comment.id);
     Stack::vertical((
         threads::chevron_row(state, card_id, false, Empty::new().into_any()).style(|s| s.flex_shrink(0.0_f32)),
-        comments_view(app, state, &thread)
-            .scroll()
-            .style(|s| s.width_full().flex_shrink(1.0_f32).min_height(0.0)),
+        comments_view(app, state, &thread).scroll().style(threads::card_scroll),
     ))
     .style(|s| {
         s.flex_col()

@@ -553,12 +553,14 @@ impl Run {
         self.len() <= REVEAL_ALL_AT
     }
 
-    /// The head lines Up reveals: the first `REVEAL_STEP` of the run.
+    /// The head lines Down reveals: the first `REVEAL_STEP` of the run,
+    /// which follow the code above the divider.
     pub fn top(&self) -> (usize, usize) {
         (self.first_head, (self.first_head + REVEAL_STEP - 1).min(self.last_head()))
     }
 
-    /// The head lines Down reveals: the last `REVEAL_STEP` of the run.
+    /// The head lines Up reveals: the last `REVEAL_STEP` of the run,
+    /// which lead into the code below the divider.
     pub fn bottom(&self) -> (usize, usize) {
         ((self.last_head() + 1).saturating_sub(REVEAL_STEP).max(self.first_head), self.last_head())
     }

@@ -447,9 +447,11 @@ pub fn composer_view(
             }),
             outdated_pill(outdated),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
-            // Put the box away. Nothing typed into it is kept.
+            // Put the box away. Nothing typed into it is kept. The button
+            // is the size of the thread's `...` and sits where it sits,
+            // since the thread's card takes the composer's place.
             icon_button(|| SidebarIcon::Close, || theme::FG_SUBTLE, move || state.close_composer())
-                .style(|s| s.size(22.0, 22.0).margin_right(-4.0)),
+                .style(|s| s.size(theme::THREAD_MENU, theme::THREAD_MENU)),
         ))
         .style(|s| s.items_center().width_full().margin_bottom(8.0)),
         editor,
@@ -748,10 +750,7 @@ fn open_card(
     };
     let messages = messages_view(app, state, backend.clone(), thread.id.clone(), face);
     let messages = match face {
-        ThreadFace::Inline => messages
-            .scroll()
-            .style(|s| s.width_full().flex_shrink(1.0_f32).min_height(0.0))
-            .into_any(),
+        ThreadFace::Inline => messages.scroll().style(card_scroll).into_any(),
         ThreadFace::Column | ThreadFace::Card => messages.into_any(),
     };
     Stack::vertical((
@@ -775,10 +774,25 @@ pub(crate) fn inline_card_max_height() -> f64 {
     crate::review::doc::CARD_MAX_ROWS as f64 * theme::CODE_LINE_HEIGHT as f64 - 2.0 * theme::CARD_INSET - 2.0
 }
 
+/// The scroll a card's messages sit in, for the cap. floem keeps the
+/// bar's width whether or not anything overflows, off the right of the
+/// content for the vertical bar and under it for the horizontal one. The
+/// messages take the card's whole width and never scroll sideways, so the
+/// scroll reaches `CARD_SCROLLBAR` into the card's right padding, where
+/// the bar draws at the cap, and keeps nothing under the messages.
+pub(crate) fn card_scroll(s: floem::style::Style) -> floem::style::Style {
+    s.flex_shrink(1.0_f32)
+        .min_height(0.0)
+        .overflow_x(floem::taffy::Overflow::Hidden)
+        .scrollbar_width(theme::CARD_SCROLLBAR)
+        .margin_right(-theme::CARD_SCROLLBAR)
+}
+
 /// The first row of a card in the code, where the column's card has its
 /// anchor's label: the chevron that collapses it, Outdated, and at the
 /// end whatever the card puts there, the `...` menu on a thread of the
-/// reader's own.
+/// reader's own. The row is as tall as that menu whether or not it holds
+/// one, so the chevron sits at one height on every card.
 pub(crate) fn chevron_row(state: ReviewState, card_id: CardId, outdated: bool, trailing: floem::AnyView) -> impl IntoView {
     Stack::horizontal((
         chevron(state, card_id, true),
@@ -786,7 +800,7 @@ pub(crate) fn chevron_row(state: ReviewState, card_id: CardId, outdated: bool, t
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         trailing,
     ))
-    .style(|s| s.items_center().width_full())
+    .style(|s| s.items_center().width_full().height(theme::THREAD_MENU))
 }
 
 /// A thread of the reader's own collapsed to its one row: who asked, the
@@ -796,7 +810,12 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
     let first = thread.messages.first();
     let author = first.map(|m| m.author.clone()).unwrap_or(Author::User);
     let line = first.map(|m| crate::review::timeline::first_line(&m.body)).unwrap_or_default();
-    let menu = thread_menu(state, thread.id.clone(), theme::COLLAPSED_CARD_MENU).into_any();
+    // Set off from the pill before it as the pills are from what is
+    // before them: the pill's fill and the menu's hover fill are one
+    // colour, and would touch.
+    let menu = thread_menu(state, thread.id.clone(), theme::COLLAPSED_CARD_MENU)
+        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP))
+        .into_any();
     collapsed_card_row(
         state,
         CardId::Thread(thread.id),
@@ -873,7 +892,7 @@ fn more_pill(more: usize) -> impl IntoView {
                 .height(theme::COLLAPSED_CARD_PILL)
                 .border_radius(theme::COLLAPSED_CARD_PILL / 2.0)
                 .padding_horiz(6.0)
-                .margin_left(8.0)
+                .margin_left(theme::COLLAPSED_CARD_PILL_GAP)
                 .items_center()
                 .justify_center()
                 .selectable(false)
@@ -1005,7 +1024,9 @@ pub fn delete_confirmation(state: ReviewState, backend: Rc<Backend>, thread_id: 
             .into_any()
         },
     )
-    .style(|s| s.width_full())
+    // Hidden rather than empty while nothing is asked, so it takes no
+    // share of the card's gap.
+    .style(move |s| s.width_full().apply_if(!asking.get(), |s| s.hide()))
 }
 
 /// The `...` at the end of a thread's first row, and the menu under it,
@@ -1104,7 +1125,9 @@ pub fn follow_up(
             (composer.filter(|_| drawn_here), running.get())
         },
         move |(composer, _)| match composer {
-            Some(c) => composer_view(app, state, backend.clone(), c, face).into_any(),
+            // Under a thread the composer is a child of this container,
+            // not a card placed by its edges, and takes the width here.
+            Some(c) => composer_view(app, state, backend.clone(), c, face).style(|s| s.width_full()).into_any(),
             None => {
                 let thread = state.comment_threads.with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
                 match thread {
@@ -1804,8 +1827,8 @@ mod column {
         harness.paint();
         // The anchor row is the card's first row; its close button is the
         // last thing on it. Card: 12 margin + 12 padding from the column's
-        // right edge; button 22 wide with a -4 margin.
-        let x = 1400.0 - 12.0 - 12.0 + 4.0 - 11.0;
+        // right edge; button 22 wide, at the padding's edge.
+        let x = 1400.0 - 12.0 - 12.0 - 11.0;
         let y = crate::theme::REVIEW_HEADER_HEIGHT + 2.0 * crate::theme::TAB_HEIGHT + 12.0 + 12.0 + 11.0;
         let under = harness.element_id_at(x, y);
         harness.click(x, y);

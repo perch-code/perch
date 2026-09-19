@@ -243,16 +243,23 @@ fn status_line(state: ReviewState, hidden: usize) -> StatusLine {
         return whole(format!("{}{STATUS_SEPARATOR}not shown as text", file.path));
     }
     let language = file.language.map(|l| l.name()).unwrap_or("Plain text");
-    let changes = file.change_count();
+    let lines = counted(file.line_count(), "line");
+    let changes = counted(file.change_count(), "change");
     let line = state.cursor_line.get() + 1;
     StatusLine {
-        before: format!(
-            "{}{STATUS_SEPARATOR}{language}{STATUS_SEPARATOR}{} lines{STATUS_SEPARATOR}{changes} changes",
-            file.path,
-            file.line_count()
-        ),
+        before: format!("{}{STATUS_SEPARATOR}{language}{STATUS_SEPARATOR}{lines}{STATUS_SEPARATOR}{changes}", file.path),
         hidden: (hidden > 0).then(|| hidden_lines_label(hidden)),
         after: format!("{STATUS_SEPARATOR}ln {line}{server}"),
+    }
+}
+
+/// `1 change`, `4 changes`: a count with its noun, singular for one, as
+/// the tab strip and the hidden count say it.
+fn counted(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -320,7 +327,7 @@ mod tests {
         state.open_tab("src/x.rs");
         state.finish_load("src/x.rs", std::sync::Arc::new(file));
 
-        let before = format!("src/x.rs{STATUS_SEPARATOR}Rust{STATUS_SEPARATOR}2 lines{STATUS_SEPARATOR}1 changes");
+        let before = format!("src/x.rs{STATUS_SEPARATOR}Rust{STATUS_SEPARATOR}2 lines{STATUS_SEPARATOR}1 change");
         let after = format!("{STATUS_SEPARATOR}ln 1");
         assert_eq!(status_line(state, 0), StatusLine { before: before.clone(), hidden: None, after: after.clone() });
         assert_eq!(

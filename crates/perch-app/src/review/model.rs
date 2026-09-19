@@ -400,8 +400,16 @@ pub struct ReviewState {
     /// The backend, model and effort last sent, which the next composer
     /// starts on.
     pub agent_last: RwSignal<Option<AgentChoice>>,
-    /// The display line the pointer is over in the gutter, for the `+`.
+    /// The display line the pointer is over in the gutter, for the `+`,
+    /// or the row of a divider, for its controls.
     pub hovered_line: RwSignal<Option<usize>>,
+    /// The element that recorded `hovered_line`. A divider's row is
+    /// several elements, its gutter row and the parts of the bar over
+    /// the code, and floem delivers the enter to the next before the
+    /// leave from the last; a leave clears the line only when it comes
+    /// from the element that set it, so a move between the parts of one
+    /// row keeps its controls.
+    pub hovered_by: RwSignal<Option<floem::ElementId>>,
     /// True while the composer's text box has the keyboard, so `a` stands
     /// down.
     pub composer_focused: RwSignal<bool>,
@@ -497,6 +505,7 @@ impl ReviewState {
             known_cards: RwSignal::new(HashSet::new()),
             agent_last: RwSignal::new(None),
             hovered_line: RwSignal::new(None),
+            hovered_by: RwSignal::new(None),
             composer_focused: RwSignal::new(false),
             composer_draft: RwSignal::new(String::new()),
             composer_autofocus: RwSignal::new(true),
@@ -586,6 +595,7 @@ impl ReviewState {
         // open is the reader's and stays, as `collapsed_cards` says.
         self.card_rows.set(HashMap::new());
         self.hovered_line.set(None);
+        self.hovered_by.set(None);
         self.composer_focused.set(false);
         self.composer_draft.set(String::new());
         self.expanded.set(std::collections::HashSet::new());
@@ -1102,6 +1112,22 @@ impl ReviewState {
             }
             *threads = Arc::new(all);
         });
+    }
+
+    /// The pointer came onto `row`, on the element `by`.
+    pub fn enter_row(&self, by: floem::ElementId, row: usize) {
+        self.hovered_line.set(Some(row));
+        self.hovered_by.set(Some(by));
+    }
+
+    /// The pointer left the element `by`. The row goes when `by` is the
+    /// element that recorded it, and stays when another has since: see
+    /// `hovered_by`.
+    pub fn leave_row(&self, by: floem::ElementId) {
+        if self.hovered_by.get_untracked() == Some(by) {
+            self.hovered_line.set(None);
+            self.hovered_by.set(None);
+        }
     }
 
     /// The head lines under the editor's selection, as an anchor. `None`

@@ -286,14 +286,8 @@ fn divider_row(state: ReviewState, file: Arc<LoadedFile>, doc: RwSignal<Arc<Doc>
     );
 
     Container::new(controls)
-        .on_event_cont(el::PointerEnter, move |_, _| state.hovered_line.set(Some(key)))
-        .on_event_cont(el::PointerLeave, move |_, _| {
-            state.hovered_line.update(|h| {
-                if *h == Some(key) {
-                    *h = None;
-                }
-            })
-        })
+        .on_event_cont(el::PointerEnter, move |cx, _| state.enter_row(cx.target, key))
+        .on_event_cont(el::PointerLeave, move |cx, _| state.leave_row(cx.target))
         .style(|s| {
             s.width_full()
                 .height(theme::CODE_LINE_HEIGHT as f64)
@@ -321,9 +315,12 @@ fn divider_controls(state: ReviewState, file: Arc<LoadedFile>, run: Run, reset: 
     } else {
         let (up, down) = (reveal.clone(), reveal);
         let step = doc::REVEAL_STEP;
+        // The arrows point the way the code grows, as github.com's do: Up
+        // grows the code below the divider upward, into the run's last
+        // lines; Down grows the code above it downward, into the first.
         Stack::horizontal((
-            glyph_control(SidebarIcon::ChevronUp, format!("Show {step} lines above"), move || up(run.top())),
-            glyph_control(SidebarIcon::ChevronDown, format!("Show {step} lines below"), move || down(run.bottom())),
+            glyph_control(SidebarIcon::ChevronUp, format!("Show the last {step} hidden lines"), move || up(run.bottom())),
+            glyph_control(SidebarIcon::ChevronDown, format!("Show the first {step} hidden lines"), move || down(run.top())),
         ))
         .style(|s| s.items_center().gap(2.0))
         .into_any()
@@ -436,14 +433,8 @@ fn row_view(
 
     match slot {
         Slot::Anchor(_) => row
-            .on_event_cont(el::PointerEnter, move |_, _| state.hovered_line.set(Some(key)))
-            .on_event_cont(el::PointerLeave, move |_, _| {
-                state.hovered_line.update(|h| {
-                    if *h == Some(key) {
-                        *h = None;
-                    }
-                })
-            })
+            .on_event_cont(el::PointerEnter, move |cx, _| state.enter_row(cx.target, key))
+            .on_event_cont(el::PointerLeave, move |cx, _| state.leave_row(cx.target))
             .into_any(),
         Slot::Blank => row.into_any(),
     }

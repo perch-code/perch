@@ -293,9 +293,15 @@ pub const COLLAPSED_CARD_MENU: f64 = 18.0;
 pub const CARD_INSET: f64 = 3.0;
 /// The collapsed card's row: the room at either end, and the pill that
 /// says how many messages follow the first, two pixels shorter than the
-/// strip's count pill so it sits inside the borders.
+/// strip's count pill so it sits inside the borders, with this much room
+/// before it and before the `...` after it, so no two fills touch.
 pub const COLLAPSED_CARD_PADDING: f64 = 8.0;
 pub const COLLAPSED_CARD_PILL: f64 = 16.0;
+pub const COLLAPSED_CARD_PILL_GAP: f64 = 8.0;
+/// The bar a card's messages scroll by once the card is at its cap,
+/// floem's own width, drawn in the card's right padding rather than
+/// taking room from the messages.
+pub const CARD_SCROLLBAR: f64 = 8.0;
 /// The slot the card's chevron sits in, and the glyph inside it, the
 /// sizes the gutter's controls use.
 pub const CHEVRON_SLOT: f64 = 16.0;
