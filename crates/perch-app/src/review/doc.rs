@@ -580,12 +580,14 @@ pub fn divider_label(hidden: usize) -> String {
     }
 }
 
-/// The default folds of a buffer: every run of unchanged display lines
-/// longer than twice the context, less the context at each end that
-/// touches something. The run at the top of the file keeps its context
-/// before the first change and folds from line one; the run at the bottom
-/// keeps its context after the last and folds to the end. A buffer that is
-/// one run has nothing to fold around and gives none.
+/// The default folds of a buffer: every run of unchanged display lines,
+/// less the context at each end that touches something, where what is
+/// left to hide is more than six lines. A divider over six lines or fewer
+/// is worse than the lines, so such a run is shown whole; the same rule
+/// governs the pieces a reveal leaves. The run at the top of the file
+/// keeps its context before the first change and folds from line one; the
+/// run at the bottom keeps its context after the last and folds to the
+/// end. A buffer that is one run has nothing to fold around and gives none.
 ///
 /// What a run is folded around is a change, a ghost, or a line in
 /// `anchors`, which are inclusive head line ranges, zero based: the
@@ -624,13 +626,16 @@ pub fn runs(buffer: &DisplayBuffer, anchors: &[(usize, usize)]) -> Vec<Run> {
         if at_top && at_bottom {
             continue;
         }
-        // Not longer than twice the context: shown whole.
+        // A run no longer than its context at both ends has nothing left
+        // to hide.
         if end - start < 2 * CONTEXT_LINES {
             continue;
         }
         let first = if at_top { start } else { start + CONTEXT_LINES };
         let last = if at_bottom { end } else { end - CONTEXT_LINES };
-        if first > last {
+        // Six lines or fewer left to hide: shown whole, as a reveal's piece
+        // of that size is.
+        if first > last || last - first < 2 * CONTEXT_LINES {
             continue;
         }
         let Some(first_head) = buffer.head_line(first) else { continue };
@@ -1296,10 +1301,12 @@ mod tests {
     }
 
     #[test]
-    fn a_run_of_six_is_no_run_and_a_run_of_seven_hides_one_line() {
-        assert!(runs(&two_changes(6), &[]).is_empty());
-        let seven = runs(&two_changes(7), &[]);
-        assert_eq!(seven, vec![Run::new(5, 5, 4)]);
+    fn a_run_that_would_hide_six_lines_or_fewer_is_shown_whole_and_one_that_hides_seven_folds() {
+        assert!(runs(&two_changes(6), &[]).is_empty(), "nothing left past the context");
+        assert!(runs(&two_changes(7), &[]).is_empty(), "one hidden line is worse than the line");
+        assert!(runs(&two_changes(12), &[]).is_empty(), "six hidden lines are still shown");
+        let thirteen = runs(&two_changes(13), &[]);
+        assert_eq!(thirteen, vec![Run::new(5, 11, 4)], "seven hidden lines fold");
     }
 
     #[test]
@@ -1315,8 +1322,12 @@ mod tests {
     #[test]
     fn an_anchor_over_several_lines_keeps_them_all() {
         let b = two_changes(40);
-        let runs = runs(&b, &[(10, 30)]);
-        assert_eq!(runs, vec![Run::new(5, 7, 4), Run::new(35, 38, 34)]);
+        // Three lines would be left to hide on either side of the anchor,
+        // which is fewer than a divider is worth, so both sides show whole.
+        assert!(runs(&b, &[(10, 30)]).is_empty());
+        // A narrower anchor leaves eight on each side, and those fold.
+        let runs = runs(&b, &[(15, 25)]);
+        assert_eq!(runs, vec![Run::new(5, 12, 4), Run::new(30, 38, 29)]);
     }
 
     #[test]
@@ -1330,8 +1341,11 @@ mod tests {
 
     #[test]
     fn a_short_run_at_either_end_is_shown_whole() {
+        // An edge run keeps its three lines of context toward the change and
+        // folds the rest, when the rest is more than six lines.
         assert!(runs(&one_change(6, 6), &[]).is_empty());
-        assert_eq!(runs(&one_change(7, 7), &[]).len(), 2);
+        assert!(runs(&one_change(9, 9), &[]).is_empty(), "six left at each end are shown");
+        assert_eq!(runs(&one_change(10, 10), &[]).len(), 2, "seven left at each end fold");
     }
 
     #[test]
