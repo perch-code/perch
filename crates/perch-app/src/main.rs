@@ -27,6 +27,7 @@ use crate::state::AppState;
 mod dump;
 mod scan_cli;
 mod scope_cli;
+mod sync_cli;
 mod timeline_cli;
 
 fn main() {
@@ -64,6 +65,12 @@ fn main() {
     // card, in the order the window shows them.
     if args.get(1).map(String::as_str) == Some("--timeline") {
         timeline_cli::run(&args[2..]);
+        return;
+    }
+    // One list pass over a repository, against the real cache, and what
+    // it added, updated or closed.
+    if args.get(1).map(String::as_str) == Some("--sync") {
+        sync_cli::run(&args[2..]);
         return;
     }
 

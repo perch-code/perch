@@ -1,0 +1,938 @@
+//! The list pass.
+//!
+//! Every open pull request and issue of a declared repository is a row,
+//! whether or not anyone was notified about it. A pass asks the two open
+//! lists conditionally, upserts what they hold, and fetches once more any
+//! item the cache still has open that the list no longer names, to learn
+//! how it closed. The pass is a function over a `Source` and the cache
+//! rather than over `Ctx`, so the harness can run one without the window
+//! and the tests can run one against a fake GitHub.
+
+use std::collections::HashSet;
+use std::fmt;
+use std::sync::Mutex;
+
+use jiff::Timestamp;
+use perch_github::{
+    Allowance, Cache, CacheError, Discussion, GitHub, Issue, IssueComment, Item, ItemKind,
+    ItemSubject, Listed, Page, PullRequest,
+};
+
+use super::Ctx;
+
+/// What the pass and the backfill ask of GitHub, so a test can stand a
+/// fake in for it. The closed lists, the discussion fetches and the
+/// allowance are the backfill's; they are here so it paces itself by the
+/// same source the pass reads.
+// The backfill is the step after the poll loop's; until it lands, its
+// half of the trait has no caller.
+#[allow(dead_code)]
+pub(crate) trait Source {
+    async fn list_open_pulls(
+        &self,
+        repo_full_name: &str,
+        etag: Option<&str>,
+    ) -> Result<Listed<PullRequest>, perch_github::Error>;
+    async fn list_open_issues(
+        &self,
+        repo_full_name: &str,
+        etag: Option<&str>,
+    ) -> Result<Listed<Issue>, perch_github::Error>;
+    async fn list_closed_pulls(
+        &self,
+        repo_full_name: &str,
+        page: u32,
+    ) -> Result<Page<PullRequest>, perch_github::Error>;
+    async fn list_closed_issues(
+        &self,
+        repo_full_name: &str,
+        page: u32,
+        since: Option<Timestamp>,
+    ) -> Result<Page<Issue>, perch_github::Error>;
+    async fn fetch_pull_request(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<PullRequest, perch_github::Error>;
+    async fn fetch_issue(&self, repo_full_name: &str, number: u64) -> Result<Issue, perch_github::Error>;
+    async fn fetch_discussion(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<Discussion, perch_github::Error>;
+    async fn fetch_issue_comments(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<Vec<IssueComment>, perch_github::Error>;
+    fn allowance(&self) -> Option<Allowance>;
+}
+
+impl Source for GitHub {
+    async fn list_open_pulls(
+        &self,
+        repo_full_name: &str,
+        etag: Option<&str>,
+    ) -> Result<Listed<PullRequest>, perch_github::Error> {
+        GitHub::list_open_pulls(self, repo_full_name, etag).await
+    }
+
+    async fn list_open_issues(
+        &self,
+        repo_full_name: &str,
+        etag: Option<&str>,
+    ) -> Result<Listed<Issue>, perch_github::Error> {
+        GitHub::list_open_issues(self, repo_full_name, etag).await
+    }
+
+    async fn list_closed_pulls(
+        &self,
+        repo_full_name: &str,
+        page: u32,
+    ) -> Result<Page<PullRequest>, perch_github::Error> {
+        GitHub::list_closed_pulls(self, repo_full_name, page).await
+    }
+
+    async fn list_closed_issues(
+        &self,
+        repo_full_name: &str,
+        page: u32,
+        since: Option<Timestamp>,
+    ) -> Result<Page<Issue>, perch_github::Error> {
+        GitHub::list_closed_issues(self, repo_full_name, page, since).await
+    }
+
+    async fn fetch_pull_request(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<PullRequest, perch_github::Error> {
+        GitHub::fetch_pull_request(self, repo_full_name, number).await
+    }
+
+    async fn fetch_issue(&self, repo_full_name: &str, number: u64) -> Result<Issue, perch_github::Error> {
+        GitHub::fetch_issue(self, repo_full_name, number).await
+    }
+
+    async fn fetch_discussion(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<Discussion, perch_github::Error> {
+        GitHub::fetch_discussion(self, repo_full_name, number).await
+    }
+
+    async fn fetch_issue_comments(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<Vec<IssueComment>, perch_github::Error> {
+        GitHub::fetch_issue_comments(self, repo_full_name, number).await
+    }
+
+    fn allowance(&self) -> Option<Allowance> {
+        GitHub::allowance(self)
+    }
+}
+
+/// What stopped a pass: GitHub, the cache, or having no cache to write to.
+#[derive(Debug)]
+pub(crate) enum Error {
+    GitHub(perch_github::Error),
+    Cache(CacheError),
+    /// No cache was opened, or a panic poisoned its lock.
+    NoCache,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::GitHub(e) => write!(f, "{e}"),
+            Error::Cache(e) => write!(f, "cache: {e}"),
+            Error::NoCache => write!(f, "there is no cache to write the items to"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<perch_github::Error> for Error {
+    fn from(e: perch_github::Error) -> Self {
+        Error::GitHub(e)
+    }
+}
+
+impl From<CacheError> for Error {
+    fn from(e: CacheError) -> Self {
+        Error::Cache(e)
+    }
+}
+
+/// What one pass did, as `owner/repo#n` labels, for the harness to print
+/// and the poll loop to log.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct PassReport {
+    /// Rows the pass made, and branch rows that took a pull request.
+    pub added: Vec<String>,
+    /// Rows whose subject moved.
+    pub updated: Vec<String>,
+    /// Rows whose subject fell out of the open list and was fetched
+    /// closed or merged.
+    pub closed: Vec<String>,
+    /// Both lists answered 304, so no row was read or written.
+    pub unchanged: bool,
+}
+
+impl PassReport {
+    /// Whether no row changed, whatever the lists said.
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.updated.is_empty() && self.closed.is_empty()
+    }
+}
+
+/// One list pass over a repository: pull requests, then issues.
+///
+/// Each list is asked with the tag stored from the last pass. A 304 means
+/// nothing opened, closed or moved, and that list is done. A 200 is
+/// upserted whole, then every item the cache holds open in the repository
+/// that the list did not name is fetched by number and stored as GitHub
+/// reports it: merged, closed, or now and then still open and missed by a
+/// page boundary. The tag is written only after every upsert and closure
+/// for that list succeeded, so a pass that failed part way asks
+/// unconditionally next time and applies what this one did not. Rows the
+/// pass made have no attention and no checkout: the reader declared the
+/// repository and asked to see it, and that is all a row is.
+///
+/// The cache lock is taken for each stretch of cache work and never held
+/// across a request, so a pass does not hold up a mark or an open while
+/// GitHub answers.
+pub(crate) async fn list_pass<S: Source>(
+    source: &S,
+    cache: &Mutex<Cache>,
+    repo: &str,
+    now: Timestamp,
+) -> Result<PassReport, Error> {
+    let mut report = PassReport::default();
+    let pulls = pass_list(source, cache, repo, ItemKind::PullRequest, now, &mut report).await?;
+    let issues = pass_list(source, cache, repo, ItemKind::Issue, now, &mut report).await?;
+    report.unchanged = pulls == Answer::Unchanged && issues == Answer::Unchanged;
+    Ok(report)
+}
+
+/// One pass over the app's own client and cache, and the sidebar told
+/// once whatever happened: a failed pass has usually written rows before
+/// it stopped, and they should show.
+// The poll loop takes this up in the next step. Until then only the
+// harness runs a pass, over the pieces directly, so nothing calls it yet.
+#[allow(dead_code)]
+pub(super) async fn list_pass_for(ctx: &Ctx, repo: &str) -> Result<PassReport, Error> {
+    let Some(cache) = ctx.cache.as_ref() else {
+        return Err(Error::NoCache);
+    };
+    let outcome = list_pass(ctx.github.as_ref(), cache, repo, Timestamp::now()).await;
+    if !matches!(&outcome, Ok(report) if report.is_empty()) {
+        ctx.send_items();
+    }
+    outcome
+}
+
+/// How a list answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Unchanged,
+    Changed,
+}
+
+/// One of the two lists, from the conditional request to the tag.
+async fn pass_list<S: Source>(
+    source: &S,
+    cache: &Mutex<Cache>,
+    repo: &str,
+    kind: ItemKind,
+    now: Timestamp,
+    report: &mut PassReport,
+) -> Result<Answer, Error> {
+    let key = etag_key(kind, repo);
+    let etag = with(cache, |c| c.meta(&key))?;
+    let listed = match kind {
+        ItemKind::PullRequest => {
+            wrap(source.list_open_pulls(repo, etag.as_deref()).await?, ItemSubject::PullRequest)
+        }
+        ItemKind::Issue => wrap(source.list_open_issues(repo, etag.as_deref()).await?, ItemSubject::Issue),
+    };
+    let Listed::Changed { etag, items } = listed else {
+        tracing::info!(repo, kind = kind.column(), "open list unchanged");
+        return Ok(Answer::Unchanged);
+    };
+    tracing::info!(repo, kind = kind.column(), count = items.len(), "open list read");
+
+    let mut named: HashSet<u64> = HashSet::new();
+    with(cache, |c| {
+        for subject in items {
+            named.insert(subject.number());
+            upsert(c, repo, subject, now, report)?;
+        }
+        Ok(())
+    })?;
+
+    // What the cache still holds open that GitHub no longer lists. Read
+    // after the upserts, so a row the list just made cannot be judged.
+    let missing: Vec<(u64, String)> = with(cache, |c| {
+        Ok(c.open_subjects_in(repo)?
+            .into_iter()
+            .filter(|(k, number, _)| *k == kind && !named.contains(number))
+            .map(|(_, number, id)| (number, id))
+            .collect())
+    })?;
+    for (number, id) in missing {
+        let subject = match kind {
+            ItemKind::PullRequest => ItemSubject::PullRequest(source.fetch_pull_request(repo, number).await?),
+            ItemKind::Issue => ItemSubject::Issue(source.fetch_issue(repo, number).await?),
+        };
+        let open = subject.is_open();
+        with(cache, |c| {
+            let Some(mut item) = c.load_item(&id)? else { return Ok(()) };
+            item.subject = Some(subject);
+            c.update_item(&item)
+        })?;
+        tracing::info!(repo, number, open, "fetched a subject the open list no longer names");
+        let label = format!("{repo}#{number}");
+        if open {
+            report.updated.push(label);
+        } else {
+            report.closed.push(label);
+        }
+    }
+
+    // The tag last, and only now: written any earlier it would vouch for
+    // rows this pass never wrote, and the next pass would take its word.
+    with(cache, |c| match &etag {
+        Some(etag) => c.set_meta(&key, etag),
+        None => c.delete_meta(&key),
+    })?;
+    Ok(Answer::Changed)
+}
+
+/// One listed subject into the cache: the row that has it, else a checkout
+/// of the reader's own on a pull request's head branch, else a new row.
+fn upsert(
+    cache: &Cache,
+    repo: &str,
+    subject: ItemSubject,
+    now: Timestamp,
+    report: &mut PassReport,
+) -> Result<(), CacheError> {
+    let number = subject.number();
+    let label = format!("{repo}#{number}");
+
+    if let Some(mut item) = cache.find_item_by_subject(repo, subject.kind(), number)? {
+        let stored = item.subject.take();
+        if !newer(subject.updated_at(), stored.as_ref().and_then(ItemSubject::updated_at)) {
+            return Ok(());
+        }
+        item.subject = Some(match stored {
+            Some(stored) => carry_forward(subject, &stored),
+            None => subject,
+        });
+        cache.update_item(&item)?;
+        report.updated.push(label);
+        return Ok(());
+    }
+
+    if let ItemSubject::PullRequest(pr) = &subject {
+        if let Some(mut item) = branch_item_for(cache, pr) {
+            // The branch was cut against a base; the pull request says
+            // which, and the review diffs against it from here on.
+            if let Some(c) = item.checkout.as_mut() {
+                c.base_ref = pr.base_ref.clone();
+            }
+            item.subject = Some(subject);
+            cache.update_item(&item)?;
+            tracing::info!(repo, number, item = %item.id, "a branch of the reader's own took its pull request");
+            report.added.push(label);
+            return Ok(());
+        }
+    }
+
+    let mut item = Item::new(subject.repo_full_name(), now);
+    item.subject = Some(subject);
+    cache.insert_item(&item)?;
+    report.added.push(label);
+    Ok(())
+}
+
+/// A checkout of the reader's own on a pull request's head branch, with
+/// no subject yet, that the pull request can attach to. The head
+/// repository is the fork when there is one, and a branch of the same
+/// name on the upstream is someone else's; a head with no repository is a
+/// deleted fork, which is nobody's checkout. A root row the scan put away
+/// because its branch is no longer checked out is passed over too: it
+/// cannot be read, and a checkout of Perch's own can.
+pub(crate) fn branch_item_for(cache: &Cache, pr: &PullRequest) -> Option<Item> {
+    let head_repo = pr.head_repo_full_name.as_deref()?;
+    cache
+        .find_item_by_branch(head_repo, &pr.head_ref)
+        .ok()
+        .flatten()
+        .filter(|i| i.subject.is_none())
+        .filter(|i| !i.is_archived() || i.checkout.as_ref().is_some_and(|c| c.owned))
+}
+
+/// Whether an incoming subject is strictly newer than the stored one, so
+/// an earlier page cannot write over a detail fetch that landed between
+/// two pages, and a list that has not moved rewrites nothing. A subject
+/// with no time is the oldest there is: a stored one with none gives way
+/// to anything, and an incoming one with none replaces only its like.
+fn newer(incoming: Option<Timestamp>, stored: Option<Timestamp>) -> bool {
+    match (incoming, stored) {
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some(_), None) => true,
+        (Some(incoming), Some(stored)) => incoming > stored,
+    }
+}
+
+/// A list entry carries no additions, deletions, changed files or merger,
+/// because the list endpoint leaves them out. The stored subject's are
+/// kept where the entry's are at their defaults, so a row does not lose
+/// what a detail fetch gave it every time the list moves.
+fn carry_forward(mut incoming: ItemSubject, stored: &ItemSubject) -> ItemSubject {
+    if let (ItemSubject::PullRequest(pr), ItemSubject::PullRequest(old)) = (&mut incoming, stored) {
+        if pr.additions == 0 && pr.deletions == 0 && pr.changed_files == 0 {
+            pr.additions = old.additions;
+            pr.deletions = old.deletions;
+            pr.changed_files = old.changed_files;
+        }
+        if pr.merged_by.is_none() {
+            pr.merged_by = old.merged_by.clone();
+        }
+    }
+    incoming
+}
+
+/// The meta key a list's tag is kept under: `etag:pulls:<owner/repo>` or
+/// `etag:issues:<owner/repo>`, the name lower-cased so a repository
+/// spelled two ways in config is one key.
+fn etag_key(kind: ItemKind, repo: &str) -> String {
+    let list = match kind {
+        ItemKind::PullRequest => "pulls",
+        ItemKind::Issue => "issues",
+    };
+    format!("etag:{list}:{}", repo.to_lowercase())
+}
+
+/// A list of one subject type as a list of subjects, so the two lists go
+/// through one upsert.
+fn wrap<T>(listed: Listed<T>, into: impl Fn(T) -> ItemSubject) -> Listed<ItemSubject> {
+    match listed {
+        Listed::Unchanged => Listed::Unchanged,
+        Listed::Changed { etag, items } => {
+            Listed::Changed { etag, items: items.into_iter().map(into).collect() }
+        }
+    }
+}
+
+/// One stretch of cache work under the lock. The guard never crosses an
+/// await, and a poisoned lock reads as no cache.
+fn with<T>(cache: &Mutex<Cache>, f: impl FnOnce(&Cache) -> Result<T, CacheError>) -> Result<T, Error> {
+    let guard = cache.lock().map_err(|_| Error::NoCache)?;
+    f(&guard).map_err(Error::Cache)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use perch_github::ItemCheckout;
+
+    use super::*;
+
+    const REPO: &str = "a/b";
+
+    fn at(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    /// A pull request as the list gives it: no stats, no merger.
+    fn pull(n: u64, updated: &str) -> PullRequest {
+        PullRequest {
+            number: n,
+            title: format!("pull {n}"),
+            author_login: format!("u{n}"),
+            author_avatar_url: String::new(),
+            head_sha: format!("h{n}"),
+            head_ref: format!("branch-{n}"),
+            base_sha: "m".into(),
+            base_ref: "main".into(),
+            draft: false,
+            merged: false,
+            state: "open".into(),
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            repo_full_name: REPO.into(),
+            head_repo_full_name: Some(REPO.into()),
+            updated_at: Some(at(updated)),
+            review_requested: false,
+            checks: None,
+            review_decision: None,
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: Vec::new(),
+            milestone: None,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+        }
+    }
+
+    /// The same pull request as a detail fetch gives it, merged.
+    fn merged(n: u64, updated: &str) -> PullRequest {
+        let mut pr = pull(n, updated);
+        pr.state = "closed".into();
+        pr.merged = true;
+        pr.merged_at = Some(at(updated));
+        pr.merged_by = Some("rohan".into());
+        pr.closed_at = Some(at(updated));
+        pr.additions = 12;
+        pr.deletions = 3;
+        pr.changed_files = 2;
+        pr
+    }
+
+    fn issue(n: u64, updated: &str) -> Issue {
+        Issue {
+            number: n,
+            title: format!("issue {n}"),
+            body: String::new(),
+            state: "open".into(),
+            state_reason: None,
+            author_login: format!("u{n}"),
+            author_avatar_url: String::new(),
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            comments: 0,
+            created_at: None,
+            updated_at: at(updated),
+            repo_full_name: REPO.into(),
+        }
+    }
+
+    fn changed<T>(etag: Option<&str>, items: Vec<T>) -> Listed<T> {
+        Listed::Changed { etag: etag.map(str::to_string), items }
+    }
+
+    fn down() -> perch_github::Error {
+        perch_github::Error::Network("the fake is down".into())
+    }
+
+    /// A GitHub that answers from what the test put in it. A list left
+    /// `None` fails; a number nobody put in fails; every call is written
+    /// down so a test can say what was asked.
+    #[derive(Default)]
+    struct Fake {
+        pulls: Option<Listed<PullRequest>>,
+        issues: Option<Listed<Issue>>,
+        pulls_by_number: HashMap<u64, PullRequest>,
+        issues_by_number: HashMap<u64, Issue>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl Fake {
+        fn note(&self, call: String) {
+            self.calls.lock().unwrap().push(call);
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Source for Fake {
+        async fn list_open_pulls(
+            &self,
+            _repo: &str,
+            etag: Option<&str>,
+        ) -> Result<Listed<PullRequest>, perch_github::Error> {
+            self.note(format!("pulls etag={}", etag.unwrap_or("-")));
+            self.pulls.clone().ok_or_else(down)
+        }
+
+        async fn list_open_issues(
+            &self,
+            _repo: &str,
+            etag: Option<&str>,
+        ) -> Result<Listed<Issue>, perch_github::Error> {
+            self.note(format!("issues etag={}", etag.unwrap_or("-")));
+            self.issues.clone().ok_or_else(down)
+        }
+
+        async fn list_closed_pulls(&self, _repo: &str, _page: u32) -> Result<Page<PullRequest>, perch_github::Error> {
+            Err(down())
+        }
+
+        async fn list_closed_issues(
+            &self,
+            _repo: &str,
+            _page: u32,
+            _since: Option<Timestamp>,
+        ) -> Result<Page<Issue>, perch_github::Error> {
+            Err(down())
+        }
+
+        async fn fetch_pull_request(&self, _repo: &str, number: u64) -> Result<PullRequest, perch_github::Error> {
+            self.note(format!("pull {number}"));
+            self.pulls_by_number.get(&number).cloned().ok_or_else(down)
+        }
+
+        async fn fetch_issue(&self, _repo: &str, number: u64) -> Result<Issue, perch_github::Error> {
+            self.note(format!("issue {number}"));
+            self.issues_by_number.get(&number).cloned().ok_or_else(down)
+        }
+
+        async fn fetch_discussion(&self, _repo: &str, _number: u64) -> Result<Discussion, perch_github::Error> {
+            Err(down())
+        }
+
+        async fn fetch_issue_comments(
+            &self,
+            _repo: &str,
+            _number: u64,
+        ) -> Result<Vec<IssueComment>, perch_github::Error> {
+            Err(down())
+        }
+
+        fn allowance(&self) -> Option<Allowance> {
+            None
+        }
+    }
+
+    /// A cache in a directory of its own, with the directory kept so it
+    /// lives as long as the cache does.
+    fn cache() -> (tempfile::TempDir, Mutex<Cache>) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(&dir.path().join("perch.db"), None).unwrap();
+        (dir, Mutex::new(cache))
+    }
+
+    fn pull_item(cache: &Mutex<Cache>, n: u64) -> Option<Item> {
+        cache.lock().unwrap().find_item_by_subject(REPO, ItemKind::PullRequest, n).unwrap()
+    }
+
+    fn issue_item(cache: &Mutex<Cache>, n: u64) -> Option<Item> {
+        cache.lock().unwrap().find_item_by_subject(REPO, ItemKind::Issue, n).unwrap()
+    }
+
+    fn meta(cache: &Mutex<Cache>, key: &str) -> Option<String> {
+        cache.lock().unwrap().meta(key).unwrap()
+    }
+
+    fn store_pull(cache: &Mutex<Cache>, pr: PullRequest) -> Item {
+        let mut item = Item::new(REPO, at("2026-09-10T00:00:00Z"));
+        item.subject = Some(ItemSubject::PullRequest(pr));
+        cache.lock().unwrap().insert_item(&item).unwrap();
+        item
+    }
+
+    fn store_issue(cache: &Mutex<Cache>, issue: Issue) -> Item {
+        let mut item = Item::new(REPO, at("2026-09-10T00:00:00Z"));
+        item.subject = Some(ItemSubject::Issue(issue));
+        cache.lock().unwrap().insert_item(&item).unwrap();
+        item
+    }
+
+    const NOW: &str = "2026-09-18T12:00:00Z";
+
+    #[tokio::test]
+    async fn a_new_number_makes_a_row_with_no_attention_and_no_checkout() {
+        let (_dir, cache) = cache();
+        let fake = Fake {
+            pulls: Some(changed(Some("W/\"p1\""), vec![pull(7, "2026-09-16T11:40:00Z")])),
+            issues: Some(changed(Some("W/\"i1\""), vec![issue(42, "2026-09-16T11:40:00Z")])),
+            ..Default::default()
+        };
+
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        assert_eq!(report.added, vec!["a/b#7", "a/b#42"]);
+        assert!(report.updated.is_empty() && report.closed.is_empty());
+        assert!(!report.unchanged);
+        let item = pull_item(&cache, 7).expect("a row for the pull request");
+        assert_eq!(item.attention_at, None, "a listed row is not attention");
+        assert_eq!(item.checkout, None);
+        assert_eq!(item.created_at, at(NOW));
+        assert_eq!(item.last_opened_at, at(NOW));
+        assert_eq!(item.repo_full_name, REPO);
+        assert!(issue_item(&cache, 42).is_some());
+        // The tags are stored once the rows are in.
+        assert_eq!(meta(&cache, "etag:pulls:a/b").as_deref(), Some("W/\"p1\""));
+        assert_eq!(meta(&cache, "etag:issues:a/b").as_deref(), Some("W/\"i1\""));
+        // Asked with no tag the first time, and the closure step had
+        // nothing to fetch.
+        assert_eq!(fake.calls(), vec!["pulls etag=-", "issues etag=-"]);
+    }
+
+    #[tokio::test]
+    async fn a_known_number_updates_its_subject() {
+        let (_dir, cache) = cache();
+        let stored = store_pull(&cache, pull(7, "2026-09-16T11:40:00Z"));
+        let mut moved = pull(7, "2026-09-17T09:00:00Z");
+        moved.title = "pull 7, renamed".into();
+        let fake = Fake { pulls: Some(changed(None, vec![moved])), issues: Some(changed(None, vec![])), ..Default::default() };
+
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        assert_eq!(report.updated, vec!["a/b#7"]);
+        assert!(report.added.is_empty());
+        let item = pull_item(&cache, 7).unwrap();
+        assert_eq!(item.id, stored.id, "the same row");
+        assert_eq!(item.title(), "pull 7, renamed");
+        assert_eq!(item.pull_request().unwrap().updated_at, Some(at("2026-09-17T09:00:00Z")));
+    }
+
+    #[tokio::test]
+    async fn an_older_or_equal_updated_at_does_not_replace_the_subject() {
+        let (_dir, cache) = cache();
+        let mut kept = pull(7, "2026-09-17T09:00:00Z");
+        kept.title = "from a detail fetch".into();
+        store_pull(&cache, kept);
+
+        for stale in ["2026-09-17T09:00:00Z", "2026-09-16T11:40:00Z"] {
+            let mut entry = pull(7, stale);
+            entry.title = "from an earlier page".into();
+            let fake = Fake { pulls: Some(changed(None, vec![entry])), issues: Some(changed(None, vec![])), ..Default::default() };
+            let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+            assert!(report.is_empty(), "{stale} is not newer");
+            assert_eq!(pull_item(&cache, 7).unwrap().title(), "from a detail fetch");
+        }
+    }
+
+    #[test]
+    fn a_subject_with_no_time_gives_way_and_replaces_only_its_like() {
+        assert!(newer(Some(at(NOW)), None), "anything beats no time");
+        assert!(!newer(None, Some(at(NOW))), "no time beats nothing dated");
+        assert!(newer(None, None), "two undated subjects: take the new one");
+        assert!(!newer(Some(at(NOW)), Some(at(NOW))), "equal is not newer");
+    }
+
+    #[tokio::test]
+    async fn a_list_entry_with_zero_stats_keeps_the_stored_stats() {
+        let (_dir, cache) = cache();
+        let mut detailed = pull(7, "2026-09-16T11:40:00Z");
+        detailed.additions = 412;
+        detailed.deletions = 87;
+        detailed.changed_files = 9;
+        store_pull(&cache, detailed);
+        let fake = Fake {
+            pulls: Some(changed(None, vec![pull(7, "2026-09-17T09:00:00Z")])),
+            issues: Some(changed(None, vec![])),
+            ..Default::default()
+        };
+
+        list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        let pr = pull_item(&cache, 7).unwrap().pull_request().unwrap().clone();
+        assert_eq!((pr.additions, pr.deletions, pr.changed_files), (412, 87, 9));
+        assert_eq!(pr.updated_at, Some(at("2026-09-17T09:00:00Z")), "the rest of the entry landed");
+    }
+
+    #[tokio::test]
+    async fn a_branch_item_on_the_head_branch_takes_the_subject_and_keeps_its_id() {
+        let (_dir, cache) = cache();
+        let mut branch = Item::new(REPO, at("2026-09-10T00:00:00Z"));
+        branch.checkout = Some(ItemCheckout {
+            branch: "branch-7".into(),
+            base_ref: "develop".into(),
+            head_sha: "h7".into(),
+            path: "/x/b".into(),
+            owned: false,
+            on_disk: true,
+            churn: Some((3, 1)),
+            last_seen_head: None,
+        });
+        cache.lock().unwrap().insert_item(&branch).unwrap();
+        let fake = Fake {
+            pulls: Some(changed(None, vec![pull(7, "2026-09-16T11:40:00Z")])),
+            issues: Some(changed(None, vec![])),
+            ..Default::default()
+        };
+
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        assert_eq!(report.added, vec!["a/b#7"]);
+        let item = pull_item(&cache, 7).expect("the branch row has the subject");
+        assert_eq!(item.id, branch.id);
+        let checkout = item.checkout.expect("the checkout stays");
+        assert_eq!(checkout.branch, "branch-7");
+        assert_eq!(checkout.base_ref, "main", "the pull request's base");
+        assert_eq!(cache.lock().unwrap().load_items().unwrap().len(), 1, "no second row");
+    }
+
+    #[tokio::test]
+    async fn a_number_missing_from_the_list_is_fetched_and_stored_closed() {
+        let (_dir, cache) = cache();
+        store_pull(&cache, pull(7, "2026-09-16T11:40:00Z"));
+        let listed = store_pull(&cache, pull(8, "2026-09-16T11:40:00Z"));
+        let closed = store_issue(&cache, issue(42, "2026-09-16T11:40:00Z"));
+        let mut done = issue(42, "2026-09-18T08:00:00Z");
+        done.state = "closed".into();
+        done.state_reason = Some("completed".into());
+        let fake = Fake {
+            pulls: Some(changed(Some("W/\"p2\""), vec![pull(8, "2026-09-16T11:40:00Z")])),
+            issues: Some(changed(Some("W/\"i2\""), vec![])),
+            pulls_by_number: HashMap::from([(7, merged(7, "2026-09-18T08:00:00Z"))]),
+            issues_by_number: HashMap::from([(42, done)]),
+            ..Default::default()
+        };
+
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        assert_eq!(report.closed, vec!["a/b#7", "a/b#42"]);
+        assert!(report.added.is_empty() && report.updated.is_empty());
+        let pr = pull_item(&cache, 7).unwrap().pull_request().unwrap().clone();
+        assert!(pr.merged && !pr.is_open());
+        assert_eq!(pr.merged_by.as_deref(), Some("rohan"), "stored as GitHub reports it");
+        let issue = issue_item(&cache, 42).unwrap();
+        assert_eq!(issue.id, closed.id);
+        assert!(!issue.issue().unwrap().is_open());
+        assert_eq!(pull_item(&cache, 8).unwrap().id, listed.id, "the listed one is left as it was");
+        assert_eq!(
+            fake.calls(),
+            vec!["pulls etag=-", "pull 7", "issues etag=-", "issue 42"],
+            "one fetch per missing number, and no discussion"
+        );
+        assert_eq!(meta(&cache, "etag:pulls:a/b").as_deref(), Some("W/\"p2\""));
+        assert_eq!(meta(&cache, "etag:issues:a/b").as_deref(), Some("W/\"i2\""));
+    }
+
+    #[tokio::test]
+    async fn a_failure_part_way_leaves_the_tag_as_it_was() {
+        let (_dir, cache) = cache();
+        cache.lock().unwrap().set_meta("etag:pulls:a/b", "W/\"old\"").unwrap();
+        store_pull(&cache, pull(7, "2026-09-16T11:40:00Z"));
+        // The list moved on and no longer names 7; the fetch to learn why
+        // fails, so the pass stops before the tag.
+        let fake = Fake {
+            pulls: Some(changed(Some("W/\"new\""), vec![pull(9, "2026-09-17T09:00:00Z")])),
+            issues: Some(changed(None, vec![])),
+            ..Default::default()
+        };
+
+        let err = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap_err();
+
+        assert!(matches!(err, Error::GitHub(_)), "{err}");
+        assert_eq!(meta(&cache, "etag:pulls:a/b").as_deref(), Some("W/\"old\""), "the old tag stands");
+        assert!(pull_item(&cache, 9).is_some(), "what was upserted before the failure stays");
+        assert!(pull_item(&cache, 7).unwrap().pull_request().unwrap().is_open(), "nothing was invented for 7");
+        assert_eq!(fake.calls(), vec!["pulls etag=W/\"old\"", "pull 7"], "the issues list was never reached");
+    }
+
+    #[tokio::test]
+    async fn a_failed_issues_list_leaves_the_pulls_tag_written_and_the_issues_tag_alone() {
+        let (_dir, cache) = cache();
+        cache.lock().unwrap().set_meta("etag:issues:a/b", "W/\"old\"").unwrap();
+        let fake = Fake {
+            pulls: Some(changed(Some("W/\"p\""), vec![pull(7, "2026-09-16T11:40:00Z")])),
+            issues: None,
+            ..Default::default()
+        };
+
+        let err = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap_err();
+
+        assert!(matches!(err, Error::GitHub(_)));
+        assert_eq!(meta(&cache, "etag:pulls:a/b").as_deref(), Some("W/\"p\""), "that list finished");
+        assert_eq!(meta(&cache, "etag:issues:a/b").as_deref(), Some("W/\"old\""), "that one did not");
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_cache_stops_the_pass_before_anything_is_asked() {
+        let (_dir, cache) = cache();
+        cache.lock().unwrap().set_meta("etag:pulls:a/b", "W/\"old\"").unwrap();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cache.lock().unwrap();
+            panic!("a task died holding the cache");
+        }));
+        let fake = Fake { pulls: Some(changed(None, vec![pull(7, NOW)])), ..Default::default() };
+
+        let err = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap_err();
+
+        assert!(matches!(err, Error::NoCache), "{err}");
+        assert!(fake.calls().is_empty(), "no request without a cache to write to");
+        let inner = cache.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(inner.meta("etag:pulls:a/b").unwrap().as_deref(), Some("W/\"old\""));
+    }
+
+    #[tokio::test]
+    async fn unchanged_touches_nothing() {
+        let (_dir, cache) = cache();
+        cache.lock().unwrap().set_meta("etag:pulls:a/b", "W/\"p\"").unwrap();
+        cache.lock().unwrap().set_meta("etag:issues:a/b", "W/\"i\"").unwrap();
+        let stored = store_pull(&cache, pull(7, "2026-09-16T11:40:00Z"));
+        let fake = Fake { pulls: Some(Listed::Unchanged), issues: Some(Listed::Unchanged), ..Default::default() };
+
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        assert!(report.unchanged);
+        assert!(report.is_empty());
+        assert_eq!(fake.calls(), vec!["pulls etag=W/\"p\"", "issues etag=W/\"i\""], "asked with the stored tags");
+        assert_eq!(cache.lock().unwrap().load_items().unwrap(), vec![stored]);
+        assert_eq!(meta(&cache, "etag:pulls:a/b").as_deref(), Some("W/\"p\""));
+        assert_eq!(meta(&cache, "etag:issues:a/b").as_deref(), Some("W/\"i\""));
+    }
+
+    #[tokio::test]
+    async fn one_list_unchanged_and_the_other_not_is_not_unchanged() {
+        let (_dir, cache) = cache();
+        let fake = Fake {
+            pulls: Some(Listed::Unchanged),
+            issues: Some(changed(None, vec![issue(42, NOW)])),
+            ..Default::default()
+        };
+
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        assert!(!report.unchanged);
+        assert_eq!(report.added, vec!["a/b#42"]);
+    }
+
+    #[tokio::test]
+    async fn a_200_without_a_tag_deletes_the_stored_key() {
+        let (_dir, cache) = cache();
+        cache.lock().unwrap().set_meta("etag:pulls:a/b", "W/\"p\"").unwrap();
+        let fake = Fake {
+            pulls: Some(changed(None, vec![pull(7, NOW)])),
+            issues: Some(changed(None, vec![])),
+            ..Default::default()
+        };
+
+        list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        assert_eq!(meta(&cache, "etag:pulls:a/b"), None, "the next pass asks unconditionally");
+        assert_eq!(fake.calls()[0], "pulls etag=W/\"p\"", "this one asked with the old tag");
+    }
+
+    #[test]
+    fn the_tag_key_lower_cases_the_repository() {
+        assert_eq!(etag_key(ItemKind::PullRequest, "SlateDB/SlateDB"), "etag:pulls:slatedb/slatedb");
+        assert_eq!(etag_key(ItemKind::Issue, "a/b"), "etag:issues:a/b");
+    }
+
+    #[tokio::test]
+    async fn a_missing_number_still_open_on_fetch_is_an_update_not_a_closure() {
+        let (_dir, cache) = cache();
+        store_pull(&cache, pull(7, "2026-09-16T11:40:00Z"));
+        // Missed by a page boundary: GitHub still says open when asked.
+        let fake = Fake {
+            pulls: Some(changed(None, vec![])),
+            issues: Some(changed(None, vec![])),
+            pulls_by_number: HashMap::from([(7, pull(7, "2026-09-17T09:00:00Z"))]),
+            ..Default::default()
+        };
+
+        let report = list_pass(&fake, &cache, REPO, at(NOW)).await.unwrap();
+
+        assert_eq!(report.updated, vec!["a/b#7"]);
+        assert!(report.closed.is_empty());
+        assert!(pull_item(&cache, 7).unwrap().pull_request().unwrap().is_open());
+    }
+}

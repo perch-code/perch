@@ -22,6 +22,8 @@ use perch_github::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
+pub(crate) mod sync;
+
 /// How many per-thread detail requests may be in flight at once.
 ///
 /// A cold inbox of 100 threads is 100 requests against a 5000/hour budget.
@@ -1441,18 +1443,10 @@ async fn open_owned_branch(
 }
 
 /// A checkout of the reader's own on a pull request's head branch, with
-/// no subject yet, that the pull request can attach to. The head
-/// repository is the fork when there is one, and a branch of the same
-/// name on the upstream is someone else's; a head with no repository is a
-/// deleted fork, which is nobody's checkout. A root row the scan put away
-/// because its branch is no longer checked out is passed over too: it
-/// cannot be read, and a checkout of Perch's own can.
+/// no subject yet, that the pull request can attach to. The rule is the
+/// list pass's, in `sync`, since the pass attaches the same way.
 fn branch_item_for(ctx: &Ctx, pr: &PullRequest) -> Option<Item> {
-    let head_repo = pr.head_repo_full_name.as_deref()?;
-    ctx.with_cache(|c| c.find_item_by_branch(head_repo, &pr.head_ref).ok().flatten())
-        .flatten()
-        .filter(|i| i.subject.is_none())
-        .filter(|i| !i.is_archived() || i.checkout.as_ref().is_some_and(|c| c.owned))
+    ctx.with_cache(|c| sync::branch_item_for(c, pr)).flatten()
 }
 
 /// The branches items already hold in a repository, which a cut must not
@@ -3511,8 +3505,10 @@ pub(crate) fn build_loaded_file(
 
 type SharedCache = Option<Arc<std::sync::Mutex<Cache>>>;
 
-/// The cache, and whether an older one had to be thrown away.
-fn open_cache() -> (SharedCache, bool) {
+/// The cache, and whether an older one had to be thrown away. The
+/// harness that runs a list pass opens it the same way, so what it
+/// writes is what the window reads.
+pub(crate) fn open_cache() -> (SharedCache, bool) {
     let Some(path) = perch_github::config::db_path() else {
         return (None, false);
     };
