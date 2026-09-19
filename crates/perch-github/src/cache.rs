@@ -14,62 +14,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::comments::{self, Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStep};
 use crate::discussion::Discussion;
 use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
-use crate::pulls::PullRequest;
 use crate::workflow_runs::Checks;
 
 /// The shape of the tables. A database with an older number, or none, is
 /// deleted and recreated: there is no migration, and nothing before the
 /// number was written has shipped to anyone.
-pub const SCHEMA_VERSION: u32 = 11;
-
-/// A checkout Perch owns: a directory on a branch, with a record that
-/// outlives the directory.
-///
-/// Keyed by repository and branch. A pull request maps to a branch, so it
-/// is findable; a commit is a value the row carries, so a force-push updates
-/// a row instead of making one. Archiving removes the directory and keeps
-/// everything else, so restoring is a checkout rather than a clone.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Worktree {
-    /// `<owner>/<repo>#<branch>`.
-    pub id: String,
-    pub repo_full_name: String,
-    /// The local branch, such as `perch/pr-123`.
-    pub branch: String,
-    /// The branch the diff is taken against.
-    pub base_ref: String,
-    /// `None` for a worktree that has no pull request yet.
-    pub pr_number: Option<u64>,
-    /// What the branch pointed at the last time Perch looked.
-    pub head_sha: String,
-    /// Absolute. Where the checkout lives, or lived while archived. Stored
-    /// rather than derived so the layout on disk can change without
-    /// orphaning rows.
-    pub path: PathBuf,
-    pub created_at: Timestamp,
-    pub last_opened_at: Timestamp,
-    /// `None` while the directory exists.
-    pub archived_at: Option<Timestamp>,
-    /// A snapshot, so the list can paint offline and before the network
-    /// answers. Refreshed whenever the pull request is fetched.
-    pub pull_request: Option<PullRequest>,
-}
-
-impl Worktree {
-    pub fn is_archived(&self) -> bool {
-        self.archived_at.is_some()
-    }
-
-    /// The id of the worktree a pull request lives in.
-    pub fn for_pull_request(repo_full_name: &str, number: u64) -> String {
-        format!("{repo_full_name}#{}", Self::pr_branch(number))
-    }
-
-    /// The branch Perch puts a pull request on.
-    pub fn pr_branch(number: u64) -> String {
-        format!("perch/pr-{number}")
-    }
-}
+pub const SCHEMA_VERSION: u32 = 12;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
@@ -131,30 +81,6 @@ impl Cache {
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
         conn.execute_batch(
             r#"
-            CREATE TABLE IF NOT EXISTS threads (
-                id          TEXT PRIMARY KEY,
-                updated_at  TEXT NOT NULL,
-                json        TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS subject_details (
-                thread_id   TEXT NOT NULL,
-                updated_at  TEXT NOT NULL,
-                json        TEXT NOT NULL,
-                PRIMARY KEY (thread_id, updated_at)
-            );
-            CREATE TABLE IF NOT EXISTS worktrees (
-                id              TEXT PRIMARY KEY,
-                repo_full_name  TEXT NOT NULL,
-                branch          TEXT NOT NULL,
-                base_ref        TEXT NOT NULL,
-                pr_number       INTEGER,
-                head_sha        TEXT NOT NULL,
-                path            TEXT NOT NULL,
-                created_at      TEXT NOT NULL,
-                last_opened_at  TEXT NOT NULL,
-                archived_at     TEXT,
-                pr_json         TEXT
-            );
             CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -237,13 +163,6 @@ impl Cache {
                 created_at     TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS comment_messages_thread ON comment_messages(thread_id);
-            CREATE TABLE IF NOT EXISTS marks (
-                thread_id  TEXT PRIMARY KEY,
-                saved      INTEGER NOT NULL DEFAULT 0,
-                done_at    TEXT,
-                marked_at  TEXT NOT NULL,
-                json       TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS discussions (
                 item_id     TEXT PRIMARY KEY,
                 fetched_at  TEXT NOT NULL,
@@ -269,149 +188,6 @@ impl Cache {
             params![SCHEMA_VERSION.to_string()],
         )?;
         Ok(Self { conn, avatar_dir })
-    }
-
-    pub fn load_worktrees(&self) -> Result<Vec<Worktree>, CacheError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, repo_full_name, branch, base_ref, pr_number, head_sha, path,
-                    created_at, last_opened_at, archived_at, pr_json
-             FROM worktrees",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, Option<i64>>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, String>(8)?,
-                r.get::<_, Option<String>>(9)?,
-                r.get::<_, Option<String>>(10)?,
-            ))
-        })?;
-
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, repo, branch, base_ref, pr_number, head_sha, path, created, opened, archived, pr_json) =
-                row?;
-            let (Ok(created_at), Ok(last_opened_at)) =
-                (created.parse::<Timestamp>(), opened.parse::<Timestamp>())
-            else {
-                tracing::warn!(id, "skipping worktree row with unreadable timestamps");
-                continue;
-            };
-            // A snapshot an older build wrote is not worth losing the row over.
-            let pull_request = pr_json.and_then(|j| serde_json::from_str(&j).ok());
-            out.push(Worktree {
-                id,
-                repo_full_name: repo,
-                branch,
-                base_ref,
-                pr_number: pr_number.and_then(|n| u64::try_from(n).ok()),
-                head_sha,
-                path: PathBuf::from(path),
-                created_at,
-                last_opened_at,
-                archived_at: archived.and_then(|a| a.parse().ok()),
-                pull_request,
-            });
-        }
-        Ok(out)
-    }
-
-    /// Insert a worktree, or replace every column of an existing one.
-    pub fn upsert_worktree(&self, worktree: &Worktree) -> Result<(), CacheError> {
-        let pr_json = match &worktree.pull_request {
-            Some(pr) => Some(serde_json::to_string(pr)?),
-            None => None,
-        };
-        self.conn.execute(
-            "INSERT OR REPLACE INTO worktrees
-             (id, repo_full_name, branch, base_ref, pr_number, head_sha, path,
-              created_at, last_opened_at, archived_at, pr_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                worktree.id,
-                worktree.repo_full_name,
-                worktree.branch,
-                worktree.base_ref,
-                worktree.pr_number.map(|n| n as i64),
-                worktree.head_sha,
-                worktree.path.to_string_lossy().into_owned(),
-                worktree.created_at.to_string(),
-                worktree.last_opened_at.to_string(),
-                worktree.archived_at.map(|t| t.to_string()),
-                pr_json,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn touch_worktree(&self, id: &str, opened_at: Timestamp) -> Result<(), CacheError> {
-        self.conn.execute(
-            "UPDATE worktrees SET last_opened_at = ?2 WHERE id = ?1",
-            params![id, opened_at.to_string()],
-        )?;
-        Ok(())
-    }
-
-    pub fn set_worktree_archived(
-        &self,
-        id: &str,
-        archived_at: Option<Timestamp>,
-    ) -> Result<(), CacheError> {
-        self.conn.execute(
-            "UPDATE worktrees SET archived_at = ?2 WHERE id = ?1",
-            params![id, archived_at.map(|t| t.to_string())],
-        )?;
-        Ok(())
-    }
-
-    /// Record where the branch points now, and refresh the snapshot if the
-    /// pull request was fetched along the way.
-    pub fn set_worktree_head(
-        &self,
-        id: &str,
-        head_sha: &str,
-        pull_request: Option<&PullRequest>,
-    ) -> Result<(), CacheError> {
-        match pull_request {
-            Some(pr) => {
-                self.conn.execute(
-                    "UPDATE worktrees SET head_sha = ?2, pr_json = ?3 WHERE id = ?1",
-                    params![id, head_sha, serde_json::to_string(pr)?],
-                )?;
-            }
-            None => {
-                self.conn.execute(
-                    "UPDATE worktrees SET head_sha = ?2 WHERE id = ?1",
-                    params![id, head_sha],
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Forget a worktree and everything said in it. Archiving keeps the
-    /// threads; they are the point of keeping the record.
-    pub fn forget_worktree(&self, id: &str) -> Result<(), CacheError> {
-        let tx = self.conn.unchecked_transaction()?;
-        // Messages point at runs, so they go first.
-        tx.execute(
-            "DELETE FROM comment_messages WHERE thread_id IN (SELECT id FROM comment_threads WHERE worktree_id = ?1)",
-            params![id],
-        )?;
-        tx.execute(
-            "DELETE FROM runs WHERE thread_id IN (SELECT id FROM comment_threads WHERE worktree_id = ?1)",
-            params![id],
-        )?;
-        tx.execute("DELETE FROM comment_threads WHERE worktree_id = ?1", params![id])?;
-        tx.execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
-        tx.commit()?;
-        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -1031,14 +807,6 @@ impl Cache {
         Ok(out)
     }
 
-    pub fn set_item_marks(&self, id: &str, saved: bool, done_at: Option<Timestamp>) -> Result<(), CacheError> {
-        self.conn.execute(
-            "UPDATE items SET saved = ?2, done_at = ?3 WHERE id = ?1",
-            params![id, saved as i64, done_at.map(|t| t.to_string())],
-        )?;
-        Ok(())
-    }
-
     /// Set attention, only ever forward: an older notification arriving
     /// late cannot rewind it, and cannot change the reason either.
     pub fn touch_attention(&self, id: &str, at: Timestamp, reason: &str) -> Result<bool, CacheError> {
@@ -1203,6 +971,7 @@ mod tests {
     use super::*;
     use crate::comments::{RunStatus, Side, ThreadOrigin};
     use crate::items::{Subject as ItemSubject, SubjectKind as ItemKind};
+    use crate::pulls::PullRequest;
 
     fn pull_request(number: u64) -> PullRequest {
         PullRequest {
@@ -1234,133 +1003,6 @@ mod tests {
             labels: vec![],
             assignees: vec![],
         }
-    }
-
-    fn worktree(number: u64) -> Worktree {
-        let now: Timestamp = "2026-09-18T10:00:00Z".parse().unwrap();
-        Worktree {
-            id: Worktree::for_pull_request("acme/widgets", number),
-            repo_full_name: "acme/widgets".into(),
-            branch: Worktree::pr_branch(number),
-            base_ref: "main".into(),
-            pr_number: Some(number),
-            head_sha: "abc123".into(),
-            path: PathBuf::from("/tmp/perch/worktrees/acme__widgets__perch-pr-7"),
-            created_at: now,
-            last_opened_at: now,
-            archived_at: None,
-            pull_request: Some(pull_request(number)),
-        }
-    }
-
-    #[test]
-    fn the_id_is_repository_and_branch_not_number() {
-        assert_eq!(Worktree::for_pull_request("acme/widgets", 7), "acme/widgets#perch/pr-7");
-        assert_eq!(Worktree::pr_branch(7), "perch/pr-7");
-    }
-
-    #[test]
-    fn worktrees_round_trip_through_upsert_and_load() {
-        let c = Cache::open_in_memory().unwrap();
-        let w = worktree(7);
-        c.upsert_worktree(&w).unwrap();
-        assert_eq!(c.load_worktrees().unwrap(), vec![w]);
-    }
-
-    #[test]
-    fn upserting_the_same_id_replaces_rather_than_duplicates() {
-        let c = Cache::open_in_memory().unwrap();
-        c.upsert_worktree(&worktree(7)).unwrap();
-        let mut moved = worktree(7);
-        moved.head_sha = "fff999".into();
-        c.upsert_worktree(&moved).unwrap();
-
-        let all = c.load_worktrees().unwrap();
-        assert_eq!(all.len(), 1, "a force-push updates a row, it does not make one");
-        assert_eq!(all[0].head_sha, "fff999");
-    }
-
-    #[test]
-    fn archiving_is_a_nullable_timestamp() {
-        let c = Cache::open_in_memory().unwrap();
-        c.upsert_worktree(&worktree(7)).unwrap();
-        let when: Timestamp = "2026-09-19T12:00:00Z".parse().unwrap();
-
-        c.set_worktree_archived(&worktree(7).id, Some(when)).unwrap();
-        let w = &c.load_worktrees().unwrap()[0];
-        assert!(w.is_archived());
-        assert_eq!(w.archived_at, Some(when));
-
-        // Restoring clears it; the row and everything else stay.
-        c.set_worktree_archived(&worktree(7).id, None).unwrap();
-        let w = &c.load_worktrees().unwrap()[0];
-        assert!(!w.is_archived());
-        assert_eq!(w.branch, "perch/pr-7");
-    }
-
-    #[test]
-    fn touching_moves_only_the_opened_time() {
-        let c = Cache::open_in_memory().unwrap();
-        c.upsert_worktree(&worktree(7)).unwrap();
-        let later: Timestamp = "2026-09-20T08:00:00Z".parse().unwrap();
-        c.touch_worktree(&worktree(7).id, later).unwrap();
-        let w = &c.load_worktrees().unwrap()[0];
-        assert_eq!(w.last_opened_at, later);
-        assert_eq!(w.created_at, worktree(7).created_at);
-    }
-
-    #[test]
-    fn setting_the_head_refreshes_the_snapshot_when_one_is_given() {
-        let c = Cache::open_in_memory().unwrap();
-        c.upsert_worktree(&worktree(7)).unwrap();
-        let mut pr = pull_request(7);
-        pr.title = "Renamed on the web".into();
-        pr.head_sha = "fff999".into();
-
-        c.set_worktree_head(&worktree(7).id, "fff999", Some(&pr)).unwrap();
-        let w = &c.load_worktrees().unwrap()[0];
-        assert_eq!(w.head_sha, "fff999");
-        assert_eq!(w.pull_request.as_ref().unwrap().title, "Renamed on the web");
-
-        // Without a pull request the snapshot is left as it was.
-        c.set_worktree_head(&worktree(7).id, "aaa111", None).unwrap();
-        let w = &c.load_worktrees().unwrap()[0];
-        assert_eq!(w.head_sha, "aaa111");
-        assert_eq!(w.pull_request.as_ref().unwrap().title, "Renamed on the web");
-    }
-
-    #[test]
-    fn forgetting_removes_the_row() {
-        let c = Cache::open_in_memory().unwrap();
-        c.upsert_worktree(&worktree(7)).unwrap();
-        c.upsert_worktree(&worktree(8)).unwrap();
-        c.forget_worktree(&worktree(7).id).unwrap();
-        let ids: Vec<String> = c.load_worktrees().unwrap().into_iter().map(|w| w.id).collect();
-        assert_eq!(ids, vec![worktree(8).id]);
-    }
-
-    #[test]
-    fn the_snapshot_paints_with_no_network() {
-        // Nothing but the worktrees table is populated, as on an offline
-        // launch: the row still carries enough to draw the list.
-        let c = Cache::open_in_memory().unwrap();
-        c.upsert_worktree(&worktree(7)).unwrap();
-        let w = &c.load_worktrees().unwrap()[0];
-        let pr = w.pull_request.as_ref().expect("snapshot");
-        assert_eq!(pr.title, "Add a thing");
-        assert_eq!(pr.number, 7);
-    }
-
-    #[test]
-    fn a_worktree_without_a_pull_request_is_allowed() {
-        let c = Cache::open_in_memory().unwrap();
-        let mut w = worktree(7);
-        w.id = "acme/widgets#perch/scratch".into();
-        w.branch = "perch/scratch".into();
-        w.pr_number = None;
-        w.pull_request = None;
-        c.upsert_worktree(&w).unwrap();
-        assert_eq!(c.load_worktrees().unwrap(), vec![w]);
     }
 
     fn stamp(s: &str) -> Timestamp {
@@ -1477,25 +1119,17 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_a_worktree_removes_its_threads_and_runs() {
+    fn deleting_an_item_takes_its_threads_and_runs() {
         let c = Cache::open_in_memory().unwrap();
-        c.upsert_worktree(&worktree(7)).unwrap();
-        c.insert_comment_thread(&comment_thread("t1", &worktree(7).id)).unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        let id = pr_item(7).id;
+        c.insert_comment_thread(&comment_thread("t1", &id)).unwrap();
         c.insert_comment_thread(&comment_thread("t2", "elsewhere")).unwrap();
 
-        c.forget_worktree(&worktree(7).id).unwrap();
-        assert!(c.load_comment_threads(&worktree(7).id).unwrap().is_empty());
+        c.delete_item(&id).unwrap();
+        assert!(c.load_comment_threads(&id).unwrap().is_empty());
         assert!(c.load_run("t1-r1").unwrap().is_none());
         assert_eq!(c.load_comment_threads("elsewhere").unwrap().len(), 1);
-    }
-
-    #[test]
-    fn archiving_keeps_threads() {
-        let c = Cache::open_in_memory().unwrap();
-        c.upsert_worktree(&worktree(7)).unwrap();
-        c.insert_comment_thread(&comment_thread("t1", &worktree(7).id)).unwrap();
-        c.set_worktree_archived(&worktree(7).id, Some(stamp("2026-09-19T00:00:00Z"))).unwrap();
-        assert_eq!(c.load_comment_threads(&worktree(7).id).unwrap().len(), 1);
     }
 
     #[test]
@@ -1580,8 +1214,8 @@ mod tests {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                 CREATE TABLE worktrees (id TEXT PRIMARY KEY);
-                 INSERT INTO worktrees VALUES ('old');",
+                 CREATE TABLE threads (id TEXT PRIMARY KEY);
+                 INSERT INTO threads VALUES ('old');",
             )
             .unwrap();
         }
@@ -1594,7 +1228,7 @@ mod tests {
         assert_eq!(n, 1, "the new tables exist");
         let old: i64 = c
             .conn
-            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'worktrees' AND sql LIKE '%id TEXT PRIMARY KEY)%'", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'threads'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(old, 0, "the old table is gone");
     }
@@ -1747,7 +1381,12 @@ mod tests {
         let mut cut = branch_item("perch/pr-7-2");
         cut.from_item_id = Some(pr_item(7).id);
         c.insert_item(&cut).unwrap();
-        c.set_item_marks(&pr_item(7).id, true, Some(stamp_of("2026-09-18T12:00:00Z"))).unwrap();
+        // Saved and Done are columns of the row, written the way every
+        // other edit is.
+        let mut marked = pr_item(7);
+        marked.saved = true;
+        marked.done_at = Some(stamp_of("2026-09-18T12:00:00Z"));
+        c.update_item(&marked).unwrap();
         let i = c.load_item(&pr_item(7).id).unwrap().unwrap();
         assert!(i.saved);
         assert_eq!(i.done_at, Some(stamp_of("2026-09-18T12:00:00Z")));
