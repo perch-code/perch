@@ -16,7 +16,7 @@ use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, Store};
 use perch_github::{
     resolve_token, Anchor, Author, Cache, CommentMessage, CommentThread, Config, DetailSource,
-    GitHub, Item, ItemCheckout, ItemKind, ItemSubject, Mark, PullRequest, Reason, RunRecord,
+    GitHub, Item, ItemCheckout, ItemKind, ItemSubject, Mark, PullRequest, RunRecord,
     RunStatus, SubjectDetail, SubjectKind, Thread, ThreadOrigin,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -598,6 +598,7 @@ async fn run(
         avatars: fetches.avatars.clone(),
         seen_ci: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        passes: Arc::new(tokio::sync::Notify::new()),
     };
 
     // Who the reader is on GitHub, for their own byline: once per launch,
@@ -644,6 +645,9 @@ async fn run(
     // A refresh happens immediately, then on whatever cadence the server asks
     // for. A command from the UI short-circuits the wait.
     let mut poll_after = Duration::from_secs(0);
+    // Whether the session's first list passes have run. The backfill
+    // starts after them and not before: it reads the rows they make.
+    let mut first_pass_done = false;
 
     loop {
         let command = tokio::select! {
@@ -662,7 +666,28 @@ async fn run(
         }
         match command {
             Some(Command::Refresh) | None => {
+                // The open lists before the inbox, so a notification about
+                // a pull request the pass has just listed finds its row.
+                // The passes are requests too, and the status bar says so
+                // from the first of them, not from the inbox poll after.
+                let _ = ctx.events.send(Event::Status(Status::Refreshing));
+                let pass_failure = list_passes(&ctx).await;
+                if !first_pass_done {
+                    first_pass_done = true;
+                    // The backfill starts here, once: `tokio::spawn` over
+                    // `sync::backfill` with a clone of `ctx`, its handle
+                    // dropped and never awaited, so the loop is not held
+                    // by it. Until that lands, the first pass is only
+                    // noted.
+                }
+                ctx.passes.notify_one();
                 poll_after = refresh(&ctx, &source, &fetches).await;
+                // A pass that failed is what the status bar shows, whatever
+                // the inbox poll said: the sidebar is missing rows, and
+                // `refresh` has just reported a healthy inbox over it.
+                if let Some(e) = pass_failure {
+                    let _ = ctx.events.send(Event::Status(describe_pass_error(&e)));
+                }
                 let open = ctx.slot.lock().ok().and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
                 if let Some(item_id) = open {
                     let ctx = ctx.clone();
@@ -1013,6 +1038,12 @@ struct Ctx {
     seen_ci: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
     /// Items whose GitHub side is being fetched again right now.
     refreshing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Notified after every poll's list passes. The backfill sleeps on it
+    /// between rounds, so it starts a round on the rows a pass just
+    /// wrote rather than on a clock of its own. `notify_one` keeps a
+    /// permit when nothing is waiting, so a round that ran long is woken
+    /// as soon as it next waits and a pass is never missed.
+    passes: Arc<tokio::sync::Notify>,
 }
 
 impl Ctx {
@@ -1570,7 +1601,7 @@ async fn finish_open(
             let (ctx2, item_id2, pr2) = (ctx.clone(), item.id.clone(), pr.clone());
             tokio::spawn(async move { archive_discussion(&ctx2, &item_id2, &pr2).await });
             let (ctx2, item_id2) = (ctx.clone(), item.id.clone());
-            tokio::spawn(async move { fetch_checks(&ctx2, &item_id2, &pr).await });
+            tokio::spawn(async move { fetch_checks(&ctx2, &item_id2, &pr, None).await });
         }
     }
     true
@@ -1717,14 +1748,28 @@ fn base_revs_for(item: &Item) -> Vec<String> {
 /// shown. The pull request's, not the checkout's: a root or a branch of
 /// the reader's own may sit ahead of or behind what GitHub ran. A failure
 /// shows nothing: absent means unknown.
-async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
+///
+/// `ci_at` is the time of the CI notification this fetch answers, when it
+/// answers one. The checks coming back red is then the item's attention,
+/// dated to the notification rather than to now, so the same one still
+/// in the inbox next poll cannot move it again. An open, and a
+/// notification about something said, pass `None`: red checks the reader
+/// is already looking at are not news, and a comment's reason is its own.
+async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest, ci_at: Option<Timestamp>) {
     let head = pr.head_sha.as_str();
     match ctx.github.list_workflow_runs_for_sha(&pr.repo_full_name, head).await {
         Ok(runs) => {
             let checks = perch_github::Checks::of(&runs);
+            let failing = matches!(checks.state, perch_github::CheckState::Failing { .. });
             ctx.with_cache(|c| c.store_checks(item_id, head, &checks));
             if ctx.is_open(item_id) {
                 let _ = ctx.events.send(Event::ChecksReady { item_id: item_id.to_string(), checks: Arc::new(checks) });
+            }
+            if let Some(at) = ci_at.filter(|_| failing) {
+                if let Some(Ok(true)) = ctx.with_cache(|c| c.touch_attention(item_id, at, "ci_failed")) {
+                    tracing::info!(item = item_id, "the checks failed, and the item is attention");
+                    ctx.send_items();
+                }
             }
         }
         Err(e) => tracing::info!(item = item_id, error = %e, "could not fetch the checks"),
@@ -1912,6 +1957,34 @@ struct ReviewContext {
     issue: Option<Arc<(perch_github::Issue, Vec<perch_github::IssueComment>)>>,
 }
 
+/// One list pass over each declared repository, in config order, which is
+/// the order the sidebar shows them in. A repository whose pass failed is
+/// logged and the next is tried: one being unreachable says nothing about
+/// the rest, and a pass that stopped part way has usually written rows
+/// before it did. The first failure is returned for the status bar.
+async fn list_passes(ctx: &Ctx) -> Option<sync::Error> {
+    let mut first_failure = None;
+    for repo in ctx.config.declared() {
+        match sync::list_pass_for(ctx, &repo).await {
+            Ok(report) if !report.is_empty() => tracing::info!(
+                repo,
+                added = report.added.len(),
+                updated = report.updated.len(),
+                closed = report.closed.len(),
+                "list pass"
+            ),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(repo, error = %e, "list pass failed");
+                if first_failure.is_none() {
+                    first_failure = Some(e);
+                }
+            }
+        }
+    }
+    first_failure
+}
+
 /// One poll of the notifications API. Returns how long to wait before the next.
 async fn refresh(ctx: &Ctx, source: &str, fetches: &Fetches) -> Duration {
     let github = &ctx.github;
@@ -1971,8 +2044,8 @@ async fn refresh(ctx: &Ctx, source: &str, fetches: &Fetches) -> Duration {
                     from_cache: false,
                 });
 
-                // A notification about an item is the item's attention, and
-                // a review request makes the item it is about.
+                // A notification about an item is the item's attention,
+                // when its reason asks for the reader.
                 attend(ctx, &threads).await;
 
                 fetch_details(
@@ -2004,11 +2077,17 @@ async fn refresh(ctx: &Ctx, source: &str, fetches: &Fetches) -> Duration {
     }
 }
 
-/// Set attention on the items these notifications are about, and make an
-/// item for a review request that has none.
+/// Set attention on the items these notifications are about, for the
+/// reasons that ask for the reader.
 ///
-/// The one case a notification makes an item is the case the tool exists
-/// for. Every other reason on an unknown subject stays in the inbox.
+/// A notification makes no item. The list pass has made the row for
+/// everything open in a declared repository, and a subject with no row is
+/// left in the inbox. Nor is every reason attention: subscribed activity
+/// and a state change are the repository moving, which the pass already
+/// shows by moving the row, and putting every push on every watched pull
+/// request into Priority is what made the inbox noisy. A CI notification
+/// fetches the open pull request's checks again instead, and it is the
+/// checks coming back red that is the attention.
 async fn attend(ctx: &Ctx, threads: &[Thread]) {
     let mut changed = false;
     for thread in threads {
@@ -2027,65 +2106,29 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
         let repo = thread.repository.full_name.as_str();
         // An archived item does not claim its notifications; they stay
         // in the inbox, as the sidebar leaves them there.
-        let existing = ctx
+        let item = ctx
             .with_cache(|c| c.find_item_by_subject(repo, kind, number).ok().flatten())
             .flatten()
             .filter(|i| !i.is_archived());
-        let reason = thread.reason.wire().to_string();
+        let Some(item) = item else { continue };
 
-        let item = match existing {
-            Some(item) => item,
-            None if thread.reason == Reason::ReviewRequested && kind == ItemKind::PullRequest => {
-                match ctx.github.fetch_pull_request(repo, number).await {
-                    Ok(pr) => {
-                        // A checkout of the reader's own on the head branch
-                        // is this pull request's item already; it takes
-                        // the subject rather than a second row being made.
-                        let on_branch = branch_item_for(ctx, &pr);
-                        let (mut item, is_new) = match on_branch {
-                            Some(item) => (item, false),
-                            None => (Item::new(&pr.repo_full_name, Timestamp::now()), true),
-                        };
-                        if let Some(c) = item.checkout.as_mut() {
-                            c.base_ref = pr.base_ref.clone();
-                        }
-                        item.subject = Some(ItemSubject::PullRequest(pr));
-                        let written = ctx.with_cache(|c| if is_new { c.insert_item(&item) } else { c.update_item(&item) });
-                        match written {
-                            Some(Ok(())) => {
-                                tracing::info!(repo, number, is_new, "review request made an item");
-                                changed = true;
-                                item
-                            }
-                            Some(Err(e)) => {
-                                tracing::warn!(repo, number, error = %e, "could not make the item");
-                                continue;
-                            }
-                            None => continue,
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(repo, number, error = %e, "could not fetch the requested review");
-                        continue;
-                    }
-                }
+        if thread.reason.makes_attention() {
+            let reason = thread.reason.wire();
+            if let Some(Ok(true)) =
+                ctx.with_cache(|c| c.touch_attention(&item.id, thread.updated_at, reason))
+            {
+                changed = true;
             }
-            None => continue,
-        };
-        if let Some(Ok(true)) =
-            ctx.with_cache(|c| c.touch_attention(&item.id, thread.updated_at, &reason))
-        {
-            changed = true;
         }
         // Something was said about the item that is open: its Conversation
-        // follows. Once per notification, as with CI.
+        // follows, whatever the reason. Once per notification, as with CI.
         if ctx.is_open(&item.id) {
             let key = (thread.id.clone(), thread.updated_at);
             let fresh = ctx.seen_ci.lock().map(|mut s| s.insert(key)).unwrap_or(false);
             if fresh {
                 let ctx = ctx.clone();
                 let item_id = item.id.clone();
-                tokio::spawn(async move { refresh_open_item(&ctx, &item_id).await });
+                tokio::spawn(async move { refresh_open_item(&ctx, &item_id, None).await });
             }
         }
     }
@@ -2095,21 +2138,23 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
 }
 
 /// Fetch again what the open item shows from GitHub: the pull request and
-/// its discussion and checks, or the issue's comments.
-async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
+/// its discussion and checks, or the issue's comments. `ci_at` is the CI
+/// notification's time when that is what prompted the fetch; see
+/// `fetch_checks`.
+async fn refresh_open_item(ctx: &Ctx, item_id: &str, ci_at: Option<Timestamp>) {
     // One at a time per item: two notifications in one poll would fetch
     // and archive the same discussion twice, side by side.
     let taken = ctx.refreshing.lock().map(|mut s| s.insert(item_id.to_string())).unwrap_or(false);
     if !taken {
         return;
     }
-    refresh_open_item_inner(ctx, item_id).await;
+    refresh_open_item_inner(ctx, item_id, ci_at).await;
     if let Ok(mut s) = ctx.refreshing.lock() {
         s.remove(item_id);
     }
 }
 
-async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
+async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str, ci_at: Option<Timestamp>) {
     let open = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref().filter(|c| c.item_id == item_id).map(|c| (c.pull_request.clone(), c.issue.clone()))
     });
@@ -2137,7 +2182,7 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
             }
         };
         archive_discussion(ctx, item_id, &pr).await;
-        fetch_checks(ctx, item_id, &pr).await;
+        fetch_checks(ctx, item_id, &pr, ci_at).await;
     } else if let Some(issue) = issue {
         let (issue, _) = &*issue;
         match ctx.github.fetch_issue_comments(&issue.repo_full_name, issue.number).await {
@@ -2175,7 +2220,10 @@ fn keep_issue_comments(ctx: &Ctx, item_id: &str, issue: &perch_github::Issue, co
 }
 
 /// Fetch the checks again when a CI notification names the open pull
-/// request's repository and head branch.
+/// request's repository and head branch, and make the item attention,
+/// reason `ci_failed`, when they come back red. Only the open pull
+/// request's: a run on any other branch is a row the list pass moves,
+/// and the reader will see the checks pill when they open it.
 async fn refresh_open_checks(ctx: &Ctx, thread: &Thread) {
     let Some(query) = perch_github::WorkflowRunQuery::from_thread(thread) else { return };
     let open = ctx.slot.lock().ok().and_then(|g| {
@@ -2194,7 +2242,8 @@ async fn refresh_open_checks(ctx: &Ctx, thread: &Thread) {
         return;
     }
     let ctx = ctx.clone();
-    tokio::spawn(async move { refresh_open_item(&ctx, &item_id).await });
+    let at = thread.updated_at;
+    tokio::spawn(async move { refresh_open_item(&ctx, &item_id, Some(at)).await });
 }
 
 /// Rescan roots, then ask GitHub about subject-less branches.
@@ -3685,6 +3734,16 @@ fn describe_error(e: &perch_github::Error) -> Status {
     }
 }
 
+/// A list pass's failure as the status bar shows it: GitHub's the way a
+/// failed poll is described, so a rate limit reads as one, and the
+/// cache's in its own words.
+fn describe_pass_error(e: &sync::Error) -> Status {
+    match e {
+        sync::Error::GitHub(e) => describe_error(e),
+        other => Status::Error { message: other.to_string() },
+    }
+}
+
 /// Wall-clock time in the user's zone, for the status bar.
 fn local_clock_time(epoch: i64) -> Option<String> {
     let ts = Timestamp::from_second(epoch).ok()?;
@@ -3814,5 +3873,242 @@ mod tests {
         let got = resolve_threads(&cache, &ids(&["1", "ghost"]));
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "1");
+    }
+
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc::Receiver;
+    use std::sync::Mutex;
+
+    /// A GitHub of one thread that answers every request the same way and
+    /// writes down the paths it was asked, so a test can say what the
+    /// code asked for and what it did not. The listener lives as long as
+    /// the test binary does.
+    fn serve(status: &'static str, body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let seen = paths.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                if let Some(path) = request_path(&mut stream) {
+                    seen.lock().unwrap().push(path);
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (base, paths)
+    }
+
+    /// The path of one GET, read past its headers so the client sees the
+    /// answer as the answer to it.
+    fn request_path(stream: &mut TcpStream) -> Option<String> {
+        let mut reader = BufReader::new(stream.try_clone().ok()?);
+        let mut start = String::new();
+        reader.read_line(&mut start).ok()?;
+        let path = start.split_whitespace().nth(1)?.to_string();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).ok()? == 0 || line.trim_end().is_empty() {
+                break;
+            }
+        }
+        Some(path)
+    }
+
+    /// A base nothing listens on, so a request the code should not make
+    /// is refused at once instead of reaching GitHub.
+    fn nowhere() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    }
+
+    /// A context with no window behind it: a client at `base`, a cache
+    /// and a knowledge root in a directory of their own, and the events
+    /// kept so a test can say what the sidebar was told.
+    fn ctx(dir: &Path, base: &str, declared: &[&str]) -> (Ctx, Receiver<Event>) {
+        let (events, received) = std::sync::mpsc::channel();
+        let cache = Cache::open(&dir.join("perch.db"), None).unwrap();
+        let mut config = Config::default();
+        config.repo = declared
+            .iter()
+            .map(|name| perch_github::RepoConfig { name: (*name).to_string(), roots: Vec::new() })
+            .collect();
+        let ctx = Ctx {
+            github: Arc::new(GitHub::with_base_uri("token", base).unwrap()),
+            preparer: Arc::new(Preparer::new(Store::new(dir.join("store")), None)),
+            cache: Some(Arc::new(std::sync::Mutex::new(cache))),
+            config: Arc::new(config),
+            knowledge: Arc::new(perch_knowledge::Knowledge::open(dir.join("knowledge"))),
+            slot: Arc::new(std::sync::Mutex::new(None)),
+            language_server: Arc::new(tokio::sync::Mutex::new(None)),
+            events,
+            runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            avatars: Arc::new(Semaphore::new(1)),
+            seen_ci: Default::default(),
+            refreshing: Default::default(),
+            passes: Arc::new(tokio::sync::Notify::new()),
+        };
+        (ctx, received)
+    }
+
+    fn pull_request(number: u64) -> PullRequest {
+        PullRequest {
+            number,
+            title: format!("pull {number}"),
+            author_login: "u".into(),
+            author_avatar_url: String::new(),
+            head_sha: format!("h{number}"),
+            head_ref: format!("branch-{number}"),
+            base_sha: "m".into(),
+            base_ref: "main".into(),
+            draft: false,
+            merged: false,
+            state: "open".into(),
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            repo_full_name: "a/b".into(),
+            head_repo_full_name: Some("a/b".into()),
+            updated_at: Some("2026-09-16T11:40:00Z".parse().unwrap()),
+            review_requested: false,
+            checks: None,
+            review_decision: None,
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: Vec::new(),
+            milestone: None,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+        }
+    }
+
+    /// A row for `a/b#<number>`, as the list pass makes it: no attention.
+    fn store_pull(ctx: &Ctx, number: u64) -> Item {
+        let mut item = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        item.subject = Some(ItemSubject::PullRequest(pull_request(number)));
+        ctx.with_cache(|c| c.insert_item(&item)).unwrap().unwrap();
+        item
+    }
+
+    fn with_reason(mut t: Thread, reason: Reason) -> Thread {
+        t.reason = reason;
+        t
+    }
+
+    fn items_sent(received: &Receiver<Event>) -> usize {
+        received.try_iter().filter(|e| matches!(e, Event::Items(_))).count()
+    }
+
+    #[tokio::test]
+    async fn a_subscribed_notification_about_an_item_is_not_attention() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+
+        attend(&ctx, &[with_reason(thread("7", "seven"), Reason::Subscribed)]).await;
+
+        let item = ctx.item(&item.id).unwrap();
+        assert_eq!(item.attention_at, None, "a push on a watched pull request is not Priority");
+        assert_eq!(item.attention_reason, None);
+        assert_eq!(items_sent(&received), 0, "nothing changed, so the sidebar is not told");
+    }
+
+    #[tokio::test]
+    async fn a_mention_about_an_item_is_its_attention_dated_to_the_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        let mention = with_reason(thread("7", "seven"), Reason::Mention);
+
+        attend(&ctx, std::slice::from_ref(&mention)).await;
+
+        let item = ctx.item(&item.id).unwrap();
+        assert_eq!(item.attention_at, Some(mention.updated_at));
+        assert_eq!(item.attention_reason.as_deref(), Some("mention"));
+        assert_eq!(items_sent(&received), 1);
+    }
+
+    #[tokio::test]
+    async fn a_review_request_with_no_item_makes_none() {
+        let dir = tempfile::tempdir().unwrap();
+        // Any request would be refused, and none is made: the list pass
+        // is what makes rows now, and the inbox keeps the notification.
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+
+        attend(&ctx, &[with_reason(thread("7", "seven"), Reason::ReviewRequested)]).await;
+
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        assert!(items.is_empty(), "a notification does not decide what exists");
+        assert_eq!(items_sent(&received), 0);
+    }
+
+    const FAILING_RUN: &str = r#"{"workflow_runs":[{"name":"ci","run_number":1,"status":"completed","conclusion":"failure","head_branch":"branch-7","html_url":"https://github.com/a/b/actions/runs/1","created_at":"2026-09-18T11:00:00Z","updated_at":"2026-09-18T11:05:00Z"}]}"#;
+
+    #[tokio::test]
+    async fn red_checks_after_a_ci_notification_are_attention() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("200 OK", FAILING_RUN);
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        let at: Timestamp = "2026-09-18T11:06:00Z".parse().unwrap();
+
+        fetch_checks(&ctx, &item.id, &pull_request(7), Some(at)).await;
+
+        let item = ctx.item(&item.id).unwrap();
+        assert_eq!(item.attention_at, Some(at), "dated to the notification, not to now");
+        assert_eq!(item.attention_reason.as_deref(), Some("ci_failed"));
+        assert_eq!(items_sent(&received), 1);
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/repos/a/b/actions/runs?head_sha=h7&per_page=100"]);
+    }
+
+    #[tokio::test]
+    async fn red_checks_on_an_open_are_kept_but_are_not_attention() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _) = serve("200 OK", FAILING_RUN);
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+
+        fetch_checks(&ctx, &item.id, &pull_request(7), None).await;
+
+        let checks = ctx.with_cache(|c| c.load_checks(&item.id, "h7").unwrap()).unwrap();
+        assert!(matches!(checks, Some(perch_github::Checks { state: perch_github::CheckState::Failing { .. }, .. })));
+        let item = ctx.item(&item.id).unwrap();
+        assert_eq!(item.attention_at, None, "red checks the reader is looking at are not news");
+        assert_eq!(items_sent(&received), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_pass_does_not_stop_the_next_repository_and_the_first_failure_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        // Not found rather than a server error, which the client retries.
+        let (base, paths) = serve("404 Not Found", "{}");
+        let (ctx, _received) = ctx(dir.path(), &base, &["a/b", "c/d"]);
+
+        let failure = list_passes(&ctx).await;
+
+        assert!(matches!(failure, Some(sync::Error::GitHub(perch_github::Error::Status { status: 404, .. }))));
+        // Both repositories were asked, each for its pull requests and no
+        // further, since a list that failed ends its pass.
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/repos/a/b/pulls?state=open&per_page=100&page=1", "/repos/c/d/pulls?state=open&per_page=100&page=1"]
+        );
+    }
+
+    #[test]
+    fn a_pass_failure_is_described_the_way_a_poll_failure_is() {
+        let limited = sync::Error::GitHub(perch_github::Error::RateLimited { reset_epoch: None });
+        assert!(matches!(describe_pass_error(&limited), Status::RateLimited { .. }));
+        match describe_pass_error(&sync::Error::NoCache) {
+            Status::Error { message } => assert!(message.contains("no cache"), "{message}"),
+            other => panic!("expected an error status, got {other:?}"),
+        }
     }
 }

@@ -222,9 +222,6 @@ pub(crate) async fn list_pass<S: Source>(
 /// One pass over the app's own client and cache, and the sidebar told
 /// once whatever happened: a failed pass has usually written rows before
 /// it stopped, and they should show.
-// The poll loop takes this up in the next step. Until then only the
-// harness runs a pass, over the pieces directly, so nothing calls it yet.
-#[allow(dead_code)]
 pub(super) async fn list_pass_for(ctx: &Ctx, repo: &str) -> Result<PassReport, Error> {
     let Some(cache) = ctx.cache.as_ref() else {
         return Err(Error::NoCache);

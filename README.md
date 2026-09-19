@@ -44,8 +44,12 @@ GitHub.
 **The inbox**
 
 - Behind the bell, with a count: the notifications that are not about any
-  item. A notification about an item becomes the item's attention instead
-  and is acted on there.
+  item. A notification about an item is handled there instead: one that
+  asks for you, a review request, a mention, an assignment or a comment,
+  becomes the item's attention, and a CI notification about the open
+  pull request fetches its checks again and is attention when they fail.
+  One that only says the item moved does nothing; the row's date already
+  shows that.
 - Lists your notification inbox, grouped by repository or date.
 - Sidebar filters: Assigned, Participating, Mentioned, Team mentioned,
   Review requested, plus a per-repository filter with counts.
