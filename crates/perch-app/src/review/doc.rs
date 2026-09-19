@@ -687,10 +687,14 @@ mod tests {
         doc.text.lines().collect()
     }
 
+    /// `n` lines of context, numbered from `from`.
+    fn context(from: usize, n: usize) -> String {
+        (from..from + n).map(|i| format!("line {i}\n")).collect()
+    }
+
     /// A head of `before` unchanged lines, then a changed one, then `after`
     /// unchanged lines, with the base the same but for the changed line.
     fn one_change(before: usize, after: usize) -> DisplayBuffer {
-        let context = |from: usize, n: usize| (from..from + n).map(|i| format!("line {i}\n")).collect::<String>();
         let base = format!("{}old\n{}", context(0, before), context(before, after));
         let head = format!("{}new\n{}", context(0, before), context(before, after));
         buffer(&base, &head)
@@ -699,7 +703,7 @@ mod tests {
     /// A changed first line, `between` unchanged lines, and a changed last
     /// line, so the only run is the one between the two.
     fn two_changes(between: usize) -> DisplayBuffer {
-        let context: String = (0..between).map(|i| format!("line {i}\n")).collect();
+        let context = context(0, between);
         let base = format!("old top\n{context}old bottom\n");
         let head = format!("new top\n{context}new bottom\n");
         buffer(&base, &head)
@@ -1150,6 +1154,59 @@ mod tests {
     }
 
     #[test]
+    fn the_split_stays_the_same_height_through_three_runs_and_two_reveals() {
+        // Three changes, each fifty unchanged lines apart, and the middle
+        // one grown from one line to three so the two sides do not pair
+        // row for row: three runs, the last to the end of the file.
+        let base = format!("old top\n{}old mid\n{}old bottom\n{}", context(0, 50), context(50, 50), context(100, 50));
+        let head = format!(
+            "new top\n{}new mid\nnew mid 2\nnew mid 3\n{}new bottom\n{}",
+            context(0, 50),
+            context(50, 50),
+            context(100, 50)
+        );
+        let diff = file_diff(&base, &head);
+        let alignment = perch_git::alignment(&diff, &base, &head);
+        let b = DisplayBuffer::unified(&head, &base, &diff);
+        let all = runs(&b, &[]);
+        assert_eq!(all.len(), 3);
+
+        // Down on the first run, and a jump's worth in the middle of the
+        // second, which leaves it two pieces: four dividers.
+        let mut reveals = Reveals::default();
+        let (a, z) = all[0].bottom();
+        reveals.add(a, z);
+        let middle = all[1].first_head + all[1].len() / 2;
+        reveals.add(middle - CONTEXT_LINES, middle + CONTEXT_LINES);
+        let folds = reveals.apply(&all);
+        assert_eq!(folds.len(), 4);
+
+        let (left, right) = build_split(&alignment, &base, &b, &folds, &[]);
+        assert_eq!(left.len(), right.len());
+        let dividers: Vec<usize> = (0..right.len()).filter(|r| right.run_of(*r).is_some()).collect();
+        assert_eq!(dividers.len(), 4);
+        for row in &dividers {
+            assert_eq!(left.rows[*row], right.rows[*row], "the divider is on both sides at row {row}");
+        }
+        assert_eq!(left.hidden_lines(), right.hidden_lines());
+        // The same folds hide the same lines in the stacked document; the
+        // heights differ only by the ghosts the split pairs away.
+        let stacked = build(&b, &folds, &[]);
+        assert_eq!(stacked.hidden_lines(), right.hidden_lines());
+        assert_eq!(stacked.len(), right.len() + 3);
+        // Every revealed head line is on a row of the head side, and the
+        // base line beside it is on the same row of the base side.
+        for head in a..=z {
+            let row = right.row_of_head(head).expect("a revealed line is shown");
+            assert_eq!(left.display_line(row), Some(head), "unchanged lines pair with their own number");
+        }
+        for head in (middle - CONTEXT_LINES)..=(middle + CONTEXT_LINES) {
+            let row = right.row_of_head(head).expect("a revealed line is shown");
+            assert_eq!(left.display_line(row), Some(head - 2), "after the grown change the base is two lines behind");
+        }
+    }
+
+    #[test]
     fn a_line_an_anchor_sits_on_stays_in_view_with_its_context() {
         let b = two_changes(40);
         let doc = build(&b, &runs(&b, &[(20, 20)]), &[]);
@@ -1231,9 +1288,8 @@ mod tests {
         // Three changes, two runs. Revealing the whole of the first run
         // takes its divider out of the folds, so the second run becomes
         // run 0; the divider standing for it is the same divider.
-        let context = |n: usize| (0..n).map(|i| format!("line {i}\n")).collect::<String>();
-        let base = format!("old top\n{}old mid\n{}old bottom\n", context(20), context(20));
-        let head = format!("new top\n{}new mid\n{}new bottom\n", context(20), context(20));
+        let base = format!("old top\n{}old mid\n{}old bottom\n", context(0, 20), context(20, 20));
+        let head = format!("new top\n{}new mid\n{}new bottom\n", context(0, 20), context(20, 20));
         let b = buffer(&base, &head);
         let all = runs(&b, &[]);
         assert_eq!(all.len(), 2);

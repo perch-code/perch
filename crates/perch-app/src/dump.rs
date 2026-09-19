@@ -1,4 +1,4 @@
-//! `perch --dump-file owner/repo#N path/to/file.rs [--whole]`
+//! `perch --dump-file owner/repo#N path/to/file.rs [--whole] [--split]`
 //!
 //! Renders a file exactly as the review view would, as text: the document
 //! the editor draws, with gutter numbers, change bars, the highlight
@@ -6,21 +6,28 @@
 //! is folded away. Lets the data path be checked without a window. The
 //! folds are around the changes and the anchors of the item's threads,
 //! read from the cache the app uses; `--whole` renders the buffer whole,
-//! with nothing folded.
+//! with nothing folded. `--split` renders both sides of the split, one
+//! after the other, each with its dividers, and ends in the two row
+//! counts, so that the sides being the same height can be checked by eye
+//! and by test.
 
 use std::sync::Arc;
 
 use perch_git::{ChangeStatus, Preparer, RepoId, Row, Store};
 use perch_github::{resolve_token, Cache, Config, GitHub, ItemKind};
 
-use crate::review::doc::{self, DocRow};
+use crate::review::doc::{self, Doc, DocRow, Reveals, Tint};
+use crate::review::editor::{self, Side};
+use crate::review::model::LoadedFile;
 
 pub fn run(args: &[String]) {
     let mut positional = Vec::new();
     let mut whole = false;
+    let mut split = false;
     for arg in args {
         match arg.as_str() {
             "--whole" => whole = true,
+            "--split" => split = true,
             flag if flag.starts_with("--") => usage(),
             _ => positional.push(arg.clone()),
         }
@@ -32,18 +39,18 @@ pub fn run(args: &[String]) {
         .build()
         .expect("runtime");
 
-    if let Err(e) = runtime.block_on(dump(target, path, whole)) {
+    if let Err(e) = runtime.block_on(dump(target, path, whole, split)) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
 }
 
 fn usage() -> ! {
-    eprintln!("usage: perch --dump-file owner/repo#number path [--whole]");
+    eprintln!("usage: perch --dump-file owner/repo#number path [--whole] [--split]");
     std::process::exit(2);
 }
 
-async fn dump(target: &str, path: &str, whole: bool) -> Result<(), String> {
+async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), String> {
     let (full_name, number) = target
         .split_once('#')
         .ok_or_else(|| "expected owner/repo#number".to_string())?;
@@ -129,11 +136,24 @@ async fn dump(target: &str, path: &str, whole: bool) -> Result<(), String> {
         perch_git::Scope::Branch,
     ));
 
-    // The document as the window would build it: the reveals are not
-    // stored yet, so the folds are the defaults.
+    // The documents as the window would build them: the reveals are not
+    // stored yet, so the folds are the defaults. A file with no base side
+    // is stacked in the window whatever the layout, and here too.
     let anchors = if whole { Vec::new() } else { anchors_from_cache(full_name, number, path) };
-    let folds = if whole { Vec::new() } else { doc::runs(&file.buffer, &anchors) };
-    let doc = doc::build(&file.buffer, &folds, &[]);
+    let reveals = Reveals::default();
+    let sides = if split {
+        let sides = editor::split_doc(&file, !whole, &anchors, &reveals);
+        if sides.is_none() {
+            eprintln!("note: {path} has no base side; the window shows it stacked, and so does this");
+        }
+        sides
+    } else {
+        None
+    };
+    let rendered = match sides {
+        Some((left, right)) => Rendered::Split(left, right),
+        None => Rendered::Stacked(editor::stacked_doc(&file, !whole, &anchors, &reveals)),
+    };
 
     println!("file:     {}", file.path);
     println!("language: {:?}", file.language.map(|l| l.name()));
@@ -142,18 +162,57 @@ async fn dump(target: &str, path: &str, whole: bool) -> Result<(), String> {
     println!("changes:  {}", file.buffer.change_starts.len());
     if !whole {
         println!("anchors:  {}", anchors.len());
-        println!("hidden:   {}", doc.hidden_lines());
+        println!("hidden:   {}", rendered.hidden_lines());
     }
-    println!();
+
+    match rendered {
+        Rendered::Stacked(doc) => {
+            println!();
+            print_rows(&file, &doc, None);
+        }
+        Rendered::Split(left, right) => {
+            println!();
+            println!("base");
+            print_rows(&file, &left, Some(Side::Base));
+            println!();
+            println!("head");
+            print_rows(&file, &right, Some(Side::Head));
+            println!();
+            println!("rows:     {} base, {} head", left.len(), right.len());
+        }
+    }
+
+    Ok(())
+}
+
+/// What is printed: the stacked document, or a split's two sides.
+enum Rendered {
+    Stacked(Doc),
+    Split(Doc, Doc),
+}
+
+impl Rendered {
+    /// The folds are the same on both sides of a split, so either side
+    /// says how many lines they hide.
+    fn hidden_lines(&self) -> usize {
+        match self {
+            Rendered::Stacked(doc) | Rendered::Split(_, doc) => doc.hidden_lines(),
+        }
+    }
+}
+
+/// The rows of one document, one per line: the gutter number, the
+/// change bar, the text and how many highlight spans it carries; a
+/// divider as its label, a spacer as its card, a filler blank. The base
+/// side's document is over the base file, whose lines are its own; the
+/// stacked document and the head side are over the unified buffer, which
+/// says which file each line is from.
+fn print_rows(file: &LoadedFile, doc: &Doc, side: Option<Side>) {
     println!("  gut  bar  text");
     println!("  ---  ---  ----");
-
     for (index, entry) in doc.rows.iter().enumerate() {
-        let row = match entry {
-            DocRow::Line { display, .. } => match file.buffer.row(*display) {
-                Some(row) => row,
-                None => continue,
-            },
+        let (display, tint) = match entry {
+            DocRow::Line { display, tint } => (*display, *tint),
             DocRow::Divider { run } => {
                 let hidden = doc.folds.get(*run).map(doc::Run::len).unwrap_or(0);
                 println!("  \u{00b7}\u{00b7}\u{00b7} {} \u{00b7}\u{00b7}\u{00b7}", doc::divider_label(hidden));
@@ -169,25 +228,22 @@ async fn dump(target: &str, path: &str, whole: bool) -> Result<(), String> {
                 continue;
             }
         };
+        let (number, spans) = match side {
+            Some(Side::Base) => (display + 1, file.base_spans.line(display)),
+            Some(Side::Head) | None => match file.buffer.row(display) {
+                Some(Row::Head { head_line, .. }) => (head_line + 1, file.head_spans.line(head_line)),
+                Some(Row::Deleted { base_line }) => (base_line + 1, file.base_spans.line(base_line)),
+                None => continue,
+            },
+        };
+        let bar = match tint {
+            Tint::Added => '+',
+            Tint::Modified => '~',
+            Tint::Deleted => '-',
+            Tint::Plain => ' ',
+        };
         let text = doc.line(index);
-        let (number, bar) = match row {
-            Row::Head { head_line, status } => (
-                head_line + 1,
-                match status {
-                    perch_git::LineStatus::Added => '+',
-                    perch_git::LineStatus::Modified => '~',
-                    perch_git::LineStatus::Unchanged => ' ',
-                },
-            ),
-            Row::Deleted { base_line } => (base_line + 1, '-'),
-        };
-
-        let spans = match &row {
-            Row::Head { head_line, .. } => file.head_spans.line(*head_line),
-            Row::Deleted { base_line } => file.base_spans.line(*base_line),
-        };
         let captures = spans.len();
-
         println!(
             "  {number:>4} {bar}   {text}{}",
             if captures > 0 {
@@ -197,8 +253,6 @@ async fn dump(target: &str, path: &str, whole: bool) -> Result<(), String> {
             }
         );
     }
-
-    Ok(())
 }
 
 /// How a spacer names its card: `thread abc123`, `github 12345`, or

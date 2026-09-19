@@ -107,6 +107,12 @@ pub fn editor_pane(
 /// The file, stacked or split. A file with nothing to put on the left,
 /// because it was added, is outside the changed list or is binary, is
 /// stacked whatever the toggle says.
+///
+/// The documents are built here from the signals as they are, untracked:
+/// the view is built once, and what changes under it edits the document
+/// rather than building another editor. The anchors are a memo so that a
+/// thread's messages changing, as they do every line of a streaming
+/// answer, do not rebuild a document whose anchors are the same.
 fn code_view(
     app: AppState,
     state: ReviewState,
@@ -115,13 +121,19 @@ fn code_view(
     layout: Layout,
     backend: Rc<Backend>,
 ) -> impl IntoView {
-    let split = match layout {
-        Layout::Split => split_of(&file),
+    let anchors = Memo::new({
+        let file = file.clone();
+        move |_| state.anchors_in(&file.path)
+    });
+    let split = Effect::untrack(|| match layout {
+        Layout::Split => {
+            split_doc(&file, state.folded.get(), &anchors.get(), &state.reveals_for(&file.path, &file.blob))
+        }
         Layout::Stacked => None,
-    };
+    });
     match split {
-        Some(split) => split_view(app, state, file, split, epoch, backend).into_any(),
-        None => stacked_view(app, state, file, epoch, backend).into_any(),
+        Some(split) => split_view(app, state, file, anchors, split, epoch, backend).into_any(),
+        None => stacked_view(app, state, file, anchors, epoch, backend).into_any(),
     }
 }
 
@@ -129,15 +141,10 @@ fn stacked_view(
     app: AppState,
     state: ReviewState,
     file: Arc<LoadedFile>,
+    anchors: Memo<Vec<(usize, usize)>>,
     epoch: u64,
     backend: Rc<Backend>,
 ) -> impl IntoView {
-    let anchors = Memo::new({
-        let file = file.clone();
-        move |_| state.anchors_in(&file.path)
-    });
-    // Untracked: the view is built once, and what changes under it edits
-    // the document rather than building another editor.
     let built = Effect::untrack(|| {
         stacked_doc(&file, state.folded.get(), &anchors.get(), &state.reveals_for(&file.path, &file.blob))
     });
@@ -160,7 +167,12 @@ fn stacked_view(
     // The folds are wired before the jump: a jump into a fold reveals it,
     // and the reveal has to reach the editor before the jump looks for the
     // row to scroll to.
-    wire_folds(state, file.clone(), anchors, live, epoch, viewport, scroll_to, cursor);
+    wire_folds(state, file.clone(), anchors, epoch, {
+        let file = file.clone();
+        move |folded, anchors, reveals| {
+            apply(&live, stacked_doc(&file, folded, anchors, reveals), viewport, scroll_to, cursor)
+        }
+    });
     wire_cursor(state, backend, file.clone(), doc, cursor);
     wire_jump(state, file.clone(), doc, scroll_to, epoch);
 
@@ -168,35 +180,60 @@ fn stacked_view(
         diff_gutter(state, app, file, doc, viewport, scroll_delta),
         // The layer is placed against this box, so it takes the relative
         // position; the editor fills it.
-        Stack::vertical((editor, divider_layer(state, doc, viewport, scroll_delta)))
+        Stack::vertical((editor, divider_layer(state, doc, viewport, scroll_delta, Bars::Editor)))
             .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().position(Position::Relative)),
     ))
     .style(|s| s.size_full().min_height(0.0))
 }
 
-/// The stacked document of a file: folded to the changes and the anchors
-/// less the reveals, or whole.
-fn stacked_doc(file: &LoadedFile, folded: bool, anchors: &[(usize, usize)], reveals: &Reveals) -> Doc {
-    let folds = if folded { reveals.apply(&doc::runs(&file.buffer, anchors)) } else { Vec::new() };
-    doc::build(&file.buffer, &folds, &[])
+/// The folds of a file: the runs around its changes and anchors less the
+/// reveals, or none when the worktree's files are shown whole.
+fn folds_of(file: &LoadedFile, folded: bool, anchors: &[(usize, usize)], reveals: &Reveals) -> Vec<Run> {
+    if folded {
+        reveals.apply(&doc::runs(&file.buffer, anchors))
+    } else {
+        Vec::new()
+    }
 }
 
-/// Rebuilds the document whenever what it is built from changes, and edits
-/// the editor to match. The inputs are read tracked, so the effect runs
-/// on each of them: Show whole, the file's reveals, and the anchors, which
-/// are a memo so that a thread's messages changing under it, as they do
-/// every line of a streaming answer, do not rebuild a document whose
-/// anchors are the same.
-#[allow(clippy::too_many_arguments)]
+/// The stacked document of a file: folded to the changes and the anchors
+/// less the reveals, or whole.
+pub(crate) fn stacked_doc(file: &LoadedFile, folded: bool, anchors: &[(usize, usize)], reveals: &Reveals) -> Doc {
+    doc::build(&file.buffer, &folds_of(file, folded, anchors, reveals), &[])
+}
+
+/// The two documents of a file's split, folded as the stacked one is, or
+/// `None` when there is no base to put on the left. The head's text and
+/// statuses, and where each head line is displayed, come out of the
+/// unified buffer, which has every head line in order with the ghosts
+/// between; the folds are in its display lines, and a divider goes into
+/// both sides at the same row.
+pub(crate) fn split_doc(
+    file: &LoadedFile,
+    folded: bool,
+    anchors: &[(usize, usize)],
+    reveals: &Reveals,
+) -> Option<(Doc, Doc)> {
+    let base = file.base_buffer.as_ref()?;
+    if file.truncated || file.alignment.is_empty() {
+        return None;
+    }
+    let folds = folds_of(file, folded, anchors, reveals);
+    Some(doc::build_split(&file.alignment, &base.text, &file.buffer, &folds, &[]))
+}
+
+/// Runs `rebuild` whenever what a document is built from changes, so it
+/// can build the new document and edit the editor to match. The inputs
+/// are read tracked, so the effect runs on each of them: Show whole, the
+/// file's reveals, and the anchors, which are a memo so that a thread's
+/// messages changing under it, as they do every line of a streaming
+/// answer, do not rebuild a document whose anchors are the same.
 fn wire_folds(
     state: ReviewState,
     file: Arc<LoadedFile>,
     anchors: Memo<Vec<(usize, usize)>>,
-    live: LiveDoc,
     epoch: u64,
-    viewport: RwSignal<Rect>,
-    scroll_to: RwSignal<Option<Vec2>>,
-    cursor: RwSignal<Cursor>,
+    rebuild: impl Fn(bool, &[(usize, usize)], &Reveals) + 'static,
 ) {
     Effect::new(move |first: Option<bool>| {
         let folded = state.folded.get();
@@ -209,7 +246,7 @@ fn wire_folds(
         if state.editor_epoch.get_untracked() != epoch {
             return true;
         }
-        apply(&live, stacked_doc(&file, folded, &anchors, &reveals), viewport, scroll_to, cursor);
+        rebuild(folded, &anchors, &reveals);
         true
     });
 }
@@ -293,6 +330,18 @@ fn shift_cursor(cursor: &mut Cursor, start: usize, delta: isize) {
     }
 }
 
+/// Where a divider layer's bars sit in the box the layer covers.
+#[derive(Clone, Copy)]
+enum Bars {
+    /// Across the whole box: the stacked layout's editor.
+    Editor,
+    /// Across the head side of a split, whose layer covers the outer
+    /// stack so that the bars are placed from the one scroll: the right
+    /// half of it, less the gutter. The label and the controls are the
+    /// head side's; the base side's row is its tint alone.
+    HeadSide,
+}
+
 /// The dividers' labels, drawn over the editor at their rows: `47
 /// unchanged lines` centred across the bar the row's own background
 /// paints. Placed the way the gutter's column is, from the viewport, with
@@ -304,6 +353,7 @@ fn divider_layer(
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
+    bars: Bars,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
     let visible = move || {
@@ -315,28 +365,32 @@ fn divider_layer(
                 .collect::<Vec<_>>()
         })
     };
-    let bars = dyn_stack(visible, |(row, run)| (*row, *run), move |(row, run)| {
-        divider_bar(state, row, run, viewport, scroll_delta)
+    let stack = dyn_stack(visible, |(row, run)| (*row, *run), move |(row, run)| {
+        divider_bar(state, row, run, viewport, scroll_delta, bars)
     })
     .style(|s| s.size_full());
 
-    Container::new(bars)
+    Container::new(stack)
         .style(|s| s.size_full().position(Position::Relative))
         .clip()
         .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none())
 }
 
-/// One divider's label over its row.
+/// One divider's label over its row. The label is the part that takes
+/// the pointer; in a split it is set into the bar where the head side's
+/// editor is, and the rest of the bar lets the pointer through to the
+/// base side and the gutters beneath.
 fn divider_bar(
     state: ReviewState,
     row: usize,
     run: Run,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
+    bars: Bars,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
     let label = doc::divider_label(run.len());
-    Container::new(Label::derived(move || label.clone()).style(|s| {
+    let label = Container::new(Label::derived(move || label.clone()).style(|s| {
         s.selectable(false)
             .font_family(theme::CODE_FONT_STACK.to_string())
             .font_size(theme::CODE_FONT_SIZE - 1.0)
@@ -355,18 +409,35 @@ fn divider_bar(
         let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
         scroll_delta.set(Vec2::new(-delta.x, -delta.y));
     })
-    .style(move |s| {
-        // Read live, as the gutter reads its offset: the bar outlives a
-        // scroll, and a position captured when it was built would not.
-        let top = row as f64 * line_height - viewport.get().y0;
-        s.absolute()
-            .inset_top(top)
-            .inset_left(0.0)
-            .width_full()
-            .height(line_height)
+    .style(|s| {
+        s.flex_grow(1.0_f32)
+            .min_width(0.0)
+            .height_full()
             .items_center()
             .justify_center()
             .pointer_events_auto()
+    });
+
+    let bar = match bars {
+        Bars::Editor => label.into_any(),
+        // The outer stack's shape: two halves about a one-pixel rule, the
+        // right one beginning with its gutter.
+        Bars::HeadSide => Stack::horizontal((
+            Empty::new().style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).height_full()),
+            Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32)),
+            Stack::horizontal((
+                Empty::new().style(|s| s.width(theme::GUTTER_WIDTH).height_full().flex_shrink(0.0_f32)),
+                label,
+            ))
+            .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0).height_full()),
+        ))
+        .into_any(),
+    };
+    bar.style(move |s| {
+        // Read live, as the gutter reads its offset: the bar outlives a
+        // scroll, and a position captured when it was built would not.
+        let top = row as f64 * line_height - viewport.get().y0;
+        s.absolute().inset_top(top).inset_left(0.0).width_full().height(line_height)
     })
 }
 
@@ -376,10 +447,16 @@ fn divider_bar(
 /// the right one's viewport drives the left through `scroll_to`, and a
 /// wheel over the left, which takes no pointer events, is handed to the
 /// right. The left's scrollbar is hidden, so there is one.
+///
+/// The two documents are edited in the same pass, from the pair the
+/// builder returns, so the two stay the same height: the dividers are on
+/// both sides at the same rows, and the divider layer over the outer stack
+/// draws their labels on the head side from the one scroll.
 fn split_view(
     app: AppState,
     state: ReviewState,
     file: Arc<LoadedFile>,
+    anchors: Memo<Vec<(usize, usize)>>,
     split: (Doc, Doc),
     epoch: u64,
     backend: Rc<Backend>,
@@ -401,20 +478,32 @@ fn split_view(
         right_text,
         PerchStyling::side(file.clone(), Side::Head, right_doc, epoch.wrapping_mul(2) + 1),
     );
+    let left_live = LiveDoc { handle: left.doc(), doc: left_doc };
+    let right_live = LiveDoc { handle: right.doc(), doc: right_doc };
     state.docs.set(Some(LiveDocs {
         epoch,
-        layout: LiveLayout::Split {
-            left: LiveDoc { handle: left.doc(), doc: left_doc },
-            right: LiveDoc { handle: right.doc(), doc: right_doc },
-        },
+        layout: LiveLayout::Split { left: left_live.clone(), right: right_live.clone() },
     }));
 
-    wire_cursor(state, backend, file.clone(), right_doc, right.editor().cursor);
-    wire_jump(state, file.clone(), right_doc, right.editor().scroll_to, epoch);
+    let (left_viewport, left_scroll_to, left_delta, left_cursor) =
+        (left.editor().viewport, left.editor().scroll_to, left.editor().scroll_delta, left.editor().cursor);
+    let (right_viewport, right_scroll_to, right_delta, right_cursor) =
+        (right.editor().viewport, right.editor().scroll_to, right.editor().scroll_delta, right.editor().cursor);
 
-    let (left_viewport, left_scroll_to, left_delta) =
-        (left.editor().viewport, left.editor().scroll_to, left.editor().scroll_delta);
-    let (right_viewport, right_delta) = (right.editor().viewport, right.editor().scroll_delta);
+    // The folds are wired before the jump, as in the stacked layout. The
+    // right is edited first: it owns the scroll, and the left follows.
+    wire_folds(state, file.clone(), anchors, epoch, {
+        let file = file.clone();
+        move |folded, anchors, reveals| {
+            let Some((new_left, new_right)) = split_doc(&file, folded, anchors, reveals) else {
+                return;
+            };
+            apply(&right_live, new_right, right_viewport, right_scroll_to, right_cursor);
+            apply(&left_live, new_left, left_viewport, left_scroll_to, left_cursor);
+        }
+    });
+    wire_cursor(state, backend, file.clone(), right_doc, right_cursor);
+    wire_jump(state, file.clone(), right_doc, right_scroll_to, epoch);
 
     // The left follows the right down the file. Sideways it keeps its own
     // place: the lines on the two sides are not the same length.
@@ -448,12 +537,15 @@ fn split_view(
     ))
     .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0).height_full());
 
+    // The layer is placed against the outer stack, so it takes the
+    // relative position; the bars are set into it where the head side is.
     Stack::horizontal((
         left_pane,
         Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32).background(theme::BORDER)),
         right_pane,
+        divider_layer(state, right_doc, right_viewport, right_delta, Bars::HeadSide),
     ))
-    .style(|s| s.size_full().min_height(0.0))
+    .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
 }
 
 #[cfg(test)]
@@ -601,18 +693,6 @@ pub enum Side {
     Head,
 }
 
-/// The split for a loaded file, or `None` when there is no base to put on
-/// the left. The head's text and statuses, and where each head line is
-/// displayed, come out of the unified buffer, which has every head line in
-/// order with the ghosts between.
-fn split_of(file: &LoadedFile) -> Option<(Doc, Doc)> {
-    let base = file.base_buffer.as_ref()?;
-    if file.truncated || file.alignment.is_empty() {
-        return None;
-    }
-    Some(doc::build_split(&file.alignment, &base.text, &file.buffer, &[], &[]))
-}
-
 /// What the language server says about the symbol under the cursor.
 ///
 /// A strip below the code rather than a floating popup: it never covers the
@@ -736,6 +816,11 @@ mod tests {
 
     fn lines(doc: &Doc) -> Vec<&str> {
         doc.text.lines().collect()
+    }
+
+    /// A file's split shown whole, with nothing folded.
+    fn split_of(file: &LoadedFile) -> Option<(Doc, Doc)> {
+        split_doc(file, false, &[], &Reveals::default())
     }
 
     #[test]
@@ -1057,6 +1142,14 @@ mod window {
         }
     }
 
+    /// The split's two live documents, left and right.
+    fn sides(state: ReviewState) -> (LiveDoc, LiveDoc) {
+        match state.docs.get().expect("an editor is open").layout {
+            LiveLayout::Split { left, right } => (left, right),
+            LiveLayout::Stacked(_) => panic!("the layout is split"),
+        }
+    }
+
     /// Where the code pane starts: after the open drawer and the file
     /// rail, under the header and the two strips.
     fn pane_origin() -> (f64, f64) {
@@ -1187,6 +1280,119 @@ mod window {
         assert_eq!(viewport.get().y0, before + 20.0 * line_height, "the scroll moved by the rows added above it");
         let doc = live.doc.get();
         assert_eq!(doc.display_line(first_row + 20), first_line, "the same line is first in view");
+    }
+
+    #[test]
+    fn the_split_keeps_both_sides_the_same_height_through_a_down_click() {
+        // Three changes fifty lines apart, then twelve four lines apart so
+        // the document is long enough to scroll: three runs of forty-four,
+        // so each divider offers Up and Down.
+        let blocks = |word: &str| (0..12).map(|i| format!("{word}{i}\n{}", context(150 + i * 4, 4))).collect::<String>();
+        let (mut harness, state) = harness_with(
+            format!(
+                "new top\n{}new mid\n{}new bottom\n{}{}",
+                context(0, 50),
+                context(50, 50),
+                context(100, 50),
+                blocks("new")
+            ),
+            format!(
+                "old top\n{}old mid\n{}old bottom\n{}{}",
+                context(0, 50),
+                context(50, 50),
+                context(100, 50),
+                blocks("old")
+            ),
+        );
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let (left, right) = sides(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+
+        // The split pairs each rewritten line with its old one, so the
+        // sides are the 213 aligned rows less the three runs, plus their
+        // dividers, at the same rows on both.
+        let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
+        assert_eq!(right_doc.len(), 213 - 3 * 44 + 3);
+        assert_eq!(left_doc.len(), right_doc.len());
+        assert_eq!(right_doc.hidden_lines(), 3 * 44);
+        for row in [4, 12, 20] {
+            assert_eq!(right_doc.run_of(row).map(|r| r.len()), left_doc.run_of(row).map(|r| r.len()), "row {row}");
+            assert!(right_doc.run_of(row).is_some(), "row {row} is a divider");
+        }
+        assert_eq!(laid_out_text(&left), left_doc.text);
+        assert_eq!(laid_out_text(&right), right_doc.text);
+        let (left_viewport, right_viewport) = super::SPLIT_VIEWPORTS.with(|v| v.get()).expect("a split was built");
+        let y0 = right_viewport.get().y0;
+
+        // The head side's gutter is at the right pane's left edge, past
+        // the base side and the rule between. Its divider row holds the
+        // controls: Down's centre is 44 from the gutter's left.
+        let (pane_left, top) = pane_origin();
+        let right_gutter = pane_left + (1400.0 - pane_left - 1.0) / 2.0 + 1.0;
+        let (x, y) = (right_gutter + 44.0, top + 4.0 * line_height + line_height / 2.0);
+        harness.pointer_move(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.hovered_line.get(), Some(4), "the head side's divider row records the pointer");
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+
+        let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
+        assert_eq!(right_doc.len(), 84 + 20, "click at ({x}, {y}) over {under:?} did not reveal twenty lines");
+        assert_eq!(left_doc.len(), right_doc.len(), "the base side grew with the head side");
+        assert_eq!(right_doc.run_of(4).map(|r| r.len()), Some(24), "the divider stays, hiding twenty fewer");
+        assert_eq!(left_doc.run_of(4).map(|r| r.len()), Some(24));
+        assert_eq!(right_doc.row_of_head(28), Some(5), "the first revealed head line follows the divider");
+        assert_eq!(left_doc.display_line(5), Some(28), "beside its own base line");
+        assert_eq!(laid_out_text(&left), left_doc.text, "the left editor's text is its document's");
+        assert_eq!(laid_out_text(&right), right_doc.text, "the right editor's text is its document's");
+        assert_eq!(right_viewport.get().y0, y0, "the viewport did not move");
+        assert_eq!(left_viewport.get().y0, right_viewport.get().y0, "the left is where the right is");
+
+        // The base side's gutter has no controls: the same click there
+        // reveals nothing.
+        let (x, y) = (pane_left + 44.0, y);
+        harness.pointer_move(x, y);
+        harness.rebuild();
+        harness.paint();
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(right.doc.get().len(), 104, "the base side's divider row is the tint alone");
+        assert_eq!(left.doc.get().len(), 104);
+
+        // The bar's label is over the head side's editor, and records the
+        // pointer as the gutter row does; over the base side's editor the
+        // bar lets the pointer through, and nothing records it.
+        harness.pointer_move(right_gutter + crate::theme::GUTTER_WIDTH + 100.0, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.hovered_line.get(), Some(4), "the label over the head side records the row");
+        harness.pointer_move(pane_left + crate::theme::GUTTER_WIDTH + 100.0, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.hovered_line.get(), None, "the bar over the base side is nothing");
+
+        // A jump into the second run reveals around the target on both
+        // sides and scrolls both to it.
+        assert_eq!(right.doc.get().row_of_head(80), None, "head line 80 is folded");
+        state.jump_to_line.set(Some(80));
+        harness.rebuild();
+        harness.paint();
+        assert!(state.jump_to_line.get().is_none(), "the split's right editor took the jump");
+        let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
+        assert_eq!(right_doc.len(), 104 + 7 + 1, "seven lines and a second divider for the run's other piece");
+        assert_eq!(left_doc.len(), right_doc.len());
+        let row = right_doc.row_of_head(80).expect("the target is shown");
+        assert_eq!(left_doc.display_line(row), Some(80));
+        assert_eq!(laid_out_text(&left), left_doc.text);
+        assert_eq!(laid_out_text(&right), right_doc.text);
+        assert_eq!(right_viewport.get().y0, (row as f64 - 4.0) * line_height, "scrolled to the target");
+        assert_eq!(left_viewport.get().y0, right_viewport.get().y0);
     }
 
     #[test]
