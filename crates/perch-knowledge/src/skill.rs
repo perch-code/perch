@@ -32,6 +32,13 @@ Perch archives discussion about these repositories as markdown under
 each repository to its directory; match `git remote get-url origin`
 against `owner/repo` to find the directory for the repository you are in.
 
+A repository declared in Perch is archived whole: its open pull requests
+and issues as they move, and its closed history oldest first, so the
+closed history is complete once the backfill has run. A closed pull
+request or issue with no file here is one the backfill has not reached;
+`perch --backfill {example}` runs it in the foreground and says whether
+it is caught up.
+
 Layout, per repository:
 
     <owner>/<repo>/index.md              what is here and how current it is
@@ -105,6 +112,13 @@ mod tests {
         let text = render(Path::new("/k"), &[]);
         assert!(text.contains("match `git remote get-url origin`\nagainst `owner/repo`"), "{text}");
         assert!(text.contains("<owner>/<repo>/perch/branches/<branch>.md"));
+    }
+
+    #[test]
+    fn closed_history_is_complete_once_the_backfill_has_run_and_the_command_is_named() {
+        let text = render(Path::new("/k"), &["slatedb/slatedb".into()]);
+        assert!(text.contains("closed history is complete once the backfill has run"), "{text}");
+        assert!(text.contains("`perch --backfill slatedb/slatedb`"), "{text}");
     }
 
     #[test]

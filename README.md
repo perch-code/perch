@@ -18,8 +18,10 @@ GitHub.
 
 - A repository is declared in `config.toml` as `[[repo]]`: its
   `owner/repo` name and, optionally, the directories where you already
-  work on it. A repository nobody declares still gets a section the first
-  time something from it is opened, and the section looks the same.
+  work on it. Declaring it lists it whole: every open pull request and
+  issue is a row, kept current on every poll, and one that merges or
+  closes says so. A repository nobody declares still gets a section the
+  first time something from it is opened, and the section looks the same.
 - Under a repository, an *item* is one row with up to three parts: a
   GitHub pull request or issue, a checkout on disk, and attention. A
   branch of your own becomes a pull request when GitHub opens one on it,
@@ -171,13 +173,19 @@ Files, shaped like a pull request's page on GitHub.
 
 **Knowledge**
 
-- Opening a pull request also archives its discussion: the description,
-  the conversation, each review and the line comments under it, as plain
-  markdown under `~/.perch/knowledge/<owner>/<repo>/github/pulls/`.
-  Every message carries its author, time and a permalink.
+- Every discussion is archived as plain markdown under
+  `~/.perch/knowledge/<owner>/<repo>/github/`: a pull request's
+  description, conversation, each review and the line comments under it,
+  and an issue with its comments. Opening one archives it, and a declared
+  repository is archived whole in the background, open items as they
+  move and closed history oldest first, so once the backfill has run the
+  archive covers the whole repository. Every message carries its author,
+  time and a permalink.
 - A skill is written for Claude Code and Codex that says where the files are
   and how to search them, so an agent working in one of those repositories
-  can answer "why was this done" from the thread rather than guessing.
+  can answer "why was this done" from the thread rather than guessing;
+  once the backfill has run, that is anything the repository has ever
+  discussed.
 - Ripgrep is the search. There is no index and no database: `raw/` holds one
   JSON record per line, and everything else is rendered from it.
 
@@ -297,7 +305,7 @@ Everything Perch keeps is under one directory, `$PERCH_HOME` if set, else
 ```
 ~/.perch/
   config.toml        repositories, token, agent, knowledge settings
-  perch.db           items, threads, marks, the inbox cache
+  perch.db           items, threads, marks, the inbox cache, where the backfill is
   avatars/
   repos/             one bare clone per repository
   worktrees/         one checkout per branch Perch made, <owner>__<repo>__<branch>
@@ -341,11 +349,14 @@ become items. A root belongs to the one repository its `origin` names, so
 a checkout of each repository goes under its own `[[repo]]`; a root whose
 origin is some other repository is skipped, and the status line says so.
 
-Declaring a repository puts it in the sidebar in config order and gives
-its `roots` a home. A repository you did not declare shows what you
-opened, and its section looks the same. A file that still declares
-`[[project]]` is not loaded, and the notice says to write `[[repo]]`
-instead.
+Declaring a repository puts it in the sidebar in config order, gives its
+`roots` a home, and has Perch list it whole: on every poll its open pull
+requests and issues become rows, with nothing marking them new, a row
+whose pull request merged or closed says so, and its history is archived
+under knowledge in the background. A repository you did not declare
+shows only what you opened, and its section looks the same. A file that
+still declares `[[project]]` is not loaded, and the notice says to write
+`[[repo]]` instead.
 
 ## Threads
 
@@ -446,25 +457,42 @@ says `source: perch`. They are kept apart from the `github/` files so
 nothing you asked on this machine can be taken for something said in
 public, and the skill tells the agent which is which.
 
-Everything outside `raw/` can be deleted and comes back the next time a
-pull request is opened. Deleting `raw/` too only loses what has not been
-opened since; a pull request is archived again whenever it is opened, and
-re-opening one that has not changed writes nothing.
+Every declared repository is archived whole while Perch runs. After each
+poll a background task archives the open items whose discussion has moved
+since it was last kept, newest first, then walks the repository's closed
+pull requests and issues oldest first, a page at a time. It keeps its
+place in `perch.db`, so a restart goes on from the page it was on, and
+once the walk has reached the end it picks up only what has changed
+since. It paces itself by GitHub's rate limit: with fewer than a thousand
+requests left it waits for the reset, and neither the poll nor anything
+you do is held by it. The status bar shows how far it is, "Archiving
+slatedb/slatedb, 312 of about 2,140", and the line goes when every
+repository is caught up. `perch --backfill <owner/repo> [--limit n]` runs
+one round for a repository in the foreground, printing each discussion as
+it is archived with the requests left after it, and says whether the
+repository is caught up; `perch --sync <owner/repo>` runs one list pass
+and prints each row it added, updated or closed, or "unchanged".
+
+Everything outside `raw/` is rendered from it and comes back as
+discussions are archived. Deleting `raw/` too loses the closed history,
+since the backfill keeps its place in `perch.db` and does not walk again
+on its own; what is open is archived again as it moves, a pull request is
+archived again whenever it is opened, and re-opening one that has not
+changed writes nothing.
 
 A knowledge directory written before this layout has `<project>/raw/`;
 delete those project directories, and the files come back under
-`<owner>/<repo>/` as pull requests are opened. Perch neither reads nor
-migrates the old layout.
+`<owner>/<repo>/` as the backfill and your opens archive them again.
+Perch neither reads nor migrates the old layout.
 
 The skill goes to `~/.claude/skills/perch/SKILL.md` for Claude Code and
 `~/.agents/skills/perch/SKILL.md` for Codex. It names every repository
-the store holds and the root, and tells the agent to start from `index.md`
-and search with `rg`. Nothing else is needed to point an agent at the
+the store holds and the root, tells the agent to start from `index.md`
+and search with `rg`, and says what the archive covers: a declared
+repository whole once the backfill has run, and `perch --backfill` is how
+to see whether it has. Nothing else is needed to point an agent at the
 files; ask it why a change was made in a checkout of one of those
 repositories.
-
-Only pull requests opened in Perch are archived. There is no backfill and
-no timer.
 
 ## Layout
 

@@ -1,4 +1,5 @@
-//! One-line footer: refresh state, token source, and any error.
+//! One-line footer: refresh state, token source, any error, and where the
+//! backfill is while it runs.
 
 use floem::peniko::Color;
 use floem::prelude::*;
@@ -8,7 +9,7 @@ use floem::views::{Container, Decorators, Label, Stack, dyn_container};
 use crate::backend::{Backend, Status};
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::state::{AppState, Screen};
+use crate::state::{AppState, Archiving, Screen};
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{sidebar_glyph, spacer};
@@ -30,6 +31,7 @@ pub fn status_bar(
                 .text_ellipsis()
                 .min_width(0.0)
         }),
+        archiving(state),
         spacer(),
         dyn_container(
             move || (review.pull_request.with(|p| p.is_some()), state.screen.get()),
@@ -121,6 +123,47 @@ fn message(state: AppState) -> String {
     }
 }
 
+/// Where the backfill is, after the poll status, in the subdued colour
+/// the counts on the right use: it is progress, not the poll's health.
+/// Gone, not blank, when nothing is being archived, so the bar reads as
+/// it did before there was a backfill.
+fn archiving(state: AppState) -> impl IntoView {
+    Label::derived(move || state.archiving.with(|a| a.as_ref().map(archiving_line).unwrap_or_default())).style(
+        move |s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::FG_SUBTLE)
+                .text_ellipsis()
+                .min_width(0.0)
+                .apply_if(state.archiving.with(Option::is_none), |s| s.hide())
+        },
+    )
+}
+
+/// "Archiving slatedb/slatedb, 312 of about 2,140". About, because the
+/// total is the open count plus what the first closed page's `Link`
+/// header implied, and a page can be short.
+fn archiving_line(archiving: &Archiving) -> String {
+    format!(
+        "Archiving {}, {} of about {}",
+        archiving.repo,
+        with_thousands(archiving.done),
+        with_thousands(archiving.total)
+    )
+}
+
+/// A count with a comma every three digits, so 2140 reads as 2,140.
+fn with_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn refresh_button(backend: std::rc::Rc<Backend>) -> impl IntoView {
     Container::new(sidebar_glyph(SidebarIcon::Refresh, theme::FG_MUTED))
         .on_event_stop(el::Click, move |_, _| backend.refresh())
@@ -131,4 +174,24 @@ fn refresh_button(backend: std::rc::Rc<Backend>) -> impl IntoView {
                 .border_radius(4.0)
                 .hover(|s| s.background(theme::CANVAS_HOVER).cursor(CursorStyle::Pointer))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_backfill_line_names_the_repository_and_the_counts_with_thousands_separated() {
+        let line = archiving_line(&Archiving { repo: "slatedb/slatedb".into(), done: 312, total: 2140 });
+        assert_eq!(line, "Archiving slatedb/slatedb, 312 of about 2,140");
+    }
+
+    #[test]
+    fn a_comma_goes_every_three_digits_and_nowhere_else() {
+        assert_eq!(with_thousands(0), "0");
+        assert_eq!(with_thousands(999), "999");
+        assert_eq!(with_thousands(1_000), "1,000");
+        assert_eq!(with_thousands(12_345), "12,345");
+        assert_eq!(with_thousands(1_234_567), "1,234,567");
+    }
 }
