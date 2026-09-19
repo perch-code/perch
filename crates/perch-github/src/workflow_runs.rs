@@ -1,31 +1,19 @@
-//! Workflow runs: for the notifications that announce them, and for the
-//! checks pill on an item's header.
+//! Workflow runs: the checks pill on an item's header, and the branch a
+//! CI notification is about.
 //!
 //! A `CheckSuite` notification carries a title and nothing else: no URL, no
-//! run id, no check suite id. github.com still shows it as `Hourly DST #912`
-//! with a link to the run, so the run is found the way a person would find
-//! it: by the workflow's name, the branch, and when the notification came.
+//! run id, no check suite id. The workflow's name and the branch are read
+//! out of the title, which is enough to say whether the notification is
+//! about the open pull request's branch and its checks want asking after.
 //!
 //! The pill reads the runs for one commit and shows the worst of them.
 
-use jiff::{SignedDuration, Timestamp};
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{SubjectDetail, SubjectState, Thread, UserPayload};
+use crate::model::{Thread, UserPayload};
 
-/// How far before the notification a run may have been created. A run is
-/// created when it is queued and finishes some time later; a week covers
-/// anything short of a runner that never picked it up.
-const LOOKBACK: SignedDuration = SignedDuration::from_hours(24 * 7);
-
-/// How far a run's last update may sit from the notification and still be
-/// the run it announced. The observed lag is about twenty seconds. The rest
-/// is slack for a slow notification pipeline, not room for a different run:
-/// the same workflow rarely finishes twice on one branch within it.
-const TOLERANCE: SignedDuration = SignedDuration::from_mins(15);
-
-/// Everything needed to find the run behind a `CheckSuite` notification.
+/// What a `CheckSuite` notification says about the run it announces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowRunQuery {
     pub repo_full_name: String,
@@ -51,60 +39,6 @@ impl WorkflowRunQuery {
             branch,
             at: thread.updated_at,
         })
-    }
-
-    /// The API path that lists the candidates: the branch's runs created in
-    /// the week before the notification, newest first.
-    ///
-    /// Not narrowed by conclusion. A run re-run since the notification may
-    /// have a different one now, and that is the run to show.
-    pub(crate) fn path(&self) -> String {
-        const STAMP: &str = "%Y-%m-%dT%H:%M:%SZ";
-        let from = (self.at - LOOKBACK).strftime(STAMP);
-        let to = self.at.strftime(STAMP);
-        let branch = utf8_percent_encode(&self.branch, NON_ALPHANUMERIC);
-        format!(
-            "/repos/{}/actions/runs?branch={branch}&created={from}..{to}&per_page=100",
-            self.repo_full_name
-        )
-    }
-
-    /// The run this notification announced, out of the candidates.
-    pub(crate) fn pick(&self, runs: Vec<WorkflowRunPayload>) -> Option<SubjectDetail> {
-        let candidates: Vec<WorkflowRunPayload> = runs
-            .into_iter()
-            .filter(|r| {
-                r.name == self.workflow
-                    && r.head_branch.as_deref() == Some(self.branch.as_str())
-                    && r.created_at <= self.at
-            })
-            .collect();
-
-        // The run finished just before the notification went out, so its
-        // last update sits within the tolerance. The closest one is it.
-        let announced = candidates
-            .iter()
-            .map(|r| (r.updated_at.duration_since(self.at).abs(), r))
-            .filter(|(gap, _)| *gap <= TOLERANCE)
-            .min_by_key(|(gap, _)| *gap)
-            .map(|(_, r)| r);
-
-        // A run re-run since then was updated when the re-run finished, not
-        // when the notification went out. Of the runs still being worked on
-        // at the notification, the most recently started is the one it
-        // announced.
-        let rerun = || {
-            let floor = self.at - TOLERANCE;
-            candidates
-                .iter()
-                .filter(|r| r.updated_at >= floor)
-                .max_by_key(|r| r.created_at)
-        };
-
-        announced
-            .or_else(rerun)
-            .cloned()
-            .map(WorkflowRunPayload::into_detail)
     }
 }
 
@@ -191,7 +125,7 @@ pub(crate) struct WorkflowRunsPayload {
     pub workflow_runs: Vec<WorkflowRunPayload>,
 }
 
-/// One workflow run, reduced to what finding it and showing it need.
+/// One workflow run, as GitHub lists it and as the checks are kept.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRunPayload {
     #[serde(default)]
@@ -232,53 +166,11 @@ impl WorkflowRunPayload {
         self.status == "completed"
             && matches!(self.conclusion.as_deref(), Some("success" | "neutral" | "skipped"))
     }
-
-    fn into_detail(self) -> SubjectDetail {
-        let state = match (self.status.as_str(), self.conclusion.as_deref()) {
-            ("completed", Some("success")) => SubjectState::RunSuccess,
-            ("completed", Some("failure" | "timed_out" | "startup_failure")) => {
-                SubjectState::RunFailure
-            }
-            // Waiting on someone to approve it, which is closer to running
-            // than to stopped.
-            ("completed", Some("action_required")) => SubjectState::RunInProgress,
-            // Cancelled, skipped, stale, neutral: nothing ran.
-            ("completed", _) => SubjectState::RunCancelled,
-            // Queued, in progress, waiting, pending, requested.
-            _ => SubjectState::RunInProgress,
-        };
-        let (author_login, author_avatar_url) = self
-            .actor
-            .map(|u| (u.login, u.avatar_url))
-            .unwrap_or_default();
-
-        SubjectDetail {
-            number: self.run_number,
-            state,
-            author_login,
-            author_avatar_url,
-            workflow: Some(self.name),
-            html_url: Some(self.html_url),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn at() -> Timestamp {
-        "2026-09-15T23:45:29Z".parse().unwrap()
-    }
-
-    fn query() -> WorkflowRunQuery {
-        WorkflowRunQuery {
-            repo_full_name: "slatedb/slatedb".into(),
-            workflow: "Hourly DST".into(),
-            branch: "main".into(),
-            at: at(),
-        }
-    }
 
     fn run(
         name: &str,
@@ -336,164 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn the_path_covers_the_week_before_the_notification() {
-        assert_eq!(
-            query().path(),
-            "/repos/slatedb/slatedb/actions/runs?branch=main\
-             &created=2026-09-08T23:45:29Z..2026-09-15T23:45:29Z&per_page=100"
-        );
-    }
-
-    #[test]
-    fn branches_are_encoded_into_the_query() {
-        let q = WorkflowRunQuery {
-            branch: "feature/a+b".into(),
-            ..query()
-        };
-        assert!(q.path().contains("branch=feature%2Fa%2Bb&"), "{}", q.path());
-    }
-
-    #[test]
-    fn the_run_that_finished_just_before_the_notification_wins() {
-        let picked = query()
-            .pick(vec![
-                run(
-                    "Hourly DST",
-                    912,
-                    "2026-09-15T23:25:07Z",
-                    "2026-09-15T23:45:08Z",
-                    "failure",
-                ),
-                run(
-                    "Hourly DST",
-                    911,
-                    "2026-09-15T20:01:11Z",
-                    "2026-09-15T20:14:21Z",
-                    "success",
-                ),
-                run(
-                    "PR Checks",
-                    8205,
-                    "2026-09-15T23:40:00Z",
-                    "2026-09-15T23:45:20Z",
-                    "failure",
-                ),
-            ])
-            .unwrap();
-        assert_eq!(picked.number, 912);
-        assert_eq!(picked.state, SubjectState::RunFailure);
-        assert_eq!(picked.workflow.as_deref(), Some("Hourly DST"));
-        assert_eq!(
-            picked.html_url.as_deref(),
-            Some("https://github.com/slatedb/slatedb/actions/runs/912")
-        );
-        assert_eq!(picked.author_login, "criccomini");
-        assert_eq!(picked.reference(), "Hourly DST #912");
-    }
-
-    #[test]
-    fn a_run_that_started_after_the_notification_is_not_it() {
-        let picked = query().pick(vec![run(
-            "Hourly DST",
-            913,
-            "2026-09-15T23:46:00Z",
-            "2026-09-15T23:47:00Z",
-            "failure",
-        )]);
-        assert_eq!(picked, None);
-    }
-
-    #[test]
-    fn a_run_re_run_since_is_still_found_and_shows_its_new_state() {
-        // Re-run an hour later and green now. Its updated_at moved past the
-        // tolerance, but it was the run underway when the notification went
-        // out.
-        let picked = query()
-            .pick(vec![
-                run(
-                    "Hourly DST",
-                    912,
-                    "2026-09-15T23:25:07Z",
-                    "2026-09-16T00:50:00Z",
-                    "success",
-                ),
-                run(
-                    "Hourly DST",
-                    911,
-                    "2026-09-15T20:01:11Z",
-                    "2026-09-15T20:14:21Z",
-                    "failure",
-                ),
-            ])
-            .unwrap();
-        assert_eq!(picked.number, 912);
-        assert_eq!(picked.state, SubjectState::RunSuccess);
-    }
-
-    #[test]
-    fn an_older_run_is_not_mistaken_for_a_missing_one() {
-        // The announced run is gone, and the previous one finished hours
-        // earlier. Nothing fits, and nothing is better than the wrong number.
-        let picked = query().pick(vec![run(
-            "Hourly DST",
-            911,
-            "2026-09-15T20:01:11Z",
-            "2026-09-15T20:14:21Z",
-            "failure",
-        )]);
-        assert_eq!(picked, None);
-    }
-
-    #[test]
-    fn another_branch_is_not_it_either() {
-        let mut other = run(
-            "Hourly DST",
-            912,
-            "2026-09-15T23:25:07Z",
-            "2026-09-15T23:45:08Z",
-            "failure",
-        );
-        other.head_branch = Some("release".into());
-        assert_eq!(query().pick(vec![other]), None);
-    }
-
-    #[test]
-    fn conclusions_map_to_states() {
-        let state = |status: &str, conclusion: Option<&str>| {
-            let mut r = run("w", 1, "2026-09-15T23:25:07Z", "2026-09-15T23:45:08Z", "");
-            r.status = status.into();
-            r.conclusion = conclusion.map(str::to_string);
-            r.into_detail().state
-        };
-        assert_eq!(
-            state("completed", Some("success")),
-            SubjectState::RunSuccess
-        );
-        assert_eq!(
-            state("completed", Some("failure")),
-            SubjectState::RunFailure
-        );
-        assert_eq!(
-            state("completed", Some("timed_out")),
-            SubjectState::RunFailure
-        );
-        assert_eq!(
-            state("completed", Some("cancelled")),
-            SubjectState::RunCancelled
-        );
-        assert_eq!(
-            state("completed", Some("skipped")),
-            SubjectState::RunCancelled
-        );
-        assert_eq!(
-            state("completed", Some("action_required")),
-            SubjectState::RunInProgress
-        );
-        assert_eq!(state("in_progress", None), SubjectState::RunInProgress);
-        assert_eq!(state("queued", None), SubjectState::RunInProgress);
-    }
-
-    #[test]
     fn the_runs_envelope_deserializes() {
         let json = r#"{"total_count":1,"workflow_runs":[{
             "id":35035566266,"name":"Hourly DST","run_number":912,"run_attempt":1,
@@ -504,12 +238,12 @@ mod tests {
             "actor":{"login":"criccomini","avatar_url":"https://avatars/1"}
         }]}"#;
         let payload: WorkflowRunsPayload = serde_json::from_str(json).unwrap();
-        let picked = query().pick(payload.workflow_runs).unwrap();
-        assert_eq!(picked.reference(), "Hourly DST #912");
-        assert_eq!(
-            picked.html_url.as_deref(),
-            Some("https://github.com/slatedb/slatedb/actions/runs/35035566266")
-        );
+        let [run] = payload.workflow_runs.as_slice() else { panic!("one run") };
+        assert_eq!(run.name, "Hourly DST");
+        assert_eq!(run.run_number, 912);
+        assert_eq!(run.head_branch.as_deref(), Some("main"));
+        assert_eq!(run.html_url, "https://github.com/slatedb/slatedb/actions/runs/35035566266");
+        assert_eq!(run.actor.as_ref().map(|a| a.login.as_str()), Some("criccomini"));
     }
 
     /// A run with the given status and conclusion, created `number`

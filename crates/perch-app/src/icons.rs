@@ -4,7 +4,7 @@
 //! how `currentColor` resolves inside floem's SVG view.
 
 use floem::peniko::Color;
-use perch_github::{SubjectKind, SubjectState};
+use perch_github::SubjectState;
 
 use crate::theme;
 
@@ -30,39 +30,25 @@ fn hex(c: Color) -> String {
 /// The colour a state's icon and its number are drawn in.
 pub fn state_color(state: SubjectState) -> Color {
     match state {
-        SubjectState::IssueOpen | SubjectState::PrOpen | SubjectState::RunSuccess => theme::OPEN,
+        SubjectState::IssueOpen | SubjectState::PrOpen => theme::OPEN,
         SubjectState::IssueClosed | SubjectState::PrMerged => theme::MERGED,
-        SubjectState::PrClosed | SubjectState::RunFailure => theme::CLOSED,
-        SubjectState::IssueNotPlanned | SubjectState::PrDraft | SubjectState::RunCancelled => {
-            theme::DRAFT
-        }
-        SubjectState::RunInProgress => theme::PENDING,
+        SubjectState::PrClosed => theme::CLOSED,
+        SubjectState::IssueNotPlanned | SubjectState::PrDraft => theme::DRAFT,
     }
 }
 
-/// Icon for a resolved issue, pull request or workflow run state.
+/// Icon for a resolved issue or pull request state.
 pub fn state_icon(state: SubjectState) -> String {
     let c = hex(state_color(state));
     let body = match state {
-        // A run still going shares the open issue's dot: something is
-        // happening, in the amber GitHub uses for it.
-        SubjectState::IssueOpen | SubjectState::RunInProgress => format!(
+        SubjectState::IssueOpen => format!(
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
                <circle cx="8" cy="8" r="2" fill="{c}"/>"#
         ),
-        SubjectState::IssueClosed | SubjectState::RunSuccess => format!(
+        SubjectState::IssueClosed => format!(
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
                <path d="M5.1 8.2 L7.1 10.2 L11 5.9" fill="none" stroke="{c}"
                      stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
-        ),
-        SubjectState::RunFailure => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M5.7 5.7 L10.3 10.3 M10.3 5.7 L5.7 10.3" stroke="{c}"
-                     stroke-width="1.6" stroke-linecap="round"/>"#
-        ),
-        SubjectState::RunCancelled => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M5.2 8 H10.8" stroke="{c}" stroke-width="1.6" stroke-linecap="round"/>"#
         ),
         SubjectState::IssueNotPlanned => format!(
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
@@ -99,58 +85,10 @@ pub fn state_icon(state: SubjectState) -> String {
     svg16(&body)
 }
 
-/// Icon for a thread whose detail has not arrived, or whose subject has none.
-pub fn kind_icon(kind: &SubjectKind) -> String {
-    let c = hex(theme::FG_SUBTLE);
-    let body = match kind {
-        // Detail pending. A dashed ring reads as "not known yet" without
-        // implying a state the row does not have. A workflow run is here
-        // too: until its run is found, a check mark would claim it passed.
-        SubjectKind::Issue | SubjectKind::PullRequest | SubjectKind::CheckSuite => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.4"
-                       stroke-dasharray="2.4 2.6" stroke-linecap="round"/>"#
-        ),
-        SubjectKind::Discussion => format!(
-            r#"<path d="M2.4 3.6 h11.2 v7 h-5.4 l-3.2 2.6 v-2.6 h-2.6 z" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>"#
-        ),
-        SubjectKind::Commit => format!(
-            r#"<circle cx="8" cy="8" r="3" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M1.8 8 H5 M11 8 H14.2" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>"#
-        ),
-        SubjectKind::Release => format!(
-            r#"<path d="M8.4 1.9 H14.1 V7.6 L7.9 13.8 L2.2 8.1 Z" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linejoin="round"/>
-               <circle cx="11.3" cy="4.7" r="1.15" fill="{c}"/>"#
-        ),
-        SubjectKind::RepositoryVulnerabilityAlert => format!(
-            r#"<path d="M8 1.8 L13.4 3.7 V8 C13.4 11 11 13.4 8 14.2 C5 13.4 2.6 11 2.6 8 V3.7 Z"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M8 5.6 V8.6" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
-               <circle cx="8" cy="10.8" r="0.95" fill="{c}"/>"#
-        ),
-        SubjectKind::Other(_) => format!(r#"<circle cx="8" cy="8" r="3.2" fill="{c}"/>"#),
-    };
-    svg16(&body)
-}
-
 /// Sidebar glyphs. Drawn at 16px, tinted by the caller's colour.
 pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
     let c = hex(color);
     let body = match name {
-        SidebarIcon::Inbox => format!(
-            r#"<path d="M1.9 9.2 L3.6 3.1 h8.8 l1.7 6.1 v3.7 h-12.2 z" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M1.9 9.2 h3.4 a2.7 2.7 0 0 0 5.4 0 h3.4" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linejoin="round"/>"#
-        ),
-        SidebarIcon::Bell => format!(
-            r#"<path d="M8 2.2 C5.7 2.2 4.3 3.9 4.3 6.1 V9.3 L3.1 11.3 H12.9 L11.7 9.3 V6.1
-                       C11.7 3.9 10.3 2.2 8 2.2 Z" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M6.5 13.1 A1.6 1.6 0 0 0 9.5 13.1" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>"#
-        ),
         SidebarIcon::Bookmark => format!(
             r#"<path d="M4 2.2 h8 v11.6 l-4-3.1 -4 3.1 z" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linejoin="round"/>"#
@@ -167,43 +105,13 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M2.6 1.8 v3.1 h3.1" fill="none" stroke="{c}" stroke-width="1.5"
                      stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
-        // The partial state of a checkbox: some of these, not all.
-        SidebarIcon::Dash => format!(
-            r#"<path d="M4.2 8 h7.6" fill="none" stroke="{c}" stroke-width="1.8"
-                     stroke-linecap="round"/>"#
-        ),
         SidebarIcon::Check => format!(
             r#"<path d="M3.2 8.4 L6.4 11.6 L12.8 4.6" fill="none" stroke="{c}"
                      stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
-        SidebarIcon::Target => format!(
-            r#"<circle cx="8" cy="8" r="6.1" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <circle cx="8" cy="8" r="2.7" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <circle cx="8" cy="8" r="0.9" fill="{c}"/>"#
-        ),
         SidebarIcon::Comment => format!(
             r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="none"
                      stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>"#
-        ),
-        SidebarIcon::Mention => format!(
-            r#"<circle cx="8" cy="8" r="2.6" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <path d="M10.6 5.8 v3.3 a1.9 1.9 0 0 0 3.1 1.4 A6.2 6.2 0 1 0 11.4 13.4"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
-        ),
-        SidebarIcon::People => format!(
-            r#"<circle cx="6" cy="5.6" r="2.4" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <path d="M1.9 13.3 a4.1 4.1 0 0 1 8.2 0" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>
-               <path d="M10.7 3.6 a2.4 2.4 0 0 1 0 4.5" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>
-               <path d="M11.6 9.6 a4.1 4.1 0 0 1 2.6 3.7" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>"#
-        ),
-        SidebarIcon::Eye => format!(
-            r#"<path d="M1.4 8 C3.4 4.6 5.6 3.2 8 3.2 s4.6 1.4 6.6 4.8 C12.6 11.4 10.4 12.8 8 12.8
-                       S3.4 11.4 1.4 8 Z" fill="none" stroke="{c}" stroke-width="1.4"
-                     stroke-linejoin="round"/>
-               <circle cx="8" cy="8" r="2.1" fill="none" stroke="{c}" stroke-width="1.4"/>"#
         ),
         SidebarIcon::Search => format!(
             r#"<circle cx="7" cy="7" r="4.4" fill="none" stroke="{c}" stroke-width="1.5"/>
@@ -335,18 +243,11 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarIcon {
-    Inbox,
-    Bell,
     Bookmark,
     BookmarkFilled,
     Check,
-    Dash,
     Undo,
-    Target,
     Comment,
-    Mention,
-    People,
-    Eye,
     ChevronRight,
     ChevronLeft,
     ChevronDown,
@@ -387,7 +288,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 35] = [
+    pub const ALL: [SidebarIcon; 28] = [
         SidebarIcon::Link,
         SidebarIcon::ThreadHollow,
         SidebarIcon::ChangesRequested,
@@ -399,8 +300,6 @@ impl SidebarIcon {
         SidebarIcon::Plus,
         SidebarIcon::Stop,
         SidebarIcon::Thread,
-        SidebarIcon::Inbox,
-        SidebarIcon::Bell,
         SidebarIcon::Branch,
         SidebarIcon::Trash,
         SidebarIcon::Ellipsis,
@@ -408,13 +307,8 @@ impl SidebarIcon {
         SidebarIcon::Bookmark,
         SidebarIcon::BookmarkFilled,
         SidebarIcon::Check,
-        SidebarIcon::Dash,
         SidebarIcon::Undo,
-        SidebarIcon::Target,
         SidebarIcon::Comment,
-        SidebarIcon::Mention,
-        SidebarIcon::People,
-        SidebarIcon::Eye,
         SidebarIcon::ChevronRight,
         SidebarIcon::ChevronLeft,
         SidebarIcon::ChevronDown,
@@ -440,10 +334,6 @@ mod tests {
             SubjectState::PrDraft,
             SubjectState::PrMerged,
             SubjectState::PrClosed,
-            SubjectState::RunSuccess,
-            SubjectState::RunFailure,
-            SubjectState::RunCancelled,
-            SubjectState::RunInProgress,
         ] {
             let svg = state_icon(s);
             assert!(svg.starts_with("<svg"), "{s:?}");
@@ -462,24 +352,6 @@ mod tests {
             open.replace(&hex(theme::OPEN), "X"),
             draft.replace(&hex(theme::DRAFT), "X")
         );
-    }
-
-    #[test]
-    fn a_failed_run_is_not_drawn_as_a_check() {
-        let failed = state_icon(SubjectState::RunFailure);
-        let passed = state_icon(SubjectState::RunSuccess);
-        assert_ne!(
-            failed.replace(&hex(theme::CLOSED), "X"),
-            passed.replace(&hex(theme::OPEN), "X")
-        );
-        assert!(failed.contains(&hex(theme::CLOSED)));
-        assert!(passed.contains(&hex(theme::OPEN)));
-    }
-
-    #[test]
-    fn unknown_subject_kinds_still_get_an_icon() {
-        let svg = kind_icon(&SubjectKind::Other("Sponsorship".into()));
-        assert!(svg.starts_with("<svg"));
     }
 
     #[test]

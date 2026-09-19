@@ -19,7 +19,7 @@ use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::OpenItem;
 use crate::ui::titlebar::title_bar;
-use crate::ui::widgets::{avatar, clickable, open_in_browser, sidebar_glyph, text_button, worktree_menu};
+use crate::ui::widgets::{avatar, clickable, open_in_browser, sidebar_glyph, worktree_menu};
 
 pub fn header(
     app: AppState,
@@ -27,7 +27,6 @@ pub fn header(
     backend: Rc<Backend>,
     open_item: OpenItem,
     on_back: impl Fn() + 'static,
-    on_done: impl Fn(String) + 'static,
     on_archive: impl Fn(String) + 'static,
 ) -> impl IntoView {
     // The bar is the window's title bar, so a press on anything in it that
@@ -42,7 +41,6 @@ pub fn header(
         checks_pill(state),
         directory(state, on_archive),
         churn(state),
-        done_button(state, on_done),
     )))
     .style(bar_style);
     Stack::vertical((bar, metadata_strip(app, state, backend, open_item))).style(|s| s.flex_col().width_full())
@@ -127,33 +125,6 @@ fn back_button(on_back: impl Fn() + 'static) -> impl IntoView {
             .background(theme::CANVAS)
             .hover(|s| s.background(theme::CANVAS_SUBTLE).cursor(CursorStyle::Pointer))
     })
-}
-
-/// Finish with a pull request and dismiss the notification behind it.
-///
-/// The whole point of the feature: read a review, be done with it, land on
-/// the next one. Absent when the pull request was opened by some route that
-/// had no notification, such as the launch hook.
-fn done_button(state: ReviewState, on_done: impl Fn(String) + 'static) -> impl IntoView {
-    // The container rebuilds the button whenever the thread changes, and each
-    // rebuild needs its own handle on the callback.
-    let on_done = std::rc::Rc::new(on_done);
-    dyn_container(
-        move || state.thread_id.get(),
-        move |thread_id| {
-            let Some(thread_id) = thread_id else {
-                return Empty::new().into_any();
-            };
-            let on_done = on_done.clone();
-            text_button(
-                || "Done".to_string(),
-                SidebarIcon::Check,
-                move || on_done(thread_id.clone()),
-            )
-            .into_any()
-        },
-    )
-    .style(|s| s.flex_shrink(0.0_f32))
 }
 
 fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
@@ -269,8 +240,6 @@ fn state_word(state: SubjectState) -> &'static str {
         SubjectState::PrMerged => "Merged",
         SubjectState::PrClosed | SubjectState::IssueClosed => "Closed",
         SubjectState::IssueNotPlanned => "Not planned",
-        // Runs are not opened as items; the pill never sees them.
-        SubjectState::RunSuccess | SubjectState::RunFailure | SubjectState::RunCancelled | SubjectState::RunInProgress => "",
     }
 }
 
@@ -700,10 +669,9 @@ fn metadata_strip(app: AppState, state: ReviewState, backend: Rc<Backend>, open_
                     chips(strip.closes, move |n| {
                         let (backend, repo) = (backend.clone(), repo.clone());
                         let open = move || {
-                            // The same road a sidebar row takes: the progress
-                            // card at once, and no notification behind it.
+                            // By number rather than by row: the issue may
+                            // have no item yet, and the backend makes one.
                             app.begin_open("Reading the issue");
-                            state.thread_id.set(None);
                             backend.open_subject(&repo, ItemKind::Issue, n);
                         };
                         chip(format!("#{n}"), theme::BADGE_BG, theme::FG_MUTED, Some(Rc::new(open)))

@@ -16,8 +16,8 @@ use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, Store};
 use perch_github::{
     resolve_token, Anchor, Author, Cache, CacheError, CommentMessage, CommentThread, Config,
-    DetailSource, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, Mark, PullRequest,
-    RunRecord, RunStatus, SubjectDetail, SubjectKind, Thread, ThreadOrigin,
+    GitHub, Item, ItemCheckout, ItemKind, ItemSubject, PullRequest, RunRecord, RunStatus,
+    SubjectKind, Thread, ThreadOrigin,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
@@ -27,40 +27,11 @@ pub(crate) mod backfill;
 mod fake;
 pub(crate) mod sync;
 
-/// How many per-thread detail requests may be in flight at once.
-///
-/// A cold inbox of 100 threads is 100 requests against a 5000/hour budget.
-/// Eight at a time keeps the first screen filling quickly without burning
-/// through the limit in a burst.
-const DETAIL_CONCURRENCY: usize = 8;
+/// How many avatar downloads may be in flight at once.
 const AVATAR_CONCURRENCY: usize = 6;
-const LAST_MODIFIED_KEY: &str = "notifications_last_modified";
 /// Settings the UI keeps between launches. Sent back at startup.
 pub const UI_META_KEYS: [&str; 5] =
     ["item_filters", "collapsed_sections", "review.layout", "viewer.login", "viewer.avatar_url"];
-
-/// What the per-thread fetches share.
-#[derive(Clone)]
-struct Fetches {
-    details: Arc<Semaphore>,
-    avatars: Arc<Semaphore>,
-    /// Workflow run lookups that came back empty, by thread id and
-    /// `updated_at`. A run GitHub no longer lists, or a title the branch's
-    /// runs do not match, would otherwise be looked up again on every inbox
-    /// refresh. Kept for the process only, so a restart asks once more in
-    /// case the answer has changed.
-    unresolved: Arc<std::sync::Mutex<std::collections::HashSet<(String, String)>>>,
-}
-
-impl Fetches {
-    fn new() -> Self {
-        Self {
-            details: Arc::new(Semaphore::new(DETAIL_CONCURRENCY)),
-            avatars: Arc::new(Semaphore::new(AVATAR_CONCURRENCY)),
-            unresolved: Default::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -69,8 +40,10 @@ pub enum Command {
     /// issue view for an issue. Prepares the checkout when there is one to
     /// prepare.
     OpenItem { id: String },
-    /// Turn a notification into an item, or find the one it already has,
-    /// and open it.
+    /// Find or make the item for a pull request or issue named by number,
+    /// and open it. Every sidebar row opens by id; this is for the launch
+    /// hooks and the review header's "Closes #N" chip, which name a subject
+    /// that may have no row yet.
     OpenSubject { repo_full_name: String, kind: ItemKind, number: u64 },
     /// Read, diff, and highlight one file of the open checkout, over the
     /// scope that is set.
@@ -129,32 +102,9 @@ pub enum Command {
     DeleteCommentThread { id: String },
 }
 
-/// A mark write.
-///
-/// On its own channel, drained by its own task, because the main loop awaits
-/// the network inline. Holding a click behind a poll is fine for the poll and
-/// not fine for the click.
-#[derive(Debug, Clone)]
-pub enum MarkCommand {
-    /// Save or unsave every thread named, as one act.
-    ///
-    /// A single row is a batch of one. Bulk selection is the reason these
-    /// take a list: a hundred rows should cost one transaction and one
-    /// event, not a hundred of each.
-    SetSaved { thread_ids: Vec<String>, saved: bool },
-    /// Mark done, or restore, every thread named, as one act.
-    SetDone { thread_ids: Vec<String>, done: bool },
-}
-
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// A whole inbox, from the cache on startup or from the network after.
-    Threads { threads: Vec<Thread>, from_cache: bool },
-    Detail { thread_id: String, detail: SubjectDetail },
     Avatar { url: String, bytes: Vec<u8> },
-    /// Every mark Perch holds. Sent whole rather than as a patch, because
-    /// the set is small and a replacement cannot drift.
-    Marks(Vec<Mark>),
     /// The repositories config.toml declares, `owner/repo` in config
     /// order, which is the order the sidebar lists them in. Sent once at
     /// startup; the file is read once.
@@ -247,7 +197,6 @@ pub enum Status {
 /// Handle the UI keeps. Dropping it ends the worker.
 pub struct Backend {
     commands: UnboundedSender<Command>,
-    marks: UnboundedSender<MarkCommand>,
 }
 
 impl Backend {
@@ -256,7 +205,8 @@ impl Backend {
     }
 
     /// Open a pull request or an issue by number, making its item if it has
-    /// none yet.
+    /// none yet. The launch hooks and the review header's "Closes #N" chip
+    /// come through here; a sidebar row has an id and uses `open_item`.
     pub fn open_subject(&self, repo_full_name: &str, kind: ItemKind, number: u64) {
         let _ = self.commands.send(Command::OpenSubject {
             repo_full_name: repo_full_name.to_string(),
@@ -368,20 +318,6 @@ impl Backend {
         let _ = self.commands.send(Command::DeleteCommentThread { id: id.to_string() });
     }
 
-    pub fn set_saved(&self, thread_ids: Vec<String>, saved: bool) {
-        if thread_ids.is_empty() {
-            return;
-        }
-        let _ = self.marks.send(MarkCommand::SetSaved { thread_ids, saved });
-    }
-
-    pub fn set_done(&self, thread_ids: Vec<String>, done: bool) {
-        if thread_ids.is_empty() {
-            return;
-        }
-        let _ = self.marks.send(MarkCommand::SetDone { thread_ids, done });
-    }
-
     pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
         let _ = self.commands.send(Command::Hover {
             token,
@@ -408,15 +344,13 @@ impl Backend {
     #[cfg(test)]
     pub fn detached() -> Self {
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
-        let (marks, _) = tokio::sync::mpsc::unbounded_channel();
-        Backend { commands, marks }
+        Backend { commands }
     }
 }
 
 /// Start the worker thread. Returns the command handle and the event receiver.
 pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (mark_tx, mark_rx) = tokio::sync::mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = std::sync::mpsc::channel();
 
     std::thread::Builder::new()
@@ -435,31 +369,21 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
                     return;
                 }
             };
-            runtime.block_on(run(cmd_rx, mark_rx, evt_tx));
+            runtime.block_on(run(cmd_rx, evt_tx));
         })
         .expect("spawn backend thread");
 
-    (
-        Backend {
-            commands: cmd_tx,
-            marks: mark_tx,
-        },
-        evt_rx,
-    )
+    (Backend { commands: cmd_tx }, evt_rx)
 }
 
-async fn run(
-    mut commands: UnboundedReceiver<Command>,
-    marks: UnboundedReceiver<MarkCommand>,
-    events: EventSender<Event>,
-) {
+async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event>) {
     tracing::info!("backend started");
     let mut config = Config::load();
     tracing::info!(poll = config.poll_interval_secs, "config loaded");
 
     // Which agents are installed, asked alongside the GitHub setup rather
     // than before it: Codex's catalog can take a few seconds on a cold
-    // cache, and the inbox should not wait for a picker.
+    // cache, and the sidebar should not wait for a picker.
     let agents = {
         let mut agent = config.agent.clone();
         let events = events.clone();
@@ -520,52 +444,18 @@ async fn run(
         }
     }
 
-    // Marks run beside the loop rather than in it. A poll can hold the loop
-    // for as long as the network takes, and a reader who presses Done should
-    // not find out how long that is.
-    spawn_mark_writer(marks, cache.clone(), events.clone());
-
-    let fetches = Fetches::new();
+    let avatars = Arc::new(Semaphore::new(AVATAR_CONCURRENCY));
 
     // Paint from the cache first. A cold launch with no network still shows
-    // the inbox as it was.
-    //
-    // This goes through the same path a network response does, which is the
-    // point: it reads the details AND the avatars back off disk. Sending the
-    // details alone left every row showing a letter placeholder whenever the
-    // poll came back unchanged, because nothing else ever loads an avatar.
+    // the sidebar as it was, with the settings it was left with.
     if let Some(cache) = cache.as_ref() {
-        // Marks go out before the list they narrow. Sent the other way
-        // round, a dismissed row would paint for a frame before vanishing.
         if let Ok(guard) = cache.lock() {
-            send_marks(&guard, &events);
-            // The sidebar paints from the cache before the network is
-            // asked anything.
             send_items(&guard, &events);
             for key in UI_META_KEYS {
                 if let Ok(Some(value)) = guard.meta(key) {
                     let _ = events.send(Event::Meta { key: key.to_string(), value });
                 }
             }
-        }
-
-        let cached = cache.lock().ok().and_then(|guard| {
-            let threads = guard.load_threads().ok()?;
-            (!threads.is_empty()).then_some(threads)
-        });
-
-        if let Some(threads) = cached {
-            let _ = events.send(Event::Threads {
-                threads: threads.clone(),
-                from_cache: true,
-            });
-            fetch_details(
-                github.clone(),
-                Some(cache.clone()),
-                events.clone(),
-                fetches.clone(),
-                threads,
-            );
         }
     }
     let source = token.source.describe().to_string();
@@ -602,7 +492,7 @@ async fn run(
         language_server: language_server.clone(),
         events: events.clone(),
         runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        avatars: fetches.avatars.clone(),
+        avatars,
         seen_ci: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         passes: Arc::new(tokio::sync::Notify::new()),
@@ -631,7 +521,7 @@ async fn run(
     // make a directory. Inline, not spawned: a checkout made by a launch
     // hook while this ran would have no row yet, and would be taken for a
     // stray and removed from under it. It is a directory listing and at
-    // most a prune, so the inbox is not kept waiting.
+    // most a prune, so the first poll is not kept waiting.
     reconcile_checkouts(&ctx, reset).await;
     {
         // Then put away whatever nobody has opened in a fortnight. Archived,
@@ -686,10 +576,10 @@ async fn run(
         }
         match command {
             Some(Command::Refresh) | None => {
-                // The open lists before the inbox, so a notification about
-                // a pull request the pass has just listed finds its row.
-                // The passes are requests too, and the status bar says so
-                // from the first of them, not from the inbox poll after.
+                // The open lists before the notifications, so a notification
+                // about a pull request the pass has just listed finds its
+                // row. The passes are requests too, and the status bar says
+                // so from the first of them, not from the poll after.
                 let _ = ctx.events.send(Event::Status(Status::Refreshing));
                 let pass_failure = list_passes(&ctx).await;
                 if !first_pass_done {
@@ -701,10 +591,10 @@ async fn run(
                     backfill::spawn(ctx.clone());
                 }
                 ctx.passes.notify_one();
-                poll_after = refresh(&ctx, &source, &fetches).await;
+                poll_after = refresh(&ctx, &source).await;
                 // A pass that failed is what the status bar shows, whatever
-                // the inbox poll said: the sidebar is missing rows, and
-                // `refresh` has just reported a healthy inbox over it.
+                // the poll said: the sidebar is missing rows, and `refresh`
+                // has just reported a healthy poll over it.
                 if let Some((repo, e)) = pass_failure {
                     let _ = ctx.events.send(Event::Status(describe_pass_error(&repo, &e)));
                 }
@@ -943,96 +833,6 @@ async fn run(
     }
 }
 
-/// Drain mark writes on their own task.
-///
-/// Ends when the UI drops its handle, which is also when the loop ends.
-fn spawn_mark_writer(
-    mut marks: UnboundedReceiver<MarkCommand>,
-    cache: SharedCache,
-    events: EventSender<Event>,
-) {
-    tokio::spawn(async move {
-        while let Some(command) = marks.recv().await {
-            match command {
-                MarkCommand::SetSaved { thread_ids, saved } => {
-                    write_marks(&cache, &events, &thread_ids, |c, threads| {
-                        c.set_saved(threads, saved)
-                    });
-                }
-                MarkCommand::SetDone { thread_ids, done } => {
-                    write_marks(&cache, &events, &thread_ids, |c, threads| {
-                        c.set_done(threads, done)
-                    });
-                }
-            }
-        }
-    });
-}
-
-/// Write one flag across a batch of threads, then publish the new mark set.
-///
-/// The whole batch is one transaction inside the cache, so a bulk action
-/// either lands or does not, and the UI hears about it once.
-///
-/// Resolving and writing happen under one lock, so a poll landing in the
-/// middle cannot leave a mark describing a thread the write never saw.
-fn write_marks(
-    cache: &SharedCache,
-    events: &EventSender<Event>,
-    thread_ids: &[String],
-    write: impl FnOnce(&mut Cache, &[&Thread]) -> Result<(), perch_github::CacheError>,
-) {
-    let Some(cache) = cache.as_ref() else {
-        tracing::warn!("no cache, so nothing to mark");
-        return;
-    };
-    let Ok(mut guard) = cache.lock() else { return };
-
-    let threads = resolve_threads(&guard, thread_ids);
-    let refs: Vec<&Thread> = threads.iter().collect();
-    if let Err(e) = write(&mut guard, &refs) {
-        tracing::warn!(error = %e, "could not write marks");
-        return;
-    }
-    send_marks(&guard, events);
-}
-
-/// Thread ids to the threads they name.
-///
-/// The live inbox wins, and a mark's snapshot covers a thread the API has
-/// stopped returning. An id in neither is one the UI believes in and the
-/// cache does not, so skip it rather than invent a thread to mark.
-fn resolve_threads(cache: &Cache, ids: &[String]) -> Vec<Thread> {
-    let live = cache.load_threads().unwrap_or_default();
-    let marks = cache.load_marks().unwrap_or_default();
-
-    let mut by_id: std::collections::HashMap<&str, &Thread> = std::collections::HashMap::new();
-    for m in &marks {
-        by_id.insert(m.thread_id.as_str(), &m.snapshot);
-    }
-    for t in &live {
-        by_id.insert(t.id.as_str(), t);
-    }
-
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        match by_id.get(id.as_str()) {
-            Some(t) => out.push((*t).clone()),
-            None => tracing::warn!(thread_id = %id, "asked to mark a thread nothing knows about"),
-        }
-    }
-    out
-}
-
-fn send_marks(cache: &Cache, events: &EventSender<Event>) {
-    match cache.load_marks() {
-        Ok(marks) => {
-            let _ = events.send(Event::Marks(marks));
-        }
-        Err(e) => tracing::warn!(error = %e, "could not read marks"),
-    }
-}
-
 /// How long an owned checkout stays on disk without being opened before
 /// the sweep archives its item.
 const CHECKOUT_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
@@ -1051,10 +851,10 @@ struct Ctx {
     events: EventSender<Event>,
     /// Running agents by run id, so a cancel can find its child.
     runs: Arc<std::sync::Mutex<std::collections::HashMap<String, (perch_agent::Run, String)>>>,
-    /// The avatar download limit, shared with the inbox's fetches.
+    /// The avatar download limit, shared by everything that wants a face.
     avatars: Arc<Semaphore>,
-    /// CI notifications already acted on, by id and time, so one sitting
-    /// in the inbox does not fetch the checks again on every poll.
+    /// CI notifications already acted on, by id and time, so one GitHub
+    /// keeps returning does not fetch the checks again on every poll.
     seen_ci: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
     /// Items whose GitHub side is being fetched again right now.
     refreshing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
@@ -1637,9 +1437,8 @@ async fn finish_open(
 
     if let Some(pr) = pull_request {
         // The cached discussion and checks paint before GitHub answers,
-        // as the inbox does, with the faces the last open left on disk and
-        // the description a question needs. A checkout with no pull
-        // request has neither.
+        // with the faces the last open left on disk and the description a
+        // question needs. A checkout with no pull request has neither.
         let cached = ctx.with_cache(|c| c.load_discussion(&item.id).ok().flatten()).flatten();
         if let Some((_, d)) = cached {
             if let Ok(mut guard) = ctx.slot.lock() {
@@ -1650,7 +1449,12 @@ async fn finish_open(
             ctx.want_avatars(d.comments.iter().map(|c| c.user_avatar_url.clone()));
             let _ = ctx.events.send(Event::DiscussionReady { item_id: item.id.clone(), discussion: Arc::new(d) });
         }
-        ctx.want_avatars(pr.requested_reviewers.iter().map(|r| r.avatar_url.clone()));
+        // The author's face is on the header, whether or not they said
+        // anything in the discussion.
+        ctx.want_avatars(
+            std::iter::once(pr.author_avatar_url.clone())
+                .chain(pr.requested_reviewers.iter().map(|r| r.avatar_url.clone())),
+        );
         let cached = ctx.with_cache(|c| c.load_checks(&item.id, &pr.head_sha).ok().flatten()).flatten();
         if let Some(checks) = cached {
             let _ = ctx.events.send(Event::ChecksReady { item_id: item.id.clone(), checks: Arc::new(checks) });
@@ -1809,8 +1613,8 @@ fn base_revs_for(item: &Item) -> Vec<String> {
 ///
 /// `ci_at` is the time of the CI notification this fetch answers, when it
 /// answers one. The checks coming back red is then the item's attention,
-/// dated to the notification rather than to now, so the same one still
-/// in the inbox next poll cannot move it again. An open, and a
+/// dated to the notification rather than to now, so the same one GitHub
+/// returns again next poll cannot move it again. An open, and a
 /// notification about something said, pass `None`: red checks the reader
 /// is already looking at are not news, and a comment's reason is its own.
 async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest, ci_at: Option<Timestamp>) {
@@ -2047,76 +1851,25 @@ async fn list_passes(ctx: &Ctx) -> Option<(String, sync::Error)> {
 }
 
 /// One poll of the notifications API. Returns how long to wait before the next.
-async fn refresh(ctx: &Ctx, source: &str, fetches: &Fetches) -> Duration {
-    let github = &ctx.github;
-    let cache = &ctx.cache;
+///
+/// One request: the first page, every time. The notifications live for
+/// the length of `attend` and are dropped; nothing is stored, so nothing
+/// is compared against last time. `X-Poll-Interval` still paces the next.
+async fn refresh(ctx: &Ctx, source: &str) -> Duration {
     let events = &ctx.events;
     let config = ctx.config.as_ref();
     let _ = events.send(Event::Status(Status::Refreshing));
 
-    let since = cache
-        .as_ref()
-        .and_then(|c| c.lock().ok())
-        .and_then(|c| c.meta(LAST_MODIFIED_KEY).ok().flatten());
-
-    match github.list_threads(since.as_deref()).await {
+    match ctx.github.list_threads().await {
         Ok(result) => {
             let poll_after = result
                 .poll_interval
                 .max(Duration::from_secs(config.poll_interval_secs.max(1)));
+            tracing::info!(count = result.threads.len(), "notifications polled");
 
-            if result.threads.is_none() {
-                tracing::info!("inbox unchanged, keeping the cached list");
-            }
-
-            if let Some(threads) = result.threads {
-                tracing::info!(count = threads.len(), "inbox refreshed");
-                if let Some(cache) = cache.as_ref() {
-                    if let Ok(mut guard) = cache.lock() {
-                        match guard.store_threads(&threads) {
-                            // The stored timestamp must describe the stored
-                            // list. Writing it on any other path would let a
-                            // later probe answer "unchanged" for a list we
-                            // never saved, and the cache could never heal.
-                            Ok(()) => {
-                                if let Some(lm) = result.last_modified.as_ref() {
-                                    let _ = guard.set_meta(LAST_MODIFIED_KEY, lm);
-                                }
-                                // A thread with activity newer than the
-                                // moment it was dismissed stops being done.
-                                // This runs before the list goes out so the
-                                // UI never renders a new inbox against marks
-                                // that inbox has already invalidated.
-                                match guard.reconcile_marks(&threads) {
-                                    Ok(true) => send_marks(&guard, events),
-                                    Ok(false) => {}
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "could not reconcile marks")
-                                    }
-                                }
-                            }
-                            Err(e) => tracing::warn!(error = %e, "could not cache threads"),
-                        }
-                    }
-                }
-
-                let _ = events.send(Event::Threads {
-                    threads: threads.clone(),
-                    from_cache: false,
-                });
-
-                // A notification about an item is the item's attention,
-                // when its reason asks for the reader.
-                attend(ctx, &threads).await;
-
-                fetch_details(
-                    github.clone(),
-                    cache.clone(),
-                    events.clone(),
-                    fetches.clone(),
-                    threads,
-                );
-            }
+            // A notification about an item is the item's attention, when
+            // its reason asks for the reader.
+            attend(ctx, &result.threads).await;
 
             let _ = events.send(Event::Status(Status::Idle {
                 at: Timestamp::now(),
@@ -2143,10 +1896,10 @@ async fn refresh(ctx: &Ctx, source: &str, fetches: &Fetches) -> Duration {
 ///
 /// A notification makes no item. The list pass has made the row for
 /// everything open in a declared repository, and a subject with no row is
-/// left in the inbox. Nor is every reason attention: subscribed activity
-/// and a state change are the repository moving, which the pass already
-/// shows by moving the row, and putting every push on every watched pull
-/// request into Priority is what made the inbox noisy. A CI notification
+/// let go. Nor is every reason attention: subscribed activity and a state
+/// change are the repository moving, which the pass already shows by
+/// moving the row, and putting every push on every watched pull request
+/// into Priority would be noise. A CI notification
 /// fetches the open pull request's checks again instead, and it is the
 /// checks coming back red that is the attention.
 async fn attend(ctx: &Ctx, threads: &[Thread]) {
@@ -2165,8 +1918,8 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
         };
         let Some(number) = thread.number_hint() else { continue };
         let repo = thread.repository.full_name.as_str();
-        // An archived item does not claim its notifications; they stay
-        // in the inbox, as the sidebar leaves them there.
+        // An archived item does not claim its notifications; what the
+        // reader put away stays put away.
         let item = ctx
             .with_cache(|c| c.find_item_by_subject(repo, kind, number).ok().flatten())
             .flatten()
@@ -2306,7 +2059,7 @@ async fn refresh_open_checks(ctx: &Ctx, thread: &Thread) {
     }
     // The snapshot is refetched on the way, so the checks are for the head
     // the run was on, not the one the item opened at. Once per
-    // notification, not once per poll it is still in the inbox, and off
+    // notification, not once per poll GitHub still returns it, and off
     // the poll, which the command loop waits on.
     let key = (thread.id.clone(), thread.updated_at);
     if ctx.seen_ci.lock().map(|mut s| !s.insert(key)).unwrap_or(true) {
@@ -3703,115 +3456,6 @@ pub(crate) fn open_cache() -> (SharedCache, bool) {
     }
 }
 
-/// Queue detail and avatar fetches for a freshly loaded inbox.
-fn fetch_details(
-    github: Arc<GitHub>,
-    cache: SharedCache,
-    events: EventSender<Event>,
-    fetches: Fetches,
-    threads: Vec<Thread>,
-) {
-    // Repository owner avatars, for the section headers.
-    let mut seen_avatars = std::collections::HashSet::new();
-    for t in &threads {
-        if !t.repository.owner_avatar_url.is_empty()
-            && seen_avatars.insert(t.repository.owner_avatar_url.clone())
-        {
-            spawn_avatar(
-                github.clone(),
-                cache.clone(),
-                events.clone(),
-                fetches.avatars.clone(),
-                t.repository.owner_avatar_url.clone(),
-            );
-        }
-    }
-
-    for thread in threads {
-        let Some(source) = thread.detail_source() else {
-            continue;
-        };
-
-        let updated_at = thread.updated_at.to_string();
-
-        // A thread whose `updated_at` has not moved keeps its cached detail,
-        // so a restart costs no requests at all.
-        //
-        // The lock is released before anything else runs. `spawn_avatar`
-        // takes the same mutex to look on disk, and a std Mutex is not
-        // reentrant, so calling it while still holding the guard deadlocked
-        // the whole pipeline on the first cached thread. That is why avatars
-        // stopped after the handful loaded before this loop.
-        let cached_detail = cache
-            .as_ref()
-            .and_then(|handle| handle.lock().ok())
-            .and_then(|guard| guard.load_detail(&thread.id, &updated_at).ok().flatten());
-
-        if let Some(detail) = cached_detail {
-            let avatar = detail.author_avatar_url.clone();
-            let _ = events.send(Event::Detail {
-                thread_id: thread.id.clone(),
-                detail,
-            });
-            if !avatar.is_empty() && seen_avatars.insert(avatar.clone()) {
-                spawn_avatar(
-                    github.clone(),
-                    cache.clone(),
-                    events.clone(),
-                    fetches.avatars.clone(),
-                    avatar,
-                );
-            }
-            continue;
-        }
-
-        let key = (thread.id.clone(), updated_at.clone());
-        if fetches.unresolved.lock().is_ok_and(|set| set.contains(&key)) {
-            continue;
-        }
-
-        let github = github.clone();
-        let cache = cache.clone();
-        let events = events.clone();
-        let fetches = fetches.clone();
-        let thread_id = thread.id.clone();
-
-        tokio::spawn(async move {
-            let Ok(_permit) = fetches.details.acquire().await else {
-                return;
-            };
-            let fetched = match &source {
-                DetailSource::Subject { url, kind } => {
-                    github.fetch_detail(url, kind).await.map(Some)
-                }
-                DetailSource::WorkflowRun(query) => github.fetch_workflow_run_detail(query).await,
-            };
-            match fetched {
-                Ok(Some(detail)) => {
-                    if let Some(cache) = cache.as_ref() {
-                        if let Ok(guard) = cache.lock() {
-                            let _ = guard.store_detail(&thread_id, &updated_at, &detail);
-                        }
-                    }
-                    let avatar = detail.author_avatar_url.clone();
-                    tracing::debug!(thread_id, number = detail.number, "detail fetched");
-                    let _ = events.send(Event::Detail { thread_id, detail });
-                    if !avatar.is_empty() {
-                        spawn_avatar(github, cache, events, fetches.avatars.clone(), avatar);
-                    }
-                }
-                Ok(None) => {
-                    tracing::debug!(thread_id, ?source, "no run fits the notification");
-                    if let Ok(mut set) = fetches.unresolved.lock() {
-                        set.insert(key);
-                    }
-                }
-                Err(e) => tracing::debug!(error = %e, ?source, "detail fetch failed"),
-            }
-        });
-    }
-}
-
 fn spawn_avatar(
     github: Arc<GitHub>,
     cache: SharedCache,
@@ -3958,59 +3602,6 @@ mod tests {
                 owner_avatar_url: String::new(),
             },
         }
-    }
-
-    fn ids(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| (*s).to_string()).collect()
-    }
-
-    #[test]
-    fn ids_resolve_against_the_live_inbox() {
-        let mut cache = Cache::open_in_memory().unwrap();
-        cache.store_threads(&[thread("1", "one"), thread("2", "two")]).unwrap();
-
-        let got = resolve_threads(&cache, &ids(&["2", "1"]));
-        // In the order asked for, so a batch marks exactly what it named.
-        assert_eq!(
-            got.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
-            ["2", "1"]
-        );
-    }
-
-    #[test]
-    fn a_snapshot_covers_a_thread_the_api_has_dropped() {
-        let mut cache = Cache::open_in_memory().unwrap();
-        let t = thread("1", "one");
-        cache.store_threads(std::slice::from_ref(&t)).unwrap();
-        cache.set_saved(&[&t], true).unwrap();
-        // GitHub stops returning it, but the bookmark keeps a copy.
-        cache.store_threads(&[]).unwrap();
-
-        let got = resolve_threads(&cache, &ids(&["1"]));
-        assert_eq!(got, vec![t]);
-    }
-
-    #[test]
-    fn the_live_thread_wins_over_a_stale_snapshot() {
-        let mut cache = Cache::open_in_memory().unwrap();
-        let old = thread("1", "old title");
-        cache.set_saved(&[&old], true).unwrap();
-
-        let fresh = thread("1", "new title");
-        cache.store_threads(std::slice::from_ref(&fresh)).unwrap();
-
-        let got = resolve_threads(&cache, &ids(&["1"]));
-        assert_eq!(got[0].subject.title, "new title");
-    }
-
-    #[test]
-    fn an_id_nothing_knows_about_is_skipped_rather_than_invented() {
-        let mut cache = Cache::open_in_memory().unwrap();
-        cache.store_threads(&[thread("1", "one")]).unwrap();
-
-        let got = resolve_threads(&cache, &ids(&["1", "ghost"]));
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].id, "1");
     }
 
     use std::io::{BufRead, BufReader, Write};
@@ -4193,7 +3784,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A GitHub that would answer for the pull request, so a fetch
         // could not fail its way to the same outcome: the list pass is
-        // what makes rows now, and the inbox keeps the notification.
+        // what makes rows now, and the notification is let go.
         let (base, paths) = serve("200 OK", PULL_7);
         let (ctx, received) = ctx(dir.path(), &base, &[]);
 

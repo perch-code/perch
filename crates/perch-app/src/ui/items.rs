@@ -177,7 +177,7 @@ pub fn item_row(
         .style(move |s| {
             let base = clickable(s)
                 .width_full()
-                .height(46.0)
+                .height(theme::ROW_HEIGHT)
                 .items_center()
                 .padding_left(10.0)
                 .padding_right(6.0)
@@ -303,7 +303,7 @@ fn trailing(attention: bool, placement: Placement) -> impl IntoView {
     .style(|s| s.width(14.0).items_center().justify_center().flex_shrink(0.0_f32))
 }
 
-/// Save, Done and the menu, on hover, as the inbox rows have.
+/// Save, Done and the menu, on hover.
 fn row_actions(state: AppState, backend: Rc<Backend>, item: Item, placement: Placement) -> impl IntoView {
     let id = item.id.clone();
     let hovering = move || state.hovered_item.with(|h| h.as_deref() == Some(id.as_str()));

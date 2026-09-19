@@ -9,7 +9,7 @@ use floem::views::{Container, Decorators, Label, Stack, dyn_container};
 use crate::backend::{Backend, Status};
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::state::{AppState, Archiving, Screen};
+use crate::state::{AppState, Archiving};
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{sidebar_glyph, spacer};
@@ -34,11 +34,11 @@ pub fn status_bar(
         archiving(state),
         spacer(),
         dyn_container(
-            move || (review.pull_request.with(|p| p.is_some()), state.screen.get()),
-            move |(open, screen)| {
+            move || review.pull_request.with(|p| p.is_some()),
+            move |open| {
                 if open {
                     crate::review::review_status(review).into_any()
-                } else if screen == Screen::Sidebar {
+                } else {
                     Label::derived(move || {
                         let (active, archived) = state.items.with(|all| {
                             (
@@ -50,18 +50,6 @@ pub fn status_bar(
                             (1, 0) => "1 item".to_string(),
                             (n, 0) => format!("{n} items"),
                             (n, a) => format!("{n} active, {a} archived"),
-                        }
-                    })
-                    .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE))
-                    .into_any()
-                } else {
-                    Label::derived(move || {
-                        let n = state.visible().len();
-                        let total = state.threads.with(|t| t.len());
-                        if n == total {
-                            format!("{total} notifications")
-                        } else {
-                            format!("{n} of {total} notifications")
                         }
                     })
                     .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE))

@@ -44,7 +44,6 @@ pub fn review_view(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
-    on_mark: crate::ui::list::OnMark,
     open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
     let open_file: OpenFile = Rc::new({
@@ -69,16 +68,6 @@ pub fn review_view(
         }
     });
 
-    let on_done: Rc<dyn Fn(String)> = Rc::new({
-        let backend = backend.clone();
-        move |thread_id: String| {
-            on_mark(vec![thread_id], crate::ui::list::MarkAction::Done(true));
-            // Dismissing is also leaving: the next notification is the point.
-            app.leave_review(state);
-            backend.close_review();
-        }
-    });
-
     // The backend closes the review itself when the archive goes through,
     // and the Items event that follows closes the view. A refusal leaves
     // everything as it was, with the reason in the status line.
@@ -98,14 +87,13 @@ pub fn review_view(
                 if is_issue {
                     header::issue_header(app, state, header_backend.clone(), header_open_item.clone()).into_any()
                 } else {
-                    let (back, done, archive) = (on_back.clone(), on_done.clone(), on_archive.clone());
+                    let (back, archive) = (on_back.clone(), on_archive.clone());
                     header::header(
                         app,
                         state,
                         header_backend.clone(),
                         header_open_item.clone(),
                         move || back(),
-                        move |id| done(id),
                         move |id| archive(id),
                     )
                     .into_any()
@@ -218,7 +206,7 @@ fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Back
     .style(|s| s.size_full().min_height(0.0))
 }
 
-/// One line under the review view, replacing the inbox's status bar content.
+/// One line under the review view, in the status bar's right-hand slot.
 pub fn review_status(state: ReviewState) -> impl IntoView {
     use floem::views::Label;
 

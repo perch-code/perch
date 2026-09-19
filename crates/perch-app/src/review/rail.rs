@@ -328,7 +328,7 @@ fn viewed_box(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> im
     let toggle_file = file.clone();
     checkbox(
         move || if state.is_viewed(&file) { Checked::Full } else { Checked::Empty },
-        move |_| {
+        move || {
             let Some(item_id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
                 return;
             };

@@ -1,10 +1,9 @@
 //! The drawer on the left, which is the whole navigation.
 //!
 //! Top to bottom: a strip the traffic lights sit over, the search box and
-//! the filter button, the bell that opens the inbox, then Priority, Pinned,
-//! and one section per repository, owner or date. While the inbox is open
-//! the drawer shows that screen's own views, filters and repositories
-//! instead, with a row at the top that comes back here.
+//! the filter button, then Priority, Pinned, and one section per
+//! repository, owner or date. Every row is an item, and the filter menu is
+//! how the list is narrowed.
 
 use std::rc::Rc;
 
@@ -17,36 +16,20 @@ use floem::views::{
 
 use crate::backend::Backend;
 use perch_github::Item;
-use crate::filter::{ReasonFilter, View};
 use crate::icons::SidebarIcon;
 use crate::items::{AttentionReason, Direction, ItemGroup, ItemSort, ItemStatus};
-use crate::review::model::ReviewState;
-use crate::state::{AppState, Screen};
+use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::{item_row, section_header, OpenItem, Placement};
 use crate::ui::titlebar::title_bar;
-use crate::ui::widgets::{avatar, count_badge, section_heading, sidebar_glyph, sidebar_row};
+use crate::ui::widgets::sidebar_glyph;
 
 /// The drawer, open.
-pub fn sidebar(
-    state: AppState,
-    review: ReviewState,
-    backend: Rc<Backend>,
-    on_open: OpenItem,
-) -> impl IntoView {
+pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
     Stack::vertical((
         lights_strip(state),
-        dyn_container(
-            move || !review.is_showing() && state.screen.get() == Screen::Inbox,
-            move |inbox| {
-                if inbox {
-                    inbox_nav(state, review).into_any()
-                } else {
-                    repos_nav(state, review, backend.clone(), on_open.clone()).into_any()
-                }
-            },
-        )
-        .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0).flex_col()),
+        repos_nav(state, backend, on_open)
+            .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0).flex_col()),
     ))
     .style(move |s| {
         s.width(state.sidebar_width.get())
@@ -117,15 +100,9 @@ fn toggle_button(state: AppState) -> impl IntoView {
 // The repositories navigation
 // ---------------------------------------------------------------------
 
-fn repos_nav(
-    state: AppState,
-    review: ReviewState,
-    backend: Rc<Backend>,
-    on_open: OpenItem,
-) -> impl IntoView {
+fn repos_nav(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
     Stack::vertical((
         search_row(state, backend.clone()),
-        bell_row(state, review),
         sections(state, backend, on_open),
     ))
     .style(|s| s.size_full().flex_col())
@@ -149,7 +126,16 @@ fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                 .border_radius(theme::RADIUS)
                 .focus(|s| s.border_color(theme::ACCENT))
         });
-    state.search_box.set(Some(input.view_id()));
+    let id = input.view_id();
+    state.search_box.set(Some(id));
+    // Cmd-1 with the drawer shut asked for the keyboard before this box
+    // existed; it is taken once the box is in the tree.
+    let input = input.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+        if state.focus_search.get_untracked() {
+            state.focus_search.set(false);
+            id.request_focus();
+        }
+    });
 
     Stack::horizontal((input, filter_button(state, backend)))
         .style(|s| s.items_center().width_full().gap(6.0).padding_horiz(12.0).padding_vert(6.0))
@@ -334,38 +320,6 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
     menu
 }
 
-/// The bell: the inbox, with how many unread notifications are in it.
-fn bell_row(state: AppState, review: ReviewState) -> impl IntoView {
-    let unread = move || state.counts().unread;
-    Container::new(
-        Stack::horizontal((
-            sidebar_glyph(SidebarIcon::Bell, theme::FG_MUTED).style(|s| s.size(16.0, 16.0)),
-            Label::derived(|| "Inbox".to_string()).style(|s| {
-                s.font_size(theme::TEXT_BODY).color(theme::FG).margin_left(9.0).flex_grow(1.0_f32).selectable(false)
-            }),
-            dyn_container(unread, move |n| {
-                if n == 0 {
-                    Empty::new().into_any()
-                } else {
-                    count_badge(move || n).into_any()
-                }
-            }),
-        ))
-        .style(|s| s.items_center().width_full()),
-    )
-    .on_event_stop(el::Click, move |_, _| state.show_screen(review, Screen::Inbox))
-    .style(|s| {
-        crate::ui::widgets::clickable(s)
-            .width_full()
-            .height(34.0)
-            .items_center()
-            .padding_horiz(10.0)
-            .margin_horiz(6.0)
-            .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
-    })
-}
-
 /// Priority, Pinned, and the groups, in one scrolling column.
 fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
     let (b1, b2, b3) = (backend.clone(), backend.clone(), backend);
@@ -496,235 +450,6 @@ fn quiet_line(text: &'static str) -> impl IntoView {
             .selectable(false)
     })
 }
-
-// ---------------------------------------------------------------------
-// The inbox navigation
-// ---------------------------------------------------------------------
-
-/// The notifications screen's own drawer: a way back, then its views,
-/// filters and repositories as they were.
-fn inbox_nav(state: AppState, review: ReviewState) -> impl IntoView {
-    Stack::vertical((
-        back_row(state, review),
-        views_section(state, review),
-        section_heading("Filters"),
-        filters_section(state),
-        section_heading("Repositories"),
-        repos_section(state),
-    ))
-    .style(|s| s.size_full().flex_col())
-}
-
-fn back_row(state: AppState, review: ReviewState) -> impl IntoView {
-    Container::new(
-        Stack::horizontal((
-            sidebar_glyph(SidebarIcon::ChevronLeft, theme::FG_MUTED).style(|s| s.size(12.0, 12.0)),
-            Label::derived(|| "Repositories".to_string()).style(|s| {
-                s.font_size(theme::TEXT_META).color(theme::FG_MUTED).margin_left(6.0).selectable(false)
-            }),
-        ))
-        .style(|s| s.items_center()),
-    )
-    .on_event_stop(el::Click, move |_, _| state.show_screen(review, Screen::Sidebar))
-    .style(|s| {
-        crate::ui::widgets::clickable(s)
-            .height(30.0)
-            .items_center()
-            .padding_horiz(10.0)
-            .margin_horiz(6.0)
-            .margin_top(2.0)
-            .margin_bottom(4.0)
-            .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
-    })
-}
-
-/// Inbox, Saved and Done, as three rows.
-///
-/// Whichever is open wears the card, in the accent, with a bold label: the
-/// same treatment the worktree rows give the checkout being read, so the two
-/// panels say "you are here" the same way.
-fn views_section(state: AppState, review: ReviewState) -> impl IntoView {
-    Stack::vertical((
-        view_row(state, review, View::Inbox, SidebarIcon::Inbox),
-        view_row(state, review, View::Saved, SidebarIcon::Bookmark),
-        view_row(state, review, View::Done, SidebarIcon::Check),
-    ))
-    .style(|s| s.width_full().flex_col().gap(1.0))
-}
-
-fn view_row(
-    state: AppState,
-    review: ReviewState,
-    view: View,
-    icon: SidebarIcon,
-) -> impl IntoView {
-    use floem::peniko::Color;
-    use floem::text::FontWeight;
-
-    let selected = move || state.view.get() == view && !review.is_showing();
-    let count = move || {
-        let c = state.counts();
-        match view {
-            // The inbox badge counts what is still asking for attention, so
-            // dismissing a thread quiets it.
-            View::Inbox => c.unread,
-            View::Saved => c.saved,
-            View::Done => c.done,
-        }
-    };
-
-    let content = Stack::horizontal((
-        dyn_container(
-            move || if selected() { theme::ACCENT } else { theme::FG_MUTED },
-            move |c| crate::ui::widgets::sidebar_glyph(icon, c).into_any(),
-        )
-        .style(|s| s.size(16.0, 16.0)),
-        Label::derived(move || view.label()).style(move |s| {
-            s.font_size(theme::TEXT_BODY)
-                .font_weight(if selected() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
-                .color(if selected() { theme::FG } else { theme::FG_MUTED })
-                .margin_left(9.0)
-                .flex_grow(1.0_f32)
-        }),
-        dyn_container(count, move |n| {
-            if n == 0 {
-                Empty::new().into_any()
-            } else {
-                count_badge(move || n).into_any()
-            }
-        }),
-    ))
-    .style(|s| s.items_center().width_full());
-
-    Container::new(content)
-        .on_event_stop(el::Click, move |_, _| {
-            // Doubles as the way back from a pull request.
-            state.show_screen(review, Screen::Inbox);
-            // Filters carry over, the way the web keeps a search when you
-            // cross from the inbox into Done. Clearing them here made this a
-            // reset button nobody asked for.
-            state.set_view(view);
-        })
-        .style(move |s| {
-            let base = crate::ui::widgets::clickable(s)
-                .width_full()
-                .height(34.0)
-                .items_center()
-                .padding_horiz(10.0)
-                .margin_horiz(6.0)
-                .border_radius(theme::RADIUS);
-            if selected() {
-                base.background(theme::CANVAS_SELECTED).border(1.0).border_color(Color::TRANSPARENT)
-            } else {
-                base.border(1.0)
-                    .border_color(Color::TRANSPARENT)
-                    .hover(|s| s.background(theme::CANVAS_HOVER))
-            }
-        })
-}
-
-fn filters_section(state: AppState) -> impl IntoView {
-    dyn_stack(
-        || ReasonFilter::ALL,
-        |f| *f,
-        move |f| {
-            let selected = move || state.reason_filter.get() == Some(f);
-            let count = move || state.counts().by_reason.get(&f).copied().unwrap_or(0);
-            Container::new(sidebar_row(
-                icon_for(f),
-                f.label().to_string(),
-                selected,
-                true,
-                Some(Box::new(count)),
-            ))
-            .on_event_stop(el::Click, move |_, _| state.toggle_reason(f))
-        },
-    )
-    .style(|s| s.flex_col().width_full().gap(1.0))
-}
-
-fn icon_for(f: ReasonFilter) -> SidebarIcon {
-    match f {
-        ReasonFilter::Assigned => SidebarIcon::Target,
-        ReasonFilter::Participating => SidebarIcon::Comment,
-        ReasonFilter::Mentioned => SidebarIcon::Mention,
-        ReasonFilter::TeamMentioned => SidebarIcon::People,
-        ReasonFilter::ReviewRequested => SidebarIcon::Eye,
-    }
-}
-
-fn repos_section(state: AppState) -> impl IntoView {
-    dyn_stack(
-        move || state.counts().repos,
-        // Keyed on the count as well as the name: the row draws the number it
-        // was built with, so a repository whose count moved has to be rebuilt
-        // or it keeps the old one.
-        |(name, count, _)| (name.clone(), *count),
-        move |(name, count, avatar_url)| {
-            let click_name = name.clone();
-            Container::new(repo_row(state, name, count, avatar_url))
-                .on_event_stop(el::Click, move |_, _| state.toggle_repo(&click_name))
-        },
-    )
-    .style(|s| s.flex_col().width_full().gap(1.0).padding_bottom(10.0))
-    .scroll()
-    .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
-}
-
-fn repo_row(state: AppState, name: String, count: usize, avatar_url: String) -> impl IntoView {
-    use floem::peniko::Color;
-    use floem::text::FontWeight;
-    use floem::views::{Label, Stack};
-
-    // Owner avatars make a long repository list scannable at a glance.
-    let seed = name.clone();
-    let label_text = name.clone();
-
-    // One clone per closure: the capture is a String, so these cannot share a
-    // single `Copy` predicate the way the reason filters do.
-    let (sel_a, sel_b, sel_c) = (name.clone(), name.clone(), name.clone());
-    let selected_text = move || state.repo_filter.with(|r| r.as_deref() == Some(sel_a.as_str()));
-    let selected_weight = move || state.repo_filter.with(|r| r.as_deref() == Some(sel_b.as_str()));
-    let selected_box = move || state.repo_filter.with(|r| r.as_deref() == Some(sel_c.as_str()));
-
-    let content = Stack::horizontal((
-        avatar(state, move || avatar_url.clone(), 16.0, seed).style(|s| s.margin_right(9.0)),
-        Label::derived(move || label_text.clone()).style(move |s| {
-            s.font_size(theme::TEXT_BODY)
-                .color(if selected_text() { theme::FG } else { theme::FG_MUTED })
-                .font_weight(if selected_weight() {
-                    FontWeight::SEMI_BOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_ellipsis()
-                .flex_grow(1.0_f32)
-                .min_width(0.0)
-        }),
-        count_badge(move || count),
-    ))
-    .style(|s| s.items_center().width_full().min_width(0.0));
-
-    Container::new(content).style(move |s| {
-        let base = crate::ui::widgets::clickable(s)
-            .width_full()
-            .height(34.0)
-            .items_center()
-            .padding_horiz(10.0)
-            .margin_horiz(6.0)
-            .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::CANVAS_HOVER).cursor(floem::style::CursorStyle::Pointer));
-        if selected_box() {
-            base.background(theme::ACCENT_SUBTLE)
-                .border(1.0)
-                .border_color(theme::ACCENT_RING)
-        } else {
-            base.border(1.0).border_color(Color::TRANSPARENT)
-        }
-    })
-}
-
 
 /// The strip along the panel's right edge that drags it wider or narrower.
 ///

@@ -3,8 +3,6 @@
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::text::FontWeight;
-use floem::menu::Menu;
-use floem::reactive::RwSignal;
 use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
 
 use crate::icons::{self, SidebarIcon};
@@ -99,15 +97,13 @@ pub fn sidebar_glyph(name: SidebarIcon, color: Color) -> impl IntoView {
     icon_in(move || icons::sidebar_icon(name, color), move || color)
 }
 
-/// A checkbox, in the three states a set can be in.
+/// A checkbox.
 ///
-/// Toggling happens on pointer-down rather than on click, because that is the
-/// event that carries the shift key, and a shift-click has to extend the run
-/// rather than check one row. The click is swallowed as well, so checking a
-/// row inside a row-shaped button does not also open it.
+/// Toggling happens on pointer-down, and the click is swallowed, so checking
+/// a box inside a row-shaped button does not also open the row.
 pub fn checkbox(
     checked: impl Fn() -> Checked + 'static,
-    on_toggle: impl Fn(bool) + 'static,
+    on_toggle: impl Fn() + 'static,
 ) -> impl IntoView {
     // Two readers, one closure: the container picks the glyph and the style
     // picks the fill, and a closure that captures a thread id is not Copy.
@@ -117,7 +113,6 @@ pub fn checkbox(
     let box_ = Container::new(
         dyn_container(move || for_glyph(), |checked| match checked {
             Checked::Empty => Empty::new().into_any(),
-            Checked::Partial => sidebar_glyph(SidebarIcon::Dash, theme::CANVAS).into_any(),
             Checked::Full => sidebar_glyph(SidebarIcon::Check, theme::CANVAS).into_any(),
         })
         .style(|s| s.size(12.0, 12.0).items_center().justify_center()),
@@ -139,14 +134,9 @@ pub fn checkbox(
     // The listeners sit on a box half again as wide as the one that is drawn.
     // A click is the view that both the press and the release land in, so a
     // press on a 16px target that drifts a few pixels before release counts
-    // as a click on the row, which opens the pull request.
+    // as a click on the row, which opens the file.
     Container::new(box_)
-        .on_event_stop(
-            floem::event::listener::PointerDown,
-            move |_, e: &PointerButtonEvent| {
-                on_toggle(e.state.modifiers.contains(Modifiers::SHIFT));
-            },
-        )
+        .on_event_stop(floem::event::listener::PointerDown, move |_, _| on_toggle())
         // Belt and braces: the row around this one is itself a button.
         .on_event_stop(floem::event::listener::Click, |_, _| {})
         .style(|s| {
@@ -159,8 +149,7 @@ pub fn checkbox(
         })
 }
 
-/// A small bordered text button, as used by the selection bar and the group
-/// headers.
+/// A small bordered text button, as under a Delete confirmation.
 pub fn text_button(
     label: impl Fn() -> String + 'static,
     glyph: SidebarIcon,
@@ -192,7 +181,7 @@ pub fn text_button(
     })
 }
 
-/// A small round icon button, as sits at the end of a notification row.
+/// A small round icon button, as sits at the end of an item row.
 ///
 /// Its own hover background, so it reads as a target inside a row that is
 /// itself a button.
@@ -214,125 +203,6 @@ pub fn icon_button(
             .border_radius(13.0)
             .hover(|s| s.background(theme::BADGE_BG))
     })
-}
-
-/// A pop-up button: the value that is set, a chevron, and a menu of the rest.
-///
-/// Every dropdown in the window is this one control, so none of them can
-/// drift into looking like a special case. floem's own Dropdown renders its
-/// label and its popup list outside this app's styling, so its text never
-/// quite matched the rest of the window. The button here is an ordinary
-/// label, and the menu is the platform's, so both look like they belong.
-///
-/// floem looks for a popout menu on the deepest view under the pointer and
-/// never walks up, so a click that landed on the text or the chevron found
-/// nothing and opened nothing. Only a click on the padding around them
-/// reached the stack that owns the menu, which is why it seemed to work at
-/// random. Making both children transparent to the pointer keeps the stack
-/// the deepest hit wherever the click lands. The flag is inherited, so it
-/// cannot go on the stack itself: that would make the stack unpickable too
-/// and the menu would never open at all.
-///
-/// `on_pick` rather than a plain write, because choosing a value is not
-/// always only a write: the sidebar's view picker also has to leave whatever
-/// pull request is open.
-pub fn picker<T, const N: usize>(
-    selected: RwSignal<T>,
-    options: [T; N],
-    on_pick: impl Fn(T) + 'static + Copy,
-) -> impl IntoView
-where
-    T: Copy + PartialEq + std::fmt::Display + 'static,
-{
-    Stack::horizontal((
-        Label::derived(move || selected.get().to_string()).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .color(theme::FG)
-                .selectable(false)
-                .pointer_events_none()
-                .margin_right(6.0)
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-        }),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
-            .style(|s| s.size(11.0, 11.0).pointer_events_none()),
-    ))
-    .popout_menu(move || {
-        let mut menu = Menu::new();
-        for option in options {
-            let label = option.to_string();
-            menu = menu.item(label, |item| {
-                // Untracked: the builder runs from event dispatch, outside any
-                // reactive scope, and again on every open, which is exactly
-                // when the tick has to be recomputed.
-                item.checked(selected.get_untracked() == option)
-                    .action(move || on_pick(option))
-            });
-        }
-        menu
-    })
-    .style(|s| {
-        s.items_center()
-            .height(28.0)
-            .padding_horiz(9.0)
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER)
-            .border_radius(theme::RADIUS)
-            .selectable(false)
-            .hover(|s| {
-                s.background(theme::CANVAS_SUBTLE)
-                    .cursor(floem::style::CursorStyle::Pointer)
-            })
-    })
-}
-
-/// A rounded count pill, as used beside every sidebar row.
-///
-/// The pill has a fixed height and centres the label inside it, rather than
-/// growing from the label's own padding. A label's box carries the font's
-/// leading, which is not shared evenly above and below the glyph, so padding
-/// alone leaves the number sitting low in the pill.
-pub fn count_badge(count: impl Fn() -> usize + 'static) -> impl IntoView {
-    Container::new(
-        Label::derived(move || {
-            let n = count();
-            if n > 999 { "999+".to_string() } else { n.to_string() }
-        })
-        .style(|s| {
-            s.font_size(theme::TEXT_BADGE)
-                .font_weight(FontWeight::MEDIUM)
-                .color(theme::BADGE_FG)
-                .selectable(false)
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-        }),
-    )
-    .style(|s| {
-        s.height(theme::BADGE_HEIGHT)
-            .min_width(theme::BADGE_HEIGHT + 2.0)
-            .padding_horiz(6.0)
-            .border_radius(theme::BADGE_HEIGHT / 2.0)
-            .background(theme::BADGE_BG)
-            .items_center()
-            .justify_center()
-            .flex_shrink(0.0_f32)
-    })
-}
-
-/// An uppercase, letter-spaced section heading.
-pub fn section_heading(text: &'static str) -> impl IntoView {
-    Label::derived(move || text.to_uppercase()).style(|s| {
-        s.font_size(theme::TEXT_SECTION)
-            .font_weight(FontWeight::SEMI_BOLD)
-            .color(theme::FG_SUBTLE)
-            .padding_horiz(10.0)
-            .padding_top(14.0)
-            .padding_bottom(6.0)
-    })
-}
-
-/// A one pixel rule.
-pub fn hairline() -> impl IntoView {
-    Empty::new().style(|s| s.height(1.0).width_full().background(theme::BORDER_MUTED))
 }
 
 /// A circular avatar that falls back to a tinted initial until the image
@@ -376,27 +246,6 @@ pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, se
     .style(move |s| s.size(size, size).border_radius(radius))
 }
 
-/// A muted pill, used for the reason badge on a row.
-pub fn reason_pill(text: impl Fn() -> String + 'static) -> impl IntoView {
-    Container::new(Label::derived(text).style(|s| {
-        s.font_size(theme::TEXT_BADGE)
-            .color(theme::FG_MUTED)
-            .selectable(false)
-            .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-    }))
-    .style(|s| {
-        s.height(theme::PILL_HEIGHT)
-            .padding_horiz(8.0)
-            .background(theme::CANVAS_SUBTLE)
-            .border(1.0)
-            .border_color(theme::BORDER_MUTED)
-            .border_radius(theme::PILL_HEIGHT / 2.0)
-            .items_center()
-            .justify_center()
-            .flex_shrink(0.0_f32)
-    })
-}
-
 /// A centred message for empty and error states.
 pub fn centered_message(
     glyph: SidebarIcon,
@@ -433,75 +282,4 @@ pub fn centered_message(
 /// A horizontal spacer that pushes what follows to the right.
 pub fn spacer() -> impl IntoView {
     Empty::new().style(|s| s.flex_grow(1.0_f32))
-}
-
-/// Row used by the reason filters in the sidebar.
-pub fn sidebar_row(
-    glyph: SidebarIcon,
-    text: String,
-    selected: impl Fn() -> bool + 'static + Copy,
-    enabled: bool,
-    badge: Option<Box<dyn Fn() -> usize>>,
-) -> impl IntoView {
-    let fg = move || {
-        if !enabled {
-            theme::FG_SUBTLE
-        } else if selected() {
-            theme::FG
-        } else {
-            theme::FG_MUTED
-        }
-    };
-
-    let content = Stack::horizontal((
-        dyn_container(fg, move |c| sidebar_glyph(glyph, c).into_any())
-            .style(|s| s.size(16.0, 16.0).margin_right(9.0)),
-        Label::derived(move || text.clone()).style(move |s| {
-            s.font_size(theme::TEXT_BODY)
-                .color(fg())
-                .font_weight(if selected() {
-                    FontWeight::SEMI_BOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_ellipsis()
-                .flex_grow(1.0_f32)
-                .min_width(0.0)
-        }),
-        dyn_container(
-            move || badge.as_ref().map(|b| b()).unwrap_or(0),
-            move |n| {
-                if n == 0 {
-                    Empty::new().into_any()
-                } else {
-                    count_badge(move || n).into_any()
-                }
-            },
-        ),
-    ))
-    .style(|s| s.items_center().width_full().min_width(0.0));
-
-    Container::new(content).style(move |s| {
-        // Selectable is cleared either way, so a label never shows an I-beam
-        // over a row. Only an enabled row offers a pointer.
-        let base = if enabled { clickable(s) } else { s.selectable(false) }
-            .width_full()
-            .height(34.0)
-            .items_center()
-            .padding_horiz(10.0)
-            .border_radius(theme::RADIUS)
-            .margin_horiz(6.0);
-        let base = if selected() {
-            base.background(theme::ACCENT_SUBTLE)
-                .border(1.0)
-                .border_color(theme::ACCENT_RING)
-        } else {
-            base.border(1.0).border_color(Color::TRANSPARENT)
-        };
-        if enabled && !selected() {
-            base.hover(|s| s.background(theme::CANVAS_HOVER))
-        } else {
-            base
-        }
-    })
 }

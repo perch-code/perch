@@ -1,11 +1,8 @@
 //! Window layout.
 
-pub mod list;
-pub mod row;
 pub mod sidebar;
 pub mod status;
 pub mod titlebar;
-pub mod toolbar;
 pub mod widgets;
 pub mod items;
 
@@ -14,12 +11,15 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::SignalUpdate;
-use floem::views::{Decorators, Stack, dyn_container};
+use floem::text::FontWeight;
+use floem::views::{Container, Decorators, Label, Stack, dyn_container};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, Status};
+use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::state::{AppState, Screen};
+use crate::state::AppState;
 use crate::theme;
+use crate::ui::widgets::sidebar_glyph;
 
 /// The platform's command modifier.
 const OS_MOD: Modifiers = if cfg!(target_os = "macos") {
@@ -29,32 +29,9 @@ const OS_MOD: Modifiers = if cfg!(target_os = "macos") {
 };
 
 pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    // Narrowing the list drops the selection. This is the reactive scope, so
-    // it is where that watch belongs.
-    state.watch_filters();
     state.review.set(Some(review));
 
     let review_backend = backend.clone();
-    let open_thread: list::OpenThread = Rc::new({
-        let backend = backend.clone();
-        move |repo: &str, kind: perch_github::ItemKind, number: u64, thread_id: &str| {
-            // Showing the review view immediately, with its progress card,
-            // beats leaving the inbox looking like the click did nothing.
-            state.begin_review(
-                review,
-                match kind {
-                    perch_github::ItemKind::PullRequest => "Reading the pull request",
-                    perch_github::ItemKind::Issue => "Reading the issue",
-                },
-            );
-            // Which notification this came from, so finishing the review can
-            // dismiss it. The backend never needs to know; the click already
-            // has it, and a round trip would only be a way of forgetting.
-            review.thread_id.set(Some(thread_id.to_string()).filter(|id| !id.is_empty()));
-            backend.open_subject(repo, kind, number);
-        }
-    });
-
     // Opening from the sidebar. An archived row is restored on the way,
     // which the backend treats as the same act.
     let open_item: items::OpenItem = Rc::new({
@@ -68,7 +45,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             };
             state.begin_review(review, message);
             state.open_item.set(Some(item.id.clone()));
-            review.thread_id.set(None);
             if item.is_archived() {
                 backend.restore_item(&item.id);
             } else {
@@ -79,18 +55,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let panel_backend = backend.clone();
     let panel_open = open_item.clone();
     let review_open_item = open_item.clone();
-
-    // Every way of marking a thread lands here, so each of them costs the
-    // backend one write and the UI one event.
-    let on_mark: list::OnMark = Rc::new({
-        let backend = backend.clone();
-        move |ids: Vec<String>, action: list::MarkAction| match action {
-            list::MarkAction::Saved(saved) => backend.set_saved(ids, saved),
-            list::MarkAction::Done(done) => backend.set_done(ids, done),
-        }
-    });
-    let key_mark = on_mark.clone();
-    let review_mark = on_mark.clone();
     let key_backend = backend.clone();
     let capture_backend = backend.clone();
     let references_backend = backend.clone();
@@ -130,7 +94,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         // The handle is absolutely placed over the drawer's
                         // right edge, so the drawer is its positioning box.
                         floem::views::Container::new(Stack::horizontal((
-                            sidebar::sidebar(state, review, panel_backend.clone(), panel_open.clone()),
+                            sidebar::sidebar(state, panel_backend.clone(), panel_open.clone()),
                             sidebar::resize_handle(state),
                         )))
                         .style(|s| {
@@ -144,34 +108,29 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 },
             ),
-            // The review view replaces the inbox in place, so the sidebar and
-            // the status line stay where they were.
+            // The main area: the review view over the sidebar, or the
+            // empty state, which on a fresh install with no token is what
+            // to do about that.
             dyn_container(
-                move || (review.is_showing(), state.screen.get()),
-                move |(open, screen)| {
+                move || (review.is_showing(), state.status.with(|s| matches!(s, Status::NoToken { .. }))),
+                move |(open, no_token)| {
                     if open {
                         crate::review::review_view(
                             state,
                             review,
                             review_backend.clone(),
-                            review_mark.clone(),
                             review_open_item.clone(),
                         )
                         .into_any()
-                    } else if screen == Screen::Sidebar {
+                    } else if no_token {
+                        token_help(state).into_any()
+                    } else {
                         widgets::centered_message(
-                            crate::icons::SidebarIcon::Branch,
+                            SidebarIcon::Branch,
                             || "Nothing open".to_string(),
                             || "Pick a pull request, an issue, or a branch from the sidebar.".to_string(),
                         )
                         .into_any()
-                    } else {
-                        Stack::vertical((
-                            toolbar::toolbar(state),
-                            list::list(state, open_thread.clone(), on_mark.clone()),
-                        ))
-                            .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().flex_col())
-                            .into_any()
                     }
                 },
             )
@@ -331,8 +290,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         }
 
         // `e` and `s` on the sidebar row under the pointer, else on the
-        // selected row, as on inbox rows. The inbox's own rows come first
-        // when it is the screen and nothing in the sidebar is hovered.
+        // selected row.
         if key.modifiers.is_empty()
             && !state.search_focused.get()
             && !review.composer_focused.get()
@@ -341,10 +299,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             let target = state
                 .hovered_item
                 .get()
-                .or_else(|| {
-                    let inbox_showing = !review.is_showing() && state.screen.get() == Screen::Inbox;
-                    if inbox_showing { None } else { state.open_item.get() }
-                })
+                .or_else(|| state.open_item.get())
                 .and_then(|id| state.item(&id));
             if let Some(item) = target {
                 match key.code {
@@ -353,59 +308,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 return EventPropagation::Stop;
             }
-        }
-
-        // Bare letters act on the inbox, the way they do on the web. They are
-        // only shortcuts when nothing is being typed into and the inbox is
-        // what is on screen; the root handler cannot see focus, so the search
-        // box reports its own.
-        if key.modifiers.is_empty()
-            && !review.is_showing()
-            && state.screen.get() == Screen::Inbox
-            && !state.search_focused.get()
-            && matches!(key.code, Code::KeyE | Code::KeyS | Code::Escape)
-        {
-            if key.code == Code::Escape {
-                if state.selection_len() == 0 {
-                    return EventPropagation::Continue;
-                }
-                state.clear_selection();
-                return EventPropagation::Stop;
-            }
-
-            // A selection is what the reader last said they meant. Without
-            // one, the row under the pointer is.
-            //
-            // The hover only moves when the pointer does, so it can still name
-            // a row that has left the screen: one just dismissed, or one left
-            // behind by opening a pull request. Acting on that would undo the
-            // last keystroke instead of repeating it, so check it is still on
-            // screen first.
-            let targets = match state.selection_len() {
-                0 => state
-                    .hovered
-                    .get()
-                    .filter(|id| state.is_visible(id))
-                    .map(|id| vec![id])
-                    .unwrap_or_default(),
-                _ => state.selection(),
-            };
-            if targets.is_empty() {
-                return EventPropagation::Continue;
-            }
-
-            match key.code {
-                Code::KeyE => {
-                    let restoring = state.would_restore(&targets);
-                    key_mark(targets, list::MarkAction::Done(!restoring));
-                }
-                _ => {
-                    let unsaving = state.would_unsave(&targets);
-                    key_mark(targets, list::MarkAction::Saved(!unsaving));
-                }
-            }
-            state.clear_selection();
-            return EventPropagation::Stop;
         }
 
         if !key.modifiers.contains(OS_MOD) {
@@ -432,7 +334,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 EventPropagation::Stop
             }
-            // Back to wherever the review was opened from.
+            // Back to the sidebar.
             Code::BracketLeft => {
                 if review.is_showing() {
                     state.leave_review(review);
@@ -440,20 +342,17 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 EventPropagation::Continue
             }
-            // Cmd-1 is the sidebar's search; Cmd-2 is the inbox.
+            // Cmd-1 is the sidebar's search. With the drawer shut it opens
+            // the drawer, and the box takes the keyboard once it is built.
             Code::Digit1 => {
-                if state.sidebar_open.get() && (review.is_showing() || state.screen.get() == Screen::Sidebar) {
+                if state.sidebar_open.get() {
                     if let Some(id) = state.search_box.get() {
                         id.request_focus();
                     }
                 } else {
-                    state.show_screen(review, Screen::Sidebar);
+                    state.focus_search.set(true);
                     state.sidebar_open.set(true);
                 }
-                EventPropagation::Stop
-            }
-            Code::Digit2 => {
-                state.show_screen(review, Screen::Inbox);
                 EventPropagation::Stop
             }
             _ => EventPropagation::Continue,
@@ -466,5 +365,67 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             .font_size(theme::TEXT_BODY)
             .color(theme::FG)
             .background(theme::CANVAS)
+    })
+}
+
+/// What to do when no token resolved, in the main area's empty state. Built
+/// the way `centered_message` is, so it reads as the same screen as
+/// "Nothing open", with the two ways of signing in under the words.
+fn token_help(state: AppState) -> impl IntoView {
+    let detail = move || match state.status.get() {
+        Status::NoToken { detail } => detail,
+        _ => String::new(),
+    };
+
+    Container::new(
+        Stack::vertical((
+            Container::new(sidebar_glyph(SidebarIcon::Warning, theme::FG_SUBTLE)).style(|s| {
+                s.size(48.0, 48.0)
+                    .border_radius(24.0)
+                    .background(theme::CANVAS_SUBTLE)
+                    .items_center()
+                    .justify_center()
+                    .margin_bottom(14.0)
+            }),
+            Label::derived(|| "No GitHub token found".to_string()).style(|s| {
+                s.font_size(theme::TEXT_TITLE)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .color(theme::FG)
+                    .margin_bottom(6.0)
+            }),
+            Label::derived(detail).style(|s| {
+                s.font_size(theme::TEXT_BODY)
+                    .color(theme::FG_MUTED)
+                    .max_width(420.0)
+                    .margin_bottom(16.0)
+            }),
+            Stack::vertical((
+                code_line("export GITHUB_TOKEN=ghp_..."),
+                code_line("gh auth login"),
+            ))
+            .style(|s| s.gap(6.0)),
+            Label::derived(|| "The token needs the notifications scope.".to_string()).style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG_SUBTLE)
+                    .margin_top(14.0)
+            }),
+        ))
+        .style(|s| s.items_center()),
+    )
+    .style(|s| s.size_full().items_center().justify_center().padding(40.0))
+}
+
+/// One command to copy, in the code font.
+fn code_line(text: &'static str) -> impl IntoView {
+    Label::derived(move || text.to_string()).style(|s| {
+        s.font_family(theme::CODE_FONT_STACK.to_string())
+            .font_size(theme::TEXT_META)
+            .color(theme::FG)
+            .background(theme::CANVAS_SUBTLE)
+            .border(1.0)
+            .border_color(theme::BORDER_MUTED)
+            .border_radius(theme::RADIUS)
+            .padding_horiz(10.0)
+            .padding_vert(5.0)
     })
 }

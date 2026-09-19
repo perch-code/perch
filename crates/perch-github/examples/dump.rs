@@ -1,8 +1,8 @@
-//! Print the notifications inbox as JSON. Smoke test for the client.
+//! Print one page of notifications. Smoke test for the client.
 //!
 //!     cargo run -p perch-github --example dump
 
-use perch_github::{resolve_token, Config, DetailSource, GitHub};
+use perch_github::{resolve_token, Config, GitHub};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -13,14 +13,12 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("token source: {}", token.source.describe());
 
     let gh = GitHub::new(&token.value)?;
-    let result = gh.list_threads(None).await?;
-    let threads = result.threads.unwrap_or_default();
+    let result = gh.list_threads().await?;
 
-    eprintln!("threads: {}", threads.len());
+    eprintln!("threads: {}", result.threads.len());
     eprintln!("poll interval: {:?}", result.poll_interval);
-    eprintln!("last modified: {:?}", result.last_modified);
 
-    for t in threads.iter().take(12) {
+    for t in result.threads.iter().take(12) {
         eprintln!(
             "  {} {:<24} {:>7} {:<18} {}",
             if t.unread { "●" } else { " " },
@@ -29,25 +27,6 @@ async fn main() -> anyhow::Result<()> {
             t.reason.label(),
             t.subject.title
         );
-    }
-
-    // Exercise both detail paths: the first issue or PR, and the first
-    // workflow run.
-    let (mut subject_done, mut run_done) = (false, false);
-    for t in &threads {
-        match t.detail_source() {
-            Some(DetailSource::Subject { url, kind }) if !subject_done => {
-                subject_done = true;
-                let detail = gh.fetch_detail(&url, &kind).await?;
-                eprintln!("\ndetail for {}: {:?}", t.subject.title, detail);
-            }
-            Some(DetailSource::WorkflowRun(query)) if !run_done => {
-                run_done = true;
-                let detail = gh.fetch_workflow_run_detail(&query).await?;
-                eprintln!("\nrun for {}: {:?}", t.subject.title, detail);
-            }
-            _ => {}
-        }
     }
 
     Ok(())

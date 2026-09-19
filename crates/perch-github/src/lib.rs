@@ -15,7 +15,7 @@ pub mod pulls;
 pub mod workflow_runs;
 
 pub use auth::{resolve_token, Token, TokenSource};
-pub use cache::{Cache, CacheError, Mark, Worktree};
+pub use cache::{Cache, CacheError, Worktree};
 pub use comments::{
     Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStatus, RunStep, Side,
     ThreadOrigin,
@@ -26,6 +26,4 @@ pub use discussion::{Discussion, IssueComment, PullEvent, PullEventKind, Review,
 pub use items::{Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind};
 pub use pulls::{CheckStatus, PullRequest, ReviewDecision, Reviewer};
 pub use workflow_runs::{worst, CheckState, Checks, WorkflowRunPayload, WorkflowRunQuery};
-pub use model::{
-    DetailSource, Reason, Repository, Subject, SubjectDetail, SubjectKind, SubjectState, Thread,
-};
+pub use model::{Reason, Repository, Subject, SubjectKind, SubjectState, Thread};

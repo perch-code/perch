@@ -1,20 +1,18 @@
-//! GitHub REST client: the notifications inbox and the repository lists.
+//! GitHub REST client: the notifications poll and the repository lists.
 //!
 //! Uses octocrab's raw `_get_with_headers` rather than its typed builders,
 //! because the rules need response headers: `X-Poll-Interval` sets the
-//! floor on how often the inbox may be asked again, `Last-Modified` and
-//! `ETag` drive conditional requests, `Link` says how long a repository's
-//! closed history is, and the rate limit headers are kept as the allowance
-//! the backfill paces itself by.
+//! floor on how often the notifications may be asked for again, `ETag`
+//! drives the lists' conditional requests, `Link` says how long a
+//! repository's closed history is, and the rate limit headers are kept as
+//! the allowance the backfill paces itself by.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{
-    HeaderMap, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LINK,
-};
+use http::header::{HeaderMap, HeaderValue, ETAG, IF_NONE_MATCH, LINK};
 use http::StatusCode;
 use http_body_util::BodyExt;
 use jiff::Timestamp;
@@ -25,14 +23,12 @@ use crate::discussion::{
     ReviewCommentPayload, ReviewPayload,
 };
 use crate::items::{Issue, IssuePayload};
-use crate::model::{SubjectDetail, SubjectKind, SubjectPayload, Thread};
+use crate::model::Thread;
 use crate::pulls::{PullPayload, PullRequest};
-use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunQuery, WorkflowRunsPayload};
+use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunsPayload};
 
 /// Page size for the notifications list. GitHub caps `per_page` at 50 here.
 const PER_PAGE: usize = 50;
-/// Hard cap on pages, so a huge inbox can't spin forever. 10 x 50 = 500.
-const MAX_PAGES: usize = 10;
 /// Fallback when the server sends no `X-Poll-Interval`.
 const DEFAULT_POLL_SECS: u64 = 60;
 /// Page size for every other list. GitHub allows a hundred there.
@@ -105,21 +101,12 @@ pub struct Allowance {
     pub reset_epoch: i64,
 }
 
-/// Outcome of a notifications poll.
+/// Outcome of a notifications poll: the first page, and how long the
+/// server asks for before the next.
 #[derive(Debug)]
 pub struct ListResult {
-    /// `None` means the server answered 304 and our cached list still stands.
-    pub threads: Option<Vec<Thread>>,
-    pub last_modified: Option<String>,
+    pub threads: Vec<Thread>,
     pub poll_interval: Duration,
-}
-
-/// One raw `/notifications` page response, before it is parsed.
-struct RawPage {
-    status: StatusCode,
-    last_modified: Option<String>,
-    poll_interval: Duration,
-    body: String,
 }
 
 /// One response with its headers read before the body was consumed, which
@@ -203,119 +190,23 @@ impl GitHub {
         }
     }
 
-    /// Fetch the inbox.
+    /// The first page of notifications, read and unread alike: the web UI's
+    /// Unread tab is a filter over one list, not a separate query.
     ///
-    /// Always asks for read and unread threads: the web UI's Unread tab is a
-    /// filter over one list, not a separate query.
-    ///
-    /// `since` is the previous response's `Last-Modified`, used only as a
-    /// cheap "has anything changed?" probe. It is deliberately *not* used to
-    /// build the returned list, because GitHub treats `If-Modified-Since` on
-    /// this endpoint as a filter rather than a cache validator: a 200 carries
-    /// only the threads updated since that instant. A partial list cannot
-    /// show which threads were dismissed on github.com or unsubscribed from,
-    /// so acting on one would silently drop the rest of the inbox. When the
-    /// probe says something moved, we pay one extra request for the whole
-    /// list.
-    ///
-    /// Perch's own Done is a separate thing entirely, and local: see
-    /// `cache::Mark`.
-    pub async fn list_threads(&self, since: Option<&str>) -> Result<ListResult, Error> {
-        if let Some(since) = since {
-            let probe = self.fetch_page(1, Some(since)).await?;
-            if probe.status == StatusCode::NOT_MODIFIED {
-                return Ok(ListResult {
-                    threads: None,
-                    last_modified: probe.last_modified,
-                    poll_interval: probe.poll_interval,
-                });
-            }
-            // Something changed. Fall through and re-read the full inbox.
-        }
-
-        let mut all = Vec::new();
-        let mut last_modified = None;
-        let mut poll_interval = Duration::from_secs(DEFAULT_POLL_SECS);
-
-        for page in 1..=MAX_PAGES {
-            let response = self.fetch_page(page, None).await?;
-
-            if page == 1 {
-                last_modified = response.last_modified.clone();
-                poll_interval = response.poll_interval;
-            }
-
-            let page_threads: Vec<Thread> = serde_json::from_str(&response.body)
-                .map_err(|e| Error::Decode(e.to_string()))?;
-
-            let short_page = page_threads.len() < PER_PAGE;
-            all.extend(page_threads);
-            if short_page {
-                break;
-            }
-        }
-
-        Ok(ListResult {
-            threads: Some(all),
-            last_modified,
-            poll_interval,
-        })
-    }
-
-    /// One page of `/notifications`, with the headers the poll loop needs.
-    async fn fetch_page(&self, page: usize, since: Option<&str>) -> Result<RawPage, Error> {
-        let uri =
-            format!("/notifications?all=true&participating=false&per_page={PER_PAGE}&page={page}");
-
-        let mut headers = HeaderMap::new();
-        if let Some(since) = since.and_then(|s| HeaderValue::from_str(s).ok()) {
-            headers.insert(IF_MODIFIED_SINCE, since);
-        }
-
-        let fetched = self.get(&uri, Some(headers)).await?;
-        let last_modified = header_str(&fetched.headers, LAST_MODIFIED.as_str());
+    /// One request, unconditional. What comes back is acted on and dropped,
+    /// so there is nothing to compare against last time, and a partial
+    /// answer to `If-Modified-Since` would only be a way of missing some.
+    /// Fifty is GitHub's cap here, and more than one poll's worth of news.
+    pub async fn list_threads(&self) -> Result<ListResult, Error> {
+        let uri = format!("/notifications?all=true&participating=false&per_page={PER_PAGE}");
+        let fetched = self.get(&uri, None).await?;
         let poll_interval = header_str(&fetched.headers, "x-poll-interval")
             .and_then(|v| v.parse::<u64>().ok())
             .map(|s| Duration::from_secs(s.max(1)))
             .unwrap_or_else(|| Duration::from_secs(DEFAULT_POLL_SECS));
-
-        Ok(RawPage {
-            status: fetched.status,
-            last_modified,
-            poll_interval,
-            body: fetched.body,
-        })
-    }
-
-    /// Fetch the issue or PR behind a thread: number, state, author.
-    pub async fn fetch_detail(
-        &self,
-        subject_url: &str,
-        kind: &SubjectKind,
-    ) -> Result<SubjectDetail, Error> {
-        let path = api_path(subject_url).ok_or_else(|| {
-            Error::Decode(format!("subject url is not a GitHub API url: {subject_url}"))
-        })?;
-
-        let fetched = self.get(&path, None).await?;
-        let payload: SubjectPayload =
+        let threads: Vec<Thread> =
             serde_json::from_str(&fetched.body).map_err(|e| Error::Decode(e.to_string()))?;
-
-        Ok(payload.into_detail(kind))
-    }
-
-    /// Find the workflow run behind a `CheckSuite` notification.
-    ///
-    /// `Ok(None)` when no run on the branch fits: it has aged out of GitHub's
-    /// retention, or the title named something the branch's runs do not.
-    pub async fn fetch_workflow_run_detail(
-        &self,
-        query: &WorkflowRunQuery,
-    ) -> Result<Option<SubjectDetail>, Error> {
-        let body = self.get_text(&query.path()).await?;
-        let payload: WorkflowRunsPayload =
-            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
-        Ok(query.pick(payload.workflow_runs))
+        Ok(ListResult { threads, poll_interval })
     }
 
     /// Fetch a pull request by number.
@@ -700,14 +591,6 @@ fn with_size_param(url: &str, size: u32) -> String {
     }
 }
 
-/// Reduce an absolute `api.github.com` URL to the path octocrab expects.
-fn api_path(url: &str) -> Option<String> {
-    let rest = url
-        .strip_prefix("https://api.github.com")
-        .or_else(|| url.strip_prefix("http://api.github.com"))?;
-    Some(rest.to_string())
-}
-
 fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
     headers.get(name)?.to_str().ok().map(str::to_string)
 }
@@ -795,15 +678,6 @@ mod tests {
     fn avatar_urls_gain_a_size_parameter() {
         assert_eq!(with_size_param("https://x/a.png", 64), "https://x/a.png?s=64");
         assert_eq!(with_size_param("https://x/a?v=4", 64), "https://x/a?v=4&s=64");
-    }
-
-    #[test]
-    fn api_urls_reduce_to_paths() {
-        assert_eq!(
-            api_path("https://api.github.com/repos/slatedb/slatedb/pulls/2091").as_deref(),
-            Some("/repos/slatedb/slatedb/pulls/2091")
-        );
-        assert_eq!(api_path("https://example.com/nope"), None);
     }
 
     #[test]

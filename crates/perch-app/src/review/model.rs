@@ -178,7 +178,8 @@ pub struct Tab {
 /// struct is `Copy` and can be handed to any view closure.
 #[derive(Clone, Copy)]
 pub struct ReviewState {
-    /// `None` when the inbox is showing.
+    /// `None` until a pull request is open: an issue and a bare branch
+    /// have none.
     pub pull_request: RwSignal<Option<Arc<PullRequest>>>,
     /// The item this review is reading: its checkout, and its pull request
     /// when it has one.
@@ -195,10 +196,6 @@ pub struct ReviewState {
     /// The pull request could not be fetched; this is the checkout as it
     /// was last left.
     pub offline: RwSignal<bool>,
-    /// The notification this was opened from, so finishing a review can
-    /// dismiss it. `None` when a pull request was opened by any other route,
-    /// such as the launch hook, and there is no notification to mark.
-    pub thread_id: RwSignal<Option<String>>,
     /// True from the click until the review view is left, so the progress
     /// card can show before the pull request itself has resolved.
     pub opening: RwSignal<bool>,
@@ -327,7 +324,6 @@ impl ReviewState {
             issue_comments: RwSignal::new(Arc::new(Vec::new())),
             stale_head: RwSignal::new(None),
             offline: RwSignal::new(false),
-            thread_id: RwSignal::new(None),
             opening: RwSignal::new(false),
             phase: RwSignal::new(Phase::Preparing),
             preparing: RwSignal::new(Preparing::Idle),
@@ -475,12 +471,11 @@ impl ReviewState {
         self.opening.get() || self.is_open()
     }
 
-    /// Leave the review view and return to the inbox.
+    /// Leave the review view for the sidebar's empty main area.
     pub fn close(&self) {
         self.reset_checkout();
         self.opening.set(false);
         self.item.set(None);
-        self.thread_id.set(None);
         self.preparing.set(Preparing::Idle);
         self.set_phase(Phase::Preparing);
     }

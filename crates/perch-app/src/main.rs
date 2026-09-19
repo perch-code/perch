@@ -1,9 +1,9 @@
-//! Perch: a read-only GitHub notifications inbox for the desktop.
+//! Perch: a desktop reader for the pull requests and issues in the
+//! repositories the reader declares.
 
 mod app_icon;
 mod ask;
 mod backend;
-mod filter;
 mod icons;
 mod items;
 mod items_cli;

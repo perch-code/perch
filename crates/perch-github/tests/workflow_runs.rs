@@ -1,10 +1,10 @@
-//! The workflow run lookup against a local server, to pin the request.
+//! The workflow runs for a head against a local server, to pin the request.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
-use perch_github::{CheckState, Checks, GitHub, SubjectState, WorkflowRunQuery};
+use perch_github::{CheckState, Checks, GitHub};
 
 fn read_path(stream: &mut TcpStream) -> Option<String> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
@@ -58,48 +58,6 @@ const RUNS: &str = r#"{"total_count":2,"workflow_runs":[
    "created_at":"2026-09-15T20:01:11Z","updated_at":"2026-09-15T20:14:21Z",
    "actor":{"login":"criccomini","avatar_url":"https://avatars/1"}}
 ]}"#;
-
-fn query() -> WorkflowRunQuery {
-    WorkflowRunQuery {
-        repo_full_name: "slatedb/slatedb".into(),
-        workflow: "Hourly DST".into(),
-        branch: "main".into(),
-        at: "2026-09-15T23:45:29Z".parse().unwrap(),
-    }
-}
-
-#[tokio::test]
-async fn the_run_is_asked_for_by_branch_and_window_and_found_by_name_and_time() {
-    let (base, paths) = spawn(RUNS);
-    let gh = GitHub::with_base_uri("t", &base).unwrap();
-
-    let detail = gh
-        .fetch_workflow_run_detail(&query())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(detail.reference(), "Hourly DST #912");
-    assert_eq!(detail.state, SubjectState::RunFailure);
-    assert_eq!(
-        detail.html_url.as_deref(),
-        Some("https://github.com/slatedb/slatedb/actions/runs/35035566266")
-    );
-
-    let paths = paths.lock().unwrap();
-    assert_eq!(paths.len(), 1, "one request, no paging: {paths:?}");
-    assert_eq!(
-        paths[0],
-        "/repos/slatedb/slatedb/actions/runs?branch=main\
-         &created=2026-09-08T23:45:29Z..2026-09-15T23:45:29Z&per_page=100"
-    );
-}
-
-#[tokio::test]
-async fn a_branch_with_no_fitting_run_is_not_an_error() {
-    let (base, _) = spawn(r#"{"total_count":0,"workflow_runs":[]}"#);
-    let gh = GitHub::with_base_uri("t", &base).unwrap();
-    assert_eq!(gh.fetch_workflow_run_detail(&query()).await.unwrap(), None);
-}
 
 #[tokio::test]
 async fn the_runs_for_a_head_are_asked_for_by_sha_and_read_whole() {

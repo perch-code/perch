@@ -1,9 +1,8 @@
 //! The sidebar's list: filtering, grouping and sorting items. Pure functions
 //! over the declared repositories and the items the cache holds.
 //!
-//! Everything here runs in memory, the way `filter` does for the inbox.
-//! Changing a setting never refetches, and the sidebar is paintable from the
-//! cache alone.
+//! Everything here runs in memory. Changing a setting never refetches, and
+//! the sidebar is paintable from the cache alone.
 
 use std::collections::{HashMap, HashSet};
 

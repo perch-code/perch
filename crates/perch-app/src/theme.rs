@@ -13,10 +13,6 @@ pub const CANVAS_SIDEBAR: Color = Color::from_rgb8(0xfa, 0xfb, 0xfc);
 /// The activity rail sits a shade deeper than the panel beside it.
 pub const CANVAS_RAIL: Color = Color::from_rgb8(0xf2, 0xf4, 0xf6);
 pub const CANVAS_HOVER: Color = Color::from_rgb8(0xf3, 0xf4, 0xf6);
-/// The "you are here" row in a panel: a flat fill a shade deeper than hover.
-/// A white card on the panel's near-white ground only showed as its border.
-pub const CANVAS_SELECTED: Color = Color::from_rgb8(0xe8, 0xec, 0xf0);
-pub const CANVAS_UNREAD: Color = Color::from_rgb8(0xf7, 0xfb, 0xff);
 
 /// Lines.
 pub const BORDER: Color = Color::from_rgb8(0xd1, 0xd9, 0xe0);
@@ -39,8 +35,6 @@ pub const CLOSED: Color = Color::from_rgb8(0xd1, 0x24, 0x2f);
 pub const DRAFT: Color = Color::from_rgb8(0x59, 0x63, 0x6e);
 /// A check still running: GitHub's pending yellow.
 pub const DRAFT_YELLOW: Color = Color::from_rgb8(0xbf, 0x87, 0x00);
-/// A workflow run still going: GitHub's attention amber.
-pub const PENDING: Color = Color::from_rgb8(0x9a, 0x67, 0x00);
 
 /// Badges.
 /// A caution pill: the amber GitHub uses for an attention banner.
@@ -49,9 +43,7 @@ pub const NOTICE_BORDER: Color = Color::from_rgb8(0xd4, 0xa7, 0x2c);
 pub const NOTICE_FG: Color = Color::from_rgb8(0x7d, 0x4e, 0x00);
 
 pub const BADGE_BG: Color = Color::from_rgb8(0xea, 0xee, 0xf2);
-pub const BADGE_FG: Color = Color::from_rgb8(0x59, 0x63, 0x6e);
 pub const SHADOW: Color = Color::from_rgba8(0x1f, 0x23, 0x28, 0x14);
-pub const SHADOW_SOFT: Color = Color::from_rgba8(0x1f, 0x23, 0x28, 0x0c);
 
 /// Avatar placeholders, cycled by name so a row is stable between launches.
 pub const AVATAR_TINTS: [Color; 6] = [
@@ -91,8 +83,8 @@ pub const SIDEBAR_MAX_WIDTH: f64 = 520.0;
 /// Wider than an editor's activity bar because the traffic lights sit at the
 /// top of it, and they need the room.
 pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
-pub const ROW_HEIGHT: f64 = 66.0;
-pub const TOOLBAR_HEIGHT: f64 = 60.0;
+/// An item row in the sidebar: two lines of text and the glyph beside them.
+pub const ROW_HEIGHT: f64 = 46.0;
 pub const STATUS_HEIGHT: f64 = 34.0;
 /// Room above the rail's first entry, where the traffic lights sit.
 ///
@@ -100,10 +92,6 @@ pub const STATUS_HEIGHT: f64 = 34.0;
 /// the entry drifting down the rail.
 pub const TITLEBAR_HEIGHT: f64 = 36.0;
 pub const RADIUS: f64 = 6.0;
-/// Pills get a fixed height so their text can be centred by layout rather
-/// than by padding, which the font's uneven leading throws off.
-pub const BADGE_HEIGHT: f64 = 20.0;
-pub const PILL_HEIGHT: f64 = 22.0;
 pub const RADIUS_LG: f64 = 10.0;
 /// The references panel under the editor, and how far it can be dragged.
 pub const REFERENCES_HEIGHT: f64 = 220.0;

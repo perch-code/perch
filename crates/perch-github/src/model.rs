@@ -2,12 +2,10 @@
 //!
 //! Enums deserialize unknown strings into an `Other` variant rather than
 //! failing. GitHub adds notification reasons and subject types without
-//! notice, and a new one must never take down the inbox.
+//! notice, and a new one must never take down the poll.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize};
-
-use crate::workflow_runs::WorkflowRunQuery;
 
 /// A notification thread, as returned by `GET /notifications`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,73 +22,15 @@ pub struct Thread {
 }
 
 impl Thread {
-    /// The issue or PR number, parsed from the tail of the subject API URL.
-    ///
-    /// Lets a row render `#2097` on first paint, before the per-thread detail
-    /// request lands.
+    /// The issue or PR number, parsed from the tail of the subject API URL,
+    /// which is how a notification is matched to its item.
     pub fn number_hint(&self) -> Option<u64> {
         let url = self.subject.url.as_deref()?;
         url.rsplit('/').next()?.parse().ok()
     }
-
-    /// Where this notification lives on github.com.
-    ///
-    /// Derived from the API url rather than requested, so it costs nothing.
-    /// Falls back to the repository page for subjects that have no page of
-    /// their own, such as a failed workflow run.
-    pub fn html_url(&self) -> String {
-        let repo = format!("https://github.com/{}", self.repository.full_name);
-        let Some(api_url) = self.subject.url.as_deref() else {
-            return repo;
-        };
-
-        // "https://api.github.com/repos/o/r/issues/7" -> ["o", "r", "issues", "7"]
-        let Some(rest) = api_url.split_once("/repos/").map(|(_, rest)| rest) else {
-            return repo;
-        };
-        let parts: Vec<&str> = rest.splitn(4, '/').collect();
-        if parts.len() < 4 || parts.iter().any(|p| p.is_empty()) {
-            return repo;
-        }
-
-        // The web uses /pull/N where the API uses /pulls/N. Only the subject
-        // segment is rewritten: a repository may legitimately be named
-        // "pulls", and mangling it would produce a dead link.
-        let kind = if parts[2] == "pulls" { "pull" } else { parts[2] };
-        format!("https://github.com/{}/{}/{}/{}", parts[0], parts[1], kind, parts[3])
-    }
-
-    /// What to fetch for this thread's detail, if its subject has any.
-    pub fn detail_source(&self) -> Option<DetailSource> {
-        match self.subject.kind {
-            SubjectKind::Issue | SubjectKind::PullRequest => Some(DetailSource::Subject {
-                url: self.subject.url.clone()?,
-                kind: self.subject.kind.clone(),
-            }),
-            SubjectKind::CheckSuite => {
-                WorkflowRunQuery::from_thread(self).map(DetailSource::WorkflowRun)
-            }
-            _ => None,
-        }
-    }
-
-    /// True when this thread's subject supports a detail fetch.
-    pub fn has_detail(&self) -> bool {
-        self.detail_source().is_some()
-    }
 }
 
-/// What a thread's detail request asks for.
-#[derive(Debug, Clone, PartialEq)]
-pub enum DetailSource {
-    /// An issue or pull request, at its API URL.
-    Subject { url: String, kind: SubjectKind },
-    /// A workflow run. The notification carries no link to it, so it is
-    /// looked up by name and time.
-    WorkflowRun(WorkflowRunQuery),
-}
-
-/// Why this thread is in the inbox.
+/// Why GitHub sent this notification.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Reason {
     Assign,
@@ -148,27 +88,14 @@ impl Reason {
         }
     }
 
-    /// Reasons the web UI's "Participating" filter includes.
-    pub fn is_participating(&self) -> bool {
-        matches!(
-            self,
-            Reason::Author
-                | Reason::Comment
-                | Reason::Mention
-                | Reason::TeamMention
-                | Reason::ReviewRequested
-                | Reason::Assign
-        )
-    }
-
     /// Whether a notification with this reason puts its item in Priority.
     /// Someone asked for the reader, or the reader is part of the
     /// conversation; anything else is the repository moving, which the
     /// list pass already shows by moving the row. Subscribed activity
     /// in particular would put every push on every pull request the
-    /// reader watches into Priority, which is what made the inbox noisy.
-    /// The set matches `is_participating` today and is its own rule so
-    /// the two can part without either being wrong.
+    /// reader watches into Priority, which is noise. The set is the web
+    /// UI's "Participating" filter, and is its own rule so the two can
+    /// part without either being wrong.
     pub fn makes_attention(&self) -> bool {
         match self {
             Reason::ReviewRequested
@@ -305,40 +232,8 @@ fn owner_avatar<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     })
 }
 
-/// Per-thread detail: what a row shows beyond the notification itself.
-///
-/// An issue or pull request is fetched from `subject.url`. A workflow run is
-/// found by a [`WorkflowRunQuery`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubjectDetail {
-    /// The issue or pull request number, or a run's number within its
-    /// workflow.
-    pub number: u64,
-    pub state: SubjectState,
-    pub author_login: String,
-    pub author_avatar_url: String,
-    /// The workflow's name, for a run. github.com writes a run as
-    /// `Hourly DST #912`, and so does [`Self::reference`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<String>,
-    /// Where a run lives on github.com. The notification itself links to
-    /// nothing better than the repository. Issues and pull requests carry
-    /// nothing here: `Thread::html_url` already knows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub html_url: Option<String>,
-}
-
-impl SubjectDetail {
-    /// How the row names it: `#2097` for an issue or pull request, and
-    /// `Hourly DST #912` for a workflow run, the way github.com does.
-    pub fn reference(&self) -> String {
-        match &self.workflow {
-            Some(workflow) => format!("{workflow} #{}", self.number),
-            None => format!("#{}", self.number),
-        }
-    }
-}
-
+/// The state an issue or pull request is in, as its row and its header
+/// draw it. Derived from the item's snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SubjectState {
     IssueOpen,
@@ -348,29 +243,6 @@ pub enum SubjectState {
     PrDraft,
     PrMerged,
     PrClosed,
-    RunSuccess,
-    RunFailure,
-    /// Also skipped, stale and neutral: nothing ran.
-    RunCancelled,
-    RunInProgress,
-}
-
-/// The raw shape of an issue or PR payload, reduced to what a row needs.
-#[derive(Debug, Deserialize)]
-pub(crate) struct SubjectPayload {
-    pub number: u64,
-    #[serde(default)]
-    pub state: String,
-    #[serde(default)]
-    pub state_reason: Option<String>,
-    #[serde(default)]
-    pub draft: Option<bool>,
-    #[serde(default)]
-    pub merged_at: Option<String>,
-    #[serde(default)]
-    pub pull_request: Option<serde_json::Value>,
-    #[serde(default)]
-    pub user: Option<UserPayload>,
 }
 
 /// A user as GitHub nests one. Public because a workflow run carries its
@@ -381,46 +253,6 @@ pub struct UserPayload {
     pub login: String,
     #[serde(default)]
     pub avatar_url: String,
-}
-
-impl SubjectPayload {
-    pub(crate) fn into_detail(self, kind: &SubjectKind) -> SubjectDetail {
-        let is_pr = matches!(kind, SubjectKind::PullRequest) || self.pull_request.is_some();
-        let closed = self.state.eq_ignore_ascii_case("closed");
-
-        let state = if is_pr {
-            if self.merged_at.is_some() {
-                SubjectState::PrMerged
-            } else if closed {
-                SubjectState::PrClosed
-            } else if self.draft.unwrap_or(false) {
-                SubjectState::PrDraft
-            } else {
-                SubjectState::PrOpen
-            }
-        } else if closed {
-            match self.state_reason.as_deref() {
-                Some("not_planned") => SubjectState::IssueNotPlanned,
-                _ => SubjectState::IssueClosed,
-            }
-        } else {
-            SubjectState::IssueOpen
-        };
-
-        let (author_login, author_avatar_url) = self
-            .user
-            .map(|u| (u.login, u.avatar_url))
-            .unwrap_or_default();
-
-        SubjectDetail {
-            number: self.number,
-            state,
-            author_login,
-            author_avatar_url,
-            workflow: None,
-            html_url: None,
-        }
-    }
 }
 
 /// GitHub emits RFC 3339 with a `Z` suffix, which `jiff::Timestamp` parses.
@@ -461,6 +293,7 @@ mod ts_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workflow_runs::WorkflowRunQuery;
 
     #[test]
     fn known_reasons_map_to_variants() {
@@ -486,14 +319,6 @@ mod tests {
     fn unknown_subject_kind_falls_back_to_other() {
         let k: SubjectKind = serde_json::from_str(r#""Sponsorship""#).unwrap();
         assert_eq!(k, SubjectKind::Other("Sponsorship".into()));
-    }
-
-    #[test]
-    fn participating_covers_the_web_ui_set() {
-        assert!(Reason::Author.is_participating());
-        assert!(Reason::ReviewRequested.is_participating());
-        assert!(!Reason::Subscribed.is_participating());
-        assert!(!Reason::CiActivity.is_participating());
     }
 
     #[test]
@@ -528,96 +353,28 @@ mod tests {
     }
 
     #[test]
-    fn a_pull_request_links_to_its_web_page() {
-        let mut t = thread_with_url(Some("https://api.github.com/repos/slatedb/slatedb/pulls/2091"));
-        t.subject.kind = SubjectKind::PullRequest;
-        // The web path is /pull/, singular, where the API says /pulls/.
-        assert_eq!(t.html_url(), "https://github.com/slatedb/slatedb/pull/2091");
-    }
-
-    #[test]
-    fn an_issue_links_to_its_web_page() {
-        let t = thread_with_url(Some("https://api.github.com/repos/slatedb/slatedb/issues/1147"));
-        assert_eq!(t.html_url(), "https://github.com/slatedb/slatedb/issues/1147");
-    }
-
-    #[test]
-    fn a_subject_without_a_page_falls_back_to_the_repository() {
-        // A failed workflow run has no url of its own.
-        let t = thread_with_url(None);
-        assert_eq!(t.html_url(), "https://github.com/a/b");
-    }
-
-    #[test]
-    fn an_unrecognised_url_shape_falls_back_rather_than_producing_nonsense() {
-        let t = thread_with_url(Some("https://example.com/whatever"));
-        assert_eq!(t.html_url(), "https://github.com/a/b");
-    }
-
-    #[test]
-    fn only_the_first_pulls_segment_is_rewritten() {
-        // A repository legitimately named "pulls" must not be mangled.
-        let t = thread_with_url(Some("https://api.github.com/repos/o/pulls/issues/3"));
-        assert_eq!(t.html_url(), "https://github.com/o/pulls/issues/3");
-    }
-
-    #[test]
     fn number_hint_is_none_without_a_url() {
         assert_eq!(thread_with_url(None).number_hint(), None);
     }
 
     #[test]
-    fn an_issue_is_fetched_at_its_url() {
-        let t = thread_with_url(Some("https://api.github.com/repos/a/b/issues/7"));
-        assert_eq!(
-            t.detail_source(),
-            Some(DetailSource::Subject {
-                url: "https://api.github.com/repos/a/b/issues/7".into(),
-                kind: SubjectKind::Issue,
-            })
-        );
-        // Without the URL there is nothing to ask for.
-        assert_eq!(thread_with_url(None).detail_source(), None);
-        assert!(!thread_with_url(None).has_detail());
-    }
-
-    #[test]
-    fn a_workflow_run_is_looked_up_from_its_title() {
+    fn a_workflow_run_notification_names_the_run_to_look_up() {
         let mut t = thread_with_url(None);
         t.subject.kind = SubjectKind::CheckSuite;
         t.subject.title = "Hourly DST workflow run failed for main branch".into();
         assert_eq!(
-            t.detail_source(),
-            Some(DetailSource::WorkflowRun(WorkflowRunQuery {
+            WorkflowRunQuery::from_thread(&t),
+            Some(WorkflowRunQuery {
                 repo_full_name: "a/b".into(),
                 workflow: "Hourly DST".into(),
                 branch: "main".into(),
                 at: t.updated_at,
-            }))
+            })
         );
 
         // A title that names no run is left alone rather than guessed at.
         t.subject.title = "Something else entirely".into();
-        assert_eq!(t.detail_source(), None);
-    }
-
-    #[test]
-    fn a_run_is_referenced_by_workflow_and_number() {
-        let mut d = payload(r#"{"number":2097,"state":"open"}"#).into_detail(&SubjectKind::Issue);
-        assert_eq!(d.reference(), "#2097");
-        d.workflow = Some("Hourly DST".into());
-        d.number = 912;
-        assert_eq!(d.reference(), "Hourly DST #912");
-    }
-
-    #[test]
-    fn a_detail_cached_before_runs_existed_still_loads() {
-        let json = r#"{"number":7,"state":"PrOpen","author_login":"o","author_avatar_url":"u"}"#;
-        let d: SubjectDetail = serde_json::from_str(json).unwrap();
-        assert_eq!(d.workflow, None);
-        assert_eq!(d.html_url, None);
-        // And an issue's detail is written the way it always was.
-        assert_eq!(serde_json::to_string(&d).unwrap(), json);
+        assert_eq!(WorkflowRunQuery::from_thread(&t), None);
     }
 
     #[test]
@@ -644,7 +401,6 @@ mod tests {
         assert_eq!(t.subject.kind, SubjectKind::PullRequest);
         assert_eq!(t.number_hint(), Some(2091));
         assert_eq!(t.repository.owner_avatar_url, "https://avatars.githubusercontent.com/u/1");
-        assert!(t.has_detail());
     }
 
     #[test]
@@ -688,46 +444,6 @@ mod tests {
     fn repository_without_an_owner_is_not_an_error() {
         let r: Repository = serde_json::from_str(r#"{"full_name":"a/b"}"#).unwrap();
         assert_eq!(r.owner_avatar_url, "");
-    }
-
-    #[test]
-    fn pr_states_derive_from_flags() {
-        let merged = payload(r#"{"number":1,"state":"closed","merged_at":"2026-01-01T00:00:00Z"}"#);
-        assert_eq!(
-            merged.into_detail(&SubjectKind::PullRequest).state,
-            SubjectState::PrMerged
-        );
-
-        let draft = payload(r#"{"number":2,"state":"open","draft":true}"#);
-        assert_eq!(
-            draft.into_detail(&SubjectKind::PullRequest).state,
-            SubjectState::PrDraft
-        );
-
-        let closed = payload(r#"{"number":3,"state":"closed"}"#);
-        assert_eq!(
-            closed.into_detail(&SubjectKind::PullRequest).state,
-            SubjectState::PrClosed
-        );
-    }
-
-    #[test]
-    fn issue_not_planned_is_distinct_from_closed() {
-        let np = payload(r#"{"number":4,"state":"closed","state_reason":"not_planned"}"#);
-        assert_eq!(
-            np.into_detail(&SubjectKind::Issue).state,
-            SubjectState::IssueNotPlanned
-        );
-
-        let done = payload(r#"{"number":5,"state":"closed","state_reason":"completed"}"#);
-        assert_eq!(
-            done.into_detail(&SubjectKind::Issue).state,
-            SubjectState::IssueClosed
-        );
-    }
-
-    fn payload(json: &str) -> SubjectPayload {
-        serde_json::from_str(json).unwrap()
     }
 
     fn thread_with_url(url: Option<&str>) -> Thread {
