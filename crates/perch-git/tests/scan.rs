@@ -5,13 +5,16 @@
 //! linked worktrees, which is what a reader's working directory looks like.
 //! The store's bare clone is made from the same remote, as in
 //! `worktree_branches.rs`, so `ensure_home` and `cut_branch` fetch from a
-//! path rather than GitHub.
+//! path rather than GitHub. Where a root's remote is given a GitHub URL it
+//! is only ever read back as text; nothing fetches from it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use perch_git::cmd::Git;
 use perch_git::{branch_churn, head_commit_time, home_ref, scan_root, Preparer, RepoId, Store};
+
+const GITHUB: &[&str] = &["github.com"];
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -121,17 +124,56 @@ impl RootFixture {
     }
 }
 
+/// A repository made with `git init -b <branch>` and one commit, with a
+/// linked worktree on `feature/local`: the reader's own project, never
+/// pushed anywhere. It has no remote at all.
+struct LocalFixture {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    feature: PathBuf,
+    git: Git,
+}
+
+impl LocalFixture {
+    fn new(branch: &str) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("local");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", branch]);
+        commit(&root, "one");
+
+        let feature = tmp.path().join("local-feature");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/local",
+                feature.to_str().unwrap(),
+            ],
+        );
+
+        Self {
+            _tmp: tmp,
+            root,
+            feature,
+            git: Git::new(None),
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_root_lists_itself_and_its_worktrees_with_their_branches() {
     let f = RootFixture::new();
 
-    let scan = scan_root(&f.git, &f.root).await.expect("scan");
+    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
 
-    assert_eq!(scan.repo_full_name.as_deref(), Some("acme/widgets"));
-    assert_eq!(
-        scan.default_branch, "main",
-        "set by git clone in origin/HEAD"
-    );
+    assert_eq!(scan.github.as_deref(), Some("acme/widgets"));
+    assert_eq!(scan.remote.as_deref(), Some("origin"));
+    assert_eq!(scan.base, "main", "set by git clone in origin/HEAD");
+    assert_eq!(scan.base_ref, "origin/main");
 
     let branches: Vec<_> = scan.entries.iter().map(|e| e.branch.as_deref()).collect();
     assert_eq!(
@@ -161,8 +203,8 @@ async fn a_root_lists_itself_and_its_worktrees_with_their_branches() {
 async fn scanning_from_a_linked_worktree_finds_the_same_set() {
     let f = RootFixture::new();
 
-    let from_root = scan_root(&f.git, &f.root).await.unwrap();
-    let from_worktree = scan_root(&f.git, &f.one).await.unwrap();
+    let from_root = scan_root(&f.git, &f.root, None, GITHUB).await.unwrap();
+    let from_worktree = scan_root(&f.git, &f.one, None, GITHUB).await.unwrap();
 
     assert_eq!(
         from_root, from_worktree,
@@ -186,7 +228,7 @@ async fn a_detached_worktree_has_no_branch() {
         ],
     );
 
-    let scan = scan_root(&f.git, &f.root).await.unwrap();
+    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.unwrap();
     let entry = scan
         .entries
         .iter()
@@ -202,25 +244,152 @@ async fn a_directory_that_is_not_a_checkout_is_an_error() {
     let plain = tmp.path().join("plain");
     std::fs::create_dir_all(&plain).unwrap();
 
-    let err = scan_root(&Git::new(None), &plain).await.unwrap_err();
+    let err = scan_root(&Git::new(None), &plain, None, GITHUB).await.unwrap_err();
     assert!(matches!(err, perch_git::Error::Git { .. }), "{err}");
 
     let missing = tmp.path().join("missing");
-    assert!(scan_root(&Git::new(None), &missing).await.is_err());
+    assert!(scan_root(&Git::new(None), &missing, None, GITHUB).await.is_err());
 }
 
 #[tokio::test]
-async fn a_root_without_an_origin_scans_with_no_name() {
+async fn a_root_without_an_origin_scans_as_local() {
     let f = RootFixture::new();
     git(&f.root, &["remote", "remove", "origin"]);
 
-    let scan = scan_root(&f.git, &f.root).await.unwrap();
-    assert_eq!(scan.repo_full_name, None);
-    assert_eq!(
-        scan.default_branch, "main",
-        "the fallback, with origin/HEAD gone"
-    );
+    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.unwrap();
+    assert_eq!(scan.github, None);
+    assert_eq!(scan.remote, None);
+    assert_eq!(scan.base, "main", "the local branch, with origin/HEAD gone");
+    assert_eq!(scan.base_ref, "main");
     assert_eq!(scan.entries.len(), 3);
+}
+
+#[tokio::test]
+async fn a_repository_with_no_remote_scans_as_local_on_main() {
+    // The design's "no GitHub call is made" case. There is no remote to
+    // name a repository and no token in `Git::new(None)`; scan_root only
+    // reads the worktree list, the remote config and refs already on disk,
+    // so nothing here can reach the network.
+    let f = LocalFixture::new("main");
+
+    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+
+    assert_eq!(scan.github, None);
+    assert_eq!(scan.remote, None);
+    assert_eq!(scan.base, "main");
+    assert_eq!(scan.base_ref, "main");
+    let branches: Vec<_> = scan.entries.iter().map(|e| e.branch.as_deref()).collect();
+    assert_eq!(branches, vec![Some("main"), Some("feature/local")]);
+    assert_eq!(
+        scan.entries[1].path.canonicalize().unwrap(),
+        f.feature.canonicalize().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_repository_with_no_remote_on_master_has_master_as_its_base() {
+    let f = LocalFixture::new("master");
+
+    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+
+    assert_eq!(scan.github, None);
+    assert_eq!(scan.remote, None);
+    assert_eq!(scan.base, "master");
+}
+
+#[tokio::test]
+async fn a_base_from_config_names_a_branch_that_is_neither_main_nor_master() {
+    let f = LocalFixture::new("trunk");
+
+    let scan = scan_root(&f.git, &f.root, Some("trunk"), GITHUB).await.expect("scan");
+
+    assert_eq!(scan.base, "trunk");
+    assert_eq!(scan.base_ref, "trunk");
+}
+
+#[tokio::test]
+async fn a_repository_with_no_remote_head_no_base_and_no_main_or_master_is_an_error() {
+    let f = LocalFixture::new("trunk");
+
+    let err = scan_root(&f.git, &f.root, None, GITHUB).await.unwrap_err();
+
+    assert!(matches!(err, perch_git::Error::NoBase { .. }), "{err}");
+    let message = err.to_string();
+    assert!(message.contains(&f.root.display().to_string()), "{message}");
+    assert!(message.contains("neither main nor master"), "{message}");
+}
+
+#[tokio::test]
+async fn a_fork_is_named_by_upstream_and_its_base_falls_back_to_the_local_branch() {
+    let f = RootFixture::new();
+    std::fs::write(f.one.join("b.txt"), "x\ny\n").unwrap();
+    git(&f.one, &["add", "."]);
+    git(&f.one, &["commit", "-q", "-m", "work"]);
+    // The reader's copy is origin; the repository it came from is upstream,
+    // added but never fetched, so neither refs/remotes/upstream/HEAD nor
+    // refs/remotes/upstream/main exists.
+    git(
+        &f.root,
+        &["remote", "set-url", "origin", "https://github.com/me/widgets.git"],
+    );
+    git(
+        &f.root,
+        &["remote", "add", "upstream", "https://github.com/acme/widgets.git"],
+    );
+
+    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+
+    assert_eq!(scan.github.as_deref(), Some("acme/widgets"));
+    assert_eq!(scan.remote.as_deref(), Some("upstream"));
+    assert_eq!(scan.base, "main", "past the missing upstream/HEAD to refs/heads/main");
+    assert_eq!(scan.base_ref, "main", "upstream has no main to diff against yet");
+    assert_eq!(branch_churn(&f.git, &f.one, &scan.base_ref).await.unwrap(), (2, 0));
+
+    // The first fetch of upstream brings its main, without an upstream/HEAD
+    // on older gits, and the diff moves there.
+    let main = git(&f.root, &["rev-parse", "refs/heads/main"]);
+    git(&f.root, &["update-ref", "refs/remotes/upstream/main", &main]);
+
+    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+
+    assert_eq!(scan.base, "main");
+    assert_eq!(scan.base_ref, "upstream/main");
+    assert_eq!(branch_churn(&f.git, &f.one, &scan.base_ref).await.unwrap(), (2, 0));
+}
+
+#[tokio::test]
+async fn a_root_whose_origin_is_elsewhere_scans_as_local() {
+    let f = RootFixture::new();
+    git(
+        &f.root,
+        &["remote", "set-url", "origin", "https://gitlab.com/acme/widgets.git"],
+    );
+
+    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+
+    assert_eq!(scan.github, None);
+    assert_eq!(scan.remote, None);
+    assert_eq!(scan.base, "main", "origin is not GitHub, so its HEAD does not count");
+    assert_eq!(scan.entries.len(), 3);
+}
+
+#[tokio::test]
+async fn churn_runs_against_the_scan_s_base_ref_for_github_and_local_roots() {
+    let f = RootFixture::new();
+    std::fs::write(f.one.join("b.txt"), "x\ny\n").unwrap();
+    git(&f.one, &["add", "."]);
+    git(&f.one, &["commit", "-q", "-m", "work"]);
+    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.unwrap();
+    assert_eq!(scan.base_ref, "origin/main");
+    assert_eq!(branch_churn(&f.git, &f.one, &scan.base_ref).await.unwrap(), (2, 0));
+
+    let l = LocalFixture::new("main");
+    std::fs::write(l.feature.join("c.txt"), "x\n").unwrap();
+    git(&l.feature, &["add", "."]);
+    git(&l.feature, &["commit", "-q", "-m", "work"]);
+    let scan = scan_root(&l.git, &l.root, None, GITHUB).await.unwrap();
+    assert_eq!(scan.base_ref, "main");
+    assert_eq!(branch_churn(&l.git, &l.feature, &scan.base_ref).await.unwrap(), (1, 0));
 }
 
 #[tokio::test]

@@ -8,6 +8,7 @@ mod icons;
 mod items;
 mod items_cli;
 mod knowledge;
+mod repos;
 mod review;
 mod state;
 mod theme;

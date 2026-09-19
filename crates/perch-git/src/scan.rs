@@ -3,9 +3,11 @@
 //! A root is a directory the user declared in config under a repository: a
 //! clone of it, or a worktree of one. Asking it `git worktree
 //! list` gives every worktree of that repository, the root itself included,
-//! and each one on a branch other than the default is a branch of the
-//! reader's own. Nothing here writes: the scan reads, and the caller decides
-//! what the items are.
+//! and each one on a branch other than the base is a branch of the
+//! reader's own. Its remotes say which repository it is: a GitHub remote,
+//! `upstream` before `origin` before any other, names it `owner/repo`, and a
+//! root with none is local to this machine. Nothing here writes or fetches:
+//! the scan reads, and the caller decides what the items are.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,11 +34,20 @@ pub struct WorktreeEntry {
 /// What a root has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootScan {
-    /// `owner/repo` from the `origin` remote, when it looks like one.
-    pub repo_full_name: Option<String>,
-    /// From `refs/remotes/origin/HEAD`, which `git clone` sets; `main` when
-    /// nothing says otherwise.
-    pub default_branch: String,
+    /// `owner/repo` from a GitHub remote, when the root has one.
+    pub github: Option<String>,
+    /// The remote that named it: `upstream` over `origin` over any other.
+    /// None when `github` is.
+    pub remote: Option<String>,
+    /// The base branch: the remote's HEAD, else the `base` the caller gave,
+    /// else `main` or `master`, whichever exists.
+    pub base: String,
+    /// What a branch is diffed against: `<remote>/<base>` for a GitHub
+    /// root whose remote has the base, since the branch left the base as
+    /// the remote had it; `<base>` itself for a local root, and for a
+    /// GitHub root whose remote was added but never fetched, which has no
+    /// copy of the base yet.
+    pub base_ref: String,
     pub entries: Vec<WorktreeEntry>,
 }
 
@@ -128,31 +139,59 @@ fn unquote(path: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// `owner/repo` from a remote URL in any of the shapes GitHub hands out:
-/// `https://github.com/o/r.git`, `git@github.com:o/r.git`,
-/// `ssh://git@github.com/o/r`. The host is not checked, so a GitHub
-/// Enterprise remote parses too; a local path does not.
-pub fn repo_from_remote(url: &str) -> Option<String> {
+/// `(name, url)` for each `(fetch)` line of `git remote -v`, in order.
+///
+/// Each remote prints twice, once for fetching and once for pushing, with
+/// the name and URL separated by a tab and the URL and its role by a space.
+/// The push URL can differ from the fetch one, but the fetch URL is where
+/// the repository comes from, so that is the one that names it. A partial
+/// clone's fetch line ends in its filter, `(fetch) [blob:none]`, and is a
+/// fetch line all the same.
+pub fn parse_remotes(remote_v: &str) -> Vec<(String, String)> {
+    remote_v
+        .lines()
+        .filter_map(|line| {
+            let (name, rest) = line.trim_end().split_once('\t')?;
+            let url = rest
+                .strip_suffix(" (fetch)")
+                .or_else(|| rest.rsplit_once(" (fetch) [").map(|(url, _)| url))?;
+            Some((name.to_string(), url.to_string()))
+        })
+        .collect()
+}
+
+/// A root's remotes, `(name, url)` for each, as `git remote -v` lists
+/// them. An error when the root is not inside a git checkout, which is
+/// the first thing a caller with a directory from config finds out.
+pub async fn remotes(git: &Git, root: &Path) -> Result<Vec<(String, String)>, Error> {
+    let listing = git.run(Some(root), ["remote", "-v"], QUERY_TIMEOUT).await?;
+    Ok(parse_remotes(&listing))
+}
+
+/// `owner/repo` from a remote URL on one of `hosts`, in any of the shapes
+/// GitHub hands out: `https://github.com/o/r.git`, `git@github.com:o/r.git`,
+/// `ssh://git@github.com/o/r`. The host is compared without regard to case,
+/// and a `user@` before it or a `:port` after it does not count. A remote on
+/// any other host, or a local path, is not a GitHub repository.
+pub fn repo_from_remote(url: &str, hosts: &[&str]) -> Option<String> {
     let url = url.trim();
     if url.is_empty() {
         return None;
     }
 
-    let path = if let Some((scheme, rest)) = url.split_once("://") {
-        if scheme == "file" {
-            return None;
-        }
-        // Past the authority, which may carry `user@` and `:port`.
-        let (_, path) = rest.split_once('/')?;
-        path
+    let (authority, path) = if let Some((_, rest)) = url.split_once("://") {
+        rest.split_once('/')?
     } else if url.starts_with('/') || url.starts_with('.') {
         return None;
-    } else if let Some((_, path)) = url.split_once(':') {
-        // scp-like: `git@github.com:o/r.git`
-        path
     } else {
-        return None;
+        // scp-like: `git@github.com:o/r.git`
+        url.split_once(':')?
     };
+
+    let host = host_of(authority);
+    if !hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
+        return None;
+    }
 
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
@@ -163,13 +202,47 @@ pub fn repo_from_remote(url: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
-/// Ask a root what it has checked out.
+/// The host in a URL's authority, without the `user@` before it or the
+/// `:port` after it.
+fn host_of(authority: &str) -> &str {
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    host.split_once(':').map_or(host, |(host, _)| host)
+}
+
+/// The remote that decides which repository a root is: `upstream` if it is
+/// on GitHub, else `origin` if it is, else the first other GitHub remote.
+/// `(remote name, owner/repo)`. A fork's `origin` is the reader's own copy;
+/// its `upstream` is the repository the pull requests are on.
+pub fn github_remote(remotes: &[(String, String)], hosts: &[&str]) -> Option<(String, String)> {
+    const PREFERRED: [&str; 2] = ["upstream", "origin"];
+    let named = PREFERRED
+        .iter()
+        .filter_map(|preferred| remotes.iter().find(|(name, _)| name == preferred));
+    let others = remotes
+        .iter()
+        .filter(|(name, _)| !PREFERRED.contains(&name.as_str()));
+    named
+        .chain(others)
+        .find_map(|(name, url)| repo_from_remote(url, hosts).map(|slug| (name.clone(), slug)))
+}
+
+/// Ask a root what it has checked out, and which repository it is.
 ///
 /// A root that is not inside a git checkout is an error from the first
-/// command. A root with no `origin`, or one whose `origin` is not a
-/// `owner/repo` URL, scans with `repo_full_name` unset and the caller says
-/// whether that is a problem.
-pub async fn scan_root(git: &Git, root: &Path) -> Result<RootScan, Error> {
+/// command. Its remotes name the repository: the GitHub one among them,
+/// `upstream` before `origin` before any other, fills `github` and `remote`,
+/// and a root with no GitHub remote scans with both unset, the caller saying
+/// whether that is a problem. The base branch is the remote's HEAD when a
+/// clone or fetch recorded one, else the `base` given, else `main` or
+/// `master`, whichever the root has; a root with none of those is an error,
+/// since there would be nothing to diff a branch against. A branch is
+/// diffed against the remote's copy of the base when the remote has one,
+/// and against the base itself when it does not: a fork's `upstream`,
+/// added by hand and not yet fetched, names the repository without having
+/// a branch to diff against. Nothing here touches the network: remotes
+/// come from the root's config and a remote HEAD from a ref already on
+/// disk.
+pub async fn scan_root(git: &Git, root: &Path, base: Option<&str>, hosts: &[&str]) -> Result<RootScan, Error> {
     let listing = git
         .run(
             Some(root),
@@ -179,34 +252,81 @@ pub async fn scan_root(git: &Git, root: &Path) -> Result<RootScan, Error> {
         .await?;
     let entries = parse_worktree_list(&listing);
 
-    let repo_full_name = git
-        .run(Some(root), ["remote", "get-url", "origin"], QUERY_TIMEOUT)
-        .await
-        .ok()
-        .and_then(|url| repo_from_remote(&url));
+    let (remote, github) = match github_remote(&remotes(git, root).await?, hosts) {
+        Some((remote, github)) => (Some(remote), Some(github)),
+        None => (None, None),
+    };
 
-    let default_branch = git
-        .run(
-            Some(root),
-            ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-            QUERY_TIMEOUT,
-        )
-        .await
-        .ok()
-        .and_then(|target| {
-            target
-                .trim()
-                .strip_prefix("refs/remotes/origin/")
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "main".to_string());
+    // The remote's HEAD is a branch the remote has by construction; a base
+    // from anywhere else is checked against the remote before the diff is
+    // pointed at it.
+    let mut resolved = None;
+    let mut remote_has_base = false;
+    if let Some(remote) = &remote {
+        resolved = remote_head(git, root, remote).await;
+        remote_has_base = resolved.is_some();
+    }
+    if resolved.is_none() {
+        resolved = base.map(str::to_string);
+    }
+    if resolved.is_none() {
+        for candidate in ["main", "master"] {
+            if has_ref(git, root, &format!("refs/heads/{candidate}")).await {
+                resolved = Some(candidate.to_string());
+                break;
+            }
+        }
+    }
+    let base = resolved.ok_or_else(|| Error::NoBase {
+        root: root.to_path_buf(),
+    })?;
+    if let (Some(remote), false) = (&remote, remote_has_base) {
+        remote_has_base = has_ref(git, root, &format!("refs/remotes/{remote}/{base}")).await;
+    }
+    let base_ref = match &remote {
+        Some(remote) if remote_has_base => format!("{remote}/{base}"),
+        _ => base.clone(),
+    };
 
     Ok(RootScan {
-        repo_full_name,
-        default_branch,
+        github,
+        remote,
+        base,
+        base_ref,
         entries,
     })
+}
+
+/// The branch `refs/remotes/<remote>/HEAD` points at, which `git clone` sets
+/// and `git remote set-head` can. None when the remote has never been
+/// fetched, or its HEAD was never recorded.
+async fn remote_head(git: &Git, root: &Path, remote: &str) -> Option<String> {
+    let prefix = format!("refs/remotes/{remote}/");
+    git.run(
+        Some(root),
+        ["symbolic-ref", "--quiet", &format!("{prefix}HEAD")],
+        QUERY_TIMEOUT,
+    )
+    .await
+    .ok()
+    .and_then(|target| {
+        target
+            .trim()
+            .strip_prefix(prefix.as_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// Whether a ref, spelled in full, exists in the root's repository.
+async fn has_ref(git: &Git, root: &Path, full_ref: &str) -> bool {
+    git.run(
+        Some(root),
+        ["rev-parse", "--verify", "--quiet", full_ref],
+        QUERY_TIMEOUT,
+    )
+    .await
+    .is_ok()
 }
 
 /// Lines added and removed on a worktree's branch since it left `base_ref`:
@@ -352,6 +472,44 @@ branch refs/heads/topic
         assert_eq!(unquote("/plain/path with space"), "/plain/path with space");
     }
 
+    const GITHUB: &[&str] = &["github.com"];
+
+    // Captured from git 2.50 on a fork: the reader's copy as origin, the
+    // repository it was forked from as upstream, a push URL that differs
+    // from its fetch URL, and a remote from a `--filter=blob:none` clone,
+    // whose fetch line carries the filter.
+    const REMOTE_V: &str = "\
+origin\thttps://github.com/me/widgets.git (fetch)
+origin\tgit@github.com:me/widgets.git (push)
+upstream\thttps://github.com/acme/widgets.git (fetch)
+upstream\thttps://github.com/acme/widgets.git (push)
+mirror\thttps://gitlab.com/acme/widgets.git (fetch)
+mirror\thttps://gitlab.com/acme/widgets.git (push)
+partial\thttps://github.com/acme/partial.git (fetch) [blob:none]
+partial\thttps://github.com/acme/partial.git (push)
+";
+
+    fn remotes(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, url)| (name.to_string(), url.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_remotes_takes_the_fetch_lines_and_keeps_their_order() {
+        assert_eq!(
+            parse_remotes(REMOTE_V),
+            remotes(&[
+                ("origin", "https://github.com/me/widgets.git"),
+                ("upstream", "https://github.com/acme/widgets.git"),
+                ("mirror", "https://gitlab.com/acme/widgets.git"),
+                ("partial", "https://github.com/acme/partial.git"),
+            ])
+        );
+        assert!(parse_remotes("").is_empty());
+    }
+
     #[test]
     fn github_remote_urls_in_every_shape_give_owner_and_repo() {
         for url in [
@@ -366,7 +524,7 @@ branch refs/heads/topic
             "  https://github.com/acme/widgets.git\n",
         ] {
             assert_eq!(
-                repo_from_remote(url).as_deref(),
+                repo_from_remote(url, GITHUB).as_deref(),
                 Some("acme/widgets"),
                 "{url}"
             );
@@ -376,7 +534,7 @@ branch refs/heads/topic
     #[test]
     fn dotted_repository_names_keep_their_dots() {
         assert_eq!(
-            repo_from_remote("git@github.com:rust-lang/docs.rs.git").as_deref(),
+            repo_from_remote("git@github.com:rust-lang/docs.rs.git", GITHUB).as_deref(),
             Some("rust-lang/docs.rs")
         );
     }
@@ -393,8 +551,105 @@ branch refs/heads/topic
             "git@github.com:acme",
             "widgets",
         ] {
-            assert_eq!(repo_from_remote(url), None, "{url:?}");
+            assert_eq!(repo_from_remote(url, GITHUB), None, "{url:?}");
         }
+    }
+
+    #[test]
+    fn a_remote_on_another_host_is_not_a_github_repository() {
+        for url in [
+            "https://gitlab.com/acme/widgets.git",
+            "git@gitlab.com:acme/widgets.git",
+            "ssh://git@gitlab.com/acme/widgets",
+            "/Users/t/Code/acme/widgets",
+        ] {
+            assert_eq!(repo_from_remote(url, GITHUB), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_configured_enterprise_host_counts_whatever_its_case() {
+        let hosts = &["github.com", "github.acme.example"];
+        assert_eq!(
+            repo_from_remote("https://github.acme.example/acme/widgets.git", hosts).as_deref(),
+            Some("acme/widgets")
+        );
+        assert_eq!(
+            repo_from_remote("git@GitHub.Acme.Example:acme/widgets.git", hosts).as_deref(),
+            Some("acme/widgets")
+        );
+        assert_eq!(
+            repo_from_remote("https://GITHUB.COM/acme/widgets", hosts).as_deref(),
+            Some("acme/widgets")
+        );
+        assert_eq!(
+            repo_from_remote("https://github.acme.example/acme/widgets.git", GITHUB),
+            None,
+            "an enterprise host counts only when it is configured"
+        );
+    }
+
+    #[test]
+    fn a_user_and_a_port_do_not_count_when_matching_the_host() {
+        for url in [
+            "https://me@github.com/acme/widgets.git",
+            "https://me:s3cret@github.com:443/acme/widgets.git",
+            "ssh://git@github.com:22/acme/widgets",
+            "ssh://github.com:22/acme/widgets",
+            "me@github.com:acme/widgets.git",
+        ] {
+            assert_eq!(
+                repo_from_remote(url, GITHUB).as_deref(),
+                Some("acme/widgets"),
+                "{url}"
+            );
+        }
+        assert_eq!(
+            repo_from_remote("https://github.com@evil.example/acme/widgets", GITHUB),
+            None,
+            "the user part is not the host"
+        );
+    }
+
+    #[test]
+    fn github_remote_prefers_upstream_then_origin_then_any_other() {
+        let all = parse_remotes(REMOTE_V);
+        assert_eq!(
+            github_remote(&all, GITHUB),
+            Some(("upstream".to_string(), "acme/widgets".to_string()))
+        );
+
+        let no_upstream = remotes(&[
+            ("mirror", "https://github.com/mirror/widgets.git"),
+            ("origin", "https://github.com/me/widgets.git"),
+        ]);
+        assert_eq!(
+            github_remote(&no_upstream, GITHUB),
+            Some(("origin".to_string(), "me/widgets".to_string())),
+            "origin wins over another remote listed before it"
+        );
+
+        let upstream_elsewhere = remotes(&[
+            ("upstream", "https://gitlab.com/acme/widgets.git"),
+            ("origin", "/Users/t/Code/widgets"),
+            ("fork", "https://github.com/them/widgets.git"),
+            ("other", "https://github.com/other/widgets.git"),
+        ]);
+        assert_eq!(
+            github_remote(&upstream_elsewhere, GITHUB),
+            Some(("fork".to_string(), "them/widgets".to_string())),
+            "a preferred name that is not on GitHub does not win"
+        );
+    }
+
+    #[test]
+    fn github_remote_is_nothing_when_no_remote_is_on_github() {
+        let none = remotes(&[
+            ("origin", "https://gitlab.com/acme/widgets.git"),
+            ("backup", "/Volumes/backup/widgets.git"),
+        ]);
+        assert_eq!(github_remote(&none, GITHUB), None);
+        assert_eq!(github_remote(&[], GITHUB), None);
     }
 
     #[test]

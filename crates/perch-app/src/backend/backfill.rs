@@ -81,7 +81,8 @@ pub(crate) struct Backfill<'a, S, W> {
 
 /// The app's backfill, over the context's client, cache and knowledge,
 /// woken by its passes. A context with no cache has no rows to read and
-/// gets none.
+/// gets none. A local repository has no history on GitHub to walk, and
+/// is left out of the list.
 pub(super) fn spawn(ctx: Ctx) {
     let Some(cache) = ctx.cache.clone() else {
         tracing::info!("no cache, so no backfill");
@@ -94,7 +95,7 @@ pub(super) fn spawn(ctx: Ctx) {
             cache: cache.as_ref(),
             knowledge: ctx.knowledge.clone(),
             write_skill: ctx.config.knowledge.skills,
-            declared: ctx.config.declared(),
+            declared: ctx.config.declared().into_iter().filter(|r| !perch_github::is_local(r)).collect(),
             events: ctx.events.clone(),
             refreshing: ctx.refreshing.clone(),
             is_open: Arc::new(move |id: &str| window.is_open(id)),

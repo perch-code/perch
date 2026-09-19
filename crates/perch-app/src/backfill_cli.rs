@@ -6,8 +6,9 @@
 //! cursor. A line is printed for each discussion archived, with the
 //! allowance GitHub reported after it, so what a pull request costs
 //! against an issue can be read off. With a limit the round stops after
-//! that many, and the next run picks up at the cursor. How the backfill
-//! is checked without a window.
+//! that many, and the next run picks up at the cursor. A local
+//! repository, `local/<name>`, has no history on GitHub and is refused
+//! with a line saying so. How the backfill is checked without a window.
 
 use std::sync::Arc;
 
@@ -41,11 +42,8 @@ pub fn run(args: &[String]) {
 
 fn backfill(runtime: &tokio::runtime::Runtime, repo: String, limit: Option<usize>) -> Result<(), String> {
     // The client is built inside the runtime, which its connection pool
-    // needs to be.
-    let setup = {
-        let _inside = runtime.enter();
-        setup(&repo)?
-    };
+    // needs to be, and the setup scans the roots, which is async.
+    let setup = runtime.block_on(setup(&repo))?;
     let knowledge = Arc::new(perch_knowledge::Knowledge::open(setup.config.knowledge.root_path()));
     let write_skill = setup.config.knowledge.skills;
     // The client's clone shares the allowance cells, so the line after

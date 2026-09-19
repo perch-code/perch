@@ -77,8 +77,9 @@ async fn print(id: &str, scope: &Scope) -> Result<(), String> {
 }
 
 /// The base the app diffs against, found the way the app finds it: the
-/// pull request's fetched base, else the home ref, else origin's branch,
-/// else the branch name as the checkout knows it.
+/// pull request's fetched base, else the home ref, else the branch as the
+/// remote that names the repository has it, the scan's `upstream` before
+/// `origin`, else origin's, else the branch name as the checkout knows it.
 async fn merge_base(git: &Git, worktree: &Path, item: &Item, head: &str) -> Result<String, String> {
     let checkout = item.checkout.as_ref().ok_or("no checkout")?;
     let mut candidates = Vec::new();
@@ -86,7 +87,16 @@ async fn merge_base(git: &Git, worktree: &Path, item: &Item, head: &str) -> Resu
         candidates.push(format!("refs/perch/base/{}", pr.number));
     }
     candidates.push(perch_git::home_ref(&checkout.base_ref));
-    candidates.push(format!("origin/{}", checkout.base_ref));
+    let hosts = perch_github::Config::load().github_hosts();
+    let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+    let remotes = perch_git::remotes(git, worktree).await.unwrap_or_default();
+    if let Some((remote, _)) = perch_git::github_remote(&remotes, &hosts) {
+        candidates.push(format!("{remote}/{}", checkout.base_ref));
+    }
+    let origin = format!("origin/{}", checkout.base_ref);
+    if !candidates.contains(&origin) {
+        candidates.push(origin);
+    }
     candidates.push(checkout.base_ref.clone());
     for base in candidates {
         if let Ok(out) = git.run(Some(worktree), ["merge-base", &base, head], Duration::from_secs(30)).await {

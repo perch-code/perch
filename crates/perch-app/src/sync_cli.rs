@@ -4,7 +4,9 @@
 //! prints what it did: a line for each item added, updated or closed, or
 //! "unchanged" when both lists answered 304. The log goes to stderr under
 //! `RUST_LOG`, as the app's does, so the requests a pass makes can be
-//! counted. How the pass is checked without a window.
+//! counted. A local repository, `local/<name>`, has no pass to run and is
+//! refused with a line saying so. How the pass is checked without a
+//! window.
 
 use std::sync::{Arc, Mutex};
 
@@ -52,11 +54,19 @@ pub(crate) struct Setup {
 /// repository. The warnings go to stderr, and a repository config.toml
 /// does not declare is noted rather than refused: the app's poll runs
 /// over the declared repositories only, and the harness over whatever it
-/// is given.
-pub(crate) fn setup(repo: &str) -> Result<Setup, String> {
-    let config = Config::load();
+/// is given. A local repository is refused: it has nothing on GitHub to
+/// list or to archive, and the client would only be asked about an
+/// account called `local`.
+pub(crate) async fn setup(repo: &str) -> Result<Setup, String> {
+    let config = crate::repos::load_resolved_async().await;
     for warning in &config.warnings {
         eprintln!("warning: {warning}");
+    }
+    if perch_github::is_local(repo) {
+        return Err(format!(
+            "{} is a local repository, with nothing on GitHub to sync or archive",
+            config.display_name(repo)
+        ));
     }
     if !config.is_declared(repo) {
         eprintln!("note: {repo} is not a [[repo]] in config.toml, so the app does not list it");
@@ -76,7 +86,7 @@ pub(crate) fn setup(repo: &str) -> Result<Setup, String> {
 }
 
 async fn sync(repo: &str) -> Result<(), String> {
-    let Setup { github, cache, .. } = setup(repo)?;
+    let Setup { github, cache, .. } = setup(repo).await?;
     let report = list_pass(&github, &cache, repo, Timestamp::now())
         .await
         .map_err(|e| e.to_string())?;

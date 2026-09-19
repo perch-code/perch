@@ -235,10 +235,12 @@ pub struct Checkout {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Item {
     pub id: String,
-    /// `owner/repo`: the repository the item is in, which is what the
-    /// sidebar sections over. For a checkout this is the checkout's remote,
-    /// so a branch on a fork is the fork's even when its pull request is
-    /// upstream's.
+    /// The repository the item is in, which is what the sidebar sections
+    /// over: `owner/repo` on GitHub, `local/<name>` for one with no GitHub
+    /// remote. For a checkout under a root this is its `[[repo]]`'s
+    /// identity, the repository its GitHub remote names with `upstream`
+    /// before `origin`, so a branch in a fork of a repository is that
+    /// repository's, and its pull request there attaches to it.
     pub repo_full_name: String,
     pub subject: Option<Subject>,
     pub checkout: Option<Checkout>,

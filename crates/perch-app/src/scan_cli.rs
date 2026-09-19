@@ -1,17 +1,16 @@
 //! `perch --scan [root...]`
 //!
 //! Prints what the root scan finds: for each `[[repo]]` root in config,
-//! or for the directories given instead, the repository its `origin` names,
-//! its default branch, and every worktree with its path, branch, head and
-//! the lines it has added and removed against the default branch. Reads
-//! only; nothing is written to the cache or to disk. How the scan is
-//! checked without a window.
+//! or for the directories given instead, the repository its GitHub remote
+//! names and which remote that was, its base branch, and every worktree
+//! with its path, branch, head and the lines it has added and removed
+//! against the base. Reads only; nothing is written to the cache or to
+//! disk. How the scan is checked without a window.
 
 use std::path::{Path, PathBuf};
 
 use perch_git::cmd::Git;
 use perch_git::{branch_churn, scan_root, WorktreeEntry};
-use perch_github::Config;
 
 pub fn run(args: &[String]) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -25,13 +24,19 @@ async fn scan(args: &[String]) {
     let git = Git::new(None);
 
     if !args.is_empty() {
+        // The directories given, with the hosts config names: github.com,
+        // and the enterprise host when the file has one. A config that
+        // does not load leaves github.com alone, which is what the app
+        // would count too.
+        let hosts = perch_github::Config::load().github_hosts();
+        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
         for root in args {
-            print_root(&git, Path::new(root)).await;
+            print_root(&git, Path::new(root), None, &hosts).await;
         }
         return;
     }
 
-    let config = Config::load();
+    let config = crate::repos::load_resolved_async().await;
     for warning in &config.warnings {
         eprintln!("warning: {warning}");
     }
@@ -39,25 +44,27 @@ async fn scan(args: &[String]) {
         eprintln!("no [[repo]] entries in config.toml");
         return;
     }
+    let hosts = config.github_hosts();
+    let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
 
     for repo in &config.repo {
         let roots: Vec<PathBuf> = repo.root_paths();
-        println!("repo {}", repo.name);
+        println!("repo {} ({})", repo.display_name(), repo.identity().unwrap_or("unresolved"));
         if roots.is_empty() {
             println!("  no roots");
             continue;
         }
         for root in &roots {
-            print_root(&git, root).await;
+            print_root(&git, root, repo.base.as_deref(), &hosts).await;
         }
     }
 }
 
 /// One root, its worktrees indented under it. A root that cannot be
 /// scanned prints why and the next one is tried, as the app's scan will.
-async fn print_root(git: &Git, root: &Path) {
+async fn print_root(git: &Git, root: &Path, base: Option<&str>, hosts: &[&str]) {
     println!("  root {}", root.display());
-    let scan = match scan_root(git, root).await {
+    let scan = match scan_root(git, root, base, hosts).await {
         Ok(scan) => scan,
         Err(e) => {
             println!("    error: {e}");
@@ -65,19 +72,18 @@ async fn print_root(git: &Git, root: &Path) {
         }
     };
 
-    println!(
-        "    repo {}, default branch {}",
-        scan.repo_full_name
-            .as_deref()
-            .unwrap_or("(origin is not owner/repo)"),
-        scan.default_branch
-    );
+    match (&scan.github, &scan.remote) {
+        (Some(github), Some(remote)) => {
+            println!("    github {github} (remote {remote}), base {}, diffed against {}", scan.base, scan.base_ref)
+        }
+        _ => println!("    no GitHub remote (local), base {}", scan.base),
+    }
     for entry in &scan.entries {
-        println!("    {}", describe(git, entry, &scan.default_branch).await);
+        println!("    {}", describe(git, entry, &scan.base, &scan.base_ref).await);
     }
 }
 
-async fn describe(git: &Git, entry: &WorktreeEntry, default_branch: &str) -> String {
+async fn describe(git: &Git, entry: &WorktreeEntry, base: &str, base_ref: &str) -> String {
     let head = entry.head_sha.get(..7).unwrap_or(&entry.head_sha);
     let main = if entry.is_main {
         " [main worktree]"
@@ -90,14 +96,14 @@ async fn describe(git: &Git, entry: &WorktreeEntry, default_branch: &str) -> Str
         Some(branch) if entry.prunable || !entry.path.join(".git").exists() => {
             format!("{}  {branch}  {head}  (gone, not an item){main}", entry.path.display())
         }
-        Some(branch) if branch == default_branch => {
+        Some(branch) if branch == base => {
             format!(
-                "{}  {branch}  {head}  (default branch, not an item){main}",
+                "{}  {branch}  {head}  (base branch, not an item){main}",
                 entry.path.display()
             )
         }
         Some(branch) => {
-            let churn = match branch_churn(git, &entry.path, default_branch).await {
+            let churn = match branch_churn(git, &entry.path, base_ref).await {
                 Ok((added, removed)) => format!("+{added} \u{2212}{removed}"),
                 Err(e) => format!("churn unavailable: {e}"),
             };

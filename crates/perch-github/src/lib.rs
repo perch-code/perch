@@ -21,7 +21,10 @@ pub use comments::{
     ThreadOrigin,
 };
 pub use client::{Allowance, Error, GitHub, ListResult, Listed, Page, PullLookup};
-pub use config::{AgentConfig, CodexConfig, Config, KnowledgeConfig, RepoConfig, CLAUDE_CODE, CODEX};
+pub use config::{
+    is_local, AgentConfig, CodexConfig, Config, DeclaredRepo, KnowledgeConfig, RepoConfig, CLAUDE_CODE,
+    CODEX, LOCAL_OWNER,
+};
 pub use discussion::{Discussion, IssueComment, PullEvent, PullEventKind, Review, ReviewComment};
 pub use items::{Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind};
 pub use pulls::{CheckStatus, PullRequest, ReviewDecision, Reviewer};

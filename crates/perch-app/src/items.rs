@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use jiff::Timestamp;
-use perch_github::{Item, ItemSubject};
+use perch_github::{DeclaredRepo, Item, ItemSubject};
 
 use crate::timefmt::{bucket, DateBucket};
 
@@ -517,6 +517,8 @@ pub struct ItemSection {
     /// Stable identity for the view diffing key: the grouping's key, a
     /// colon, and the lower-cased repository, owner, or the date label.
     pub key: String,
+    /// The heading: a declared repository's name, an undeclared one's
+    /// `owner/repo` as its items spell it, the owner, or the date label.
     pub title: String,
     /// For a repository, its active items before any filter, and for an
     /// owner the sum over its repositories. The badge says how much is
@@ -546,8 +548,8 @@ pub struct Sections {
     pub groups: Vec<ItemSection>,
 }
 
-/// Build the sidebar from the declared repositories, `owner/repo` in config
-/// order, and the cache's items.
+/// Build the sidebar from the declared repositories, each an identity and
+/// a display name in config order, and the cache's items.
 ///
 /// Pinned ignores the group, sort and kind settings and respects the
 /// search. Saved only, Needs attention and the reason narrow the searched
@@ -556,7 +558,7 @@ pub struct Sections {
 /// stay out of it unless the status shows archived items. Group sections
 /// take every filter. The direction reverses the rows and the date buckets
 /// and nothing else; pin order is not the sort.
-pub fn sections(declared: &[String], items: &[Item], filters: &ItemFilters, now: Timestamp) -> Sections {
+pub fn sections(declared: &[DeclaredRepo], items: &[Item], filters: &ItemFilters, now: Timestamp) -> Sections {
     let searched: Vec<&Item> =
         items.iter().filter(|i| filters.matches_query(i) && filters.narrows_to(i)).collect();
     let top_level = |i: &Item| !i.is_archived() || filters.status.shows_archived();
@@ -598,11 +600,16 @@ fn sort_items(items: &mut [&Item], sort: ItemSort, direction: Direction) {
 /// One repository's rows, on the way to becoming a section of its own or
 /// part of its owner's.
 struct RepoBucket {
-    /// `owner/repo`, lower-cased: the identity, since a checkout's origin
-    /// and the API can spell one repository differently.
+    /// The identity lower-cased, `owner/repo` or `local/<name>`, since
+    /// config.toml, a checkout's remote and the API can each spell one
+    /// repository differently.
     key: String,
-    /// The declared spelling when declared, else the first row's.
-    name: String,
+    /// The identity as declared, else as the first row spelled it. The
+    /// owner heading is its first half.
+    identity: String,
+    /// The section heading: the declared name, else the identity as the
+    /// first row spelled it.
+    title: String,
     declared: bool,
     items: Vec<Item>,
     /// Active items in the repository, before any filter.
@@ -610,19 +617,27 @@ struct RepoBucket {
 }
 
 /// The rows bucketed by repository, declared repositories first in config
-/// order, then the rest by name. Grouping is by the item's own repository,
-/// so a checkout of a fork sits under the fork whatever its pull request
-/// is against, the same repository the row's second line names. A declared
-/// repository with no rows is still here, empty, for Show Empty.
+/// order, then the rest by identity. Grouping is by the item's own
+/// repository, so a checkout of a fork sits under the fork whatever its
+/// pull request is against, the same repository the row's second line
+/// names. A declared repository with no rows is still here, empty, for
+/// Show Empty.
 ///
 /// Every repository with an item gets a bucket, whether or not any of its
 /// items survive the filters, so its active count reaches its owner's
 /// badge the same as a declared repository's does. The callers drop an
 /// undeclared bucket with no rows.
-fn by_repository_order(declared: &[String], all: &[Item], rows: &[&Item]) -> Vec<RepoBucket> {
+fn by_repository_order(declared: &[DeclaredRepo], all: &[Item], rows: &[&Item]) -> Vec<RepoBucket> {
     let mut buckets: Vec<RepoBucket> = declared
         .iter()
-        .map(|name| RepoBucket { key: name.to_lowercase(), name: name.clone(), declared: true, items: Vec::new(), active: 0 })
+        .map(|repo| RepoBucket {
+            key: repo.identity.to_lowercase(),
+            identity: repo.identity.clone(),
+            title: repo.name.clone(),
+            declared: true,
+            items: Vec::new(),
+            active: 0,
+        })
         .collect();
     let mut extra: Vec<RepoBucket> = Vec::new();
     for item in all {
@@ -630,7 +645,8 @@ fn by_repository_order(declared: &[String], all: &[Item], rows: &[&Item]) -> Vec
         if !buckets.iter().chain(extra.iter()).any(|b| b.key == key) {
             extra.push(RepoBucket {
                 key,
-                name: item.repo_full_name.clone(),
+                identity: item.repo_full_name.clone(),
+                title: item.repo_full_name.clone(),
                 declared: false,
                 items: Vec::new(),
                 active: 0,
@@ -665,18 +681,20 @@ fn by_repository(buckets: Vec<RepoBucket>, show_empty: bool) -> Vec<ItemSection>
         .filter(|b| !b.items.is_empty() || (show_empty && b.declared))
         .map(|b| ItemSection {
             key: format!("{}:{}", ItemGroup::Repository.key(), b.key),
-            title: b.name,
+            title: b.title,
             count: b.active,
             items: b.items,
         })
         .collect()
 }
 
-/// One flat section per owner, the part before the slash, with the rows
-/// of its repositories one after another in the repository order and no
-/// heading between them. The count is the sum over the repositories. With
-/// Show Empty, an owner all of whose declared repositories have nothing is
-/// listed too.
+/// One flat section per owner, the part of the identity before the slash,
+/// with the rows of its repositories one after another in the repository
+/// order and no heading between them. The owner is read from the identity
+/// and not the name, so a repository with no GitHub remote sits under
+/// `local`, its reserved owner. The count is the sum over the
+/// repositories. With Show Empty, an owner all of whose declared
+/// repositories have nothing is listed too.
 fn by_owner(buckets: Vec<RepoBucket>, show_empty: bool) -> Vec<ItemSection> {
     struct OwnerBucket {
         key: String,
@@ -691,7 +709,7 @@ fn by_owner(buckets: Vec<RepoBucket>, show_empty: bool) -> Vec<ItemSection> {
         let owner = match owners.iter().position(|o| o.key == key) {
             Some(i) => &mut owners[i],
             None => {
-                let name = bucket.name.split('/').next().unwrap_or_default().to_string();
+                let name = bucket.identity.split('/').next().unwrap_or_default().to_string();
                 owners.push(OwnerBucket { key, name, declared: false, items: Vec::new(), active: 0 });
                 let last = owners.len() - 1;
                 &mut owners[last]
@@ -871,8 +889,16 @@ mod tests {
         i
     }
 
-    fn declared(names: &[&str]) -> Vec<String> {
-        names.iter().map(|n| n.to_string()).collect()
+    /// Declared as `github = "owner/repo"` with no `name`, so each shows
+    /// as the repo half, the way config.toml defaults it.
+    fn declared(identities: &[&str]) -> Vec<DeclaredRepo> {
+        identities
+            .iter()
+            .map(|id| DeclaredRepo {
+                identity: id.to_string(),
+                name: id.split_once('/').map_or(*id, |(_, repo)| repo).to_string(),
+            })
+            .collect()
     }
 
     fn titles(s: &Sections) -> Vec<&str> {
@@ -883,7 +909,7 @@ mod tests {
     /// with attention, a done pull request, a merged one, an issue, an
     /// archived branch, and a plain branch. slatedb/slatedb has one open
     /// pull request. x/empty has nothing.
-    fn fixture() -> (Vec<String>, Vec<Item>) {
+    fn fixture() -> (Vec<DeclaredRepo>, Vec<Item>) {
         let declared = declared(&["criccomini/perch", "slatedb/slatedb", "x/empty"]);
 
         let mut wanted = item("pr-wanted", "criccomini/perch", "2026-09-10T10:00:00Z");
@@ -960,7 +986,7 @@ mod tests {
         let (declared, items) = fixture();
         let s = sections(&declared, &items, &ItemFilters::default(), now());
         let perch = &s.groups[0];
-        assert_eq!(perch.title, "criccomini/perch");
+        assert_eq!(perch.title, "perch");
         let rows = section_ids(perch);
         assert!(rows.contains(&"pr-wanted"));
         assert!(rows.contains(&"issue"));
@@ -1052,19 +1078,19 @@ mod tests {
         // Config order, not name order: slatedb is declared first.
         let declared = declared(&["slatedb/slatedb", "criccomini/perch", "x/empty"]);
         let s = sections(&declared, &items, &ItemFilters::default(), now());
-        assert_eq!(titles(&s), ["slatedb/slatedb", "criccomini/perch"]);
+        assert_eq!(titles(&s), ["slatedb", "perch"]);
         assert_eq!(s.groups[0].key, "repo:slatedb/slatedb");
         assert_eq!(s.groups[0].group(), ItemGroup::Repository);
 
         let f = ItemFilters { show_empty: true, ..Default::default() };
         let s = sections(&declared, &items, &f, now());
-        assert_eq!(titles(&s), ["slatedb/slatedb", "criccomini/perch", "x/empty"]);
+        assert_eq!(titles(&s), ["slatedb", "perch", "empty"]);
         assert_eq!(s.groups[2].count, 0);
         assert!(s.groups[2].items.is_empty());
     }
 
     #[test]
-    fn an_undeclared_repository_follows_the_declared_ones_by_name() {
+    fn an_undeclared_repository_follows_the_declared_ones_by_identity_and_is_titled_by_its_slug() {
         let (declared, mut items) = fixture();
         items[6].repo_full_name = "zed/later".into();
         let mut first = item("stray", "Aardvark/first", "2026-09-13T10:00:00Z");
@@ -1072,19 +1098,60 @@ mod tests {
         items.push(first);
 
         let s = sections(&declared, &items, &ItemFilters::default(), now());
-        assert_eq!(titles(&s), ["criccomini/perch", "Aardvark/first", "zed/later"], "by name, case aside");
+        // Nothing declares the last two, so no name shortens them: the
+        // heading is the slug as the item spelled it.
+        assert_eq!(titles(&s), ["perch", "Aardvark/first", "zed/later"], "by identity, case aside");
         assert_eq!(s.groups[1].key, "repo:aardvark/first");
         assert_eq!(s.groups[2].count, 1, "an undeclared repository counts its active items too");
     }
 
     #[test]
-    fn a_repository_spelled_two_ways_is_one_section_with_the_declared_spelling() {
+    fn a_repository_spelled_two_ways_is_one_section_with_the_declared_name() {
         let (declared, mut items) = fixture();
         items[6].repo_full_name = "Criccomini/Perch".into();
         let s = sections(&declared, &items, &ItemFilters::default(), now());
-        assert_eq!(titles(&s), ["criccomini/perch"]);
+        assert_eq!(titles(&s), ["perch"]);
+        assert_eq!(s.groups[0].key, "repo:criccomini/perch");
         assert!(section_ids(&s.groups[0]).contains(&"slatedb-pr"));
         assert_eq!(s.groups[0].count, 4);
+    }
+
+    #[test]
+    fn a_declared_name_is_the_heading_and_the_identity_is_the_key() {
+        let (_, items) = fixture();
+        let mut declared = declared(&["criccomini/perch", "slatedb/slatedb", "x/empty"]);
+        declared[0].name = "Perch (mine)".into();
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
+        assert_eq!(titles(&s), ["Perch (mine)", "slatedb"]);
+        assert_eq!(s.groups[0].key, "repo:criccomini/perch", "the key is the identity, whatever the name");
+        assert_eq!(reference(&items[0], ItemGroup::Owner), "criccomini/perch #57 · fence", "the row keeps the slug");
+    }
+
+    #[test]
+    fn a_local_repository_is_titled_by_its_name_and_grouped_under_local() {
+        let (_, mut items) = fixture();
+        // A checkout of a repository with no GitHub remote: its identity is
+        // local/<name>, and its section is called by the name alone.
+        let mut declared = declared(&["criccomini/perch", "slatedb/slatedb"]);
+        declared.push(DeclaredRepo { identity: "local/notes".into(), name: "notes".into() });
+        let mut draft = item("notes-draft", "local/notes", "2026-09-13T10:00:00Z");
+        draft.checkout = Some(checkout("draft"));
+        items.push(draft);
+
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
+        assert_eq!(titles(&s), ["perch", "slatedb", "notes"]);
+        assert_eq!(s.groups[2].key, "repo:local/notes");
+        assert_eq!(section_ids(&s.groups[2]), ["notes-draft"]);
+        assert_eq!(reference(&items[7], ItemGroup::Repository), "draft", "the heading names the repository");
+        assert_eq!(reference(&items[7], ItemGroup::Owner), "local/notes · draft");
+
+        // Under Owner, the heading is the reserved owner, read from the
+        // identity and not the name.
+        let f = ItemFilters { group: ItemGroup::Owner, ..Default::default() };
+        let s = sections(&declared, &items, &f, now());
+        assert_eq!(titles(&s), ["criccomini", "slatedb", "local"]);
+        assert_eq!(s.groups[2].key, "owner:local");
+        assert_eq!(section_ids(&s.groups[2]), ["notes-draft"]);
     }
 
     #[test]
@@ -1093,7 +1160,7 @@ mod tests {
         // The pull request is criccomini/perch's; the checkout is of a fork.
         items[0].repo_full_name = "chris/perch".into();
         let s = sections(&declared, &items, &ItemFilters::default(), now());
-        assert_eq!(titles(&s), ["criccomini/perch", "slatedb/slatedb", "chris/perch"]);
+        assert_eq!(titles(&s), ["perch", "slatedb", "chris/perch"]);
         assert_eq!(section_ids(&s.groups[2]), ["pr-wanted"]);
         assert_eq!(reference(&items[0], ItemGroup::Owner), "chris/perch #57 · fence");
     }
@@ -1161,7 +1228,7 @@ mod tests {
         // section, with or without Show Empty.
         let f = ItemFilters { kinds, show_empty: true, ..Default::default() };
         let s = sections(&two, &items, &f, now());
-        assert_eq!(titles(&s), ["slatedb/slatedb", "criccomini/perch"]);
+        assert_eq!(titles(&s), ["slatedb", "perch"]);
         assert_eq!(s.groups[0].count, 2);
     }
 
@@ -1308,7 +1375,7 @@ mod tests {
         let f = ItemFilters { saved_only: true, ..Default::default() };
         let s = sections(&declared, &items, &f, now());
         assert_eq!(ids(&s.pinned), ["issue"], "the unsaved pinned branch is cut");
-        assert_eq!(titles(&s), ["criccomini/perch"]);
+        assert_eq!(titles(&s), ["perch"]);
         assert_eq!(section_ids(&s.groups[0]), ["issue-saved"]);
         // The badge is not narrowed.
         assert_eq!(s.groups[0].count, 4);
@@ -1329,7 +1396,7 @@ mod tests {
         let f = ItemFilters { attention_only: true, ..Default::default() };
         let s = sections(&declared, &items, &f, now());
         assert!(s.pinned.is_empty(), "the pinned branch has no attention");
-        assert_eq!(titles(&s), ["criccomini/perch", "slatedb/slatedb"]);
+        assert_eq!(titles(&s), ["perch", "slatedb"]);
         assert_eq!(section_ids(&s.groups[0]), ["pr-wanted"]);
         assert_eq!(section_ids(&s.groups[1]), ["slatedb-pr"]);
         let listed: Vec<&str> = s.groups.iter().flat_map(section_ids).collect();

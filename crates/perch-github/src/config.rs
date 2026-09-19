@@ -17,6 +17,10 @@ pub struct Config {
     pub knowledge: KnowledgeConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    /// A GitHub Enterprise host whose remotes count as GitHub, beside
+    /// github.com.
+    #[serde(default)]
+    pub github_host: Option<String>,
     /// `[[repo]]` entries: the repositories Perch lists, syncs, and files
     /// knowledge under.
     #[serde(default)]
@@ -166,22 +170,113 @@ pub struct KnowledgeConfig {
     project: Vec<toml::Value>,
 }
 
-/// A repository the reader follows: `owner/repo`, and any checkouts of it
-/// already on this machine.
+/// The owner reserved for repositories with no GitHub remote. Their
+/// identity is `local/<name>`, so it splits on one slash and files under
+/// two directories like any other; `parse` refuses it in `github`, so a
+/// GitHub repository cannot collide with one.
+pub const LOCAL_OWNER: &str = "local";
+
+/// Whether an identity is `local/<name>`: a repository with no GitHub
+/// remote, which no GitHub pass should ask about. The owner is compared
+/// without regard to case, as identities are everywhere else.
+pub fn is_local(identity: &str) -> bool {
+    match identity.split_once('/') {
+        Some((owner, _)) => owner.eq_ignore_ascii_case(LOCAL_OWNER),
+        None => false,
+    }
+}
+
+/// A repository the reader follows. Its identity is `owner/repo` on
+/// GitHub, or `local/<name>` for one that lives only on this machine;
+/// either way it is compared without regard to case, and everything
+/// downstream splits it on its one slash. `name` is what the sidebar
+/// shows and nothing more.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RepoConfig {
-    /// `owner/repo`. The identity, compared without regard to case.
-    pub name: String,
+    /// `owner/repo` on GitHub. Absent for a repository that lives only on
+    /// this machine.
+    #[serde(default)]
+    pub github: Option<String>,
+    /// What the sidebar calls it. Defaults to the repo half of `github`,
+    /// else the first root's basename.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Directories that are checkouts of the repository, or worktrees of
     /// one. A leading `~` is the home directory.
     #[serde(default)]
     pub roots: Vec<String>,
+    /// The base branch, used when no remote HEAD says which it is.
+    #[serde(default)]
+    pub base: Option<String>,
+    /// The identity once known: `github` when given, else set by `resolve`
+    /// from the first root's scan.
+    #[serde(skip)]
+    identity: Option<String>,
 }
 
 impl RepoConfig {
     pub fn root_paths(&self) -> Vec<PathBuf> {
         self.roots.iter().map(|r| expand_home(r)).collect()
     }
+
+    /// The identity, once there is one: `github` when the file gave it,
+    /// else what `resolve` settled on. None for a roots-only entry the
+    /// scan has not reached yet.
+    pub fn identity(&self) -> Option<&str> {
+        self.github.as_deref().or(self.identity.as_deref())
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        self.identity().is_some()
+    }
+
+    /// What the sidebar shows: `name`, else the repo half of `github`,
+    /// else the first root's basename. Empty only for an entry `parse`
+    /// would not have kept.
+    pub fn display_name(&self) -> String {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
+        if let Some((_, repo)) = self.github.as_deref().and_then(|g| g.split_once('/')) {
+            return repo.to_string();
+        }
+        self.root_paths()
+            .first()
+            .and_then(|root| root.file_name())
+            .map(|base| base.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Give a roots-only entry its identity: `Some(slug)` from a GitHub
+    /// remote makes it that repository, `None` makes it `local/<name>`.
+    pub fn resolve(&mut self, github: Option<String>) {
+        self.identity = Some(match github {
+            Some(slug) => slug,
+            None => format!("{LOCAL_OWNER}/{}", self.display_name()),
+        });
+    }
+
+    /// How a warning names the entry: by its `github`, else its roots,
+    /// else its `name`, else as the bare table.
+    fn label(&self) -> String {
+        if let Some(github) = &self.github {
+            format!("[[repo]] github = {github:?}")
+        } else if !self.roots.is_empty() {
+            format!("[[repo]] roots = {:?}", self.roots)
+        } else if let Some(name) = &self.name {
+            format!("[[repo]] name = {name:?}")
+        } else {
+            "[[repo]]".to_string()
+        }
+    }
+}
+
+/// One declared repository as the sidebar needs it: the identity its items
+/// carry, and the name its section shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredRepo {
+    pub identity: String,
+    pub name: String,
 }
 
 fn default_true() -> bool {
@@ -197,27 +292,80 @@ impl Default for KnowledgeConfig {
 }
 
 impl Config {
-    /// Whether a repository is one of the `[[repo]]` entries. Declaring one
-    /// is what starts the list pass and the backfill for it; an item in a
-    /// repository nobody declared is still an item.
-    pub fn is_declared(&self, repo_full_name: &str) -> bool {
-        self.entry(repo_full_name).is_some()
+    /// The hosts whose remotes name a GitHub repository: github.com, and
+    /// the enterprise host when the file names one.
+    pub fn github_hosts(&self) -> Vec<String> {
+        let mut hosts = vec!["github.com".to_string()];
+        if let Some(host) = self.github_host.as_deref().filter(|h| !h.is_empty()) {
+            hosts.push(host.to_string());
+        }
+        hosts
     }
 
-    /// The declared roots of a repository, `~` expanded. Empty when it is
-    /// not declared, or declared without any.
-    pub fn roots_for(&self, repo_full_name: &str) -> Vec<PathBuf> {
-        self.entry(repo_full_name).map(RepoConfig::root_paths).unwrap_or_default()
+    /// Whether an identity is one of the `[[repo]]` entries, `owner/repo`
+    /// or `local/<name>`. Declaring one is what makes the sidebar a section
+    /// for it, and for a GitHub one starts the list pass and the backfill;
+    /// an item in a repository nobody declared is still an item.
+    pub fn is_declared(&self, identity: &str) -> bool {
+        self.entry(identity).is_some()
     }
 
-    /// The declared names in config order, which is the order the sidebar
-    /// and the list pass take them in.
+    /// The declared roots of the repository with an identity, `~` expanded.
+    /// Empty when nothing declares it, or the entry has none.
+    pub fn roots_for(&self, identity: &str) -> Vec<PathBuf> {
+        self.entry(identity).map(RepoConfig::root_paths).unwrap_or_default()
+    }
+
+    /// The identities in config order, which is the order the sidebar and
+    /// the list pass take them in. A roots-only entry is left out until
+    /// `resolve` has given it one.
     pub fn declared(&self) -> Vec<String> {
-        self.repo.iter().map(|r| r.name.clone()).collect()
+        self.repo.iter().filter_map(|r| r.identity().map(str::to_string)).collect()
     }
 
-    fn entry(&self, repo_full_name: &str) -> Option<&RepoConfig> {
-        self.repo.iter().find(|r| r.name.eq_ignore_ascii_case(repo_full_name))
+    /// The resolved entries as the sidebar needs them, in config order.
+    pub fn declared_repos(&self) -> Vec<DeclaredRepo> {
+        self.repo
+            .iter()
+            .filter_map(|r| r.identity().map(|id| DeclaredRepo { identity: id.to_string(), name: r.display_name() }))
+            .collect()
+    }
+
+    /// What the sidebar calls an identity: its entry's name, or the
+    /// identity itself when nothing declares it.
+    pub fn display_name(&self, identity: &str) -> String {
+        match self.entry(identity) {
+            Some(r) => r.display_name(),
+            None => identity.to_string(),
+        }
+    }
+
+    /// After every entry is resolved: a later entry whose identity repeats
+    /// an earlier one's is dropped with a warning naming both. `parse`
+    /// already refused a repeated `github`, so what lands here is a
+    /// roots-only entry whose checkout turned out to be of a repository
+    /// declared above it.
+    pub fn drop_repeated_identities(&mut self) {
+        let mut kept: Vec<RepoConfig> = Vec::new();
+        for r in std::mem::take(&mut self.repo) {
+            let repeated = r.identity().and_then(|id| {
+                let first = kept.iter().find(|k| k.identity().is_some_and(|kid| kid.eq_ignore_ascii_case(id)))?;
+                Some((id, first))
+            });
+            match repeated {
+                Some((id, first)) => self.warnings.push(format!(
+                    "config.toml: {} is {id}, which {} already declares; the later entry was skipped",
+                    r.label(),
+                    first.label()
+                )),
+                None => kept.push(r),
+            }
+        }
+        self.repo = kept;
+    }
+
+    fn entry(&self, identity: &str) -> Option<&RepoConfig> {
+        self.repo.iter().find(|r| r.identity().is_some_and(|id| id.eq_ignore_ascii_case(identity)))
     }
 }
 
@@ -295,44 +443,79 @@ impl Config {
         if let Some(key) = old_key {
             let mut refused = Self::fallback();
             refused.warnings.push(format!(
-                "config.toml: {key} is no longer read; declare each repository as [[repo]] with name = \"owner/repo\". The file was not loaded."
+                "config.toml: {key} is no longer read; declare each repository as [[repo]] with github = \"owner/repo\". The file was not loaded."
             ));
             return Ok(refused);
         }
-        c.keep_well_formed_names();
+        c.keep_well_formed_repos();
         Ok(c)
     }
 
-    /// Drop a `[[repo]]` whose name is not `owner/repo`, with a warning
-    /// naming it. Everything downstream splits the name on its one slash,
-    /// and a name that does not split would be a section nothing could
-    /// list or file under. The rest of the file loads.
+    /// Drop a `[[repo]]` that could not be listed or scanned, with a
+    /// warning naming it, and let the rest of the file load. A `github`
+    /// that is not `owner/repo` would not split the way everything
+    /// downstream splits an identity; the owner `local` is kept for
+    /// repositories with no GitHub remote; an entry with neither `github`
+    /// nor roots has nothing to list and nothing to scan; and two entries
+    /// with the same `github`, or two the sidebar would call the same
+    /// thing, are one repository or an ambiguity, so the later one goes.
     ///
-    /// A name declared twice, in any case, is one repository: the name is
-    /// the identity. The later entry's roots join the first's, with a
-    /// warning, so the sidebar makes one section and the list pass one
-    /// request rather than one per entry.
-    fn keep_well_formed_names(&mut self) {
+    /// A file from before `github` existed said `name = "owner/repo"`.
+    /// That reads as `github` when nothing else set it, with a notice, so
+    /// nothing breaks on upgrade.
+    ///
+    /// An entry with `github` has its identity from here on. One with only
+    /// roots waits for the scan to say whether its checkout is on GitHub.
+    fn keep_well_formed_repos(&mut self) {
         let mut kept: Vec<RepoConfig> = Vec::new();
-        for r in std::mem::take(&mut self.repo) {
-            if !is_full_name(&r.name) {
+        for mut r in std::mem::take(&mut self.repo) {
+            if r.github.is_none() && r.name.as_deref().is_some_and(|n| n.contains('/')) {
+                let old = r.name.take().unwrap_or_default();
                 self.warnings.push(format!(
-                    "config.toml: [[repo]] name = {:?} is not owner/repo; the entry was skipped",
-                    r.name
+                    "config.toml: [[repo]] name = {old:?} was read as github = {old:?}; the key is now github, and name is what the sidebar shows"
                 ));
-            } else if let Some(first) = kept.iter_mut().find(|k| k.name.eq_ignore_ascii_case(&r.name)) {
-                self.warnings.push(format!(
-                    "config.toml: [[repo]] name = {:?} repeats {:?}; its roots were added to the first entry",
-                    r.name, first.name
-                ));
-                for root in r.roots {
-                    if !first.roots.contains(&root) {
-                        first.roots.push(root);
-                    }
-                }
-            } else {
-                kept.push(r);
+                r.github = Some(old);
             }
+            if let Some(github) = r.github.as_deref().filter(|g| !is_full_name(g)) {
+                self.warnings.push(format!(
+                    "config.toml: [[repo]] github = {github:?} is not owner/repo; the entry was skipped"
+                ));
+                continue;
+            }
+            if r.github.as_deref().is_some_and(is_local) {
+                self.warnings.push(format!(
+                    "config.toml: {} has the owner {LOCAL_OWNER}, which is reserved for repositories with no GitHub remote; the entry was skipped",
+                    r.label()
+                ));
+                continue;
+            }
+            if r.github.is_none() && r.roots.is_empty() {
+                self.warnings.push(format!(
+                    "config.toml: {} has neither github nor roots, so there is nothing to list and nothing to scan; the entry was skipped",
+                    r.label()
+                ));
+                continue;
+            }
+            if let Some(first) = kept.iter().find(|k| {
+                k.github.as_deref().zip(r.github.as_deref()).is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+            }) {
+                self.warnings.push(format!(
+                    "config.toml: {} repeats {}; the later entry was skipped",
+                    r.label(),
+                    first.label()
+                ));
+                continue;
+            }
+            let name = r.display_name();
+            if let Some(first) = kept.iter().find(|k| k.display_name().eq_ignore_ascii_case(&name)) {
+                self.warnings.push(format!(
+                    "config.toml: {} and {} would both show as {name:?}; give one of them a name. The later entry was skipped",
+                    r.label(),
+                    first.label()
+                ));
+                continue;
+            }
+            kept.push(r);
         }
         self.repo = kept;
     }
@@ -343,6 +526,7 @@ impl Config {
             poll_interval_secs: default_poll_secs(),
             knowledge: KnowledgeConfig::default(),
             agent: AgentConfig::default(),
+            github_host: None,
             repo: Vec::new(),
             project: Vec::new(),
             warnings: Vec::new(),
@@ -473,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_repository_is_known_by_its_whole_name_whatever_the_case() {
+    fn a_declared_repository_is_known_by_its_identity_whatever_the_case() {
         let c = Config::parse(
             r#"
             [knowledge]
@@ -481,19 +665,20 @@ mod tests {
             skills = false
 
             [[repo]]
-            name = "slatedb/slatedb"
+            github = "slatedb/slatedb"
 
             [[repo]]
-            name = "slatedb/slatedb-go"
+            github = "slatedb/slatedb-go"
             "#,
         )
         .unwrap();
-        assert!(c.warnings.is_empty());
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
         assert_eq!(c.declared(), vec!["slatedb/slatedb", "slatedb/slatedb-go"]);
         assert!(c.is_declared("slatedb/slatedb-go"));
-        assert!(c.is_declared("SlateDB/SlateDB"), "the name is an identity, not a spelling");
+        assert!(c.is_declared("SlateDB/SlateDB"), "the identity is an identity, not a spelling");
         assert!(!c.is_declared("slatedb"), "the whole owner/repo, not a part of it");
         assert!(!c.is_declared("criccomini/perch"));
+        assert!(c.repo.iter().all(RepoConfig::is_resolved), "github is the identity, nothing to wait for");
         assert!(!c.knowledge.skills);
         assert_eq!(c.knowledge.root_path(), home_dir().join("elsewhere"));
     }
@@ -503,20 +688,185 @@ mod tests {
         let c = Config::parse(
             r#"
             [[repo]]
-            name = "criccomini/perch"
+            github = "criccomini/perch"
             roots = ["~/Code/perch", "/tmp/perch-2"]
+            base = "trunk"
 
             [[repo]]
-            name = "slatedb/slatedb"
+            github = "slatedb/slatedb"
             "#,
         )
         .unwrap();
         assert_eq!(c.repo.len(), 2);
         assert_eq!(c.repo[0].root_paths(), vec![home_dir().join("Code/perch"), PathBuf::from("/tmp/perch-2")]);
+        assert_eq!(c.repo[0].base.as_deref(), Some("trunk"));
         assert_eq!(c.roots_for("Criccomini/Perch"), c.repo[0].root_paths());
         assert!(c.repo[1].roots.is_empty());
+        assert_eq!(c.repo[1].base, None);
         assert!(c.roots_for("slatedb/slatedb").is_empty());
         assert!(c.roots_for("nobody/declared").is_empty());
+    }
+
+    #[test]
+    fn the_name_defaults_to_the_repo_half_of_github() {
+        let c = Config::parse(
+            r#"
+            [[repo]]
+            github = "slatedb/slatedb"
+
+            [[repo]]
+            github = "criccomini/perch"
+            name = "Perch"
+            "#,
+        )
+        .unwrap();
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.repo[0].display_name(), "slatedb");
+        assert_eq!(c.repo[1].display_name(), "Perch", "a name given is the name shown");
+        assert_eq!(
+            c.declared_repos(),
+            vec![
+                DeclaredRepo { identity: "slatedb/slatedb".into(), name: "slatedb".into() },
+                DeclaredRepo { identity: "criccomini/perch".into(), name: "Perch".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_roots_only_entry_is_named_after_its_first_root() {
+        let c = Config::parse(
+            r#"
+            [[repo]]
+            roots = ["~/Code/notes", "/tmp/notes-2"]
+
+            [[repo]]
+            roots = ["/srv/scratch/"]
+            name = "Scratch"
+            "#,
+        )
+        .unwrap();
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.repo[0].display_name(), "notes");
+        assert_eq!(c.repo[1].display_name(), "Scratch");
+        assert_eq!(c.repo[0].github, None);
+        assert_eq!(c.repo[0].name, None, "the default is computed, not written back");
+    }
+
+    #[test]
+    fn a_roots_only_entry_is_declared_once_resolved() {
+        let mut c = Config::parse(
+            r#"
+            [[repo]]
+            github = "slatedb/slatedb"
+
+            [[repo]]
+            roots = ["~/Code/notes"]
+
+            [[repo]]
+            roots = ["~/Code/perch"]
+            "#,
+        )
+        .unwrap();
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.repo.len(), 3, "the entry is kept, waiting on the scan");
+        assert!(!c.repo[1].is_resolved());
+        assert_eq!(c.repo[1].identity(), None);
+        assert_eq!(c.declared(), vec!["slatedb/slatedb"], "not declared until the scan says what it is");
+        assert!(!c.is_declared("local/notes"));
+        assert!(c.roots_for("local/notes").is_empty());
+
+        c.repo[1].resolve(None);
+        assert_eq!(c.repo[1].identity(), Some("local/notes"));
+        assert!(is_local(c.repo[1].identity().unwrap()));
+        c.repo[2].resolve(Some("criccomini/perch".into()));
+        assert_eq!(c.repo[2].identity(), Some("criccomini/perch"));
+        assert!(c.repo.iter().all(RepoConfig::is_resolved));
+        assert_eq!(c.declared(), vec!["slatedb/slatedb", "local/notes", "criccomini/perch"]);
+        assert!(c.is_declared("Local/Notes"));
+        assert_eq!(c.roots_for("local/notes"), vec![home_dir().join("Code/notes")]);
+        assert_eq!(c.roots_for("criccomini/perch"), vec![home_dir().join("Code/perch")]);
+        assert_eq!(
+            c.declared_repos(),
+            vec![
+                DeclaredRepo { identity: "slatedb/slatedb".into(), name: "slatedb".into() },
+                DeclaredRepo { identity: "local/notes".into(), name: "notes".into() },
+                DeclaredRepo { identity: "criccomini/perch".into(), name: "perch".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn drop_repeated_identities_drops_the_later_entry_with_a_warning_naming_both() {
+        let mut c = Config::parse(
+            r#"
+            [[repo]]
+            github = "slatedb/slatedb"
+
+            [[repo]]
+            roots = ["~/Code/slatedb-checkout"]
+
+            [[repo]]
+            roots = ["~/Code/notes"]
+            "#,
+        )
+        .unwrap();
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        c.repo[1].resolve(Some("SlateDB/slatedb".into()));
+        c.repo[2].resolve(None);
+        c.drop_repeated_identities();
+        assert_eq!(c.declared(), vec!["slatedb/slatedb", "local/notes"]);
+        assert_eq!(c.roots_for("slatedb/slatedb"), Vec::<PathBuf>::new(), "the first entry's roots, which are none");
+        assert_eq!(c.warnings.len(), 1);
+        assert!(c.warnings[0].contains("[[repo]] roots = [\"~/Code/slatedb-checkout\"]"), "{}", c.warnings[0]);
+        assert!(c.warnings[0].contains("[[repo]] github = \"slatedb/slatedb\""), "{}", c.warnings[0]);
+        assert!(c.warnings[0].ends_with("the later entry was skipped"), "{}", c.warnings[0]);
+    }
+
+    #[test]
+    fn display_name_finds_the_entry_whatever_the_case_and_echoes_a_stranger() {
+        let mut c = Config::parse(
+            r#"
+            [[repo]]
+            github = "slatedb/slatedb"
+            name = "SlateDB"
+
+            [[repo]]
+            github = "criccomini/perch"
+
+            [[repo]]
+            roots = ["~/Code/notes"]
+            "#,
+        )
+        .unwrap();
+        c.repo[2].resolve(None);
+        assert_eq!(c.display_name("slatedb/slatedb"), "SlateDB");
+        assert_eq!(c.display_name("SLATEDB/SLATEDB"), "SlateDB");
+        assert_eq!(c.display_name("criccomini/perch"), "perch");
+        assert_eq!(c.display_name("Local/Notes"), "notes");
+        assert_eq!(c.display_name("nobody/declared"), "nobody/declared", "an undeclared identity is its own name");
+    }
+
+    #[test]
+    fn a_local_identity_is_one_whose_owner_is_local() {
+        assert!(is_local("local/notes"));
+        assert!(is_local("Local/Notes"), "the owner is compared like any other");
+        assert!(is_local("LOCAL/x/y"));
+        assert!(!is_local("slatedb/slatedb"));
+        assert!(!is_local("localhost/x"));
+        assert!(!is_local("local"), "no slash, no owner");
+        assert!(!is_local(""));
+        assert_eq!(LOCAL_OWNER, "local");
+    }
+
+    #[test]
+    fn github_hosts_is_github_com_and_the_enterprise_host_when_set() {
+        let c = Config::parse("").unwrap();
+        assert_eq!(c.github_host, None);
+        assert_eq!(c.github_hosts(), vec!["github.com"]);
+        let c = Config::parse("github_host = \"github.example.com\"").unwrap();
+        assert_eq!(c.github_hosts(), vec!["github.com", "github.example.com"]);
+        let c = Config::parse("github_host = \"\"").unwrap();
+        assert_eq!(c.github_hosts(), vec!["github.com"], "an empty host names nothing");
     }
 
     #[test]
@@ -534,6 +884,7 @@ mod tests {
         assert_eq!(c.warnings.len(), 1);
         assert!(c.warnings[0].starts_with("config.toml: [[project]] is no longer read"), "{}", c.warnings[0]);
         assert!(c.warnings[0].contains("[[repo]]"), "the message names the new key");
+        assert!(c.warnings[0].contains("github = \"owner/repo\""), "and the key inside it: {}", c.warnings[0]);
         assert!(c.repo.is_empty());
         assert_eq!(c.poll_interval_secs, 60, "nothing else in the file was taken either");
     }
@@ -548,28 +899,174 @@ mod tests {
     }
 
     #[test]
-    fn a_name_that_is_not_owner_and_repo_is_skipped_with_a_warning() {
+    fn a_github_that_is_not_owner_and_repo_is_skipped_with_a_warning() {
         let c = Config::parse(
             r#"
             [[repo]]
-            name = "slatedb"
+            github = "slatedb"
+            roots = ["~/Code/slatedb"]
 
             [[repo]]
-            name = "slatedb/slatedb"
+            github = "slatedb/slatedb"
 
             [[repo]]
-            name = "a/b/c"
+            github = "a/b/c"
+
+            [[repo]]
+            github = "/b"
             "#,
         )
         .unwrap();
         assert_eq!(c.declared(), vec!["slatedb/slatedb"], "the rest of the file loads");
-        assert_eq!(c.warnings.len(), 2);
-        assert!(c.warnings[0].contains("\"slatedb\""), "{}", c.warnings[0]);
-        assert!(c.warnings[1].contains("\"a/b/c\""), "{}", c.warnings[1]);
+        assert_eq!(c.warnings.len(), 3);
+        assert!(c.warnings[0].contains("github = \"slatedb\" is not owner/repo"), "{}", c.warnings[0]);
+        assert!(c.warnings[1].contains("github = \"a/b/c\" is not owner/repo"), "{}", c.warnings[1]);
+        assert!(c.warnings[2].contains("github = \"/b\" is not owner/repo"), "{}", c.warnings[2]);
     }
 
     #[test]
-    fn a_name_declared_twice_is_one_entry_with_the_roots_of_both() {
+    fn a_repeated_github_is_skipped_with_a_warning_naming_both() {
+        let c = Config::parse(
+            r#"
+            [[repo]]
+            github = "slatedb/slatedb"
+            roots = ["~/Code/slatedb"]
+
+            [[repo]]
+            github = "slatedb/slatedb-go"
+
+            [[repo]]
+            github = "SlateDB/slatedb"
+            name = "fork"
+            roots = ["~/Code/slatedb", "~/Code/slatedb-fork"]
+
+            [[repo]]
+            github = "slatedb/slatedb-go"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.declared(), vec!["slatedb/slatedb", "slatedb/slatedb-go"], "the first spelling, once");
+        assert_eq!(c.repo[0].roots, vec!["~/Code/slatedb"], "the later entry's roots do not join the first's");
+        assert!(c.repo[1].roots.is_empty());
+        assert_eq!(c.roots_for("SLATEDB/SLATEDB").len(), 1);
+        assert_eq!(c.warnings.len(), 2);
+        assert!(
+            c.warnings[0].contains("[[repo]] github = \"SlateDB/slatedb\" repeats [[repo]] github = \"slatedb/slatedb\""),
+            "{}",
+            c.warnings[0]
+        );
+        assert!(
+            c.warnings[1].contains("[[repo]] github = \"slatedb/slatedb-go\" repeats [[repo]] github = \"slatedb/slatedb-go\""),
+            "{}",
+            c.warnings[1]
+        );
+        assert!(c.warnings.iter().all(|w| w.ends_with("the later entry was skipped")), "{:?}", c.warnings);
+    }
+
+    #[test]
+    fn a_repeated_name_is_skipped_with_a_warning_naming_both() {
+        let c = Config::parse(
+            r#"
+            [[repo]]
+            github = "slatedb/slatedb"
+
+            [[repo]]
+            github = "criccomini/slatedb"
+
+            [[repo]]
+            roots = ["~/Code/SlateDB"]
+
+            [[repo]]
+            github = "criccomini/perch"
+            name = "slatedb"
+
+            [[repo]]
+            github = "criccomini/slatedb"
+            name = "my slatedb"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            c.declared(),
+            vec!["slatedb/slatedb", "criccomini/slatedb"],
+            "the first to claim a name keeps it; the last entry's github repeats nothing kept, and its name is its own"
+        );
+        assert_eq!(c.repo.len(), 2, "the roots-only entry went too, not just the GitHub ones");
+        assert_eq!(c.display_name("criccomini/slatedb"), "my slatedb");
+        assert_eq!(c.warnings.len(), 3, "{:?}", c.warnings);
+        assert!(
+            c.warnings[0].contains("[[repo]] github = \"criccomini/slatedb\" and [[repo]] github = \"slatedb/slatedb\""),
+            "{}",
+            c.warnings[0]
+        );
+        assert!(c.warnings[0].contains("would both show as \"slatedb\""), "{}", c.warnings[0]);
+        assert!(c.warnings[0].contains("give one of them a name"), "{}", c.warnings[0]);
+        assert!(c.warnings[0].ends_with("The later entry was skipped"), "{}", c.warnings[0]);
+        assert!(
+            c.warnings[1].contains("[[repo]] roots = [\"~/Code/SlateDB\"]"),
+            "case does not tell them apart: {}",
+            c.warnings[1]
+        );
+        assert!(
+            c.warnings[2].contains("[[repo]] github = \"criccomini/perch\""),
+            "a written name counts too: {}",
+            c.warnings[2]
+        );
+    }
+
+    #[test]
+    fn the_local_owner_in_github_is_skipped_with_a_warning() {
+        let c = Config::parse(
+            r#"
+            [[repo]]
+            github = "local/notes"
+            roots = ["~/Code/notes"]
+
+            [[repo]]
+            github = "Local/scratch"
+
+            [[repo]]
+            github = "slatedb/slatedb"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.declared(), vec!["slatedb/slatedb"]);
+        assert_eq!(c.warnings.len(), 2);
+        assert!(c.warnings[0].contains("[[repo]] github = \"local/notes\" has the owner local"), "{}", c.warnings[0]);
+        assert!(c.warnings[0].contains("reserved for repositories with no GitHub remote"), "{}", c.warnings[0]);
+        assert!(c.warnings[1].contains("[[repo]] github = \"Local/scratch\""), "any case: {}", c.warnings[1]);
+        assert!(c.warnings.iter().all(|w| w.ends_with("the entry was skipped")), "{:?}", c.warnings);
+    }
+
+    #[test]
+    fn an_entry_with_neither_github_nor_roots_is_skipped_with_a_warning() {
+        let c = Config::parse(
+            r#"
+            [[repo]]
+            name = "notes"
+
+            [[repo]]
+            base = "main"
+
+            [[repo]]
+            github = "slatedb/slatedb"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.declared(), vec!["slatedb/slatedb"]);
+        assert_eq!(c.repo.len(), 1);
+        assert_eq!(c.warnings.len(), 2);
+        assert!(
+            c.warnings[0].starts_with("config.toml: [[repo]] name = \"notes\" has neither github nor roots"),
+            "{}",
+            c.warnings[0]
+        );
+        assert!(c.warnings[1].starts_with("config.toml: [[repo]] has neither github nor roots"), "{}", c.warnings[1]);
+        assert!(c.warnings.iter().all(|w| w.ends_with("the entry was skipped")), "{:?}", c.warnings);
+    }
+
+    #[test]
+    fn an_old_name_with_a_slash_is_read_as_github_with_a_notice() {
         let c = Config::parse(
             r#"
             [[repo]]
@@ -577,24 +1074,37 @@ mod tests {
             roots = ["~/Code/slatedb"]
 
             [[repo]]
-            name = "slatedb/slatedb-go"
+            name = "criccomini/perch"
+            github = "criccomini/perch"
 
             [[repo]]
-            name = "SlateDB/slatedb"
-            roots = ["~/Code/slatedb", "~/Code/slatedb-fork"]
-
-            [[repo]]
-            name = "slatedb/slatedb-go"
+            name = "a/b/c"
             "#,
         )
         .unwrap();
-        assert_eq!(c.declared(), vec!["slatedb/slatedb", "slatedb/slatedb-go"], "the first spelling, once");
-        assert_eq!(c.repo[0].roots, vec!["~/Code/slatedb", "~/Code/slatedb-fork"]);
-        assert!(c.repo[1].roots.is_empty());
-        assert_eq!(c.roots_for("SLATEDB/SLATEDB").len(), 2);
-        assert_eq!(c.warnings.len(), 2);
-        assert!(c.warnings[0].contains("\"SlateDB/slatedb\" repeats \"slatedb/slatedb\""), "{}", c.warnings[0]);
-        assert!(c.warnings[1].contains("\"slatedb/slatedb-go\" repeats"), "{}", c.warnings[1]);
+        assert_eq!(c.declared(), vec!["slatedb/slatedb", "criccomini/perch"], "declared still lists it");
+        assert_eq!(c.repo[0].github.as_deref(), Some("slatedb/slatedb"));
+        assert_eq!(c.repo[0].name, None, "the name defaults rather than showing the slug");
+        assert_eq!(c.repo[0].display_name(), "slatedb");
+        assert_eq!(c.roots_for("slatedb/slatedb"), vec![home_dir().join("Code/slatedb")]);
+        assert_eq!(c.repo[1].name.as_deref(), Some("criccomini/perch"), "a name beside github is left as written");
+        assert_eq!(c.warnings.len(), 3, "{:?}", c.warnings);
+        assert!(
+            c.warnings[0].starts_with("config.toml: [[repo]] name = \"slatedb/slatedb\" was read as github = \"slatedb/slatedb\""),
+            "{}",
+            c.warnings[0]
+        );
+        assert!(
+            c.warnings[0].contains("the key is now github, and name is what the sidebar shows"),
+            "{}",
+            c.warnings[0]
+        );
+        assert!(c.warnings[1].contains("name = \"a/b/c\" was read as github"), "{}", c.warnings[1]);
+        assert!(
+            c.warnings[2].contains("github = \"a/b/c\" is not owner/repo"),
+            "and then judged as github: {}",
+            c.warnings[2]
+        );
     }
 
     #[test]

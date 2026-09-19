@@ -184,8 +184,8 @@ pub fn repo_index(repo: &str, sections: &[(Source, Vec<Message>)]) -> String {
 }
 
 /// The root index: every repository, the directory it is under, and when
-/// it last moved, so an agent can match `git remote get-url origin` to a
-/// directory.
+/// it last moved, so an agent can match its GitHub remote, or its
+/// directory name for a local repository, to a directory.
 pub fn root_index(repos: &[(String, Vec<Message>)]) -> String {
     let mut out = String::from("# Perch knowledge\n\n");
     out.push_str("| repository | directory | messages | updated |\n|---|---|---|---|\n");

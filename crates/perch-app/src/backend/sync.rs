@@ -408,7 +408,11 @@ fn upsert(
 /// name on the upstream is someone else's; a head with no repository is a
 /// deleted fork, which is nobody's checkout. A root row the scan put away
 /// because its branch is no longer checked out is passed over too: it
-/// cannot be read, and a checkout of Perch's own can.
+/// cannot be read, and a checkout of Perch's own can. A branch in a root
+/// that is a fork of the repository is filed under the repository, not
+/// the fork, so it is not found here; the pull request lookup that
+/// follows the scan asks by the fork's owner and takes the row this pass
+/// makes meanwhile.
 pub(crate) fn branch_item_for(cache: &Cache, pr: &PullRequest) -> Option<Item> {
     let head_repo = pr.head_repo_full_name.as_deref()?;
     cache

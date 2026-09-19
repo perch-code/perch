@@ -18,8 +18,8 @@ pub use diff::{
 pub use display::{DisplayBuffer, Row};
 pub use prepare::{home_ref, Checkout, Cut, Preparer, Step};
 pub use scan::{
-    branch_churn, head_commit_time, parse_worktree_list, repo_from_remote, scan_root, RootScan,
-    WorktreeEntry,
+    branch_churn, github_remote, head_commit_time, parse_remotes, parse_worktree_list,
+    remotes, repo_from_remote, scan_root, RootScan, WorktreeEntry,
 };
 pub use scope::{alignment, changed_files, dirt, log, read_side, Commit, Dirt, Rev, Scope};
 pub use store::{RepoId, Store};
@@ -39,4 +39,9 @@ pub enum Error {
     NoMergeBase,
     #[error("unexpected git output: {0}")]
     Parse(String),
+    #[error(
+        "no base branch for {}: no remote HEAD, no base in config.toml, and neither main nor master",
+        root.display()
+    )]
+    NoBase { root: std::path::PathBuf },
 }

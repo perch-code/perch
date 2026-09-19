@@ -9,7 +9,7 @@
 //! `items::sections` is checked against real data without a window.
 
 use jiff::Timestamp;
-use perch_github::{Cache, CheckStatus, Config, Item, ItemSubject};
+use perch_github::{Cache, CheckStatus, Item, ItemSubject};
 
 use crate::items::{self, ItemFilters, RowKind, Sections};
 
@@ -51,13 +51,14 @@ fn print(filters: &ItemFilters) -> Result<(), String> {
     if reset {
         eprintln!("note: the database was older than this build and has been recreated");
     }
-    // The declared repositories come from the file, as the window's do;
-    // the cache knows only the ones with items.
-    let config = Config::load();
+    // The declared repositories come from the file, as the window's do,
+    // roots scanned for their identities the same way; the cache knows
+    // only the ones with items.
+    let config = crate::repos::load_resolved();
     for warning in &config.warnings {
         eprintln!("warning: {warning}");
     }
-    let declared = config.declared();
+    let declared = config.declared_repos();
     let items = cache.load_items().map_err(|e| e.to_string())?;
     let sections = items::sections(&declared, &items, filters, Timestamp::now());
 
@@ -154,15 +155,15 @@ fn pr_status(item: &Item) -> Option<String> {
 mod tests {
     use super::*;
     use crate::items::ItemGroup;
-    use perch_github::{ItemCheckout, PullRequest, ReviewDecision};
+    use perch_github::{DeclaredRepo, ItemCheckout, PullRequest, ReviewDecision};
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
     }
 
-    /// One declared repository with a pull request that wants a review and
-    /// a pinned branch.
-    fn fixture() -> (Vec<String>, Vec<Item>) {
+    /// One declared repository, shown as `perch`, with a pull request that
+    /// wants a review and a pinned branch.
+    fn fixture() -> (Vec<DeclaredRepo>, Vec<Item>) {
         let mut wanted = Item::new("criccomini/perch", at("2026-09-10T10:00:00Z"));
         wanted.id = "a".into();
         wanted.subject = Some(ItemSubject::PullRequest(PullRequest {
@@ -211,7 +212,8 @@ mod tests {
         });
         branch.pinned_at = Some(at("2026-09-18T10:00:00Z"));
 
-        (vec!["criccomini/perch".into()], vec![wanted, branch])
+        let declared = DeclaredRepo { identity: "criccomini/perch".into(), name: "perch".into() };
+        (vec![declared], vec![wanted, branch])
     }
 
     fn text(filters: &ItemFilters) -> String {
@@ -231,7 +233,7 @@ mod tests {
             "Pinned",
             "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned",
             "",
-            "criccomini/perch (2)",
+            "perch (2)",
             "  P  Fence the manifest  [#57 · fence]  ci:failure review requested  * review requested",
             "",
         ]
@@ -280,7 +282,7 @@ mod tests {
         // Only the pull request matches, so its repository's section is.
         let f = ItemFilters { query: "fence".into(), ..Default::default() };
         let got = text(&f);
-        assert!(got.starts_with("criccomini/perch (2)\n  P  Fence the manifest"), "{got}");
+        assert!(got.starts_with("perch (2)\n  P  Fence the manifest"), "{got}");
     }
 
     #[test]
@@ -293,7 +295,7 @@ mod tests {
         // Needs attention cuts the pinned branch, which has none.
         let got = text(&ItemFilters::parse("attention=1;reason=review_requested;direction=oldest").unwrap());
         assert!(!got.contains("Pinned"), "{got}");
-        assert_eq!(got, "criccomini/perch (2)\n  P  Fence the manifest  [#57 · fence]  ci:failure review requested  * review requested\n");
+        assert_eq!(got, "perch (2)\n  P  Fence the manifest  [#57 · fence]  ci:failure review requested  * review requested\n");
 
         // Nothing is saved.
         let got = text(&ItemFilters::parse("saved=1").unwrap());

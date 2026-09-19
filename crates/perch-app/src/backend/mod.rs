@@ -112,10 +112,11 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub enum Event {
     Avatar { url: String, bytes: Vec<u8> },
-    /// The repositories config.toml declares, `owner/repo` in config
-    /// order, which is the order the sidebar lists them in. Sent once at
-    /// startup; the file is read once.
-    Repos(Vec<String>),
+    /// The repositories config.toml declares, each as the identity its
+    /// items carry and the name its section shows, in config order, which
+    /// is the order the sidebar lists them in. Sent once at startup; the
+    /// file is read once.
+    Repos(Vec<perch_github::DeclaredRepo>),
     /// Every item, active and archived. Whole, for the same reason.
     Items(Vec<Item>),
     /// A remembered setting, sent once at startup for each key the UI
@@ -418,7 +419,13 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
 async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event>) {
     tracing::info!("backend started");
     let mut config = Config::load();
-    tracing::info!(poll = config.poll_interval_secs, "config loaded");
+    // A `[[repo]]` with roots and no `github` is whatever its first root
+    // is, which takes a look at the directory. Before anything reads the
+    // declared list: the sidebar's sections, the passes and the backfill
+    // all come from it. No token yet, and none needed: the scan reads
+    // the root's own config and fetches nothing.
+    crate::repos::resolve(&mut config, &perch_git::cmd::Git::new(None)).await;
+    tracing::info!(poll = config.poll_interval_secs, repos = ?config.declared(), "config loaded");
 
     // Which agents are installed, asked alongside the GitHub setup rather
     // than before it: Codex's catalog can take a few seconds on a cold
@@ -471,7 +478,7 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
         let _ = events.send(Event::Notice(warning.clone()));
     }
     // The sidebar's order, before the items it orders.
-    let _ = events.send(Event::Repos(config.declared()));
+    let _ = events.send(Event::Repos(config.declared_repos()));
     if let Some(cache) = cache.as_ref() {
         // A run still marked running is one Perch died in the middle of.
         if let Ok(guard) = cache.lock() {
@@ -636,7 +643,7 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 // the poll said: the sidebar is missing rows, and `refresh`
                 // has just reported a healthy poll over it.
                 if let Some((repo, e)) = pass_failure {
-                    let _ = ctx.events.send(Event::Status(describe_pass_error(&repo, &e)));
+                    let _ = ctx.events.send(Event::Status(describe_pass_error(&ctx.config.display_name(&repo), &e)));
                 }
                 let open = ctx.slot.lock().ok().and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
                 if let Some(item_id) = open {
@@ -1271,6 +1278,20 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
     let _ = events.send(Event::ReviewProgress { message: "Checking out the files".into(), percent: None });
 
     let git_checkout = if checkout.owned {
+        // A checkout under the store is cut in a clone from GitHub, which
+        // a local repository has not got, so a row like this is from
+        // before the entry was local. Said here rather than found out by
+        // a clone that cannot start.
+        if perch_github::is_local(&item.repo_full_name) {
+            let _ = events.send(Event::ReviewFailed {
+                message: format!(
+                    "{} is not on GitHub, so there is no clone to put {} back in",
+                    ctx.config.display_name(&item.repo_full_name),
+                    checkout.branch
+                ),
+            });
+            return false;
+        }
         match open_owned_branch(ctx, &repo, &checkout).await {
             Ok(c) => c,
             Err(e) => {
@@ -1611,7 +1632,7 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
     if !head.is_empty() && head != checkout.head_sha && checkout.stale.is_none() {
         checkout.head_sha = head.clone();
         if let Some(item) = ctx.item(item_id) {
-            for base in base_revs_for(&item) {
+            for base in base_revs_for(ctx, &item).await {
                 if let Ok(mb) = git.run(Some(&checkout.worktree), ["merge-base", &base, &head], Duration::from_secs(30)).await {
                     let mb = mb.trim().to_string();
                     if !mb.is_empty() {
@@ -1666,16 +1687,17 @@ fn next_scope_gen() -> u64 {
 }
 
 /// The revisions an item's diff may be taken against, as the opens find
-/// them, best first: a root checkout's origin branch, since it is the
-/// reader's own clone and has none of Perch's refs; for a checkout in the
-/// store, a pull request's fetched base, then the home ref or the commit
-/// the branch was forked from. The first that resolves is the one.
-fn base_revs_for(item: &Item) -> Vec<String> {
+/// them, best first: a root checkout's base as its remote has it, since
+/// it is the reader's own clone and has none of Perch's refs; for a
+/// checkout in the store, a pull request's fetched base, then the home
+/// ref or the commit the branch was forked from. The first that resolves
+/// is the one.
+async fn base_revs_for(ctx: &Ctx, item: &Item) -> Vec<String> {
     let Some(checkout) = item.checkout.as_ref() else { return Vec::new() };
     let base = &checkout.base_ref;
     let is_sha = base.len() == 40 && base.chars().all(|c| c.is_ascii_hexdigit());
     if !checkout.owned {
-        return vec![format!("origin/{base}"), base.clone()];
+        return root_base_revs(ctx, &checkout.path, base).await;
     }
     let mut out = Vec::new();
     if let Some(pr) = item.pull_request() {
@@ -1683,6 +1705,30 @@ fn base_revs_for(item: &Item) -> Vec<String> {
     }
     out.push(if is_sha { base.clone() } else { perch_git::home_ref(base) });
     out
+}
+
+/// The revisions a root checkout's branch may be diffed against, best
+/// first: the base as the remote that names the repository has it, which
+/// is the remote the scan chose and counted the row's churn against, so
+/// the review and the row agree on where the branch left; then as
+/// `origin` has it, for a fork whose `upstream` has not been fetched;
+/// then the branch itself. The remote is read from the checkout the way
+/// the scan reads it, since the row carries the base's name and not the
+/// remote's.
+async fn root_base_revs(ctx: &Ctx, path: &Path, base: &str) -> Vec<String> {
+    let hosts = ctx.config.github_hosts();
+    let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+    let remotes = perch_git::remotes(ctx.preparer.git(), path).await.unwrap_or_default();
+    let mut revs = Vec::new();
+    if let Some((remote, _)) = perch_git::github_remote(&remotes, &hosts) {
+        revs.push(format!("{remote}/{base}"));
+    }
+    let origin = format!("origin/{base}");
+    if !revs.contains(&origin) {
+        revs.push(origin);
+    }
+    revs.push(base.to_string());
+    revs
 }
 
 /// One request for the workflow runs on the pull request's head, kept and
@@ -1740,6 +1786,16 @@ async fn set_scope(ctx: &Ctx, item_id: &str, scope: perch_git::Scope) {
     }
 }
 
+/// Why a branch cannot be cut for a local repository, or None when it can.
+/// A cut is made in the store's clone of the repository on GitHub, from
+/// its home checkout; a repository that lives only on this machine has
+/// neither, and the clone that would fail is one that must not be tried.
+fn no_home_for_local(ctx: &Ctx, repo_full_name: &str) -> Option<String> {
+    perch_github::is_local(repo_full_name).then(|| {
+        format!("{} is not on GitHub, so there is no home checkout to cut from", ctx.config.display_name(repo_full_name))
+    })
+}
+
 /// Cut `perch/issue-<n>` from the default branch and make the item for it,
 /// or find the one that already has that branch.
 async fn start_work(ctx: &Ctx, issue_item_id: &str) -> Result<String, String> {
@@ -1752,6 +1808,9 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str) -> Result<String, String> {
     let Some(repo) = RepoId::parse(&issue_item.repo_full_name) else {
         return Err(format!("{} is not a repository name", issue_item.repo_full_name));
     };
+    if let Some(message) = no_home_for_local(ctx, &issue_item.repo_full_name) {
+        return Err(message);
+    }
     let wanted = format!("perch/issue-{}", issue.number);
     if let Some(existing) = ctx
         .with_cache(|c| c.find_item_by_branch(&issue_item.repo_full_name, &wanted).ok().flatten())
@@ -1818,6 +1877,9 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
     let Some(repo) = RepoId::parse(&source.repo_full_name) else {
         return Err(format!("{} is not a repository name", source.repo_full_name));
     };
+    if let Some(message) = no_home_for_local(ctx, &source.repo_full_name) {
+        return Err(message);
+    }
     ctx.preparer.ensure_bare(&repo, |_| {}).await.map_err(|e| e.to_string())?;
     // A root's branch may not be in the store's clone; fetch its head
     // there by commit so the cut has something to start from.
@@ -1905,10 +1967,11 @@ struct ReviewContext {
 /// before it did. The first failure is returned for the status bar, with
 /// the repository whose pass it was: a pass has as many endpoints as
 /// there are declared repositories, and GitHub's answer names none of
-/// them.
+/// them. A local repository has nothing on GitHub to list, and is not
+/// asked about.
 async fn list_passes(ctx: &Ctx) -> Option<(String, sync::Error)> {
     let mut first_failure = None;
-    for repo in ctx.config.declared() {
+    for repo in ctx.config.declared().into_iter().filter(|r| !perch_github::is_local(r)) {
         match sync::list_pass_for(ctx, &repo).await {
             Ok(report) if !report.is_empty() => tracing::info!(
                 repo,
@@ -2184,38 +2247,59 @@ async fn scan_roots(ctx: &Ctx) -> bool {
     let mut seen: std::collections::HashSet<(std::path::PathBuf, String)> = std::collections::HashSet::new();
     let mut scanned_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut failed_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let hosts = ctx.config.github_hosts();
+    let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
 
     for declared in &ctx.config.repo {
+        // Every entry has its identity by the time the backend runs. One
+        // without would have nothing to key its rows by, so it is passed
+        // over rather than guessed at.
+        let Some(identity) = declared.identity() else { continue };
+        let local = perch_github::is_local(identity);
+        let name = declared.display_name();
         for root in declared.root_paths() {
-            let scan = match perch_git::scan_root(git, &root).await {
+            let scan = match perch_git::scan_root(git, &root, declared.base.as_deref(), &hosts).await {
                 Ok(s) => s,
                 Err(e) => {
                     ctx.notice(format!("{}: {e}", root.display()));
-                    failed_repos.insert(declared.name.to_lowercase());
+                    failed_repos.insert(identity.to_lowercase());
                     continue;
                 }
             };
-            let Some(repo) = scan.repo_full_name.clone() else {
-                ctx.notice(format!("{}: origin is not a GitHub repository", root.display()));
-                continue;
-            };
-            // A root belongs to the one repository its origin names.
-            if !repo.eq_ignore_ascii_case(&declared.name) {
-                ctx.notice(format!("{}: origin is {repo}, not {}", root.display(), declared.name));
-                continue;
+            // A root belongs to the one repository its remote names, and a
+            // local repository's roots have no GitHub remote at all. A
+            // root that says otherwise is left out of the entry rather
+            // than filed under a repository it is not.
+            match (scan.github.as_deref(), local) {
+                (None, false) => {
+                    ctx.notice(format!("{}: no GitHub remote for {name}", root.display()));
+                    continue;
+                }
+                (Some(slug), false) if !slug.eq_ignore_ascii_case(identity) => {
+                    ctx.notice(format!("{}: its remote is {slug}, not {identity}", root.display()));
+                    continue;
+                }
+                (Some(slug), true) => {
+                    ctx.notice(format!("{}: its remote is {slug}, but {name} is local", root.display()));
+                    continue;
+                }
+                _ => {}
             }
-            scanned_repos.insert(repo.to_lowercase());
+            scanned_repos.insert(identity.to_lowercase());
+            // `<remote>/<base>` for a GitHub root, since the branch left the
+            // base as the remote has it; `<base>` itself for a local one,
+            // which has no remote to have it, and for a GitHub root whose
+            // remote has not been fetched yet.
+            let base_ref = scan.base_ref.as_str();
             for entry in &scan.entries {
                 let Some(branch) = entry.branch.clone() else { continue };
-                if branch == scan.default_branch || entry.prunable || !entry.path.join(".git").exists() {
+                if branch == scan.base || entry.prunable || !entry.path.join(".git").exists() {
                     continue;
                 }
                 let path = entry.path.canonicalize().unwrap_or_else(|_| entry.path.clone());
                 seen.insert((path.clone(), branch.clone()));
-                let churn = perch_git::branch_churn(git, &entry.path, &format!("origin/{}", scan.default_branch))
-                    .await
-                    .ok();
-                let existing = ctx.with_cache(|c| c.find_item_by_branch(&repo, &branch).ok().flatten()).flatten();
+                let churn = perch_git::branch_churn(git, &entry.path, base_ref).await.ok();
+                let existing = ctx.with_cache(|c| c.find_item_by_branch(identity, &branch).ok().flatten()).flatten();
                 match existing {
                     Some(mut item) => {
                         let Some(c) = item.checkout.as_mut() else { continue };
@@ -2241,10 +2325,13 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                         }
                     }
                     None => {
-                        let mut item = Item::new(&repo, Timestamp::now());
+                        // The entry's identity, not the scan's slug: the
+                        // two agree for a GitHub root, and a local root
+                        // has none.
+                        let mut item = Item::new(identity, Timestamp::now());
                         item.checkout = Some(ItemCheckout {
                             branch,
-                            base_ref: scan.default_branch.clone(),
+                            base_ref: scan.base.clone(),
                             head_sha: entry.head_sha.clone(),
                             path,
                             owned: false,
@@ -2305,22 +2392,27 @@ async fn scan_roots(ctx: &Ctx) -> bool {
 
 /// For each item with a branch and no subject, ask GitHub whether a pull
 /// request has been opened on it, conditionally. When one has, the item
-/// becomes that pull request's, in the same row.
+/// becomes that pull request's, in the same row. A branch of a local
+/// repository is on nobody's GitHub, and is not asked about.
 async fn attach_pull_requests(ctx: &Ctx) -> bool {
     let items = ctx.with_cache(|c| c.load_items().unwrap_or_default()).unwrap_or_default();
     let mut changed = false;
     for item in items {
-        if item.subject.is_some() || item.is_archived() {
+        if item.subject.is_some() || item.is_archived() || perch_github::is_local(&item.repo_full_name) {
             continue;
         }
         let Some(checkout) = item.checkout.as_ref() else { continue };
-        let Some((head_owner, _)) = item.repo_full_name.split_once('/') else { continue };
+        // The pull request's head is the repository the branch is pushed
+        // to, which for a checkout in a fork is the fork, not the item's
+        // repository.
+        let head_repo = head_repo_of(ctx, &item, checkout).await;
+        let Some((head_owner, _)) = head_repo.split_once('/') else { continue };
         // The pull request may be against any declared repository when the
         // checkout is a fork of one. The lookups are conditional, so a
         // repository asked every poll is one request that mostly says 304.
         let mut candidates: Vec<String> = vec![item.repo_full_name.clone()];
         for r in ctx.config.declared() {
-            if !candidates.iter().any(|c| c.eq_ignore_ascii_case(&r)) {
+            if !perch_github::is_local(&r) && !candidates.iter().any(|c| c.eq_ignore_ascii_case(&r)) {
                 candidates.push(r);
             }
         }
@@ -2332,14 +2424,13 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
                 Ok(perch_github::PullLookup::Answer { pull, etag }) => {
                     // `head=owner:branch` matches a branch of that name on
                     // any of the owner's repositories with a pull request
-                    // here; only one on this item's repository is this
-                    // branch.
-                    // A head with no repository is a deleted fork, which
-                    // cannot be a checkout of the reader's.
+                    // here; only one on the checkout's own repository is
+                    // this branch. A head with no repository is a deleted
+                    // fork, which cannot be a checkout of the reader's.
                     let pull = pull.filter(|pr| {
                         pr.head_repo_full_name
                             .as_deref()
-                            .is_some_and(|h| h.eq_ignore_ascii_case(&item.repo_full_name))
+                            .is_some_and(|h| h.eq_ignore_ascii_case(&head_repo))
                     });
                     let Some(pr) = pull else {
                         if let Some(etag) = etag {
@@ -2382,6 +2473,26 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
         }
     }
     changed
+}
+
+/// The repository a checkout's branch is pushed to, which is what a pull
+/// request's head names. A checkout under the store was cut in the item's
+/// repository. One under a root is on its `origin`: the item's repository
+/// for a plain clone, and the reader's fork for a root the scan filed
+/// under its `upstream`. The item's repository when `origin` is not on
+/// GitHub, or the directory has gone.
+async fn head_repo_of(ctx: &Ctx, item: &Item, checkout: &ItemCheckout) -> String {
+    if checkout.owned {
+        return item.repo_full_name.clone();
+    }
+    let hosts = ctx.config.github_hosts();
+    let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+    let remotes = perch_git::remotes(ctx.preparer.git(), &checkout.path).await.unwrap_or_default();
+    remotes
+        .iter()
+        .find(|(name, _)| name == "origin")
+        .and_then(|(_, url)| perch_git::repo_from_remote(url, &hosts))
+        .unwrap_or_else(|| item.repo_full_name.clone())
 }
 
 /// Give a branch row its pull request, under the one lock. `Ok(false)`
@@ -2427,8 +2538,17 @@ fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<
     Ok(true)
 }
 
-/// Find or make the item for a pull request or issue, and open it.
+/// Find or make the item for a pull request or issue, and open it. A local
+/// repository has neither: a launch hook naming one under the reserved
+/// owner is told so rather than asked of GitHub, where `local` could be
+/// somebody's account.
 async fn open_subject(ctx: &Ctx, repo_full_name: String, kind: ItemKind, number: u64) -> bool {
+    if perch_github::is_local(&repo_full_name) {
+        let _ = ctx.events.send(Event::ReviewFailed {
+            message: format!("{} is not on GitHub, so it has no #{number}", ctx.config.display_name(&repo_full_name)),
+        });
+        return false;
+    }
     match kind {
         ItemKind::PullRequest => open_pull_request(ctx, repo_full_name, number).await,
         ItemKind::Issue => open_issue(ctx, repo_full_name, number).await,
@@ -2864,9 +2984,10 @@ async fn open_owned_branch_for_pull(
 /// A checkout under one of the reader's roots, opened where it is.
 ///
 /// Nothing is fetched into it and nothing is reset. The diff is against
-/// the base as the checkout's own `origin` last saw it, and every git
-/// command runs in the directory itself, which works in a worktree as it
-/// does in a bare clone.
+/// the base as the checkout's own remote last saw it, the remote the scan
+/// counted the row's churn against, and every git command runs in the
+/// directory itself, which works in a worktree as it does in a bare
+/// clone.
 async fn open_own_checkout(
     ctx: &Ctx,
     _repo: &RepoId,
@@ -2890,10 +3011,17 @@ async fn open_own_checkout(
         )));
     }
     let head_sha = git.run(Some(&own.path), ["rev-parse", "HEAD"], timeout).await?.trim().to_string();
-    let remote_base = format!("origin/{base_ref}");
-    let base = match git.run(Some(&own.path), ["rev-parse", "--verify", "--quiet", &remote_base], timeout).await {
-        Ok(sha) if !sha.trim().is_empty() => sha.trim().to_string(),
-        _ => git.run(Some(&own.path), ["rev-parse", "--verify", "--quiet", base_ref], timeout).await?.trim().to_string(),
+    let mut base = None;
+    for candidate in root_base_revs(ctx, &own.path, base_ref).await {
+        if let Ok(sha) = git.run(Some(&own.path), ["rev-parse", "--verify", "--quiet", &candidate], timeout).await {
+            if !sha.trim().is_empty() {
+                base = Some(sha.trim().to_string());
+                break;
+            }
+        }
+    }
+    let Some(base) = base else {
+        return Err(perch_git::Error::Io(format!("{} has no {base_ref} to diff against", own.path.display())));
     };
     let merge_base = git
         .run(Some(&own.path), ["merge-base", &base, &head_sha], timeout)
@@ -3767,15 +3895,35 @@ mod tests {
 
     /// A context with no window behind it: a client at `base`, a cache
     /// and a knowledge root in a directory of their own, and the events
-    /// kept so a test can say what the sidebar was told.
+    /// kept so a test can say what the sidebar was told. `declared` are
+    /// GitHub repositories, `owner/repo`.
     fn ctx(dir: &Path, base: &str, declared: &[&str]) -> (Ctx, Receiver<Event>) {
+        ctx_declaring(dir, base, declared.iter().map(|name| github_repo(name)).collect())
+    }
+
+    /// A `[[repo]]` with `github = "owner/repo"`, resolved from the file.
+    /// Field by field: the entry's identity is a field of its own, and a
+    /// private one, so the struct cannot be spelled out from here.
+    fn github_repo(slug: &str) -> perch_github::RepoConfig {
+        let mut repo = perch_github::RepoConfig::default();
+        repo.github = Some(slug.to_string());
+        repo
+    }
+
+    /// A `[[repo]]` with roots and no GitHub remote, resolved the way the
+    /// startup scan resolves one: `local/<name>`.
+    fn local_repo(name: &str) -> perch_github::RepoConfig {
+        let mut repo = perch_github::RepoConfig::default();
+        repo.roots = vec![format!("/x/{name}")];
+        repo.resolve(None);
+        repo
+    }
+
+    fn ctx_declaring(dir: &Path, base: &str, repos: Vec<perch_github::RepoConfig>) -> (Ctx, Receiver<Event>) {
         let (events, received) = std::sync::mpsc::channel();
         let cache = Cache::open(&dir.join("perch.db"), None).unwrap();
         let mut config = Config::default();
-        config.repo = declared
-            .iter()
-            .map(|name| perch_github::RepoConfig { name: (*name).to_string(), roots: Vec::new() })
-            .collect();
+        config.repo = repos;
         let ctx = Ctx {
             github: Arc::new(GitHub::with_base_uri("token", base).unwrap()),
             preparer: Arc::new(Preparer::new(Store::new(dir.join("store")), None)),
@@ -4012,6 +4160,208 @@ mod tests {
             ["/repos/a/b/pulls?state=open&per_page=100&page=1", "/repos/c/d/pulls?state=open&per_page=100&page=1"]
         );
     }
+
+    #[tokio::test]
+    async fn a_local_repository_gets_no_list_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("200 OK", "[]");
+        let (ctx, _received) = ctx_declaring(dir.path(), &base, vec![local_repo("notes"), github_repo("a/b")]);
+        assert_eq!(ctx.config.declared(), ["local/notes", "a/b"], "both are declared; only one is on GitHub");
+
+        let failure = list_passes(&ctx).await;
+
+        assert!(failure.is_none(), "{failure:?}");
+        let paths = paths.lock().unwrap();
+        assert!(!paths.is_empty(), "the GitHub repository was listed");
+        assert!(
+            paths.iter().all(|p| p.starts_with("/repos/a/b/")),
+            "nothing was asked about the local one: {paths:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_branch_of_a_local_repository_is_not_looked_up_on_github() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("200 OK", "[]");
+        // A GitHub repository is declared too, so the candidates a branch
+        // is looked up under would have somewhere to go.
+        let (ctx, _received) = ctx_declaring(dir.path(), &base, vec![local_repo("notes"), github_repo("a/b")]);
+        let mut branch = Item::new("local/notes", "2026-09-10T00:00:00Z".parse().unwrap());
+        branch.checkout = Some(root_checkout("feature"));
+        ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
+
+        let changed = attach_pull_requests(&ctx).await;
+
+        assert!(!changed);
+        assert!(paths.lock().unwrap().is_empty(), "no request for a local branch");
+        assert!(ctx.item(&branch.id).unwrap().subject.is_none());
+
+        // A branch of the GitHub repository is looked up under it alone:
+        // the local repository is not a candidate.
+        let mut hub = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        hub.checkout = Some(ItemCheckout { path: "/x/b2".into(), ..root_checkout("feature-2") });
+        ctx.with_cache(|c| c.insert_item(&hub)).unwrap().unwrap();
+
+        attach_pull_requests(&ctx).await;
+
+        let paths = paths.lock().unwrap();
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        assert!(paths[0].starts_with("/repos/a/b/pulls?head="), "{}", paths[0]);
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A repository on `main` with one commit at `root`, and a linked
+    /// worktree beside it on `branch` with one more commit, one line
+    /// added. No remote unless the test adds one, and nothing fetches: a
+    /// remote is config the scan reads back as text.
+    fn root_with_branch(root: &Path, branch: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(root).unwrap();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("one.txt"), "one\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "one"]);
+        let worktree = root.with_file_name(format!("{}-{}", root.file_name().unwrap().to_string_lossy(), branch));
+        git(root, &["worktree", "add", "-q", "-b", branch, worktree.to_str().unwrap()]);
+        std::fs::write(worktree.join("two.txt"), "two\n").unwrap();
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-q", "-m", "two"]);
+        worktree
+    }
+
+    /// A `[[repo]]` with one root and, when given, a `github`.
+    fn rooted(github: Option<&str>, root: &Path) -> perch_github::RepoConfig {
+        let mut repo = perch_github::RepoConfig::default();
+        repo.github = github.map(str::to_string);
+        repo.roots = vec![root.to_string_lossy().into_owned()];
+        repo
+    }
+
+    fn notices(received: &Receiver<Event>) -> Vec<String> {
+        received
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::Notice(message) => Some(message),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_local_root_s_branches_are_rows_under_local_and_nothing_is_asked_of_github() {
+        // The design's scan case: a `git init` repository with no remote,
+        // declared by its root alone. Its branch is a row under
+        // `local/<name>`, diffed against `main` since there is no remote to
+        // have a copy of it, and neither the scan nor the pull request
+        // lookup that follows it sends a request.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        root_with_branch(&root, "feature");
+        let (base, paths) = serve("200 OK", "[]");
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, received) = ctx_declaring(dir.path(), &base, vec![entry]);
+        assert_eq!(ctx.config.declared(), ["local/notes"]);
+
+        assert!(scan_roots(&ctx).await, "a row was made");
+
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        let item = &items[0];
+        assert_eq!(item.repo_full_name, "local/notes", "the entry's identity, not the scan's");
+        let checkout = item.checkout.as_ref().expect("a checkout");
+        assert_eq!(checkout.branch, "feature");
+        assert_eq!(checkout.base_ref, "main", "the base branch, with no remote to prefix it");
+        assert_eq!(checkout.churn, Some((1, 0)), "counted against main");
+        assert!(!checkout.owned);
+        assert!(notices(&received).is_empty(), "nothing to complain about");
+
+        assert!(!attach_pull_requests(&ctx).await);
+
+        assert!(paths.lock().unwrap().is_empty(), "no GitHub call for a local repository");
+        assert!(!scan_roots(&ctx).await, "a second scan over the same tree changes nothing");
+    }
+
+    #[tokio::test]
+    async fn a_github_entry_whose_root_has_no_remote_is_told_so_and_gets_no_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("b");
+        root_with_branch(&root, "feature");
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![rooted(Some("a/b"), &root)]);
+
+        assert!(!scan_roots(&ctx).await);
+
+        assert!(ctx.with_cache(|c| c.load_items().unwrap()).unwrap().is_empty());
+        let notices = notices(&received);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("no GitHub remote for b"), "{}", notices[0]);
+        assert!(notices[0].starts_with(&root.display().to_string()), "names the root: {}", notices[0]);
+    }
+
+    #[tokio::test]
+    async fn a_fork_root_s_branch_is_filed_under_the_upstream_and_takes_its_pull_request_there() {
+        // The reader's copy is `origin`, the repository it came from is
+        // `upstream`, and the entry declares the upstream. The branch is a
+        // row of the upstream's, and its pull request, opened on the
+        // upstream from the fork, is looked up there with the fork as its
+        // head.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("widgets");
+        root_with_branch(&root, "fence");
+        git(&root, &["remote", "add", "origin", "https://github.com/me/widgets.git"]);
+        git(&root, &["remote", "add", "upstream", "https://github.com/acme/widgets.git"]);
+        let (base, paths) = serve_by_path(|path| {
+            if path.starts_with("/repos/acme/widgets/pulls?head=me%3Afence") {
+                ("200 OK", format!("[{PULL_FROM_FORK}]"))
+            } else {
+                ("200 OK", "[]".to_string())
+            }
+        });
+        let (ctx, _received) = ctx_declaring(dir.path(), &base, vec![rooted(Some("acme/widgets"), &root)]);
+
+        assert!(scan_roots(&ctx).await);
+
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].repo_full_name, "acme/widgets", "the entry's identity, which upstream names");
+        let checkout = items[0].checkout.as_ref().unwrap();
+        assert_eq!(checkout.base_ref, "main", "the base's name, without the remote");
+        assert_eq!(checkout.churn, Some((1, 0)), "upstream was never fetched, so against main itself");
+
+        assert!(attach_pull_requests(&ctx).await);
+
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        assert_eq!(items.len(), 1, "the same row, not a second: {items:?}");
+        assert_eq!(items[0].pull_request().map(|p| p.number), Some(9));
+        assert_eq!(items[0].checkout.as_ref().map(|c| c.branch.as_str()), Some("fence"));
+        let paths = paths.lock().unwrap();
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        assert!(
+            paths[0].starts_with("/repos/acme/widgets/pulls?head=me%3Afence"),
+            "asked of the upstream, with the fork as the head: {}",
+            paths[0]
+        );
+    }
+
+    /// `acme/widgets#9`, opened from the fork `me/widgets`, as the pulls
+    /// list sends it.
+    const PULL_FROM_FORK: &str = r#"{"number":9,"title":"fence","state":"open","draft":false,
+        "user":{"login":"me","avatar_url":""},
+        "head":{"sha":"h9","ref":"fence","repo":{"full_name":"me/widgets"}},
+        "base":{"sha":"m","ref":"main","repo":{"full_name":"acme/widgets"}},
+        "updated_at":"2026-09-16T11:40:00Z"}"#;
 
     #[test]
     fn a_pass_failure_is_described_the_way_a_poll_failure_is() {

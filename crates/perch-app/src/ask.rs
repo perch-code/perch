@@ -160,13 +160,13 @@ pub fn run_cli(args: &[String]) {
 
 async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), String> {
     use perch_git::{Preparer, RepoId, Store};
-    use perch_github::{resolve_token, Config, GitHub, Side};
+    use perch_github::{resolve_token, GitHub, Side};
 
     let (full_name, number) = target.split_once('#').ok_or("expected owner/repo#number")?;
     let number: u64 = number.parse().map_err(|_| "bad number")?;
     let id = RepoId::parse(full_name).ok_or("bad repo")?;
 
-    let mut config = Config::load();
+    let mut config = crate::repos::load_resolved_async().await;
     for problem in discover(&mut config.agent).await {
         eprintln!("note: {problem}");
     }

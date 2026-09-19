@@ -15,12 +15,14 @@ that a coding agent can search. Nothing in Perch writes to GitHub.
 
 **Repositories and items**
 
-- A repository is declared in `config.toml` as `[[repo]]`: its
-  `owner/repo` name and, optionally, the directories where you already
-  work on it. Declaring it lists it whole: every open pull request and
-  issue is a row, kept current on every poll, and one that merges or
-  closes says so. A repository nobody declares still gets a section the
-  first time something from it is opened, and the section looks the same.
+- A repository is declared in `config.toml` as `[[repo]]`: its `github`,
+  `owner/repo`, the `roots` where you already work on it, or both.
+  Roots alone take the repository from their GitHub remote, or make a
+  local repository when they have none. Declaring a GitHub repository
+  lists it whole: every open pull request and issue is a row, kept current
+  on every poll, and one that merges or closes says so. A repository
+  nobody declares still gets a section the first time something from it
+  is opened, and the section looks the same.
 - Under a repository, an *item* is one row with up to three parts: a
   GitHub pull request or issue, a checkout on disk, and attention. A
   branch of your own becomes a pull request when GitHub opens one on it,
@@ -166,12 +168,15 @@ Files, shaped like a pull request's page on GitHub.
 **Branches, roots, and checkouts**
 
 - Declare `roots` on a repository and every git worktree under them on a
-  branch other than the default becomes an item, with lines added and
-  removed against the base on the row. Perch never touches a directory it
-  did not make: Archive and Delete on such a row act on the row. Switch a
-  root to another branch and the row for the old one is archived until the
-  branch is checked out again; remove the worktree and the row goes,
-  unless it has threads.
+  branch other than its base becomes an item, with lines added and
+  removed since it left its base on the row. The count is taken against
+  the base as the remote has it for a GitHub root, `upstream/main` say,
+  and against the base branch itself for a local one, or for a remote
+  that has not been fetched yet; opening the row diffs against the same
+  base. Perch never touches a directory it did not make: Archive and
+  Delete on such a row act on the row. Switch a root to another branch
+  and the row for the old one is archived until the branch is checked out
+  again; remove the worktree and the row goes, unless it has threads.
 - A pull request opened from a branch Perch cut, or from a root, is read
   in that checkout: nothing is reset, and if the pull request has moved
   past what is there the header says so. Only `perch/pr-N` checkouts follow
@@ -197,10 +202,10 @@ Files, shaped like a pull request's page on GitHub.
   `~/.perch/knowledge/<owner>/<repo>/github/`: a pull request's
   description, conversation, each review and the line comments under it,
   and an issue with its comments. Opening one archives it, and a declared
-  repository is archived whole in the background, open items as they
-  move and closed history oldest first, so once the backfill has run the
-  archive covers the whole repository. Every message carries its author,
-  time and a permalink.
+  GitHub repository is archived whole in the background, open items as
+  they move and closed history oldest first, so once the backfill has run
+  the archive covers the whole repository. Every message carries its
+  author, time and a permalink.
 - A skill is written for Claude Code and Codex that says where the files are
   and how to search them, so an agent working in one of those repositories
   can answer "why was this done" from the thread rather than guessing;
@@ -355,33 +360,69 @@ recreated on launch, with a notice; the clones stay and are reused.
 Optional, at `~/.perch/config.toml`:
 
 ```toml
-token = "ghp_..."        # only when env vars and gh are unavailable
-poll_interval_secs = 60  # a floor; X-Poll-Interval may raise it
+token = "ghp_..."                # only when env vars and gh are unavailable
+poll_interval_secs = 60          # a floor; X-Poll-Interval may raise it
+github_host = "ghe.acme.com"     # optional; an Enterprise host that counts as GitHub
 
 [[repo]]
-name = "criccomini/perch"
+github = "criccomini/perch"
+name = "perch"                   # optional; what the sidebar shows
 roots = ["~/Code/perch"]         # optional; checkouts you already have
+base = "main"                    # optional; when no remote HEAD says
 
 [[repo]]
-name = "slatedb/slatedb"
+github = "slatedb/slatedb"
 
 [[repo]]
-name = "slatedb/slatedb-go"
+name = "notes"
+roots = ["~/Code/notes"]         # no GitHub remote: a local repository
 ```
 
-`name` is the repository's `owner/repo`, compared without regard to case.
-`roots` says where you already work on it, and each root's worktrees
-become items. A root belongs to the one repository its `origin` names, so
+`github` is the repository on GitHub, `owner/repo`, compared without
+regard to case. `name` is what the sidebar shows, and defaults to the
+repository half of `github`, `perch` above, or to the first root's
+directory name. `roots` says where you already work on it, and each
+root's worktrees become items. A root belongs to the repository its
+GitHub remote names, `upstream` first, then `origin`, then any other, so
 a checkout of each repository goes under its own `[[repo]]`; a root whose
-origin is some other repository is skipped, and the status line says so.
+remote names some other repository is skipped, and the status line says
+so. `base` is the base branch, for when no remote HEAD says which it is;
+without it Perch takes `main` or `master`, whichever exists. An entry
+with neither `github` nor `roots` has nothing to list and nothing to
+scan, and is skipped with a notice. `github_host`, at the top level,
+names a GitHub Enterprise host whose remotes count as GitHub beside
+`github.com`.
 
-Declaring a repository puts it in the sidebar in config order, gives its
-`roots` a home, and has Perch list it whole: on every poll its open pull
-requests and issues become rows, with nothing marking them new, a row
-whose pull request merged or closed says so, and its history is archived
-under knowledge in the background. A repository you did not declare
-shows only what you opened, and its section looks the same. A file that
-still declares `[[project]]` is not loaded, and the notice says to write
+An entry with `roots` and no `github` takes its repository from the
+first root: a GitHub remote makes it that repository, and none makes it
+a local one. A local repository is `local/<name>`, so `local` is a
+reserved owner and `github = "local/..."` is refused. Its branches are
+items, its threads are filed under `knowledge/local/<name>/`, and
+nothing about it is asked of GitHub. Changing its `name` moves where new
+knowledge is filed and does not move what is already there.
+
+A checkout whose `origin` is your fork and whose `upstream` is the
+repository belongs to the repository, since the scan takes `upstream`
+first. Declare `github` as the upstream repository, or leave `github`
+out and let the scan decide, and list the checkout under `roots`. Its
+branches are rows of the repository, counted and diffed against
+`upstream`'s base once `upstream` has been fetched, and a pull request
+opened from one of them is looked up in the repository with your fork as
+its head, and attaches to the branch's row. A file that still declares
+the fork itself, `github = "me/widgets"`, gets a notice that the root's
+remote names the upstream, and the root is skipped until the entry says
+so too.
+
+Declaring a repository puts it in the sidebar in config order and gives
+its `roots` a home. One on GitHub is also listed whole: on every poll
+its open pull requests and issues become rows, with nothing marking them
+new, a row whose pull request merged or closed says so, and its history
+is archived under knowledge in the background. A repository you did not
+declare shows only what you opened, and its section looks the same.
+
+An older file that says `name = "owner/repo"` with no `github` still
+loads, the name read as `github`, with a notice. A file that still
+declares `[[project]]` is not loaded, and the notice says to write
 `[[repo]]` instead.
 
 ## Threads
@@ -450,8 +491,8 @@ the root scan finds.
 ## Knowledge
 
 Discussion lands under `knowledge/` in the Perch home, one directory per
-repository, `owner/repo`, whether or not the repository is declared.
-Change the root with `knowledge.root`:
+repository, `owner/repo`, whether or not the repository is declared, and
+`local/<name>` for a local one. Change the root with `knowledge.root`:
 
 ```toml
 [knowledge]
@@ -475,9 +516,10 @@ The layout, per repository:
 ```
 
 The root `index.md` is a table of every repository the store holds and
-the directory it is under, so an agent can go from `git remote get-url
-origin` to the right files without a lookup. Each repository's `index.md`
-lists its containers and how current each is.
+the directory it is under, so an agent can go from the checkout's GitHub
+remote, `upstream` before `origin`, or from `local/<name>` for a local
+repository, to the right files without a lookup. Each repository's
+`index.md` lists its containers and how current each is.
 
 The `perch/` files are your own threads: each question, its answer, the
 lines it was about and the model that answered, with front matter that
@@ -485,7 +527,7 @@ says `source: perch`. They are kept apart from the `github/` files so
 nothing you asked on this machine can be taken for something said in
 public, and the skill tells the agent which is which.
 
-Every declared repository is archived whole while Perch runs. After each
+Every declared GitHub repository is archived whole while Perch runs. After each
 poll a background task archives the open items whose discussion has moved
 since it was last kept, newest first, then walks the repository's closed
 pull requests and issues oldest first, a page at a time. It keeps its
@@ -498,12 +540,13 @@ miss one entry; it is archived when it next moves or is opened in Perch.
 It paces itself by GitHub's rate limit: with fewer than a thousand
 requests left it waits for the reset, and neither the poll nor anything
 you do is held by it. The status bar shows how far it is, "Archiving
-slatedb/slatedb, 312 of about 2,140", and the line goes when every
-repository is caught up. `perch --backfill <owner/repo> [--limit n]` runs
-one round for a repository in the foreground, printing each discussion as
-it is archived with the requests left after it, and says whether the
-repository is caught up; `perch --sync <owner/repo>` runs one list pass
-and prints each row it added, updated or closed, or "unchanged".
+slatedb, 312 of about 2,140", the repository by the name the sidebar
+shows, and the line goes when every repository is caught up.
+`perch --backfill <owner/repo> [--limit n]` runs one round for a
+repository in the foreground, printing each discussion as it is archived
+with the requests left after it, and says whether the repository is
+caught up; `perch --sync <owner/repo>` runs one list pass and prints each
+row it added, updated or closed, or "unchanged".
 
 Everything outside `raw/` is rendered from it and comes back as
 discussions are archived. Deleting `raw/` too loses the closed history,

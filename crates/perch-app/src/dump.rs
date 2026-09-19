@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use perch_git::{ChangeStatus, Preparer, RepoId, Row, Scope, Store};
-use perch_github::{resolve_token, Cache, Config, GitHub, ItemKind};
+use perch_github::{resolve_token, Cache, GitHub, ItemKind};
 
 use crate::review::doc::{self, Card, Doc, DocRow, Reveals, Tint};
 use crate::review::editor::{self, Side};
@@ -61,7 +61,7 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     let number: u64 = number.parse().map_err(|_| "bad number".to_string())?;
     let id = RepoId::parse(full_name).ok_or_else(|| "bad repo".to_string())?;
 
-    let config = Config::load();
+    let config = crate::repos::load_resolved_async().await;
     let token = resolve_token(&config).ok_or_else(|| "no token".to_string())?;
     let gh = GitHub::new(&token.value).map_err(|e| e.to_string())?;
     let pr = gh

@@ -29,8 +29,12 @@ description: Discussion history for {names} from GitHub pull requests and issues
 
 Perch archives discussion about these repositories as markdown under
 `{root}`. Start with `{root}/index.md`, which maps
-each repository to its directory; match `git remote get-url origin`
-against `owner/repo` to find the directory for the repository you are in.
+each repository to its directory. To find the directory for the
+repository you are in, match its GitHub remote, `upstream` when it has
+one and `origin` otherwise, against `owner/repo`; a repository with no
+GitHub remote is under `local/<name>`, where `<name>` is what Perch's
+config calls it, by default the directory name of its first root. When
+no remote matches, `index.md` lists every repository here.
 
 A repository declared in Perch is archived whole: its open pull requests
 and issues as they move, and its closed history oldest first, so the
@@ -110,7 +114,8 @@ mod tests {
     #[test]
     fn the_remote_is_matched_against_the_repository_name() {
         let text = render(Path::new("/k"), &[]);
-        assert!(text.contains("match `git remote get-url origin`\nagainst `owner/repo`"), "{text}");
+        assert!(text.contains("match its GitHub remote, `upstream` when it has\none and `origin` otherwise, against `owner/repo`"), "{text}");
+        assert!(text.contains("no\nGitHub remote is under `local/<name>`"), "{text}");
         assert!(text.contains("<owner>/<repo>/perch/branches/<branch>.md"));
     }
 

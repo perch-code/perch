@@ -127,9 +127,10 @@ fn archiving(state: AppState) -> impl IntoView {
     )
 }
 
-/// "Archiving slatedb/slatedb, 312 of about 2,140". About, because the
-/// total is the open count plus what the first closed page's `Link`
-/// header implied, and a page can be short.
+/// "Archiving slatedb, 312 of about 2,140", the repository by the name
+/// the sidebar shows. About, because the total is the open count plus
+/// what the first closed page's `Link` header implied, and a page can be
+/// short.
 fn archiving_line(archiving: &Archiving) -> String {
     format!(
         "Archiving {}, {} of about {}",
@@ -172,8 +173,8 @@ mod tests {
 
     #[test]
     fn the_backfill_line_names_the_repository_and_the_counts_with_thousands_separated() {
-        let line = archiving_line(&Archiving { repo: "slatedb/slatedb".into(), done: 312, total: 2140 });
-        assert_eq!(line, "Archiving slatedb/slatedb, 312 of about 2,140");
+        let line = archiving_line(&Archiving { repo: "slatedb".into(), done: 312, total: 2140 });
+        assert_eq!(line, "Archiving slatedb, 312 of about 2,140");
     }
 
     #[test]

@@ -132,7 +132,7 @@ fn back_button(on_back: impl Fn() + 'static) -> impl IntoView {
 
 fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
     // A branch of the reader's own has no title but its name, and the
-    // subtitle names where it is.
+    // subtitle says where it is.
     let title = move || {
         state
             .pull_request
@@ -147,14 +147,7 @@ fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
                 p.as_ref()
                     .map(|p| format!("{}  #{}", p.repo_full_name, p.number))
             })
-            .or_else(|| {
-                state.item.with(|i| {
-                    i.as_ref().map(|i| match &i.checkout {
-                        Some(c) => format!("{}  \u{00b7}  against {}", i.repo_full_name, short_ref(&c.base_ref)),
-                        None => i.repo_full_name.clone(),
-                    })
-                })
-            })
+            .or_else(|| state.item.with(|i| i.as_ref().map(|i| branch_subtitle(i))))
             .unwrap_or_default()
     };
     let author = move || {
@@ -204,6 +197,21 @@ fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
             .flex_shrink(1.0_f32)
             .pointer_events_none()
     })
+}
+
+/// The subtitle of a branch item: the repository's slug and what the
+/// branch is against. A repository with no GitHub remote has no slug worth
+/// a line, so its subtitle is the base alone; the sidebar's heading
+/// already says which repository it is.
+fn branch_subtitle(item: &Item) -> String {
+    let base = item.checkout.as_ref().map(|c| format!("against {}", short_ref(&c.base_ref)));
+    if perch_github::is_local(&item.repo_full_name) {
+        return base.unwrap_or_default();
+    }
+    match base {
+        Some(base) => format!("{}  \u{00b7}  {base}", item.repo_full_name),
+        None => item.repo_full_name.clone(),
+    }
 }
 
 /// A commit as a base reads as its short hash; a branch as its name.
@@ -899,6 +907,30 @@ fn progress_bar(percent: impl Fn() -> Option<u8> + 'static) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn branch_item(repo: &str, base_ref: &str) -> Item {
+        let mut item = Item::new(repo, "2026-09-18T09:59:00Z".parse().unwrap());
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: "fence".into(),
+            base_ref: base_ref.into(),
+            head_sha: "h".into(),
+            path: "/w/fence".into(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+        });
+        item
+    }
+
+    #[test]
+    fn a_branch_subtitle_names_the_slug_unless_the_repository_is_local() {
+        assert_eq!(branch_subtitle(&branch_item("slatedb/slatedb", "main")), "slatedb/slatedb  \u{00b7}  against main");
+        assert_eq!(branch_subtitle(&branch_item("local/notes", "main")), "against main");
+        assert_eq!(branch_subtitle(&branch_item("Local/notes", "main")), "against main", "the owner in any case");
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(branch_subtitle(&branch_item("local/notes", sha)), "against 0123456");
+    }
 
     #[test]
     fn the_issues_a_description_closes_are_read_in_any_case_and_once_each() {

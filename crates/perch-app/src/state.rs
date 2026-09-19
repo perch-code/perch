@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use jiff::Timestamp;
-use perch_github::{AgentConfig, Item};
+use perch_github::{AgentConfig, DeclaredRepo, Item};
 
 use crate::backend::{Event, Status};
 
@@ -21,7 +21,8 @@ pub enum Checked {
 }
 
 /// The backfill's progress, as `Event::Backfill` reports it: `done`
-/// discussions of about `total` for `repo`.
+/// discussions of about `total` for `repo`, which is the repository's
+/// display name, since the status bar is the only reader.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Archiving {
     pub repo: String,
@@ -33,11 +34,12 @@ pub struct Archiving {
 pub struct AppState {
     /// Encoded image bytes, shared so a clone is a refcount bump.
     pub avatars: RwSignal<HashMap<String, Arc<Vec<u8>>>>,
-    /// The repositories config.toml declares, `owner/repo` in config
-    /// order, which is the order the sidebar lists them in. A repository
-    /// with items that nobody declared is a section all the same; only
-    /// the items say so.
-    pub repos: RwSignal<Vec<String>>,
+    /// The repositories config.toml declares, each as the identity its
+    /// items carry and the name its section shows, in config order, which
+    /// is the order the sidebar lists them in. A repository with items
+    /// that nobody declared is a section all the same; only the items say
+    /// so.
+    pub repos: RwSignal<Vec<DeclaredRepo>>,
     /// Every item, active and archived.
     pub items: RwSignal<Vec<Item>>,
     /// The item whose row is selected in the sidebar: the open one.
@@ -392,8 +394,11 @@ impl AppState {
             // An empty notice is the backend saying the last one has been
             // read: the reader has moved on to something else.
             Event::Notice(message) => self.notice.set(Some(message).filter(|m| !m.is_empty())),
-            // A total of zero is the backfill saying it is caught up.
+            // A total of zero is the backfill saying it is caught up. The
+            // backend names the repository by its identity; the bar shows
+            // what the sidebar calls it.
             Event::Backfill { repo, done, total } => {
+                let repo = self.display_name(&repo);
                 self.archiving.set((total > 0).then_some(Archiving { repo, done, total }))
             }
             Event::AgentConfig(agent) => self.agent.set(agent),
@@ -451,7 +456,19 @@ impl AppState {
         self.items.with(|all| all.iter().find(|i| i.id == id).cloned())
     }
 
-    /// The sidebar as the filters cut it: Pinned and the groups.
+    /// What the sidebar calls an identity: its declared name, or the
+    /// identity itself when nothing declares it.
+    pub fn display_name(&self, identity: &str) -> String {
+        self.repos.with(|repos| {
+            repos
+                .iter()
+                .find(|r| r.identity.eq_ignore_ascii_case(identity))
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| identity.to_string())
+        })
+    }
+
+        /// The sidebar as the filters cut it: Pinned and the groups.
     pub fn item_sections(&self) -> crate::items::Sections {
         let mut filters = self.item_filters.get();
         filters.query = self.item_query.get();
@@ -548,6 +565,28 @@ mod tests {
         assert!(review.viewed.get().contains(&("src/x.rs".into(), "b1".into())));
         assert_eq!(review.reveals_for("src/x.rs", "b1").iter().collect::<Vec<_>>(), vec![(4, 23)]);
         assert!(!review.folded.get(), "Show whole is not undone by a write that came before it");
+    }
+
+    #[test]
+    fn the_backfill_line_names_the_repository_as_the_sidebar_does() {
+        let app = AppState::new();
+        app.apply(Event::Repos(vec![
+            DeclaredRepo { identity: "slatedb/slatedb".into(), name: "slatedb".into() },
+            DeclaredRepo { identity: "local/notes".into(), name: "notes".into() },
+        ]));
+
+        // The backend says which repository by identity, in whatever case
+        // GitHub answered under; the bar shows the declared name.
+        app.apply(Event::Backfill { repo: "SlateDB/SlateDB".into(), done: 312, total: 2140 });
+        assert_eq!(app.archiving.get(), Some(Archiving { repo: "slatedb".into(), done: 312, total: 2140 }));
+
+        // A repository nobody declared is named as it came.
+        app.apply(Event::Backfill { repo: "x/stray".into(), done: 1, total: 2 });
+        assert_eq!(app.archiving.get().map(|a| a.repo), Some("x/stray".to_string()));
+
+        // Caught up: the line comes down.
+        app.apply(Event::Backfill { repo: String::new(), done: 0, total: 0 });
+        assert_eq!(app.archiving.get(), None);
     }
 
     #[test]
