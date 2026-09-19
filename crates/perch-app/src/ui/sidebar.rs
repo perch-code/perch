@@ -471,11 +471,14 @@ fn group_section(
 
 /// A line under a header that has nothing to list. It hangs from the
 /// header's title at x=31, not from its chevron slot at 16, so it reads as
-/// belonging to the header above.
+/// belonging to the header above, and ends in an ellipsis in a narrow
+/// drawer the way the title does.
 fn quiet_line(text: &'static str) -> impl IntoView {
     Label::derived(move || text.to_string()).style(|s| {
         s.font_size(theme::TEXT_META)
             .color(theme::FG_SUBTLE)
+            .text_ellipsis()
+            .min_width(0.0)
             .padding_left(31.0)
             .padding_right(16.0)
             .padding_vert(6.0)
