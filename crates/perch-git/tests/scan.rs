@@ -2,7 +2,7 @@
 //! in a temp dir.
 //!
 //! The "remote" is a local repository. A root is a clone of it with two
-//! linked worktrees, which is what a reader's project directory looks like.
+//! linked worktrees, which is what a reader's working directory looks like.
 //! The store's bare clone is made from the same remote, as in
 //! `worktree_branches.rs`, so `ensure_home` and `cut_branch` fetch from a
 //! path rather than GitHub.

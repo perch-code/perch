@@ -316,7 +316,7 @@ mod tests {
         let state = ReviewState::new();
         let pr = pull();
         let now = at("2026-09-18T09:59:00Z");
-        let mut item = Item::new("perch", "criccomini/perch", now);
+        let mut item = Item::new("criccomini/perch", now);
         item.id = "wt".into();
         item.subject = Some(ItemSubject::PullRequest(pr.clone()));
         item.checkout = Some(ItemCheckout {

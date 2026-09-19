@@ -1,5 +1,5 @@
 //! Item rows: a pull request, an issue, or a branch of the reader's own,
-//! under its project in the sidebar.
+//! under its repository in the sidebar.
 //!
 //! One row draws every shape an item can have. The glyph and the reference
 //! line come from which parts the item has, never from a stored kind. The
@@ -20,11 +20,11 @@ use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::text::FontWeight;
 use floem::views::{Container, Decorators, Empty, Label, Stack, TextInput, dyn_container};
-use perch_github::{CheckStatus, Item, ItemSubject, Project, SubjectState};
+use perch_github::{CheckStatus, Item, ItemSubject, SubjectState};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::items::{attention_label, reference, ItemGroup};
+use crate::items::{attention_label, full_reference, reference, ItemGroup};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
@@ -42,7 +42,8 @@ pub enum Placement {
     Priority,
     /// Under Pinned: a pin glyph.
     Pinned,
-    /// Under a project or a date.
+    /// Under a repository, an owner or a date, which decides whether the
+    /// second line names the repository.
     Section(ItemGroup),
 }
 
@@ -75,7 +76,6 @@ pub fn item_row(
     state: AppState,
     backend: Rc<Backend>,
     item: Item,
-    project: Option<Project>,
     placement: Placement,
     on_open: OpenItem,
 ) -> impl IntoView {
@@ -88,11 +88,11 @@ pub fn item_row(
     };
     let archived = item.is_archived();
     let attention = item.needs_attention();
-    let group = match placement {
-        Placement::Section(g) => g,
-        _ => ItemGroup::Project,
+    let mut reference_text = match placement {
+        Placement::Section(group) => reference(&item, group),
+        // No heading above these names a repository, so the row does.
+        Placement::Priority | Placement::Pinned => full_reference(&item),
     };
-    let mut reference_text = reference(&item, project.as_ref(), group);
     // A branch of the reader's own says how far it has gone from its base.
     if item.subject.is_none() {
         if let Some((a, d)) = item.checkout.as_ref().and_then(|c| c.churn) {
@@ -190,25 +190,18 @@ pub fn item_row(
             }
         });
 
-    // Anything that opens under the row: a Delete confirmation, or the
-    // box for a new project's name.
+    // What opens under the row: a Delete confirmation.
     let under_item = item.clone();
     Stack::vertical((
         row,
         dyn_container(
             {
                 let id = item.id.clone();
-                move || {
-                    let deleting = state.confirm_delete.with(|d| d.as_deref() == Some(id.as_str()));
-                    let naming = state.new_project_for.with(|d| d.as_deref() == Some(id.as_str()));
-                    (deleting, naming)
-                }
+                move || state.confirm_delete.with(|d| d.as_deref() == Some(id.as_str()))
             },
-            move |(deleting, naming)| {
+            move |deleting| {
                 if deleting {
                     delete_confirmation(state, under_backend.clone(), under_item.clone()).into_any()
-                } else if naming {
-                    new_project_box(state, under_backend.clone(), under_item.clone()).into_any()
                 } else {
                     Empty::new().into_any()
                 }
@@ -402,8 +395,6 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
     let pinned = item.is_pinned();
     let archived = item.is_archived();
     let is_issue = item.issue().is_some();
-    let projects = state.projects.get();
-    let current_project = item.project_id.clone();
 
     let mut menu = Menu::new().submenu("Open in", {
         let path = path.clone();
@@ -469,7 +460,6 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
             let i = i.clone();
             m.accelerator(key(KeyCode::KeyR)).action(move || {
                 state.confirm_delete.set(None);
-                state.new_project_for.set(None);
                 state.renaming.set(Some(i.clone()));
             })
         });
@@ -495,33 +485,6 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
     }
     menu = menu.separator();
 
-    menu = menu.submenu("Move to Project", {
-        let projects = projects.clone();
-        let backend = backend.clone();
-        let id = id.clone();
-        let current = current_project.clone();
-        move |mut sub| {
-            for p in &projects {
-                let (b, i, pid) = (backend.clone(), id.clone(), p.id.clone());
-                let checked = p.id == current;
-                sub = sub.item(p.name.clone(), move |m| {
-                    let (b, i, pid) = (b.clone(), i.clone(), pid.clone());
-                    m.checked(checked).enabled(!checked).action(move || b.move_item(&i, Some(pid.clone()), None))
-                });
-            }
-            let i = id.clone();
-            sub.separator().item("New Project\u{2026}", move |m| {
-                let i = i.clone();
-                m.action(move || {
-                    state.renaming.set(None);
-                    state.confirm_delete.set(None);
-                    state.new_project_for.set(Some(i.clone()));
-                })
-            })
-        }
-    });
-    menu = menu.separator();
-
     {
         let (b, i) = (backend.clone(), id.clone());
         // An unowned checkout that has gone from disk cannot come back.
@@ -544,7 +507,6 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
             let i = i.clone();
             m.accelerator(key(KeyCode::KeyD)).action(move || {
                 state.renaming.set(None);
-                state.new_project_for.set(None);
                 state.confirm_delete.set(Some(i.clone()));
             })
         });
@@ -636,42 +598,6 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
     })
 }
 
-/// A box for a new project's name, under the row being moved.
-fn new_project_box(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoView {
-    let text = RwSignal::new(String::new());
-    let id = item.id.clone();
-    let input = TextInput::new(text)
-        .placeholder("New project name")
-        .on_enter(move || {
-            let name = text.get();
-            if !name.trim().is_empty() {
-                backend.move_item(&id, None, Some(name.trim().to_string()));
-            }
-            state.new_project_for.set(None);
-        })
-        .on_event_cont(el::FocusGained, move |_, _| state.search_focused.set(true))
-        .on_event_cont(el::FocusLost, move |_, _| state.search_focused.set(false))
-        .on_event_stop(el::Click, |_, _| {})
-        .style(|s| {
-            s.width_full()
-                .height(26.0)
-                .font_size(theme::TEXT_BODY)
-                .padding_horiz(6.0)
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::ACCENT)
-                .border_radius(4.0)
-        });
-    let input_id = input.view_id();
-    let asked = std::rc::Rc::new(std::cell::Cell::new(false));
-    Container::new(input.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
-        if !asked.replace(true) {
-            input_id.request_focus();
-        }
-    }))
-    .style(|s| s.width_full().padding_horiz(6.0).padding_bottom(6.0))
-}
-
 /// A section heading in the sidebar: a name, a count in the muted colour,
 /// and a chevron when it can fold.
 pub fn section_header(title: String, count: usize, collapsed: Option<bool>) -> impl IntoView {
@@ -722,7 +648,7 @@ mod tests {
 
     #[test]
     fn a_branch_has_no_state_glyph_and_a_closed_issue_has_one() {
-        let mut i = Item::new("perch", "criccomini/perch", "2026-09-18T10:00:00Z".parse().unwrap());
+        let mut i = Item::new("criccomini/perch", "2026-09-18T10:00:00Z".parse().unwrap());
         assert_eq!(state_of(&i), None);
         i.subject = Some(ItemSubject::Issue(perch_github::Issue {
             number: 1,

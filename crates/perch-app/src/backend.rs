@@ -16,8 +16,8 @@ use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, Store};
 use perch_github::{
     resolve_token, Anchor, Author, Cache, CommentMessage, CommentThread, Config, DetailSource,
-    GitHub, Item, ItemCheckout, ItemKind, ItemSubject, Mark, Project, PullRequest, Reason,
-    RunRecord, RunStatus, SubjectDetail, SubjectKind, Thread, ThreadOrigin,
+    GitHub, Item, ItemCheckout, ItemKind, ItemSubject, Mark, PullRequest, Reason, RunRecord,
+    RunStatus, SubjectDetail, SubjectKind, Thread, ThreadOrigin,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
@@ -32,7 +32,7 @@ const AVATAR_CONCURRENCY: usize = 6;
 const LAST_MODIFIED_KEY: &str = "notifications_last_modified";
 /// Settings the UI keeps between launches. Sent back at startup.
 pub const UI_META_KEYS: [&str; 5] =
-    ["item_filters", "collapsed_projects", "review.layout", "viewer.login", "viewer.avatar_url"];
+    ["item_filters", "collapsed_sections", "review.layout", "viewer.login", "viewer.avatar_url"];
 
 /// What the per-thread fetches share.
 #[derive(Clone)]
@@ -101,9 +101,6 @@ pub enum Command {
     /// Attention now, reason `manual`.
     MarkUnread { id: String },
     RenameItem { id: String, name: Option<String> },
-    /// `project_id` of `None` with `new_project` set makes an implicit
-    /// project of that name first.
-    MoveItem { id: String, project_id: Option<String>, new_project: Option<String> },
     /// Cut `perch/issue-<n>` from the default branch and make a
     /// checkout-only item pointing back at the issue.
     StartWork { issue_item_id: String },
@@ -153,8 +150,10 @@ pub enum Event {
     /// Every mark Perch holds. Sent whole rather than as a patch, because
     /// the set is small and a replacement cannot drift.
     Marks(Vec<Mark>),
-    /// Every project, declared or implicit. Whole, like marks.
-    Projects(Vec<Project>),
+    /// The repositories config.toml declares, `owner/repo` in config
+    /// order, which is the order the sidebar lists them in. Sent once at
+    /// startup; the file is read once.
+    Repos(Vec<String>),
     /// Every item, active and archived. Whole, for the same reason.
     Items(Vec<Item>),
     /// A remembered setting, sent once at startup for each key the UI
@@ -316,10 +315,6 @@ impl Backend {
 
     pub fn rename_item(&self, id: &str, name: Option<String>) {
         let _ = self.commands.send(Command::RenameItem { id: id.to_string(), name });
-    }
-
-    pub fn move_item(&self, id: &str, project_id: Option<String>, new_project: Option<String>) {
-        let _ = self.commands.send(Command::MoveItem { id: id.to_string(), project_id, new_project });
     }
 
     pub fn start_work(&self, issue_item_id: &str) {
@@ -503,6 +498,8 @@ async fn run(
     for warning in &config.warnings {
         let _ = events.send(Event::Notice(warning.clone()));
     }
+    // The sidebar's order, before the items it orders.
+    let _ = events.send(Event::Repos(config.declared()));
     if let Some(cache) = cache.as_ref() {
         // A run still marked running is one Perch died in the middle of.
         if let Ok(guard) = cache.lock() {
@@ -533,10 +530,8 @@ async fn run(
         // round, a dismissed row would paint for a frame before vanishing.
         if let Ok(guard) = cache.lock() {
             send_marks(&guard, &events);
-            // Projects follow the file on every launch, then the sidebar
-            // paints from the cache before the network is asked anything.
-            sync_projects(&guard, &config);
-            send_projects(&guard, &events);
+            // The sidebar paints from the cache before the network is
+            // asked anything.
             send_items(&guard, &events);
             for key in UI_META_KEYS {
                 if let Ok(Some(value)) = guard.meta(key) {
@@ -741,9 +736,6 @@ async fn run(
                 edit_item(&ctx, &id, |item| {
                     item.name = name.clone().filter(|n| !n.trim().is_empty());
                 });
-            }
-            Some(Command::MoveItem { id, project_id, new_project }) => {
-                move_item(&ctx, &id, project_id, new_project);
             }
             Some(Command::StartWork { issue_item_id }) => {
                 ctx.clear_notice();
@@ -1062,10 +1054,6 @@ impl Ctx {
         self.with_cache(|c| send_items(c, &self.events));
     }
 
-    fn send_projects(&self) {
-        self.with_cache(|c| send_projects(c, &self.events));
-    }
-
     fn notice(&self, message: impl Into<String>) {
         let _ = self.events.send(Event::Notice(message.into()));
     }
@@ -1094,23 +1082,6 @@ impl Ctx {
             client.shutdown().await;
         }
     }
-
-    /// The project a repository's items go in, made implicit if nothing
-    /// declares it. Returns its id.
-    fn project_for(&self, repo_full_name: &str) -> String {
-        let name = self.config.project_for(repo_full_name);
-        let id = Project::id_for(&name);
-        self.with_cache(|c| {
-            let known = c.load_projects().unwrap_or_default();
-            if !known.iter().any(|p| p.id == id) {
-                if let Err(e) = c.upsert_project(&Project::implicit(&name)) {
-                    tracing::warn!(error = %e, "could not make an implicit project");
-                }
-                send_projects(c, &self.events);
-            }
-        });
-        id
-    }
 }
 
 fn send_items(cache: &Cache, events: &EventSender<Event>) {
@@ -1119,58 +1090,6 @@ fn send_items(cache: &Cache, events: &EventSender<Event>) {
             let _ = events.send(Event::Items(items));
         }
         Err(e) => tracing::warn!(error = %e, "could not read items"),
-    }
-}
-
-fn send_projects(cache: &Cache, events: &EventSender<Event>) {
-    match cache.load_projects() {
-        Ok(projects) => {
-            let _ = events.send(Event::Projects(projects));
-        }
-        Err(e) => tracing::warn!(error = %e, "could not read projects"),
-    }
-}
-
-/// Make the projects table follow config.toml.
-///
-/// Declared projects are upserted whole. A row the file no longer mentions
-/// keeps its items and becomes implicit; one with no items and no entry is
-/// deleted.
-fn sync_projects(cache: &Cache, config: &Config) {
-    let declared: Vec<Project> = config
-        .project
-        .iter()
-        .map(|p| Project {
-            id: Project::id_for(&p.name),
-            name: p.name.trim().to_string(),
-            repos: p.repos.clone(),
-            roots: p.root_paths(),
-            implicit: false,
-        })
-        .collect();
-    for p in &declared {
-        if let Err(e) = cache.upsert_project(p) {
-            tracing::warn!(project = %p.id, error = %e, "could not record the project");
-        }
-    }
-    let items = cache.load_items().unwrap_or_default();
-    for existing in cache.load_projects().unwrap_or_default() {
-        if declared.iter().any(|d| d.id == existing.id) {
-            continue;
-        }
-        let has_items = items.iter().any(|i| i.project_id == existing.id);
-        if has_items {
-            if !existing.implicit {
-                let _ = cache.upsert_project(&Project {
-                    implicit: true,
-                    repos: Vec::new(),
-                    roots: Vec::new(),
-                    ..existing
-                });
-            }
-        } else {
-            let _ = cache.delete_project(&existing.id);
-        }
     }
 }
 
@@ -1186,54 +1105,6 @@ fn edit_item(ctx: &Ctx, id: &str, edit: impl FnOnce(&mut Item)) {
         return;
     }
     ctx.send_items();
-}
-
-/// Put an item in another project, making the project when asked.
-fn move_item(ctx: &Ctx, id: &str, project_id: Option<String>, new_project: Option<String>) {
-    let target = match (project_id, new_project) {
-        (Some(id), _) => id,
-        (None, Some(name)) if !name.trim().is_empty() => {
-            // A name that is a project already, in any case, is that
-            // project; upserting over it would lose its repositories.
-            let project = Project::implicit(&name);
-            let exists = ctx
-                .with_cache(|c| c.load_projects().ok().is_some_and(|ps| ps.iter().any(|p| p.id == project.id)))
-                .unwrap_or(false);
-            if !exists {
-                if let Some(Err(e)) = ctx.with_cache(|c| c.upsert_project(&project)) {
-                    ctx.notice(format!("Could not make the project: {e}"));
-                    return;
-                }
-            }
-            project.id
-        }
-        _ => return,
-    };
-    let from = ctx.item(id).map(|i| i.project_id);
-    edit_item(ctx, id, |item| item.project_id = target.clone());
-    // An implicit project holds only what is moved there, and goes when
-    // its last item does.
-    if let Some(from) = from {
-        ctx.with_cache(|c| drop_empty_implicit(c, &from));
-    }
-    ctx.send_projects();
-}
-
-/// Delete a project if it is implicit and nothing is left in it.
-fn drop_empty_implicit(cache: &Cache, project_id: &str) {
-    let empty = cache
-        .load_items()
-        .unwrap_or_default()
-        .iter()
-        .all(|i| i.project_id != project_id);
-    let implicit = cache
-        .load_projects()
-        .unwrap_or_default()
-        .iter()
-        .any(|p| p.id == project_id && p.implicit);
-    if empty && implicit {
-        let _ = cache.delete_project(project_id);
-    }
 }
 
 /// Make the items table and the disk agree about owned checkouts.
@@ -1449,8 +1320,6 @@ async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
     ctx.with_cache(|c| c.delete_item(id))
         .transpose()
         .map_err(|e| e.to_string())?;
-    ctx.with_cache(|c| drop_empty_implicit(c, &item.project_id));
-    ctx.send_projects();
     ctx.send_items();
     Ok(())
 }
@@ -1938,7 +1807,7 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str) -> Result<String, String> {
         .unwrap_or_default();
 
     let now = Timestamp::now();
-    let mut item = Item::new(&issue_item.project_id, &issue_item.repo_full_name, now);
+    let mut item = Item::new(&issue_item.repo_full_name, now);
     item.checkout = Some(ItemCheckout {
         branch: cut.branch,
         base_ref: default,
@@ -2007,7 +1876,7 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     let now = Timestamp::now();
-    let mut item = Item::new(&source.project_id, &source.repo_full_name, now);
+    let mut item = Item::new(&source.repo_full_name, now);
     item.checkout = Some(ItemCheckout {
         branch: cut.branch,
         // The source's head, so what is shown is what has been done on top.
@@ -2181,10 +2050,7 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
                         let on_branch = branch_item_for(ctx, &pr);
                         let (mut item, is_new) = match on_branch {
                             Some(item) => (item, false),
-                            None => {
-                                let project = ctx.project_for(&pr.repo_full_name);
-                                (Item::new(&project, &pr.repo_full_name, Timestamp::now()), true)
-                            }
+                            None => (Item::new(&pr.repo_full_name, Timestamp::now()), true),
                         };
                         if let Some(c) = item.checkout.as_mut() {
                             c.base_ref = pr.base_ref.clone();
@@ -2347,29 +2213,28 @@ async fn refresh_items(ctx: &Ctx) {
     }
 }
 
-/// Every worktree under a project's roots is an item, and one whose
-/// directory has gone is deleted, or archived when it has threads. Returns
-/// whether anything changed.
+/// Every worktree under a declared repository's roots is an item, and one
+/// whose directory has gone is deleted, or archived when it has threads.
+/// Returns whether anything changed.
 async fn scan_roots(ctx: &Ctx) -> bool {
-    let projects = ctx.with_cache(|c| c.load_projects().unwrap_or_default()).unwrap_or_default();
     let git = ctx.preparer.git();
     let mut changed = false;
     // Which unowned items were seen, by directory and branch, so the rest
     // can be judged gone. A root that could not be scanned takes its
-    // project out of the judgement: its worktrees are not in any other
+    // repository out of the judgement: its worktrees are not in any other
     // root's listing when it is a clone of its own, and which repository
     // it was for is exactly what the scan would have said.
     let mut seen: std::collections::HashSet<(std::path::PathBuf, String)> = std::collections::HashSet::new();
     let mut scanned_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut failed_projects: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut failed_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for project in &projects {
-        for root in &project.roots {
-            let scan = match perch_git::scan_root(git, root).await {
+    for declared in &ctx.config.repo {
+        for root in declared.root_paths() {
+            let scan = match perch_git::scan_root(git, &root).await {
                 Ok(s) => s,
                 Err(e) => {
                     ctx.notice(format!("{}: {e}", root.display()));
-                    failed_projects.insert(project.id.clone());
+                    failed_repos.insert(declared.name.to_lowercase());
                     continue;
                 }
             };
@@ -2377,8 +2242,10 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                 ctx.notice(format!("{}: origin is not a GitHub repository", root.display()));
                 continue;
             };
-            if !project.claims(&repo) {
-                ctx.notice(format!("{}: {repo} is not one of {}'s repositories", root.display(), project.name));
+            // A root is listed under the repository its origin names; one
+            // that holds worktrees of two is listed under both.
+            if !repo.eq_ignore_ascii_case(&declared.name) {
+                ctx.notice(format!("{}: origin is {repo}, not {}", root.display(), declared.name));
                 continue;
             }
             scanned_repos.insert(repo.to_lowercase());
@@ -2418,7 +2285,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                         }
                     }
                     None => {
-                        let mut item = Item::new(&project.id, &repo, Timestamp::now());
+                        let mut item = Item::new(&repo, Timestamp::now());
                         item.checkout = Some(ItemCheckout {
                             branch,
                             base_ref: scan.default_branch.clone(),
@@ -2452,7 +2319,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         let Some(c) = item.checkout.as_ref() else { continue };
         if c.owned
             || item.is_archived()
-            || failed_projects.contains(&item.project_id)
+            || failed_repos.contains(&item.repo_full_name.to_lowercase())
             || !scanned_repos.contains(&item.repo_full_name.to_lowercase())
         {
             continue;
@@ -2485,7 +2352,6 @@ async fn scan_roots(ctx: &Ctx) -> bool {
 /// becomes that pull request's, in the same row.
 async fn attach_pull_requests(ctx: &Ctx) -> bool {
     let items = ctx.with_cache(|c| c.load_items().unwrap_or_default()).unwrap_or_default();
-    let projects = ctx.with_cache(|c| c.load_projects().unwrap_or_default()).unwrap_or_default();
     let mut changed = false;
     for item in items {
         if item.subject.is_some() || item.is_archived() {
@@ -2493,14 +2359,13 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
         }
         let Some(checkout) = item.checkout.as_ref() else { continue };
         let Some((head_owner, _)) = item.repo_full_name.split_once('/') else { continue };
-        // The pull request may be against any of the project's repositories
-        // when the checkout is a fork.
+        // The pull request may be against any declared repository when the
+        // checkout is a fork of one. The lookups are conditional, so a
+        // repository asked every poll is one request that mostly says 304.
         let mut candidates: Vec<String> = vec![item.repo_full_name.clone()];
-        if let Some(p) = projects.iter().find(|p| p.id == item.project_id) {
-            for r in &p.repos {
-                if !candidates.iter().any(|c| c.eq_ignore_ascii_case(r)) {
-                    candidates.push(r.clone());
-                }
+        for r in ctx.config.declared() {
+            if !candidates.iter().any(|c| c.eq_ignore_ascii_case(&r)) {
+                candidates.push(r);
             }
         }
         for repo in candidates {
@@ -2627,10 +2492,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
     // The row as it is now, not as it was before the fetch.
     let mut item = match existing {
         Some(item) => ctx.item(&item.id).unwrap_or(item),
-        None => {
-            let project = ctx.project_for(&issue.repo_full_name);
-            Item::new(&project, &issue.repo_full_name, now)
-        }
+        None => Item::new(&issue.repo_full_name, now),
     };
     item.subject = Some(ItemSubject::Issue(issue.clone()));
     item.archived_at = None;
@@ -2737,8 +2599,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
     if !offline {
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            let project = ctx.config.project_for(&issue.repo_full_name);
-            let messages = crate::knowledge::issue_to_messages(&issue, &comments, &project);
+            let messages = crate::knowledge::issue_to_messages(&issue, &comments);
             match ingest(&ctx, messages).await {
                 Ok(n) => {
                     let _ = ctx.events.send(Event::Archived { repo_full_name: issue.repo_full_name.clone(), number, added: n });
@@ -2757,15 +2618,15 @@ async fn ingest(ctx: &Ctx, messages: Vec<perch_knowledge::Message>) -> Result<us
     let write_skill = ctx.config.knowledge.skills;
     // File writes, off the runtime's threads.
     let outcome = tokio::task::spawn_blocking(move || {
-        let before = knowledge.projects()?;
+        let before = knowledge.repos()?;
         let ingested = knowledge.ingest(&messages)?;
-        let after = knowledge.projects()?;
-        // The skill names every project, so it is rewritten when the set
-        // changes, and written the first time anything is here at all.
+        let after = knowledge.repos()?;
+        // The skill names every repository, so it is rewritten when the
+        // set changes, and written the first time anything is here at all.
         let dirs = crate::knowledge::skill_dirs();
         let missing = dirs.iter().any(|d| !d.join("SKILL.md").is_file());
         if write_skill && (before != after || missing) {
-            knowledge.write_skill(&perch_knowledge::SkillConfig { projects: after, dirs })?;
+            knowledge.write_skill(&perch_knowledge::SkillConfig { repos: after, dirs })?;
         }
         Ok::<_, perch_knowledge::Error>(ingested)
     })
@@ -2909,8 +2770,7 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
             // A fresh item's checkout is of the pull request's own
             // repository, whichever fork the head is on: that is the clone
             // it is cut in.
-            let project = ctx.project_for(&pull_request.repo_full_name);
-            Item::new(&project, &pull_request.repo_full_name, now)
+            Item::new(&pull_request.repo_full_name, now)
         }
     };
     // CI turning red is attention. Nothing else about the snapshot is.
@@ -3063,8 +2923,7 @@ async fn archive_discussion(ctx: &Ctx, item_id: &str, pr: &perch_github::PullReq
         });
     }
 
-    let project = ctx.config.project_for(&pr.repo_full_name);
-    let messages = crate::knowledge::to_messages(pr, &discussion, &project);
+    let messages = crate::knowledge::to_messages(pr, &discussion);
     match ingest(ctx, messages).await {
         Ok(added) => {
             tracing::info!(repo = %pr.repo_full_name, number = pr.number, added, "discussion archived");
@@ -3286,8 +3145,7 @@ async fn ask(
     if run.status == perch_github::RunStatus::Finished {
         let threads = ctx.with_cache(|c| c.load_comment_threads(&item_id).unwrap_or_default()).unwrap_or_default();
         if let Some(item) = ctx.item(&item_id) {
-            let project = ctx.config.project_for(&item.repo_full_name);
-            let messages = crate::knowledge::threads_to_messages(&item, &threads, &project);
+            let messages = crate::knowledge::threads_to_messages(&item, &threads);
             if let Err(e) = ingest(ctx, messages).await {
                 tracing::warn!(error = %e, "could not archive the thread");
             }

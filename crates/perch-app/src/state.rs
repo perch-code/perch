@@ -9,14 +9,14 @@ use std::sync::Arc;
 
 use floem::reactive::{Effect, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use jiff::Timestamp;
-use perch_github::{AgentConfig, Item, ItemKind, Mark, Project, SubjectDetail, SubjectKind, Thread};
+use perch_github::{AgentConfig, Item, ItemKind, Mark, SubjectDetail, SubjectKind, Thread};
 
 use crate::backend::{Event, Status};
 use crate::filter::{self, Counts, Filters, Group, ReasonFilter, Section, Sort, View};
 
 /// What the window is showing when no review is open: the sidebar with its
-/// projects and an empty main area, or the inbox of notifications that are
-/// not about any item.
+/// repositories and an empty main area, or the inbox of notifications that
+/// are not about any item.
 ///
 /// The review view sits over either. `AppState::return_to` remembers which
 /// one it was opened from, so leaving a review lands where it started.
@@ -44,8 +44,11 @@ pub struct AppState {
     pub avatars: RwSignal<HashMap<String, Arc<Vec<u8>>>>,
     /// Perch's own saved and done flags, keyed by thread id.
     pub marks: RwSignal<HashMap<String, Mark>>,
-    /// Every project, declared in config or made for an item.
-    pub projects: RwSignal<Vec<Project>>,
+    /// The repositories config.toml declares, `owner/repo` in config
+    /// order, which is the order the sidebar lists them in. A repository
+    /// with items that nobody declared is a section all the same; only
+    /// the items say so.
+    pub repos: RwSignal<Vec<String>>,
     /// Every item, active and archived.
     pub items: RwSignal<Vec<Item>>,
     /// The item whose row is selected in the sidebar: the open one.
@@ -76,14 +79,13 @@ pub struct AppState {
     pub hovered_item: RwSignal<Option<String>>,
     /// The sidebar's filter menu settings and search.
     pub item_filters: RwSignal<crate::items::ItemFilters>,
-    /// Project sections folded shut, by project id.
+    /// Sections folded shut, by section key: `repo:`, `owner:` or `date:`
+    /// and the lower-cased name or the label.
     pub collapsed: RwSignal<HashSet<String>>,
     /// The item whose title is a text box right now.
     pub renaming: RwSignal<Option<String>>,
     /// The item with a Delete confirmation open under it.
     pub confirm_delete: RwSignal<Option<String>>,
-    /// The item with a "New project" box open under it.
-    pub new_project_for: RwSignal<Option<String>>,
     /// The sidebar's search box, so Cmd-1 can focus it.
     pub search_box: RwSignal<Option<floem::ViewId>>,
     /// What is typed in the sidebar's search box.
@@ -140,7 +142,7 @@ impl AppState {
             details: RwSignal::new(HashMap::new()),
             avatars: RwSignal::new(HashMap::new()),
             marks: RwSignal::new(HashMap::new()),
-            projects: RwSignal::new(Vec::new()),
+            repos: RwSignal::new(Vec::new()),
             items: RwSignal::new(Vec::new()),
             open_item: RwSignal::new(None),
             notice: RwSignal::new(None),
@@ -155,7 +157,6 @@ impl AppState {
             collapsed: RwSignal::new(HashSet::new()),
             renaming: RwSignal::new(None),
             confirm_delete: RwSignal::new(None),
-            new_project_for: RwSignal::new(None),
             search_box: RwSignal::new(None),
             item_query: RwSignal::new(String::new()),
             pending_meta: RwSignal::new(None),
@@ -407,13 +408,13 @@ impl AppState {
                 // and with it any check it had.
                 self.prune_selection();
             }
-            Event::Projects(projects) => self.projects.set(projects),
+            Event::Repos(repos) => self.repos.set(repos),
             Event::Meta { key, value } => match key.as_str() {
                 "item_filters" => match crate::items::ItemFilters::parse(&value) {
                     Ok(f) => self.item_filters.set(f),
                     Err(e) => tracing::warn!(error = %e, "ignoring saved item filters"),
                 },
-                "collapsed_projects" => {
+                "collapsed_sections" => {
                     self.collapsed.set(value.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect())
                 }
                 "review.layout" => {
@@ -745,16 +746,12 @@ impl AppState {
         self.items.with(|all| all.iter().find(|i| i.id == id).cloned())
     }
 
-    pub fn project(&self, id: &str) -> Option<Project> {
-        self.projects.with(|all| all.iter().find(|p| p.id == id).cloned())
-    }
-
     /// The sidebar as the filters cut it: Priority, Pinned, and the groups.
     pub fn item_sections(&self) -> crate::items::Sections {
         let mut filters = self.item_filters.get();
         filters.query = self.item_query.get();
-        self.projects.with(|projects| {
-            self.items.with(|items| crate::items::sections(projects, items, &filters, self.now.get()))
+        self.repos.with(|repos| {
+            self.items.with(|items| crate::items::sections(repos, items, &filters, self.now.get()))
         })
     }
 
@@ -835,7 +832,7 @@ mod tests {
     }
 
     fn item(checkout_repo: &str, pr_repo: &str, number: u64) -> Item {
-        let mut item = Item::new("p", checkout_repo, jiff::Timestamp::UNIX_EPOCH);
+        let mut item = Item::new(checkout_repo, jiff::Timestamp::UNIX_EPOCH);
         item.subject = Some(perch_github::ItemSubject::PullRequest(perch_github::PullRequest {
             number,
             title: "t".into(),

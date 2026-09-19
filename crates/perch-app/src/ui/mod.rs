@@ -230,8 +230,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             // it: a composer, or something open under a sidebar row.
             let claimed = review.composer.with(Option::is_some)
                 || state.renaming.with(Option::is_some)
-                || state.confirm_delete.with(Option::is_some)
-                || state.new_project_for.with(Option::is_some);
+                || state.confirm_delete.with(Option::is_some);
             if key.code == Code::Escape
                 && key.modifiers.is_empty()
                 && !claimed
@@ -323,12 +322,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // Escape puts away whatever the sidebar has open under a row.
         if key.code == Code::Escape && key.modifiers.is_empty() {
             let had = state.renaming.with(Option::is_some)
-                || state.confirm_delete.with(Option::is_some)
-                || state.new_project_for.with(Option::is_some);
+                || state.confirm_delete.with(Option::is_some);
             if had {
                 state.renaming.set(None);
                 state.confirm_delete.set(None);
-                state.new_project_for.set(None);
                 return EventPropagation::Stop;
             }
         }

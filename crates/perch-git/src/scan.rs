@@ -1,7 +1,7 @@
-//! Finding the branches a project's roots have checked out.
+//! Finding the branches a repository's roots have checked out.
 //!
-//! A root is a directory the user declared in config: a clone of one of the
-//! project's repositories, or a worktree of one. Asking it `git worktree
+//! A root is a directory the user declared in config under a repository: a
+//! clone of it, or a worktree of one. Asking it `git worktree
 //! list` gives every worktree of that repository, the root itself included,
 //! and each one on a branch other than the default is a branch of the
 //! reader's own. Nothing here writes: the scan reads, and the caller decides

@@ -2,9 +2,9 @@
 //!
 //! Top to bottom: a strip the traffic lights sit over, the search box and
 //! the filter button, the bell that opens the inbox, then Priority, Pinned,
-//! and one section per project. While the inbox is open the drawer shows
-//! that screen's own views, filters and repositories instead, with a row
-//! at the top that comes back here.
+//! and one section per repository, owner or date. While the inbox is open
+//! the drawer shows that screen's own views, filters and repositories
+//! instead, with a row at the top that comes back here.
 
 use std::rc::Rc;
 
@@ -42,7 +42,7 @@ pub fn sidebar(
                 if inbox {
                     inbox_nav(state, review).into_any()
                 } else {
-                    projects_nav(state, review, backend.clone(), on_open.clone()).into_any()
+                    repos_nav(state, review, backend.clone(), on_open.clone()).into_any()
                 }
             },
         )
@@ -114,10 +114,10 @@ fn toggle_button(state: AppState) -> impl IntoView {
 }
 
 // ---------------------------------------------------------------------
-// The projects navigation
+// The repositories navigation
 // ---------------------------------------------------------------------
 
-fn projects_nav(
+fn repos_nav(
     state: AppState,
     review: ReviewState,
     backend: Rc<Backend>,
@@ -262,7 +262,7 @@ fn filter_menu(state: AppState, backend: Rc<Backend>) -> Menu {
     menu = menu.separator();
     {
         let set = set.clone();
-        menu = menu.item("Show Empty Projects", move |m| {
+        menu = menu.item("Show Empty Repositories", move |m| {
             let set = set.clone();
             m.checked(f.show_empty).action(move || set(Box::new(|f| f.show_empty = !f.show_empty)))
         });
@@ -320,11 +320,8 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
             section_header("Priority".into(), 0, None),
             dyn_stack(
                 move || state.item_sections().priority,
-                move |item| row_key(state, item),
-                move |item| {
-                    let project = state.project(&item.project_id);
-                    item_row(state, b1.clone(), item, project, Placement::Priority, o1.clone())
-                },
+                row_key,
+                move |item| item_row(state, b1.clone(), item, Placement::Priority, o1.clone()),
             )
             .style(|s| s.flex_col().width_full().gap(1.0)),
             dyn_container(
@@ -351,11 +348,8 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
                     section_header("Pinned".into(), 0, None),
                     dyn_stack(
                         move || state.item_sections().pinned,
-                        move |item| row_key(state, item),
-                        move |item| {
-                            let project = state.project(&item.project_id);
-                            item_row(state, b.clone(), item, project, Placement::Pinned, o.clone())
-                        },
+                        row_key,
+                        move |item| item_row(state, b.clone(), item, Placement::Pinned, o.clone()),
                     )
                     .style(|s| s.flex_col().width_full().gap(1.0)),
                 ))
@@ -363,14 +357,14 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
                 .into_any()
             },
         ),
-        // One section per project, or per date.
+        // One section per repository, owner or date.
         dyn_stack(
             move || state.item_sections().groups,
             move |section| {
                 (
                     section.key.clone(),
                     section.title.clone(),
-                    section.items.iter().map(|i| row_key(state, i)).collect::<Vec<_>>(),
+                    section.items.iter().map(row_key).collect::<Vec<_>>(),
                     section.count,
                 )
             },
@@ -383,13 +377,13 @@ fn sections(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl In
     .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
 }
 
-/// What a row is rebuilt on: everything it draws, which is the whole row
-/// and the name of its project. Listing the fields by hand missed one
-/// every time a chip was added, so the row is its own key.
-type RowKey = (Item, Option<String>);
-
-fn row_key(state: AppState, item: &Item) -> RowKey {
-    (item.clone(), state.project(&item.project_id).map(|p| p.name))
+/// What a row is rebuilt on: everything it draws, which is the whole row.
+/// Listing the fields by hand missed one every time a chip was added, so
+/// the row is its own key. The grouping, which the second line also
+/// depends on, is in the section's key above, and a section is rebuilt
+/// whole when it changes.
+fn row_key(item: &Item) -> Item {
+    item.clone()
 }
 
 fn group_section(
@@ -400,14 +394,12 @@ fn group_section(
 ) -> impl IntoView {
     let (key_a, key_b) = (section.key.clone(), section.key.clone());
     let toggle_key = section.key.clone();
-    let by_date = section.key.starts_with("date:");
-    let project_id = section.key.strip_prefix("project:").map(str::to_string);
     let collapsed = move || state.collapsed.with(|c| c.contains(&key_a));
     let collapsed_body = move || state.collapsed.with(|c| c.contains(&key_b));
     let items = section.items.clone();
     let title = section.title.clone();
     let count = section.count;
-    let placement = Placement::Section(if by_date { ItemGroup::Date } else { ItemGroup::Project });
+    let placement = Placement::Section(section.group());
 
     Stack::vertical((
         dyn_container(collapsed, move |c| section_header(title.clone(), count, Some(c)).into_any())
@@ -418,7 +410,7 @@ fn group_section(
                     }
                 });
                 let joined: Vec<String> = state.collapsed.get_untracked().into_iter().collect();
-                state.pending_meta.set(Some(("collapsed_projects".to_string(), joined.join(","))));
+                state.pending_meta.set(Some(("collapsed_sections".to_string(), joined.join(","))));
             })
             .style(|s| s.width_full()),
         dyn_container(collapsed_body, move |c| {
@@ -426,17 +418,10 @@ fn group_section(
                 return Empty::new().into_any();
             }
             let (b, o, items) = (backend.clone(), on_open.clone(), items.clone());
-            let project_id = project_id.clone();
             dyn_stack(
                 move || items.clone(),
-                move |item| row_key(state, item),
-                move |item| {
-                    let project = project_id
-                        .as_deref()
-                        .or(Some(item.project_id.as_str()))
-                        .and_then(|id| state.project(id));
-                    item_row(state, b.clone(), item, project, placement, o.clone())
-                },
+                row_key,
+                move |item| item_row(state, b.clone(), item, placement, o.clone()),
             )
             .style(|s| s.flex_col().width_full().gap(1.0))
             .into_any()
@@ -477,7 +462,7 @@ fn back_row(state: AppState, review: ReviewState) -> impl IntoView {
     Container::new(
         Stack::horizontal((
             sidebar_glyph(SidebarIcon::ChevronLeft, theme::FG_MUTED).style(|s| s.size(12.0, 12.0)),
-            Label::derived(|| "Projects".to_string()).style(|s| {
+            Label::derived(|| "Repositories".to_string()).style(|s| {
                 s.font_size(theme::TEXT_META).color(theme::FG_MUTED).margin_left(6.0).selectable(false)
             }),
         ))

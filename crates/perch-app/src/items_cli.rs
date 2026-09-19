@@ -1,11 +1,12 @@
 //! `perch --items ["status=closed;group=date;query=fence"]`
 //!
 //! Prints the sidebar as text: Priority, Pinned, then each section and its
-//! rows, from the cache the app uses. It is how `items::sections` is checked
-//! against real data without a window.
+//! rows, from the cache the app uses and the repositories config.toml
+//! declares. `group` is `repo`, `owner` or `date`. It is how
+//! `items::sections` is checked against real data without a window.
 
 use jiff::Timestamp;
-use perch_github::{Cache, CheckStatus, Item, ItemSubject, Project};
+use perch_github::{Cache, CheckStatus, Config, Item, ItemSubject};
 
 use crate::items::{self, ItemFilters, RowKind, Sections};
 
@@ -16,7 +17,7 @@ pub fn run(args: &[String]) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("bad filters: {e}");
-                eprintln!("keys: status, kinds, group, sort, show_empty, show_pr_status, query");
+                eprintln!("keys: status, kinds, group (repo, owner, date), sort, show_empty, show_pr_status, query");
                 std::process::exit(2);
             }
         },
@@ -42,9 +43,15 @@ fn print(filters: &ItemFilters) -> Result<(), String> {
     if reset {
         eprintln!("note: the database was older than this build and has been recreated");
     }
-    let projects = cache.load_projects().map_err(|e| e.to_string())?;
+    // The declared repositories come from the file, as the window's do;
+    // the cache knows only the ones with items.
+    let config = Config::load();
+    for warning in &config.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let declared = config.declared();
     let items = cache.load_items().map_err(|e| e.to_string())?;
-    let sections = items::sections(&projects, &items, filters, Timestamp::now());
+    let sections = items::sections(&declared, &items, filters, Timestamp::now());
 
     // What the list below was made under, on stderr so stdout stays the
     // sidebar alone.
@@ -56,46 +63,41 @@ fn print(filters: &ItemFilters) -> Result<(), String> {
     }
 
     let mut out = String::new();
-    render(&mut out, &projects, &sections, filters);
+    render(&mut out, &sections, filters);
     print!("{out}");
     Ok(())
 }
 
-fn render(out: &mut String, projects: &[Project], sections: &Sections, filters: &ItemFilters) {
-    let project_of = |item: &Item| projects.iter().find(|p| p.id == item.project_id);
-
+fn render(out: &mut String, sections: &Sections, filters: &ItemFilters) {
     out.push_str("Priority\n");
     if sections.priority.is_empty() {
         out.push_str("  Nothing needs attention\n");
     }
+    // Priority and Pinned sit under no repository heading, so their rows
+    // name it whatever the grouping.
     for item in &sections.priority {
-        row(out, item, project_of(item), filters, false);
+        row(out, item, &items::full_reference(item), filters, false);
     }
 
     if !sections.pinned.is_empty() {
         out.push_str("\nPinned\n");
         for item in &sections.pinned {
-            row(out, item, project_of(item), filters, true);
+            row(out, item, &items::full_reference(item), filters, true);
         }
     }
 
     for section in &sections.groups {
         out.push_str(&format!("\n{} ({})\n", section.title, section.count));
         for item in &section.items {
-            row(out, item, project_of(item), filters, false);
+            row(out, item, &items::reference(item, section.group()), filters, false);
         }
     }
 }
 
 /// One row: the glyph letter, the title, the reference line, and whatever
 /// the window would show at the right edge, in the order it shows them.
-fn row(out: &mut String, item: &Item, project: Option<&Project>, filters: &ItemFilters, pinned: bool) {
-    let mut line = format!(
-        "  {}  {}  [{}]",
-        RowKind::of(item).letter(),
-        item.title(),
-        items::reference(item, project, filters.group),
-    );
+fn row(out: &mut String, item: &Item, reference: &str, filters: &ItemFilters, pinned: bool) {
+    let mut line = format!("  {}  {}  [{reference}]", RowKind::of(item).letter(), item.title());
     if filters.show_pr_status {
         if let Some(chips) = pr_status(item) {
             line.push_str("  ");
@@ -153,18 +155,10 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// One project with a pull request that wants a review and a pinned
-    /// branch.
-    fn fixture() -> (Vec<Project>, Vec<Item>) {
-        let perch = Project {
-            id: "perch".into(),
-            name: "perch".into(),
-            repos: vec!["criccomini/perch".into()],
-            roots: vec![],
-            implicit: false,
-        };
-
-        let mut wanted = Item::new("perch", "criccomini/perch", at("2026-09-10T10:00:00Z"));
+    /// One declared repository with a pull request that wants a review and
+    /// a pinned branch.
+    fn fixture() -> (Vec<String>, Vec<Item>) {
+        let mut wanted = Item::new("criccomini/perch", at("2026-09-10T10:00:00Z"));
         wanted.id = "a".into();
         wanted.subject = Some(ItemSubject::PullRequest(PullRequest {
             number: 57,
@@ -198,7 +192,7 @@ mod tests {
         wanted.attention_at = Some(at("2026-09-18T09:00:00Z"));
         wanted.attention_reason = Some("review_requested".into());
 
-        let mut branch = Item::new("perch", "criccomini/perch", at("2026-09-14T10:00:00Z"));
+        let mut branch = Item::new("criccomini/perch", at("2026-09-14T10:00:00Z"));
         branch.id = "b".into();
         branch.checkout = Some(ItemCheckout {
             branch: "perch/issue-42".into(),
@@ -212,16 +206,16 @@ mod tests {
         });
         branch.pinned_at = Some(at("2026-09-18T10:00:00Z"));
 
-        (vec![perch], vec![wanted, branch])
+        (vec!["criccomini/perch".into()], vec![wanted, branch])
     }
 
     fn text(filters: &ItemFilters) -> String {
-        let (projects, items) = fixture();
+        let (declared, items) = fixture();
         // `now` is the attention's own instant, so the date bucket is Today
         // in any time zone.
-        let sections = items::sections(&projects, &items, filters, at("2026-09-18T09:00:00Z"));
+        let sections = items::sections(&declared, &items, filters, at("2026-09-18T09:00:00Z"));
         let mut out = String::new();
-        render(&mut out, &projects, &sections, filters);
+        render(&mut out, &sections, filters);
         out
     }
 
@@ -235,8 +229,8 @@ mod tests {
             "Pinned",
             "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned",
             "",
-            "perch (2)",
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested  * review requested",
+            "criccomini/perch (2)",
+            "  P  Fence the manifest  [#57 · fence]  ci:failure review requested  * review requested",
             "",
         ]
         .join("\n");
@@ -244,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn chips_go_when_pr_status_is_off_and_a_date_row_names_its_project() {
+    fn chips_go_when_pr_status_is_off_and_a_date_row_names_its_repository() {
         let f = ItemFilters {
             show_pr_status: false,
             group: ItemGroup::Date,
@@ -252,9 +246,16 @@ mod tests {
             ..Default::default()
         };
         let got = text(&f);
-        assert!(got.contains("  P  Fence the manifest  [perch #57 · fence]  * review requested\n"), "{got}");
+        assert!(got.contains("  P  Fence the manifest  [criccomini/perch #57 · fence]  * review requested\n"), "{got}");
         assert!(got.contains("\nToday (1)\n"), "{got}");
         assert!(!got.contains("Pinned"), "{got}");
+    }
+
+    #[test]
+    fn an_owner_section_is_titled_by_the_owner_and_its_rows_name_the_repository() {
+        let f = ItemFilters { group: ItemGroup::Owner, ..Default::default() };
+        let got = text(&f);
+        assert!(got.contains("\ncriccomini (2)\n  P  Fence the manifest  [criccomini/perch #57 · fence]"), "{got}");
     }
 
     #[test]

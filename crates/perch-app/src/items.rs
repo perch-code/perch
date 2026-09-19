@@ -1,5 +1,5 @@
 //! The sidebar's list: filtering, grouping and sorting items. Pure functions
-//! over the projects and items the cache holds.
+//! over the declared repositories and the items the cache holds.
 //!
 //! Everything here runs in memory, the way `filter` does for the inbox.
 //! Changing a setting never refetches, and the sidebar is paintable from the
@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use jiff::Timestamp;
-use perch_github::{Item, ItemSubject, Project};
+use perch_github::{Item, ItemSubject};
 
 use crate::timefmt::{bucket, DateBucket};
 
@@ -151,26 +151,34 @@ impl RowKind {
     }
 }
 
+/// What the sidebar's sections are: one per repository, one per owner, or
+/// one per date bucket. Owner is how two repositories share a heading;
+/// there is no named group of the reader's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ItemGroup {
     #[default]
-    Project,
+    Repository,
+    Owner,
     Date,
 }
 
 impl ItemGroup {
-    pub const ALL: [ItemGroup; 2] = [ItemGroup::Project, ItemGroup::Date];
+    pub const ALL: [ItemGroup; 3] = [ItemGroup::Repository, ItemGroup::Owner, ItemGroup::Date];
 
     pub fn label(self) -> &'static str {
         match self {
-            ItemGroup::Project => "Project",
+            ItemGroup::Repository => "Repository",
+            ItemGroup::Owner => "Owner",
             ItemGroup::Date => "Date",
         }
     }
 
+    /// The persisted form, and the prefix of every section key this
+    /// grouping makes, so a section can say which grouping made it.
     fn key(self) -> &'static str {
         match self {
-            ItemGroup::Project => "project",
+            ItemGroup::Repository => "repo",
+            ItemGroup::Owner => "owner",
             ItemGroup::Date => "date",
         }
     }
@@ -251,7 +259,7 @@ impl Default for ItemFilters {
         Self {
             status: ItemStatus::Active,
             kinds: ItemKinds::default(),
-            group: ItemGroup::Project,
+            group: ItemGroup::Repository,
             sort: ItemSort::LastActivity,
             show_empty: false,
             show_pr_status: true,
@@ -302,9 +310,9 @@ impl ItemFilters {
 
     /// Whether the search matches the item. Case-insensitive substring over
     /// the title as shown, the title before any Rename, the number, the
-    /// branch, and the project name, so a renamed pull request is found by
-    /// either name and `#57` finds number 57.
-    fn matches_query(&self, item: &Item, project_name: &str) -> bool {
+    /// branch, and the repository's `owner/repo`, so a renamed pull request
+    /// is found by either name and `#57` finds number 57.
+    fn matches_query(&self, item: &Item) -> bool {
         let needle = self.query.trim().to_lowercase();
         if needle.is_empty() {
             return true;
@@ -315,7 +323,7 @@ impl ItemFilters {
             item.given_title(),
             number.as_str(),
             item.branch().unwrap_or(""),
-            project_name,
+            item.repo_full_name.as_str(),
         ]
         .iter()
         .any(|hay| !hay.is_empty() && hay.to_lowercase().contains(&needle))
@@ -330,47 +338,53 @@ fn parse_flag(s: &str) -> Option<bool> {
     }
 }
 
-/// One project, or one date bucket, and its rows.
+/// One repository, one owner, or one date bucket, and its rows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemSection {
-    /// Stable identity for the view diffing key.
+    /// Stable identity for the view diffing key: the grouping's key, a
+    /// colon, and the lower-cased repository, owner, or the date label.
     pub key: String,
     pub title: String,
-    /// For a project, its active items, before any filter. The badge says
-    /// how much is going on there, whatever the list is narrowed to. For a
-    /// date bucket, the rows it holds.
+    /// For a repository, its active items before any filter, and for an
+    /// owner the sum over its repositories. The badge says how much is
+    /// going on there, whatever the list is narrowed to. For a date
+    /// bucket, the rows it holds.
     pub count: usize,
     pub items: Vec<Item>,
+}
+
+impl ItemSection {
+    /// Which grouping made the section, read back from its key, so a view
+    /// that is handed a section alone knows how to draw its rows.
+    pub fn group(&self) -> ItemGroup {
+        ItemGroup::ALL
+            .into_iter()
+            .find(|g| self.key.strip_prefix(g.key()).is_some_and(|rest| rest.starts_with(':')))
+            .unwrap_or_default()
+    }
 }
 
 /// What the sidebar draws, top to bottom.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sections {
     /// Items with attention newer than their Done mark, newest attention
-    /// first. These still appear under their project.
+    /// first. These still appear under their repository.
     pub priority: Vec<Item>,
     /// Pinned items, most recently pinned first. These do not appear under
-    /// their project.
+    /// their repository.
     pub pinned: Vec<Item>,
     pub groups: Vec<ItemSection>,
 }
 
-/// Build the sidebar from the cache's projects and items.
+/// Build the sidebar from the declared repositories, `owner/repo` in config
+/// order, and the cache's items.
 ///
 /// Priority and Pinned ignore the group, sort and kind settings and respect
 /// the search. The status filter touches them in one way only: archived
 /// items stay out of both unless the status shows archived items. Group
 /// sections take every filter.
-pub fn sections(projects: &[Project], items: &[Item], filters: &ItemFilters, now: Timestamp) -> Sections {
-    let names: HashMap<&str, &str> =
-        projects.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
-    let searched: Vec<&Item> = items
-        .iter()
-        .filter(|i| {
-            let name = names.get(i.project_id.as_str()).copied().unwrap_or(&i.project_id);
-            filters.matches_query(i, name)
-        })
-        .collect();
+pub fn sections(declared: &[String], items: &[Item], filters: &ItemFilters, now: Timestamp) -> Sections {
+    let searched: Vec<&Item> = items.iter().filter(|i| filters.matches_query(i)).collect();
     let top_level = |i: &Item| !i.is_archived() || filters.status.shows_archived();
 
     let mut priority: Vec<Item> = searched
@@ -396,7 +410,8 @@ pub fn sections(projects: &[Project], items: &[Item], filters: &ItemFilters, now
     sort_items(&mut rows, filters.sort);
 
     let groups = match filters.group {
-        ItemGroup::Project => by_project(projects, items, &rows, filters.show_empty),
+        ItemGroup::Repository => by_repository(by_repository_order(declared, items, &rows), filters.show_empty),
+        ItemGroup::Owner => by_owner(by_repository_order(declared, items, &rows), filters.show_empty),
         ItemGroup::Date => by_date(&rows, filters.sort, now),
     };
 
@@ -407,42 +422,115 @@ fn sort_items(items: &mut [&Item], sort: ItemSort) {
     items.sort_by(|a, b| sort.time(b).cmp(&sort.time(a)).then_with(|| a.id.cmp(&b.id)));
 }
 
-/// One section per project in the order given, which is config order for
-/// declared projects and creation order for implicit ones. An item whose
-/// project is not in the list gets a section of its own at the end, named
-/// by the id, rather than vanishing; the cache's foreign key means this
-/// should not happen, but a row is better than a hole.
-fn by_project(projects: &[Project], all: &[Item], rows: &[&Item], show_empty: bool) -> Vec<ItemSection> {
-    let mut by_id: HashMap<&str, Vec<Item>> = HashMap::new();
-    let mut extra: Vec<&str> = Vec::new();
-    for item in rows {
-        let id = item.project_id.as_str();
-        if !by_id.contains_key(id) && !projects.iter().any(|p| p.id == id) {
-            extra.push(id);
-        }
-        by_id.entry(id).or_default().push((*item).clone());
-    }
+/// One repository's rows, on the way to becoming a section of its own or
+/// part of its owner's.
+struct RepoBucket {
+    /// `owner/repo`, lower-cased: the identity, since a checkout's origin
+    /// and the API can spell one repository differently.
+    key: String,
+    /// The declared spelling when declared, else the first row's.
+    name: String,
+    declared: bool,
+    items: Vec<Item>,
+    /// Active items in the repository, before any filter.
+    active: usize,
+}
 
-    let mut active: HashMap<&str, usize> = HashMap::new();
-    for item in all.iter().filter(|i| i.is_active()) {
-        *active.entry(item.project_id.as_str()).or_default() += 1;
-    }
-
-    projects
+/// The rows bucketed by repository, declared repositories first in config
+/// order, then the rest by name. Grouping is by the item's own repository,
+/// so a checkout of a fork sits under the fork whatever its pull request
+/// is against, the same repository the row's second line names. A declared
+/// repository with no rows is still here, empty, for Show Empty.
+fn by_repository_order(declared: &[String], all: &[Item], rows: &[&Item]) -> Vec<RepoBucket> {
+    let mut buckets: Vec<RepoBucket> = declared
         .iter()
-        .map(|p| (p.id.as_str(), p.name.as_str()))
-        .chain(extra.into_iter().map(|id| (id, id)))
-        .filter_map(|(id, name)| {
-            let items = by_id.remove(id).unwrap_or_default();
-            if items.is_empty() && !show_empty {
-                return None;
+        .map(|name| RepoBucket { key: name.to_lowercase(), name: name.clone(), declared: true, items: Vec::new(), active: 0 })
+        .collect();
+    let mut extra: Vec<RepoBucket> = Vec::new();
+    for item in rows {
+        let key = item.repo_full_name.to_lowercase();
+        let bucket = match buckets.iter().chain(extra.iter()).position(|b| b.key == key) {
+            Some(i) if i < buckets.len() => &mut buckets[i],
+            Some(i) => &mut extra[i - buckets.len()],
+            None => {
+                extra.push(RepoBucket {
+                    key,
+                    name: item.repo_full_name.clone(),
+                    declared: false,
+                    items: Vec::new(),
+                    active: 0,
+                });
+                let last = extra.len() - 1;
+                &mut extra[last]
             }
-            Some(ItemSection {
-                key: format!("project:{id}"),
-                title: name.to_string(),
-                count: active.get(id).copied().unwrap_or(0),
-                items,
-            })
+        };
+        bucket.items.push((*item).clone());
+    }
+    extra.sort_by(|a, b| a.key.cmp(&b.key));
+    buckets.extend(extra);
+
+    let mut active: HashMap<String, usize> = HashMap::new();
+    for item in all.iter().filter(|i| i.is_active()) {
+        *active.entry(item.repo_full_name.to_lowercase()).or_default() += 1;
+    }
+    for bucket in &mut buckets {
+        bucket.active = active.get(&bucket.key).copied().unwrap_or(0);
+    }
+    buckets
+}
+
+/// One section per repository with rows, in the order the buckets came,
+/// plus the declared ones with nothing when asked to show them.
+fn by_repository(buckets: Vec<RepoBucket>, show_empty: bool) -> Vec<ItemSection> {
+    buckets
+        .into_iter()
+        .filter(|b| !b.items.is_empty() || (show_empty && b.declared))
+        .map(|b| ItemSection {
+            key: format!("{}:{}", ItemGroup::Repository.key(), b.key),
+            title: b.name,
+            count: b.active,
+            items: b.items,
+        })
+        .collect()
+}
+
+/// One flat section per owner, the part before the slash, with the rows
+/// of its repositories one after another in the repository order and no
+/// heading between them. The count is the sum over the repositories. With
+/// Show Empty, an owner all of whose declared repositories have nothing is
+/// listed too.
+fn by_owner(buckets: Vec<RepoBucket>, show_empty: bool) -> Vec<ItemSection> {
+    struct OwnerBucket {
+        key: String,
+        name: String,
+        declared: bool,
+        items: Vec<Item>,
+        active: usize,
+    }
+    let mut owners: Vec<OwnerBucket> = Vec::new();
+    for bucket in buckets {
+        let key = bucket.key.split('/').next().unwrap_or_default().to_string();
+        let owner = match owners.iter().position(|o| o.key == key) {
+            Some(i) => &mut owners[i],
+            None => {
+                let name = bucket.name.split('/').next().unwrap_or_default().to_string();
+                owners.push(OwnerBucket { key, name, declared: false, items: Vec::new(), active: 0 });
+                let last = owners.len() - 1;
+                &mut owners[last]
+            }
+        };
+        owner.declared |= bucket.declared;
+        owner.items.extend(bucket.items);
+        owner.active += bucket.active;
+    }
+    owners
+        .into_iter()
+        .filter(|o| !o.items.is_empty() || (show_empty && o.declared))
+        .map(|o| ItemSection {
+            key: format!("{}:{}", ItemGroup::Owner.key(), o.key),
+            title: o.name,
+            count: o.active,
+            items: o.items,
         })
         .collect()
 }
@@ -462,7 +550,7 @@ fn by_date(rows: &[&Item], sort: ItemSort, now: Timestamp) -> Vec<ItemSection> {
         .map(|b| {
             let items = by_bucket.remove(&b).unwrap_or_default();
             ItemSection {
-                key: format!("date:{}", b.label()),
+                key: format!("{}:{}", ItemGroup::Date.key(), b.label()),
                 title: b.label().to_string(),
                 count: items.len(),
                 items,
@@ -473,29 +561,39 @@ fn by_date(rows: &[&Item], sort: ItemSort, now: Timestamp) -> Vec<ItemSection> {
 
 /// The row's second line: `owner/repo #57 · branch` for a pull request,
 /// `owner/repo #42` for an issue, `owner/repo · branch` for a checkout with
-/// no subject. Under Group by Date the project name stands in for
-/// `owner/repo`, since the date sections no longer say which project a row
-/// belongs to.
-pub fn reference(item: &Item, project: Option<&Project>, group: ItemGroup) -> String {
-    let place = match (group, project) {
-        (ItemGroup::Date, Some(p)) => p.name.as_str(),
-        _ => item.repo_full_name.as_str(),
+/// no subject. Under Repository the heading already names the repository,
+/// so the line is `#57 · branch`, `#42`, or the branch alone. Under Owner
+/// and Date nothing above the row says which repository it is in, so the
+/// line does. The repository is the item's own: for a checkout of a fork,
+/// the fork.
+pub fn reference(item: &Item, group: ItemGroup) -> String {
+    let place = match group {
+        ItemGroup::Repository => "",
+        ItemGroup::Owner | ItemGroup::Date => item.repo_full_name.as_str(),
     };
+    let with_place = |rest: String| if place.is_empty() { rest } else { format!("{place} {rest}") };
     match &item.subject {
         Some(ItemSubject::PullRequest(pr)) => {
             let branch = item.branch().unwrap_or(pr.head_ref.as_str());
             if branch.is_empty() {
-                format!("{place} #{}", pr.number)
+                with_place(format!("#{}", pr.number))
             } else {
-                format!("{place} #{} · {branch}", pr.number)
+                with_place(format!("#{} · {branch}", pr.number))
             }
         }
-        Some(ItemSubject::Issue(issue)) => format!("{place} #{}", issue.number),
+        Some(ItemSubject::Issue(issue)) => with_place(format!("#{}", issue.number)),
         None => match item.branch() {
+            Some(branch) if place.is_empty() => branch.to_string(),
             Some(branch) => format!("{place} · {branch}"),
             None => place.to_string(),
         },
     }
+}
+
+/// The second line with the repository in it, whatever the grouping. For
+/// Priority and Pinned rows, which sit under no heading that names one.
+pub fn full_reference(item: &Item) -> String {
+    reference(item, ItemGroup::Date)
 }
 
 /// The words a Priority row says next to its dot, from the reason the
@@ -504,6 +602,8 @@ pub fn attention_label(reason: &str) -> String {
     match reason {
         "review_requested" => "review requested".into(),
         "mention" | "team_mention" => "mentioned".into(),
+        "assign" => "assigned".into(),
+        "author" => "authored".into(),
         "comment" => "commented".into(),
         "ci_failed" => "CI failed".into(),
         other => other.replace('_', " "),
@@ -521,16 +621,6 @@ mod tests {
 
     fn now() -> Timestamp {
         at("2026-09-18T12:00:00Z")
-    }
-
-    fn project(name: &str, repo: &str) -> Project {
-        Project {
-            id: Project::id_for(name),
-            name: name.into(),
-            repos: vec![repo.into()],
-            roots: vec![],
-            implicit: false,
-        }
     }
 
     fn pr(number: u64, title: &str, branch: &str, state: &str, updated: &str) -> ItemSubject {
@@ -596,54 +686,59 @@ mod tests {
         }
     }
 
-    fn item(id: &str, project: &str, repo: &str, created: &str) -> Item {
-        let mut i = Item::new(project, repo, at(created));
+    fn item(id: &str, repo: &str, created: &str) -> Item {
+        let mut i = Item::new(repo, at(created));
         i.id = id.into();
         i
     }
 
-    /// Two projects. perch has a pull request with attention, a done pull
-    /// request, a merged one, an issue, an archived branch, and a plain
-    /// branch. slatedb has one open pull request. empty has nothing.
-    fn fixture() -> (Vec<Project>, Vec<Item>) {
-        let projects = vec![
-            project("perch", "criccomini/perch"),
-            project("slatedb", "slatedb/slatedb"),
-            project("empty", "x/empty"),
-        ];
+    fn declared(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
 
-        let mut wanted = item("pr-wanted", "perch", "criccomini/perch", "2026-09-10T10:00:00Z");
+    fn titles(s: &Sections) -> Vec<&str> {
+        s.groups.iter().map(|g| g.title.as_str()).collect()
+    }
+
+    /// Three declared repositories. criccomini/perch has a pull request
+    /// with attention, a done pull request, a merged one, an issue, an
+    /// archived branch, and a plain branch. slatedb/slatedb has one open
+    /// pull request. x/empty has nothing.
+    fn fixture() -> (Vec<String>, Vec<Item>) {
+        let declared = declared(&["criccomini/perch", "slatedb/slatedb", "x/empty"]);
+
+        let mut wanted = item("pr-wanted", "criccomini/perch", "2026-09-10T10:00:00Z");
         wanted.subject = Some(pr(57, "Fence the manifest", "fence", "open", "2026-09-17T10:00:00Z"));
         wanted.checkout = Some(checkout("fence"));
         wanted.attention_at = Some(at("2026-09-18T09:00:00Z"));
         wanted.attention_reason = Some("review_requested".into());
 
-        let mut done = item("pr-done", "perch", "criccomini/perch", "2026-09-11T10:00:00Z");
+        let mut done = item("pr-done", "criccomini/perch", "2026-09-11T10:00:00Z");
         done.subject = Some(pr(58, "Tracing spans", "spans", "open", "2026-09-16T10:00:00Z"));
         done.attention_at = Some(at("2026-09-16T10:00:00Z"));
         done.done_at = Some(at("2026-09-16T10:00:00Z"));
 
-        let mut merged = item("pr-merged", "perch", "criccomini/perch", "2026-09-01T10:00:00Z");
+        let mut merged = item("pr-merged", "criccomini/perch", "2026-09-01T10:00:00Z");
         merged.subject = Some(pr(50, "Old thing", "old", "merged", "2026-09-02T10:00:00Z"));
 
-        let mut bug = item("issue", "perch", "criccomini/perch", "2026-09-12T10:00:00Z");
+        let mut bug = item("issue", "criccomini/perch", "2026-09-12T10:00:00Z");
         bug.subject = Some(issue(42, "Compaction stalls", "open", "2026-09-15T10:00:00Z"));
 
-        let mut archived = item("branch-archived", "perch", "criccomini/perch", "2026-08-01T10:00:00Z");
+        let mut archived = item("branch-archived", "criccomini/perch", "2026-08-01T10:00:00Z");
         archived.checkout = Some(checkout("perch/issue-7"));
         archived.archived_at = Some(at("2026-09-01T10:00:00Z"));
 
-        let mut branch = item("branch", "perch", "criccomini/perch", "2026-09-14T10:00:00Z");
+        let mut branch = item("branch", "criccomini/perch", "2026-09-14T10:00:00Z");
         branch.checkout = Some(checkout("perch/issue-42"));
         branch.from_item_id = Some("issue".into());
 
-        let mut other = item("slatedb-pr", "slatedb", "slatedb/slatedb", "2026-09-13T10:00:00Z");
+        let mut other = item("slatedb-pr", "slatedb/slatedb", "2026-09-13T10:00:00Z");
         other.subject = Some(pr(2092, "Two-phase checkpoint", "checkpoint", "open", "2026-09-14T10:00:00Z"));
         if let Some(ItemSubject::PullRequest(p)) = &mut other.subject {
             p.repo_full_name = "slatedb/slatedb".into();
         }
 
-        (projects, vec![wanted, done, merged, bug, archived, branch, other])
+        (declared, vec![wanted, done, merged, bug, archived, branch, other])
     }
 
     fn ids(items: &[Item]) -> Vec<&str> {
@@ -656,59 +751,59 @@ mod tests {
 
     #[test]
     fn priority_holds_only_items_with_attention_past_done() {
-        let (projects, mut items) = fixture();
+        let (declared, mut items) = fixture();
         // A second wanted item, older attention, so the order is checked too.
-        let mut older = item("issue-mentioned", "perch", "criccomini/perch", "2026-09-12T10:00:00Z");
+        let mut older = item("issue-mentioned", "criccomini/perch", "2026-09-12T10:00:00Z");
         older.subject = Some(issue(43, "Mentioned issue", "open", "2026-09-15T10:00:00Z"));
         older.attention_at = Some(at("2026-09-17T09:00:00Z"));
         older.attention_reason = Some("mention".into());
         items.push(older);
 
-        let s = sections(&projects, &items, &ItemFilters::default(), now());
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
         assert_eq!(ids(&s.priority), ["pr-wanted", "issue-mentioned"]);
         // Done is not in there, and neither is anything without attention.
         assert!(s.priority.iter().all(Item::needs_attention));
     }
 
     #[test]
-    fn priority_keeps_the_item_under_its_project_too() {
-        let (projects, items) = fixture();
-        let s = sections(&projects, &items, &ItemFilters::default(), now());
+    fn priority_keeps_the_item_under_its_repository_too() {
+        let (declared, items) = fixture();
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
         assert!(section_ids(&s.groups[0]).contains(&"pr-wanted"));
     }
 
     #[test]
     fn priority_leaves_out_an_archived_item_unless_the_status_shows_archived() {
-        let (projects, mut items) = fixture();
+        let (declared, mut items) = fixture();
         items[4].attention_at = Some(at("2026-09-18T11:00:00Z"));
         items[4].attention_reason = Some("comment".into());
 
-        let s = sections(&projects, &items, &ItemFilters::default(), now());
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
         assert_eq!(ids(&s.priority), ["pr-wanted"]);
 
         let f = ItemFilters { status: ItemStatus::Archived, ..Default::default() };
-        let s = sections(&projects, &items, &f, now());
+        let s = sections(&declared, &items, &f, now());
         assert_eq!(ids(&s.priority), ["branch-archived", "pr-wanted"]);
     }
 
     #[test]
     fn priority_ignores_the_kind_filter() {
-        let (projects, items) = fixture();
+        let (declared, items) = fixture();
         let f = ItemFilters {
             kinds: ItemKinds { pull_requests: false, issues: true, branches: true },
             ..Default::default()
         };
-        let s = sections(&projects, &items, &f, now());
+        let s = sections(&declared, &items, &f, now());
         assert_eq!(ids(&s.priority), ["pr-wanted"]);
         assert!(!section_ids(&s.groups[0]).contains(&"pr-wanted"));
     }
 
     #[test]
     fn active_excludes_closed_done_and_archived() {
-        let (projects, items) = fixture();
-        let s = sections(&projects, &items, &ItemFilters::default(), now());
+        let (declared, items) = fixture();
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
         let perch = &s.groups[0];
-        assert_eq!(perch.title, "perch");
+        assert_eq!(perch.title, "criccomini/perch");
         let rows = section_ids(perch);
         assert!(rows.contains(&"pr-wanted"));
         assert!(rows.contains(&"issue"));
@@ -721,9 +816,9 @@ mod tests {
 
     #[test]
     fn closed_holds_merged_and_done_but_not_archived() {
-        let (projects, items) = fixture();
+        let (declared, items) = fixture();
         let f = ItemFilters { status: ItemStatus::Closed, ..Default::default() };
-        let s = sections(&projects, &items, &f, now());
+        let s = sections(&declared, &items, &f, now());
         assert_eq!(s.groups.len(), 1);
         assert_eq!(section_ids(&s.groups[0]), ["pr-done", "pr-merged"]);
         // The badge still counts what is active there.
@@ -732,26 +827,26 @@ mod tests {
 
     #[test]
     fn archived_and_all_show_what_they_say() {
-        let (projects, items) = fixture();
+        let (declared, items) = fixture();
         let f = ItemFilters { status: ItemStatus::Archived, ..Default::default() };
-        let s = sections(&projects, &items, &f, now());
+        let s = sections(&declared, &items, &f, now());
         assert_eq!(section_ids(&s.groups[0]), ["branch-archived"]);
 
         let f = ItemFilters { status: ItemStatus::All, ..Default::default() };
-        let s = sections(&projects, &items, &f, now());
+        let s = sections(&declared, &items, &f, now());
         let total: usize = s.groups.iter().map(|g| g.items.len()).sum();
         assert_eq!(total, items.len());
     }
 
     #[test]
     fn kinds_come_from_the_shape_of_the_item() {
-        let (projects, items) = fixture();
+        let (declared, items) = fixture();
         let f = ItemFilters {
             status: ItemStatus::All,
             kinds: ItemKinds { pull_requests: false, issues: false, branches: true },
             ..Default::default()
         };
-        let s = sections(&projects, &items, &f, now());
+        let s = sections(&declared, &items, &f, now());
         assert_eq!(section_ids(&s.groups[0]), ["branch", "branch-archived"]);
 
         let f = ItemFilters {
@@ -759,44 +854,102 @@ mod tests {
             kinds: ItemKinds { pull_requests: false, issues: true, branches: false },
             ..Default::default()
         };
-        let s = sections(&projects, &items, &f, now());
+        let s = sections(&declared, &items, &f, now());
         assert_eq!(section_ids(&s.groups[0]), ["issue"]);
     }
 
     #[test]
-    fn projects_keep_their_given_order_and_hide_when_empty() {
-        let (projects, items) = fixture();
-        let s = sections(&projects, &items, &ItemFilters::default(), now());
-        let titles: Vec<&str> = s.groups.iter().map(|g| g.title.as_str()).collect();
-        assert_eq!(titles, ["perch", "slatedb"]);
+    fn declared_repositories_lead_in_config_order_and_hide_when_empty() {
+        let (_, items) = fixture();
+        // Config order, not name order: slatedb is declared first.
+        let declared = declared(&["slatedb/slatedb", "criccomini/perch", "x/empty"]);
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
+        assert_eq!(titles(&s), ["slatedb/slatedb", "criccomini/perch"]);
+        assert_eq!(s.groups[0].key, "repo:slatedb/slatedb");
+        assert_eq!(s.groups[0].group(), ItemGroup::Repository);
 
         let f = ItemFilters { show_empty: true, ..Default::default() };
-        let s = sections(&projects, &items, &f, now());
-        let titles: Vec<&str> = s.groups.iter().map(|g| g.title.as_str()).collect();
-        assert_eq!(titles, ["perch", "slatedb", "empty"]);
+        let s = sections(&declared, &items, &f, now());
+        assert_eq!(titles(&s), ["slatedb/slatedb", "criccomini/perch", "x/empty"]);
         assert_eq!(s.groups[2].count, 0);
         assert!(s.groups[2].items.is_empty());
     }
 
     #[test]
-    fn an_item_whose_project_is_unknown_still_gets_a_row() {
-        let (projects, mut items) = fixture();
-        items[6].project_id = "ghost".into();
-        let s = sections(&projects, &items, &ItemFilters::default(), now());
-        let titles: Vec<&str> = s.groups.iter().map(|g| g.title.as_str()).collect();
-        assert_eq!(titles, ["perch", "ghost"]);
+    fn an_undeclared_repository_follows_the_declared_ones_by_name() {
+        let (declared, mut items) = fixture();
+        items[6].repo_full_name = "zed/later".into();
+        let mut first = item("stray", "Aardvark/first", "2026-09-13T10:00:00Z");
+        first.checkout = Some(checkout("stray"));
+        items.push(first);
+
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
+        assert_eq!(titles(&s), ["criccomini/perch", "Aardvark/first", "zed/later"], "by name, case aside");
+        assert_eq!(s.groups[1].key, "repo:aardvark/first");
+        assert_eq!(s.groups[2].count, 1, "an undeclared repository counts its active items too");
+    }
+
+    #[test]
+    fn a_repository_spelled_two_ways_is_one_section_with_the_declared_spelling() {
+        let (declared, mut items) = fixture();
+        items[6].repo_full_name = "Criccomini/Perch".into();
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
+        assert_eq!(titles(&s), ["criccomini/perch"]);
+        assert!(section_ids(&s.groups[0]).contains(&"slatedb-pr"));
+        assert_eq!(s.groups[0].count, 4);
+    }
+
+    #[test]
+    fn a_fork_checkout_groups_under_the_fork() {
+        let (declared, mut items) = fixture();
+        // The pull request is criccomini/perch's; the checkout is of a fork.
+        items[0].repo_full_name = "chris/perch".into();
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
+        assert_eq!(titles(&s), ["criccomini/perch", "slatedb/slatedb", "chris/perch"]);
+        assert_eq!(section_ids(&s.groups[2]), ["pr-wanted"]);
+        assert_eq!(reference(&items[0], ItemGroup::Owner), "chris/perch #57 · fence");
+    }
+
+    #[test]
+    fn group_by_owner_is_one_flat_section_per_owner_with_rows_by_repository() {
+        let (_, mut items) = fixture();
+        let declared = declared(&["slatedb/slatedb-go", "slatedb/slatedb", "criccomini/perch", "x/empty"]);
+        // Newer than the slatedb/slatedb row, and in a repository declared
+        // after it, so the repository order beats the sort.
+        let mut go = item("go-pr", "slatedb/slatedb-go", "2026-09-13T10:00:00Z");
+        go.subject = Some(pr(12, "Go bindings", "bindings", "open", "2026-09-17T11:00:00Z"));
+        let mut go_old = item("go-old", "slatedb/slatedb-go", "2026-09-13T10:00:00Z");
+        go_old.subject = Some(pr(11, "Older bindings", "older", "open", "2026-09-10T11:00:00Z"));
+        items.push(go_old);
+        items.push(go);
+
+        let f = ItemFilters { group: ItemGroup::Owner, ..Default::default() };
+        let s = sections(&declared, &items, &f, now());
+        assert_eq!(titles(&s), ["slatedb", "criccomini"]);
+        assert_eq!(s.groups[0].key, "owner:slatedb");
+        assert_eq!(s.groups[0].group(), ItemGroup::Owner);
+        // slatedb-go first, as declared, then slatedb; the sort inside each.
+        assert_eq!(section_ids(&s.groups[0]), ["go-pr", "go-old", "slatedb-pr"]);
+        assert_eq!(s.groups[0].count, 3, "the sum over the owner's repositories");
+        assert_eq!(s.groups[1].count, 3);
+
+        // An owner with nothing shows only with Show Empty.
+        let f = ItemFilters { group: ItemGroup::Owner, show_empty: true, ..Default::default() };
+        let s = sections(&declared, &items, &f, now());
+        assert_eq!(titles(&s), ["slatedb", "criccomini", "x"]);
+        assert!(s.groups[2].items.is_empty());
     }
 
     #[test]
     fn sorts_order_by_the_time_they_name() {
-        let (projects, mut items) = fixture();
+        let (declared, mut items) = fixture();
         items[3].last_opened_at = at("2026-09-18T11:00:00Z");
         items[5].last_opened_at = at("2026-09-18T10:00:00Z");
         items[0].last_opened_at = at("2026-09-18T09:00:00Z");
 
         let by = |sort: ItemSort| {
             let f = ItemFilters { sort, ..Default::default() };
-            let s = sections(&projects, &items, &f, now());
+            let s = sections(&declared, &items, &f, now());
             section_ids(&s.groups[0]).into_iter().map(String::from).collect::<Vec<_>>()
         };
         // Attention at the 18th, an issue updated on the 15th, a branch made on the 14th.
@@ -810,57 +963,61 @@ mod tests {
     fn group_by_date_buckets_on_the_sort_time_newest_first() {
         let now = Timestamp::now();
         let ago = |h: i64| now - jiff::SignedDuration::from_hours(h);
-        let (projects, _) = fixture();
-        let mut a = item("a", "perch", "criccomini/perch", "2026-09-01T10:00:00Z");
+        let (declared, _) = fixture();
+        let mut a = item("a", "criccomini/perch", "2026-09-01T10:00:00Z");
         a.checkout = Some(checkout("a"));
         a.attention_at = Some(ago(2));
-        let mut b = item("b", "perch", "criccomini/perch", "2026-09-01T10:00:00Z");
+        let mut b = item("b", "criccomini/perch", "2026-09-01T10:00:00Z");
         b.checkout = Some(checkout("b"));
         b.attention_at = Some(ago(26));
-        let mut c = item("c", "slatedb", "slatedb/slatedb", "2026-09-01T10:00:00Z");
+        let mut c = item("c", "slatedb/slatedb", "2026-09-01T10:00:00Z");
         c.checkout = Some(checkout("c"));
         c.attention_at = Some(ago(24 * 40));
         let items = vec![c.clone(), b.clone(), a.clone()];
 
         let f = ItemFilters { group: ItemGroup::Date, ..Default::default() };
-        let s = sections(&projects, &items, &f, now);
-        let titles: Vec<&str> = s.groups.iter().map(|g| g.title.as_str()).collect();
-        assert_eq!(titles, ["Today", "Yesterday", "Earlier"]);
+        let s = sections(&declared, &items, &f, now);
+        assert_eq!(titles(&s), ["Today", "Yesterday", "Earlier"]);
+        assert_eq!(s.groups[0].key, "date:Today");
+        assert_eq!(s.groups[0].group(), ItemGroup::Date);
         assert_eq!(section_ids(&s.groups[0]), ["a"]);
         assert_eq!(s.groups[0].count, 1);
 
         // Created puts all three on the same day.
         let f = ItemFilters { group: ItemGroup::Date, sort: ItemSort::Created, ..Default::default() };
-        let s = sections(&projects, &items, &f, now);
+        let s = sections(&declared, &items, &f, now);
         assert_eq!(s.groups.len(), 1);
         assert_eq!(section_ids(&s.groups[0]), ["a", "b", "c"]);
     }
 
     #[test]
-    fn group_by_date_puts_the_project_in_the_reference() {
-        let (projects, items) = fixture();
-        let perch = Some(&projects[0]);
-        assert_eq!(reference(&items[0], perch, ItemGroup::Project), "criccomini/perch #57 · fence");
-        assert_eq!(reference(&items[0], perch, ItemGroup::Date), "perch #57 · fence");
-        assert_eq!(reference(&items[3], perch, ItemGroup::Project), "criccomini/perch #42");
-        assert_eq!(reference(&items[3], perch, ItemGroup::Date), "perch #42");
-        assert_eq!(reference(&items[5], perch, ItemGroup::Project), "criccomini/perch · perch/issue-42");
-        assert_eq!(reference(&items[5], perch, ItemGroup::Date), "perch · perch/issue-42");
-        // No project to name: the repository stands in.
-        assert_eq!(reference(&items[5], None, ItemGroup::Date), "criccomini/perch · perch/issue-42");
+    fn the_second_line_drops_the_repository_under_repository_only() {
+        let (_, items) = fixture();
+        assert_eq!(reference(&items[0], ItemGroup::Repository), "#57 · fence");
+        assert_eq!(reference(&items[0], ItemGroup::Owner), "criccomini/perch #57 · fence");
+        assert_eq!(reference(&items[0], ItemGroup::Date), "criccomini/perch #57 · fence");
+        assert_eq!(reference(&items[3], ItemGroup::Repository), "#42");
+        assert_eq!(reference(&items[3], ItemGroup::Owner), "criccomini/perch #42");
+        assert_eq!(reference(&items[5], ItemGroup::Repository), "perch/issue-42");
+        assert_eq!(reference(&items[5], ItemGroup::Owner), "criccomini/perch · perch/issue-42");
+        assert_eq!(reference(&items[5], ItemGroup::Date), "criccomini/perch · perch/issue-42");
+        // Priority and Pinned sit under no repository, so they always say it.
+        assert_eq!(full_reference(&items[0]), "criccomini/perch #57 · fence");
+        assert_eq!(full_reference(&items[5]), "criccomini/perch · perch/issue-42");
     }
 
     #[test]
     fn a_pull_request_without_a_checkout_names_its_head_branch() {
         let (_, items) = fixture();
-        assert_eq!(reference(&items[1], None, ItemGroup::Project), "criccomini/perch #58 · spans");
+        assert_eq!(reference(&items[1], ItemGroup::Repository), "#58 · spans");
+        assert_eq!(reference(&items[1], ItemGroup::Owner), "criccomini/perch #58 · spans");
     }
 
     #[test]
     fn search_hits_branch_names() {
-        let (projects, items) = fixture();
+        let (declared, items) = fixture();
         let f = ItemFilters { query: "ISSUE-42".into(), ..Default::default() };
-        let s = sections(&projects, &items, &f, now());
+        let s = sections(&declared, &items, &f, now());
         assert_eq!(s.groups.len(), 1);
         assert_eq!(section_ids(&s.groups[0]), ["branch"]);
         // The pull request with attention does not match, so Priority is empty.
@@ -868,30 +1025,31 @@ mod tests {
     }
 
     #[test]
-    fn search_hits_the_number_the_title_the_name_and_the_project() {
-        let (projects, mut items) = fixture();
+    fn search_hits_the_number_the_title_the_name_and_the_repository() {
+        let (declared, mut items) = fixture();
         items[0].name = Some("the fence one".into());
 
         let hits = |q: &str| {
             let f = ItemFilters { status: ItemStatus::All, query: q.into(), ..Default::default() };
-            let s = sections(&projects, &items, &f, now());
+            let s = sections(&declared, &items, &f, now());
             s.groups.iter().flat_map(|g| g.items.iter().map(|i| i.id.clone())).collect::<Vec<_>>()
         };
         assert_eq!(hits("#57"), ["pr-wanted"]);
         assert_eq!(hits("57"), ["pr-wanted"]);
         assert_eq!(hits("fence the manifest"), ["pr-wanted"], "the given title still matches");
         assert_eq!(hits("fence one"), ["pr-wanted"], "and so does the name");
-        assert_eq!(hits("slatedb").len(), 1, "the project name matches");
+        assert_eq!(hits("slatedb").len(), 1, "the repository name matches");
+        assert_eq!(hits("criccomini/").len(), 6, "and so does the owner");
         assert!(hits("nothing like this").is_empty());
     }
 
     #[test]
-    fn pinned_items_are_not_repeated_under_their_project() {
-        let (projects, mut items) = fixture();
+    fn pinned_items_are_not_repeated_under_their_repository() {
+        let (declared, mut items) = fixture();
         items[3].pinned_at = Some(at("2026-09-17T10:00:00Z"));
         items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
 
-        let s = sections(&projects, &items, &ItemFilters::default(), now());
+        let s = sections(&declared, &items, &ItemFilters::default(), now());
         assert_eq!(ids(&s.pinned), ["branch", "issue"], "most recently pinned first");
         assert_eq!(section_ids(&s.groups[0]), ["pr-wanted"]);
         // The badge is not narrowed by pinning.
@@ -900,12 +1058,12 @@ mod tests {
 
     #[test]
     fn pinned_is_hidden_when_empty_and_respects_the_search() {
-        let (projects, mut items) = fixture();
-        assert!(sections(&projects, &items, &ItemFilters::default(), now()).pinned.is_empty());
+        let (declared, mut items) = fixture();
+        assert!(sections(&declared, &items, &ItemFilters::default(), now()).pinned.is_empty());
 
         items[3].pinned_at = Some(at("2026-09-17T10:00:00Z"));
         let f = ItemFilters { query: "fence".into(), ..Default::default() };
-        let s = sections(&projects, &items, &f, now());
+        let s = sections(&declared, &items, &f, now());
         assert!(s.pinned.is_empty());
         assert_eq!(section_ids(&s.groups[0]), ["pr-wanted"]);
     }
@@ -931,6 +1089,12 @@ mod tests {
         let d = ItemFilters::default();
         assert_eq!(ItemFilters::parse(&d.to_meta()).unwrap(), d);
         assert_eq!(ItemFilters::parse("").unwrap(), d, "nothing stored means the defaults");
+
+        // The three groupings by their keys, the default first.
+        assert!(d.to_meta().contains(";group=repo;"));
+        assert_eq!(ItemFilters::parse("group=repo").unwrap().group, ItemGroup::Repository);
+        assert_eq!(ItemFilters::parse("group=owner").unwrap().group, ItemGroup::Owner);
+        assert_eq!(ItemFilters::parse("group=date").unwrap().group, ItemGroup::Date);
     }
 
     #[test]
@@ -975,6 +1139,9 @@ mod tests {
     fn attention_reasons_read_as_the_spec_words_them() {
         assert_eq!(attention_label("review_requested"), "review requested");
         assert_eq!(attention_label("mention"), "mentioned");
+        assert_eq!(attention_label("team_mention"), "mentioned");
+        assert_eq!(attention_label("assign"), "assigned");
+        assert_eq!(attention_label("author"), "authored");
         assert_eq!(attention_label("comment"), "commented");
         assert_eq!(attention_label("manual"), "manual");
         assert_eq!(attention_label("ci_failed"), "CI failed");

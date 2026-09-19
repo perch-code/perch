@@ -1,6 +1,6 @@
 //! `perch --scan [root...]`
 //!
-//! Prints what the root scan finds: for each `[[project]]` root in config,
+//! Prints what the root scan finds: for each `[[repo]]` root in config,
 //! or for the directories given instead, the repository its `origin` names,
 //! its default branch, and every worktree with its path, branch, head and
 //! the lines it has added and removed against the default branch. Reads
@@ -35,14 +35,14 @@ async fn scan(args: &[String]) {
     for warning in &config.warnings {
         eprintln!("warning: {warning}");
     }
-    if config.project.is_empty() {
-        eprintln!("no [[project]] entries in config.toml");
+    if config.repo.is_empty() {
+        eprintln!("no [[repo]] entries in config.toml");
         return;
     }
 
-    for project in &config.project {
-        let roots: Vec<PathBuf> = project.root_paths();
-        println!("project {}", project.name);
+    for repo in &config.repo {
+        let roots: Vec<PathBuf> = repo.root_paths();
+        println!("repo {}", repo.name);
         if roots.is_empty() {
             println!("  no roots");
             continue;

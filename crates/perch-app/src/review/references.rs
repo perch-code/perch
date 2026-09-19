@@ -727,7 +727,7 @@ mod window {
             assignees: vec![],
         };
         let now = "2026-09-18T09:59:00Z".parse().unwrap();
-        let mut item = Item::new("slatedb", "slatedb/slatedb", now);
+        let mut item = Item::new("slatedb/slatedb", now);
         item.id = "wt".into();
         item.subject = Some(ItemSubject::PullRequest(pr.clone()));
         item.checkout = Some(ItemCheckout {

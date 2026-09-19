@@ -50,7 +50,7 @@ fn main() {
         items_cli::run(&args[2..]);
         return;
     }
-    // What the root scan finds under each project's roots, without writing.
+    // What the root scan finds under each repository's roots, without writing.
     if args.get(1).map(String::as_str) == Some("--scan") {
         scan_cli::run(&args[2..]);
         return;

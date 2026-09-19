@@ -808,7 +808,7 @@ mod window {
         let app = AppState::new();
         let state = ReviewState::new();
         let now = "2026-09-18T09:59:00Z".parse().unwrap();
-        let mut item = Item::new("slatedb", "slatedb/slatedb", now);
+        let mut item = Item::new("slatedb/slatedb", now);
         item.id = "wt".into();
         item.checkout = Some(ItemCheckout {
             branch: "perch/pr-812".into(),
