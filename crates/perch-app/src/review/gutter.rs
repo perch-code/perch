@@ -471,16 +471,13 @@ fn anchor_slot(
         },
         move |(thread, github, hovered)| match (thread, github) {
             // A review comment from GitHub on this line, hollow where a
-            // thread of the reader's own is solid. Click focuses its
-            // card, and opens the column, where it is listed under On
-            // GitHub, until the card is drawn in the code.
+            // thread of the reader's own is solid. Click scrolls the
+            // editor to its card and flashes it, as it does for the
+            // reader's own; the column is not opened for it.
             (None, Some(id)) => Container::new(
                 sidebar_glyph(SidebarIcon::ThreadHollow, theme::FG_MUTED).style(|s| s.size(12.0, 12.0)),
             )
-            .on_event_stop(el::Click, move |_, _| {
-                state.focus_card.set(Some(CardId::GitHub(id)));
-                state.show_threads();
-            })
+            .on_event_stop(el::Click, move |_, _| state.focus_card.set(Some(CardId::GitHub(id))))
             .style(|s| {
                 crate::ui::widgets::clickable(s).size(16.0, 16.0).items_center().justify_center()
             })

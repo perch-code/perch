@@ -19,6 +19,7 @@ use perch_git::{DisplayBuffer, LineStatus, Row};
 use perch_github::CommentThread;
 
 use crate::review::hover;
+use crate::review::timeline::LineThread;
 
 /// How many lines of context stay in view on each side of a change or an
 /// anchor. A run that is not longer than twice this is shown whole: a
@@ -40,6 +41,13 @@ pub const CARD_MAX_ROWS: usize = 40;
 /// A collapsed card is one row: the first author, the first line, and how
 /// many messages follow.
 pub const COLLAPSED_ROWS: usize = 1;
+
+/// How many rows the composer's card is given before it has been laid
+/// out: its first row, the box at its shortest, the pickers and Send,
+/// and the room around them, which is a little over eight rows, so nine.
+/// The card's laid-out height corrects it, and grows it as the question
+/// is typed.
+pub const COMPOSER_ROWS: usize = 9;
 
 /// The column a message body is taken to wrap at for the estimate. The
 /// card is wider or narrower than this, and the estimate only has to be
@@ -72,7 +80,6 @@ pub enum CardId {
     /// One of GitHub's review comment threads, by its first comment's id.
     GitHub(u64),
     /// The one being written.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the composer is a card from step 7 of milestone 11"))]
     Composer,
 }
 
@@ -84,13 +91,25 @@ pub enum CardId {
 /// rows; it only has to be near enough that the first paint is not a
 /// jump, and the card's laid-out height corrects it.
 pub fn estimate_rows(thread: &CommentThread, collapsed: bool) -> usize {
+    estimate_rows_of(thread.messages.iter().map(|m| m.body.as_str()), collapsed)
+}
+
+/// The same estimate for one of GitHub's threads: the comment and its
+/// replies are the messages. The card has no follow-up line, and the row
+/// charged for one stands in for the room the comments take that the
+/// two rows per message do not.
+pub fn estimate_github_rows(thread: &LineThread, collapsed: bool) -> usize {
+    let bodies = std::iter::once(&thread.comment).chain(thread.replies.iter()).map(|c| c.body.as_str());
+    estimate_rows_of(bodies, collapsed)
+}
+
+/// The estimate over the bodies of a card's messages.
+fn estimate_rows_of<'a>(bodies: impl Iterator<Item = &'a str>, collapsed: bool) -> usize {
     if collapsed {
         return COLLAPSED_ROWS;
     }
-    let lines: usize = thread
-        .messages
-        .iter()
-        .map(|m| m.body.lines().map(|l| l.chars().count().div_ceil(ESTIMATE_COLUMNS).max(1)).sum::<usize>() + ROWS_PER_MESSAGE)
+    let lines: usize = bodies
+        .map(|body| body.lines().map(|l| l.chars().count().div_ceil(ESTIMATE_COLUMNS).max(1)).sum::<usize>() + ROWS_PER_MESSAGE)
         .sum();
     (lines + CARD_CHROME_ROWS).min(CARD_MAX_ROWS)
 }
@@ -1042,6 +1061,38 @@ mod tests {
         assert_eq!(doc.first_spacer_row(&folded.id), None);
     }
 
+    #[test]
+    fn a_readers_card_a_github_card_and_the_composer_under_one_line_stack_in_that_order() {
+        let b = two_changes(4);
+        let cards = [
+            Card { id: CardId::Thread("t1".into()), after_display_line: 2, rows: 2 },
+            Card { id: CardId::GitHub(7), after_display_line: 2, rows: 3 },
+            Card { id: CardId::Composer, after_display_line: 2, rows: 1 },
+        ];
+        let doc = build(&b, &[], &cards);
+        assert_eq!(doc.len(), b.len() + 6);
+        assert_eq!(doc.rows[2], line(2, Tint::Plain));
+        assert_eq!(doc.cards(), &[(CardId::Thread("t1".into()), 3), (CardId::GitHub(7), 5), (CardId::Composer, 8)]);
+        assert_eq!(doc.card_span(&CardId::Thread("t1".into())), Some(3..5));
+        assert_eq!(doc.card_span(&CardId::GitHub(7)), Some(5..8));
+        assert_eq!(doc.card_span(&CardId::Composer), Some(8..9));
+        for row in 3..9 {
+            assert!(matches!(doc.rows[row], DocRow::Spacer { .. }), "row {row} is a spacer");
+            assert_eq!(doc.line(row), "");
+        }
+        assert_eq!(doc.rows[9], line(3, Tint::Plain));
+        assert_eq!(doc.row_of_display(3), Some(9));
+        // The split has the same three, at the same rows on both sides.
+        let base = format!("old top\n{}old bottom\n", context(0, 4));
+        let head = format!("new top\n{}new bottom\n", context(0, 4));
+        let diff = file_diff(&base, &head);
+        let alignment = perch_git::alignment(&diff, &base, &head);
+        let (left, right) = build_split(&alignment, &base, &b, &[], &cards);
+        assert_eq!(left.len(), right.len());
+        assert_eq!(right.cards(), &[(CardId::Thread("t1".into()), 2), (CardId::GitHub(7), 4), (CardId::Composer, 7)]);
+        assert_eq!(left.cards(), right.cards());
+    }
+
     // The estimate.
 
     /// A thread of the given message bodies, with nothing else about it
@@ -1102,6 +1153,50 @@ mod tests {
         assert_eq!(estimate_rows(&thread_of(&["why?", &hundred_lines]), true), COLLAPSED_ROWS);
         assert_eq!(estimate_rows(&thread_of(&["why?"]), true), 1);
         assert_eq!(estimate_rows(&thread_of(&[]), true), 1);
+    }
+
+    /// One of GitHub's threads: a comment and its replies, with nothing
+    /// else about them mattering to the estimate.
+    fn github_thread_of(bodies: &[&str]) -> LineThread {
+        use perch_github::{ReviewComment, Side};
+        let at = "2026-09-18T09:59:00Z".parse().unwrap();
+        let comment = |i: usize, body: &str| ReviewComment {
+            id: 100 + i as u64,
+            pull_request_review_id: None,
+            in_reply_to_id: (i > 0).then_some(100),
+            user: "octocat".into(),
+            body: body.into(),
+            path: "src/x.rs".into(),
+            line: Some(7),
+            original_line: None,
+            diff_hunk: String::new(),
+            side: Side::Right,
+            created_at: at,
+            updated_at: None,
+            html_url: String::new(),
+        };
+        let mut comments = bodies.iter().enumerate().map(|(i, body)| comment(i, body));
+        let first = comments.next().expect("a thread has a comment");
+        LineThread { comment: first, replies: comments.collect() }
+    }
+
+    #[test]
+    fn a_github_thread_is_estimated_as_a_readers_thread_of_the_same_messages_is() {
+        // The comment alone: its line, the byline and the gap, and the
+        // chrome.
+        assert_eq!(estimate_github_rows(&github_thread_of(&["nit"]), false), 1 + 2 + 2);
+        // A reply is a message: its lines and its own two rows.
+        assert_eq!(estimate_github_rows(&github_thread_of(&["nit", "done\n\nthanks"]), false), (1 + 2) + (3 + 2) + 2);
+        assert_eq!(
+            estimate_github_rows(&github_thread_of(&["nit", "done\n\nthanks"]), false),
+            estimate_rows(&thread_of(&["nit", "done\n\nthanks"]), false),
+            "the same messages are the same rows whoever wrote them"
+        );
+        let long_line = "x".repeat(200);
+        assert_eq!(estimate_github_rows(&github_thread_of(&[&long_line]), false), 3 + 2 + 2, "wrapped at eighty columns");
+        let hundred_lines = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        assert_eq!(estimate_github_rows(&github_thread_of(&["nit", &hundred_lines]), false), CARD_MAX_ROWS);
+        assert_eq!(estimate_github_rows(&github_thread_of(&["nit", &hundred_lines]), true), COLLAPSED_ROWS);
     }
 
     #[test]

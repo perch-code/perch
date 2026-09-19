@@ -7,13 +7,13 @@
 //! data path be checked without a window. The folds are around the
 //! changes and the anchors of the item's threads, less the reveals stored
 //! for the file's blob, and none at all when Show whole is off for the
-//! item; the cards are the item's threads anchored in the file, at their
-//! estimated heights, since nothing has laid them out; all read from the
-//! cache the app uses. `--whole` renders the buffer whole, with nothing
-//! folded and no card. `--split` renders both sides of the split, one
-//! after the other, each with its dividers and spacers, and ends in the
-//! two row counts, so that the sides being the same height can be
-//! checked by eye and by test.
+//! item; the cards are the item's threads anchored in the file and
+//! GitHub's review threads on it, at their estimated heights, since
+//! nothing has laid them out; all read from the cache the app uses.
+//! `--whole` renders the buffer whole, with nothing folded and no card.
+//! `--split` renders both sides of the split, one after the other, each
+//! with its dividers and spacers, and ends in the two row counts, so that
+//! the sides being the same height can be checked by eye and by test.
 
 use std::sync::Arc;
 
@@ -264,8 +264,9 @@ fn reveals_line(reveals: &Reveals) -> String {
 /// head lines its threads are anchored on, the reader's own and GitHub's
 /// review comments, as the window counts them; the reveals stored for the
 /// file's blob; whether the item's files are folded at all; and the
-/// reader's threads anchored in the file as cards, each at its estimate,
-/// open, since nothing has been collapsed or laid out here.
+/// reader's threads anchored in the file and GitHub's review threads on
+/// it as cards, each at its estimate, open, since nothing has been
+/// collapsed or laid out here. No composer: nothing is being written.
 struct Kept {
     anchors: Vec<(usize, usize)>,
     reveals: Reveals,
@@ -330,6 +331,7 @@ fn kept_in(db: &std::path::Path, full_name: &str, number: u64, file: &LoadedFile
             .collect()
     };
     let folded = folded_from_meta(cache.meta(&folded_meta_key(&item.id)).map_err(|e| e.to_string())?.as_deref());
-    let cards = crate::review::model::cards_of(&threads, file, &Default::default(), &Default::default());
+    let github = crate::review::model::github_threads_of(discussion.as_ref(), &file.path);
+    let cards = crate::review::model::cards_of(&threads, &github, None, file, &Default::default(), &Default::default());
     Ok(Some(Kept { anchors, reveals, folded, cards }))
 }

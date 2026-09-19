@@ -364,6 +364,12 @@ pub struct ReviewState {
     pub composer: RwSignal<Option<Composer>>,
     /// How many composers have been opened, for `Composer::opening`.
     pub composer_opened: RwSignal<u64>,
+    /// The anchor of a question sent from the composer's card in the
+    /// code whose thread has not arrived yet. The card's rows stay under
+    /// the anchor, blank, until the next thread list brings the thread
+    /// and its card takes their place, so the code does not close over
+    /// the rows and open again a moment later.
+    pub sent_composer: RwSignal<Option<Anchor>>,
     /// The editor's selection as display lines, first and last inclusive.
     pub selection: RwSignal<Option<(usize, usize)>>,
     /// A gutter marker was clicked: the card to scroll the editor to and
@@ -480,6 +486,7 @@ impl ReviewState {
             threads_open: RwSignal::new(false),
             composer: RwSignal::new(None),
             composer_opened: RwSignal::new(0),
+            sent_composer: RwSignal::new(None),
             selection: RwSignal::new(None),
             focus_card: RwSignal::new(None),
             confirm_thread: RwSignal::new(None),
@@ -571,6 +578,7 @@ impl ReviewState {
         self.archived.set(None);
         self.comment_threads.set(Arc::new(Vec::new()));
         self.composer.set(None);
+        self.sent_composer.set(None);
         self.selection.set(None);
         self.focus_card.set(None);
         self.confirm_thread.set(None);
@@ -825,17 +833,50 @@ impl ReviewState {
         self.comment_threads.with(|threads| self.discussion.with(|d| anchors_of(threads, d.as_deref(), path)))
     }
 
-    /// The cards of a file: the reader's threads anchored in it, each with
-    /// the rows it has now. Tracked on the threads, the rows and which
-    /// cards are collapsed, so a document built from them follows all
-    /// three; the file itself is read as it is, since a file's content
-    /// is fixed for the editor built over it.
+    /// The cards of a file: the reader's threads anchored in it, GitHub's
+    /// review threads on it, and the composer when it is a card in it,
+    /// each with the rows it has now. Tracked on the threads, the
+    /// discussion, the composer, the rows and which cards are collapsed,
+    /// so a document built from them follows them all; the file itself is
+    /// read as it is, since a file's content is fixed for the editor
+    /// built over it.
     pub fn cards_in(&self, path: &str) -> Vec<Card> {
         let Some(file) = self.files.with_untracked(|m| m.get(path).cloned()) else {
             return Vec::new();
         };
+        let github = self.github_threads_in(path);
+        let composer = self.composer_card_anchor(path);
         self.comment_threads.with(|threads| {
-            self.collapsed_cards.with(|collapsed| self.card_rows.with(|rows| cards_of(threads, &file, collapsed, rows)))
+            self.collapsed_cards.with(|collapsed| {
+                self.card_rows.with(|rows| cards_of(threads, &github, composer.as_ref(), &file, collapsed, rows))
+            })
+        })
+    }
+
+    /// The anchor the composer's card in a file sits under, if it has
+    /// one there: the open composer's, when it starts a thread on lines
+    /// of the file, or else the one a sent question's card keeps until
+    /// its thread arrives. Tracked on both.
+    pub fn composer_card_anchor(&self, path: &str) -> Option<Anchor> {
+        self.composer
+            .with(|c| c.as_ref().filter(|c| c.thread_id.is_none()).and_then(|c| c.anchor.clone()))
+            .or_else(|| self.sent_composer.get())
+            .filter(|a| a.path == path)
+    }
+
+    /// Whether the open composer is drawn as a card in the code: it
+    /// starts a thread on lines of the active file, which is loaded and
+    /// has the lines. The column's slot is empty then, so the composer is
+    /// in one place. Tracked.
+    pub fn composer_is_inline(&self) -> bool {
+        let Some(file) = self.active_file() else {
+            return false;
+        };
+        self.composer.with(|c| {
+            c.as_ref()
+                .filter(|c| c.thread_id.is_none())
+                .and_then(|c| c.anchor.as_ref())
+                .is_some_and(|a| a.path == file.path && card_line(&file, a).is_some())
         })
     }
 
@@ -872,6 +913,11 @@ impl ReviewState {
     /// is outdated, and open otherwise; one seen before keeps whatever the
     /// reader left it as. The cards are settled before the threads are
     /// written, so the document built from the threads is built once.
+    ///
+    /// A sent question's card gives up its rows here, in the same pass
+    /// as the threads land, so the thread's card takes the rows in the
+    /// one edit rather than the code closing over them and opening
+    /// again.
     pub fn set_comment_threads(&self, threads: Arc<Vec<CommentThread>>) {
         let new: Vec<(CardId, bool)> = self.known_cards.with_untracked(|known| {
             threads
@@ -888,7 +934,23 @@ impl ReviewState {
             }
             self.known_cards.update(|k| k.extend(new.into_iter().map(|(id, _)| id)));
         }
-        self.comment_threads.set(threads);
+        floem::reactive::Effect::batch(|| {
+            if self.sent_composer.with_untracked(Option::is_some) {
+                self.sent_composer.set(None);
+                self.forget_composer_rows();
+            }
+            self.comment_threads.set(threads);
+        });
+    }
+
+    /// The composer's laid-out rows are the card's that was, and the next
+    /// composer starts on the estimate.
+    fn forget_composer_rows(&self) {
+        if self.card_rows.with_untracked(|r| r.contains_key(&CardId::Composer)) {
+            self.card_rows.update(|r| {
+                r.remove(&CardId::Composer);
+            });
+        }
     }
 
     /// The reveals for a file's content, tracked, so a document built from
@@ -1013,13 +1075,29 @@ impl ReviewState {
     }
 
     /// Open a composer, for a new thread on `anchor` or the worktree.
+    ///
+    /// The column opens for it, unless it is drawn in the code: a
+    /// composer on lines of the open file is a card under them, and the
+    /// column's slot for it is empty, so opening the column would only
+    /// narrow the code. A sent question's card gives way to the new
+    /// composer, since there is one composer card at a time.
     pub fn open_composer(&self, thread_id: Option<String>, anchor: Option<Anchor>, draft: String, defaults: AgentChoice) {
         let (backend, model, effort) = self.agent_last.get().unwrap_or(defaults);
         self.composer_draft.set(draft.clone());
         let opening = self.composer_opened.get_untracked() + 1;
         self.composer_opened.set(opening);
-        self.composer.set(Some(Composer { thread_id, anchor, backend, model, effort, draft, opening }));
-        self.show_threads();
+        floem::reactive::Effect::batch(|| {
+            if self.sent_composer.with_untracked(Option::is_some) {
+                self.sent_composer.set(None);
+                self.forget_composer_rows();
+            }
+            self.composer.set(Some(Composer { thread_id, anchor, backend, model, effort, draft, opening }));
+        });
+        // Untracked, as `show_threads` reads: a caller that is an effect
+        // must not come to depend on the file or the composer through this.
+        if !floem::reactive::Effect::untrack(|| self.composer_is_inline()) {
+            self.show_threads();
+        }
     }
 
     /// Open the thread column, if it is not open already.
@@ -1044,12 +1122,35 @@ impl ReviewState {
         }
     }
 
-    /// Close the composer and forget its draft.
+    /// Close the composer and forget its draft. A composer card's rows go
+    /// with it.
     pub fn close_composer(&self) {
-        self.composer.set(None);
+        floem::reactive::Effect::batch(|| {
+            self.composer.set(None);
+            self.forget_composer_rows();
+        });
         self.composer_draft.set(String::new());
         // The box goes with the composer and is never told it lost focus,
         // so the flag that stands the keys down is cleared here.
+        self.composer_focused.set(false);
+    }
+
+    /// The composer's question went to the backend, and the composer is
+    /// closed. A composer that was a card in the code leaves its rows
+    /// where they are, under its anchor, for the thread's card to take
+    /// when the thread arrives; see `sent_composer`.
+    pub fn composer_sent(&self) {
+        let card = floem::reactive::Effect::untrack(|| self.composer_is_inline())
+            .then(|| self.composer.with_untracked(|c| c.as_ref().and_then(|c| c.anchor.clone())))
+            .flatten();
+        floem::reactive::Effect::batch(|| {
+            self.composer.set(None);
+            match card {
+                Some(anchor) => self.sent_composer.set(Some(anchor)),
+                None => self.forget_composer_rows(),
+            }
+        });
+        self.composer_draft.set(String::new());
         self.composer_focused.set(false);
     }
 
@@ -1121,39 +1222,68 @@ pub fn github_threads_of(discussion: Option<&Discussion>, path: &str) -> Vec<cra
         .collect()
 }
 
-/// The reader's threads anchored in a file as cards, oldest first, so two
-/// under one line stack in the order they were asked. A card sits under
-/// the last line of its anchor, after any ghost spliced under that line,
-/// and takes the rows in `rows` when the card has been laid out, else the
-/// estimate, and one row when collapsed. A thread whose last line the
-/// file does not have, because its anchor has gone stale past the end,
-/// has nowhere to sit and gets no card.
+/// A file's cards: the reader's threads anchored in it, oldest first, so
+/// two under one line stack in the order they were asked; then GitHub's
+/// review threads on it, `github`, by their first comment's id; then the
+/// composer, when `composer` is the anchor of its card in the file. A
+/// card sits under the last line of its anchor, after any ghost spliced
+/// under that line, and takes the rows in `rows` when the card has been
+/// laid out, else the estimate, and one row when collapsed. A thread
+/// whose last line the file does not have, because its anchor has gone
+/// stale past the end, has nowhere to sit and gets no card.
 pub fn cards_of(
     threads: &[CommentThread],
+    github: &[crate::review::timeline::LineThread],
+    composer: Option<&Anchor>,
     file: &LoadedFile,
     collapsed: &HashSet<CardId>,
     rows: &HashMap<CardId, usize>,
 ) -> Vec<Card> {
+    let rows_for = |id: &CardId, estimate: &dyn Fn(bool) -> usize| {
+        let is_collapsed = collapsed.contains(id);
+        match rows.get(id) {
+            Some(&rows) if !is_collapsed => rows,
+            _ => estimate(is_collapsed),
+        }
+    };
+
     let mut anchored: Vec<&CommentThread> = threads
         .iter()
         .filter(|t| t.anchor.as_ref().is_some_and(|a| a.path == file.path))
         .collect();
     anchored.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
-    anchored
+    let mut out: Vec<Card> = anchored
         .into_iter()
         .filter_map(|t| {
-            let anchor = t.anchor.as_ref()?;
-            let last = anchor.start_line.max(anchor.line).saturating_sub(1) as usize;
-            let after_display_line = display_line_with_ghosts(&file.buffer, last)?;
+            let after_display_line = card_line(file, t.anchor.as_ref()?)?;
             let id = CardId::Thread(t.id.clone());
-            let is_collapsed = collapsed.contains(&id);
-            let rows = match rows.get(&id) {
-                Some(&rows) if !is_collapsed => rows,
-                _ => doc::estimate_rows(t, is_collapsed),
-            };
+            let rows = rows_for(&id, &|collapsed| doc::estimate_rows(t, collapsed));
             Some(Card { id, after_display_line, rows })
         })
-        .collect()
+        .collect();
+
+    let mut github: Vec<&crate::review::timeline::LineThread> = github.iter().collect();
+    github.sort_by_key(|t| t.comment.id);
+    out.extend(github.into_iter().filter_map(|t| {
+        let line = t.comment.line?.saturating_sub(1) as usize;
+        let after_display_line = display_line_with_ghosts(&file.buffer, line)?;
+        let id = CardId::GitHub(t.comment.id);
+        let rows = rows_for(&id, &|collapsed| doc::estimate_github_rows(t, collapsed));
+        Some(Card { id, after_display_line, rows })
+    }));
+
+    if let Some(after_display_line) = composer.and_then(|a| card_line(file, a)) {
+        let rows = rows.get(&CardId::Composer).copied().unwrap_or(doc::COMPOSER_ROWS);
+        out.push(Card { id: CardId::Composer, after_display_line, rows });
+    }
+    out
+}
+
+/// The display line a card for an anchor goes after: its last line's,
+/// past the ghosts under it. `None` when the file does not have the line.
+fn card_line(file: &LoadedFile, anchor: &Anchor) -> Option<usize> {
+    let last = anchor.start_line.max(anchor.line).saturating_sub(1) as usize;
+    display_line_with_ghosts(&file.buffer, last)
 }
 
 /// The display line a card under a head line goes after: the line's own,
@@ -1403,7 +1533,7 @@ mod tests {
         worktree.anchor = None;
         let threads = [threads, vec![elsewhere, worktree]].concat();
 
-        let cards = cards_of(&threads, &file, &HashSet::new(), &HashMap::new());
+        let cards = cards_of(&threads, &[], None, &file, &HashSet::new(), &HashMap::new());
         let estimate = doc::estimate_rows(&threads[0], false);
         assert_eq!(
             cards,
@@ -1424,14 +1554,14 @@ mod tests {
             String::new(),
         );
         let on_a = [anchored("end", 1, 1, "2026-09-18T10:00:00Z", false)];
-        assert_eq!(cards_of(&on_a, &cut, &HashSet::new(), &HashMap::new())[0].after_display_line, 2);
+        assert_eq!(cards_of(&on_a, &[], None, &cut, &HashSet::new(), &HashMap::new())[0].after_display_line, 2);
 
         // Collapsed, a card is one row; laid out, it has the rows the
         // layout gave it, unless it is collapsed.
         let collapsed: HashSet<CardId> = [CardId::Thread("first".into())].into_iter().collect();
         let rows: HashMap<CardId, usize> =
             [(CardId::Thread("first".into()), 9), (CardId::Thread("later".into()), 7)].into_iter().collect();
-        let cards = cards_of(&threads, &file, &collapsed, &rows);
+        let cards = cards_of(&threads, &[], None, &file, &collapsed, &rows);
         assert_eq!(cards[0].rows, doc::COLLAPSED_ROWS);
         assert_eq!(cards[1].rows, 7);
 
@@ -1447,6 +1577,174 @@ mod tests {
         assert_eq!(state.cards_in("src/x.rs")[1].rows, 1);
         state.toggle_card(&CardId::Thread("later".into()));
         assert_eq!(state.cards_in("src/x.rs")[1].rows, estimate);
+    }
+
+    /// A review comment from GitHub on head line `line` of `src/x.rs`,
+    /// one-based, with a reply.
+    fn github_comment(id: u64, line: Option<u64>, side: perch_github::Side, reply_to: Option<u64>) -> perch_github::ReviewComment {
+        perch_github::ReviewComment {
+            id,
+            pull_request_review_id: None,
+            in_reply_to_id: reply_to,
+            user: "octocat".into(),
+            body: "nit".into(),
+            path: "src/x.rs".into(),
+            line,
+            original_line: None,
+            diff_hunk: String::new(),
+            side,
+            created_at: "2026-09-18T09:59:00Z".parse().unwrap(),
+            updated_at: None,
+            html_url: String::new(),
+        }
+    }
+
+    /// The file of `a_files_cards_sit_under_their_anchors_last_line_past_its_ghosts_oldest_first`.
+    fn spliced_file() -> LoadedFile {
+        crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "a\nB\nc\ne\nF\ng\n".into(),
+            "a\nb\nc\nd\ne\nf\ng\n".into(),
+            Some(ChangeStatus::Modified),
+            false,
+            Scope::Branch,
+            String::new(),
+        )
+    }
+
+    #[test]
+    fn githubs_threads_and_the_composer_are_cards_after_the_readers_under_the_same_line() {
+        use perch_github::Side;
+        let file = spliced_file();
+        let threads = vec![anchored("mine", 3, 3, "2026-09-18T10:00:00Z", false)];
+        // Two of GitHub's on c, the later by id first in the list, one on
+        // e, and one on the base side, which has nowhere in the head to be.
+        let discussion = Discussion {
+            opened_at: None,
+            body: String::new(),
+            comments: Vec::new(),
+            reviews: Vec::new(),
+            review_comments: vec![
+                github_comment(20, Some(3), Side::Right, None),
+                github_comment(10, Some(3), Side::Right, None),
+                github_comment(11, Some(3), Side::Right, Some(10)),
+                github_comment(30, Some(4), Side::Right, None),
+                github_comment(40, Some(2), Side::Left, None),
+            ],
+            events: Vec::new(),
+        };
+        let github = github_threads_of(Some(&discussion), "src/x.rs");
+        assert_eq!(github.len(), 3, "the base side's is not placed");
+        let composer = Anchor { path: "src/x.rs".into(), start_line: 1, line: 3, side: Side::Right, commit_sha: "h".into() };
+        let cards = cards_of(&threads, &github, Some(&composer), &file, &HashSet::new(), &HashMap::new());
+        let ids: Vec<(CardId, usize)> = cards.iter().map(|c| (c.id.clone(), c.after_display_line)).collect();
+        // Under c, past the ghost of d at display line 4: the reader's,
+        // then GitHub's by id, then the composer on the last selected
+        // line; GitHub's on e is under e alone.
+        assert_eq!(
+            ids,
+            vec![
+                (CardId::Thread("mine".into()), 4),
+                (CardId::GitHub(10), 4),
+                (CardId::GitHub(20), 4),
+                (CardId::GitHub(30), 5),
+                (CardId::Composer, 4),
+            ]
+        );
+        let two_messages = github.iter().find(|t| t.comment.id == 10).unwrap();
+        assert_eq!(two_messages.replies.len(), 1);
+        assert_eq!(cards[1].rows, doc::estimate_github_rows(two_messages, false));
+        let one_message = github.iter().find(|t| t.comment.id == 20).unwrap();
+        assert_eq!(cards[2].rows, doc::estimate_github_rows(one_message, false));
+        assert!(cards[2].rows < cards[1].rows, "a comment without a reply is shorter");
+        assert_eq!(cards[4].rows, doc::COMPOSER_ROWS, "the composer's estimate until it is laid out");
+
+        // Laid out and collapsed, as the reader's cards are.
+        let collapsed: HashSet<CardId> = [CardId::GitHub(10)].into_iter().collect();
+        let rows: HashMap<CardId, usize> = [(CardId::GitHub(20), 6), (CardId::Composer, 12)].into_iter().collect();
+        let cards = cards_of(&threads, &github, Some(&composer), &file, &collapsed, &rows);
+        assert_eq!(cards[1].rows, doc::COLLAPSED_ROWS);
+        assert_eq!(cards[2].rows, 6);
+        assert_eq!(cards[4].rows, 12);
+
+        // Through the state: the discussion and the composer are read
+        // with the threads.
+        let state = ReviewState::new();
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(file));
+        });
+        state.active.set(Some("src/x.rs".into()));
+        state.comment_threads.set(Arc::new(threads));
+        state.discussion.set(Some(Arc::new(discussion)));
+        assert_eq!(state.cards_in("src/x.rs").len(), 4);
+        assert!(!state.composer_is_inline());
+        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        state.open_composer(None, Some(composer.clone()), String::new(), choice.clone());
+        assert!(state.composer_is_inline());
+        assert!(!state.threads_open.get(), "the column is not opened for a composer drawn in the code");
+        assert_eq!(state.composer_card_anchor("src/x.rs"), Some(composer.clone()));
+        assert_eq!(state.composer_card_anchor("src/y.rs"), None);
+        assert_eq!(state.cards_in("src/x.rs").len(), 5);
+        // A follow-up is inside its thread's card, not a card of its own,
+        // and a question about the worktree is the column's.
+        state.open_composer(Some("mine".into()), Some(composer.clone()), String::new(), choice.clone());
+        assert!(!state.composer_is_inline());
+        assert_eq!(state.cards_in("src/x.rs").len(), 4);
+        state.open_composer(None, None, String::new(), choice);
+        assert!(!state.composer_is_inline());
+        assert!(state.threads_open.get(), "the column opens for a composer it draws");
+        assert_eq!(state.cards_in("src/x.rs").len(), 4);
+    }
+
+    #[test]
+    fn a_sent_question_keeps_its_cards_rows_until_the_threads_arrive_and_escape_gives_them_up() {
+        use perch_github::Side;
+        let state = ReviewState::new();
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(spliced_file()));
+        });
+        state.active.set(Some("src/x.rs".into()));
+        let anchor = Anchor { path: "src/x.rs".into(), start_line: 3, line: 3, side: Side::Right, commit_sha: "h".into() };
+        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+
+        // Opened, laid out at ten rows, and sent: the composer is gone,
+        // and the card's rows stay under its lines.
+        state.open_composer(None, Some(anchor.clone()), String::new(), choice.clone());
+        state.set_card_rows(&CardId::Composer, 10);
+        assert_eq!(state.cards_in("src/x.rs"), vec![Card { id: CardId::Composer, after_display_line: 4, rows: 10 }]);
+        state.composer_sent();
+        assert!(state.composer.get().is_none());
+        assert_eq!(state.sent_composer.get(), Some(anchor.clone()));
+        assert_eq!(state.cards_in("src/x.rs"), vec![Card { id: CardId::Composer, after_display_line: 4, rows: 10 }]);
+
+        // The thread arrives, and its card takes the place of the rows.
+        state.set_comment_threads(Arc::new(vec![anchored("new", 3, 3, "2026-09-18T10:00:00Z", false)]));
+        assert_eq!(state.sent_composer.get(), None);
+        let cards = state.cards_in("src/x.rs");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, CardId::Thread("new".into()));
+        assert!(!state.card_rows.get().contains_key(&CardId::Composer), "the next composer starts on the estimate");
+
+        // Escape gives the rows up at once.
+        state.open_composer(None, Some(anchor.clone()), String::new(), choice.clone());
+        state.set_card_rows(&CardId::Composer, 10);
+        state.close_composer();
+        assert_eq!(state.cards_in("src/x.rs").len(), 1);
+        assert!(!state.card_rows.get().contains_key(&CardId::Composer));
+
+        // A question sent from the column keeps no rows: it was no card.
+        state.open_composer(None, None, String::new(), choice.clone());
+        state.composer_sent();
+        assert_eq!(state.sent_composer.get(), None);
+
+        // A new composer opened before the thread lands takes the
+        // placeholder's place: there is one composer card at a time.
+        state.open_composer(None, Some(anchor.clone()), String::new(), choice.clone());
+        state.composer_sent();
+        assert!(state.sent_composer.get().is_some());
+        state.open_composer(None, Some(anchor), String::new(), choice);
+        assert_eq!(state.sent_composer.get(), None);
+        assert_eq!(state.cards_in("src/x.rs").iter().filter(|c| c.id == CardId::Composer).count(), 1);
     }
 
     #[test]

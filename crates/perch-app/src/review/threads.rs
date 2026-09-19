@@ -3,7 +3,9 @@
 //! A thread is a comment thread, not a chat: short questions, short
 //! answers, tied to lines. The column lists the open file's threads first,
 //! then the worktree's others under a divider. A composer sits at the top
-//! for a new thread, or under a thread for a follow-up.
+//! for a new thread, unless the thread is on lines of the open file, when
+//! the composer is a card in the code under them instead; a follow-up's
+//! composer sits under its thread.
 //!
 //! The same thread is also a card on Conversation, and a card in the code
 //! under the lines it is about. The message, the run's steps and footer,
@@ -141,16 +143,29 @@ fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: Open
     let here_backend = backend.clone();
     let here_open = open_file.clone();
 
+    // A composer for a new thread sits at the top, unless it is drawn in
+    // the code as a card under its lines: then this slot is empty, so the
+    // composer is in one place. A follow-up's sits under its thread
+    // instead. Keyed on what the composer is about and which opening it
+    // is, not on the composer itself: picking a model writes the
+    // composer, and a rebuild on that would throw the typed question
+    // away.
+    let slot = Memo::new(move |_| {
+        state.composer.with(|c| {
+            c.as_ref()
+                .filter(|c| c.thread_id.is_none() && !state.composer_is_inline())
+                .map(|c| (c.anchor.clone(), c.opening))
+        })
+    });
     Stack::vertical((
-        // A composer for a new thread sits at the top. A follow-up's sits
-        // under its thread instead.
         dyn_container(
-            move || state.composer.with(|c| c.as_ref().filter(|c| c.thread_id.is_none()).cloned()),
-            move |composer| match composer {
+            move || slot.get(),
+            move |slot| match slot.and_then(|_| state.composer.get_untracked()) {
                 Some(c) => composer_view(app, state, composer_backend.clone(), c, ThreadFace::Column).into_any(),
                 None => Empty::new().into_any(),
             },
         )
+        .debug_name("column-composer")
         .style(|s| s.width_full()),
         dyn_stack(
             move || {
@@ -181,9 +196,15 @@ fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: Open
                 }
                 Row::Divider => group_heading("Elsewhere in this worktree").into_any(),
                 Row::GitHubDivider => group_heading("On GitHub").into_any(),
-                Row::GitHub(t) => {
-                    crate::review::cards::line_thread_block(app, state, here_backend.clone(), here_open.clone(), t).into_any()
-                }
+                Row::GitHub(t) => crate::review::cards::line_thread_block(
+                    app,
+                    state,
+                    here_backend.clone(),
+                    here_open.clone(),
+                    t,
+                    ThreadFace::Column,
+                )
+                .into_any(),
             },
         )
         .style(|s| s.flex_col().width_full().gap(10.0).padding(12.0)),
@@ -234,7 +255,10 @@ enum Row {
 
 /// The box a question is typed into, with where it is anchored above and
 /// the model, the effort and Send below. In the column it sits in a
-/// margin of its own; as a card it fills its place.
+/// margin of its own; as a card on Conversation it fills its place; in
+/// the code it is a card under the lines it is about, placed by the
+/// layer that draws the cards. Send closes it; a card in the code leaves
+/// its rows for the thread's card to take when the thread arrives.
 pub fn composer_view(
     app: AppState,
     state: ReviewState,
@@ -313,7 +337,7 @@ pub fn composer_view(
                 composer.effort,
             );
             state.agent_last.set(Some((composer.backend, composer.model.clone(), composer.effort)));
-            state.close_composer();
+            state.composer_sent();
         })
     };
     let key_send = send.clone();
@@ -439,15 +463,17 @@ pub fn composer_view(
     .style(move |s| {
         let base = s
             .flex_col()
-            .width_full()
             .padding(12.0)
             .background(theme::CANVAS)
             .border(1.0)
             .border_color(theme::ACCENT_RING)
             .border_radius(theme::RADIUS_LG);
         match face {
-            ThreadFace::Column => base.margin(theme::THREAD_PADDING).margin_bottom(0.0),
-            ThreadFace::Card | ThreadFace::Inline => base,
+            ThreadFace::Column => base.width_full().margin(theme::THREAD_PADDING).margin_bottom(0.0),
+            ThreadFace::Card => base.width_full(),
+            // A card in the code is placed by its edges, and its width
+            // follows from them.
+            ThreadFace::Inline => base,
         }
     })
 }
@@ -671,17 +697,25 @@ pub fn thread_card(
         }
     });
 
-    // A gutter marker was clicked: flash the border, and in the column
-    // scroll to the card; the editor is scrolled to the card in the code
-    // by the layer that places it. The first run only subscribes: a card
-    // built after a click must not take the click for its own.
-    let view_id = card.view_id();
+    // In the column the marker's click scrolls to the card as well; the
+    // editor is scrolled to the card in the code by the layer that
+    // places it.
+    let scroll_to = (face == ThreadFace::Column).then(|| card.view_id());
+    wire_flash(state, card_id, flashing, scroll_to);
+    card
+}
+
+/// A gutter marker was clicked on the card's thread: `flashing` goes on
+/// for the flash's length, and `scroll_to` is scrolled to first when
+/// there is one. The first run only subscribes: a card built after a
+/// click must not take the click for its own.
+pub(crate) fn wire_flash(state: ReviewState, card_id: CardId, flashing: RwSignal<bool>, scroll_to: Option<floem::ViewId>) {
     Effect::new(move |first: Option<()>| {
         let focused = state.focus_card.with(|f| f.as_ref() == Some(&card_id));
         if first.is_none() || !focused {
             return;
         }
-        if face == ThreadFace::Column {
+        if let Some(view_id) = scroll_to {
             view_id.scroll_to(None);
         }
         flashing.set(true);
@@ -689,7 +723,6 @@ pub fn thread_card(
             flashing.set(false);
         });
     });
-    card
 }
 
 /// A thread's card open: its first row, the delete confirmation when one
@@ -705,7 +738,10 @@ fn open_card(
     face: ThreadFace,
 ) -> impl IntoView {
     let first_row = match face {
-        ThreadFace::Inline => chevron_row(state, thread.clone()).into_any(),
+        ThreadFace::Inline => {
+            let menu = thread_menu(state, thread.id.clone(), theme::THREAD_MENU).into_any();
+            chevron_row(state, CardId::Thread(thread.id.clone()), thread.outdated, menu).into_any()
+        }
         ThreadFace::Column | ThreadFace::Card => anchor_line(state, open_file, thread.clone()).into_any(),
     };
     let messages = messages_view(app, state, backend.clone(), thread.id.clone(), face);
@@ -733,36 +769,60 @@ fn open_card(
 
 /// How tall a card in the code may be: its rows at the cap, less the
 /// inset inside its first and last rows and its border.
-fn inline_card_max_height() -> f64 {
+pub(crate) fn inline_card_max_height() -> f64 {
     crate::review::doc::CARD_MAX_ROWS as f64 * theme::CODE_LINE_HEIGHT as f64 - 2.0 * theme::CARD_INSET - 2.0
 }
 
 /// The first row of a card in the code, where the column's card has its
-/// anchor's label: the chevron that collapses it, Outdated, and the `...`
-/// menu.
-fn chevron_row(state: ReviewState, thread: CommentThread) -> impl IntoView {
-    let card_id = CardId::Thread(thread.id.clone());
+/// anchor's label: the chevron that collapses it, Outdated, and at the
+/// end whatever the card puts there, the `...` menu on a thread of the
+/// reader's own.
+pub(crate) fn chevron_row(state: ReviewState, card_id: CardId, outdated: bool, trailing: floem::AnyView) -> impl IntoView {
     Stack::horizontal((
         chevron(state, card_id, true),
-        outdated_pill(thread.outdated),
+        outdated_pill(outdated),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        thread_menu(state, thread.id, theme::THREAD_MENU),
+        trailing,
     ))
     .style(|s| s.items_center().width_full())
 }
 
-/// A card in the code collapsed to its one row: the chevron, who asked,
-/// the first line of what they asked, how many messages follow, Outdated,
+/// A thread of the reader's own collapsed to its one row: who asked, the
+/// first line of what they asked, how many messages follow, Outdated,
 /// and the `...` menu, smaller than the open card's so it fits the row.
 fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
-    let card_id = CardId::Thread(thread.id.clone());
     let first = thread.messages.first();
     let author = first.map(|m| m.author.clone()).unwrap_or(Author::User);
     let line = first.map(|m| crate::review::timeline::first_line(&m.body)).unwrap_or_default();
-    let more = thread.messages.len().saturating_sub(1);
+    let menu = thread_menu(state, thread.id.clone(), theme::COLLAPSED_CARD_MENU).into_any();
+    collapsed_card_row(
+        state,
+        CardId::Thread(thread.id),
+        move || author_name(app, &author),
+        line,
+        thread.messages.len().saturating_sub(1),
+        thread.outdated,
+        menu,
+    )
+}
+
+/// A card in the code collapsed to its one row: the chevron, `author`,
+/// the first `line` of the first message, how many `more` messages
+/// follow, Outdated, and at the end whatever the card puts there. The
+/// author is read each time it is drawn, since who the reader is can
+/// land after the card is built.
+pub(crate) fn collapsed_card_row(
+    state: ReviewState,
+    card_id: CardId,
+    author: impl Fn() -> String + 'static,
+    line: String,
+    more: usize,
+    outdated: bool,
+    trailing: floem::AnyView,
+) -> impl IntoView {
     Stack::horizontal((
         chevron(state, card_id, false),
-        Label::derived(move || author_name(app, &author)).style(|s| {
+        Label::derived(author).style(|s| {
             s.font_size(theme::TEXT_BADGE)
                 .font_weight(FontWeight::SEMI_BOLD)
                 .color(theme::FG)
@@ -780,8 +840,8 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
                 .flex_grow(1.0_f32)
         }),
         more_pill(more),
-        outdated_pill(thread.outdated),
-        thread_menu(state, thread.id, theme::COLLAPSED_CARD_MENU),
+        outdated_pill(outdated),
+        trailing,
     ))
     .style(|s| s.items_center().width_full().height_full().padding_horiz(theme::COLLAPSED_CARD_PADDING))
 }

@@ -7,7 +7,9 @@
 //! on the pull request would be a lie. A GitHub card is white with a
 //! byline strip across the top; a thread card sits on the page's own grey
 //! inside a dashed border, with a Local chip in its byline that says on
-//! hover what Local means.
+//! hover what Local means. The same holds in the code, where a review
+//! comment's block is a card under its line: white and solid, against
+//! the grey and dashed card of the reader's own.
 
 use std::rc::Rc;
 
@@ -16,12 +18,13 @@ use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::text::FontWeight;
-use floem::views::{Container, Decorators, Empty, Label, Stack, TooltipExt, dyn_container, dyn_stack};
+use floem::views::{Container, Decorators, Empty, Label, ScrollExt, Stack, TooltipExt, dyn_container, dyn_stack};
 use perch_git::{LineStatus, Row};
 use perch_github::{Anchor, CommentThread, IssueComment, PullEvent, PullEventKind, Review, ReviewComment};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
+use crate::review::doc::CardId;
 use crate::review::markdown;
 use crate::review::model::{ItemTab, LoadedFile, ReviewState};
 use crate::review::threads::{self, ThreadFace};
@@ -337,7 +340,7 @@ pub fn review_card(
         dyn_stack(
             move || comments.clone(),
             |t| t.comment.id,
-            move |t| line_thread_block(app, state, backend.clone(), open_file.clone(), t),
+            move |t| line_thread_block(app, state, backend.clone(), open_file.clone(), t, ThreadFace::Card),
         )
         .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP)),
     ))
@@ -346,12 +349,28 @@ pub fn review_card(
     track_hover(card(byline_strip(byline(app, who, actions(hovered, ask, url))), body.into_any()), hovered)
 }
 
-/// A line comment and its replies under `path:line` and the lines of the
-/// hunk it was left on.
-/// A review comment and its replies as one block: the lines it was on,
-/// then the comments, each with Ask about this. On Conversation inside a
-/// review card; on Files in the thread column under On GitHub.
+/// A review comment and its replies as one block, each with Ask about
+/// this. On Conversation inside a review card, and in the thread column
+/// under On GitHub, the comments come under `path:line` and the lines the
+/// comment was left on; in the code, as a card under those lines, they
+/// come under the chevron that collapses the card to one row, and
+/// neither the heading nor the lines, since the card is under them.
 pub fn line_thread_block(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_file: OpenFile,
+    thread: LineThread,
+    face: ThreadFace,
+) -> floem::AnyView {
+    match face {
+        ThreadFace::Column | ThreadFace::Card => located_block(app, state, backend, open_file, thread).into_any(),
+        ThreadFace::Inline => github_card(app, state, thread).into_any(),
+    }
+}
+
+/// The block headed by where the comment was left, over the lines.
+fn located_block(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
@@ -404,24 +423,10 @@ pub fn line_thread_block(
     )
     .style(|s| s.width_full());
 
-    let replies = thread.replies.clone();
-    let anchor_of = move |c: &ReviewComment| anchor_for(state, c);
     Stack::vertical((
         location_row(state, open_file, path, line, heading, false),
         lines_view,
-        Stack::vertical((
-            nested_comment(app, state, first.clone(), anchor_of(&first), false),
-            dyn_stack(
-                move || replies.clone(),
-                |r| r.id,
-                move |r| {
-                    let anchor = anchor_of(&r);
-                    nested_comment(app, state, r, anchor, true)
-                },
-            )
-            .style(|s| s.flex_col().width_full().gap(10.0)),
-        ))
-        .style(|s| s.flex_col().width_full().gap(10.0).padding(12.0)),
+        comments_view(app, state, &thread).style(|s| s.padding(12.0)),
     ))
     .style(|s| s.flex_col().width_full())
     .clip()
@@ -432,6 +437,103 @@ pub fn line_thread_block(
             .border_color(theme::BORDER_MUTED)
             .border_radius(theme::RADIUS)
     })
+}
+
+/// The comment and its replies, each with Ask about this, a reply flush
+/// under the comment it answers.
+fn comments_view(app: AppState, state: ReviewState, thread: &LineThread) -> impl IntoView {
+    let first = thread.comment.clone();
+    let replies = thread.replies.clone();
+    let anchor_of = move |c: &ReviewComment| anchor_for(state, c);
+    Stack::vertical((
+        nested_comment(app, state, first.clone(), anchor_of(&first), false),
+        dyn_stack(
+            move || replies.clone(),
+            |r| r.id,
+            move |r| {
+                let anchor = anchor_of(&r);
+                nested_comment(app, state, r, anchor, true)
+            },
+        )
+        .style(|s| s.flex_col().width_full().gap(10.0)),
+    ))
+    .style(|s| s.flex_col().width_full().gap(10.0))
+}
+
+/// One of GitHub's threads as a card in the code, under the line it was
+/// left on: the block's white and solid chrome, so it cannot be taken
+/// for a thread of the reader's own, led by the chevron that collapses
+/// it to one row. Collapsed, it is its one row exactly: the chevron, who
+/// commented, the first line, and how many replies follow. The Ask in
+/// each byline opens the composer, which is a card under the same line.
+/// A gutter marker click on the thread flashes the border. Nothing here
+/// says whether GitHub has the thread resolved: the comments GitHub
+/// sends do not say, so the card starts open.
+fn github_card(app: AppState, state: ReviewState, thread: LineThread) -> impl IntoView {
+    let card_id = CardId::GitHub(thread.comment.id);
+    let flashing = RwSignal::new(false);
+    let collapsed = {
+        let card_id = card_id.clone();
+        Memo::new(move |_| state.is_collapsed(&card_id))
+    };
+    let open_thread = thread.clone();
+    let card = dyn_container(
+        move || collapsed.get(),
+        move |collapsed| {
+            if collapsed {
+                collapsed_github_row(state, open_thread.clone()).into_any()
+            } else {
+                open_github_card(app, state, open_thread.clone()).into_any()
+            }
+        },
+    )
+    .style(move |s| {
+        let base = s
+            .background(theme::CANVAS)
+            .border(1.0)
+            .border_radius(theme::RADIUS)
+            .apply_if(collapsed.get(), |s| s.height(theme::CODE_LINE_HEIGHT as f64));
+        if flashing.get() {
+            base.border_color(theme::ACCENT)
+        } else {
+            base.border_color(theme::BORDER_MUTED)
+        }
+    });
+    threads::wire_flash(state, card_id, flashing, None);
+    card
+}
+
+/// The GitHub card open: the chevron row, then the comments, which
+/// scroll inside the card once it is as tall as a card may be.
+fn open_github_card(app: AppState, state: ReviewState, thread: LineThread) -> impl IntoView {
+    let card_id = CardId::GitHub(thread.comment.id);
+    Stack::vertical((
+        threads::chevron_row(state, card_id, false, Empty::new().into_any()).style(|s| s.flex_shrink(0.0_f32)),
+        comments_view(app, state, &thread)
+            .scroll()
+            .style(|s| s.width_full().flex_shrink(1.0_f32).min_height(0.0)),
+    ))
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .padding(theme::THREAD_PADDING)
+            .gap(theme::THREAD_GAP)
+            .max_height(threads::inline_card_max_height())
+    })
+}
+
+/// The GitHub card collapsed to its one row.
+fn collapsed_github_row(state: ReviewState, thread: LineThread) -> impl IntoView {
+    let user = thread.comment.user.clone();
+    threads::collapsed_card_row(
+        state,
+        CardId::GitHub(thread.comment.id),
+        move || user.clone(),
+        crate::review::timeline::first_line(&thread.comment.body),
+        thread.replies.len(),
+        false,
+        Empty::new().into_any(),
+    )
 }
 
 /// The line a GitHub comment was left on, as an anchor for a thread about
