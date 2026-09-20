@@ -112,7 +112,9 @@ pub fn review_view(
                 }
             },
         )
-        .style(|s| s.width_full().flex_shrink(0.0_f32)),
+        // Keep header-owned popovers above the item surface. Floem does not
+        // let a descendant's z-index escape its parent's sibling context.
+        .style(|s| s.width_full().flex_shrink(0.0_f32).z_index(1)),
         dyn_container(
             move || state.phase.get(),
             move |phase| match phase {
@@ -345,6 +347,97 @@ pub fn review_status(app: AppState, state: ReviewState) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use floem::headless::{HeadlessHarness, TestRoot};
+
+    fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
+        if id.debug_name().split_whitespace().any(|part| part == name) {
+            return Some(id);
+        }
+        id.children()
+            .into_iter()
+            .find_map(|child| named(child, name))
+    }
+
+    fn descends_from(mut id: floem::ViewId, ancestor: floem::ViewId) -> bool {
+        loop {
+            if id == ancestor {
+                return true;
+            }
+            let Some(parent) = id.parent() else {
+                return false;
+            };
+            id = parent;
+        }
+    }
+
+    #[test]
+    fn review_launcher_stays_above_metadata_and_item_content() {
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let now = "2026-09-20T12:00:00Z".parse().unwrap();
+
+        let mut item = perch_github::Item::new("local/perch", now);
+        item.id = "worktree".into();
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: "feature/review-layer".into(),
+            base_ref: "main".into(),
+            head_sha: "abcdef0123456789".into(),
+            path: std::path::PathBuf::from("/tmp/perch-review-layer-test"),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+        });
+        state.item.set(Some(std::sync::Arc::new(item)));
+        state.ready.set(true);
+        state.phase.set(Phase::Ready);
+        state.review_launcher_open.set(true);
+
+        // Force the metadata sibling to exist as well as the item content
+        // sibling below the complete header.
+        let mut child = perch_github::Item::new("local/perch", now);
+        child.id = "child-worktree".into();
+        child.name = Some("Child branch".into());
+        child.from_item_id = Some("worktree".into());
+        app.items.set(vec![child]);
+
+        let root = TestRoot::new();
+        let view = review_view(
+            app,
+            state,
+            Rc::new(Backend::detached()),
+            Rc::new(|_: &perch_github::Item| {}),
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 700.0);
+        harness.rebuild();
+        harness.paint();
+
+        let popover = named(harness.root_id(), "review-launch-popover").unwrap();
+        let bounds = popover.get_visual_rect_no_clip();
+        let x = bounds.x0 + 2.0;
+        let metadata_y = theme::REVIEW_HEADER_HEIGHT + theme::METADATA_HEIGHT / 2.0;
+        let content_y = theme::REVIEW_HEADER_HEIGHT + theme::METADATA_HEIGHT + 10.0;
+        assert!(bounds.y0 < metadata_y && bounds.y1 > content_y);
+
+        for (layer, y) in [("metadata", metadata_y), ("content", content_y)] {
+            let target = harness
+                .element_id_at(x, y)
+                .unwrap_or_else(|| panic!("no hit target over {layer}"))
+                .owning_id();
+            assert!(
+                descends_from(target, popover),
+                "{layer} painted over the review launcher"
+            );
+        }
+
+        let close = named(harness.root_id(), "review-launch-close").unwrap();
+        let close_bounds = close.get_visual_rect_no_clip();
+        harness.click(
+            (close_bounds.x0 + close_bounds.x1) / 2.0,
+            (close_bounds.y0 + close_bounds.y1) / 2.0,
+        );
+        assert!(!state.review_launcher_open.get());
+    }
 
     #[test]
     fn the_status_line_names_the_hidden_lines_only_when_the_file_has_some() {

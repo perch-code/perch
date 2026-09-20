@@ -45,7 +45,10 @@ pub fn header(
         churn(state),
         item_marks(state, backend.clone()),
     )))
-    .style(bar_style);
+    // Floem bounds z-index to sibling stacking contexts. The review launcher
+    // lives inside this bar, so the bar itself must sit above the metadata
+    // strip that follows it.
+    .style(|s| bar_style(s).z_index(1));
     Stack::vertical((bar, metadata_strip(app, state, backend, open_item)))
         .style(|s| s.flex_col().width_full())
 }
