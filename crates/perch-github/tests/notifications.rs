@@ -52,6 +52,14 @@ impl Request {
             .find(|(candidate, _)| candidate == name)
             .map(|(_, value)| value.as_str())
     }
+
+    fn header_values(&self, name: &str) -> Vec<&str> {
+        self.headers
+            .iter()
+            .filter(|(candidate, _)| candidate == name)
+            .map(|(_, value)| value.as_str())
+            .collect()
+    }
 }
 
 struct Response {
@@ -183,7 +191,10 @@ async fn an_unconditional_poll_fetches_every_page_and_pins_the_api_version() {
     );
     for request in requests.iter() {
         assert_eq!(request.method, "GET");
-        assert_eq!(request.header("x-github-api-version"), Some(API_VERSION));
+        assert_eq!(
+            request.header_values("x-github-api-version"),
+            vec![API_VERSION]
+        );
         assert_eq!(request.header("if-modified-since"), None);
     }
 }
@@ -275,7 +286,10 @@ async fn notification_actions_use_githubs_exact_methods_paths_and_body() {
         serde_json::json!({ "ignored": true })
     );
     for request in requests.iter() {
-        assert_eq!(request.header("x-github-api-version"), Some(API_VERSION));
+        assert_eq!(
+            request.header_values("x-github-api-version"),
+            vec![API_VERSION]
+        );
     }
 }
 

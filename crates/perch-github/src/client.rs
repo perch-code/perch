@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{
-    HeaderMap, HeaderName, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED,
+    HeaderMap, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED,
 };
 use http::StatusCode;
 use http_body_util::BodyExt;
@@ -30,9 +30,6 @@ use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunsPayload};
 const PER_PAGE: usize = 50;
 /// Fallback when the server sends no `X-Poll-Interval`.
 const DEFAULT_POLL_SECS: u64 = 60;
-/// GitHub's dated REST contract. Pinning this keeps a future default change
-/// from silently changing response shapes underneath the client.
-const API_VERSION: &str = "2022-11-28";
 /// Page size for discussion timelines. GitHub allows a hundred there.
 const LIST_PER_PAGE: usize = 100;
 /// Hard cap on pages for discussion lists.
@@ -115,12 +112,10 @@ impl GitHub {
     }
 
     fn build(token: &str, base_uri: Option<&str>) -> Result<Self, Error> {
-        let mut builder = Octocrab::builder()
-            .personal_token(token.to_string())
-            .add_header(
-                HeaderName::from_static("x-github-api-version"),
-                API_VERSION.to_string(),
-            );
+        // Octocrab already pins the GitHub REST API version. Adding the same
+        // header here produces two values, which GitHub joins with a comma and
+        // rejects as an unsupported version.
+        let mut builder = Octocrab::builder().personal_token(token.to_string());
         if let Some(base) = base_uri {
             builder = builder
                 .base_uri(base)
