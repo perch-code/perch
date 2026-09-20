@@ -5,7 +5,7 @@
 //! command never discovers a CLI or starts work, so it is safe in scripts and
 //! useful when the window cannot be opened.
 
-use perch_github::{Cache, RunHistoryFilter, RunOwner, RunRecord};
+use perch_github::{Cache, RunHistoryFilter, RunOwner, RunSummary};
 
 pub fn run(args: &[String]) {
     let limit = match args {
@@ -34,10 +34,23 @@ fn print(limit: usize) -> Result<(), String> {
         return Err(format!("no cache at {}; run the app once", path.display()));
     }
     let (cache, _) = Cache::open_with_outcome(&path, None).map_err(|error| error.to_string())?;
-    let active = cache.active_runs().map_err(|error| error.to_string())?;
-    let history = cache
-        .run_history(&RunHistoryFilter::default(), None, limit)
+    let active = cache
+        .active_run_summaries()
         .map_err(|error| error.to_string())?;
+    let mut history = Vec::new();
+    let mut cursor = None;
+    while history.len() < limit {
+        let page = cache
+            .run_history_page(
+                &RunHistoryFilter::default(),
+                cursor.as_ref(),
+                limit - history.len(),
+            )
+            .map_err(|error| error.to_string())?;
+        history.extend(page.runs);
+        let Some(next) = page.next_cursor else { break };
+        cursor = Some(next);
+    }
 
     println!("Active ({})", active.len());
     for run in &active {
@@ -51,7 +64,7 @@ fn print(limit: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn row(run: &RunRecord) -> String {
+fn row(run: &RunSummary) -> String {
     let owner = match &run.owner {
         RunOwner::Discussion {
             item_id,
@@ -106,7 +119,7 @@ fn row(run: &RunRecord) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perch_github::{RunLabels, RunPurpose, RunStatus};
+    use perch_github::{RunLabels, RunPurpose, RunRecord, RunStatus};
 
     #[test]
     fn a_summary_names_its_durable_owner_and_activity() {
@@ -130,7 +143,7 @@ mod tests {
             latest_activity: Some("Read src/main.rs".into()),
             ..RunRecord::default()
         };
-        let text = row(&run);
+        let text = row(&RunSummary::from(&run));
         assert!(
             text.contains("discussion item=i thread=t request=q"),
             "{text}"

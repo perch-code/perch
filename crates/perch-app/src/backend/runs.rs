@@ -30,6 +30,7 @@ struct Inner {
 
 #[derive(Default)]
 struct AdmissionGate {
+    closed: bool,
     blocked: HashMap<OwnerFence, usize>,
 }
 
@@ -43,11 +44,23 @@ struct Entry {
     id: String,
     owner: RunOwner,
     cancelled: AtomicBool,
+    /// The task which owned the spawn lease has finished. If its terminal
+    /// database write failed, keep the entry registered and retry that
+    /// projection instead of leaving an unowned durable active row.
+    execution_done: AtomicBool,
     finished: AtomicBool,
     cancel: Notify,
     done: watch::Sender<bool>,
     process: Mutex<Option<perch_agent::Run>>,
     stop_reason: Mutex<TerminalReason>,
+    pending_terminal: Mutex<Option<PendingTerminal>>,
+}
+
+#[derive(Clone)]
+struct PendingTerminal {
+    status: RunStatus,
+    reason: TerminalReason,
+    message: String,
 }
 
 /// A request waiting for the shared execution limit.
@@ -101,6 +114,9 @@ impl RunManager {
             .admission
             .lock()
             .map_err(|_| "The agent scheduler is unavailable")?;
+        if gate.closed {
+            return Err("Perch is shutting down; no new agent runs can start".into());
+        }
         if owner_is_blocked(&gate, &run.owner) {
             return Err("That discussion or item is being deleted".into());
         }
@@ -118,7 +134,9 @@ impl RunManager {
         if !owner_exists(&guard, &run.owner)? {
             return Err("The discussion or item for that run is gone".into());
         }
-        let active = guard.active_runs().map_err(|e| e.to_string())?;
+        let active = guard
+            .active_run_summaries()
+            .map_err(|e| e.to_string())?;
         if let RunOwner::Discussion { thread_id, .. } = &run.owner {
             if active.iter().any(|other| {
                 other.id != run.id
@@ -135,23 +153,40 @@ impl RunManager {
             },
             truncated: false,
         };
-        guard
-            .insert_run_with_event(&run, &queued)
-            .map_err(|e| e.to_string())?;
-        let run = guard
-            .load_run(&run.id)
-            .map_err(|e| e.to_string())?
-            .unwrap_or(run);
+        // Do not perform a fallible read between the durable insert and live
+        // registration. Once the transaction commits, this entry must remain
+        // reachable by cancellation and shutdown even if later reads fail.
+        let run = if let Err(insert_error) = guard.insert_run_with_event(&run, &queued) {
+            // SQLite can report an error while committing. Reconcile the
+            // ambiguous result before returning so a committed queued row is
+            // never left without a scheduler owner.
+            match guard.load_run(&run.id) {
+                Ok(Some(saved))
+                    if !entries.contains_key(&run.id)
+                        && saved.status == RunStatus::Queued
+                        && saved.owner == run.owner
+                        && saved.purpose == run.purpose
+                        && saved.original_request == run.original_request =>
+                {
+                    saved
+                }
+                _ => return Err(insert_error.to_string()),
+            }
+        } else {
+            run
+        };
         let (done, _) = watch::channel(false);
         let entry = Arc::new(Entry {
             id: run.id.clone(),
             owner: run.owner.clone(),
             cancelled: AtomicBool::new(false),
+            execution_done: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             cancel: Notify::new(),
             done,
             process: Mutex::new(None),
             stop_reason: Mutex::new(TerminalReason::UserStopped),
+            pending_terminal: Mutex::new(None),
         });
         entries.insert(run.id.clone(), entry.clone());
         drop(guard);
@@ -208,13 +243,12 @@ impl RunManager {
             permit = &mut acquire => match permit {
                 Ok(permit) => permit,
                 Err(_) => {
-                    self.transition(
-                        &entry.id,
+                    self.complete_entry(
+                        &entry,
                         RunStatus::Interrupted,
-                        Some(TerminalReason::AppShutdown),
-                        Some("Perch stopped before the run could start".into()),
+                        TerminalReason::AppShutdown,
+                        "Perch stopped before the run could start".into(),
                     );
-                    self.finish_entry(&entry);
                     return None;
                 }
             },
@@ -224,11 +258,25 @@ impl RunManager {
             return None;
         }
         let started = self.transition(&entry.id, RunStatus::Starting, None, None);
-        if !started.is_some_and(|run| run.status == RunStatus::Starting) {
+        if !started
+            .as_ref()
+            .is_some_and(|run| run.status == RunStatus::Starting)
+        {
             // A queued cancellation can commit while the semaphore wakes.
             // Never hand out a spawn lease unless Starting itself is the
             // durable state we just observed.
-            self.finish_entry(&entry);
+            if started.as_ref().is_some_and(|run| run.status.is_terminal()) {
+                self.finish_entry(&entry);
+            } else if entry.cancelled.load(Ordering::Acquire) {
+                self.finish_cancelled_queue(&entry);
+            } else {
+                self.complete_entry(
+                    &entry,
+                    RunStatus::Failed,
+                    TerminalReason::Other,
+                    "Could not save the agent's starting state".into(),
+                );
+            }
             return None;
         }
         Some(RunLease {
@@ -268,6 +316,10 @@ impl RunManager {
             *stored = reason;
         }
         entry.cancelled.store(true, Ordering::Release);
+        if entry.execution_done.load(Ordering::Acquire) {
+            self.reconcile_entry(&entry);
+            return;
+        }
         let process = entry.process.lock().ok().and_then(|slot| slot.clone());
         if let Some(process) = process {
             self.transition(id, RunStatus::Stopping, None, None);
@@ -304,7 +356,23 @@ impl RunManager {
     }
 
     pub(crate) fn finish(&self, lease: RunLease) {
-        self.finish_entry(&lease.entry);
+        let entry = lease.entry.clone();
+        let (status, reason, message) = if entry.cancelled.load(Ordering::Acquire) {
+            let (status, reason) = self.stop_terminal(&entry.id);
+            let message = if reason == TerminalReason::AppShutdown {
+                "Perch shut down while the agent was running"
+            } else {
+                "Stopped by the reader"
+            };
+            (status, reason, message.to_string())
+        } else {
+            (
+                RunStatus::Failed,
+                TerminalReason::Other,
+                "The agent exited, but Perch could not save its final state".into(),
+            )
+        };
+        self.complete_entry(&entry, status, reason, message);
         drop(lease);
     }
 
@@ -326,7 +394,7 @@ impl RunManager {
             self.cancel_with_reason(&entry.id, TerminalReason::UserStopped);
         }
         for entry in entries {
-            entry.wait_done().await;
+            self.wait_entry_done(&entry).await;
         }
     }
 
@@ -359,7 +427,7 @@ impl RunManager {
                 return;
             }
             for entry in entries {
-                entry.wait_done().await;
+                self.wait_entry_done(&entry).await;
             }
         }
     }
@@ -368,6 +436,19 @@ impl RunManager {
     /// its own TERM/KILL bound; this outer bound prevents a broken adapter
     /// from keeping the application alive forever.
     pub(crate) async fn shutdown(&self) {
+        // `admit` holds this same gate through durable insertion and live
+        // registration. Once this lock closes admission, every request which
+        // won the race is necessarily visible in `entries`, and every later
+        // request is rejected before it can spend money or touch the queue.
+        {
+            let mut gate = self
+                .inner
+                .admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            gate.closed = true;
+            self.inner.limit.close();
+        }
         let entries: Vec<_> = self
             .inner
             .entries
@@ -377,9 +458,10 @@ impl RunManager {
         for entry in &entries {
             self.cancel_with_reason(&entry.id, TerminalReason::AppShutdown);
         }
+        self.reconcile_finished();
         let wait = async {
             for entry in entries {
-                entry.wait_done().await;
+                self.wait_entry_done(&entry).await;
             }
         };
         let _ = tokio::time::timeout(Duration::from_secs(8), wait).await;
@@ -404,8 +486,92 @@ impl RunManager {
                 "Cancelled before starting",
             )
         };
-        self.transition(&entry.id, status, Some(reason), Some(message.into()));
-        self.finish_entry(entry);
+        self.complete_entry(entry, status, reason, message.into());
+    }
+
+    /// Retry terminal projections for tasks whose process is already gone.
+    /// These entries intentionally remain live if SQLite could not accept a
+    /// terminal write: cancellation/deletion/shutdown can still find them,
+    /// and startup remains a final interruption fence after a hard failure.
+    pub(crate) fn reconcile_finished(&self) {
+        let entries: Vec<_> = self
+            .inner
+            .entries
+            .lock()
+            .map(|entries| {
+                entries
+                    .values()
+                    .filter(|entry| entry.execution_done.load(Ordering::Acquire))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for entry in entries {
+            self.reconcile_entry(&entry);
+        }
+    }
+
+    fn complete_entry(
+        &self,
+        entry: &Arc<Entry>,
+        status: RunStatus,
+        reason: TerminalReason,
+        message: String,
+    ) {
+        entry.execution_done.store(true, Ordering::Release);
+        if let Ok(mut process) = entry.process.lock() {
+            *process = None;
+        }
+        if let Ok(mut pending) = entry.pending_terminal.lock() {
+            pending.get_or_insert(PendingTerminal {
+                status,
+                reason,
+                message,
+            });
+        }
+        self.reconcile_entry(entry);
+    }
+
+    fn reconcile_entry(&self, entry: &Arc<Entry>) {
+        if self
+            .load(&entry.id)
+            .is_some_and(|run| run.status.is_terminal())
+        {
+            self.finish_entry(entry);
+            return;
+        }
+        let pending = entry
+            .pending_terminal
+            .lock()
+            .ok()
+            .and_then(|pending| pending.clone());
+        let Some(pending) = pending else { return };
+        if self
+            .transition(
+                &entry.id,
+                pending.status,
+                Some(pending.reason),
+                Some(pending.message),
+            )
+            .is_some_and(|run| run.status.is_terminal())
+        {
+            self.finish_entry(entry);
+        }
+    }
+
+    async fn wait_entry_done(&self, entry: &Arc<Entry>) {
+        loop {
+            if entry.execution_done.load(Ordering::Acquire) {
+                self.reconcile_entry(entry);
+            }
+            if entry.finished.load(Ordering::Acquire) {
+                return;
+            }
+            tokio::select! {
+                _ = entry.wait_done() => return,
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
     }
 
     fn finish_entry(&self, entry: &Arc<Entry>) {
@@ -414,6 +580,9 @@ impl RunManager {
         }
         if let Ok(mut entries) = self.inner.entries.lock() {
             entries.remove(&entry.id);
+        }
+        if let Ok(mut process) = entry.process.lock() {
+            *process = None;
         }
         entry.done.send_replace(true);
     }
@@ -671,6 +840,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduler_enforces_the_global_limit_and_fifo_order() {
+        let manager = manager(2);
+        let first = manager
+            .start(admit(&manager, run("one", "thread-one", "request-one")))
+            .await
+            .unwrap();
+        let second = manager
+            .start(admit(&manager, run("two", "thread-two", "request-two")))
+            .await
+            .unwrap();
+
+        let third = admit(&manager, run("three", "thread-three", "request-three"));
+        let third_waiter = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.start(third).await.unwrap() })
+        };
+        tokio::task::yield_now().await;
+        let fourth = admit(&manager, run("four", "thread-four", "request-four"));
+        let fourth_waiter = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.start(fourth).await.unwrap() })
+        };
+        tokio::task::yield_now().await;
+        assert!(!third_waiter.is_finished());
+        assert!(!fourth_waiter.is_finished());
+
+        manager.transition(
+            "one",
+            RunStatus::Failed,
+            Some(TerminalReason::Other),
+            Some("fixture complete".into()),
+        );
+        manager.finish(first);
+        let third = tokio::time::timeout(Duration::from_secs(1), third_waiter)
+            .await
+            .expect("the oldest queued run did not receive the free slot")
+            .unwrap();
+        assert_eq!(third.entry.id, "three");
+        assert!(
+            !fourth_waiter.is_finished(),
+            "the fourth run bypassed the older waiter"
+        );
+
+        manager.transition(
+            "two",
+            RunStatus::Failed,
+            Some(TerminalReason::Other),
+            Some("fixture complete".into()),
+        );
+        manager.finish(second);
+        let fourth = tokio::time::timeout(Duration::from_secs(1), fourth_waiter)
+            .await
+            .expect("the second queued run did not receive the free slot")
+            .unwrap();
+        assert_eq!(fourth.entry.id, "four");
+
+        for lease in [third, fourth] {
+            manager.transition(
+                &lease.entry.id,
+                RunStatus::Failed,
+                Some(TerminalReason::Other),
+                Some("fixture complete".into()),
+            );
+            manager.finish(lease);
+        }
+    }
+
+    #[tokio::test]
     async fn one_discussion_cannot_admit_two_active_answers() {
         let manager = manager(4);
         let first = admit(&manager, run("one", "thread", "request-one"));
@@ -766,6 +1003,87 @@ mod tests {
         let run = manager.load("one").unwrap();
         assert_eq!(run.status, RunStatus::Interrupted);
         assert_eq!(run.terminal_reason, Some(TerminalReason::AppShutdown));
+    }
+
+    #[tokio::test]
+    async fn shutdown_fences_admission_and_waits_for_running_work() {
+        let manager = manager(1);
+        let admission = admit(&manager, run("one", "thread", "request"));
+        let lease = manager.start(admission).await.unwrap();
+        manager.transition("one", RunStatus::Running, None, None);
+
+        let shutdown = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.shutdown().await })
+        };
+        while !manager
+            .inner
+            .admission
+            .lock()
+            .map(|gate| gate.closed)
+            .unwrap_or(false)
+        {
+            tokio::task::yield_now().await;
+        }
+        assert!(!shutdown.is_finished(), "shutdown returned before the worker");
+        let (status, reason) = manager.stop_terminal("one");
+        assert_eq!(
+            (status, reason),
+            (RunStatus::Interrupted, TerminalReason::AppShutdown)
+        );
+        manager.transition(
+            "one",
+            status,
+            Some(reason),
+            Some("Perch shut down while the agent was running".into()),
+        );
+        manager.finish(lease);
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("shutdown did not observe the reaped worker")
+            .unwrap();
+
+        add_request(&manager, "later-thread", "later-request");
+        let error = manager
+            .admit(run("later", "later-thread", "later-request"))
+            .err()
+            .unwrap();
+        assert!(error.contains("shutting down"), "{error}");
+        assert!(manager.load("later").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_terminal_write_keeps_the_live_entry_for_reconciliation() {
+        let manager = manager(1);
+        let admission = admit(&manager, run("one", "thread", "request"));
+        let lease = manager.start(admission).await.unwrap();
+        let cache = manager.inner.cache.as_ref().unwrap().clone();
+        let poisoned_cache = cache.clone();
+        let poisoned = std::thread::spawn(move || {
+            let _guard = poisoned_cache.lock().unwrap();
+            panic!("poison the cache mutex to model an unavailable terminal write");
+        })
+        .join();
+        assert!(poisoned.is_err());
+
+        manager.finish(lease);
+
+        let entry = manager
+            .inner
+            .entries
+            .lock()
+            .unwrap()
+            .get("one")
+            .cloned()
+            .expect("a failed terminal projection must retain its live owner");
+        assert!(entry.execution_done.load(Ordering::Acquire));
+        assert!(!entry.finished.load(Ordering::Acquire));
+        assert!(entry.pending_terminal.lock().unwrap().is_some());
+
+        cache.clear_poison();
+        manager.reconcile_finished();
+        assert_eq!(manager.load("one").unwrap().status, RunStatus::Failed);
+        assert!(!manager.has_active_owner("item", Some("thread")));
     }
 
     #[tokio::test]

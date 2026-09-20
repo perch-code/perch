@@ -13,19 +13,19 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 
 use crate::comments::{
     self, Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,
-    RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunLabels, RunOwner, RunPurpose, RunRecord,
-    RunStatus, RunStep, TerminalReason,
+    RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunHistoryPage, RunLabels, RunOwner,
+    RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, TerminalReason,
 };
 use crate::discussion::Discussion;
 use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
 use crate::model::Thread;
 use crate::workflow_runs::Checks;
 
-/// The shape of the tables. Version 16 reconciles the run-history schema
-/// introduced on the agents branch with the notifications cache introduced
-/// on main. Versions 13 through 15 migrate in place so local conversations
-/// and review history are never discarded.
-pub const SCHEMA_VERSION: u32 = 16;
+/// The shape of the tables. Version 17 adds the captured execution prompt
+/// and an explicit truncation bit for the bounded result projection. Versions
+/// 13 through 16 migrate in place so local conversations and review history
+/// are never discarded.
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// Metadata key holding the validator for the cached notifications inbox.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -184,6 +184,7 @@ CREATE TABLE runs (
     effective_effort       TEXT NOT NULL,
     session_id             TEXT,
     original_request       TEXT NOT NULL,
+    prompt_snapshot        TEXT,
     working_directory      TEXT,
     revision_json          TEXT NOT NULL,
     repository_label       TEXT NOT NULL,
@@ -200,6 +201,7 @@ CREATE TABLE runs (
     started_at             TEXT,
     ended_at               TEXT,
     final_result           TEXT,
+    final_result_truncated INTEGER NOT NULL DEFAULT 0,
     latest_activity        TEXT,
     last_event_sequence    INTEGER NOT NULL DEFAULT 0,
     CHECK (owner_kind IN ('discussion', 'review', 'unavailable')),
@@ -305,6 +307,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             13 => migrate_13_to_14(&tx)?,
             14 => tx.execute_batch(NOTIFICATION_SCHEMA)?,
             15 => migrate_15_to_16(&tx)?,
+            16 => migrate_16_to_17(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -335,6 +338,56 @@ fn migrate_15_to_16(tx: &Transaction<'_>) -> Result<(), CacheError> {
     )?;
     if !has_run_owner {
         migrate_13_to_14(tx)?;
+    }
+    Ok(())
+}
+
+fn migrate_16_to_17(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    let has_prompt_snapshot: bool = tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM pragma_table_info('runs') WHERE name='prompt_snapshot'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_prompt_snapshot {
+        tx.execute("ALTER TABLE runs ADD COLUMN prompt_snapshot TEXT", [])?;
+    }
+    tx.execute(
+        "UPDATE runs SET prompt_snapshot=original_request WHERE prompt_snapshot IS NULL",
+        [],
+    )?;
+
+    let has_result_truncated: bool = tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM pragma_table_info('runs') WHERE name='final_result_truncated'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_result_truncated {
+        tx.execute(
+            "ALTER TABLE runs ADD COLUMN final_result_truncated INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+
+    let results = {
+        let mut stmt = tx.prepare(
+            "SELECT id, final_result FROM runs
+             WHERE final_result IS NOT NULL AND length(CAST(final_result AS BLOB)) > ?1",
+        )?;
+        let rows = stmt.query_map(params![MAX_RUN_RESULT_BYTES as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, mut result) in results {
+        truncate_string(&mut result, MAX_RUN_RESULT_BYTES);
+        tx.execute(
+            "UPDATE runs SET final_result=?2, final_result_truncated=1 WHERE id=?1",
+            params![id, result],
+        )?;
     }
     Ok(())
 }
@@ -538,6 +591,7 @@ fn migrate_13_to_14(tx: &Transaction<'_>) -> Result<(), CacheError> {
             original_request: request
                 .map(|message| message.body.clone())
                 .unwrap_or_default(),
+            prompt_snapshot: request.map(|message| message.body.clone()),
             working_directory: None,
             revision: RevisionContext::Unknown,
             labels,
@@ -554,6 +608,7 @@ fn migrate_13_to_14(tx: &Transaction<'_>) -> Result<(), CacheError> {
             started_at: Some(started_at),
             ended_at,
             final_result,
+            final_result_truncated: false,
             latest_activity: steps.last().map(|step| step.summary.clone()),
         };
         insert_run_row(tx, &record)?;
@@ -592,9 +647,10 @@ fn migrate_13_to_14(tx: &Transaction<'_>) -> Result<(), CacheError> {
 const RUN_COLUMNS: &str = "id, owner_kind, owner_item_id, owner_thread_id, owner_request_id,
     owner_reviewer_run_id, purpose, backend, executable, executable_version, requested_model,
     effective_model, requested_effort, effective_effort, session_id, original_request,
-    working_directory, revision_json, repository_label, item_label, branch_label, status,
-    terminal_reason, cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at,
-    started_at, ended_at, final_result, latest_activity, last_event_sequence";
+    prompt_snapshot, working_directory, revision_json, repository_label, item_label, branch_label,
+    status, terminal_reason, cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at,
+    started_at, ended_at, final_result, final_result_truncated, latest_activity,
+    last_event_sequence";
 
 #[derive(Debug)]
 struct RunDbRow {
@@ -614,6 +670,7 @@ struct RunDbRow {
     effort: String,
     session_id: Option<String>,
     original_request: String,
+    prompt_snapshot: Option<String>,
     working_directory: Option<String>,
     revision_json: String,
     repository: String,
@@ -630,6 +687,7 @@ struct RunDbRow {
     started_at: Option<String>,
     ended_at: Option<String>,
     final_result: Option<String>,
+    final_result_truncated: bool,
     latest_activity: Option<String>,
     last_event_sequence: i64,
 }
@@ -652,24 +710,26 @@ fn read_run_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunDbRow> {
         effort: row.get(13)?,
         session_id: row.get(14)?,
         original_request: row.get(15)?,
-        working_directory: row.get(16)?,
-        revision_json: row.get(17)?,
-        repository: row.get(18)?,
-        item: row.get(19)?,
-        branch: row.get(20)?,
-        status: row.get(21)?,
-        terminal_reason: row.get(22)?,
-        cost_usd: row.get(23)?,
-        duration_ms: row.get(24)?,
-        usage_json: row.get(25)?,
-        retry_of: row.get(26)?,
-        error: row.get(27)?,
-        queued_at: row.get(28)?,
-        started_at: row.get(29)?,
-        ended_at: row.get(30)?,
-        final_result: row.get(31)?,
-        latest_activity: row.get(32)?,
-        last_event_sequence: row.get(33)?,
+        prompt_snapshot: row.get(16)?,
+        working_directory: row.get(17)?,
+        revision_json: row.get(18)?,
+        repository: row.get(19)?,
+        item: row.get(20)?,
+        branch: row.get(21)?,
+        status: row.get(22)?,
+        terminal_reason: row.get(23)?,
+        cost_usd: row.get(24)?,
+        duration_ms: row.get(25)?,
+        usage_json: row.get(26)?,
+        retry_of: row.get(27)?,
+        error: row.get(28)?,
+        queued_at: row.get(29)?,
+        started_at: row.get(30)?,
+        ended_at: row.get(31)?,
+        final_result: row.get(32)?,
+        final_result_truncated: row.get::<_, i64>(33)? != 0,
+        latest_activity: row.get(34)?,
+        last_event_sequence: row.get(35)?,
     })
 }
 
@@ -732,6 +792,7 @@ fn run_from_db(row: RunDbRow, steps: Vec<RunStep>) -> Result<RunRecord, CacheErr
         effort: row.effort,
         session_id: row.session_id,
         original_request: row.original_request,
+        prompt_snapshot: row.prompt_snapshot,
         working_directory: row.working_directory,
         revision: serde_json::from_str(&row.revision_json)?,
         labels: RunLabels {
@@ -757,6 +818,145 @@ fn run_from_db(row: RunDbRow, steps: Vec<RunStep>) -> Result<RunRecord, CacheErr
         started_at: parse_optional_timestamp(row.started_at, "run started_at")?,
         ended_at: parse_optional_timestamp(row.ended_at, "run ended_at")?,
         final_result: row.final_result,
+        final_result_truncated: row.final_result_truncated,
+        latest_activity: row.latest_activity,
+        last_event_sequence: row.last_event_sequence.max(0) as u64,
+    })
+}
+
+const RUN_SUMMARY_COLUMNS: &str = "id, owner_kind, owner_item_id, owner_thread_id,
+    owner_request_id, owner_reviewer_run_id, purpose, backend, effective_model,
+    effective_effort, original_request, repository_label, item_label, branch_label, status,
+    terminal_reason, cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at,
+    started_at, ended_at, latest_activity, last_event_sequence";
+
+#[derive(Debug)]
+struct RunSummaryDbRow {
+    id: String,
+    owner_kind: String,
+    owner_item_id: Option<String>,
+    owner_thread_id: Option<String>,
+    owner_request_id: Option<String>,
+    owner_reviewer_run_id: Option<String>,
+    purpose: String,
+    backend: String,
+    model: String,
+    effort: String,
+    original_request: String,
+    repository: String,
+    item: String,
+    branch: Option<String>,
+    status: String,
+    terminal_reason: Option<String>,
+    cost_usd: Option<f64>,
+    duration_ms: Option<i64>,
+    usage_json: Option<String>,
+    retry_of: Option<String>,
+    error: Option<String>,
+    queued_at: String,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    latest_activity: Option<String>,
+    last_event_sequence: i64,
+}
+
+fn read_run_summary_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummaryDbRow> {
+    Ok(RunSummaryDbRow {
+        id: row.get(0)?,
+        owner_kind: row.get(1)?,
+        owner_item_id: row.get(2)?,
+        owner_thread_id: row.get(3)?,
+        owner_request_id: row.get(4)?,
+        owner_reviewer_run_id: row.get(5)?,
+        purpose: row.get(6)?,
+        backend: row.get(7)?,
+        model: row.get(8)?,
+        effort: row.get(9)?,
+        original_request: row.get(10)?,
+        repository: row.get(11)?,
+        item: row.get(12)?,
+        branch: row.get(13)?,
+        status: row.get(14)?,
+        terminal_reason: row.get(15)?,
+        cost_usd: row.get(16)?,
+        duration_ms: row.get(17)?,
+        usage_json: row.get(18)?,
+        retry_of: row.get(19)?,
+        error: row.get(20)?,
+        queued_at: row.get(21)?,
+        started_at: row.get(22)?,
+        ended_at: row.get(23)?,
+        latest_activity: row.get(24)?,
+        last_event_sequence: row.get(25)?,
+    })
+}
+
+fn summary_from_db(row: RunSummaryDbRow) -> Result<RunSummary, CacheError> {
+    let owner = match row.owner_kind.as_str() {
+        "discussion" => RunOwner::Discussion {
+            item_id: row
+                .owner_item_id
+                .ok_or_else(|| CacheError::Corrupt("discussion item id".into()))?,
+            thread_id: row
+                .owner_thread_id
+                .ok_or_else(|| CacheError::Corrupt("discussion thread id".into()))?,
+            request_id: row
+                .owner_request_id
+                .ok_or_else(|| CacheError::Corrupt("discussion request id".into()))?,
+        },
+        "review" => RunOwner::Review {
+            item_id: row
+                .owner_item_id
+                .ok_or_else(|| CacheError::Corrupt("review item id".into()))?,
+            reviewer_run_id: row
+                .owner_reviewer_run_id
+                .ok_or_else(|| CacheError::Corrupt("reviewer run id".into()))?,
+        },
+        "unavailable" => RunOwner::Unavailable {
+            legacy_thread_id: row.owner_thread_id,
+        },
+        _ => return Err(CacheError::Corrupt("run owner kind".into())),
+    };
+    let purpose =
+        RunPurpose::parse(&row.purpose).ok_or_else(|| CacheError::Corrupt("run purpose".into()))?;
+    let status =
+        RunStatus::parse(&row.status).ok_or_else(|| CacheError::Corrupt("run status".into()))?;
+    let terminal_reason = row
+        .terminal_reason
+        .map(|reason| {
+            TerminalReason::parse(&reason)
+                .ok_or_else(|| CacheError::Corrupt("terminal reason".into()))
+        })
+        .transpose()?;
+    Ok(RunSummary {
+        id: row.id,
+        owner,
+        purpose,
+        backend: row.backend,
+        model: row.model,
+        effort: row.effort,
+        original_request: row.original_request,
+        labels: RunLabels {
+            repository: row.repository,
+            item: row.item,
+            branch: row.branch,
+        },
+        status,
+        terminal_reason,
+        cost_usd: row.cost_usd,
+        duration_ms: row.duration_ms.map(|value| value as u64),
+        usage: row
+            .usage_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?,
+        retry_of: row.retry_of,
+        error: row.error,
+        queued_at: row
+            .queued_at
+            .parse()
+            .map_err(|_| CacheError::Corrupt("run queued_at".into()))?,
+        started_at: parse_optional_timestamp(row.started_at, "run started_at")?,
+        ended_at: parse_optional_timestamp(row.ended_at, "run ended_at")?,
         latest_activity: row.latest_activity,
         last_event_sequence: row.last_event_sequence.max(0) as u64,
     })
@@ -795,16 +995,29 @@ fn owner_columns(
 
 fn insert_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> {
     let (owner_kind, item_id, thread_id, request_id, reviewer_run_id) = owner_columns(&run.owner);
+    let (final_result, result_was_truncated) = run
+        .final_result
+        .as_deref()
+        .map(|result| bounded_string(result, MAX_RUN_RESULT_BYTES))
+        .map_or((None, false), |(result, truncated)| {
+            (Some(result), truncated)
+        });
+    let latest_activity = run
+        .latest_activity
+        .as_deref()
+        .map(|activity| bounded_string(activity, MAX_RUN_ACTIVITY_BYTES).0);
     conn.execute(
         "INSERT INTO runs
          (id, owner_kind, owner_item_id, owner_thread_id, owner_request_id, owner_reviewer_run_id,
           purpose, backend, executable, executable_version, requested_model, effective_model,
-          requested_effort, effective_effort, session_id, original_request, working_directory,
-          revision_json, repository_label, item_label, branch_label, status, terminal_reason,
-          cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at, started_at, ended_at,
-          final_result, latest_activity, last_event_sequence)
+          requested_effort, effective_effort, session_id, original_request, prompt_snapshot,
+          working_directory, revision_json, repository_label, item_label, branch_label, status,
+          terminal_reason, cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at,
+          started_at, ended_at, final_result, final_result_truncated, latest_activity,
+          last_event_sequence)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
-                 ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)",
+                 ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,
+                 ?35,?36)",
         params![
             run.id,
             owner_kind,
@@ -822,6 +1035,7 @@ fn insert_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
             run.effort,
             run.session_id,
             run.original_request,
+            run.prompt_snapshot,
             run.working_directory,
             serde_json::to_string(&run.revision)?,
             run.labels.repository,
@@ -837,8 +1051,9 @@ fn insert_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
             run.queued_at.to_string(),
             run.started_at.map(|value| value.to_string()),
             run.ended_at.map(|value| value.to_string()),
-            run.final_result,
-            run.latest_activity,
+            final_result,
+            (run.final_result_truncated || result_was_truncated) as i64,
+            latest_activity,
             run.last_event_sequence as i64,
         ],
     )?;
@@ -846,16 +1061,28 @@ fn insert_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
 }
 
 fn update_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> {
+    let (final_result, result_was_truncated) = run
+        .final_result
+        .as_deref()
+        .map(|result| bounded_string(result, MAX_RUN_RESULT_BYTES))
+        .map_or((None, false), |(result, truncated)| {
+            (Some(result), truncated)
+        });
+    let latest_activity = run
+        .latest_activity
+        .as_deref()
+        .map(|activity| bounded_string(activity, MAX_RUN_ACTIVITY_BYTES).0);
     conn.execute(
-        "UPDATE runs SET effective_model=?2, effective_effort=?3, session_id=?4, status=?5,
-         terminal_reason=?6, cost_usd=?7, duration_ms=?8, usage_json=?9, error=?10,
-         started_at=?11, ended_at=?12, final_result=?13, latest_activity=?14,
-         last_event_sequence=?15 WHERE id=?1",
+        "UPDATE runs SET effective_model=?2, effective_effort=?3, session_id=?4,
+         prompt_snapshot=?5, status=?6, terminal_reason=?7, cost_usd=?8, duration_ms=?9,
+         usage_json=?10, error=?11, started_at=?12, ended_at=?13, final_result=?14,
+         final_result_truncated=?15, latest_activity=?16, last_event_sequence=?17 WHERE id=?1",
         params![
             run.id,
             run.model,
             run.effort,
             run.session_id,
+            run.prompt_snapshot,
             run.status.name(),
             run.terminal_reason.map(TerminalReason::name),
             run.cost_usd,
@@ -864,8 +1091,9 @@ fn update_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
             run.error,
             run.started_at.map(|value| value.to_string()),
             run.ended_at.map(|value| value.to_string()),
-            run.final_result,
-            run.latest_activity,
+            final_result,
+            (run.final_result_truncated || result_was_truncated) as i64,
+            latest_activity,
             run.last_event_sequence as i64,
         ],
     )?;
@@ -882,6 +1110,16 @@ fn load_run_on(conn: &Connection, id: &str) -> Result<Option<RunRecord>, CacheEr
         run_from_db(row, steps)
     })
     .transpose()
+}
+
+/// Load only the mutable run projection. Event append and lifecycle updates
+/// must not rescan the historical tool stream on every write.
+fn load_run_projection_on(conn: &Connection, id: &str) -> Result<Option<RunRecord>, CacheError> {
+    let sql = format!("SELECT {RUN_COLUMNS} FROM runs WHERE id=?1");
+    conn.query_row(&sql, params![id], read_run_db_row)
+        .optional()?
+        .map(|row| run_from_db(row, Vec::new()))
+        .transpose()
 }
 
 fn read_event_row(
@@ -1013,6 +1251,7 @@ fn apply_event_to_run(
     run: &mut RunRecord,
     event: &RunEvent,
     at: Timestamp,
+    source_truncated: bool,
 ) -> Result<(), CacheError> {
     let transition = |run: &mut RunRecord, next: RunStatus| -> Result<(), CacheError> {
         if !run.status.can_transition_to(next) {
@@ -1046,14 +1285,8 @@ fn apply_event_to_run(
             run.latest_activity = Some("Started".into());
         }
         RunEvent::Text { text } => {
-            run.final_result = Some(match run.final_result.take() {
-                Some(mut prior) if !prior.is_empty() => {
-                    prior.push_str("\n\n");
-                    prior.push_str(text);
-                    prior
-                }
-                _ => text.clone(),
-            });
+            let projection_truncated = append_bounded_result(&mut run.final_result, text);
+            run.final_result_truncated |= source_truncated || projection_truncated;
             run.latest_activity = Some("Responding".into());
         }
         RunEvent::ToolCall { summary, .. } => run.latest_activity = Some(summary.clone()),
@@ -1061,6 +1294,13 @@ fn apply_event_to_run(
             run.latest_activity = Some(summary.clone())
         }
         RunEvent::ToolResult { .. } => {}
+        RunEvent::PermissionDenied { tool, message } => {
+            run.latest_activity = Some(match tool.as_deref().filter(|tool| !tool.is_empty()) {
+                Some(tool) if !message.is_empty() => format!("{tool}: {message}"),
+                Some(tool) => tool.to_string(),
+                None => message.clone(),
+            });
+        }
         RunEvent::Usage {
             usage,
             cost_usd,
@@ -1081,7 +1321,9 @@ fn apply_event_to_run(
             if let Some(session_id) = session_id {
                 run.session_id = Some(session_id.clone());
             }
-            run.final_result = Some(result.clone());
+            let (result, projection_truncated) = bounded_string(result, MAX_RUN_RESULT_BYTES);
+            run.final_result = Some(result);
+            run.final_result_truncated = source_truncated || projection_truncated;
             run.cost_usd = *cost_usd;
             run.duration_ms = *duration_ms;
             run.usage = usage.clone();
@@ -1127,14 +1369,14 @@ fn append_run_event_on(
     if let Some(existing) = load_event_by_id(conn, run_id, &event.event_id)? {
         return Ok(RunEventAppend::Duplicate(existing));
     }
-    let mut run = load_run_on(conn, run_id)?
+    let mut run = load_run_projection_on(conn, run_id)?
         .ok_or_else(|| CacheError::Corrupt(format!("no run {run_id}")))?;
     if run.status.is_terminal() {
         return Err(CacheError::TerminalRun(run_id.to_string()));
     }
     let mut event = event.clone();
     truncate_event(&mut event);
-    apply_event_to_run(&mut run, &event.event, event.occurred_at)?;
+    apply_event_to_run(&mut run, &event.event, event.occurred_at, event.truncated)?;
     let sequence = run.last_event_sequence + 1;
     run.last_event_sequence = sequence;
     let stored = RunEventRecord {
@@ -1151,17 +1393,47 @@ fn append_run_event_on(
 }
 
 const MAX_RUN_EVENT_BYTES: usize = 64 * 1024;
+const MAX_RUN_RESULT_BYTES: usize = 64 * 1024;
+const MAX_RUN_ACTIVITY_BYTES: usize = 4 * 1024;
+const TRUNCATION_MARKER: &str = "\n[…truncated…]";
+
+fn bounded_string(value: &str, max: usize) -> (String, bool) {
+    let mut value = value.to_string();
+    let truncated = value.len() > max;
+    truncate_string(&mut value, max);
+    (value, truncated)
+}
+
+fn append_bounded_result(result: &mut Option<String>, text: &str) -> bool {
+    let current = result.get_or_insert_with(String::new);
+    if current.ends_with(TRUNCATION_MARKER) {
+        return true;
+    }
+    let separator = if current.is_empty() { "" } else { "\n\n" };
+    if current.len() + separator.len() + text.len() <= MAX_RUN_RESULT_BYTES {
+        current.push_str(separator);
+        current.push_str(text);
+        return false;
+    }
+    current.push_str(separator);
+    current.push_str(text);
+    truncate_string(current, MAX_RUN_RESULT_BYTES);
+    true
+}
 
 fn truncate_string(value: &mut String, max: usize) {
     if value.len() <= max {
         return;
     }
-    let mut end = max.min(value.len());
+    let prefix_limit = max.saturating_sub(TRUNCATION_MARKER.len());
+    let mut end = prefix_limit.min(value.len());
     while !value.is_char_boundary(end) {
         end -= 1;
     }
     value.truncate(end);
-    value.push_str("\n[…truncated…]");
+    if max >= TRUNCATION_MARKER.len() {
+        value.push_str(TRUNCATION_MARKER);
+    }
 }
 
 fn truncate_event(event: &mut NewRunEvent) {
@@ -1175,6 +1447,7 @@ fn truncate_event(event: &mut NewRunEvent) {
         | RunEvent::LegacyStep { summary, .. } => truncate_string(summary, 60 * 1024),
         RunEvent::Completed { result, .. } => truncate_string(result, 60 * 1024),
         RunEvent::Terminated { message, .. } => truncate_string(message, 60 * 1024),
+        RunEvent::PermissionDenied { message, .. } => truncate_string(message, 60 * 1024),
         _ => {}
     }
     // JSON escaping can make a byte-bounded string several times larger.
@@ -1199,10 +1472,18 @@ fn truncate_event_strings(event: &mut RunEvent, max: usize) {
             }
         }
         RunEvent::Text { text } => truncate_string(text, max),
-        RunEvent::ToolCall { id, name, summary } => {
+        RunEvent::ToolCall {
+            id,
+            name,
+            summary,
+            parent_id,
+        } => {
             truncate_string(id, max);
             truncate_string(name, max);
             truncate_string(summary, max);
+            if let Some(parent_id) = parent_id {
+                truncate_string(parent_id, max);
+            }
         }
         RunEvent::ToolResult { id, summary, .. } => {
             truncate_string(id, max);
@@ -1217,6 +1498,12 @@ fn truncate_event_strings(event: &mut RunEvent, max: usize) {
             truncate_string(result, max);
         }
         RunEvent::Terminated { message, .. } => truncate_string(message, max),
+        RunEvent::PermissionDenied { tool, message } => {
+            if let Some(tool) = tool {
+                truncate_string(tool, max);
+            }
+            truncate_string(message, max);
+        }
         RunEvent::LegacyStep { summary, .. } => truncate_string(summary, max),
     }
 }
@@ -1735,6 +2022,80 @@ impl Cache {
         )
     }
 
+    /// Nonterminal scalar projections, in scheduler order. This query does
+    /// not select final output and never touches `run_events`.
+    pub fn active_run_summaries(&self) -> Result<Vec<RunSummary>, CacheError> {
+        let sql = format!(
+            "SELECT {RUN_SUMMARY_COLUMNS} FROM runs
+             WHERE status IN ('queued','starting','running','stopping')
+             ORDER BY queued_at, id"
+        );
+        let rows = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mapped = stmt.query_map([], read_run_summary_db_row)?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        rows.into_iter().map(summary_from_db).collect()
+    }
+
+    /// One bounded page of terminal scalar projections, newest first. The
+    /// returned cursor is exclusive and can be supplied repeatedly to walk
+    /// arbitrarily large histories without loading any transcript.
+    pub fn run_history_page(
+        &self,
+        filter: &RunHistoryFilter,
+        cursor: Option<&RunHistoryCursor>,
+        limit: usize,
+    ) -> Result<RunHistoryPage, CacheError> {
+        let limit = limit.clamp(1, 500);
+        let ended = cursor.map(|cursor| cursor.ended_at.to_string());
+        let cursor_id = cursor.map(|cursor| cursor.id.as_str());
+        let sql = format!(
+            "SELECT {RUN_SUMMARY_COLUMNS} FROM runs
+             WHERE status IN ('completed','failed','stopped','interrupted')
+               AND (?1 IS NULL OR owner_item_id=?1)
+               AND (?2 IS NULL OR backend=?2)
+               AND (?3 IS NULL OR status=?3)
+               AND (?4 IS NULL OR ended_at < ?4 OR (ended_at = ?4 AND id < ?5))
+             ORDER BY ended_at DESC, id DESC LIMIT ?6"
+        );
+        let rows = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mapped = stmt.query_map(
+                params![
+                    filter.item_id.as_deref(),
+                    filter.backend.as_deref(),
+                    filter.status.map(RunStatus::name),
+                    ended,
+                    cursor_id,
+                    (limit + 1) as i64,
+                ],
+                read_run_summary_db_row,
+            )?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        let mut runs = rows
+            .into_iter()
+            .map(summary_from_db)
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = runs.len() > limit;
+        runs.truncate(limit);
+        let next_cursor = if has_more {
+            let last = runs
+                .last()
+                .ok_or_else(|| CacheError::Corrupt("empty history page".into()))?;
+            Some(RunHistoryCursor {
+                ended_at: last
+                    .ended_at
+                    .ok_or_else(|| CacheError::Corrupt("terminal run ended_at".into()))?,
+                id: last.id.clone(),
+            })
+        } else {
+            None
+        };
+        Ok(RunHistoryPage { runs, next_cursor })
+    }
+
     /// Terminal runs newest first. The cursor is the last row of the
     /// previous page and is exclusive.
     pub fn run_history(
@@ -1859,8 +2220,8 @@ impl Cache {
         };
         let now = Timestamp::now();
         for id in &ids {
-            let mut run =
-                load_run_on(&tx, id)?.ok_or_else(|| CacheError::Corrupt(format!("no run {id}")))?;
+            let mut run = load_run_projection_on(&tx, id)?
+                .ok_or_else(|| CacheError::Corrupt(format!("no run {id}")))?;
             let event = RunEventRecord {
                 run_id: id.clone(),
                 sequence: run.last_event_sequence + 1,
@@ -1873,7 +2234,7 @@ impl Cache {
                 },
                 truncated: false,
             };
-            apply_event_to_run(&mut run, &event.event, now)?;
+            apply_event_to_run(&mut run, &event.event, now, false)?;
             run.last_event_sequence = event.sequence;
             insert_event_row(&tx, &event)?;
             update_run_row(&tx, &run)?;
@@ -2570,6 +2931,7 @@ mod tests {
             effort: "medium".into(),
             session_id: Some("sess".into()),
             original_request: "why?".into(),
+            prompt_snapshot: Some("full prompt: why?".into()),
             working_directory: None,
             revision: RevisionContext::Unknown,
             labels: RunLabels::default(),
@@ -2602,6 +2964,7 @@ mod tests {
                 .is_terminal()
                 .then_some(stamp("2026-09-18T10:00:14Z")),
             final_result: None,
+            final_result_truncated: false,
             latest_activity: None,
             last_event_sequence: 0,
         }
@@ -3166,6 +3529,7 @@ mod tests {
                     id: "tool-1".into(),
                     name: "Read".into(),
                     summary: "Read src/lib.rs".into(),
+                    parent_id: None,
                 },
             ),
         )
@@ -3306,6 +3670,164 @@ mod tests {
             c.runs_for_request("thread-2", "request-2").unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn summary_queries_and_event_appends_do_not_read_tool_transcripts() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut active = run("summary-active", "summary-thread", RunStatus::Running);
+        active.steps.clear();
+        active.terminal_reason = None;
+        active.ended_at = None;
+        c.insert_run(&active).unwrap();
+        c.conn
+            .execute(
+                "INSERT INTO run_events
+                 (run_id, sequence, event_id, occurred_at, kind, payload_json, truncated)
+                 VALUES (?1, 1, 'broken-tool', ?2, 'tool_call', '{broken', 0)",
+                params![active.id, active.queued_at.to_string()],
+            )
+            .unwrap();
+        c.conn
+            .execute(
+                "UPDATE runs SET last_event_sequence=1 WHERE id=?1",
+                params![active.id],
+            )
+            .unwrap();
+
+        let summaries = c.active_run_summaries().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, active.id);
+        assert!(c.load_run(&active.id).is_err());
+        c.append_run_event(
+            &active.id,
+            &event(
+                "text-after-broken-tool",
+                "2026-09-18T10:00:01Z",
+                RunEvent::Text {
+                    text: "still persisted".into(),
+                },
+            ),
+        )
+        .unwrap();
+
+        let terminal = RunRecord {
+            steps: Vec::new(),
+            ..run("summary-terminal", "summary-done", RunStatus::Completed)
+        };
+        c.insert_run(&terminal).unwrap();
+        c.conn
+            .execute(
+                "INSERT INTO run_events
+                 (run_id, sequence, event_id, occurred_at, kind, payload_json, truncated)
+                 VALUES (?1, 1, 'broken-history-tool', ?2, 'tool_call', '{broken', 0)",
+                params![terminal.id, terminal.queued_at.to_string()],
+            )
+            .unwrap();
+        let page = c
+            .run_history_page(&RunHistoryFilter::default(), None, 10)
+            .unwrap();
+        assert!(page.runs.iter().any(|run| run.id == terminal.id));
+    }
+
+    #[test]
+    fn history_cursor_walks_past_the_per_page_cap() {
+        let c = Cache::open_in_memory().unwrap();
+        let tx = c.conn.unchecked_transaction().unwrap();
+        for index in 0..620 {
+            let mut record = run(
+                &format!("history-{index:04}"),
+                &format!("history-thread-{index:04}"),
+                RunStatus::Completed,
+            );
+            record.steps.clear();
+            insert_run_row(&tx, &record).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let first = c
+            .run_history_page(&RunHistoryFilter::default(), None, 500)
+            .unwrap();
+        assert_eq!(first.runs.len(), 500);
+        let second = c
+            .run_history_page(
+                &RunHistoryFilter::default(),
+                first.next_cursor.as_ref(),
+                500,
+            )
+            .unwrap();
+        assert_eq!(second.runs.len(), 120);
+        assert!(second.next_cursor.is_none());
+        let ids = first
+            .runs
+            .iter()
+            .chain(&second.runs)
+            .map(|run| run.id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(ids.len(), 620);
+    }
+
+    #[test]
+    fn partial_result_is_bounded_while_all_text_events_remain_pageable() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut running = run("bounded-stream", "bounded-thread", RunStatus::Running);
+        running.steps.clear();
+        running.terminal_reason = None;
+        running.ended_at = None;
+        running.final_result = None;
+        c.insert_run(&running).unwrap();
+
+        for index in 0..520 {
+            c.append_run_event(
+                &running.id,
+                &event(
+                    &format!("text-{index}"),
+                    "2026-09-18T10:00:01Z",
+                    RunEvent::Text {
+                        text: format!("{index:04} {}", "x".repeat(192)),
+                    },
+                ),
+            )
+            .unwrap();
+        }
+        let projected = c.load_run(&running.id).unwrap().unwrap();
+        assert!(projected.final_result_truncated);
+        assert!(projected.final_result.unwrap().len() <= MAX_RUN_RESULT_BYTES);
+
+        let mut before = None;
+        let mut sequences = Vec::new();
+        loop {
+            let page = c.load_run_events(&running.id, before, 73).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            before = page.first().map(|event| event.sequence);
+            sequences.extend(page.into_iter().map(|event| event.sequence));
+        }
+        sequences.sort_unstable();
+        sequences.dedup();
+        assert_eq!(sequences.len(), 520);
+        assert_eq!(sequences.first(), Some(&1));
+        assert_eq!(sequences.last(), Some(&520));
+
+        c.append_run_event(
+            &running.id,
+            &event(
+                "completed-large",
+                "2026-09-18T10:00:02Z",
+                RunEvent::Completed {
+                    session_id: None,
+                    result: "z".repeat(MAX_RUN_RESULT_BYTES * 2),
+                    cost_usd: None,
+                    duration_ms: None,
+                    usage: None,
+                },
+            ),
+        )
+        .unwrap();
+        let completed = c.load_run(&running.id).unwrap().unwrap();
+        assert!(completed.final_result_truncated);
+        assert!(completed.final_result.unwrap().len() <= MAX_RUN_RESULT_BYTES);
     }
 
     #[test]
@@ -3737,6 +4259,47 @@ mod tests {
         assert_eq!(run.status, RunStatus::Completed);
         assert_eq!(run.original_request, "Why?");
         assert_eq!(run.final_result.as_deref(), Some("Because."));
+    }
+
+    #[test]
+    fn schema_16_adds_retry_prompt_and_bounds_existing_result_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            let mut record = run("schema-16-run", "schema-16-thread", RunStatus::Completed);
+            record.steps.clear();
+            record.prompt_snapshot = None;
+            cache.insert_run(&record).unwrap();
+            cache
+                .conn
+                .execute_batch(
+                    "ALTER TABLE runs DROP COLUMN prompt_snapshot;
+                     ALTER TABLE runs DROP COLUMN final_result_truncated;",
+                )
+                .unwrap();
+            cache
+                .conn
+                .execute(
+                    "UPDATE runs SET final_result=?2 WHERE id=?1",
+                    params![record.id, "z".repeat(MAX_RUN_RESULT_BYTES * 2)],
+                )
+                .unwrap();
+            cache.set_meta("schema_version", "16").unwrap();
+        }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 16,
+                to: SCHEMA_VERSION,
+            }
+        );
+        let record = cache.load_run("schema-16-run").unwrap().unwrap();
+        assert_eq!(record.prompt_snapshot.as_deref(), Some("why?"));
+        assert!(record.final_result_truncated);
+        assert!(record.final_result.unwrap().len() <= MAX_RUN_RESULT_BYTES);
     }
 
     #[test]

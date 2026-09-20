@@ -354,11 +354,20 @@ pub enum RunEvent {
         id: String,
         name: String,
         summary: String,
+        /// The delegation tool call that owns this activity, when the CLI
+        /// identifies it. `None` is a top-level step.
+        parent_id: Option<String>,
     },
     ToolResult {
         id: String,
         ok: bool,
         summary: String,
+    },
+    /// A structured denial reported by the CLI. It is activity rather than
+    /// necessarily terminal: an agent may recover and complete after it.
+    PermissionDenied {
+        tool: Option<String>,
+        message: String,
     },
     /// Token counts reported by the CLI for this turn. Missing counters stay
     /// `None` rather than being mistaken for zero.

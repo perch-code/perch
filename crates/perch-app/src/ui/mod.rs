@@ -124,7 +124,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         });
     }
 
-    Stack::vertical((
+    let root = Stack::vertical((
         Stack::horizontal((
             dyn_container(
                 move || state.sidebar_open.get(),
@@ -193,7 +193,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // Over everything, and only while the drawer's edge is being dragged.
         sidebar::resize_cursor_sheet(state),
         agents::resize_cursor_sheet(state),
-    ))
+    ));
+    let root_id = root.view_id();
+    root
     // The keys the code editor would otherwise keep. The editor stops
     // every key once it has focus, and these are pressed right after
     // clicking in it, so they are caught on the way down to it rather
@@ -205,18 +207,21 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         floem::context::EventCallbackConfig {
             phases: floem::context::Phases::CAPTURE_AND_TARGET,
         },
-        move |_, key: &KeyboardEvent| {
+        move |cx, key: &KeyboardEvent| {
             let key_backend = &capture_backend;
             // Cmd-Shift-A is app-wide, including while the editor or a
             // composer owns focus. Escape first backs out of details, then
             // closes the inspector on the next press.
             if key.code == Code::KeyA && key.modifiers == OS_MOD | Modifiers::SHIFT {
-                agents::toggle(state, key_backend, None);
+                let opener = (!state.agents_open.get())
+                    .then(|| focused_descendant(cx, root_id))
+                    .flatten();
+                agents::toggle(state, key_backend, opener);
                 return EventPropagation::Stop;
             }
             if key.code == Code::Escape && key.modifiers.is_empty() && state.agents_open.get() {
                 if state.selected_agent_run.with(Option::is_some) {
-                    state.selected_agent_run.set(None);
+                    agents::back_to_list(state);
                 } else {
                     agents::close(state, key_backend, true);
                 }
@@ -466,6 +471,21 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             .color(theme::FG)
             .background(theme::CANVAS)
     })
+}
+
+/// Floem exposes focus membership rather than its private current-focus slot.
+/// Walking the existing root is cheap for the one app-wide shortcut and lets
+/// the overlay restore the exact editor, composer, or sidebar control.
+fn focused_descendant(
+    cx: &floem::context::EventCx<'_>,
+    root: floem::ViewId,
+) -> Option<floem::ViewId> {
+    if cx.window_state.is_focused(root) {
+        return Some(root);
+    }
+    root.children()
+        .into_iter()
+        .find_map(|child| focused_descendant(cx, child))
 }
 
 /// What to do when no token resolved, in the main area's empty state. Built

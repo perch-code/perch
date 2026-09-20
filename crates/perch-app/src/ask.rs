@@ -56,7 +56,17 @@ pub fn apply_run_event(
             });
             return Some(text.clone());
         }
-        RunEvent::ToolCall { id, summary, .. } => {
+        RunEvent::ToolCall {
+            id,
+            summary,
+            parent_id,
+            ..
+        } => {
+            let summary = if parent_id.is_some() {
+                format!("↳ {summary}")
+            } else {
+                summary.clone()
+            };
             let index = run.steps.len();
             run.steps.push(RunStep {
                 summary: summary.clone(),
@@ -69,7 +79,7 @@ pub fn apply_run_event(
                     .or_default()
                     .insert(id.clone(), index);
             });
-            run.latest_activity = Some(summary.clone());
+            run.latest_activity = Some(summary);
         }
         RunEvent::ToolResult { id, ok, summary } => {
             let index = LIVE_TOOL_STEPS.with(|tools| {
@@ -92,6 +102,17 @@ pub fn apply_run_event(
                     step.summary = format!("{}: {summary}", step.summary);
                 }
             }
+        }
+        RunEvent::PermissionDenied { tool, message } => {
+            let summary = tool
+                .as_deref()
+                .map(|tool| format!("{tool}: {message}"))
+                .unwrap_or_else(|| message.clone());
+            run.steps.push(RunStep {
+                summary: summary.clone(),
+                ok: false,
+            });
+            run.latest_activity = Some(summary);
         }
         RunEvent::Usage {
             input_tokens,
@@ -437,6 +458,7 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
             perch_agent::RunEvent::Started { .. }
             | perch_agent::RunEvent::ToolCall { .. }
             | perch_agent::RunEvent::ToolResult { .. }
+            | perch_agent::RunEvent::PermissionDenied { .. }
             | perch_agent::RunEvent::Usage { .. }
             | perch_agent::RunEvent::Finished { .. }
             | perch_agent::RunEvent::Failed { .. }
@@ -958,6 +980,7 @@ mod tests {
                 id: "1".into(),
                 name: "Read".into(),
                 summary: "Read a.rs".into(),
+                parent_id: None,
             },
         );
         apply_run_event(
@@ -966,6 +989,7 @@ mod tests {
                 id: "2".into(),
                 name: "Write".into(),
                 summary: "Asked to edit a.rs".into(),
+                parent_id: None,
             },
         );
         apply_run_event(
@@ -1023,11 +1047,13 @@ mod tests {
                 id: "read".into(),
                 name: "Read".into(),
                 summary: "Read a.rs".into(),
+                parent_id: None,
             },
             RunEvent::ToolCall {
                 id: "shell".into(),
                 name: "Shell".into(),
                 summary: "Ran cargo check".into(),
+                parent_id: None,
             },
         ] {
             apply_run_event(&mut run, &event);

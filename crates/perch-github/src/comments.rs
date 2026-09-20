@@ -398,6 +398,10 @@ pub struct RunRecord {
     pub effort: String,
     pub session_id: Option<String>,
     pub original_request: String,
+    /// Full prompt captured when the run was admitted. Unlike
+    /// `original_request`, this is execution context rather than display
+    /// text and is what a retry should replay when it is available.
+    pub prompt_snapshot: Option<String>,
     pub working_directory: Option<String>,
     pub revision: RevisionContext,
     pub labels: RunLabels,
@@ -414,6 +418,9 @@ pub struct RunRecord {
     pub started_at: Option<Timestamp>,
     pub ended_at: Option<Timestamp>,
     pub final_result: Option<String>,
+    /// Whether `final_result` is only a bounded prefix. The complete stored
+    /// stream remains available through paginated run events.
+    pub final_result_truncated: bool,
     pub latest_activity: Option<String>,
     pub last_event_sequence: u64,
 }
@@ -441,6 +448,7 @@ impl Default for RunRecord {
             effort: String::new(),
             session_id: None,
             original_request: String::new(),
+            prompt_snapshot: None,
             working_directory: None,
             revision: RevisionContext::Unknown,
             labels: RunLabels::default(),
@@ -456,6 +464,7 @@ impl Default for RunRecord {
             started_at: None,
             ended_at: None,
             final_result: None,
+            final_result_truncated: false,
             latest_activity: None,
             last_event_sequence: 0,
         }
@@ -486,11 +495,19 @@ pub enum RunEvent {
         id: String,
         name: String,
         summary: String,
+        /// The delegation tool call that owns this activity. Older stored
+        /// events predate hierarchy and deserialize as top-level calls.
+        #[serde(default)]
+        parent_id: Option<String>,
     },
     ToolResult {
         id: String,
         ok: bool,
         summary: String,
+    },
+    PermissionDenied {
+        tool: Option<String>,
+        message: String,
     },
     Usage {
         usage: RunUsage,
@@ -525,6 +542,7 @@ impl RunEvent {
             Self::Text { .. } => "text",
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
+            Self::PermissionDenied { .. } => "permission_denied",
             Self::Usage { .. } => "usage",
             Self::Completed { .. } => "completed",
             Self::Terminated { .. } => "terminated",
@@ -562,6 +580,72 @@ pub struct RunHistoryFilter {
 pub struct RunHistoryCursor {
     pub ended_at: Timestamp,
     pub id: String,
+}
+
+/// The scalar projection used by app-wide run lists. It deliberately omits
+/// steps, event text, the final result, and the retry prompt; those belong to
+/// the selected run's paginated detail query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunSummary {
+    pub id: String,
+    pub owner: RunOwner,
+    pub purpose: RunPurpose,
+    pub backend: String,
+    pub model: String,
+    pub effort: String,
+    pub original_request: String,
+    pub labels: RunLabels,
+    pub status: RunStatus,
+    pub terminal_reason: Option<TerminalReason>,
+    pub cost_usd: Option<f64>,
+    pub duration_ms: Option<u64>,
+    pub usage: Option<RunUsage>,
+    pub retry_of: Option<String>,
+    pub error: Option<String>,
+    pub queued_at: Timestamp,
+    pub started_at: Option<Timestamp>,
+    pub ended_at: Option<Timestamp>,
+    pub latest_activity: Option<String>,
+    pub last_event_sequence: u64,
+}
+
+impl RunSummary {
+    pub fn thread_id(&self) -> Option<&str> {
+        self.owner.thread_id()
+    }
+}
+
+impl From<&RunRecord> for RunSummary {
+    fn from(run: &RunRecord) -> Self {
+        Self {
+            id: run.id.clone(),
+            owner: run.owner.clone(),
+            purpose: run.purpose,
+            backend: run.backend.clone(),
+            model: run.model.clone(),
+            effort: run.effort.clone(),
+            original_request: run.original_request.clone(),
+            labels: run.labels.clone(),
+            status: run.status,
+            terminal_reason: run.terminal_reason,
+            cost_usd: run.cost_usd,
+            duration_ms: run.duration_ms,
+            usage: run.usage.clone(),
+            retry_of: run.retry_of.clone(),
+            error: run.error.clone(),
+            queued_at: run.queued_at,
+            started_at: run.started_at,
+            ended_at: run.ended_at,
+            latest_activity: run.latest_activity.clone(),
+            last_event_sequence: run.last_event_sequence,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunHistoryPage {
+    pub runs: Vec<RunSummary>,
+    pub next_cursor: Option<RunHistoryCursor>,
 }
 
 /// A fresh id: time-ordered, unique on this machine, safe in a URL.
@@ -650,6 +734,7 @@ mod tests {
             effort: "medium".into(),
             session_id: Some(session.into()),
             original_request: "why?".into(),
+            prompt_snapshot: Some("full prompt: why?".into()),
             working_directory: None,
             revision: RevisionContext::Unknown,
             labels: RunLabels::default(),
@@ -665,6 +750,7 @@ mod tests {
             started_at: Some(Timestamp::UNIX_EPOCH),
             ended_at: status.is_terminal().then_some(Timestamp::UNIX_EPOCH),
             final_result: None,
+            final_result_truncated: false,
             latest_activity: None,
             last_event_sequence: 0,
         }

@@ -141,6 +141,7 @@ fn command_call(id: String, item: &Value) -> RunEvent {
         id,
         name: "command_execution".into(),
         summary: one_line(&format!("Ran {command}"), 120),
+        parent_id: None,
     }
 }
 
@@ -153,6 +154,7 @@ fn failed_step(id: String, message: &str) -> Vec<RunEvent> {
             id: id.clone(),
             name: "error".into(),
             summary: one_line(message, 120),
+            parent_id: None,
         },
         RunEvent::ToolResult {
             id,
@@ -287,6 +289,7 @@ mod tests {
                     id: "item_1".into(),
                     name: "command_execution".into(),
                     summary: "Ran sed -n '1,240p' main.rs && git log --oneline".into(),
+                    parent_id: None,
                 },
                 RunEvent::ToolResult {
                     id: "item_1".into(),
@@ -306,7 +309,8 @@ mod tests {
                 RunEvent::ToolCall {
                     id: "item_3".into(),
                     name: "command_execution".into(),
-                    summary: "Ran cat nope.txt".into()
+                    summary: "Ran cat nope.txt".into(),
+                    parent_id: None,
                 },
                 RunEvent::ToolResult {
                     id: "item_3".into(),
@@ -338,6 +342,7 @@ mod tests {
                 id: "item_0".into(),
                 name: "error".into(),
                 summary: "This session was recorded with model `gpt-6-astra` but is resuming with `gpt-5.6-luna`. Consider switching back.".into(),
+                parent_id: None,
             }
         );
         assert_eq!(
@@ -364,6 +369,7 @@ mod tests {
                     id: "error_1".into(),
                     name: "error".into(),
                     summary: "The 'gpt-6-astra' model requires a newer version of Codex.".into(),
+                    parent_id: None,
                 },
                 RunEvent::ToolResult {
                     id: "error_1".into(),

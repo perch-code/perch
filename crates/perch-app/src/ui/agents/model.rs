@@ -83,10 +83,17 @@ pub enum OutcomeFilter {
     Completed,
     Failed,
     Stopped,
+    Interrupted,
 }
 
 impl OutcomeFilter {
-    pub const ALL: [Self; 4] = [Self::All, Self::Completed, Self::Failed, Self::Stopped];
+    pub const ALL: [Self; 5] = [
+        Self::All,
+        Self::Completed,
+        Self::Failed,
+        Self::Stopped,
+        Self::Interrupted,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -94,6 +101,7 @@ impl OutcomeFilter {
             Self::Completed => "Completed",
             Self::Failed => "Failed",
             Self::Stopped => "Stopped",
+            Self::Interrupted => "Interrupted",
         }
     }
 
@@ -101,8 +109,9 @@ impl OutcomeFilter {
         match self {
             Self::All => true,
             Self::Completed => status == AgentRunStatus::Completed,
-            Self::Failed => matches!(status, AgentRunStatus::Failed | AgentRunStatus::Interrupted),
+            Self::Failed => status == AgentRunStatus::Failed,
             Self::Stopped => status == AgentRunStatus::Stopped,
+            Self::Interrupted => status == AgentRunStatus::Interrupted,
         }
     }
 }
@@ -216,6 +225,7 @@ pub struct AgentRunSummary {
     pub latest_activity: Option<String>,
     pub steps: Arc<Vec<AgentRunStep>>,
     pub response: String,
+    pub response_truncated: bool,
     pub error: Option<String>,
     pub cost_usd: Option<f64>,
     pub input_tokens: Option<u64>,
@@ -284,6 +294,26 @@ impl AgentRunSummary {
         })
     }
 
+    /// Put the typed outcome first, then retain any process diagnostic that
+    /// adds information. UI code must not infer permission or spawn failures
+    /// from arbitrary CLI prose.
+    pub fn terminal_display(&self) -> Option<String> {
+        let summary = self.terminal_summary().map(str::to_string);
+        let detail = self
+            .error
+            .as_deref()
+            .map(str::trim)
+            .filter(|detail| !detail.is_empty())
+            .map(str::to_string);
+        match (summary, detail) {
+            (Some(summary), Some(detail)) if !detail.eq_ignore_ascii_case(&summary) => {
+                Some(format!("{summary} — {detail}"))
+            }
+            (Some(summary), _) => Some(summary),
+            (None, detail) => detail,
+        }
+    }
+
     pub fn from_record(run: &perch_github::RunRecord) -> Self {
         use perch_github::comments::RunPurpose;
 
@@ -329,6 +359,54 @@ impl AgentRunSummary {
                     .collect(),
             ),
             response: run.final_result.clone().unwrap_or_default(),
+            response_truncated: run.final_result_truncated,
+            error: run.error.clone(),
+            cost_usd: run.cost_usd,
+            input_tokens: usage.and_then(|usage| usage.input_tokens),
+            output_tokens: usage.and_then(|usage| usage.output_tokens),
+            cached_input_tokens: usage.and_then(|usage| usage.cached_input_tokens),
+            retry_of: run.retry_of.clone(),
+            source_available: run.owner.item_id().is_some(),
+            last_event_sequence: run.last_event_sequence,
+        }
+    }
+
+    /// Build the list projection without hydrating transcript-only fields.
+    /// Opening a row replaces it with a full `RunRecord` through
+    /// `AppState::update_agent_run` and loads its persisted events separately.
+    pub fn from_summary(run: &perch_github::RunSummary) -> Self {
+        use perch_github::comments::RunPurpose;
+
+        let usage = run.usage.as_ref();
+        Self {
+            id: run.id.clone(),
+            item_id: run.owner.item_id().map(str::to_string),
+            thread_id: run.thread_id().map(str::to_string),
+            repository: run.labels.repository.clone(),
+            worktree: run
+                .labels
+                .branch
+                .clone()
+                .unwrap_or_else(|| run.labels.item.clone()),
+            purpose: match run.purpose {
+                RunPurpose::Question => AgentRunPurpose::Question,
+                RunPurpose::FollowUp => AgentRunPurpose::FollowUp,
+                RunPurpose::WorktreeReview => AgentRunPurpose::Review,
+            },
+            request: run.original_request.clone(),
+            backend: run.backend.clone(),
+            model: run.model.clone(),
+            effort: run.effort.clone(),
+            status: AgentRunStatus::parse(run.status.name()),
+            terminal_reason: run.terminal_reason,
+            queue_position: None,
+            queued_at: run.queued_at,
+            started_at: run.started_at,
+            ended_at: run.ended_at,
+            latest_activity: run.latest_activity.clone(),
+            steps: Arc::new(Vec::new()),
+            response: String::new(),
+            response_truncated: false,
             error: run.error.clone(),
             cost_usd: run.cost_usd,
             input_tokens: usage.and_then(|usage| usage.input_tokens),
@@ -417,25 +495,43 @@ pub fn history_runs(
     rows
 }
 
-pub fn elapsed_seconds(run: &AgentRunSummary, now: Timestamp) -> u64 {
-    let start = run.started_at.unwrap_or(run.queued_at).as_nanosecond();
-    let end = run.ended_at.unwrap_or(now).as_nanosecond();
+fn seconds_between(start: Timestamp, end: Timestamp) -> u64 {
+    let start = start.as_nanosecond();
+    let end = end.as_nanosecond();
     ((end - start).max(0) / 1_000_000_000) as u64
 }
 
-pub fn elapsed_label(run: &AgentRunSummary, now: Timestamp) -> String {
-    let seconds = elapsed_seconds(run, now);
-    let time = if seconds < 60 {
+fn duration_label(seconds: u64) -> String {
+    if seconds < 60 {
         format!("{seconds}s")
     } else if seconds < 3_600 {
         format!("{}m {:02}s", seconds / 60, seconds % 60)
     } else {
         format!("{}h {:02}m", seconds / 3_600, seconds % 3_600 / 60)
-    };
+    }
+}
+
+pub fn elapsed_seconds(run: &AgentRunSummary, now: Timestamp) -> u64 {
+    let start = run.started_at.unwrap_or(run.queued_at);
+    seconds_between(start, run.ended_at.unwrap_or(now))
+}
+
+pub fn elapsed_label(run: &AgentRunSummary, now: Timestamp) -> String {
     if run.status == AgentRunStatus::Queued {
-        format!("Queued {time}")
+        return format!(
+            "Queued {}",
+            duration_label(seconds_between(run.queued_at, run.ended_at.unwrap_or(now)))
+        );
+    }
+    let execution = duration_label(elapsed_seconds(run, now));
+    let Some(started_at) = run.started_at else {
+        return execution;
+    };
+    let queued = seconds_between(run.queued_at, started_at);
+    if queued == 0 {
+        execution
     } else {
-        time
+        format!("{execution} · queued {}", duration_label(queued))
     }
 }
 
@@ -472,6 +568,7 @@ mod tests {
             latest_activity: None,
             steps: Arc::new(Vec::new()),
             response: String::new(),
+            response_truncated: false,
             error: None,
             cost_usd: None,
             input_tokens: None,
@@ -567,6 +664,15 @@ mod tests {
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["c", "a"]
         );
+
+        let interrupted = run(
+            "i",
+            "two",
+            AgentRunStatus::Interrupted,
+            "2026-09-19T12:00:00Z",
+        );
+        assert!(OutcomeFilter::Interrupted.includes(interrupted.status));
+        assert!(!OutcomeFilter::Failed.includes(interrupted.status));
     }
 
     #[test]
@@ -579,6 +685,24 @@ mod tests {
         );
         let running = run("a", "one", AgentRunStatus::Running, "2026-09-19T10:00:00Z");
         assert_eq!(elapsed_label(&running, at("2026-09-19T10:00:42Z")), "42s");
+
+        let mut waited = running;
+        waited.queued_at = at("2026-09-19T09:58:55Z");
+        assert_eq!(
+            elapsed_label(&waited, at("2026-09-19T10:00:42Z")),
+            "42s · queued 1m 05s"
+        );
+    }
+
+    #[test]
+    fn typed_terminal_reason_precedes_but_does_not_discard_the_diagnostic() {
+        let mut failed = run("a", "one", AgentRunStatus::Failed, "2026-09-19T10:00:00Z");
+        failed.terminal_reason = Some(perch_github::TerminalReason::PermissionDenied);
+        failed.error = Some("Read was rejected by policy".into());
+        assert_eq!(
+            failed.terminal_display().as_deref(),
+            Some("The agent was denied permission — Read was rejected by policy")
+        );
     }
 
     #[test]

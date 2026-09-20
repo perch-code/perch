@@ -4,7 +4,7 @@
 //! view closure without lifetime plumbing. Derived lists are plain functions
 //! over these signals, recomputed by whichever effect reads them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -111,9 +111,17 @@ pub struct AppState {
     pub agents_backend_filter: RwSignal<BackendFilter>,
     pub agents_outcome_filter: RwSignal<OutcomeFilter>,
     pub selected_agent_run: RwSignal<Option<String>>,
+    pub agents_control: RwSignal<Option<floem::ViewId>>,
     pub agents_opener: RwSignal<Option<floem::ViewId>>,
     pub agent_history_loading: RwSignal<bool>,
     pub agent_history_has_more: RwSignal<bool>,
+    /// A load that received no answer within the UI's bounded wait. A later
+    /// authoritative page clears this again.
+    pub agent_history_load_failed: RwSignal<bool>,
+    pub agent_history_load_token: RwSignal<u64>,
+    /// Returning from detail rebuilds the list, so the run id—not the old
+    /// row's transient ViewId—is the durable focus target.
+    pub pending_agent_row_focus: RwSignal<Option<String>>,
     pub pending_agent_navigation: RwSignal<Option<PendingAgentNavigation>>,
     pub agent_navigation_token: RwSignal<u64>,
     open_expectation: RwSignal<OpenExpectation>,
@@ -121,7 +129,9 @@ pub struct AppState {
     /// Keep it open across the normal Items refresh without restoring its
     /// checkout or changing its archived state.
     pub agent_archived_owner: RwSignal<Option<String>>,
-    pub agent_completion_notice: RwSignal<Option<AgentCompletionNotice>>,
+    /// Completion notices are queued so simultaneous terminal transitions do
+    /// not erase one another before the reader can see them.
+    pub agent_completion_notices: RwSignal<VecDeque<AgentCompletionNotice>>,
     pub agent_completion_token: RwSignal<u64>,
 
     /// The item the pointer is over, so a row can show its buttons and a
@@ -195,14 +205,18 @@ impl AppState {
             agents_backend_filter: RwSignal::new(BackendFilter::All),
             agents_outcome_filter: RwSignal::new(OutcomeFilter::All),
             selected_agent_run: RwSignal::new(None),
+            agents_control: RwSignal::new(None),
             agents_opener: RwSignal::new(None),
             agent_history_loading: RwSignal::new(false),
             agent_history_has_more: RwSignal::new(false),
+            agent_history_load_failed: RwSignal::new(false),
+            agent_history_load_token: RwSignal::new(0),
+            pending_agent_row_focus: RwSignal::new(None),
             pending_agent_navigation: RwSignal::new(None),
             agent_navigation_token: RwSignal::new(0),
             open_expectation: RwSignal::new(OpenExpectation::Any),
             agent_archived_owner: RwSignal::new(None),
-            agent_completion_notice: RwSignal::new(None),
+            agent_completion_notices: RwSignal::new(VecDeque::new()),
             agent_completion_token: RwSignal::new(0),
             agent: RwSignal::new(AgentConfig::default()),
             hovered_item: RwSignal::new(None),
@@ -226,15 +240,22 @@ impl AppState {
     /// Active records win by id; repeated pages are harmless.
     pub fn merge_agent_runs(
         &self,
-        runs: impl IntoIterator<Item = perch_github::RunRecord>,
+        runs: impl IntoIterator<Item = perch_github::RunSummary>,
         has_more: bool,
     ) {
         self.agent_runs.update(|current| {
             let mut merged = current.as_ref().clone();
             for run in runs {
-                let summary = AgentRunSummary::from_record(&run);
+                let mut summary = AgentRunSummary::from_summary(&run);
                 match merged.iter().position(|existing| existing.id == summary.id) {
                     Some(index) if merged[index].can_replace_with(&summary) => {
+                        // List pages intentionally omit transcript fields. A
+                        // refresh must not erase detail already hydrated for
+                        // an open row, even when both projections carry the
+                        // same event sequence.
+                        summary.steps = merged[index].steps.clone();
+                        summary.response = merged[index].response.clone();
+                        summary.response_truncated = merged[index].response_truncated;
                         merged[index] = summary
                     }
                     Some(_) => {}
@@ -245,6 +266,33 @@ impl AppState {
         });
         self.agent_history_has_more.set(has_more);
         self.agent_history_loading.set(false);
+        self.agent_history_load_failed.set(false);
+    }
+
+    /// Start a bounded Agents-page request. The token fences an older timeout
+    /// from turning a newer successful request into an error.
+    pub fn begin_agent_history_load(&self) -> u64 {
+        let token = self
+            .agent_history_load_token
+            .get_untracked()
+            .wrapping_add(1);
+        self.agent_history_load_token.set(token);
+        self.agent_history_loading.set(true);
+        self.agent_history_load_failed.set(false);
+        token
+    }
+
+    /// Mark a still-current request as unanswered. Returns whether this call
+    /// changed the visible state, which keeps timeout tests deterministic.
+    pub fn time_out_agent_history_load(&self, token: u64) -> bool {
+        if self.agent_history_load_token.get_untracked() != token
+            || !self.agent_history_loading.get_untracked()
+        {
+            return false;
+        }
+        self.agent_history_loading.set(false);
+        self.agent_history_load_failed.set(true);
+        true
     }
 
     /// Apply one authoritative record after an event was persisted.
@@ -276,15 +324,47 @@ impl AppState {
     fn show_agent_completion(&self, run_id: String) {
         let token = self.agent_completion_token.get_untracked().wrapping_add(1);
         self.agent_completion_token.set(token);
-        self.agent_completion_notice
-            .set(Some(AgentCompletionNotice { run_id, token }));
+        let was_empty = self
+            .agent_completion_notices
+            .with_untracked(VecDeque::is_empty);
+        self.agent_completion_notices
+            .update(|notices| notices.push_back(AgentCompletionNotice { run_id, token }));
+        if was_empty {
+            self.schedule_agent_completion_dismissal(token);
+        }
+    }
+
+    pub fn current_agent_completion(&self) -> Option<AgentCompletionNotice> {
+        self.agent_completion_notices
+            .with(|notices| notices.front().cloned())
+    }
+
+    pub fn dismiss_agent_completion(&self, token: u64) {
+        let mut next = None;
+        self.agent_completion_notices.update(|notices| {
+            let Some(index) = notices.iter().position(|notice| notice.token == token) else {
+                return;
+            };
+            let was_front = index == 0;
+            notices.remove(index);
+            if was_front {
+                next = notices.front().map(|notice| notice.token);
+            }
+        });
+        if let Some(next) = next {
+            self.schedule_agent_completion_dismissal(next);
+        }
+    }
+
+    fn schedule_agent_completion_dismissal(&self, token: u64) {
         let state = *self;
         floem::action::exec_after(Duration::from_secs(8), move |_| {
-            state.agent_completion_notice.update(|notice| {
-                if notice.as_ref().is_some_and(|notice| notice.token == token) {
-                    *notice = None;
-                }
-            });
+            if state
+                .current_agent_completion()
+                .is_some_and(|notice| notice.token == token)
+            {
+                state.dismiss_agent_completion(token);
+            }
         });
     }
 
@@ -380,13 +460,17 @@ impl AppState {
             perch_agent::RunEvent::Text(text) => {
                 perch_github::RunEvent::Text { text: text.clone() }
             }
-            perch_agent::RunEvent::ToolCall { id, name, summary } => {
-                perch_github::RunEvent::ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    summary: summary.clone(),
-                }
-            }
+            perch_agent::RunEvent::ToolCall {
+                id,
+                name,
+                summary,
+                parent_id,
+            } => perch_github::RunEvent::ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                summary: summary.clone(),
+                parent_id: parent_id.clone(),
+            },
             perch_agent::RunEvent::ToolResult { id, ok, summary } => {
                 perch_github::RunEvent::ToolResult {
                     id: id.clone(),
@@ -407,6 +491,12 @@ impl AppState {
                 cost_usd: None,
                 duration_ms: None,
             },
+            perch_agent::RunEvent::PermissionDenied { tool, message } => {
+                perch_github::RunEvent::PermissionDenied {
+                    tool: tool.clone(),
+                    message: message.clone(),
+                }
+            }
             perch_agent::RunEvent::Finished { .. }
             | perch_agent::RunEvent::Failed { .. }
             | perch_agent::RunEvent::Stopped { .. } => return,
@@ -474,12 +564,14 @@ impl AppState {
         {
             self.selected_agent_run.set(None);
         }
-        if self.agent_completion_notice.with_untracked(|notice| {
-            notice
-                .as_ref()
-                .is_some_and(|notice| removed.contains(&notice.run_id))
-        }) {
-            self.agent_completion_notice.set(None);
+        let front = self.current_agent_completion().map(|notice| notice.token);
+        self.agent_completion_notices
+            .update(|notices| notices.retain(|notice| !removed.contains(&notice.run_id)));
+        if let Some(front) = front {
+            let next = self.current_agent_completion();
+            if next.as_ref().is_some_and(|notice| notice.token != front) {
+                self.schedule_agent_completion_dismissal(next.unwrap().token);
+            }
         }
     }
 
@@ -1249,5 +1341,61 @@ mod tests {
         );
         assert!(review.sent_composer.get().is_none());
         assert!(review.cards_in("src/x.rs").is_empty());
+    }
+
+    #[test]
+    fn simultaneous_agent_completions_wait_their_turn() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        app.show_agent_completion("first".into());
+        app.show_agent_completion("second".into());
+
+        let first = app.current_agent_completion().unwrap();
+        assert_eq!(first.run_id, "first");
+        app.dismiss_agent_completion(first.token);
+        assert_eq!(
+            app.current_agent_completion().map(|notice| notice.run_id),
+            Some("second".into())
+        );
+    }
+
+    #[test]
+    fn only_the_current_agent_history_request_can_time_out() {
+        let app = AppState::new();
+        let stale = app.begin_agent_history_load();
+        let current = app.begin_agent_history_load();
+        assert!(!app.time_out_agent_history_load(stale));
+        assert!(app.agent_history_loading.get());
+        assert!(app.time_out_agent_history_load(current));
+        assert!(!app.agent_history_loading.get());
+        assert!(app.agent_history_load_failed.get());
+    }
+
+    #[test]
+    fn a_summary_refresh_keeps_already_hydrated_detail() {
+        let app = AppState::new();
+        let run = perch_github::RunRecord {
+            id: "run".into(),
+            status: perch_github::RunStatus::Completed,
+            terminal_reason: Some(perch_github::TerminalReason::Completed),
+            queued_at: "2026-09-19T10:00:00Z".parse().unwrap(),
+            ended_at: Some("2026-09-19T10:00:01Z".parse().unwrap()),
+            final_result: Some("hydrated answer".into()),
+            final_result_truncated: true,
+            steps: vec![perch_github::RunStep {
+                summary: "Read src/lib.rs".into(),
+                ok: true,
+            }],
+            last_event_sequence: 3,
+            ..perch_github::RunRecord::default()
+        };
+        app.update_agent_run(&run);
+
+        app.merge_agent_runs([perch_github::RunSummary::from(&run)], false);
+
+        let retained = app.agent_run("run").unwrap();
+        assert_eq!(retained.response, "hydrated answer");
+        assert!(retained.response_truncated);
+        assert_eq!(retained.steps.len(), 1);
     }
 }

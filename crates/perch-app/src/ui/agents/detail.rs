@@ -458,7 +458,16 @@ fn activity_rows(run: &AgentRunSummary, events: &[RunEventRecord]) -> Vec<Activi
                         .unwrap_or_else(|| "Started".into()),
                     true,
                 ),
-                RunEvent::ToolCall { summary, .. } => (summary.clone(), true),
+                RunEvent::ToolCall {
+                    summary, parent_id, ..
+                } => (
+                    if parent_id.is_some() {
+                        format!("↳ {summary}")
+                    } else {
+                        summary.clone()
+                    },
+                    true,
+                ),
                 RunEvent::ToolResult {
                     ok: false, summary, ..
                 } => (
@@ -469,12 +478,26 @@ fn activity_rows(run: &AgentRunSummary, events: &[RunEventRecord]) -> Vec<Activi
                     },
                     false,
                 ),
+                RunEvent::ToolResult {
+                    ok: true, summary, ..
+                } => (
+                    if summary.is_empty() {
+                        "Tool call completed".into()
+                    } else {
+                        summary.clone()
+                    },
+                    true,
+                ),
+                RunEvent::PermissionDenied { tool, message } => (
+                    tool.as_deref()
+                        .map(|tool| format!("{tool}: {message}"))
+                        .unwrap_or_else(|| message.clone()),
+                    false,
+                ),
                 RunEvent::Completed { .. } => ("Completed".into(), true),
                 RunEvent::Terminated { message, .. } => (message.clone(), false),
                 RunEvent::LegacyStep { summary, ok } => (summary.clone(), *ok),
-                RunEvent::Text { .. }
-                | RunEvent::Usage { .. }
-                | RunEvent::ToolResult { ok: true, .. } => return None,
+                RunEvent::Text { .. } | RunEvent::Usage { .. } => return None,
             };
             Some(ActivityRow {
                 sequence: record.sequence,
@@ -491,18 +514,24 @@ fn result_section(
     initial: Arc<AgentRunSummary>,
 ) -> impl IntoView {
     let events_id = id.clone();
+    let page_state_id = id.clone();
     dyn_container(
         move || {
             (
                 current_run(state, &id, &initial),
                 current_events(state, &events_id),
+                state.agent_run_events_page_state(&page_state_id).0,
             )
         },
-        |(run, events)| result_content(run, events).into_any(),
+        |(run, events, has_more)| result_content(run, events, has_more).into_any(),
     )
 }
 
-fn result_content(run: AgentRunSummary, events: Arc<Vec<RunEventRecord>>) -> impl IntoView {
+fn response_text(
+    run: &AgentRunSummary,
+    events: &[RunEventRecord],
+    has_more: bool,
+) -> (String, Option<&'static str>) {
     let streamed = events
         .iter()
         .filter_map(|record| match &record.event {
@@ -511,17 +540,46 @@ fn result_content(run: AgentRunSummary, events: Arc<Vec<RunEventRecord>>) -> imp
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let result = if run.response.trim().is_empty() {
-        streamed
+    if run.response_truncated {
+        if streamed.trim().is_empty() {
+            return (
+                run.response.clone(),
+                Some("The stored response is truncated; response activity has not been fully loaded."),
+            );
+        }
+        if has_more {
+            return (
+                streamed,
+                Some("This response is incomplete. Load earlier activity to reconstruct the missing beginning."),
+            );
+        }
+        if events
+            .iter()
+            .any(|record| record.truncated && matches!(&record.event, RunEvent::Text { .. }))
+        {
+            return (
+                streamed,
+                Some("Some response activity was truncated in storage."),
+            );
+        }
+        return (streamed, None);
+    }
+    if run.response.trim().is_empty() {
+        (streamed, None)
     } else {
-        run.response.clone()
-    };
-    let error = run.error.clone().or_else(|| {
-        (!matches!(run.status, AgentRunStatus::Completed))
-            .then(|| run.terminal_summary())
-            .flatten()
-            .map(str::to_string)
-    });
+        (run.response.clone(), None)
+    }
+}
+
+fn result_content(
+    run: AgentRunSummary,
+    events: Arc<Vec<RunEventRecord>>,
+    has_more: bool,
+) -> impl IntoView {
+    let (result, incomplete) = response_text(&run, &events, has_more);
+    let error = (!matches!(run.status, AgentRunStatus::Completed))
+        .then(|| run.terminal_display())
+        .flatten();
     let outcome_color = status_color(run.status);
     let result_is_empty = result.trim().is_empty();
     let status = run.status;
@@ -578,6 +636,28 @@ fn result_content(run: AgentRunSummary, events: Arc<Vec<RunEventRecord>>) -> imp
         .into_any(),
         (None, false) => crate::review::markdown::render(&result).into_any(),
     };
+    let content = if let Some(message) = incomplete {
+        Stack::vertical((
+            Container::new(Label::derived(move || message.to_string()).style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG_SUBTLE)
+                    .line_height(1.4)
+                    .text_wrap()
+                    .width_full()
+            }))
+            .style(|s| {
+                s.width_full()
+                    .padding(9.0)
+                    .background(theme::BADGE_BG)
+                    .border_radius(theme::RADIUS)
+            }),
+            content,
+        ))
+        .style(|s| s.flex_col().width_full().gap(10.0))
+        .into_any()
+    } else {
+        content
+    };
     Stack::vertical((
         heading(if run.status == AgentRunStatus::Failed {
             "ERROR"
@@ -597,30 +677,15 @@ fn usage_section(state: AppState, id: Arc<String>, initial: Arc<AgentRunSummary>
 }
 
 fn usage_content(run: AgentRunSummary) -> impl IntoView {
-    let usage = {
-        let mut parts = Vec::new();
-        if let Some(tokens) = run.input_tokens {
-            parts.push(format!("{tokens} input tokens"));
-        }
-        if let Some(tokens) = run.output_tokens {
-            parts.push(format!("{tokens} output tokens"));
-        }
-        if let Some(tokens) = run.cached_input_tokens {
-            parts.push(format!("{tokens} cached input tokens"));
-        }
-        if let Some(cost) = run.cost_usd {
-            parts.push(format!("${cost:.2}"));
-        }
-        if parts.is_empty() {
-            "Usage unavailable".to_string()
-        } else {
-            parts.join(" · ")
-        }
-    };
+    let usage = usage_label(&run);
     Stack::vertical((
         heading("USAGE"),
-        Label::derived(move || usage.clone())
-            .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_SUBTLE)),
+        Label::derived(move || usage.clone()).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::FG_SUBTLE)
+                .text_wrap()
+                .width_full()
+        }),
     ))
     .style(|s| {
         s.flex_col()
@@ -630,4 +695,127 @@ fn usage_content(run: AgentRunSummary) -> impl IntoView {
             .border_top(1.0)
             .border_color(theme::BORDER_MUTED)
     })
+}
+
+fn usage_label(run: &AgentRunSummary) -> String {
+    if run.input_tokens.is_none()
+        && run.output_tokens.is_none()
+        && run.cached_input_tokens.is_none()
+        && run.cost_usd.is_none()
+    {
+        return "Usage unavailable".to_string();
+    }
+    [
+        run.input_tokens
+            .map(|tokens| format!("{tokens} input tokens"))
+            .unwrap_or_else(|| "Input tokens unavailable".into()),
+        run.output_tokens
+            .map(|tokens| format!("{tokens} output tokens"))
+            .unwrap_or_else(|| "Output tokens unavailable".into()),
+        run.cached_input_tokens
+            .map(|tokens| format!("{tokens} cached input tokens"))
+            .unwrap_or_else(|| "Cached input tokens unavailable".into()),
+        run.cost_usd
+            .map(|cost| format!("${cost:.2}"))
+            .unwrap_or_else(|| "Cost unavailable".into()),
+    ]
+    .join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary() -> AgentRunSummary {
+        let run = perch_github::RunRecord {
+            id: "run".into(),
+            backend: "codex".into(),
+            model: "gpt".into(),
+            effort: "medium".into(),
+            queued_at: jiff::Timestamp::UNIX_EPOCH,
+            ..perch_github::RunRecord::default()
+        };
+        AgentRunSummary::from_record(&run)
+    }
+
+    fn event(sequence: u64, event: RunEvent) -> RunEventRecord {
+        RunEventRecord {
+            run_id: "run".into(),
+            sequence,
+            event_id: format!("event-{sequence}"),
+            occurred_at: jiff::Timestamp::UNIX_EPOCH,
+            event,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn activity_keeps_nested_successes_and_permission_denials() {
+        let rows = activity_rows(
+            &summary(),
+            &[
+                event(
+                    1,
+                    RunEvent::ToolCall {
+                        id: "child".into(),
+                        name: "Task".into(),
+                        summary: "Inspect parser".into(),
+                        parent_id: Some("parent".into()),
+                    },
+                ),
+                event(
+                    2,
+                    RunEvent::ToolResult {
+                        id: "child".into(),
+                        ok: true,
+                        summary: "Parser inspected".into(),
+                    },
+                ),
+                event(
+                    3,
+                    RunEvent::PermissionDenied {
+                        tool: Some("Read".into()),
+                        message: "outside the checkout".into(),
+                    },
+                ),
+            ],
+        );
+        assert_eq!(rows[0].text, "↳ Inspect parser");
+        assert_eq!(rows[1].text, "Parser inspected");
+        assert!(rows[1].ok);
+        assert_eq!(rows[2].text, "Read: outside the checkout");
+        assert!(!rows[2].ok);
+    }
+
+    #[test]
+    fn partial_usage_names_every_unavailable_field() {
+        let mut run = summary();
+        run.input_tokens = Some(12);
+        let label = usage_label(&run);
+        assert!(label.contains("12 input tokens"));
+        assert!(label.contains("Output tokens unavailable"));
+        assert!(label.contains("Cached input tokens unavailable"));
+        assert!(label.contains("Cost unavailable"));
+    }
+
+    #[test]
+    fn truncated_final_result_uses_loaded_text_and_marks_missing_pages() {
+        let mut run = summary();
+        run.response = "bounded prefix".into();
+        run.response_truncated = true;
+        let events = [event(
+            1,
+            RunEvent::Text {
+                text: "loaded stream".into(),
+            },
+        )];
+
+        let (partial, notice) = response_text(&run, &events, true);
+        assert_eq!(partial, "loaded stream");
+        assert!(notice.is_some());
+
+        let (complete, notice) = response_text(&run, &events, false);
+        assert_eq!(complete, "loaded stream");
+        assert!(notice.is_none());
+    }
 }

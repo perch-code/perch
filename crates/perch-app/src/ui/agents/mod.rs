@@ -77,6 +77,7 @@ pub fn control(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 
     let button = Container::new(inner);
     let id = button.view_id();
+    state.agents_control.set(Some(id));
     let click_backend = backend.clone();
     button
         .on_event_stop(el::Click, move |_, _| {
@@ -118,6 +119,7 @@ pub fn toggle(state: AppState, backend: &Backend, opener: Option<floem::ViewId>)
         }
     } else {
         state.selected_agent_run.set(None);
+        state.pending_agent_row_focus.set(None);
         restore_opener(state);
     }
 }
@@ -125,6 +127,7 @@ pub fn toggle(state: AppState, backend: &Backend, opener: Option<floem::ViewId>)
 pub fn close(state: AppState, backend: &Backend, restore_focus: bool) {
     state.agents_open.set(false);
     state.selected_agent_run.set(None);
+    state.pending_agent_row_focus.set(None);
     backend.set_meta("agents.open", "false");
     if restore_focus {
         restore_opener(state);
@@ -137,7 +140,7 @@ fn restore_opener(state: AppState) {
     let opener = state.agents_opener.get_untracked();
     state.agents_opener.set(None);
     if let Some(opener) = opener {
-        floem::action::exec_after(Duration::ZERO, move |_| opener.request_focus());
+        opener.request_focus();
     }
 }
 
@@ -145,16 +148,19 @@ fn restore_opener(state: AppState) {
 /// keyed into it, which is what preserves all item-local view state.
 pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let load_backend = backend.clone();
-    Effect::new(move |was_open: Option<bool>| {
+    Effect::new(move |previous: Option<(bool, bool)>| {
         let open = state.agents_open.get();
-        if open && was_open != Some(true) {
-            state.agent_history_loading.set(true);
-            load_backend.load_agent_runs(FIRST_HISTORY_PAGE);
+        let active = state
+            .agent_runs
+            .with(|runs| runs.iter().any(|run| run.status.is_active()));
+        if open && !previous.is_some_and(|(was_open, _)| was_open) {
+            request_agent_runs(state, &load_backend, FIRST_HISTORY_PAGE);
+        }
+        if open && active && !state.agents_clock_armed.get_untracked() {
             arm_clock(state);
         }
-        open
+        (open, active)
     });
-
     dyn_container(
         move || state.agents_open.get(),
         move |open| {
@@ -172,6 +178,14 @@ pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
             .z_index(60)
     })
     .debug_name("agents-panel-slot")
+}
+
+pub(super) fn request_agent_runs(state: AppState, backend: &Backend, history_limit: usize) {
+    let token = state.begin_agent_history_load();
+    backend.load_agent_runs(history_limit);
+    floem::action::exec_after(Duration::from_secs(5), move |_| {
+        state.time_out_agent_history_load(token);
+    });
 }
 
 fn surface(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
@@ -214,8 +228,19 @@ fn panel_header(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             if !selected {
                 return Empty::new().into_any();
             }
-            icon_action(SidebarIcon::ChevronLeft, "Back to agents", move || {
-                state.selected_agent_run.set(None)
+            let back = icon_action(
+                SidebarIcon::ChevronLeft,
+                "agents-detail-back Back to agents",
+                move || back_to_list(state),
+            );
+            let id = back.view_id();
+            // The selected row has just left the tree. Put the keyboard on a
+            // stable detail control after Floem installs this replacement.
+            let asked = std::rc::Rc::new(std::cell::Cell::new(false));
+            back.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+                if !asked.replace(true) {
+                    id.request_focus();
+                }
             })
             .into_any()
         },
@@ -258,8 +283,16 @@ fn panel_header(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .apply_if(state.active_agent_counts() == (0, 0), |s| s.hide())
     });
     let close_backend = backend.clone();
-    let close_button = icon_action(SidebarIcon::Close, "Close agents", move || {
+    let close_button = icon_action(SidebarIcon::Close, "agents-close Close agents", move || {
         close(state, &close_backend, true)
+    });
+    let close_id = close_button.view_id();
+    let focus_close = state.selected_agent_run.get_untracked().is_none();
+    let asked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let close_button = close_button.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+        if focus_close && !asked.replace(true) {
+            close_id.request_focus();
+        }
     });
 
     title_bar(
@@ -288,11 +321,17 @@ fn panel_header(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     })
 }
 
+pub fn back_to_list(state: AppState) {
+    let selected = state.selected_agent_run.get_untracked();
+    state.pending_agent_row_focus.set(selected);
+    state.selected_agent_run.set(None);
+}
+
 pub(super) fn icon_action(
     icon: SidebarIcon,
     debug: &'static str,
     action: impl Fn() + 'static,
-) -> impl IntoView {
+) -> impl View {
     let action: Rc<dyn Fn()> = Rc::new(action);
     let click = action.clone();
     Container::new(
@@ -318,6 +357,7 @@ pub(super) fn icon_action(
             .hover(|s| s.background(theme::CANVAS_HOVER))
     })
     .debug_name(debug)
+    .into_view()
 }
 
 pub(super) fn text_action(
@@ -530,14 +570,14 @@ pub fn resize_cursor_sheet(state: AppState) -> impl IntoView {
 pub fn completion_notice(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     dyn_container(
         move || {
-            state.agent_completion_notice.get().and_then(|notice| {
+            state.current_agent_completion().and_then(|notice| {
                 state
                     .agent_run(&notice.run_id)
                     .map(|run| (notice.token, run))
             })
         },
         move |notice| {
-            let Some((_token, run)) = notice else {
+            let Some((token, run)) = notice else {
                 return Empty::new().into_any();
             };
             let color = status_color(run.status);
@@ -560,7 +600,10 @@ pub fn completion_notice(state: AppState, backend: Rc<Backend>) -> impl IntoView
                 || "View".to_string(),
                 true,
                 move || {
-                    state.agent_completion_notice.set(None);
+                    state.dismiss_agent_completion(token);
+                    state
+                        .agents_opener
+                        .set(state.agents_control.get_untracked());
                     state.agents_open.set(true);
                     state.agents_tab.set(model::AgentsTab::History);
                     state.selected_agent_run.set(Some(run_id.clone()));
@@ -570,7 +613,7 @@ pub fn completion_notice(state: AppState, backend: Rc<Backend>) -> impl IntoView
                 },
             );
             let dismiss = icon_action(SidebarIcon::Close, "Dismiss agent completion", move || {
-                state.agent_completion_notice.set(None)
+                state.dismiss_agent_completion(token)
             });
             Container::new(
                 Stack::horizontal((
@@ -684,13 +727,17 @@ mod tests {
         let app = AppState::new();
         let review = ReviewState::new();
         review.composer_draft.set("half a thought".into());
-        app.merge_agent_runs([running_record()], false);
+        app.merge_agent_runs([perch_github::RunSummary::from(&running_record())], false);
         let backend = Rc::new(Backend::detached());
         let view = crate::ui::app_view(app, review, backend);
         let mut harness = HeadlessHarness::new_with_size(root, view, 1200.0, 760.0);
         harness.rebuild();
         harness.paint();
         assert!(!shown(&harness, "agent-run:stream"));
+        let control = named(harness.root_id(), "agents-control").unwrap();
+        control.request_focus();
+        harness.rebuild();
+        assert!(harness.is_focused(control));
 
         harness.dispatch_event(key(
             Code::KeyA,
@@ -701,14 +748,25 @@ mod tests {
         harness.paint();
         assert!(app.agents_open.get());
         assert!(shown(&harness, "agent-run:stream"));
+        let close = named(harness.root_id(), "agents-close").unwrap();
+        assert!(harness.is_focused(close));
 
         app.agents_backend_filter.set(model::BackendFilter::Codex);
         harness.rebuild();
         harness.paint();
         assert!(!shown(&harness, "agent-run:stream"));
         app.agents_backend_filter.set(model::BackendFilter::All);
+        harness.rebuild();
+        harness.paint();
 
-        app.selected_agent_run.set(Some("stream".into()));
+        let row = named(harness.root_id(), "agent-run:stream").unwrap();
+        row.request_focus();
+        harness.rebuild();
+        harness.dispatch_event(key(
+            Code::Enter,
+            Key::Named(NamedKey::Enter),
+            Modifiers::empty(),
+        ));
         let mut update = running_record();
         update.final_result = Some("The first durable paragraph.".into());
         update.latest_activity = Some("Responding".into());
@@ -717,6 +775,8 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(shown(&harness, "agent-run-detail"));
+        let back = named(harness.root_id(), "agents-detail-back").unwrap();
+        assert!(harness.is_focused(back));
 
         harness.dispatch_event(key(
             Code::Escape,
@@ -728,6 +788,8 @@ mod tests {
         assert!(app.agents_open.get());
         assert!(app.selected_agent_run.get().is_none());
         assert!(shown(&harness, "agent-run:stream"));
+        let rebuilt_row = named(harness.root_id(), "agent-run:stream").unwrap();
+        assert!(harness.is_focused(rebuilt_row));
 
         harness.dispatch_event(key(
             Code::Escape,
@@ -738,5 +800,23 @@ mod tests {
         harness.paint();
         assert!(!app.agents_open.get());
         assert_eq!(review.composer_draft.get(), "half a thought");
+        assert!(harness.is_focused(control));
+    }
+
+    #[test]
+    fn an_open_idle_panel_rearms_its_clock_when_work_arrives() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.agents_open.set(true);
+        let backend = Rc::new(Backend::detached());
+        let view = crate::ui::app_view(app, review, backend);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 900.0, 700.0);
+        harness.rebuild();
+        assert!(!app.agents_clock_armed.get());
+
+        app.merge_agent_runs([perch_github::RunSummary::from(&running_record())], false);
+        harness.rebuild();
+        assert!(app.agents_clock_armed.get());
     }
 }

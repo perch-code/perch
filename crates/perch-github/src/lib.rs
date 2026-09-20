@@ -16,15 +16,15 @@ pub mod workflow_runs;
 
 pub use auth::{resolve_token, Token, TokenSource};
 pub use cache::{
-    Cache, CacheError, CacheOpen, RunEventAppend, StoredReveals,
-    NOTIFICATIONS_LAST_MODIFIED_KEY,
-};
-pub use comments::{
-    Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,
-    RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunLabels, RunOwner, RunPurpose, RunRecord,
-    RunStatus, RunStep, RunUsage, Side, TerminalReason, ThreadOrigin,
+    Cache, CacheError, CacheOpen, RunEventAppend, StoredReveals, NOTIFICATIONS_LAST_MODIFIED_KEY,
 };
 pub use client::{Error, GitHub, ListResult, PullLookup};
+pub use comments::{
+    Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,
+    RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunHistoryPage, RunLabels, RunOwner,
+    RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, RunUsage, Side, TerminalReason,
+    ThreadOrigin,
+};
 pub use config::{
     is_local, AgentConfig, CodexConfig, Config, DeclaredRepo, RepoConfig, CLAUDE_CODE, CODEX,
     LOCAL_OWNER,

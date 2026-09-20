@@ -18,7 +18,8 @@ use perch_github::{
     resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentThread,
     Config, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, NewRunEvent, PullRequest,
     RevisionContext, RunEvent as StoredRunEvent, RunEventRecord, RunHistoryFilter, RunLabels,
-    RunOwner, RunPurpose, RunRecord, RunStatus, SubjectKind, TerminalReason, Thread, ThreadOrigin,
+    RunOwner, RunPurpose, RunRecord, RunStatus, RunSummary, SubjectKind, TerminalReason, Thread,
+    ThreadOrigin,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
@@ -257,10 +258,10 @@ pub enum Event {
         thread_id: String,
         event: perch_agent::RunEvent,
     },
-    /// App-wide run summaries. Active runs are always complete; terminal
-    /// history is the requested newest-first page.
+    /// App-wide run summaries. Every active run is included; terminal
+    /// history is the requested newest-first prefix.
     AgentRuns {
-        runs: Vec<RunRecord>,
+        runs: Vec<RunSummary>,
         has_more: bool,
     },
     /// One durable state change, sent after it has committed.
@@ -1524,8 +1525,14 @@ fn send_items(cache: &Cache, events: &EventSender<Event>) {
 /// The panel filters this snapshot locally; loading an older page asks again
 /// with a larger limit, so startup never reads every transcript.
 fn send_agent_runs(ctx: &Ctx, history_limit: usize) {
+    // A process may have exited while its terminal SQLite write was
+    // transiently unavailable. Any list refresh is an opportunity to heal
+    // that projection before publishing the active set.
+    ctx.runs.reconcile_finished();
     send_agent_runs_from_cache(&ctx.cache, &ctx.events, history_limit);
 }
+
+const AGENT_HISTORY_PAGE: usize = 100;
 
 fn send_agent_runs_from_cache(
     cache: &SharedCache,
@@ -1536,7 +1543,7 @@ fn send_agent_runs_from_cache(
         return;
     };
     let Ok(guard) = cache.lock() else { return };
-    let mut runs = match guard.active_runs() {
+    let mut runs = match guard.active_run_summaries() {
         Ok(runs) => runs,
         Err(error) => {
             tracing::warn!(%error, "could not load active agents");
@@ -1544,15 +1551,31 @@ fn send_agent_runs_from_cache(
         }
     };
     let wanted = history_limit.max(1);
-    let mut history = match guard.run_history(&RunHistoryFilter::default(), None, wanted + 1) {
-        Ok(history) => history,
-        Err(error) => {
-            tracing::warn!(%error, "could not load agent history");
-            return;
+    let mut history = Vec::with_capacity(wanted);
+    let mut cursor = None;
+    let has_more = loop {
+        let page_size = (wanted - history.len()).min(AGENT_HISTORY_PAGE);
+        let page = match guard.run_history_page(
+            &RunHistoryFilter::default(),
+            cursor.as_ref(),
+            page_size,
+        ) {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!(%error, "could not load agent history");
+                return;
+            }
+        };
+        let page_was_empty = page.runs.is_empty();
+        history.extend(page.runs);
+        if history.len() >= wanted || page_was_empty {
+            break page.next_cursor.is_some();
         }
+        let Some(next) = page.next_cursor else {
+            break false;
+        };
+        cursor = Some(next);
     };
-    let has_more = history.len() > wanted;
-    history.truncate(wanted);
     runs.extend(history);
     let _ = events.send(Event::AgentRuns { runs, has_more });
 }
@@ -4288,7 +4311,7 @@ async fn ask(
     if !is_new {
         let already_active = ctx
             .with_cache(|cache| {
-                cache.active_runs().map(|runs| {
+                cache.active_run_summaries().map(|runs| {
                     runs.into_iter().any(|run| {
                         matches!(
                             run.owner,
@@ -4331,6 +4354,7 @@ async fn ask(
         effort: effort.name().into(),
         session_id: None,
         original_request: question.clone(),
+        prompt_snapshot: None,
         working_directory: Some(checkout.worktree.to_string_lossy().into_owned()),
         revision: RevisionContext::LiveCheckout {
             head_sha: Some(checkout.head_sha.clone()),
@@ -4350,6 +4374,7 @@ async fn ask(
         started_at: None,
         ended_at: None,
         final_result: None,
+        final_result_truncated: false,
         latest_activity: Some("Waiting for an execution slot".into()),
         last_event_sequence: 0,
     };
@@ -4412,6 +4437,10 @@ async fn ask(
     } else {
         crate::ask::follow_up_prompt(&input)
     };
+    // `original_request` stays suitable for a compact row label. The full
+    // constructed user prompt captures the source and conversation context
+    // which this exact attempt was admitted with.
+    run.prompt_snapshot = Some(prompt.user.clone());
     let spec = crate::ask::run_spec(
         &ctx.config.agent,
         backend,
@@ -4531,11 +4560,17 @@ async fn execute_question(
                 model: Some(model.clone()),
             }),
             perch_agent::RunEvent::Text(text) => Some(StoredRunEvent::Text { text: text.clone() }),
-            perch_agent::RunEvent::ToolCall { id, name, summary } => {
+            perch_agent::RunEvent::ToolCall {
+                id,
+                name,
+                summary,
+                parent_id,
+            } => {
                 Some(StoredRunEvent::ToolCall {
                     id: id.clone(),
                     name: name.clone(),
                     summary: summary.clone(),
+                    parent_id: parent_id.clone(),
                 })
             }
             perch_agent::RunEvent::ToolResult { id, ok, summary } => {
@@ -4543,6 +4578,12 @@ async fn execute_question(
                     id: id.clone(),
                     ok: *ok,
                     summary: summary.clone(),
+                })
+            }
+            perch_agent::RunEvent::PermissionDenied { tool, message } => {
+                Some(StoredRunEvent::PermissionDenied {
+                    tool: tool.clone(),
+                    message: message.clone(),
                 })
             }
             perch_agent::RunEvent::Usage {
@@ -4769,12 +4810,27 @@ fn append_stored_event(
 /// Start another attempt for the same durable request. The old attempt and
 /// all of its events remain in history; the discussion's request row points
 /// at the new attempt while it is active.
+type RetryConversationContext = (Vec<(Author, String)>, Option<String>);
+
+fn captured_retry_prompt(
+    mut reconstructed: crate::ask::Prompt,
+    prompt_snapshot: Option<&str>,
+) -> crate::ask::Prompt {
+    // Reconstructing still selects the original resume/system behavior, but
+    // the text sent to the CLI must be byte-for-byte what admission captured.
+    // `None` is retained for pre-snapshot databases.
+    if let Some(snapshot) = prompt_snapshot {
+        reconstructed.user = snapshot.to_string();
+    }
+    reconstructed
+}
+
 fn retry_conversation_context(
     thread: &CommentThread,
     request_id: &str,
     backend: &str,
     purpose: RunPurpose,
-) -> Option<(Vec<(Author, String)>, Option<String>)> {
+) -> Option<RetryConversationContext> {
     let request_index = thread
         .messages
         .iter()
@@ -4925,11 +4981,12 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         question: &old.original_request,
         history: &history,
     };
-    let prompt = if old.purpose == RunPurpose::Question {
+    let reconstructed_prompt = if old.purpose == RunPurpose::Question {
         crate::ask::first_prompt(&input)
     } else {
         crate::ask::follow_up_prompt(&input)
     };
+    let prompt = captured_retry_prompt(reconstructed_prompt, old.prompt_snapshot.as_deref());
     let spec = crate::ask::run_spec(
         &ctx.config.agent,
         backend,
@@ -4961,6 +5018,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         effort: effort.name().into(),
         session_id: None,
         original_request: old.original_request.clone(),
+        prompt_snapshot: Some(prompt.user.clone()),
         working_directory: old.working_directory.clone(),
         revision: old.revision.clone(),
         labels: run_labels(&item),
@@ -4976,6 +5034,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         started_at: None,
         ended_at: None,
         final_result: None,
+        final_result_truncated: false,
         latest_activity: Some("Waiting for an execution slot".into()),
         last_event_sequence: 0,
     };
@@ -5567,6 +5626,28 @@ mod tests {
         assert_eq!(
             backoff_until(Some(reset), Some(3_600)),
             Duration::from_secs(3_600)
+        );
+    }
+
+    #[test]
+    fn retry_replays_the_captured_prompt_instead_of_rebuilt_context() {
+        let rebuilt = crate::ask::Prompt {
+            system: Some("the original system behavior".into()),
+            user: "a prompt rebuilt from changed source and thread state".into(),
+        };
+        let replayed = captured_retry_prompt(
+            rebuilt,
+            Some("the exact prompt captured when the first attempt was admitted"),
+        );
+
+        assert_eq!(
+            replayed.user,
+            "the exact prompt captured when the first attempt was admitted"
+        );
+        assert_eq!(
+            replayed.system.as_deref(),
+            Some("the original system behavior"),
+            "snapshot replay must preserve question/follow-up system behavior"
         );
     }
 

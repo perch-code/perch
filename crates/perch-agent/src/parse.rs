@@ -16,10 +16,11 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
     let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("");
     // A subagent's lines name the parent's tool call. What it says is its
     // report to the parent, not part of the answer; what it does still is.
-    let delegated = v
+    let parent_id = v
         .get("parent_tool_use_id")
         .and_then(Value::as_str)
-        .is_some();
+        .map(str::to_string);
+    let delegated = parent_id.is_some();
 
     match (kind, subtype) {
         ("system", "init") => vec![RunEvent::Started {
@@ -41,6 +42,7 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
                         id: str_of(b, "id"),
                         summary: summarize_tool_call(&name, &input),
                         name,
+                        parent_id: parent_id.clone(),
                     })
                 }
                 _ => None,
@@ -59,6 +61,7 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
                 }
             })
             .collect(),
+        ("system", "permission_denied") => vec![permission_denied_event(&v)],
         ("result", _) => {
             let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             if is_error || (subtype != "success" && !subtype.is_empty()) {
@@ -68,7 +71,15 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
                 } else {
                     text
                 };
-                vec![RunEvent::Failed { message }]
+                let mut events = Vec::new();
+                if v.get("permission_denials")
+                    .and_then(Value::as_array)
+                    .is_some_and(|denials| !denials.is_empty())
+                {
+                    events.push(permission_denied_event(&v));
+                }
+                events.push(RunEvent::Failed { message });
+                events
             } else {
                 let mut events = usage_event(&v).into_iter().collect::<Vec<_>>();
                 events.push(RunEvent::Finished {
@@ -80,9 +91,32 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
             }
         }
         // thinking_tokens, task_summary, task_started and its progress,
-        // permission_denied, rate limits, and whatever comes next.
+        // rate limits, and whatever comes next.
         _ => Vec::new(),
     }
+}
+
+fn permission_denied_event(v: &Value) -> RunEvent {
+    let denial = v
+        .get("permission_denials")
+        .and_then(Value::as_array)
+        .and_then(|denials| denials.first());
+    let tool = v
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .or_else(|| denial.and_then(|entry| entry.get("tool_name")).and_then(Value::as_str))
+        .map(str::to_string);
+    let message = v
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| denial.and_then(|entry| entry.get("message")).and_then(Value::as_str))
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| match tool.as_deref() {
+            Some(tool) => format!("Permission denied for {tool}"),
+            None => "Permission denied".to_string(),
+        });
+    RunEvent::PermissionDenied { tool, message }
 }
 
 /// Claude reports denied tools as a structured system event. It is not
@@ -348,7 +382,8 @@ mod tests {
             vec![RunEvent::ToolCall {
                 id: "toolu_r".into(),
                 name: "Read".into(),
-                summary: "Read w/src/lib.rs".into()
+                summary: "Read w/src/lib.rs".into(),
+                parent_id: Some(parent.into()),
             }]
         );
         let result = format!(
@@ -415,5 +450,33 @@ mod tests {
             r#"{"type":"result","subtype":"error_during_execution","result":"permission denied"}"#
         ));
         assert!(!is_explicit_permission_denial("permission denied"));
+    }
+
+    #[test]
+    fn structured_permission_denials_are_visible_activity() {
+        assert_eq!(
+            parse_line(
+                r#"{"type":"system","subtype":"permission_denied","tool_name":"Write","message":"Write was denied"}"#
+            ),
+            vec![RunEvent::PermissionDenied {
+                tool: Some("Write".into()),
+                message: "Write was denied".into(),
+            }]
+        );
+
+        assert_eq!(
+            parse_line(
+                r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"review stopped","permission_denials":[{"tool_name":"Edit"}]}"#
+            ),
+            vec![
+                RunEvent::PermissionDenied {
+                    tool: Some("Edit".into()),
+                    message: "Permission denied for Edit".into(),
+                },
+                RunEvent::Failed {
+                    message: "review stopped".into(),
+                },
+            ]
+        );
     }
 }

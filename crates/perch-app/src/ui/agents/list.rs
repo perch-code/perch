@@ -22,7 +22,7 @@ use super::model::{
     active_groups, elapsed_label, history_runs, AgentRunGroup, AgentRunStatus, AgentRunSummary,
     AgentsTab, BackendFilter, OutcomeFilter, WorktreeFilter,
 };
-use super::{metadata, navigate_to_source, status_color, text_action};
+use super::{metadata, navigate_to_source, request_agent_runs, status_color, text_action};
 
 pub fn view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let filters_backend = backend.clone();
@@ -50,8 +50,7 @@ fn tabs(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             state.agents_tab.set(tab);
             state.selected_agent_run.set(None);
             if tab == AgentsTab::History {
-                state.agent_history_loading.set(true);
-                tab_backend.load_agent_runs(50);
+                request_agent_runs(state, &tab_backend, 50);
             }
         });
         let click = action.clone();
@@ -270,14 +269,18 @@ fn active(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl In
                 state.agents_worktree_filter.get(),
                 state.agents_backend_filter.get(),
                 state.agent_history_loading.get(),
+                state.agent_history_load_failed.get(),
             )
         },
-        move |(runs, current, worktrees, backends, loading)| {
+        move |(runs, current, worktrees, backends, loading, failed)| {
             let groups = active_groups(&runs, current.as_deref(), worktrees, backends);
             if groups.is_empty() {
                 if loading {
                     return empty_state("Loading agents…", "Reading active and queued work.")
                         .into_any();
+                }
+                if failed {
+                    return load_error(state, backend.clone(), 50).into_any();
                 }
                 return empty_state(
                     "No agents running",
@@ -383,28 +386,34 @@ fn history(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl I
                 state.agents_outcome_filter.get(),
                 state.agent_history_loading.get(),
                 state.agent_history_has_more.get(),
+                state.agent_history_load_failed.get(),
             )
         },
-        move |(runs, current, worktrees, backends, outcomes, loading, has_more)| {
+        move |(runs, current, worktrees, backends, outcomes, loading, has_more, failed)| {
             let rows = history_runs(&runs, current.as_deref(), worktrees, backends, outcomes);
+            let has_rows = !rows.is_empty();
             let loaded = runs.iter().filter(|run| !run.status.is_active()).count();
             let more_backend = backend.clone();
             let row_backend = backend.clone();
             let body = if rows.is_empty() {
-                let (title, message) = if loading {
-                    ("Loading history…", "Reading saved agent runs.")
-                } else if has_more {
-                    (
-                        "No matches yet",
-                        "Older saved runs may match these filters.",
-                    )
+                if failed {
+                    load_error(state, backend.clone(), loaded.max(50)).into_any()
                 } else {
-                    (
-                        "No saved runs",
-                        "Completed and stopped work will remain available here.",
-                    )
-                };
-                empty_state(title, message).into_any()
+                    let (title, message) = if loading {
+                        ("Loading history…", "Reading saved agent runs.")
+                    } else if has_more {
+                        (
+                            "No matches yet",
+                            "Older saved runs may match these filters.",
+                        )
+                    } else {
+                        (
+                            "No saved runs",
+                            "Completed and stopped work will remain available here.",
+                        )
+                    };
+                    empty_state(title, message).into_any()
+                }
             } else {
                 dyn_stack(
                     move || rows.clone(),
@@ -417,9 +426,9 @@ fn history(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl I
             Stack::vertical((
                 body,
                 dyn_container(
-                    move || (has_more, loading),
-                    move |(has_more, loading)| {
-                        if !has_more {
+                    move || (has_more, loading, failed, has_rows),
+                    move |(has_more, loading, failed, has_rows)| {
+                        if (!has_more && !failed) || (failed && !has_rows) {
                             return Empty::new().into_any();
                         }
                         let more_backend = more_backend.clone();
@@ -427,6 +436,8 @@ fn history(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl I
                             move || {
                                 if loading {
                                     "Loading…".to_string()
+                                } else if failed {
+                                    "Retry loading runs".to_string()
                                 } else {
                                     "Load older runs".to_string()
                                 }
@@ -434,8 +445,7 @@ fn history(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl I
                             false,
                             move || {
                                 if !loading {
-                                    state.agent_history_loading.set(true);
-                                    more_backend.load_agent_runs(loaded + 50);
+                                    request_agent_runs(state, &more_backend, loaded + 50);
                                 }
                             },
                         )
@@ -461,6 +471,7 @@ fn run_row(
 ) -> impl IntoView {
     let id = run.id.clone();
     let debug_id = id.clone();
+    let focus_id = id.clone();
     let select_id = id.clone();
     let detail_backend = backend.clone();
     let select: Rc<dyn Fn()> = Rc::new(move || {
@@ -481,15 +492,13 @@ fn run_row(
             AgentRunStatus::Running => "Working…".to_string(),
             AgentRunStatus::Stopping => "Stopping the process tree…".to_string(),
             AgentRunStatus::Completed => "Completed".to_string(),
-            AgentRunStatus::Failed => run
-                .error
-                .clone()
-                .or_else(|| run.terminal_summary().map(str::to_string))
-                .unwrap_or_else(|| "Failed".into()),
-            AgentRunStatus::Stopped => run.terminal_summary().unwrap_or("Stopped").to_string(),
-            AgentRunStatus::Interrupted => {
-                run.terminal_summary().unwrap_or("Interrupted").to_string()
-            }
+            AgentRunStatus::Failed => run.terminal_display().unwrap_or_else(|| "Failed".into()),
+            AgentRunStatus::Stopped => run
+                .terminal_display()
+                .unwrap_or_else(|| "Stopped".to_string()),
+            AgentRunStatus::Interrupted => run
+                .terminal_display()
+                .unwrap_or_else(|| "Interrupted".to_string()),
         });
     let elapsed_run = run.clone();
     let queue = queue_position(state, &run.id);
@@ -504,7 +513,7 @@ fn run_row(
         }
     };
 
-    Stack::vertical((
+    let row = Stack::vertical((
         Stack::horizontal((
             Empty::new().style(move |s| {
                 s.size(7.0, 7.0)
@@ -574,10 +583,12 @@ fn run_row(
             Label::derived(move || footer.clone()).style(|s| {
                 s.font_size(theme::TEXT_SECTION)
                     .color(theme::FG_SUBTLE)
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .flex_grow(1.0_f32)
                     .selectable(false)
                     .pointer_events_none()
             }),
-            Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
             row_actions(state, review, backend, run),
         ))
         .style(|s| s.items_center().width_full().height(27.0)),
@@ -617,7 +628,20 @@ fn run_row(
                 .border_left_color(floem::peniko::Color::TRANSPARENT)
         }
     })
-    .debug_name(format!("agent-run:{debug_id}"))
+    .debug_name(format!("agent-run:{debug_id}"));
+    let row_id = row.view_id();
+    let focus_row = state
+        .pending_agent_row_focus
+        .with_untracked(|pending| pending.as_deref() == Some(focus_id.as_str()));
+    if focus_row {
+        state.pending_agent_row_focus.set(None);
+    }
+    let asked = std::rc::Rc::new(std::cell::Cell::new(false));
+    row.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+        if focus_row && !asked.replace(true) {
+            row_id.request_focus();
+        }
+    })
 }
 
 fn row_actions(
@@ -688,7 +712,8 @@ fn row_actions(
             .into_any(),
         _ => Empty::new().into_any(),
     };
-    Stack::horizontal((primary, secondary)).style(|s| s.items_center().gap(2.0))
+    Stack::horizontal((primary, secondary))
+        .style(|s| s.items_center().gap(2.0).flex_shrink(0.0_f32))
 }
 
 fn queue_position(state: AppState, id: &str) -> Option<usize> {
@@ -733,6 +758,36 @@ fn empty_state(title: &'static str, body: &'static str) -> impl IntoView {
             }),
         ))
         .style(|s| s.items_center()),
+    )
+    .style(|s| s.size_full().items_center().justify_center().padding(32.0))
+}
+
+fn load_error(state: AppState, backend: Rc<Backend>, history_limit: usize) -> impl IntoView {
+    Container::new(
+        Stack::vertical((
+            Label::derived(|| "Could not load agents".to_string()).style(|s| {
+                s.font_size(theme::TEXT_BODY)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .color(theme::FG)
+            }),
+            Label::derived(|| {
+                "The saved run list did not answer. Existing work continues in the background."
+                    .to_string()
+            })
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG_SUBTLE)
+                    .text_align(floem::text::Alignment::Center)
+                    .text_wrap()
+                    .max_width(270.0)
+            }),
+            text_action(
+                || "Retry".to_string(),
+                true,
+                move || request_agent_runs(state, &backend, history_limit),
+            ),
+        ))
+        .style(|s| s.flex_col().items_center().gap(10.0)),
     )
     .style(|s| s.size_full().items_center().justify_center().padding(32.0))
 }
