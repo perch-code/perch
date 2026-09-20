@@ -5,8 +5,8 @@
 
 pub mod auth;
 pub mod cache;
-pub mod comments;
 pub mod client;
+pub mod comments;
 pub mod config;
 pub mod discussion;
 pub mod items;
@@ -15,10 +15,14 @@ pub mod pulls;
 pub mod workflow_runs;
 
 pub use auth::{resolve_token, Token, TokenSource};
-pub use cache::{Cache, CacheError, StoredReveals, NOTIFICATIONS_LAST_MODIFIED_KEY};
+pub use cache::{
+    Cache, CacheError, CacheOpen, RunEventAppend, StoredReveals,
+    NOTIFICATIONS_LAST_MODIFIED_KEY,
+};
 pub use comments::{
-    Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStatus, RunStep, Side,
-    ThreadOrigin,
+    Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,
+    RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunLabels, RunOwner, RunPurpose, RunRecord,
+    RunStatus, RunStep, RunUsage, Side, TerminalReason, ThreadOrigin,
 };
 pub use client::{Error, GitHub, ListResult, PullLookup};
 pub use config::{
@@ -26,7 +30,9 @@ pub use config::{
     LOCAL_OWNER,
 };
 pub use discussion::{Discussion, IssueComment, PullEvent, PullEventKind, Review, ReviewComment};
-pub use items::{Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind};
+pub use items::{
+    Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind,
+};
+pub use model::{Reason, Repository, Subject, SubjectKind, SubjectState, Thread};
 pub use pulls::{CheckStatus, PullRequest, ReviewDecision, Reviewer};
 pub use workflow_runs::{worst, CheckState, Checks, WorkflowRunPayload, WorkflowRunQuery};
-pub use model::{Reason, Repository, Subject, SubjectKind, SubjectState, Thread};

@@ -9,47 +9,130 @@
 use perch_git::{DisplayBuffer, LineStatus, Row};
 use perch_github::{Anchor, Author, PullRequest};
 
-/// Fold one event from the agent into its run record.
-///
-/// The backend applies this to the row it persists and the UI applies it to
-/// the copy it draws, so the two cannot drift. Returns the text the agent
-/// said, if the event carried any, for the caller to collect.
-pub fn apply_run_event(run: &mut perch_github::RunRecord, event: &perch_agent::RunEvent) -> Option<String> {
+thread_local! {
+    /// `RunStep` is a compatibility projection and does not retain tool IDs.
+    /// Keep the IDs beside the live UI copy so an interleaved result updates
+    /// the same step as the durable event projection does.
+    static LIVE_TOOL_STEPS: std::cell::RefCell<
+        std::collections::HashMap<String, std::collections::HashMap<String, usize>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Fold one event from the agent into the run record drawn by the live UI.
+/// Returns the text the agent said, if the event carried any, for the caller
+/// to collect.
+pub fn apply_run_event(
+    run: &mut perch_github::RunRecord,
+    event: &perch_agent::RunEvent,
+) -> Option<String> {
     use perch_agent::RunEvent;
     use perch_github::{RunStatus, RunStep};
 
+    if run.status.is_terminal() {
+        return None;
+    }
     match event {
-        RunEvent::Started { session_id, .. } => {
+        RunEvent::Started { session_id, model } => {
             run.session_id = Some(session_id.clone());
+            if !model.is_empty() {
+                run.model = model.clone();
+            }
+            // Cancellation can win the race with the CLI's first event. Keep
+            // that request visible while still retaining the metadata the CLI
+            // reported when it started.
+            if run.status != RunStatus::Stopping {
+                run.status = RunStatus::Running;
+            }
+            run.started_at.get_or_insert_with(jiff::Timestamp::now);
         }
-        RunEvent::Text(text) => return Some(text.clone()),
-        RunEvent::ToolCall { summary, .. } => {
-            run.steps.push(RunStep { summary: summary.clone(), ok: true });
+        RunEvent::Text(text) => {
+            run.final_result = Some(match run.final_result.take() {
+                Some(mut prior) if !prior.is_empty() => {
+                    prior.push_str("\n\n");
+                    prior.push_str(text);
+                    prior
+                }
+                _ => text.clone(),
+            });
+            return Some(text.clone());
         }
-        RunEvent::ToolResult { ok, summary, .. } => {
-            // Results come back in order, so the last step still marked good
-            // is the one this answers.
-            if !ok {
-                if let Some(step) = run.steps.iter_mut().rev().find(|s| s.ok) {
-                    step.ok = false;
-                    if !summary.is_empty() {
-                        step.summary = format!("{}: {summary}", step.summary);
+        RunEvent::ToolCall { id, summary, .. } => {
+            let index = run.steps.len();
+            run.steps.push(RunStep {
+                summary: summary.clone(),
+                ok: true,
+            });
+            LIVE_TOOL_STEPS.with(|tools| {
+                tools
+                    .borrow_mut()
+                    .entry(run.id.clone())
+                    .or_default()
+                    .insert(id.clone(), index);
+            });
+            run.latest_activity = Some(summary.clone());
+        }
+        RunEvent::ToolResult { id, ok, summary } => {
+            let index = LIVE_TOOL_STEPS.with(|tools| {
+                let mut tools = tools.borrow_mut();
+                let (index, empty) = match tools.get_mut(&run.id) {
+                    Some(steps) => {
+                        let index = steps.remove(id);
+                        (index, steps.is_empty())
                     }
+                    None => (None, false),
+                };
+                if empty {
+                    tools.remove(&run.id);
+                }
+                index
+            });
+            if let Some(step) = index.and_then(|index| run.steps.get_mut(index)) {
+                step.ok = *ok;
+                if !ok && !summary.is_empty() {
+                    step.summary = format!("{}: {summary}", step.summary);
                 }
             }
         }
-        RunEvent::Finished { session_id, cost_usd, duration_ms } => {
+        RunEvent::Usage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        } => {
+            run.usage = Some(perch_github::RunUsage {
+                input_tokens: *input_tokens,
+                output_tokens: *output_tokens,
+                cached_input_tokens: *cached_input_tokens,
+            });
+        }
+        RunEvent::Finished {
+            session_id,
+            cost_usd,
+            duration_ms,
+        } => {
             run.session_id = Some(session_id.clone());
-            run.status = RunStatus::Finished;
+            run.status = RunStatus::Completed;
+            run.terminal_reason = Some(perch_github::TerminalReason::Completed);
             run.cost_usd = *cost_usd;
             run.duration_ms = Some(*duration_ms);
             run.ended_at = Some(jiff::Timestamp::now());
         }
         RunEvent::Failed { message } => {
-            run.status = if message == "Stopped" { RunStatus::Stopped } else { RunStatus::Failed };
+            run.status = RunStatus::Failed;
+            run.terminal_reason = Some(perch_github::TerminalReason::Other);
             run.error = Some(message.clone());
             run.ended_at = Some(jiff::Timestamp::now());
         }
+        RunEvent::Stopped { .. } => {
+            run.status = RunStatus::Stopped;
+            run.terminal_reason = Some(perch_github::TerminalReason::UserStopped);
+            run.error = Some("Stopped by the reader".into());
+            run.ended_at = Some(jiff::Timestamp::now());
+        }
+    }
+    if run.status.is_terminal() {
+        LIVE_TOOL_STEPS.with(|tools| {
+            tools.borrow_mut().remove(&run.id);
+        });
     }
     None
 }
@@ -75,7 +158,10 @@ pub async fn discover(agent: &mut perch_github::AgentConfig) -> Vec<String> {
     let mut problems = Vec::new();
 
     match perch_agent::find_binary(&agent.binary) {
-        Some(path) => agent.binary = path.to_string_lossy().into_owned(),
+        Some(path) => {
+            agent.binary = path.to_string_lossy().into_owned();
+            agent.binary_version = executable_version(&agent.binary).await;
+        }
         None => {
             problems.push(format!("Claude Code not found as {}", agent.binary));
             agent.models.clear();
@@ -87,6 +173,7 @@ pub async fn discover(agent: &mut perch_github::AgentConfig) -> Vec<String> {
         return problems;
     };
     agent.codex.binary = codex.to_string_lossy().into_owned();
+    agent.codex.binary_version = executable_version(&agent.codex.binary).await;
     if !agent.codex.models.is_empty() {
         return problems;
     }
@@ -103,11 +190,39 @@ pub async fn discover(agent: &mut perch_github::AgentConfig) -> Vec<String> {
     problems
 }
 
+async fn executable_version(binary: &str) -> Option<String> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::process::Command::new(binary)
+            .arg("--version")
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(256)
+        .collect::<String>();
+    (!line.is_empty()).then_some(line)
+}
+
 /// The config key to point at when a backend's binary cannot be started.
 pub fn binary_hint(backend: perch_agent::Backend) -> &'static str {
     match backend {
-        perch_agent::Backend::ClaudeCode => "Set agent.binary in config.toml to where Claude Code is installed.",
-        perch_agent::Backend::Codex => "Set agent.codex.binary in config.toml to where Codex is installed.",
+        perch_agent::Backend::ClaudeCode => {
+            "Set agent.binary in config.toml to where Claude Code is installed."
+        }
+        perch_agent::Backend::Codex => {
+            "Set agent.codex.binary in config.toml to where Codex is installed."
+        }
     }
 }
 
@@ -133,7 +248,10 @@ pub fn run_spec(
         prompt: prompt.user.clone(),
         system: prompt.system.clone(),
         resume,
-        allowed_tools: perch_agent::READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
+        allowed_tools: perch_agent::READ_ONLY_TOOLS
+            .iter()
+            .map(|t| t.to_string())
+            .collect(),
     }
 }
 
@@ -151,7 +269,10 @@ pub fn run_cli(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("runtime");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
     if let Err(e) = runtime.block_on(ask(target, anchor, question)) {
         eprintln!("error: {e}");
         std::process::exit(1);
@@ -180,20 +301,46 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
     let (pr, issue, checkout) = match gh.fetch_pull_request(full_name, number).await {
         Ok(pr) => {
             let checkout = preparer
-                .prepare(&id, number, &pr.head_sha, &pr.base_ref, &format!("perch/pr-{number}"), |_| {})
+                .prepare(
+                    &id,
+                    number,
+                    &pr.head_sha,
+                    &pr.base_ref,
+                    &format!("perch/pr-{number}"),
+                    |_| {},
+                )
                 .await
                 .map_err(|e| e.to_string())?;
             (Some(pr), None, checkout)
         }
         Err(_) => {
-            let issue = gh.fetch_issue(full_name, number).await.map_err(|e| e.to_string())?;
-            let comments = gh.fetch_issue_comments(full_name, number).await.unwrap_or_default();
-            let bare = preparer.ensure_bare(&id, |_| {}).await.map_err(|e| e.to_string())?;
-            let default = preparer.default_branch(&id).await.map_err(|e| e.to_string())?;
-            let home = preparer.ensure_home(&id, &default).await.map_err(|e| e.to_string())?;
+            let issue = gh
+                .fetch_issue(full_name, number)
+                .await
+                .map_err(|e| e.to_string())?;
+            let comments = gh
+                .fetch_issue_comments(full_name, number)
+                .await
+                .unwrap_or_default();
+            let bare = preparer
+                .ensure_bare(&id, |_| {})
+                .await
+                .map_err(|e| e.to_string())?;
+            let default = preparer
+                .default_branch(&id)
+                .await
+                .map_err(|e| e.to_string())?;
+            let home = preparer
+                .ensure_home(&id, &default)
+                .await
+                .map_err(|e| e.to_string())?;
             let head = preparer
                 .git()
-                .run(Some(&home), ["rev-parse", "HEAD"], std::time::Duration::from_secs(30))
+                .run(
+                    Some(&home),
+                    ["rev-parse", "HEAD"],
+                    std::time::Duration::from_secs(30),
+                )
                 .await
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default();
@@ -209,7 +356,11 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
         }
     };
     let body = match &pr {
-        Some(_) => gh.fetch_discussion(full_name, number).await.map(|d| d.body).unwrap_or_default(),
+        Some(_) => gh
+            .fetch_discussion(full_name, number)
+            .await
+            .map(|d| d.body)
+            .unwrap_or_default(),
         None => String::new(),
     };
 
@@ -218,7 +369,10 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
         Some(spec) if pr.is_some() => {
             let (path, range) = spec.rsplit_once(':').ok_or("anchor is path:start-end")?;
             let (start, end) = match range.split_once('-') {
-                Some((a, b)) => (a.parse::<u32>().map_err(|_| "bad line")?, b.parse::<u32>().map_err(|_| "bad line")?),
+                Some((a, b)) => (
+                    a.parse::<u32>().map_err(|_| "bad line")?,
+                    b.parse::<u32>().map_err(|_| "bad line")?,
+                ),
                 None => {
                     let n = range.parse::<u32>().map_err(|_| "bad line")?;
                     (n, n)
@@ -231,7 +385,14 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
                 side: Side::Right,
                 commit_sha: checkout.head_sha.clone(),
             };
-            let file = load_display(&preparer, &checkout, &perch_git::Scope::Branch, &checkout.head_sha, path).await?;
+            let file = load_display(
+                &preparer,
+                &checkout,
+                &perch_git::Scope::Branch,
+                &checkout.head_sha,
+                path,
+            )
+            .await?;
             (Some(anchor), Some(file))
         }
         Some(_) => return Err("an anchor needs a pull request".into()),
@@ -248,25 +409,48 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
         question,
         history: &[],
     });
-    println!("--- system ---\n{}\n--- user ---\n{}\n--- run ---", prompt.system.as_deref().unwrap_or(""), prompt.user);
+    println!(
+        "--- system ---\n{}\n--- user ---\n{}\n--- run ---",
+        prompt.system.as_deref().unwrap_or(""),
+        prompt.user
+    );
 
     let effort = perch_agent::Effort::parse(&config.agent.effort).unwrap_or_default();
     let backend = backend_for(&config.agent, &config.agent.model);
-    let spec = run_spec(&config.agent, backend, &config.agent.model, effort, checkout.worktree.clone(), &prompt, None);
+    let spec = run_spec(
+        &config.agent,
+        backend,
+        &config.agent.model,
+        effort,
+        checkout.worktree.clone(),
+        &prompt,
+        None,
+    );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    perch_agent::Run::spawn(spec, tx).map_err(|e| e.to_string())?;
+    let run = perch_agent::Run::spawn(spec, tx).map_err(|e| e.to_string())?;
 
     let mut answer = Vec::new();
     while let Some(event) = rx.recv().await {
         println!("{event:?}");
         match event {
             perch_agent::RunEvent::Text(t) => answer.push(t),
-            perch_agent::RunEvent::Failed { message } => return Err(message),
-            _ => {}
+            perch_agent::RunEvent::Started { .. }
+            | perch_agent::RunEvent::ToolCall { .. }
+            | perch_agent::RunEvent::ToolResult { .. }
+            | perch_agent::RunEvent::Usage { .. }
+            | perch_agent::RunEvent::Finished { .. }
+            | perch_agent::RunEvent::Failed { .. }
+            | perch_agent::RunEvent::Stopped { .. } => {}
         }
     }
-    println!("--- answer ---\n{}", answer.join("\n\n"));
-    Ok(())
+    match run.wait().await {
+        perch_agent::RunOutcome::Finished { .. } => {
+            println!("--- answer ---\n{}", answer.join("\n\n"));
+            Ok(())
+        }
+        perch_agent::RunOutcome::Failed { message, .. } => Err(message),
+        perch_agent::RunOutcome::Stopped { .. } => Err("Stopped".into()),
+    }
 }
 
 /// The file the way the editor lays it out, diff spliced in.
@@ -282,7 +466,10 @@ pub(crate) async fn load_display(
     path: &str,
 ) -> Result<DisplayBuffer, String> {
     let (base_rev, head_rev) = if !anchor_sha.is_empty() && anchor_sha != checkout.head_sha {
-        (perch_git::Rev::Sha(format!("{anchor_sha}^")), perch_git::Rev::Sha(anchor_sha.to_string()))
+        (
+            perch_git::Rev::Sha(format!("{anchor_sha}^")),
+            perch_git::Rev::Sha(anchor_sha.to_string()),
+        )
     } else {
         scope.sides(&checkout.merge_base, &checkout.head_sha)
     };
@@ -344,7 +531,10 @@ pub struct Prompt {
 
 /// A thread's first question: framing plus the whole context.
 pub fn first_prompt(input: &PromptInput<'_>) -> Prompt {
-    Prompt { system: Some(FRAMING.to_string()), user: user_message(input, true) }
+    Prompt {
+        system: Some(FRAMING.to_string()),
+        user: user_message(input, true),
+    }
 }
 
 /// A follow-up in a resumed session: just the question. The anchor is
@@ -360,7 +550,10 @@ pub fn follow_up_prompt(input: &PromptInput<'_>) -> Prompt {
         Prompt { system: None, user }
     } else {
         // Nothing to resume: start over with the earlier exchange folded in.
-        Prompt { system: Some(FRAMING.to_string()), user: user_message(input, true) }
+        Prompt {
+            system: Some(FRAMING.to_string()),
+            user: user_message(input, true),
+        }
     }
 }
 
@@ -369,7 +562,10 @@ fn user_message(input: &PromptInput<'_>, with_context: bool) -> String {
 
     if with_context {
         if let Some(pr) = input.pull_request {
-            out.push_str(&format!("Pull request: {}#{}: {}\n", pr.repo_full_name, pr.number, pr.title));
+            out.push_str(&format!(
+                "Pull request: {}#{}: {}\n",
+                pr.repo_full_name, pr.number, pr.title
+            ));
             if let Some(body) = input.body.map(str::trim).filter(|b| !b.is_empty()) {
                 let lines: Vec<&str> = body.lines().collect();
                 let shown = &lines[..lines.len().min(MAX_BODY_LINES)];
@@ -381,7 +577,10 @@ fn user_message(input: &PromptInput<'_>, with_context: bool) -> String {
             }
             out.push('\n');
         } else if let Some((issue, comments)) = input.issue {
-            out.push_str(&format!("Issue: {}#{}: {}\n", issue.repo_full_name, issue.number, issue.title));
+            out.push_str(&format!(
+                "Issue: {}#{}: {}\n",
+                issue.repo_full_name, issue.number, issue.title
+            ));
             let body = issue.body.trim();
             if !body.is_empty() {
                 let lines: Vec<&str> = body.lines().collect();
@@ -394,7 +593,8 @@ fn user_message(input: &PromptInput<'_>, with_context: bool) -> String {
             }
             // The last few comments, each cut short: what was said is the
             // context, not every word of it.
-            let recent: Vec<&perch_github::IssueComment> = comments.iter().rev().take(MAX_COMMENTS).collect();
+            let recent: Vec<&perch_github::IssueComment> =
+                comments.iter().rev().take(MAX_COMMENTS).collect();
             if !recent.is_empty() {
                 out.push_str("\nComments:\n");
                 for c in recent.into_iter().rev() {
@@ -420,7 +620,11 @@ fn user_message(input: &PromptInput<'_>, with_context: bool) -> String {
                 } else {
                     format!("{}\u{2013}{}", anchor.start_line, anchor.line)
                 },
-                if changed { " (changed in this pull request)" } else { "" }
+                if changed {
+                    " (changed in this pull request)"
+                } else {
+                    ""
+                }
             ));
             if input.outdated {
                 out.push_str("The file has changed since this thread began, so the line numbers may be off.\n");
@@ -480,7 +684,9 @@ fn quote(file: &DisplayBuffer, anchor: &Anchor) -> Quoted {
                 changed |= *status != LineStatus::Unchanged;
             }
             // Removed lines inside the range belong to the change too.
-            Row::Deleted { .. } if first_display.is_some() && display_in_range(file, display, last) => {
+            Row::Deleted { .. }
+                if first_display.is_some() && display_in_range(file, display, last) =>
+            {
                 removed.push(lines.get(display).copied().unwrap_or(""));
             }
             _ => {}
@@ -507,7 +713,11 @@ fn quote(file: &DisplayBuffer, anchor: &Anchor) -> Quoted {
         changed = true;
     }
 
-    Quoted { selected: selected.join("\n"), removed: removed.join("\n"), changed }
+    Quoted {
+        selected: selected.join("\n"),
+        removed: removed.join("\n"),
+        changed,
+    }
 }
 
 /// Whether a deleted row sits before the last selected head line.
@@ -519,7 +729,11 @@ fn display_in_range(file: &DisplayBuffer, display: usize, last_head: usize) -> b
 }
 
 fn fenced(path: &str, text: &str) -> String {
-    let lang = path.rsplit('.').next().filter(|e| !e.contains('/')).unwrap_or("");
+    let lang = path
+        .rsplit('.')
+        .next()
+        .filter(|e| !e.contains('/'))
+        .unwrap_or("");
     format!("```{lang}\n{text}\n```\n")
 }
 
@@ -581,7 +795,13 @@ mod tests {
     }
 
     fn anchor(start: u32, line: u32) -> Anchor {
-        Anchor { path: "src/manifest.rs".into(), start_line: start, line, side: Side::Right, commit_sha: "h".into() }
+        Anchor {
+            path: "src/manifest.rs".into(),
+            start_line: start,
+            line,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        }
     }
 
     /// Base line 2 was replaced by two lines; line 5 was added.
@@ -591,8 +811,21 @@ mod tests {
         DisplayBuffer::unified(head, base, &perch_git::diff::file_diff(base, head))
     }
 
-    fn input<'a>(anchor: Option<&'a Anchor>, file: Option<&'a DisplayBuffer>, question: &'a str) -> PromptInput<'a> {
-        PromptInput { pull_request: None, issue: None, body: None, anchor, file, outdated: false, question, history: &[] }
+    fn input<'a>(
+        anchor: Option<&'a Anchor>,
+        file: Option<&'a DisplayBuffer>,
+        question: &'a str,
+    ) -> PromptInput<'a> {
+        PromptInput {
+            pull_request: None,
+            issue: None,
+            body: None,
+            anchor,
+            file,
+            outdated: false,
+            question,
+            history: &[],
+        }
     }
 
     #[test]
@@ -601,9 +834,19 @@ mod tests {
         let a = anchor(2, 3);
         let p = first_prompt(&input(Some(&a), Some(&buf), "why?"));
         assert_eq!(p.system.as_deref(), Some(FRAMING));
-        assert!(p.user.contains("File: src/manifest.rs, lines 2–3 (changed in this pull request)"), "{}", p.user);
+        assert!(
+            p.user
+                .contains("File: src/manifest.rs, lines 2–3 (changed in this pull request)"),
+            "{}",
+            p.user
+        );
         assert!(p.user.contains("```rs\nnew b1\nnew b2\n```"), "{}", p.user);
-        assert!(p.user.contains("Before this pull request:\n```rs\nold b\n```"), "{}", p.user);
+        assert!(
+            p.user
+                .contains("Before this pull request:\n```rs\nold b\n```"),
+            "{}",
+            p.user
+        );
         assert!(p.user.ends_with("Question: why?"));
     }
 
@@ -612,7 +855,11 @@ mod tests {
         let buf = buffer();
         let a = anchor(4, 4);
         let p = first_prompt(&input(Some(&a), Some(&buf), "what?"));
-        assert!(p.user.contains("File: src/manifest.rs, lines 4\n"), "{}", p.user);
+        assert!(
+            p.user.contains("File: src/manifest.rs, lines 4\n"),
+            "{}",
+            p.user
+        );
         assert!(!p.user.contains("changed in this pull request"));
         assert!(!p.user.contains("Before this pull request"));
         assert!(p.user.contains("```rs\nc\n```"));
@@ -620,8 +867,17 @@ mod tests {
 
     #[test]
     fn no_anchor_omits_the_file_block() {
-        let p = first_prompt(&PromptInput { pull_request: Some(&pr()), body: Some("Body."), ..input(None, None, "overall?") });
-        assert!(p.user.starts_with("Pull request: slatedb/slatedb#812: Fence the manifest\nBody.\n\n"), "{}", p.user);
+        let p = first_prompt(&PromptInput {
+            pull_request: Some(&pr()),
+            body: Some("Body."),
+            ..input(None, None, "overall?")
+        });
+        assert!(
+            p.user
+                .starts_with("Pull request: slatedb/slatedb#812: Fence the manifest\nBody.\n\n"),
+            "{}",
+            p.user
+        );
         assert!(!p.user.contains("File:"));
         assert!(p.user.ends_with("Question: overall?"));
     }
@@ -630,14 +886,23 @@ mod tests {
     fn outdated_adds_its_line() {
         let buf = buffer();
         let a = anchor(1, 1);
-        let p = first_prompt(&PromptInput { outdated: true, ..input(Some(&a), Some(&buf), "q") });
-        assert!(p.user.contains("The file has changed since this thread began"));
+        let p = first_prompt(&PromptInput {
+            outdated: true,
+            ..input(Some(&a), Some(&buf), "q")
+        });
+        assert!(p
+            .user
+            .contains("The file has changed since this thread began"));
     }
 
     #[test]
     fn a_long_body_is_trimmed() {
         let body: String = (1..=200).map(|i| format!("line {i}\n")).collect();
-        let p = first_prompt(&PromptInput { pull_request: Some(&pr()), body: Some(&body), ..input(None, None, "q") });
+        let p = first_prompt(&PromptInput {
+            pull_request: Some(&pr()),
+            body: Some(&body),
+            ..input(None, None, "q")
+        });
         assert!(p.user.contains("line 40\n[…]\n"), "{}", p.user);
         assert!(!p.user.contains("line 41\n"));
     }
@@ -648,45 +913,173 @@ mod tests {
         use perch_github::{RunRecord, RunStatus};
         let mut run = RunRecord {
             id: "r".into(),
-            thread_id: "t".into(),
+            owner: perch_github::RunOwner::Discussion {
+                item_id: "i".into(),
+                thread_id: "t".into(),
+                request_id: "q".into(),
+            },
             backend: "claude-code".into(),
             model: "sonnet".into(),
             effort: "medium".into(),
-            session_id: None,
             status: RunStatus::Running,
-            cost_usd: None,
-            duration_ms: None,
-            steps: vec![],
-            error: None,
-            started_at: jiff::Timestamp::now(),
-            ended_at: None,
+            started_at: Some(jiff::Timestamp::now()),
+            ..RunRecord::default()
         };
-        apply_run_event(&mut run, &RunEvent::Started { session_id: "s".into(), model: "m".into() });
+        let active = run.clone();
+        apply_run_event(
+            &mut run,
+            &RunEvent::Started {
+                session_id: "s".into(),
+                model: "m".into(),
+            },
+        );
         assert_eq!(run.session_id.as_deref(), Some("s"));
-        apply_run_event(&mut run, &RunEvent::ToolCall { id: "1".into(), name: "Read".into(), summary: "Read a.rs".into() });
-        apply_run_event(&mut run, &RunEvent::ToolCall { id: "2".into(), name: "Write".into(), summary: "Asked to edit a.rs".into() });
-        apply_run_event(&mut run, &RunEvent::ToolResult { id: "2".into(), ok: false, summary: "not allowed".into() });
+
+        let mut stopping = active.clone();
+        stopping.status = RunStatus::Stopping;
+        stopping.session_id = None;
+        stopping.model = "requested-model".into();
+        stopping.started_at = None;
+        apply_run_event(
+            &mut stopping,
+            &RunEvent::Started {
+                session_id: "late-session".into(),
+                model: "actual-model".into(),
+            },
+        );
+        assert_eq!(stopping.status, RunStatus::Stopping);
+        assert_eq!(stopping.session_id.as_deref(), Some("late-session"));
+        assert_eq!(stopping.model, "actual-model");
+        assert!(stopping.started_at.is_some());
+
+        apply_run_event(
+            &mut run,
+            &RunEvent::ToolCall {
+                id: "1".into(),
+                name: "Read".into(),
+                summary: "Read a.rs".into(),
+            },
+        );
+        apply_run_event(
+            &mut run,
+            &RunEvent::ToolCall {
+                id: "2".into(),
+                name: "Write".into(),
+                summary: "Asked to edit a.rs".into(),
+            },
+        );
+        apply_run_event(
+            &mut run,
+            &RunEvent::ToolResult {
+                id: "2".into(),
+                ok: false,
+                summary: "not allowed".into(),
+            },
+        );
         assert_eq!(run.steps[1].summary, "Asked to edit a.rs: not allowed");
         assert!(!run.steps[1].ok);
         assert!(run.steps[0].ok);
-        assert_eq!(apply_run_event(&mut run, &RunEvent::Text("hi".into())), Some("hi".into()));
-        apply_run_event(&mut run, &RunEvent::Finished { session_id: "s".into(), cost_usd: Some(0.1), duration_ms: 900 });
-        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(
+            apply_run_event(&mut run, &RunEvent::Text("hi".into())),
+            Some("hi".into())
+        );
+        apply_run_event(
+            &mut run,
+            &RunEvent::Finished {
+                session_id: "s".into(),
+                cost_usd: Some(0.1),
+                duration_ms: 900,
+            },
+        );
+        assert_eq!(run.status, RunStatus::Completed);
         assert_eq!(run.duration_ms, Some(900));
 
-        let mut stopped = run.clone();
-        apply_run_event(&mut stopped, &RunEvent::Failed { message: "Stopped".into() });
+        let mut stopped = active.clone();
+        apply_run_event(&mut stopped, &RunEvent::Stopped { forced: false });
         assert_eq!(stopped.status, RunStatus::Stopped);
-        let mut failed = run.clone();
-        apply_run_event(&mut failed, &RunEvent::Failed { message: "boom".into() });
+        let mut failed = active;
+        apply_run_event(
+            &mut failed,
+            &RunEvent::Failed {
+                message: "boom".into(),
+            },
+        );
         assert_eq!(failed.status, RunStatus::Failed);
         assert_eq!(failed.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn an_interleaved_tool_result_updates_its_own_step() {
+        use perch_agent::RunEvent;
+        use perch_github::{RunRecord, RunStatus};
+
+        let mut run = RunRecord {
+            id: "interleaved-tools".into(),
+            status: RunStatus::Running,
+            ..RunRecord::default()
+        };
+        for event in [
+            RunEvent::ToolCall {
+                id: "read".into(),
+                name: "Read".into(),
+                summary: "Read a.rs".into(),
+            },
+            RunEvent::ToolCall {
+                id: "shell".into(),
+                name: "Shell".into(),
+                summary: "Ran cargo check".into(),
+            },
+        ] {
+            apply_run_event(&mut run, &event);
+        }
+
+        apply_run_event(
+            &mut run,
+            &RunEvent::ToolResult {
+                id: "read".into(),
+                ok: false,
+                summary: "file disappeared".into(),
+            },
+        );
+
+        assert_eq!(run.steps[0].summary, "Read a.rs: file disappeared");
+        assert!(!run.steps[0].ok);
+        assert_eq!(run.steps[1].summary, "Ran cargo check");
+        assert!(run.steps[1].ok);
+    }
+
+    #[test]
+    fn an_empty_started_model_keeps_the_configured_model() {
+        use perch_agent::RunEvent;
+        use perch_github::{RunRecord, RunStatus};
+
+        let mut run = RunRecord {
+            id: "empty-started-model".into(),
+            model: "gpt-6-astra".into(),
+            status: RunStatus::Starting,
+            ..RunRecord::default()
+        };
+        apply_run_event(
+            &mut run,
+            &RunEvent::Started {
+                session_id: "session".into(),
+                model: String::new(),
+            },
+        );
+
+        assert_eq!(run.model, "gpt-6-astra");
+        assert_eq!(run.session_id.as_deref(), Some("session"));
+        assert_eq!(run.status, RunStatus::Running);
     }
 
     fn agent_config() -> perch_github::AgentConfig {
         perch_github::AgentConfig {
             binary: "/opt/claude".into(),
-            codex: perch_github::CodexConfig { binary: "/opt/codex".into(), models: vec!["gpt-5.6-sol".into()], ..Default::default() },
+            codex: perch_github::CodexConfig {
+                binary: "/opt/codex".into(),
+                models: vec!["gpt-5.6-sol".into()],
+                ..Default::default()
+            },
             ..perch_github::AgentConfig::default()
         }
     }
@@ -697,21 +1090,46 @@ mod tests {
         let agent = agent_config();
         assert_eq!(backend_for(&agent, "sonnet"), Backend::ClaudeCode);
         assert_eq!(backend_for(&agent, "gpt-5.6-sol"), Backend::Codex);
-        assert_eq!(backend_for(&agent, "nobody-lists-this"), Backend::ClaudeCode);
+        assert_eq!(
+            backend_for(&agent, "nobody-lists-this"),
+            Backend::ClaudeCode
+        );
 
         let prompt = first_prompt(&input(None, None, "why?"));
-        let claude = run_spec(&agent, Backend::ClaudeCode, "sonnet", perch_agent::Effort::High, "/tmp".into(), &prompt, None);
+        let claude = run_spec(
+            &agent,
+            Backend::ClaudeCode,
+            "sonnet",
+            perch_agent::Effort::High,
+            "/tmp".into(),
+            &prompt,
+            None,
+        );
         assert_eq!(claude.backend, Backend::ClaudeCode);
         assert_eq!(claude.binary, std::path::PathBuf::from("/opt/claude"));
         assert!(claude.args().windows(2).any(|w| w == ["--effort", "high"]));
 
-        let codex = run_spec(&agent, Backend::Codex, "gpt-5.6-sol", perch_agent::Effort::Ultra, "/tmp".into(), &prompt, Some("t-1".into()));
+        let codex = run_spec(
+            &agent,
+            Backend::Codex,
+            "gpt-5.6-sol",
+            perch_agent::Effort::Ultra,
+            "/tmp".into(),
+            &prompt,
+            Some("t-1".into()),
+        );
         assert_eq!(codex.backend, Backend::Codex);
         assert_eq!(codex.binary, std::path::PathBuf::from("/opt/codex"));
-        assert_eq!(codex.system.as_deref(), Some(FRAMING), "the framing goes as developer instructions");
+        assert_eq!(
+            codex.system.as_deref(),
+            Some(FRAMING),
+            "the framing goes as developer instructions"
+        );
         let args = codex.args();
         assert_eq!(&args[..4], ["exec", "--json", "resume", "t-1"]);
-        assert!(args.windows(2).any(|w| w == ["-c", "model_reasoning_effort=ultra"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["-c", "model_reasoning_effort=ultra"]));
     }
 
     fn fake(dir: &std::path::Path, name: &str, script: &str) -> String {
@@ -730,7 +1148,10 @@ mod tests {
         let claude = fake(dir.path(), "claude", "exit 0");
         let codex = fake(dir.path(), "codex", &format!("cat <<'EOF'\n{CATALOG}\nEOF"));
 
-        let mut agent = perch_github::AgentConfig { binary: claude.clone(), ..Default::default() };
+        let mut agent = perch_github::AgentConfig {
+            binary: claude.clone(),
+            ..Default::default()
+        };
         agent.codex.binary = codex.clone();
         assert!(discover(&mut agent).await.is_empty());
         assert_eq!(agent.binary, claude, "a path found is kept as a path");
@@ -739,12 +1160,18 @@ mod tests {
         assert!(!agent.effort_supported("gpt-5.5", "ultra"));
         assert_eq!(agent.backend_of("gpt-6-astra"), perch_github::CODEX);
 
-        let mut pinned = perch_github::AgentConfig { binary: claude, ..Default::default() };
+        let mut pinned = perch_github::AgentConfig {
+            binary: claude,
+            ..Default::default()
+        };
         pinned.codex.binary = codex;
         pinned.codex.models = vec!["mine".into()];
         assert!(discover(&mut pinned).await.is_empty());
         assert_eq!(pinned.codex.models, ["mine"], "the file's list wins");
-        assert!(pinned.codex.efforts.is_empty(), "and nothing is doubted about it");
+        assert!(
+            pinned.codex.efforts.is_empty(),
+            "and nothing is doubted about it"
+        );
     }
 
     #[tokio::test]
@@ -757,9 +1184,19 @@ mod tests {
         agent.codex.binary = dir.path().join("no-codex").to_string_lossy().into_owned();
         agent.codex.models = vec!["pinned-but-gone".into()];
         let problems = discover(&mut agent).await;
-        assert!(agent.models.is_empty(), "Claude Code's aliases go when its binary is missing");
-        assert!(agent.codex.models.is_empty(), "and so does a pinned Codex list");
-        assert_eq!(problems.len(), 1, "a missing Codex is not a problem to report: {problems:?}");
+        assert!(
+            agent.models.is_empty(),
+            "Claude Code's aliases go when its binary is missing"
+        );
+        assert!(
+            agent.codex.models.is_empty(),
+            "and so does a pinned Codex list"
+        );
+        assert_eq!(
+            problems.len(),
+            1,
+            "a missing Codex is not a problem to report: {problems:?}"
+        );
         assert!(problems[0].starts_with("Claude Code not found"));
     }
 
@@ -767,8 +1204,15 @@ mod tests {
     async fn a_catalog_that_cannot_be_read_falls_back_and_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let claude = fake(dir.path(), "claude", "exit 0");
-        let codex = fake(dir.path(), "codex", "echo 'catalog unavailable' >&2; exit 1");
-        let mut agent = perch_github::AgentConfig { binary: claude, ..Default::default() };
+        let codex = fake(
+            dir.path(),
+            "codex",
+            "echo 'catalog unavailable' >&2; exit 1",
+        );
+        let mut agent = perch_github::AgentConfig {
+            binary: claude,
+            ..Default::default()
+        };
         agent.codex.binary = codex;
         let problems = discover(&mut agent).await;
         assert_eq!(problems.len(), 1);
@@ -810,7 +1254,10 @@ mod tests {
             updated_at: None,
             html_url: String::new(),
         }];
-        let p = first_prompt(&PromptInput { issue: Some((&issue, &comments)), ..input(None, None, "where?") });
+        let p = first_prompt(&PromptInput {
+            issue: Some((&issue, &comments)),
+            ..input(None, None, "where?")
+        });
         assert!(p.user.starts_with("Issue: slatedb/slatedb#42: Fence the manifest\nIt races.\n\nComments:\nchris: Only on compaction.\n"), "{}", p.user);
         assert!(!p.user.contains("Pull request:"));
         assert!(p.user.ends_with("Question: where?"));
@@ -826,19 +1273,45 @@ mod tests {
 
     #[test]
     fn a_quoted_comment_prefixes_every_line_and_leaves_room_below() {
-        let q = quote_for("rohan", "https://github.com/a/b/pull/1#discussion_r9", "Why the fence?\n\nIt was fine before.\n");
+        let q = quote_for(
+            "rohan",
+            "https://github.com/a/b/pull/1#discussion_r9",
+            "Why the fence?\n\nIt was fine before.\n",
+        );
         assert_eq!(
             q,
             "> **rohan** [commented](https://github.com/a/b/pull/1#discussion_r9):\n> Why the fence?\n>\n> It was fine before.\n\n"
         );
-        assert_eq!(quote_for("a", "u", ""), "> **a** [commented](u):\n\n", "an empty body is only the header");
+        assert_eq!(
+            quote_for("a", "u", ""),
+            "> **a** [commented](u):\n\n",
+            "an empty body is only the header"
+        );
     }
 
     #[test]
     fn a_thread_with_nothing_to_resume_folds_its_history_in() {
-        let history = vec![(Author::User, "first?".to_string()), (Author::Agent { backend: "c".into(), model: "m".into() }, "partial".to_string())];
-        let p = follow_up_prompt(&PromptInput { history: &history, ..input(None, None, "again?") });
+        let history = vec![
+            (Author::User, "first?".to_string()),
+            (
+                Author::Agent {
+                    backend: "c".into(),
+                    model: "m".into(),
+                },
+                "partial".to_string(),
+            ),
+        ];
+        let p = follow_up_prompt(&PromptInput {
+            history: &history,
+            ..input(None, None, "again?")
+        });
         assert!(p.system.is_some());
-        assert!(p.user.contains("Earlier in this thread:\n\nReader: first?\n\nYou: partial\n\nQuestion: again?"), "{}", p.user);
+        assert!(
+            p.user.contains(
+                "Earlier in this thread:\n\nReader: first?\n\nYou: partial\n\nQuestion: again?"
+            ),
+            "{}",
+            p.user
+        );
     }
 }

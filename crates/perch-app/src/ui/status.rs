@@ -3,7 +3,7 @@
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::style::CursorStyle;
-use floem::views::{Container, Decorators, Label, Stack, dyn_container};
+use floem::views::{dyn_container, Container, Decorators, Label, Stack};
 
 use crate::backend::{Backend, Status};
 use crate::icons::SidebarIcon;
@@ -56,6 +56,7 @@ pub fn status_bar(
             },
         )
         .style(|s| s.min_width(0.0).margin_right(12.0)),
+        crate::ui::agents::control(state, backend.clone()),
         refresh_button(backend),
     ))
     .style(|s| {
@@ -101,7 +102,11 @@ fn message(state: AppState) -> String {
     match state.status.get() {
         Status::Refreshing => "Refreshing…".into(),
         Status::Idle { at, source } => {
-            format!("Updated {} · {}", timefmt::relative(at, jiff::Timestamp::now()), source)
+            format!(
+                "Updated {} · {}",
+                timefmt::relative(at, jiff::Timestamp::now()),
+                source
+            )
         }
         Status::RateLimited { message } => message,
         Status::Error { message } => message,
@@ -132,7 +137,10 @@ fn refresh_button(backend: std::rc::Rc<Backend>) -> impl IntoView {
                 .items_center()
                 .justify_center()
                 .border_radius(theme::RADIUS)
-                .hover(|s| s.background(theme::CANVAS_HOVER).cursor(CursorStyle::Pointer))
+                .hover(|s| {
+                    s.background(theme::CANVAS_HOVER)
+                        .cursor(CursorStyle::Pointer)
+                })
         })
 }
 

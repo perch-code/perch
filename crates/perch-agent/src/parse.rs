@@ -16,7 +16,10 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
     let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("");
     // A subagent's lines name the parent's tool call. What it says is its
     // report to the parent, not part of the answer; what it does still is.
-    let delegated = v.get("parent_tool_use_id").and_then(Value::as_str).is_some();
+    let delegated = v
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .is_some();
 
     match (kind, subtype) {
         ("system", "init") => vec![RunEvent::Started {
@@ -60,20 +63,62 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
             let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
             if is_error || (subtype != "success" && !subtype.is_empty()) {
                 let text = str_of(&v, "result");
-                let message = if text.trim().is_empty() { subtype.replace('_', " ") } else { text };
+                let message = if text.trim().is_empty() {
+                    subtype.replace('_', " ")
+                } else {
+                    text
+                };
                 vec![RunEvent::Failed { message }]
             } else {
-                vec![RunEvent::Finished {
+                let mut events = usage_event(&v).into_iter().collect::<Vec<_>>();
+                events.push(RunEvent::Finished {
                     session_id: str_of(&v, "session_id"),
                     cost_usd: v.get("total_cost_usd").and_then(Value::as_f64),
                     duration_ms: v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
-                }]
+                });
+                events
             }
         }
         // thinking_tokens, task_summary, task_started and its progress,
         // permission_denied, rate limits, and whatever comes next.
         _ => Vec::new(),
     }
+}
+
+/// Claude reports denied tools as a structured system event. It is not
+/// terminal by itself: an agent can recover and finish after a denied tool.
+/// The runner remembers it only so a later failed result can be classified
+/// without inspecting human-readable text.
+pub(crate) fn is_explicit_permission_denial(line: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    let system_event = v.get("type").and_then(Value::as_str) == Some("system")
+        && v.get("subtype").and_then(Value::as_str) == Some("permission_denied");
+    let result_denials = v.get("type").and_then(Value::as_str) == Some("result")
+        && v.get("permission_denials")
+            .and_then(Value::as_array)
+            .is_some_and(|denials| !denials.is_empty());
+    system_event || result_denials
+}
+
+fn usage_event(v: &Value) -> Option<RunEvent> {
+    let usage = v.get("usage")?;
+    let input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
+    let output_tokens = usage.get("output_tokens").and_then(Value::as_u64);
+    // Claude calls cache hits `cache_read_input_tokens`; accept the neutral
+    // spelling as well so the event remains stable across CLI versions.
+    let cached_input_tokens = usage
+        .get("cached_input_tokens")
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .and_then(Value::as_u64);
+    (input_tokens.is_some() || output_tokens.is_some() || cached_input_tokens.is_some()).then_some(
+        RunEvent::Usage {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        },
+    )
 }
 
 fn blocks(v: &Value) -> Vec<Value> {
@@ -115,9 +160,19 @@ fn summarize_result(error: bool, content: &str) -> String {
 pub fn summarize_tool_call(name: &str, input: &Value) -> String {
     let field = |k: &str| input.get(k).and_then(Value::as_str).map(|s| s.to_string());
     let summary = match name {
-        "Read" => format!("Read {}", field("file_path").map(|p| short_path(&p)).unwrap_or_default()),
+        "Read" => format!(
+            "Read {}",
+            field("file_path")
+                .map(|p| short_path(&p))
+                .unwrap_or_default()
+        ),
         "Glob" => format!("Listed {}", field("pattern").unwrap_or_default()),
-        "LS" => format!("Listed {}", field("path").map(|p| short_path(&p)).unwrap_or_else(|| ".".into())),
+        "LS" => format!(
+            "Listed {}",
+            field("path")
+                .map(|p| short_path(&p))
+                .unwrap_or_else(|| ".".into())
+        ),
         "Grep" => {
             let pattern = field("pattern").unwrap_or_default();
             match field("path") {
@@ -127,7 +182,12 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
         }
         "Bash" => format!("Ran {}", strip_cd(&field("command").unwrap_or_default())),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
-            format!("Asked to edit {}", field("file_path").map(|p| short_path(&p)).unwrap_or_default())
+            format!(
+                "Asked to edit {}",
+                field("file_path")
+                    .map(|p| short_path(&p))
+                    .unwrap_or_default()
+            )
         }
         "Agent" | "Task" => match field("description") {
             Some(d) => format!("Delegated: {d}"),
@@ -135,7 +195,10 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
         },
         // The input is a whole script; the line says only that one ran.
         "Workflow" => "Ran a workflow".to_string(),
-        other => match field("file_path").or_else(|| field("path")).or_else(|| field("pattern")) {
+        other => match field("file_path")
+            .or_else(|| field("path"))
+            .or_else(|| field("pattern"))
+        {
             Some(arg) => format!("{other} {}", short_path(&arg)),
             None => other.to_string(),
         },
@@ -192,7 +255,10 @@ mod tests {
 
     #[test]
     fn grep_names_the_pattern_and_bash_the_command() {
-        assert_eq!(summarize_tool_call("Grep", &json!({"pattern": "epoch"})), "Searched for epoch");
+        assert_eq!(
+            summarize_tool_call("Grep", &json!({"pattern": "epoch"})),
+            "Searched for epoch"
+        );
         assert_eq!(
             summarize_tool_call("Grep", &json!({"pattern": "epoch", "path": "src"})),
             "Searched for epoch in src"
@@ -206,27 +272,48 @@ mod tests {
     #[test]
     fn a_leading_cd_is_dropped_from_a_command() {
         assert_eq!(
-            summarize_tool_call("Bash", &json!({"command": "cd \"/a b/wt\" && git log -3 -- src/"})),
+            summarize_tool_call(
+                "Bash",
+                &json!({"command": "cd \"/a b/wt\" && git log -3 -- src/"})
+            ),
             "Ran git log -3 -- src/"
         );
-        assert_eq!(summarize_tool_call("Bash", &json!({"command": "cd src"})), "Ran cd src");
+        assert_eq!(
+            summarize_tool_call("Bash", &json!({"command": "cd src"})),
+            "Ran cd src"
+        );
     }
 
     #[test]
     fn delegation_names_the_task_and_a_workflow_hides_its_script() {
         assert_eq!(
-            summarize_tool_call("Agent", &json!({"description": "Read first line of lib.rs", "prompt": "..."})),
+            summarize_tool_call(
+                "Agent",
+                &json!({"description": "Read first line of lib.rs", "prompt": "..."})
+            ),
             "Delegated: Read first line of lib.rs"
         );
-        assert_eq!(summarize_tool_call("Task", &json!({"prompt": "..."})), "Delegated");
-        let s = summarize_tool_call("Workflow", &json!({"script": "const x = 1;\nawait run(x);"}));
+        assert_eq!(
+            summarize_tool_call("Task", &json!({"prompt": "..."})),
+            "Delegated"
+        );
+        let s = summarize_tool_call(
+            "Workflow",
+            &json!({"script": "const x = 1;\nawait run(x);"}),
+        );
         assert_eq!(s, "Ran a workflow");
     }
 
     #[test]
     fn an_unknown_tool_still_gets_a_line() {
-        assert_eq!(summarize_tool_call("WebFetch", &json!({"url": "https://x"})), "WebFetch");
-        assert_eq!(summarize_tool_call("Thing", &json!({"path": "a/b"})), "Thing a/b");
+        assert_eq!(
+            summarize_tool_call("WebFetch", &json!({"url": "https://x"})),
+            "WebFetch"
+        );
+        assert_eq!(
+            summarize_tool_call("Thing", &json!({"path": "a/b"})),
+            "Thing a/b"
+        );
     }
 
     #[test]
@@ -258,12 +345,23 @@ mod tests {
         );
         assert_eq!(
             parse_line(&call),
-            vec![RunEvent::ToolCall { id: "toolu_r".into(), name: "Read".into(), summary: "Read w/src/lib.rs".into() }]
+            vec![RunEvent::ToolCall {
+                id: "toolu_r".into(),
+                name: "Read".into(),
+                summary: "Read w/src/lib.rs".into()
+            }]
         );
         let result = format!(
             r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"toolu_r","type":"tool_result","content":"1\t//! x"}}]}},"parent_tool_use_id":"{parent}","session_id":"s"}}"#
         );
-        assert_eq!(parse_line(&result), vec![RunEvent::ToolResult { id: "toolu_r".into(), ok: true, summary: "".into() }]);
+        assert_eq!(
+            parse_line(&result),
+            vec![RunEvent::ToolResult {
+                id: "toolu_r".into(),
+                ok: true,
+                summary: "".into()
+            }]
+        );
 
         // The parent's own text, with the field present but null, is the answer.
         let top = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"//! x"}]},"parent_tool_use_id":null,"session_id":"s"}"#;
@@ -275,6 +373,47 @@ mod tests {
         let events = parse_line(
             r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":"","session_id":"s"}"#,
         );
-        assert_eq!(events, vec![RunEvent::Failed { message: "error max turns".into() }]);
+        assert_eq!(
+            events,
+            vec![RunEvent::Failed {
+                message: "error max turns".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_success_result_reports_usage_immediately_before_finished() {
+        let events = parse_line(
+            r#"{"type":"result","subtype":"success","session_id":"s","usage":{"input_tokens":34,"cache_read_input_tokens":152655,"output_tokens":1163}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![
+                RunEvent::Usage {
+                    input_tokens: Some(34),
+                    output_tokens: Some(1163),
+                    cached_input_tokens: Some(152655),
+                },
+                RunEvent::Finished {
+                    session_id: "s".into(),
+                    cost_usd: None,
+                    duration_ms: 0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_structured_system_event_is_a_permission_denial() {
+        assert!(is_explicit_permission_denial(
+            r#"{"type":"system","subtype":"permission_denied","message":"anything"}"#
+        ));
+        assert!(is_explicit_permission_denial(
+            r#"{"type":"result","subtype":"error_during_execution","permission_denials":[{"tool_name":"Write"}]}"#
+        ));
+        assert!(!is_explicit_permission_denial(
+            r#"{"type":"result","subtype":"error_during_execution","result":"permission denied"}"#
+        ));
+        assert!(!is_explicit_permission_denial("permission denied"));
     }
 }

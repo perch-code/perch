@@ -21,7 +21,7 @@ use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWit
 use floem::style::CursorStyle;
 use floem::text::FontWeight;
 use floem::views::{
-    Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack, text_editor,
+    dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
 use perch_github::{Author, CommentMessage, CommentThread, RunRecord, RunStatus};
 
@@ -40,11 +40,7 @@ pub fn thread_column(
     backend: Rc<Backend>,
     open_file: OpenFile,
 ) -> impl IntoView {
-    Stack::vertical((
-        header(app, state),
-        body(app, state, backend, open_file),
-    ))
-    .style(move |s| {
+    Stack::vertical((header(app, state), body(app, state, backend, open_file))).style(move |s| {
         s.width(state.threads_width.get())
             .height_full()
             .flex_shrink(0.0_f32)
@@ -65,12 +61,20 @@ fn header(app: AppState, state: ReviewState) -> impl IntoView {
                 .flex_grow(1.0_f32)
         }),
         // A question about the pull request as a whole.
-        icon_button(|| SidebarIcon::Plus, || theme::FG_MUTED, move || {
-            state.open_composer(None, None, String::new(), defaults(app));
-        }),
-        icon_button(|| SidebarIcon::Close, || theme::FG_MUTED, move || {
-            state.threads_open.set(false);
-        }),
+        icon_button(
+            || SidebarIcon::Plus,
+            || theme::FG_MUTED,
+            move || {
+                state.open_composer(None, None, String::new(), defaults(app));
+            },
+        ),
+        icon_button(
+            || SidebarIcon::Close,
+            || theme::FG_MUTED,
+            move || {
+                state.threads_open.set(false);
+            },
+        ),
     ))
     .style(|s| {
         s.height(theme::TAB_HEIGHT)
@@ -109,13 +113,26 @@ pub fn defaults(app: AppState) -> AgentChoice {
 /// own choice stands, and the run says what is missing.
 fn default_choice(agent: &perch_github::AgentConfig) -> AgentChoice {
     let effort = perch_agent::Effort::parse(&agent.effort).unwrap_or_default();
-    let offered = agent.models.iter().chain(agent.codex_models()).any(|m| *m == agent.model);
+    let offered = agent
+        .models
+        .iter()
+        .chain(agent.codex_models())
+        .any(|m| *m == agent.model);
     let model = if offered {
         agent.model.clone()
     } else {
-        model_groups(agent).into_iter().flatten().next().map(|(_, m)| m).unwrap_or_else(|| agent.model.clone())
+        model_groups(agent)
+            .into_iter()
+            .flatten()
+            .next()
+            .map(|(_, m)| m)
+            .unwrap_or_else(|| agent.model.clone())
     };
-    (crate::ask::backend_for(agent, &model), model.clone(), nearest_effort(agent, &model, effort))
+    (
+        crate::ask::backend_for(agent, &model),
+        model.clone(),
+        nearest_effort(agent, &model, effort),
+    )
 }
 
 /// Where a thread is drawn: in the column beside the editor, as a card on
@@ -139,7 +156,12 @@ impl ThreadFace {
     }
 }
 
-fn body(app: AppState, state: ReviewState, backend: Rc<Backend>, open_file: OpenFile) -> impl IntoView {
+fn body(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_file: OpenFile,
+) -> impl IntoView {
     let composer_backend = backend.clone();
     let here_backend = backend.clone();
     let here_open = open_file.clone();
@@ -282,7 +304,11 @@ pub fn composer_view(
     let outdated = composer
         .thread_id
         .as_ref()
-        .and_then(|id| state.comment_threads.with(|t| t.iter().find(|t| &t.id == id).map(|t| t.outdated)))
+        .and_then(|id| {
+            state
+                .comment_threads
+                .with(|t| t.iter().find(|t| &t.id == id).map(|t| t.outdated))
+        })
         .unwrap_or(false);
     let placeholder = if composer.thread_id.is_some() {
         "Follow up…".to_string()
@@ -303,17 +329,21 @@ pub fn composer_view(
     // styles in the box, the way they will in the thread.
     let styling_doc = editor.editor().doc();
     let styling_id = state.next_token();
-    let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(styling_doc, styling_id));
+    let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(
+        styling_doc,
+        styling_id,
+    ));
     let doc_editor = editor.editor().clone();
     let read_text = Rc::new(move || doc_editor.doc().text().to_string());
     // A draft the box starts with, a retried question or a quoted comment,
     // is typed under, not into.
     if !draft.is_empty() {
         let end = editor.editor().doc().text().len();
-        editor
-            .editor()
-            .cursor
-            .set(Cursor::new(CursorMode::Insert(Selection::caret(end, CursorAffinity::Backward)), None, None));
+        editor.editor().cursor.set(Cursor::new(
+            CursorMode::Insert(Selection::caret(end, CursorAffinity::Backward)),
+            None,
+            None,
+        ));
     }
 
     let send: Rc<dyn Fn()> = {
@@ -324,7 +354,9 @@ pub fn composer_view(
             if question.trim().is_empty() {
                 return;
             }
-            let Some(composer) = state.composer.get() else { return };
+            let Some(composer) = state.composer.get() else {
+                return;
+            };
             let Some(item_id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
                 return;
             };
@@ -337,7 +369,11 @@ pub fn composer_view(
                 &composer.model,
                 composer.effort,
             );
-            state.agent_last.set(Some((composer.backend, composer.model.clone(), composer.effort)));
+            state.agent_last.set(Some((
+                composer.backend,
+                composer.model.clone(),
+                composer.effort,
+            )));
             state.composer_sent();
         })
     };
@@ -348,7 +384,9 @@ pub fn composer_view(
         // Cmd-Enter sends. The editor would otherwise take Enter for a new
         // line whatever the modifiers.
         .pre_command(move |cmd| {
-            if matches!(cmd.cmd, Command::Edit(EditCommand::InsertNewLine)) && cmd.mods.contains(Modifiers::META) {
+            if matches!(cmd.cmd, Command::Edit(EditCommand::InsertNewLine))
+                && cmd.mods.contains(Modifiers::META)
+            {
                 key_send();
                 return CommandExecuted::Yes;
             }
@@ -361,14 +399,18 @@ pub fn composer_view(
                 state.composer_draft.set(editor.doc().text().to_string());
             }
         })
-        .on_event_cont(el::FocusGained, move |_, _| state.composer_focused.set(true))
+        .on_event_cont(el::FocusGained, move |_, _| {
+            state.composer_focused.set(true)
+        })
         .on_event_cont(el::FocusLost, move |_, _| state.composer_focused.set(false))
         // Escape closes an empty composer. In the capture phase, because
         // the editor stops every key once it has focus and this has to
         // run first.
         .on_event_with_config(
             el::KeyDown,
-            floem::context::EventCallbackConfig { phases: floem::context::Phases::CAPTURE },
+            floem::context::EventCallbackConfig {
+                phases: floem::context::Phases::CAPTURE,
+            },
             move |_, key: &KeyboardEvent| {
                 if key.code == Code::Escape && key.modifiers.is_empty() {
                     if escape_text().trim().is_empty() {
@@ -380,7 +422,8 @@ pub fn composer_view(
             },
         )
         .style(move |s| {
-            let base = s.width_full()
+            let base = s
+                .width_full()
                 .min_height(72.0)
                 .max_height(220.0)
                 .font_family(theme::FONT_STACK.to_string())
@@ -390,9 +433,10 @@ pub fn composer_view(
                 .border_radius(10.0);
             match face {
                 ThreadFace::Card => base.border(0.0),
-                ThreadFace::Column | ThreadFace::Inline => {
-                    base.border(1.0).border_color(theme::BORDER).focus(|s| s.border_color(theme::ACCENT))
-                }
+                ThreadFace::Column | ThreadFace::Inline => base
+                    .border(1.0)
+                    .border_color(theme::BORDER)
+                    .focus(|s| s.border_color(theme::ACCENT)),
             }
         });
     // Take the keyboard as soon as the composer appears.
@@ -416,7 +460,9 @@ pub fn composer_view(
             if asked.replace(true) {
                 return;
             }
-            let Some(id) = inner.get_untracked() else { return };
+            let Some(id) = inner.get_untracked() else {
+                return;
+            };
             // The box `a` finds again is Conversation's; a follow-up's box
             // inside an inline card is under its thread, where the reader
             // just clicked.
@@ -439,7 +485,8 @@ pub fn composer_view(
 
     Stack::vertical((
         Stack::horizontal((
-            sidebar_glyph(SidebarIcon::Thread, theme::ACCENT).style(|s| s.size(13.0, 13.0).margin_right(6.0)),
+            sidebar_glyph(SidebarIcon::Thread, theme::ACCENT)
+                .style(|s| s.size(13.0, 13.0).margin_right(6.0)),
             Label::derived(move || anchor_label.clone()).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
                     .font_family(theme::CODE_FONT_STACK.to_string())
@@ -453,8 +500,12 @@ pub fn composer_view(
             // Put the box away. Nothing typed into it is kept. The button
             // is the size of the thread's `...` and sits where it sits,
             // since the thread's card takes the composer's place.
-            icon_button(|| SidebarIcon::Close, || theme::FG_SUBTLE, move || state.close_composer())
-                .style(|s| s.size(theme::THREAD_MENU, theme::THREAD_MENU)),
+            icon_button(
+                || SidebarIcon::Close,
+                || theme::FG_SUBTLE,
+                move || state.close_composer(),
+            )
+            .style(|s| s.size(theme::THREAD_MENU, theme::THREAD_MENU)),
         ))
         .style(|s| s.items_center().width_full().margin_bottom(8.0)),
         editor,
@@ -476,10 +527,15 @@ pub fn composer_view(
                 .margin_bottom(0.0)
                 .background(theme::CANVAS)
                 .border_color(theme::BORDER),
-            ThreadFace::Card => base.width_full().background(theme::CANVAS_SUBTLE).border_color(theme::BORDER_MUTED),
+            ThreadFace::Card => base
+                .width_full()
+                .background(theme::CANVAS_SUBTLE)
+                .border_color(theme::BORDER_MUTED),
             // A card in the code is placed by its edges, and its width
             // follows from them.
-            ThreadFace::Inline => base.background(theme::CANVAS).border_color(theme::ACCENT_RING),
+            ThreadFace::Inline => base
+                .background(theme::CANVAS)
+                .border_color(theme::ACCENT_RING),
         }
     })
 }
@@ -531,11 +587,24 @@ pub fn subject_word(state: ReviewState) -> &'static str {
 fn model_picker(app: AppState, state: ReviewState) -> impl IntoView {
     use floem::menu::Menu;
 
-    let current = move || state.composer.with(|c| c.as_ref().map(|c| model_label(&c.model)).unwrap_or_default());
+    let current = move || {
+        state.composer.with(|c| {
+            c.as_ref()
+                .map(|c| model_label(&c.model))
+                .unwrap_or_default()
+        })
+    };
     menu_button(current, move || {
-        let selected = state.composer.get_untracked().map(|c| c.model).unwrap_or_default();
+        let selected = state
+            .composer
+            .get_untracked()
+            .map(|c| c.model)
+            .unwrap_or_default();
         let mut menu = Menu::new();
-        for (i, group) in model_groups(&app.agent.get_untracked()).into_iter().enumerate() {
+        for (i, group) in model_groups(&app.agent.get_untracked())
+            .into_iter()
+            .enumerate()
+        {
             if i > 0 {
                 menu = menu.separator();
             }
@@ -570,14 +639,21 @@ fn model_groups(agent: &perch_github::AgentConfig) -> Vec<Vec<(perch_agent::Back
     let entry = |m: &String| (crate::ask::backend_for(agent, m), m.clone());
     let claude: Vec<_> = agent.models.iter().map(entry).collect();
     let codex: Vec<_> = agent.codex_models().iter().map(entry).collect();
-    [claude, codex].into_iter().filter(|g| !g.is_empty()).collect()
+    [claude, codex]
+        .into_iter()
+        .filter(|g| !g.is_empty())
+        .collect()
 }
 
 /// The effort a model keeps when the one chosen is not among those it
 /// takes: the highest it does take, so a reader who asked for Ultra of a
 /// model without it gets Max and sees so, rather than Codex quietly
 /// running Max under the name Ultra.
-fn nearest_effort(agent: &perch_github::AgentConfig, model: &str, wanted: perch_agent::Effort) -> perch_agent::Effort {
+fn nearest_effort(
+    agent: &perch_github::AgentConfig,
+    model: &str,
+    wanted: perch_agent::Effort,
+) -> perch_agent::Effort {
     if agent.effort_supported(model, wanted.name()) {
         return wanted;
     }
@@ -593,22 +669,33 @@ fn nearest_effort(agent: &perch_github::AgentConfig, model: &str, wanted: perch_
 fn effort_picker(app: AppState, state: ReviewState) -> impl IntoView {
     use floem::menu::Menu;
 
-    let current = move || state.composer.with(|c| c.as_ref().map(|c| c.effort.label().to_string()).unwrap_or_default());
+    let current = move || {
+        state.composer.with(|c| {
+            c.as_ref()
+                .map(|c| c.effort.label().to_string())
+                .unwrap_or_default()
+        })
+    };
     menu_button(current, move || {
-        let (selected, model) =
-            state.composer.get_untracked().map(|c| (c.effort, c.model)).unwrap_or_default();
+        let (selected, model) = state
+            .composer
+            .get_untracked()
+            .map(|c| (c.effort, c.model))
+            .unwrap_or_default();
         let agent = app.agent.get_untracked();
         let mut menu = Menu::new();
         for effort in perch_agent::Effort::ALL {
             let takes = agent.effort_supported(&model, effort.name());
             menu = menu.item(effort.label(), move |item| {
-                item.checked(effort == selected).enabled(takes).action(move || {
-                    state.composer.update(|c| {
-                        if let Some(c) = c {
-                            c.effort = effort;
-                        }
+                item.checked(effort == selected)
+                    .enabled(takes)
+                    .action(move || {
+                        state.composer.update(|c| {
+                            if let Some(c) = c {
+                                c.effort = effort;
+                            }
+                        })
                     })
-                })
             });
         }
         menu
@@ -616,7 +703,10 @@ fn effort_picker(app: AppState, state: ReviewState) -> impl IntoView {
 }
 
 /// A small pop-up button, like the toolbar's, sized for the composer.
-fn menu_button(label: impl Fn() -> String + 'static, menu: impl Fn() -> floem::menu::Menu + 'static) -> impl IntoView {
+fn menu_button(
+    label: impl Fn() -> String + 'static,
+    menu: impl Fn() -> floem::menu::Menu + 'static,
+) -> impl IntoView {
     Stack::horizontal((
         Label::derived(label).style(|s| {
             s.font_size(theme::TEXT_BADGE)
@@ -639,7 +729,10 @@ fn menu_button(label: impl Fn() -> String + 'static, menu: impl Fn() -> floem::m
             .border_color(theme::BORDER)
             .border_radius(theme::RADIUS)
             .selectable(false)
-            .hover(|s| s.background(theme::CANVAS_SUBTLE).cursor(CursorStyle::Pointer))
+            .hover(|s| {
+                s.background(theme::CANVAS_SUBTLE)
+                    .cursor(CursorStyle::Pointer)
+            })
     })
 }
 
@@ -700,7 +793,15 @@ pub fn thread_card(
             if collapsed {
                 collapsed_row(app, state, open_thread.clone()).into_any()
             } else {
-                open_card(app, state, open_backend.clone(), open_file.clone(), open_thread.clone(), face).into_any()
+                open_card(
+                    app,
+                    state,
+                    open_backend.clone(),
+                    open_file.clone(),
+                    open_thread.clone(),
+                    face,
+                )
+                .into_any()
             }
         },
     )
@@ -715,7 +816,9 @@ pub fn thread_card(
                 .background(theme::CANVAS_SUBTLE)
                 .border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
                 .border_radius(theme::RADIUS_LG)
-                .apply_if(collapsed.get(), |s| s.height(theme::CODE_LINE_HEIGHT as f64)),
+                .apply_if(collapsed.get(), |s| {
+                    s.height(theme::CODE_LINE_HEIGHT as f64)
+                }),
             ThreadFace::Column | ThreadFace::Card => s
                 .width_full()
                 .background(theme::CANVAS)
@@ -744,7 +847,12 @@ pub fn thread_card(
 /// for the flash's length, and `scroll_to` is scrolled to first when
 /// there is one. The first run only subscribes: a card built after a
 /// click must not take the click for its own.
-pub(crate) fn wire_flash(state: ReviewState, card_id: CardId, flashing: RwSignal<bool>, scroll_to: Option<floem::ViewId>) {
+pub(crate) fn wire_flash(
+    state: ReviewState,
+    card_id: CardId,
+    flashing: RwSignal<bool>,
+    scroll_to: Option<floem::ViewId>,
+) {
     Effect::new(move |first: Option<()>| {
         let focused = state.focus_card.with(|f| f.as_ref() == Some(&card_id));
         if first.is_none() || !focused {
@@ -754,9 +862,12 @@ pub(crate) fn wire_flash(state: ReviewState, card_id: CardId, flashing: RwSignal
             view_id.scroll_to(None);
         }
         flashing.set(true);
-        floem::action::exec_after(std::time::Duration::from_millis(theme::CARD_FLASH_MILLIS), move |_| {
-            flashing.set(false);
-        });
+        floem::action::exec_after(
+            std::time::Duration::from_millis(theme::CARD_FLASH_MILLIS),
+            move |_| {
+                flashing.set(false);
+            },
+        );
     });
 }
 
@@ -775,9 +886,17 @@ fn open_card(
     let first_row = match face {
         ThreadFace::Inline => {
             let menu = thread_menu(state, thread.id.clone(), theme::THREAD_MENU).into_any();
-            chevron_row(state, CardId::Thread(thread.id.clone()), thread.outdated, menu).into_any()
+            chevron_row(
+                state,
+                CardId::Thread(thread.id.clone()),
+                thread.outdated,
+                menu,
+            )
+            .into_any()
         }
-        ThreadFace::Column | ThreadFace::Card => anchor_line(state, open_file, thread.clone()).into_any(),
+        ThreadFace::Column | ThreadFace::Card => {
+            anchor_line(state, open_file, thread.clone()).into_any()
+        }
     };
     let messages = messages_view(app, state, backend.clone(), thread.id.clone(), face);
     let messages = match face {
@@ -786,12 +905,17 @@ fn open_card(
     };
     Stack::vertical((
         first_row.style(|s| s.flex_shrink(0.0_f32)),
-        delete_confirmation(state, backend.clone(), thread.id.clone()).style(|s| s.flex_shrink(0.0_f32)),
+        delete_confirmation(state, backend.clone(), thread.id.clone())
+            .style(|s| s.flex_shrink(0.0_f32)),
         messages,
         follow_up(app, state, backend, thread.id.clone(), face).style(|s| s.flex_shrink(0.0_f32)),
     ))
     .style(move |s| {
-        let base = s.flex_col().width_full().padding(theme::THREAD_PADDING).gap(theme::THREAD_GAP);
+        let base = s
+            .flex_col()
+            .width_full()
+            .padding(theme::THREAD_PADDING)
+            .gap(theme::THREAD_GAP);
         match face {
             ThreadFace::Inline => base.max_height(inline_card_max_height()),
             ThreadFace::Column | ThreadFace::Card => base,
@@ -802,7 +926,9 @@ fn open_card(
 /// How tall a card in the code may be: its rows at the cap, less the
 /// inset inside its first and last rows and its border.
 pub(crate) fn inline_card_max_height() -> f64 {
-    crate::review::doc::CARD_MAX_ROWS as f64 * theme::CODE_LINE_HEIGHT as f64 - 2.0 * theme::CARD_INSET - 2.0
+    crate::review::doc::CARD_MAX_ROWS as f64 * theme::CODE_LINE_HEIGHT as f64
+        - 2.0 * theme::CARD_INSET
+        - 2.0
 }
 
 /// The scroll a card's messages sit in, for the cap. floem keeps the
@@ -824,7 +950,12 @@ pub(crate) fn card_scroll(s: floem::style::Style) -> floem::style::Style {
 /// end whatever the card puts there, the `...` menu on a thread of the
 /// reader's own. The row is as tall as that menu whether or not it holds
 /// one, so the chevron sits at one height on every card.
-pub(crate) fn chevron_row(state: ReviewState, card_id: CardId, outdated: bool, trailing: floem::AnyView) -> impl IntoView {
+pub(crate) fn chevron_row(
+    state: ReviewState,
+    card_id: CardId,
+    outdated: bool,
+    trailing: floem::AnyView,
+) -> impl IntoView {
     Stack::horizontal((
         chevron(state, card_id, true),
         outdated_pill(outdated),
@@ -840,7 +971,9 @@ pub(crate) fn chevron_row(state: ReviewState, card_id: CardId, outdated: bool, t
 fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
     let first = thread.messages.first();
     let author = first.map(|m| m.author.clone()).unwrap_or(Author::User);
-    let line = first.map(|m| crate::review::timeline::first_line(&m.body)).unwrap_or_default();
+    let line = first
+        .map(|m| crate::review::timeline::first_line(&m.body))
+        .unwrap_or_default();
     // Set off from the pill before it as the pills are from what is
     // before them: the pill's fill and the menu's hover fill are one
     // colour, and would touch.
@@ -895,14 +1028,24 @@ pub(crate) fn collapsed_card_row(
         outdated_pill(outdated),
         trailing,
     ))
-    .style(|s| s.items_center().width_full().height_full().padding_horiz(theme::COLLAPSED_CARD_PADDING))
+    .style(|s| {
+        s.items_center()
+            .width_full()
+            .height_full()
+            .padding_horiz(theme::COLLAPSED_CARD_PADDING)
+    })
 }
 
 /// Who wrote a message, as a collapsed card names them: the reader by
 /// their login once GitHub has said it, the agent by its model.
 fn author_name(app: AppState, author: &Author) -> String {
     match author {
-        Author::User => app.viewer.get().map(|(login, _)| login).filter(|l| !l.is_empty()).unwrap_or_else(|| "You".into()),
+        Author::User => app
+            .viewer
+            .get()
+            .map(|(login, _)| login)
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| "You".into()),
         Author::Agent { model, .. } => model_label(model),
         Author::GitHubUser(login) => login.clone(),
     }
@@ -937,14 +1080,26 @@ fn more_pill(more: usize) -> impl IntoView {
 /// slot the size of the gutter's controls. Click toggles the card.
 fn chevron(state: ReviewState, card_id: CardId, open: bool) -> impl IntoView {
     let hovered = RwSignal::new(false);
-    let color = move || if hovered.get() { theme::ACCENT } else { theme::FG_SUBTLE };
+    let color = move || {
+        if hovered.get() {
+            theme::ACCENT
+        } else {
+            theme::FG_SUBTLE
+        }
+    };
     Container::new(
-        crate::ui::widgets::icon_in(move || crate::icons::sidebar_icon(SidebarIcon::ChevronRight, color()), color).style(
-            move |s| {
-                let base = s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH);
-                if open { base.rotate(floem::style::Angle::QUARTER_TURN) } else { base }
-            },
-        ),
+        crate::ui::widgets::icon_in(
+            move || crate::icons::sidebar_icon(SidebarIcon::ChevronRight, color()),
+            color,
+        )
+        .style(move |s| {
+            let base = s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH);
+            if open {
+                base.rotate(floem::style::Angle::QUARTER_TURN)
+            } else {
+                base
+            }
+        }),
     )
     .on_event_stop(el::Click, move |_, _| state.toggle_card(&card_id))
     .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
@@ -962,22 +1117,36 @@ fn chevron(state: ReviewState, card_id: CardId, open: bool) -> impl IntoView {
 
 /// `src/x.rs:41–58`, clickable, with Outdated and the `...` menu.
 fn anchor_line(state: ReviewState, open_file: OpenFile, thread: CommentThread) -> impl IntoView {
-    let label = thread.anchor.as_ref().map(|a| a.label()).unwrap_or_else(|| "Worktree".to_string());
+    let label = thread
+        .anchor
+        .as_ref()
+        .map(|a| a.label())
+        .unwrap_or_else(|| "Worktree".to_string());
     let anchor = thread.anchor.clone();
     let delete_id = thread.id.clone();
     let has_anchor = anchor.is_some();
 
     Stack::horizontal((
         sidebar_glyph(
-            if has_anchor { SidebarIcon::Thread } else { SidebarIcon::Branch },
-            if thread.outdated { theme::FG_SUBTLE } else { theme::ACCENT },
+            if has_anchor {
+                SidebarIcon::Thread
+            } else {
+                SidebarIcon::Branch
+            },
+            if thread.outdated {
+                theme::FG_SUBTLE
+            } else {
+                theme::ACCENT
+            },
         )
         .style(|s| s.size(13.0, 13.0).margin_right(6.0).flex_shrink(0.0_f32)),
         Label::derived(move || label.clone())
             .on_event_stop(el::Click, move |_, _| {
                 if let Some(a) = &anchor {
                     open_file(&a.path);
-                    state.jump_to_line.set(Some(a.start_line.saturating_sub(1) as usize));
+                    state
+                        .jump_to_line
+                        .set(Some(a.start_line.saturating_sub(1) as usize));
                 }
             })
             .style(move |s| {
@@ -1016,8 +1185,16 @@ fn group_heading(text: &'static str) -> impl IntoView {
 
 /// "Delete this thread?" with Delete and Cancel, under the thread that
 /// asked, on a card or in the column alike. Nothing else deletes.
-pub fn delete_confirmation(state: ReviewState, backend: Rc<Backend>, thread_id: String) -> impl IntoView {
-    let asking = Memo::new(move |_| state.confirm_thread.with(|c| c.as_deref() == Some(thread_id.as_str())));
+pub fn delete_confirmation(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread_id: String,
+) -> impl IntoView {
+    let asking = Memo::new(move |_| {
+        state
+            .confirm_thread
+            .with(|c| c.as_deref() == Some(thread_id.as_str()))
+    });
     dyn_container(
         move || asking.get(),
         move |asking| {
@@ -1027,18 +1204,38 @@ pub fn delete_confirmation(state: ReviewState, backend: Rc<Backend>, thread_id: 
             let backend = backend.clone();
             Stack::vertical((
                 Label::derived(|| "Delete this thread?".to_string()).style(|s| {
-                    s.font_size(theme::TEXT_META).font_weight(FontWeight::SEMI_BOLD).color(theme::FG).selectable(false)
+                    s.font_size(theme::TEXT_META)
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .color(theme::FG)
+                        .selectable(false)
                 }),
-                Label::derived(|| "The question, its answers and the anchor go. Nothing on GitHub is touched.".to_string())
-                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).text_wrap().width_full().margin_top(2.0)),
+                Label::derived(|| {
+                    "The question, its answers and the anchor go. Nothing on GitHub is touched."
+                        .to_string()
+                })
+                .style(|s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .color(theme::FG_MUTED)
+                        .text_wrap()
+                        .width_full()
+                        .margin_top(2.0)
+                }),
                 Stack::horizontal((
-                    text_button(|| "Delete".to_string(), SidebarIcon::Trash, move || {
-                        if let Some(id) = state.confirm_thread.get_untracked() {
-                            backend.delete_comment_thread(&id);
-                        }
-                        state.confirm_thread.set(None);
-                    }),
-                    text_button(|| "Cancel".to_string(), SidebarIcon::Close, move || state.confirm_thread.set(None)),
+                    text_button(
+                        || "Delete".to_string(),
+                        SidebarIcon::Trash,
+                        move || {
+                            if let Some(id) = state.confirm_thread.get_untracked() {
+                                backend.delete_comment_thread(&id);
+                            }
+                            state.confirm_thread.set(None);
+                        },
+                    ),
+                    text_button(
+                        || "Cancel".to_string(),
+                        SidebarIcon::Close,
+                        move || state.confirm_thread.set(None),
+                    ),
                 ))
                 .style(|s| s.gap(6.0).margin_top(8.0)),
             ))
@@ -1102,15 +1299,30 @@ pub fn messages_view(
     let list_id = thread_id.clone();
     dyn_stack(
         move || {
-            state
-                .comment_threads
-                .with(|t| t.iter().find(|t| t.id == list_id).map(|t| t.messages.clone()).unwrap_or_default())
+            state.comment_threads.with(|t| {
+                t.iter()
+                    .find(|t| t.id == list_id)
+                    .map(|t| t.messages.clone())
+                    .unwrap_or_default()
+            })
         },
-        |m| (m.id.clone(), m.body.len(), m.run.as_ref().map(|r| (r.status.name(), r.steps.len(), r.error.clone()))),
+        |m| {
+            (
+                m.id.clone(),
+                m.body.len(),
+                m.run
+                    .as_ref()
+                    .map(|r| (r.status.name(), r.steps.len(), r.error.clone())),
+            )
+        },
         move |m| {
-            let thread = state.comment_threads.with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
+            let thread = state
+                .comment_threads
+                .with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
             match thread {
-                Some(thread) => message_view(app, state, backend.clone(), thread, m, face).into_any(),
+                Some(thread) => {
+                    message_view(app, state, backend.clone(), thread, m, face).into_any()
+                }
                 None => Empty::new().into_any(),
             }
         },
@@ -1139,15 +1351,19 @@ pub fn follow_up(
     // is absent while the agent works and has to appear when it is done,
     // which only the thread list says.
     let running = Memo::new(move |_| {
-        state
-            .comment_threads
-            .with(|t| t.iter().find(|t| t.id == running_thread).is_some_and(|t| t.running_run().is_some()))
+        state.comment_threads.with(|t| {
+            t.iter()
+                .find(|t| t.id == running_thread)
+                .is_some_and(|t| t.running_run().is_some())
+        })
     });
     dyn_container(
         move || {
-            let composer = state
-                .composer
-                .with(|c| c.as_ref().filter(|c| c.thread_id.as_deref() == Some(composer_thread.as_str())).cloned());
+            let composer = state.composer.with(|c| {
+                c.as_ref()
+                    .filter(|c| c.thread_id.as_deref() == Some(composer_thread.as_str()))
+                    .cloned()
+            });
             let drawn_here = match face {
                 ThreadFace::Inline => state.follow_up_is_inline(&composer_thread),
                 ThreadFace::Column => !state.follow_up_is_inline(&composer_thread),
@@ -1158,9 +1374,13 @@ pub fn follow_up(
         move |(composer, _)| match composer {
             // Under a thread the composer is a child of this container,
             // not a card placed by its edges, and takes the width here.
-            Some(c) => composer_view(app, state, backend.clone(), c, face).style(|s| s.width_full()).into_any(),
+            Some(c) => composer_view(app, state, backend.clone(), c, face)
+                .style(|s| s.width_full())
+                .into_any(),
             None => {
-                let thread = state.comment_threads.with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
+                let thread = state
+                    .comment_threads
+                    .with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
                 match thread {
                     Some(thread) => reply_line(app, state, thread, face).into_any(),
                     None => Empty::new().into_any(),
@@ -1188,7 +1408,10 @@ pub fn message_view(
     // A finished run sits on the answer, and reads in the order it went:
     // what the agent did, then what it said, then what it cost. While it
     // runs, or when it failed, the run sits under the question whole.
-    let finished = message.run.as_ref().is_some_and(|r| r.status == RunStatus::Finished);
+    let finished = message
+        .run
+        .as_ref()
+        .is_some_and(|r| r.status == RunStatus::Completed);
     let message = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
             run_surface(steps_view(state, run.clone()), face),
@@ -1232,9 +1455,25 @@ pub fn run_block(
     run: RunRecord,
     face: ThreadFace,
 ) -> impl IntoView {
+    let partial = run
+        .final_result
+        .clone()
+        .filter(|text| run.status != RunStatus::Completed && !text.trim().is_empty());
+    let response = match partial {
+        Some(text) => Container::new(crate::review::markdown::render(&text))
+            .style(|s| {
+                s.width_full()
+                    .padding_top(7.0)
+                    .border_top(1.0)
+                    .border_color(theme::BORDER_MUTED)
+            })
+            .into_any(),
+        None => Empty::new().into_any(),
+    };
     run_surface(
         Stack::vertical((
             steps_view(state, run.clone()),
+            response,
             run_footer(app, state, backend, thread, question, run, face),
         ))
         .style(|s| s.flex_col().width_full().gap(6.0)),
@@ -1257,41 +1496,62 @@ fn run_surface(inner: impl IntoView + 'static, face: ThreadFace) -> impl IntoVie
 /// The footer under a run: Stop while it goes, cost and time once it is
 /// done, the error and Retry when it is not.
 fn run_footer(
-    app: AppState,
-    state: ReviewState,
+    _app: AppState,
+    _state: ReviewState,
     backend: Rc<Backend>,
-    thread: CommentThread,
-    question: String,
+    _thread: CommentThread,
+    _question: String,
     run: RunRecord,
     face: ThreadFace,
 ) -> floem::AnyView {
     let cancel_id = run.id.clone();
     match run.status {
-        RunStatus::Running => text_button(|| "Stop".to_string(), SidebarIcon::Stop, move || {
-            backend.cancel_run(&cancel_id)
-        })
+        RunStatus::Queued => text_button(
+            || "Cancel".to_string(),
+            SidebarIcon::Stop,
+            move || backend.cancel_run(&cancel_id),
+        )
         .into_any(),
-        RunStatus::Finished => Label::derived(move || {
+        RunStatus::Starting | RunStatus::Running => text_button(
+            || "Stop".to_string(),
+            SidebarIcon::Stop,
+            move || backend.cancel_run(&cancel_id),
+        )
+        .into_any(),
+        RunStatus::Stopping => Label::new("Stopping…")
+            .style(|s| s.font_size(theme::TEXT_SECTION).color(theme::FG_SUBTLE))
+            .into_any(),
+        RunStatus::Completed => Label::derived(move || {
             let secs = run.duration_ms.unwrap_or(0) as f64 / 1000.0;
-            let cost = run.cost_usd.map(|c| format!(" \u{00b7} ${c:.2}")).unwrap_or_default();
-            let effort = perch_agent::Effort::parse(&run.effort).map(|e| e.label().to_string()).unwrap_or_else(|| run.effort.clone());
+            let cost = run
+                .cost_usd
+                .map(|c| format!(" \u{00b7} ${c:.2}"))
+                .unwrap_or_default();
+            let effort = perch_agent::Effort::parse(&run.effort)
+                .map(|e| e.label().to_string())
+                .unwrap_or_else(|| run.effort.clone());
             // A Conversation card's byline already names the model and the
             // effort; the column's card and the one in the code have no
             // byline, so the footer says.
             match face {
                 ThreadFace::Column | ThreadFace::Inline => {
-                    format!("{} \u{00b7} {effort} \u{00b7} {secs:.0}s{cost}", model_label(&run.model))
+                    format!(
+                        "{} \u{00b7} {effort} \u{00b7} {secs:.0}s{cost}",
+                        model_label(&run.model)
+                    )
                 }
                 ThreadFace::Card => format!("{secs:.0}s{cost}"),
             }
         })
-        .style(|s| s.font_size(theme::TEXT_SECTION).color(theme::FG_SUBTLE).selectable(false))
+        .style(|s| {
+            s.font_size(theme::TEXT_SECTION)
+                .color(theme::FG_SUBTLE)
+                .selectable(false)
+        })
         .into_any(),
-        RunStatus::Stopped | RunStatus::Failed => {
+        RunStatus::Stopped | RunStatus::Failed | RunStatus::Interrupted => {
             let error = run.error.clone().unwrap_or_else(|| "Failed".to_string());
-            let thread_id = thread.id.clone();
-            let anchor = thread.anchor.clone();
-            let is_first = thread.messages.first().is_some_and(|m| m.run.as_ref().is_some_and(|r| r.id == run.id) || m.body == question);
+            let retry_id = run.id.clone();
             Stack::horizontal((
                 Label::derived(move || error.clone()).style(|s| {
                     s.font_size(theme::TEXT_BADGE)
@@ -1300,12 +1560,13 @@ fn run_footer(
                         .min_width(0.0)
                         .flex_grow(1.0_f32)
                 }),
-                text_button(|| "Retry".to_string(), SidebarIcon::Refresh, move || {
-                    // Retry a thread's first question fresh; a follow-up in
-                    // its thread.
-                    let thread_id = if is_first && thread.messages.len() <= 1 { None } else { Some(thread_id.clone()) };
-                    state.open_composer(thread_id, anchor.clone(), question.clone(), defaults(app));
-                }),
+                text_button(
+                    || "Retry".to_string(),
+                    SidebarIcon::Refresh,
+                    move || {
+                        backend.retry_run(&retry_id);
+                    },
+                ),
             ))
             .style(|s| s.items_center().width_full().gap(8.0))
             .into_any()
@@ -1316,7 +1577,7 @@ fn run_footer(
 /// The step lines, folded to "Read 4 files, ran 2 commands" until the
 /// line is clicked, and open while the run goes.
 fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
-    let running = run.status == RunStatus::Running;
+    let running = run.status.is_active();
     let run_id = run.id.clone();
     let expanded = move || running || state.expanded_runs.with(|e| e.contains(&run_id));
     let chevron_id = run.id.clone();
@@ -1330,12 +1591,24 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
             Stack::horizontal((
                 sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE).style(move |s| {
                     let base = s.size(10.0, 10.0).margin_right(5.0);
-                    if expanded_chevron() { base.rotate(floem::style::Angle::QUARTER_TURN) } else { base }
+                    if expanded_chevron() {
+                        base.rotate(floem::style::Angle::QUARTER_TURN)
+                    } else {
+                        base
+                    }
                 }),
                 Label::derived(move || {
-                    if running && steps.is_empty() { "Working…".to_string() } else { summary.clone() }
+                    if running && steps.is_empty() {
+                        "Working…".to_string()
+                    } else {
+                        summary.clone()
+                    }
                 })
-                .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).selectable(false)),
+                .style(|s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .color(theme::FG_MUTED)
+                        .selectable(false)
+                }),
             ))
             .style(|s| s.items_center()),
         )
@@ -1359,7 +1632,11 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
                     Label::derived(move || step.summary.clone()).style(move |s| {
                         s.font_size(theme::TEXT_BADGE)
                             .font_family(theme::CODE_FONT_STACK.to_string())
-                            .color(if step.ok { theme::FG_MUTED } else { theme::CLOSED })
+                            .color(if step.ok {
+                                theme::FG_MUTED
+                            } else {
+                                theme::CLOSED
+                            })
                             .text_ellipsis()
                             .width_full()
                     })
@@ -1374,26 +1651,44 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
 
 /// "Read 3 files, ran 1 command", from the step lines.
 pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
-    let count = |prefix: &str| steps.iter().filter(|s| s.summary.starts_with(prefix)).count();
+    let count = |prefix: &str| {
+        steps
+            .iter()
+            .filter(|s| s.summary.starts_with(prefix))
+            .count()
+    };
     let mut parts = Vec::new();
     let reads = count("Read ");
     let runs = count("Ran ");
     let searches = count("Searched ") + count("Listed ");
     let denied = steps.iter().filter(|s| !s.ok).count();
     if reads > 0 {
-        parts.push(format!("read {reads} {}", if reads == 1 { "file" } else { "files" }));
+        parts.push(format!(
+            "read {reads} {}",
+            if reads == 1 { "file" } else { "files" }
+        ));
     }
     if runs > 0 {
-        parts.push(format!("ran {runs} {}", if runs == 1 { "command" } else { "commands" }));
+        parts.push(format!(
+            "ran {runs} {}",
+            if runs == 1 { "command" } else { "commands" }
+        ));
     }
     if searches > 0 {
-        parts.push(format!("{searches} {}", if searches == 1 { "search" } else { "searches" }));
+        parts.push(format!(
+            "{searches} {}",
+            if searches == 1 { "search" } else { "searches" }
+        ));
     }
     if denied > 0 {
         parts.push(format!("{denied} not allowed"));
     }
     if parts.is_empty() {
-        return if steps.is_empty() { "No steps".to_string() } else { format!("{} steps", steps.len()) };
+        return if steps.is_empty() {
+            "No steps".to_string()
+        } else {
+            format!("{} steps", steps.len())
+        };
     }
     let mut text = parts.join(", ");
     if let Some(first) = text.get_mut(0..1) {
@@ -1406,7 +1701,12 @@ pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
 /// thread whose follow-up is drawn inside its card in the code, the click
 /// points the reader at that card rather than opening a second box: the
 /// card is opened if collapsed, scrolled to and flashed.
-pub fn reply_line(app: AppState, state: ReviewState, thread: CommentThread, face: ThreadFace) -> impl IntoView {
+pub fn reply_line(
+    app: AppState,
+    state: ReviewState,
+    thread: CommentThread,
+    face: ThreadFace,
+) -> impl IntoView {
     let running = thread.running_run().is_some();
     if running {
         return Empty::new().into_any();
@@ -1415,10 +1715,17 @@ pub fn reply_line(app: AppState, state: ReviewState, thread: CommentThread, face
     let anchor = thread.anchor.clone();
     Label::derived(|| "Follow up…".to_string())
         .on_event_stop(el::Click, move |_, _| {
-            let already =
-                state.composer.with_untracked(|c| c.as_ref().is_some_and(|c| c.thread_id.as_deref() == Some(id.as_str())));
+            let already = state.composer.with_untracked(|c| {
+                c.as_ref()
+                    .is_some_and(|c| c.thread_id.as_deref() == Some(id.as_str()))
+            });
             if !already {
-                state.open_composer(Some(id.clone()), anchor.clone(), String::new(), defaults(app));
+                state.open_composer(
+                    Some(id.clone()),
+                    anchor.clone(),
+                    String::new(),
+                    defaults(app),
+                );
             }
             if face == ThreadFace::Column && Effect::untrack(|| state.follow_up_is_inline(&id)) {
                 let card = CardId::Thread(id.clone());
@@ -1506,7 +1813,10 @@ mod tests {
     use perch_github::RunStep;
 
     fn step(summary: &str, ok: bool) -> RunStep {
-        RunStep { summary: summary.into(), ok }
+        RunStep {
+            summary: summary.into(),
+            ok,
+        }
     }
 
     #[test]
@@ -1517,7 +1827,10 @@ mod tests {
             step("Ran git log", true),
             step("Asked to edit a.rs: not allowed", false),
         ];
-        assert_eq!(steps_summary(&steps), "Read 2 files, ran 1 command, 1 not allowed");
+        assert_eq!(
+            steps_summary(&steps),
+            "Read 2 files, ran 1 command, 1 not allowed"
+        );
         assert_eq!(steps_summary(&[]), "No steps");
         assert_eq!(steps_summary(&[step("Read a.rs", true)]), "Read 1 file");
     }
@@ -1532,30 +1845,69 @@ mod tests {
     #[test]
     fn a_fresh_composer_starts_on_a_model_that_is_offered() {
         use perch_agent::{Backend, Effort};
-        let mut agent = perch_github::AgentConfig { model: "sonnet".into(), effort: "ultra".into(), ..Default::default() };
-        assert_eq!(default_choice(&agent), (Backend::ClaudeCode, "sonnet".to_string(), Effort::Ultra));
+        let mut agent = perch_github::AgentConfig {
+            model: "sonnet".into(),
+            effort: "ultra".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            default_choice(&agent),
+            (Backend::ClaudeCode, "sonnet".to_string(), Effort::Ultra)
+        );
 
         // Claude Code is not installed: its aliases are gone, and Codex is.
         agent.models.clear();
         agent.codex.models = vec!["gpt-5.5".into(), "gpt-6-astra".into()];
-        agent.codex.efforts.insert("gpt-5.5".into(), ["low", "xhigh"].map(String::from).to_vec());
-        assert_eq!(default_choice(&agent), (Backend::Codex, "gpt-5.5".to_string(), Effort::XHigh));
+        agent.codex.efforts.insert(
+            "gpt-5.5".into(),
+            ["low", "xhigh"].map(String::from).to_vec(),
+        );
+        assert_eq!(
+            default_choice(&agent),
+            (Backend::Codex, "gpt-5.5".to_string(), Effort::XHigh)
+        );
 
         // Nothing at all: config's choice stands, and the run will say so.
         agent.codex.models.clear();
-        assert_eq!(default_choice(&agent), (Backend::ClaudeCode, "sonnet".to_string(), Effort::Ultra));
+        assert_eq!(
+            default_choice(&agent),
+            (Backend::ClaudeCode, "sonnet".to_string(), Effort::Ultra)
+        );
     }
 
     #[test]
     fn picking_a_model_without_the_effort_drops_to_the_highest_it_takes() {
         use perch_agent::Effort;
         let mut agent = perch_github::AgentConfig::default();
-        agent.codex.efforts.insert("gpt-5.5".into(), ["low", "medium", "high", "xhigh"].map(String::from).to_vec());
-        agent.codex.efforts.insert("odd".into(), vec!["medium".into()]);
-        assert_eq!(nearest_effort(&agent, "gpt-5.5", Effort::Ultra), Effort::XHigh);
-        assert_eq!(nearest_effort(&agent, "gpt-5.5", Effort::High), Effort::High, "a level it takes is kept");
-        assert_eq!(nearest_effort(&agent, "odd", Effort::Low), Effort::Medium, "even upward, to the one it has");
-        assert_eq!(nearest_effort(&agent, "sonnet", Effort::Ultra), Effort::Ultra, "no catalog, no doubt");
+        agent.codex.efforts.insert(
+            "gpt-5.5".into(),
+            ["low", "medium", "high", "xhigh"]
+                .map(String::from)
+                .to_vec(),
+        );
+        agent
+            .codex
+            .efforts
+            .insert("odd".into(), vec!["medium".into()]);
+        assert_eq!(
+            nearest_effort(&agent, "gpt-5.5", Effort::Ultra),
+            Effort::XHigh
+        );
+        assert_eq!(
+            nearest_effort(&agent, "gpt-5.5", Effort::High),
+            Effort::High,
+            "a level it takes is kept"
+        );
+        assert_eq!(
+            nearest_effort(&agent, "odd", Effort::Low),
+            Effort::Medium,
+            "even upward, to the one it has"
+        );
+        assert_eq!(
+            nearest_effort(&agent, "sonnet", Effort::Ultra),
+            Effort::Ultra,
+            "no catalog, no doubt"
+        );
     }
 
     #[test]
@@ -1563,28 +1915,49 @@ mod tests {
         use perch_agent::Backend;
         let agent = perch_github::AgentConfig {
             models: vec!["opus".into(), "sonnet".into()],
-            codex: perch_github::CodexConfig { binary: "codex".into(), models: vec!["gpt-5.6-sol".into()], ..Default::default() },
+            codex: perch_github::CodexConfig {
+                binary: "codex".into(),
+                models: vec!["gpt-5.6-sol".into()],
+                ..Default::default()
+            },
             ..perch_github::AgentConfig::default()
         };
         assert_eq!(
             model_groups(&agent),
             vec![
-                vec![(Backend::ClaudeCode, "opus".to_string()), (Backend::ClaudeCode, "sonnet".to_string())],
+                vec![
+                    (Backend::ClaudeCode, "opus".to_string()),
+                    (Backend::ClaudeCode, "sonnet".to_string())
+                ],
                 vec![(Backend::Codex, "gpt-5.6-sol".to_string())],
             ]
         );
 
-        let claude_only = perch_github::AgentConfig { models: vec!["sonnet".into()], ..perch_github::AgentConfig::default() };
-        assert_eq!(model_groups(&claude_only), vec![vec![(Backend::ClaudeCode, "sonnet".to_string())]], "no separator without Codex");
+        let claude_only = perch_github::AgentConfig {
+            models: vec!["sonnet".into()],
+            ..perch_github::AgentConfig::default()
+        };
+        assert_eq!(
+            model_groups(&claude_only),
+            vec![vec![(Backend::ClaudeCode, "sonnet".to_string())]],
+            "no separator without Codex"
+        );
 
         let shared = perch_github::AgentConfig {
             models: vec!["shared".into()],
-            codex: perch_github::CodexConfig { binary: "codex".into(), models: vec!["shared".into()], ..Default::default() },
+            codex: perch_github::CodexConfig {
+                binary: "codex".into(),
+                models: vec!["shared".into()],
+                ..Default::default()
+            },
             ..perch_github::AgentConfig::default()
         };
-        assert_eq!(model_groups(&shared)[1], vec![(Backend::ClaudeCode, "shared".to_string())], "config decides, not the section");
+        assert_eq!(
+            model_groups(&shared)[1],
+            vec![(Backend::ClaudeCode, "shared".to_string())],
+            "config decides, not the section"
+        );
     }
-
 }
 
 /// The column in a headless window, driven by clicks.
@@ -1597,8 +1970,8 @@ mod column {
     use floem::prelude::{Code, KeyboardEvent, Modifiers};
     use floem::reactive::{SignalGet, SignalUpdate};
     use perch_github::{
-        Anchor, Author, CommentMessage, CommentThread, Item, ItemCheckout, ItemSubject, PullRequest,
-        RunRecord, RunStatus, RunStep, Side, ThreadOrigin,
+        Anchor, Author, CommentMessage, CommentThread, Item, ItemCheckout, ItemSubject,
+        PullRequest, RunRecord, RunStatus, RunStep, Side, ThreadOrigin,
     };
 
     use crate::review::model::ReviewState;
@@ -1607,7 +1980,11 @@ mod column {
     fn run(status: RunStatus) -> RunRecord {
         RunRecord {
             id: "r1".into(),
-            thread_id: "t1".into(),
+            owner: perch_github::RunOwner::Discussion {
+                item_id: "wt".into(),
+                thread_id: "t1".into(),
+                request_id: "q1".into(),
+            },
             backend: "claude-code".into(),
             model: "sonnet".into(),
             effort: "medium".into(),
@@ -1616,12 +1993,19 @@ mod column {
             cost_usd: Some(0.03),
             duration_ms: Some(14_000),
             steps: vec![
-                RunStep { summary: "Read src/x.rs".into(), ok: true },
-                RunStep { summary: "Asked to edit src/x.rs".into(), ok: false },
+                RunStep {
+                    summary: "Read src/x.rs".into(),
+                    ok: true,
+                },
+                RunStep {
+                    summary: "Asked to edit src/x.rs".into(),
+                    ok: false,
+                },
             ],
             error: None,
-            started_at: "2026-09-18T10:00:00Z".parse().unwrap(),
+            started_at: Some("2026-09-18T10:00:00Z".parse().unwrap()),
             ended_at: Some("2026-09-18T10:00:14Z".parse().unwrap()),
+            ..RunRecord::default()
         }
     }
 
@@ -1635,7 +2019,7 @@ mod column {
             author,
             body: body.into(),
             created_at,
-            run: Some(run(RunStatus::Finished)),
+            run: Some(run(RunStatus::Completed)),
         };
         CommentThread {
             id: "t1".into(),
@@ -1655,7 +2039,10 @@ mod column {
                 message("m1", Author::User, "why?"),
                 message(
                     "m2",
-                    Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                    Author::Agent {
+                        backend: "claude-code".into(),
+                        model: "sonnet".into(),
+                    },
                     "because\n\n```rust\nfn x() {}\n```\n\n- one\n- two",
                 ),
             ],
@@ -1737,7 +2124,9 @@ mod column {
     /// the review header and the item view's tab strip.
     fn close_button_center() -> (f64, f64) {
         let x = 1400.0 - 8.0 - 13.0;
-        let y = crate::theme::REVIEW_HEADER_HEIGHT + crate::theme::TAB_HEIGHT + crate::theme::TAB_HEIGHT / 2.0;
+        let y = crate::theme::REVIEW_HEADER_HEIGHT
+            + crate::theme::TAB_HEIGHT
+            + crate::theme::TAB_HEIGHT / 2.0;
         (x, y)
     }
 
@@ -1750,7 +2139,10 @@ mod column {
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert!(!state.threads_open.get(), "click at ({x}, {y}) over {under:?} did not close the column");
+        assert!(
+            !state.threads_open.get(),
+            "click at ({x}, {y}) over {under:?} did not close the column"
+        );
     }
 
     #[test]
@@ -1758,7 +2150,16 @@ mod column {
         let (mut harness, state) = app_harness();
         // The state in the report: an unanchored composer, its box focused.
         state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(None, None, String::new(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
+        state.open_composer(
+            None,
+            None,
+            String::new(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
         harness.rebuild();
         harness.paint();
         assert!(state.composer.get().is_some());
@@ -1767,7 +2168,10 @@ mod column {
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert!(!state.threads_open.get(), "click at ({x}, {y}) over {under:?} did not close the column");
+        assert!(
+            !state.threads_open.get(),
+            "click at ({x}, {y}) over {under:?} did not close the column"
+        );
     }
 
     #[test]
@@ -1836,13 +2240,25 @@ mod column {
     fn escape_in_an_empty_box_closes_the_composer() {
         let (mut harness, state) = app_harness();
         state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(None, None, String::new(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
+        state.open_composer(
+            None,
+            None,
+            String::new(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
         harness.rebuild();
         harness.paint();
         harness.dispatch_event(escape());
         harness.rebuild();
         harness.paint();
-        assert!(state.composer.get().is_none(), "escape did not close the empty composer");
+        assert!(
+            state.composer.get().is_none(),
+            "escape did not close the empty composer"
+        );
         assert!(state.threads_open.get(), "the column stays");
     }
 
@@ -1850,32 +2266,60 @@ mod column {
     fn escape_keeps_a_composer_with_a_question_in_it() {
         let (mut harness, state) = app_harness();
         state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(None, None, "why is this here?".into(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
+        state.open_composer(
+            None,
+            None,
+            "why is this here?".into(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
         harness.rebuild();
         harness.paint();
         harness.dispatch_event(escape());
         harness.rebuild();
         harness.paint();
-        assert!(state.composer.get().is_some(), "escape threw the question away");
+        assert!(
+            state.composer.get().is_some(),
+            "escape threw the question away"
+        );
     }
 
     #[test]
     fn the_composers_close_button_dismisses_it() {
         let (mut harness, state) = app_harness();
         state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(None, None, "half a thought".into(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
+        state.open_composer(
+            None,
+            None,
+            "half a thought".into(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
         harness.rebuild();
         harness.paint();
         // The anchor row is the card's first row; its close button is the
         // last thing on it. Card: 12 margin + 12 padding from the column's
         // right edge; button 22 wide, at the padding's edge.
         let x = 1400.0 - 12.0 - 12.0 - 11.0;
-        let y = crate::theme::REVIEW_HEADER_HEIGHT + 2.0 * crate::theme::TAB_HEIGHT + 12.0 + 12.0 + 11.0;
+        let y = crate::theme::REVIEW_HEADER_HEIGHT
+            + 2.0 * crate::theme::TAB_HEIGHT
+            + 12.0
+            + 12.0
+            + 11.0;
         let under = harness.element_id_at(x, y);
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert!(state.composer.get().is_none(), "click at ({x}, {y}) over {under:?} did not close the composer");
+        assert!(
+            state.composer.get().is_none(),
+            "click at ({x}, {y}) over {under:?} did not close the composer"
+        );
         assert!(state.composer_draft.get().is_empty());
     }
 
@@ -1897,7 +2341,10 @@ mod column {
             harness.paint();
             y -= 6.0;
         }
-        assert!(state.composer.get().and_then(|c| c.thread_id).is_some(), "never hit the follow-up line");
+        assert!(
+            state.composer.get().and_then(|c| c.thread_id).is_some(),
+            "never hit the follow-up line"
+        );
         harness.pointer_move(x, y + 40.0);
         harness.rebuild();
         harness.paint();

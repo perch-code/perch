@@ -12,6 +12,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "io-util", "sync", "rt", "macros", "time"] }
 tracing.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"

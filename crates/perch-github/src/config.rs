@@ -44,6 +44,9 @@ pub struct AgentConfig {
     /// The Claude Code executable. Found on `PATH` unless a path is given here.
     #[serde(default = "default_binary")]
     pub binary: String,
+    /// Filled by startup discovery and copied into durable run provenance.
+    #[serde(skip)]
+    pub binary_version: Option<String>,
     /// What the picker starts on.
     #[serde(default = "default_model")]
     pub model: String,
@@ -53,6 +56,10 @@ pub struct AgentConfig {
     /// The Claude Code models the picker offers.
     #[serde(default = "default_models")]
     pub models: Vec<String>,
+    /// Maximum top-level agent processes. Additional work waits in the
+    /// durable FIFO queue; native subagents remain part of their parent.
+    #[serde(default = "default_max_concurrent_runs")]
+    pub max_concurrent_runs: usize,
     #[serde(default)]
     pub codex: CodexConfig,
 }
@@ -65,6 +72,9 @@ pub struct CodexConfig {
     /// The Codex executable. Found on `PATH` unless a path is given here.
     #[serde(default = "default_codex_binary")]
     pub binary: String,
+    /// Filled by startup discovery and copied into durable run provenance.
+    #[serde(skip)]
+    pub binary_version: Option<String>,
     /// The Codex models the picker offers, after the Claude Code ones.
     /// Empty in the file means ask Codex; empty after that means Codex
     /// is not offered.
@@ -98,14 +108,19 @@ fn default_models() -> Vec<String> {
     // The aliases the CLI resolves to the latest of each tier.
     vec!["fable".into(), "opus".into(), "sonnet".into(), "haiku".into()]
 }
+fn default_max_concurrent_runs() -> usize {
+    4
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             binary: default_binary(),
+            binary_version: None,
             model: default_model(),
             effort: default_effort(),
             models: default_models(),
+            max_concurrent_runs: default_max_concurrent_runs(),
             codex: CodexConfig::default(),
         }
     }
@@ -113,7 +128,12 @@ impl Default for AgentConfig {
 
 impl Default for CodexConfig {
     fn default() -> Self {
-        Self { binary: default_codex_binary(), models: Vec::new(), efforts: BTreeMap::new() }
+        Self {
+            binary: default_codex_binary(),
+            binary_version: None,
+            models: Vec::new(),
+            efforts: BTreeMap::new(),
+        }
     }
 }
 
@@ -131,6 +151,14 @@ impl AgentConfig {
     /// Code's, the same fallback `backend_of` makes.
     pub fn binary_for(&self, backend: &str) -> &str {
         if backend == CODEX { &self.codex.binary } else { &self.binary }
+    }
+
+    pub fn binary_version_for(&self, backend: &str) -> Option<&str> {
+        if backend == CODEX {
+            self.codex.binary_version.as_deref()
+        } else {
+            self.binary_version.as_deref()
+        }
     }
 
     /// What the picker lists after the Claude Code models.
@@ -544,10 +572,15 @@ mod tests {
         assert_eq!(c.agent.binary, "claude");
         assert_eq!(c.agent.model, "sonnet");
         assert_eq!(c.agent.models, vec!["fable", "opus", "sonnet", "haiku"]);
-        let c: Config = toml::from_str("[agent]\nbinary = \"/opt/claude\"\neffort = \"high\"").unwrap();
+        assert_eq!(c.agent.max_concurrent_runs, 4);
+        let c: Config = toml::from_str(
+            "[agent]\nbinary = \"/opt/claude\"\neffort = \"high\"\nmax_concurrent_runs = 7",
+        )
+        .unwrap();
         assert_eq!(c.agent.binary, "/opt/claude");
         assert_eq!(c.agent.effort, "high");
         assert_eq!(c.agent.model, "sonnet");
+        assert_eq!(c.agent.max_concurrent_runs, 7);
     }
 
     #[test]

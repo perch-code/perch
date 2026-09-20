@@ -34,11 +34,7 @@ fn print(id: &str) -> Result<bool, String> {
     if !path.exists() {
         return Err(format!("no cache at {}; run the app once", path.display()));
     }
-    // The same open the app does, reset included, as `--items` does.
-    let (cache, reset) = Cache::open_checked(&path, None).map_err(|e| e.to_string())?;
-    if reset {
-        eprintln!("note: the database was older than this build and has been recreated");
-    }
+    let (cache, _) = Cache::open_with_outcome(&path, None).map_err(|e| e.to_string())?;
     let Some(item) = cache.load_item(id).map_err(|e| e.to_string())? else {
         return Ok(false);
     };

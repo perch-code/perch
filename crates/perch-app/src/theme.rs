@@ -99,6 +99,13 @@ pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
 /// An item row in the sidebar: two lines of text and the glyph beside them.
 pub const ROW_HEIGHT: f64 = 68.0;
 pub const STATUS_HEIGHT: f64 = 34.0;
+/// The app-wide Agents inspector. It overlays the workspace so opening it
+/// never rebuilds or reflows the file the reader is looking at.
+pub const AGENTS_WIDTH: f64 = 408.0;
+pub const AGENTS_MIN_WIDTH: f64 = 336.0;
+pub const AGENTS_MAX_WIDTH: f64 = 620.0;
+pub const AGENTS_HEADER_HEIGHT: f64 = 46.0;
+pub const AGENT_ROW_MIN_HEIGHT: f64 = 88.0;
 /// Room above the rail's first entry, where the traffic lights sit.
 ///
 /// The lights and the scope controls share this strip.

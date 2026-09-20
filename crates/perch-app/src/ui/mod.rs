@@ -1,11 +1,12 @@
 //! Window layout.
 
+pub mod agents;
+pub mod items;
+pub mod notifications;
 pub mod sidebar;
 pub mod status;
 pub mod titlebar;
 pub mod widgets;
-pub mod items;
-pub mod notifications;
 
 use std::rc::Rc;
 
@@ -13,7 +14,7 @@ use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::SignalUpdate;
 use floem::text::FontWeight;
-use floem::views::{Container, Decorators, Label, Stack, dyn_container};
+use floem::views::{dyn_container, Container, Decorators, Label, Stack};
 
 use crate::backend::{Backend, Status};
 use crate::icons::SidebarIcon;
@@ -38,14 +39,15 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let open_item: items::OpenItem = Rc::new({
         let backend = backend.clone();
         move |item: &perch_github::Item| {
+            state.pending_agent_navigation.set(None);
+            state.agent_archived_owner.set(None);
             let message = match &item.subject {
                 _ if item.is_archived() => "Checking out the files",
                 Some(perch_github::ItemSubject::Issue(_)) => "Reading the issue",
                 Some(perch_github::ItemSubject::PullRequest(_)) => "Reading the pull request",
                 None => "Reading the branch",
             };
-            state.begin_review(review, message);
-            state.open_item.set(Some(item.id.clone()));
+            state.begin_item_review(review, message, &item.id);
             if item.is_archived() {
                 backend.restore_item(&item.id);
             } else {
@@ -97,17 +99,26 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 return;
             }
             review.pending_reveals.set(Vec::new());
-            let Some(item_id) = review.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
+            let Some(item_id) = review
+                .item
+                .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+            else {
                 return;
             };
             for write in writes {
                 match write {
-                    RevealWrite::Reveal { path, blob, first, last } => {
-                        backend.reveal(&item_id, &path, &blob, first, last)
-                    }
-                    RevealWrite::Reset { path, blob, first, last } => {
-                        backend.reset_reveals(&item_id, &path, &blob, first, last)
-                    }
+                    RevealWrite::Reveal {
+                        path,
+                        blob,
+                        first,
+                        last,
+                    } => backend.reveal(&item_id, &path, &blob, first, last),
+                    RevealWrite::Reset {
+                        path,
+                        blob,
+                        first,
+                        last,
+                    } => backend.reset_reveals(&item_id, &path, &blob, first, last),
                 }
             }
         });
@@ -140,7 +151,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             // empty state, which on a fresh install with no token is what
             // to do about that.
             dyn_container(
-                move || (review.is_showing(), state.status.with(|s| matches!(s, Status::NoToken { .. }))),
+                move || {
+                    (
+                        review.is_showing(),
+                        state.status.with(|s| matches!(s, Status::NoToken { .. })),
+                    )
+                },
                 move |(open, no_token)| {
                     if open {
                         crate::review::review_view(
@@ -156,7 +172,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         widgets::centered_message(
                             SidebarIcon::Branch,
                             || "Nothing open".to_string(),
-                            || "Pick a pull request, an issue, or a branch from the sidebar.".to_string(),
+                            || {
+                                "Pick a pull request, an issue, or a branch from the sidebar."
+                                    .to_string()
+                            },
                         )
                         .into_any()
                     }
@@ -165,9 +184,15 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full()),
         ))
         .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
-        status::status_bar(state, review, backend),
+        status::status_bar(state, review, backend.clone()),
+        // The Agents inspector overlays the workspace. Keeping it outside the
+        // review's keyed content preserves the open file, scroll position and
+        // composer while app-wide work is inspected.
+        agents::panel(state, review, backend),
+        agents::completion_notice(state, capture_backend.clone()),
         // Over everything, and only while the drawer's edge is being dragged.
         sidebar::resize_cursor_sheet(state),
+        agents::resize_cursor_sheet(state),
     ))
     // The keys the code editor would otherwise keep. The editor stops
     // every key once it has focus, and these are pressed right after
@@ -177,9 +202,26 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     // runs while a text box has the keyboard.
     .on_event_with_config(
         el::KeyDown,
-        floem::context::EventCallbackConfig { phases: floem::context::Phases::CAPTURE_AND_TARGET },
+        floem::context::EventCallbackConfig {
+            phases: floem::context::Phases::CAPTURE_AND_TARGET,
+        },
         move |_, key: &KeyboardEvent| {
             let key_backend = &capture_backend;
+            // Cmd-Shift-A is app-wide, including while the editor or a
+            // composer owns focus. Escape first backs out of details, then
+            // closes the inspector on the next press.
+            if key.code == Code::KeyA && key.modifiers == OS_MOD | Modifiers::SHIFT {
+                agents::toggle(state, key_backend, None);
+                return EventPropagation::Stop;
+            }
+            if key.code == Code::Escape && key.modifiers.is_empty() && state.agents_open.get() {
+                if state.selected_agent_run.with(Option::is_some) {
+                    state.selected_agent_run.set(None);
+                } else {
+                    agents::close(state, key_backend, true);
+                }
+                return EventPropagation::Stop;
+            }
             let typing = state.search_focused.get() || review.composer_focused.get();
             if typing || !review.is_open() {
                 return EventPropagation::Continue;
@@ -194,7 +236,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         return EventPropagation::Stop;
                     }
                     Code::Digit2 => {
-                        let has_files = review.item.with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
+                        let has_files = review
+                            .item
+                            .with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
                         if has_files {
                             review.show_tab(crate::review::model::ItemTab::Files);
                         }
@@ -209,7 +253,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 return EventPropagation::Stop;
             }
             // Escape backs out of a thread's Delete first.
-            if key.code == Code::Escape && key.modifiers.is_empty() && review.confirm_thread.with(Option::is_some) {
+            if key.code == Code::Escape
+                && key.modifiers.is_empty()
+                && review.confirm_thread.with(Option::is_some)
+            {
                 review.confirm_thread.set(None);
                 return EventPropagation::Stop;
             }
@@ -238,17 +285,31 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         // end of the column, about the item as a whole: `a`
                         // opens it, or takes the keyboard back to it.
                         if review.tab.get() == crate::review::model::ItemTab::Conversation {
-                            match review.composer_box.get().filter(|_| review.composer.with(Option::is_some)) {
+                            match review
+                                .composer_box
+                                .get()
+                                .filter(|_| review.composer.with(Option::is_some))
+                            {
                                 Some(id) => {
                                     id.scroll_to(None);
                                     id.request_focus();
                                 }
-                                None => review.open_composer(None, None, String::new(), crate::review::threads::defaults(state)),
+                                None => review.open_composer(
+                                    None,
+                                    None,
+                                    String::new(),
+                                    crate::review::threads::defaults(state),
+                                ),
                             }
                             return EventPropagation::Stop;
                         }
                         let anchor = review.anchor_from_selection();
-                        review.open_composer(None, anchor, String::new(), crate::review::threads::defaults(state));
+                        review.open_composer(
+                            None,
+                            anchor,
+                            String::new(),
+                            crate::review::threads::defaults(state),
+                        );
                         return EventPropagation::Stop;
                     }
                     // Close an empty composer. One with a question in it stays,
@@ -279,12 +340,19 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     Code::KeyV if key.modifiers.is_empty() => {
                         let item_id = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
                         let file = review.active.get().and_then(|path| {
-                            review.changed_files.with(|f| f.iter().find(|f| f.path == path).cloned())
+                            review
+                                .changed_files
+                                .with(|f| f.iter().find(|f| f.path == path).cloned())
                         });
                         // A deletion has no content to have viewed.
                         if let (Some(item_id), Some(file)) = (item_id, file) {
                             if let Some(blob) = &file.head_blob {
-                                key_backend.set_viewed(&item_id, &file.path, blob, !review.is_viewed(&file));
+                                key_backend.set_viewed(
+                                    &item_id,
+                                    &file.path,
+                                    blob,
+                                    !review.is_viewed(&file),
+                                );
                             }
                         }
                         return EventPropagation::Stop;
@@ -294,7 +362,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         let forward = key.code == Code::BracketRight;
                         if let Some(path) = review.next_unviewed(active.as_deref(), forward) {
                             // The same path a click in the rail takes.
-                            review.expanded.update(|expanded| crate::review::tree::reveal(expanded, &path));
+                            review
+                                .expanded
+                                .update(|expanded| crate::review::tree::reveal(expanded, &path));
                             if review.open_tab(&path) {
                                 key_backend.open_file(&path);
                             }
@@ -312,8 +382,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
         // Escape puts away whatever the sidebar has open under a row.
         if key.code == Code::Escape && key.modifiers.is_empty() {
-            let had = state.renaming.with(Option::is_some)
-                || state.confirm_delete.with(Option::is_some);
+            let had =
+                state.renaming.with(Option::is_some) || state.confirm_delete.with(Option::is_some);
             if had {
                 state.renaming.set(None);
                 state.confirm_delete.set(None);
@@ -390,6 +460,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     .style(|s| {
         s.size_full()
             .flex_col()
+            .position(floem::style::Position::Relative)
             .font_family(theme::FONT_STACK.to_string())
             .font_size(theme::TEXT_BODY)
             .color(theme::FG)

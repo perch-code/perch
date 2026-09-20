@@ -28,7 +28,11 @@ impl ThreadOrigin {
     }
 
     fn parse(s: &str) -> Self {
-        if s == "github" { ThreadOrigin::GitHub } else { ThreadOrigin::Local }
+        if s == "github" {
+            ThreadOrigin::GitHub
+        } else {
+            ThreadOrigin::Local
+        }
     }
 }
 
@@ -52,7 +56,11 @@ impl Side {
     }
 
     fn parse(s: &str) -> Self {
-        if s == "left" { Side::Left } else { Side::Right }
+        if s == "left" {
+            Side::Left
+        } else {
+            Side::Right
+        }
     }
 }
 
@@ -108,7 +116,7 @@ impl CommentThread {
             .iter()
             .rev()
             .filter_map(|m| m.run.as_ref())
-            .find(|r| r.status == RunStatus::Finished)
+            .find(|r| r.status == RunStatus::Completed)
             .filter(|r| r.backend == backend)
             .and_then(|r| r.session_id.clone())
     }
@@ -117,7 +125,7 @@ impl CommentThread {
         self.messages
             .iter()
             .filter_map(|m| m.run.as_ref())
-            .find(|r| r.status == RunStatus::Running)
+            .find(|r| r.status.is_active())
     }
 }
 
@@ -143,56 +151,417 @@ pub struct CommentMessage {
     pub run: Option<RunRecord>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The durable thing an agent run belongs to. Labels and paths are display
+/// snapshots; these ids are what an action validates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunOwner {
+    Discussion {
+        item_id: String,
+        thread_id: String,
+        request_id: String,
+    },
+    Review {
+        item_id: String,
+        reviewer_run_id: String,
+    },
+    /// Retained schema-13 history whose discussion owner could not be
+    /// recovered. It remains readable, but cannot be acted on.
+    Unavailable { legacy_thread_id: Option<String> },
+}
+
+impl RunOwner {
+    pub fn item_id(&self) -> Option<&str> {
+        match self {
+            Self::Discussion { item_id, .. } | Self::Review { item_id, .. } => Some(item_id),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    pub fn thread_id(&self) -> Option<&str> {
+        match self {
+            Self::Discussion { thread_id, .. } => Some(thread_id),
+            Self::Unavailable { legacy_thread_id } => legacy_thread_id.as_deref(),
+            Self::Review { .. } => None,
+        }
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Discussion { request_id, .. } => Some(request_id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPurpose {
+    Question,
+    FollowUp,
+    WorktreeReview,
+}
+
+impl RunPurpose {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Question => "question",
+            Self::FollowUp => "follow_up",
+            Self::WorktreeReview => "worktree_review",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "question" => Some(Self::Question),
+            "follow_up" => Some(Self::FollowUp),
+            "worktree_review" => Some(Self::WorktreeReview),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
+    Queued,
+    Starting,
     Running,
-    Finished,
+    Stopping,
+    Completed,
     Failed,
     Stopped,
+    Interrupted,
 }
 
 impl RunStatus {
+    pub const ACTIVE: [Self; 4] = [Self::Queued, Self::Starting, Self::Running, Self::Stopping];
+
     pub fn name(self) -> &'static str {
         match self {
-            RunStatus::Running => "running",
-            RunStatus::Finished => "finished",
-            RunStatus::Failed => "failed",
-            RunStatus::Stopped => "stopped",
+            Self::Queued => "queued",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+            Self::Interrupted => "interrupted",
         }
     }
 
-    fn parse(s: &str) -> Self {
-        match s {
-            "finished" => RunStatus::Finished,
-            "failed" => RunStatus::Failed,
-            "stopped" => RunStatus::Stopped,
-            _ => RunStatus::Running,
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Starting | Self::Running | Self::Stopping
+        )
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !self.is_active()
+    }
+
+    pub fn can_transition_to(self, next: Self) -> bool {
+        if self == next {
+            return true;
+        }
+        match self {
+            Self::Queued => matches!(
+                next,
+                Self::Starting | Self::Stopped | Self::Interrupted | Self::Failed
+            ),
+            Self::Starting => matches!(
+                next,
+                Self::Running | Self::Stopping | Self::Failed | Self::Stopped | Self::Interrupted
+            ),
+            Self::Running => matches!(
+                next,
+                Self::Stopping | Self::Completed | Self::Failed | Self::Stopped | Self::Interrupted
+            ),
+            Self::Stopping => matches!(
+                next,
+                Self::Completed | Self::Failed | Self::Stopped | Self::Interrupted
+            ),
+            Self::Completed | Self::Failed | Self::Stopped | Self::Interrupted => false,
         }
     }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(Self::Queued),
+            "starting" => Some(Self::Starting),
+            "running" => Some(Self::Running),
+            "stopping" => Some(Self::Stopping),
+            "completed" | "finished" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "stopped" => Some(Self::Stopped),
+            "interrupted" => Some(Self::Interrupted),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalReason {
+    Completed,
+    QueueCancelled,
+    UserStopped,
+    SpawnFailed,
+    PermissionDenied,
+    MalformedStream,
+    UnexpectedExit,
+    AppShutdown,
+    AppRestart,
+    UnavailableConfiguration,
+    Other,
+}
+
+impl TerminalReason {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::QueueCancelled => "queue_cancelled",
+            Self::UserStopped => "user_stopped",
+            Self::SpawnFailed => "spawn_failed",
+            Self::PermissionDenied => "permission_denied",
+            Self::MalformedStream => "malformed_stream",
+            Self::UnexpectedExit => "unexpected_exit",
+            Self::AppShutdown => "app_shutdown",
+            Self::AppRestart => "app_restart",
+            Self::UnavailableConfiguration => "unavailable_configuration",
+            Self::Other => "other",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "completed" => Some(Self::Completed),
+            "queue_cancelled" => Some(Self::QueueCancelled),
+            "user_stopped" => Some(Self::UserStopped),
+            "spawn_failed" => Some(Self::SpawnFailed),
+            "permission_denied" => Some(Self::PermissionDenied),
+            "malformed_stream" => Some(Self::MalformedStream),
+            "unexpected_exit" => Some(Self::UnexpectedExit),
+            "app_shutdown" => Some(Self::AppShutdown),
+            "app_restart" => Some(Self::AppRestart),
+            "unavailable_configuration" => Some(Self::UnavailableConfiguration),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RevisionContext {
+    #[default]
+    Unknown,
+    LiveCheckout {
+        head_sha: Option<String>,
+        base_ref: Option<String>,
+        dirty: Option<bool>,
+    },
+    Snapshot {
+        base_sha: String,
+        head_sha: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RunLabels {
+    pub repository: String,
+    pub item: String,
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RunUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunRecord {
     pub id: String,
-    pub thread_id: String,
+    pub owner: RunOwner,
+    pub purpose: RunPurpose,
     pub backend: String,
+    pub executable: Option<String>,
+    pub executable_version: Option<String>,
+    pub requested_model: String,
+    /// The model actually reported or used by the CLI.
     pub model: String,
+    pub requested_effort: String,
+    /// The effort actually used after backend capability normalization.
     pub effort: String,
     pub session_id: Option<String>,
+    pub original_request: String,
+    pub working_directory: Option<String>,
+    pub revision: RevisionContext,
+    pub labels: RunLabels,
     pub status: RunStatus,
+    pub terminal_reason: Option<TerminalReason>,
     pub cost_usd: Option<f64>,
     pub duration_ms: Option<u64>,
-    /// The tool lines, in order.
+    pub usage: Option<RunUsage>,
+    pub retry_of: Option<String>,
+    /// Compatibility projection of tool events for the existing cards.
     pub steps: Vec<RunStep>,
     pub error: Option<String>,
-    pub started_at: Timestamp,
+    pub queued_at: Timestamp,
+    pub started_at: Option<Timestamp>,
     pub ended_at: Option<Timestamp>,
+    pub final_result: Option<String>,
+    pub latest_activity: Option<String>,
+    pub last_event_sequence: u64,
+}
+
+impl RunRecord {
+    pub fn thread_id(&self) -> Option<&str> {
+        self.owner.thread_id()
+    }
+}
+
+impl Default for RunRecord {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            owner: RunOwner::Unavailable {
+                legacy_thread_id: None,
+            },
+            purpose: RunPurpose::Question,
+            backend: String::new(),
+            executable: None,
+            executable_version: None,
+            requested_model: String::new(),
+            model: String::new(),
+            requested_effort: String::new(),
+            effort: String::new(),
+            session_id: None,
+            original_request: String::new(),
+            working_directory: None,
+            revision: RevisionContext::Unknown,
+            labels: RunLabels::default(),
+            status: RunStatus::Queued,
+            terminal_reason: None,
+            cost_usd: None,
+            duration_ms: None,
+            usage: None,
+            retry_of: None,
+            steps: Vec::new(),
+            error: None,
+            queued_at: Timestamp::UNIX_EPOCH,
+            started_at: None,
+            ended_at: None,
+            final_result: None,
+            latest_activity: None,
+            last_event_sequence: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStep {
     pub summary: String,
     pub ok: bool,
+}
+
+/// One durable, ordered observation from a process or the scheduler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunEvent {
+    State {
+        status: RunStatus,
+    },
+    Started {
+        session_id: String,
+        model: Option<String>,
+    },
+    Text {
+        text: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        summary: String,
+    },
+    ToolResult {
+        id: String,
+        ok: bool,
+        summary: String,
+    },
+    Usage {
+        usage: RunUsage,
+        cost_usd: Option<f64>,
+        duration_ms: Option<u64>,
+    },
+    Completed {
+        session_id: Option<String>,
+        result: String,
+        cost_usd: Option<f64>,
+        duration_ms: Option<u64>,
+        usage: Option<RunUsage>,
+    },
+    Terminated {
+        status: RunStatus,
+        reason: TerminalReason,
+        message: String,
+    },
+    /// Schema 13 retained only a rendered tool line. Migration keeps it
+    /// exactly, without inventing a tool id or name.
+    LegacyStep {
+        summary: String,
+        ok: bool,
+    },
+}
+
+impl RunEvent {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::State { .. } => "state",
+            Self::Started { .. } => "started",
+            Self::Text { .. } => "text",
+            Self::ToolCall { .. } => "tool_call",
+            Self::ToolResult { .. } => "tool_result",
+            Self::Usage { .. } => "usage",
+            Self::Completed { .. } => "completed",
+            Self::Terminated { .. } => "terminated",
+            Self::LegacyStep { .. } => "legacy_step",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunEventRecord {
+    pub run_id: String,
+    pub sequence: u64,
+    pub event_id: String,
+    pub occurred_at: Timestamp,
+    pub event: RunEvent,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewRunEvent {
+    pub event_id: String,
+    pub occurred_at: Timestamp,
+    pub event: RunEvent,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunHistoryFilter {
+    pub item_id: Option<String>,
+    pub backend: Option<String>,
+    pub status: Option<RunStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunHistoryCursor {
+    pub ended_at: Timestamp,
+    pub id: String,
 }
 
 /// A fresh id: time-ordered, unique on this machine, safe in a URL.
@@ -215,10 +584,6 @@ pub(crate) mod sql {
 
     pub(crate) fn side(s: &str) -> Side {
         Side::parse(s)
-    }
-
-    pub(crate) fn status(s: &str) -> RunStatus {
-        RunStatus::parse(s)
     }
 
     pub(crate) fn author(kind: &str, name: Option<String>, model: Option<String>) -> Author {
@@ -247,7 +612,13 @@ mod tests {
 
     #[test]
     fn anchors_label_a_line_or_a_range() {
-        let one = Anchor { path: "src/x.rs".into(), start_line: 41, line: 41, side: Side::Right, commit_sha: "h".into() };
+        let one = Anchor {
+            path: "src/x.rs".into(),
+            start_line: 41,
+            line: 41,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        };
         assert_eq!(one.label(), "src/x.rs:41");
         let range = Anchor { line: 58, ..one };
         assert_eq!(range.label(), "src/x.rs:41–58");
@@ -264,18 +635,38 @@ mod tests {
     fn run(backend: &str, session: &str, status: RunStatus) -> RunRecord {
         RunRecord {
             id: new_id(),
-            thread_id: "t".into(),
+            owner: RunOwner::Discussion {
+                item_id: "w".into(),
+                thread_id: "t".into(),
+                request_id: "q".into(),
+            },
+            purpose: RunPurpose::Question,
             backend: backend.into(),
+            executable: None,
+            executable_version: None,
+            requested_model: "m".into(),
             model: "m".into(),
+            requested_effort: "medium".into(),
             effort: "medium".into(),
             session_id: Some(session.into()),
+            original_request: "why?".into(),
+            working_directory: None,
+            revision: RevisionContext::Unknown,
+            labels: RunLabels::default(),
             status,
+            terminal_reason: status.is_terminal().then_some(TerminalReason::Other),
             cost_usd: None,
             duration_ms: None,
+            usage: None,
+            retry_of: None,
             steps: Vec::new(),
             error: None,
-            started_at: Timestamp::UNIX_EPOCH,
-            ended_at: None,
+            queued_at: Timestamp::UNIX_EPOCH,
+            started_at: Some(Timestamp::UNIX_EPOCH),
+            ended_at: status.is_terminal().then_some(Timestamp::UNIX_EPOCH),
+            final_result: None,
+            latest_activity: None,
+            last_event_sequence: 0,
         }
     }
 
@@ -286,7 +677,10 @@ mod tests {
                 id: new_id(),
                 thread_id: "t".into(),
                 origin: ThreadOrigin::Local,
-                author: Author::Agent { backend: r.backend.clone(), model: r.model.clone() },
+                author: Author::Agent {
+                    backend: r.backend.clone(),
+                    model: r.model.clone(),
+                },
                 body: String::new(),
                 created_at: Timestamp::UNIX_EPOCH,
                 run: Some(r),
@@ -306,7 +700,7 @@ mod tests {
 
     #[test]
     fn a_follow_up_resumes_only_a_session_of_its_own_backend() {
-        let t = thread_of(vec![run("codex", "thread-1", RunStatus::Finished)]);
+        let t = thread_of(vec![run("codex", "thread-1", RunStatus::Completed)]);
         assert_eq!(t.resumable_session("codex").as_deref(), Some("thread-1"));
         assert_eq!(t.resumable_session("claude-code"), None);
     }
@@ -314,20 +708,27 @@ mod tests {
     #[test]
     fn switching_backends_does_not_reach_past_the_last_finished_run() {
         let t = thread_of(vec![
-            run("claude-code", "sess-1", RunStatus::Finished),
-            run("codex", "thread-2", RunStatus::Finished),
+            run("claude-code", "sess-1", RunStatus::Completed),
+            run("codex", "thread-2", RunStatus::Completed),
         ]);
         assert_eq!(t.resumable_session("codex").as_deref(), Some("thread-2"));
-        assert_eq!(t.resumable_session("claude-code"), None, "the newer Codex run made its history stale");
+        assert_eq!(
+            t.resumable_session("claude-code"),
+            None,
+            "the newer Codex run made its history stale"
+        );
     }
 
     #[test]
     fn a_newer_failed_run_does_not_hide_an_older_finished_one() {
         let t = thread_of(vec![
-            run("claude-code", "sess-1", RunStatus::Finished),
+            run("claude-code", "sess-1", RunStatus::Completed),
             run("claude-code", "sess-2", RunStatus::Failed),
         ]);
-        assert_eq!(t.resumable_session("claude-code").as_deref(), Some("sess-1"));
+        assert_eq!(
+            t.resumable_session("claude-code").as_deref(),
+            Some("sess-1")
+        );
         let none = thread_of(vec![run("claude-code", "sess-1", RunStatus::Failed)]);
         assert_eq!(none.resumable_session("claude-code"), None);
     }

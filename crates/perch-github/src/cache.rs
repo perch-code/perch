@@ -9,21 +9,33 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
-use crate::comments::{self, Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStep};
+use crate::comments::{
+    self, Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,
+    RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunLabels, RunOwner, RunPurpose, RunRecord,
+    RunStatus, RunStep, TerminalReason,
+};
 use crate::discussion::Discussion;
 use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
 use crate::model::Thread;
 use crate::workflow_runs::Checks;
 
-/// The shape of the tables. Schemas 13 and 14 migrate in place because they
-/// contain local items and conversations that must survive notification
-/// cache changes. Unknown schemas are recreated.
-pub const SCHEMA_VERSION: u32 = 15;
+/// The shape of the tables. Version 16 reconciles the run-history schema
+/// introduced on the agents branch with the notifications cache introduced
+/// on main. Versions 13 through 15 migrate in place so local conversations
+/// and review history are never discarded.
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// Metadata key holding the validator for the cached notifications inbox.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheOpen {
+    Created,
+    Current,
+    Migrated { from: u32, to: u32 },
+}
 
 /// An item's reveals as the store holds them: the head line ranges the
 /// reader opened out of a fold, inclusive, by `(path, blob)`.
@@ -39,6 +51,22 @@ pub enum CacheError {
     Io(#[from] std::io::Error),
     #[error("corrupt row: {0}")]
     Corrupt(String),
+    #[error("database has no supported schema version; its contents were left unchanged")]
+    MissingSchemaVersion,
+    #[error("database schema {found} is older than the oldest supported schema 13; its contents were left unchanged")]
+    UnsupportedSchema { found: u32 },
+    #[error("database schema {found} is newer than this build's schema {current}; its contents were left unchanged")]
+    NewerSchema { found: u32, current: u32 },
+    #[error("invalid run transition from {from:?} to {to:?}")]
+    InvalidRunTransition { from: RunStatus, to: RunStatus },
+    #[error("run {0} is already terminal")]
+    TerminalRun(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunEventAppend {
+    Appended(RunEventRecord),
+    Duplicate(RunEventRecord),
 }
 
 pub struct Cache {
@@ -46,170 +74,1353 @@ pub struct Cache {
     avatar_dir: Option<PathBuf>,
 }
 
+const BASE_SCHEMA: &str = r#"
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE threads (
+    position    INTEGER NOT NULL UNIQUE,
+    id          TEXT PRIMARY KEY,
+    updated_at  TEXT NOT NULL,
+    json        TEXT NOT NULL
+);
+CREATE TABLE items (
+    id               TEXT PRIMARY KEY,
+    repo_full_name   TEXT NOT NULL,
+    subject_kind     TEXT,
+    subject_number   INTEGER,
+    subject_json     TEXT,
+    subject_repo     TEXT,
+    branch           TEXT,
+    base_ref         TEXT,
+    head_sha         TEXT,
+    checkout_path    TEXT,
+    owned            INTEGER NOT NULL DEFAULT 1,
+    on_disk          INTEGER NOT NULL DEFAULT 1,
+    from_item_id     TEXT REFERENCES items(id),
+    name             TEXT,
+    saved            INTEGER NOT NULL DEFAULT 0,
+    pinned_at        TEXT,
+    archived_at      TEXT,
+    created_at       TEXT NOT NULL,
+    last_opened_at   TEXT NOT NULL,
+    additions        INTEGER,
+    deletions        INTEGER,
+    last_seen_head   TEXT,
+    CHECK (subject_kind IS NOT NULL OR branch IS NOT NULL)
+);
+CREATE UNIQUE INDEX items_subject ON items(subject_repo, subject_kind, subject_number)
+    WHERE subject_kind IS NOT NULL;
+CREATE UNIQUE INDEX items_branch ON items(repo_full_name, branch) WHERE branch IS NOT NULL;
+CREATE INDEX items_repo ON items(repo_full_name COLLATE NOCASE);
+CREATE TABLE comment_threads (
+    id             TEXT PRIMARY KEY,
+    worktree_id    TEXT NOT NULL,
+    origin         TEXT NOT NULL,
+    github_id      TEXT,
+    path           TEXT,
+    start_line     INTEGER,
+    line           INTEGER,
+    side           TEXT,
+    commit_sha     TEXT,
+    outdated       INTEGER NOT NULL DEFAULT 0,
+    resolved       INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX comment_threads_worktree ON comment_threads(worktree_id);
+CREATE TABLE discussions (
+    item_id     TEXT PRIMARY KEY,
+    fetched_at  TEXT NOT NULL,
+    json        TEXT NOT NULL
+);
+CREATE TABLE checks (
+    item_id     TEXT PRIMARY KEY,
+    head_sha    TEXT NOT NULL,
+    fetched_at  TEXT NOT NULL,
+    json        TEXT NOT NULL
+);
+CREATE TABLE viewed (
+    item_id    TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    blob       TEXT NOT NULL,
+    viewed_at  TEXT NOT NULL,
+    PRIMARY KEY (item_id, path, blob)
+);
+CREATE TABLE reveals (
+    item_id    TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    blob       TEXT NOT NULL,
+    first      INTEGER NOT NULL,
+    last       INTEGER NOT NULL,
+    PRIMARY KEY (item_id, path, blob, first, last)
+);
+"#;
+
+const NOTIFICATION_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS threads (
+    position    INTEGER NOT NULL UNIQUE,
+    id          TEXT PRIMARY KEY,
+    updated_at  TEXT NOT NULL,
+    json        TEXT NOT NULL
+);
+"#;
+
+const RUN_SCHEMA: &str = r#"
+CREATE TABLE runs (
+    id                     TEXT PRIMARY KEY,
+    owner_kind             TEXT NOT NULL,
+    owner_item_id          TEXT,
+    owner_thread_id        TEXT,
+    owner_request_id       TEXT,
+    owner_reviewer_run_id  TEXT,
+    purpose                TEXT NOT NULL,
+    backend                TEXT NOT NULL,
+    executable             TEXT,
+    executable_version     TEXT,
+    requested_model        TEXT NOT NULL,
+    effective_model        TEXT NOT NULL,
+    requested_effort       TEXT NOT NULL,
+    effective_effort       TEXT NOT NULL,
+    session_id             TEXT,
+    original_request       TEXT NOT NULL,
+    working_directory      TEXT,
+    revision_json          TEXT NOT NULL,
+    repository_label       TEXT NOT NULL,
+    item_label             TEXT NOT NULL,
+    branch_label           TEXT,
+    status                 TEXT NOT NULL,
+    terminal_reason        TEXT,
+    cost_usd               REAL,
+    duration_ms            INTEGER,
+    usage_json             TEXT,
+    retry_of_id            TEXT,
+    error                  TEXT,
+    queued_at              TEXT NOT NULL,
+    started_at             TEXT,
+    ended_at               TEXT,
+    final_result           TEXT,
+    latest_activity        TEXT,
+    last_event_sequence    INTEGER NOT NULL DEFAULT 0,
+    CHECK (owner_kind IN ('discussion', 'review', 'unavailable')),
+    CHECK (
+        (owner_kind = 'discussion' AND owner_item_id IS NOT NULL AND owner_thread_id IS NOT NULL
+             AND owner_request_id IS NOT NULL AND owner_reviewer_run_id IS NULL)
+        OR (owner_kind = 'review' AND owner_item_id IS NOT NULL AND owner_reviewer_run_id IS NOT NULL
+             AND owner_thread_id IS NULL AND owner_request_id IS NULL)
+        OR (owner_kind = 'unavailable' AND owner_item_id IS NULL AND owner_request_id IS NULL
+             AND owner_reviewer_run_id IS NULL)
+    ),
+    CHECK (status IN ('queued','starting','running','stopping','completed','failed','stopped','interrupted'))
+);
+CREATE INDEX runs_active ON runs(status, queued_at, id)
+    WHERE status IN ('queued','starting','running','stopping');
+CREATE INDEX runs_history ON runs(ended_at DESC, id DESC)
+    WHERE status IN ('completed','failed','stopped','interrupted');
+CREATE INDEX runs_item ON runs(owner_item_id, queued_at DESC, id DESC);
+CREATE INDEX runs_request ON runs(owner_thread_id, owner_request_id, queued_at, id);
+CREATE INDEX runs_backend_history ON runs(backend, status, ended_at DESC, id DESC);
+CREATE INDEX runs_retry ON runs(retry_of_id);
+CREATE UNIQUE INDEX runs_one_active_request ON runs(owner_thread_id, owner_request_id)
+    WHERE owner_kind = 'discussion' AND status IN ('queued','starting','running','stopping');
+CREATE TABLE run_events (
+    run_id       TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    sequence     INTEGER NOT NULL,
+    event_id     TEXT NOT NULL,
+    occurred_at  TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    truncated    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (run_id, sequence),
+    UNIQUE (run_id, event_id)
+);
+CREATE TABLE comment_messages (
+    id             TEXT PRIMARY KEY,
+    thread_id      TEXT NOT NULL REFERENCES comment_threads(id) ON DELETE CASCADE,
+    origin         TEXT NOT NULL,
+    github_id      TEXT,
+    author_kind    TEXT NOT NULL,
+    author         TEXT,
+    author_model   TEXT,
+    body           TEXT NOT NULL,
+    run_id         TEXT REFERENCES runs(id) ON DELETE SET NULL,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX comment_messages_thread ON comment_messages(thread_id);
+"#;
+
+fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
+    let objects: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )?;
+    if objects == 0 {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(BASE_SCHEMA)?;
+        tx.execute_batch(RUN_SCHEMA)?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+        tx.commit()?;
+        return Ok(CacheOpen::Created);
+    }
+
+    let has_meta: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_meta {
+        return Err(CacheError::MissingSchemaVersion);
+    }
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let version = raw
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(CacheError::MissingSchemaVersion)?;
+    if version > SCHEMA_VERSION {
+        return Err(CacheError::NewerSchema {
+            found: version,
+            current: SCHEMA_VERSION,
+        });
+    }
+    if version < 13 {
+        return Err(CacheError::UnsupportedSchema { found: version });
+    }
+    if version == SCHEMA_VERSION {
+        return Ok(CacheOpen::Current);
+    }
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut from = version;
+    while from < SCHEMA_VERSION {
+        match from {
+            13 => migrate_13_to_14(&tx)?,
+            14 => tx.execute_batch(NOTIFICATION_SCHEMA)?,
+            15 => migrate_15_to_16(&tx)?,
+            other => return Err(CacheError::UnsupportedSchema { found: other }),
+        }
+        from += 1;
+    }
+    tx.execute(
+        "UPDATE meta SET value=?1 WHERE key='schema_version'",
+        params![SCHEMA_VERSION.to_string()],
+    )?;
+    tx.commit()?;
+    Ok(CacheOpen::Migrated {
+        from: version,
+        to: SCHEMA_VERSION,
+    })
+}
+
+/// Schema 15 existed on main with the legacy run table, while rebased
+/// development builds could already have the richer run table. Accept both:
+/// migrate the former and leave the latter intact, and ensure the notification
+/// cache exists in either case.
+fn migrate_15_to_16(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    tx.execute_batch(NOTIFICATION_SCHEMA)?;
+    let has_run_owner: bool = tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM pragma_table_info('runs') WHERE name='owner_kind'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_run_owner {
+        migrate_13_to_14(tx)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct LegacyRun {
+    id: String,
+    thread_id: String,
+    backend: String,
+    model: String,
+    effort: String,
+    session_id: Option<String>,
+    status: String,
+    cost_usd: Option<f64>,
+    duration_ms: Option<i64>,
+    steps_json: String,
+    error: Option<String>,
+    started_at: String,
+    ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LegacyMessage {
+    rowid: i64,
+    id: String,
+    thread_id: String,
+    author_kind: String,
+    body: String,
+    run_id: Option<String>,
+    created_at: String,
+}
+
+fn migrate_13_to_14(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    let runs = {
+        let mut stmt = tx.prepare(
+            "SELECT id, thread_id, backend, model, effort, session_id, status, cost_usd,
+                    duration_ms, steps_json, error, started_at, ended_at FROM runs ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(LegacyRun {
+                id: row.get(0)?,
+                thread_id: row.get(1)?,
+                backend: row.get(2)?,
+                model: row.get(3)?,
+                effort: row.get(4)?,
+                session_id: row.get(5)?,
+                status: row.get(6)?,
+                cost_usd: row.get(7)?,
+                duration_ms: row.get(8)?,
+                steps_json: row.get(9)?,
+                error: row.get(10)?,
+                started_at: row.get(11)?,
+                ended_at: row.get(12)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let messages = {
+        let mut stmt = tx.prepare(
+            "SELECT rowid, id, thread_id, author_kind, body, run_id, created_at
+             FROM comment_messages ORDER BY thread_id, created_at, rowid",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(LegacyMessage {
+                rowid: row.get(0)?,
+                id: row.get(1)?,
+                thread_id: row.get(2)?,
+                author_kind: row.get(3)?,
+                body: row.get(4)?,
+                run_id: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let threads: HashMap<String, String> = {
+        let mut stmt = tx.prepare("SELECT id, worktree_id FROM comment_threads")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<HashMap<_, _>, _>>()?
+    };
+    let labels: HashMap<String, RunLabels> = {
+        let mut stmt =
+            tx.prepare("SELECT id, repo_full_name, name, subject_json, branch FROM items")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let repository: String = row.get(1)?;
+            let name: Option<String> = row.get(2)?;
+            let subject_json: Option<String> = row.get(3)?;
+            let branch: Option<String> = row.get(4)?;
+            let subject_title = subject_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<Subject>(json).ok())
+                .map(|subject| subject.title().to_string());
+            let item = name
+                .filter(|name| !name.trim().is_empty())
+                .or(subject_title)
+                .or_else(|| branch.clone())
+                .unwrap_or_else(|| repository.clone());
+            Ok((
+                id,
+                RunLabels {
+                    repository,
+                    item,
+                    branch,
+                },
+            ))
+        })?;
+        rows.collect::<Result<HashMap<_, _>, _>>()?
+    };
+
+    tx.execute_batch(
+        "ALTER TABLE comment_messages RENAME TO comment_messages_v13;
+         DROP INDEX IF EXISTS comment_messages_thread;
+         ALTER TABLE runs RENAME TO runs_v13;",
+    )?;
+    tx.execute_batch(RUN_SCHEMA)?;
+
+    for legacy in runs {
+        let status = RunStatus::parse(&legacy.status)
+            .ok_or_else(|| CacheError::Corrupt(format!("legacy run status {}", legacy.status)))?;
+        let started_at = legacy
+            .started_at
+            .parse::<Timestamp>()
+            .map_err(|_| CacheError::Corrupt("legacy run started_at".into()))?;
+        let mut ended_at = legacy
+            .ended_at
+            .as_deref()
+            .and_then(|value| value.parse().ok());
+        let linked = messages
+            .iter()
+            .find(|message| message.run_id.as_deref() == Some(&legacy.id));
+        let request = match linked {
+            Some(message) if message.author_kind == "user" => Some(message),
+            Some(message) => messages.iter().rfind(|candidate| {
+                candidate.thread_id == legacy.thread_id
+                    && candidate.author_kind == "user"
+                    && candidate.rowid < message.rowid
+            }),
+            None => messages.iter().rfind(|candidate| {
+                candidate.thread_id == legacy.thread_id
+                    && candidate.author_kind == "user"
+                    && candidate.created_at <= legacy.started_at
+            }),
+        };
+        let item_id = threads.get(&legacy.thread_id);
+        let owner = match (item_id, request) {
+            (Some(item_id), Some(request)) if labels.contains_key(item_id) => {
+                RunOwner::Discussion {
+                    item_id: item_id.clone(),
+                    thread_id: legacy.thread_id.clone(),
+                    request_id: request.id.clone(),
+                }
+            }
+            _ => RunOwner::Unavailable {
+                legacy_thread_id: Some(legacy.thread_id.clone()),
+            },
+        };
+        let purpose = request
+            .map(|request| {
+                let earlier = messages.iter().any(|candidate| {
+                    candidate.thread_id == legacy.thread_id
+                        && candidate.author_kind == "user"
+                        && candidate.rowid < request.rowid
+                });
+                if earlier {
+                    RunPurpose::FollowUp
+                } else {
+                    RunPurpose::Question
+                }
+            })
+            .unwrap_or(RunPurpose::Question);
+        let labels = item_id
+            .and_then(|id| labels.get(id))
+            .cloned()
+            .unwrap_or_default();
+        let final_result = linked
+            .filter(|message| message.author_kind == "agent")
+            .map(|message| message.body.clone());
+        let terminal_reason = match status {
+            RunStatus::Completed => Some(TerminalReason::Completed),
+            RunStatus::Stopped => Some(TerminalReason::UserStopped),
+            RunStatus::Failed => Some(TerminalReason::Other),
+            _ => None,
+        };
+        if status.is_terminal() && ended_at.is_none() {
+            ended_at = Some(started_at);
+        }
+        let steps: Vec<RunStep> = serde_json::from_str(&legacy.steps_json)?;
+        let record = RunRecord {
+            id: legacy.id.clone(),
+            owner,
+            purpose,
+            backend: legacy.backend,
+            executable: None,
+            executable_version: None,
+            requested_model: legacy.model.clone(),
+            model: legacy.model,
+            requested_effort: legacy.effort.clone(),
+            effort: legacy.effort,
+            session_id: legacy.session_id,
+            original_request: request
+                .map(|message| message.body.clone())
+                .unwrap_or_default(),
+            working_directory: None,
+            revision: RevisionContext::Unknown,
+            labels,
+            status,
+            terminal_reason,
+            cost_usd: legacy.cost_usd,
+            duration_ms: legacy.duration_ms.map(|value| value as u64),
+            usage: None,
+            retry_of: None,
+            last_event_sequence: steps.len() as u64,
+            steps: steps.clone(),
+            error: legacy.error,
+            queued_at: started_at,
+            started_at: Some(started_at),
+            ended_at,
+            final_result,
+            latest_activity: steps.last().map(|step| step.summary.clone()),
+        };
+        insert_run_row(tx, &record)?;
+        for (index, step) in steps.into_iter().enumerate() {
+            let event = RunEvent::LegacyStep {
+                summary: step.summary,
+                ok: step.ok,
+            };
+            tx.execute(
+                "INSERT INTO run_events
+                 (run_id, sequence, event_id, occurred_at, kind, payload_json, truncated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                params![
+                    record.id,
+                    index as i64 + 1,
+                    format!("legacy-step-{}", index + 1),
+                    started_at.to_string(),
+                    event.kind(),
+                    serde_json::to_string(&event)?,
+                ],
+            )?;
+        }
+    }
+
+    tx.execute(
+        "INSERT INTO comment_messages
+         (id, thread_id, origin, github_id, author_kind, author, author_model, body, run_id, created_at)
+         SELECT id, thread_id, origin, github_id, author_kind, author, author_model, body, run_id, created_at
+         FROM comment_messages_v13",
+        [],
+    )?;
+    tx.execute_batch("DROP TABLE comment_messages_v13; DROP TABLE runs_v13;")?;
+    Ok(())
+}
+
+const RUN_COLUMNS: &str = "id, owner_kind, owner_item_id, owner_thread_id, owner_request_id,
+    owner_reviewer_run_id, purpose, backend, executable, executable_version, requested_model,
+    effective_model, requested_effort, effective_effort, session_id, original_request,
+    working_directory, revision_json, repository_label, item_label, branch_label, status,
+    terminal_reason, cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at,
+    started_at, ended_at, final_result, latest_activity, last_event_sequence";
+
+#[derive(Debug)]
+struct RunDbRow {
+    id: String,
+    owner_kind: String,
+    owner_item_id: Option<String>,
+    owner_thread_id: Option<String>,
+    owner_request_id: Option<String>,
+    owner_reviewer_run_id: Option<String>,
+    purpose: String,
+    backend: String,
+    executable: Option<String>,
+    executable_version: Option<String>,
+    requested_model: String,
+    model: String,
+    requested_effort: String,
+    effort: String,
+    session_id: Option<String>,
+    original_request: String,
+    working_directory: Option<String>,
+    revision_json: String,
+    repository: String,
+    item: String,
+    branch: Option<String>,
+    status: String,
+    terminal_reason: Option<String>,
+    cost_usd: Option<f64>,
+    duration_ms: Option<i64>,
+    usage_json: Option<String>,
+    retry_of: Option<String>,
+    error: Option<String>,
+    queued_at: String,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    final_result: Option<String>,
+    latest_activity: Option<String>,
+    last_event_sequence: i64,
+}
+
+fn read_run_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunDbRow> {
+    Ok(RunDbRow {
+        id: row.get(0)?,
+        owner_kind: row.get(1)?,
+        owner_item_id: row.get(2)?,
+        owner_thread_id: row.get(3)?,
+        owner_request_id: row.get(4)?,
+        owner_reviewer_run_id: row.get(5)?,
+        purpose: row.get(6)?,
+        backend: row.get(7)?,
+        executable: row.get(8)?,
+        executable_version: row.get(9)?,
+        requested_model: row.get(10)?,
+        model: row.get(11)?,
+        requested_effort: row.get(12)?,
+        effort: row.get(13)?,
+        session_id: row.get(14)?,
+        original_request: row.get(15)?,
+        working_directory: row.get(16)?,
+        revision_json: row.get(17)?,
+        repository: row.get(18)?,
+        item: row.get(19)?,
+        branch: row.get(20)?,
+        status: row.get(21)?,
+        terminal_reason: row.get(22)?,
+        cost_usd: row.get(23)?,
+        duration_ms: row.get(24)?,
+        usage_json: row.get(25)?,
+        retry_of: row.get(26)?,
+        error: row.get(27)?,
+        queued_at: row.get(28)?,
+        started_at: row.get(29)?,
+        ended_at: row.get(30)?,
+        final_result: row.get(31)?,
+        latest_activity: row.get(32)?,
+        last_event_sequence: row.get(33)?,
+    })
+}
+
+fn parse_optional_timestamp(
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<Timestamp>, CacheError> {
+    value
+        .map(|value| value.parse().map_err(|_| CacheError::Corrupt(field.into())))
+        .transpose()
+}
+
+fn run_from_db(row: RunDbRow, steps: Vec<RunStep>) -> Result<RunRecord, CacheError> {
+    let owner = match row.owner_kind.as_str() {
+        "discussion" => RunOwner::Discussion {
+            item_id: row
+                .owner_item_id
+                .ok_or_else(|| CacheError::Corrupt("discussion item id".into()))?,
+            thread_id: row
+                .owner_thread_id
+                .ok_or_else(|| CacheError::Corrupt("discussion thread id".into()))?,
+            request_id: row
+                .owner_request_id
+                .ok_or_else(|| CacheError::Corrupt("discussion request id".into()))?,
+        },
+        "review" => RunOwner::Review {
+            item_id: row
+                .owner_item_id
+                .ok_or_else(|| CacheError::Corrupt("review item id".into()))?,
+            reviewer_run_id: row
+                .owner_reviewer_run_id
+                .ok_or_else(|| CacheError::Corrupt("reviewer run id".into()))?,
+        },
+        "unavailable" => RunOwner::Unavailable {
+            legacy_thread_id: row.owner_thread_id,
+        },
+        _ => return Err(CacheError::Corrupt("run owner kind".into())),
+    };
+    let purpose =
+        RunPurpose::parse(&row.purpose).ok_or_else(|| CacheError::Corrupt("run purpose".into()))?;
+    let status =
+        RunStatus::parse(&row.status).ok_or_else(|| CacheError::Corrupt("run status".into()))?;
+    let terminal_reason = row
+        .terminal_reason
+        .map(|reason| {
+            TerminalReason::parse(&reason)
+                .ok_or_else(|| CacheError::Corrupt("terminal reason".into()))
+        })
+        .transpose()?;
+    Ok(RunRecord {
+        id: row.id,
+        owner,
+        purpose,
+        backend: row.backend,
+        executable: row.executable,
+        executable_version: row.executable_version,
+        requested_model: row.requested_model,
+        model: row.model,
+        requested_effort: row.requested_effort,
+        effort: row.effort,
+        session_id: row.session_id,
+        original_request: row.original_request,
+        working_directory: row.working_directory,
+        revision: serde_json::from_str(&row.revision_json)?,
+        labels: RunLabels {
+            repository: row.repository,
+            item: row.item,
+            branch: row.branch,
+        },
+        status,
+        terminal_reason,
+        cost_usd: row.cost_usd,
+        duration_ms: row.duration_ms.map(|value| value as u64),
+        usage: row
+            .usage_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?,
+        retry_of: row.retry_of,
+        steps,
+        error: row.error,
+        queued_at: row
+            .queued_at
+            .parse()
+            .map_err(|_| CacheError::Corrupt("run queued_at".into()))?,
+        started_at: parse_optional_timestamp(row.started_at, "run started_at")?,
+        ended_at: parse_optional_timestamp(row.ended_at, "run ended_at")?,
+        final_result: row.final_result,
+        latest_activity: row.latest_activity,
+        last_event_sequence: row.last_event_sequence.max(0) as u64,
+    })
+}
+
+fn owner_columns(
+    owner: &RunOwner,
+) -> (
+    &'static str,
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+) {
+    match owner {
+        RunOwner::Discussion {
+            item_id,
+            thread_id,
+            request_id,
+        } => (
+            "discussion",
+            Some(item_id),
+            Some(thread_id),
+            Some(request_id),
+            None,
+        ),
+        RunOwner::Review {
+            item_id,
+            reviewer_run_id,
+        } => ("review", Some(item_id), None, None, Some(reviewer_run_id)),
+        RunOwner::Unavailable { legacy_thread_id } => {
+            ("unavailable", None, legacy_thread_id.as_deref(), None, None)
+        }
+    }
+}
+
+fn insert_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> {
+    let (owner_kind, item_id, thread_id, request_id, reviewer_run_id) = owner_columns(&run.owner);
+    conn.execute(
+        "INSERT INTO runs
+         (id, owner_kind, owner_item_id, owner_thread_id, owner_request_id, owner_reviewer_run_id,
+          purpose, backend, executable, executable_version, requested_model, effective_model,
+          requested_effort, effective_effort, session_id, original_request, working_directory,
+          revision_json, repository_label, item_label, branch_label, status, terminal_reason,
+          cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at, started_at, ended_at,
+          final_result, latest_activity, last_event_sequence)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
+                 ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)",
+        params![
+            run.id,
+            owner_kind,
+            item_id,
+            thread_id,
+            request_id,
+            reviewer_run_id,
+            run.purpose.name(),
+            run.backend,
+            run.executable,
+            run.executable_version,
+            run.requested_model,
+            run.model,
+            run.requested_effort,
+            run.effort,
+            run.session_id,
+            run.original_request,
+            run.working_directory,
+            serde_json::to_string(&run.revision)?,
+            run.labels.repository,
+            run.labels.item,
+            run.labels.branch,
+            run.status.name(),
+            run.terminal_reason.map(TerminalReason::name),
+            run.cost_usd,
+            run.duration_ms.map(|value| value as i64),
+            run.usage.as_ref().map(serde_json::to_string).transpose()?,
+            run.retry_of,
+            run.error,
+            run.queued_at.to_string(),
+            run.started_at.map(|value| value.to_string()),
+            run.ended_at.map(|value| value.to_string()),
+            run.final_result,
+            run.latest_activity,
+            run.last_event_sequence as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+fn update_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> {
+    conn.execute(
+        "UPDATE runs SET effective_model=?2, effective_effort=?3, session_id=?4, status=?5,
+         terminal_reason=?6, cost_usd=?7, duration_ms=?8, usage_json=?9, error=?10,
+         started_at=?11, ended_at=?12, final_result=?13, latest_activity=?14,
+         last_event_sequence=?15 WHERE id=?1",
+        params![
+            run.id,
+            run.model,
+            run.effort,
+            run.session_id,
+            run.status.name(),
+            run.terminal_reason.map(TerminalReason::name),
+            run.cost_usd,
+            run.duration_ms.map(|value| value as i64),
+            run.usage.as_ref().map(serde_json::to_string).transpose()?,
+            run.error,
+            run.started_at.map(|value| value.to_string()),
+            run.ended_at.map(|value| value.to_string()),
+            run.final_result,
+            run.latest_activity,
+            run.last_event_sequence as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_run_on(conn: &Connection, id: &str) -> Result<Option<RunRecord>, CacheError> {
+    let sql = format!("SELECT {RUN_COLUMNS} FROM runs WHERE id=?1");
+    let row = conn
+        .query_row(&sql, params![id], read_run_db_row)
+        .optional()?;
+    row.map(|row| {
+        let steps = load_steps_on(conn, &row.id)?;
+        run_from_db(row, steps)
+    })
+    .transpose()
+}
+
+fn read_event_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(String, i64, String, String, String, bool)> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get::<_, i64>(5)? != 0,
+    ))
+}
+
+fn event_from_row(
+    (run_id, sequence, event_id, occurred_at, payload, truncated): (
+        String,
+        i64,
+        String,
+        String,
+        String,
+        bool,
+    ),
+) -> Result<RunEventRecord, CacheError> {
+    Ok(RunEventRecord {
+        run_id,
+        sequence: sequence.max(0) as u64,
+        event_id,
+        occurred_at: occurred_at
+            .parse()
+            .map_err(|_| CacheError::Corrupt("event occurred_at".into()))?,
+        event: serde_json::from_str(&payload)?,
+        truncated,
+    })
+}
+
+fn load_run_events_on(
+    conn: &Connection,
+    run_id: &str,
+    before_sequence: Option<u64>,
+    limit: usize,
+) -> Result<Vec<RunEventRecord>, CacheError> {
+    let limit = limit.clamp(1, 500) as i64;
+    let rows = {
+        let mut stmt = conn.prepare(
+            "SELECT run_id, sequence, event_id, occurred_at, payload_json, truncated
+             FROM run_events WHERE run_id=?1 AND (?2 IS NULL OR sequence < ?2)
+             ORDER BY sequence DESC LIMIT ?3",
+        )?;
+        let mapped = stmt.query_map(
+            params![run_id, before_sequence.map(|value| value as i64), limit],
+            read_event_row,
+        )?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+    let mut events = rows
+        .into_iter()
+        .map(event_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    events.reverse();
+    Ok(events)
+}
+
+fn load_event_by_id(
+    conn: &Connection,
+    run_id: &str,
+    event_id: &str,
+) -> Result<Option<RunEventRecord>, CacheError> {
+    conn.query_row(
+        "SELECT run_id, sequence, event_id, occurred_at, payload_json, truncated
+         FROM run_events WHERE run_id=?1 AND event_id=?2",
+        params![run_id, event_id],
+        read_event_row,
+    )
+    .optional()?
+    .map(event_from_row)
+    .transpose()
+}
+
+fn load_steps_on(conn: &Connection, run_id: &str) -> Result<Vec<RunStep>, CacheError> {
+    let mut stmt = conn.prepare(
+        "SELECT payload_json FROM run_events
+         WHERE run_id=?1 AND kind IN ('tool_call','tool_result','legacy_step') ORDER BY sequence",
+    )?;
+    let rows = stmt.query_map(params![run_id], |row| row.get::<_, String>(0))?;
+    let mut steps = Vec::new();
+    let mut tools: HashMap<String, usize> = HashMap::new();
+    for payload in rows {
+        match serde_json::from_str::<RunEvent>(&payload?)? {
+            RunEvent::LegacyStep { summary, ok } => steps.push(RunStep { summary, ok }),
+            RunEvent::ToolCall { id, summary, .. } => {
+                tools.insert(id, steps.len());
+                steps.push(RunStep { summary, ok: true });
+            }
+            RunEvent::ToolResult { id, ok, summary } => {
+                if let Some(step) = tools.get(&id).and_then(|index| steps.get_mut(*index)) {
+                    step.ok = ok;
+                    if !ok && !summary.is_empty() {
+                        step.summary = format!("{}: {summary}", step.summary);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(steps)
+}
+
+fn insert_event_row(conn: &Connection, event: &RunEventRecord) -> Result<(), CacheError> {
+    conn.execute(
+        "INSERT INTO run_events
+         (run_id, sequence, event_id, occurred_at, kind, payload_json, truncated)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            event.run_id,
+            event.sequence as i64,
+            event.event_id,
+            event.occurred_at.to_string(),
+            event.event.kind(),
+            serde_json::to_string(&event.event)?,
+            event.truncated as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_event_to_run(
+    run: &mut RunRecord,
+    event: &RunEvent,
+    at: Timestamp,
+) -> Result<(), CacheError> {
+    let transition = |run: &mut RunRecord, next: RunStatus| -> Result<(), CacheError> {
+        if !run.status.can_transition_to(next) {
+            return Err(CacheError::InvalidRunTransition {
+                from: run.status,
+                to: next,
+            });
+        }
+        run.status = next;
+        if matches!(next, RunStatus::Starting | RunStatus::Running) && run.started_at.is_none() {
+            run.started_at = Some(at);
+        }
+        if next.is_terminal() {
+            run.ended_at = Some(at);
+        }
+        Ok(())
+    };
+    match event {
+        RunEvent::State { status } => transition(run, *status)?,
+        RunEvent::Started { session_id, model } => {
+            // Cancellation can win after spawn but before the adapter emits
+            // Started. Keep the committed Stopping state while retaining the
+            // useful process metadata carried by this late event.
+            if run.status != RunStatus::Stopping {
+                transition(run, RunStatus::Running)?;
+            }
+            run.session_id = Some(session_id.clone());
+            if let Some(model) = model.as_ref().filter(|model| !model.is_empty()) {
+                run.model = model.clone();
+            }
+            run.latest_activity = Some("Started".into());
+        }
+        RunEvent::Text { text } => {
+            run.final_result = Some(match run.final_result.take() {
+                Some(mut prior) if !prior.is_empty() => {
+                    prior.push_str("\n\n");
+                    prior.push_str(text);
+                    prior
+                }
+                _ => text.clone(),
+            });
+            run.latest_activity = Some("Responding".into());
+        }
+        RunEvent::ToolCall { summary, .. } => run.latest_activity = Some(summary.clone()),
+        RunEvent::ToolResult { summary, .. } if !summary.is_empty() => {
+            run.latest_activity = Some(summary.clone())
+        }
+        RunEvent::ToolResult { .. } => {}
+        RunEvent::Usage {
+            usage,
+            cost_usd,
+            duration_ms,
+        } => {
+            run.usage = Some(usage.clone());
+            run.cost_usd = *cost_usd;
+            run.duration_ms = *duration_ms;
+        }
+        RunEvent::Completed {
+            session_id,
+            result,
+            cost_usd,
+            duration_ms,
+            usage,
+        } => {
+            transition(run, RunStatus::Completed)?;
+            if let Some(session_id) = session_id {
+                run.session_id = Some(session_id.clone());
+            }
+            run.final_result = Some(result.clone());
+            run.cost_usd = *cost_usd;
+            run.duration_ms = *duration_ms;
+            run.usage = usage.clone();
+            run.terminal_reason = Some(TerminalReason::Completed);
+            run.latest_activity = Some("Completed".into());
+        }
+        RunEvent::Terminated {
+            status,
+            reason,
+            message,
+        } => {
+            if !matches!(
+                status,
+                RunStatus::Failed | RunStatus::Stopped | RunStatus::Interrupted
+            ) {
+                return Err(CacheError::InvalidRunTransition {
+                    from: run.status,
+                    to: *status,
+                });
+            }
+            transition(run, *status)?;
+            run.terminal_reason = Some(*reason);
+            run.error = Some(message.clone());
+            run.latest_activity = Some(
+                match status {
+                    RunStatus::Stopped => "Stopped",
+                    RunStatus::Interrupted => "Interrupted",
+                    _ => "Failed",
+                }
+                .into(),
+            );
+        }
+        RunEvent::LegacyStep { summary, .. } => run.latest_activity = Some(summary.clone()),
+    }
+    Ok(())
+}
+
+fn append_run_event_on(
+    conn: &Connection,
+    run_id: &str,
+    event: &NewRunEvent,
+) -> Result<RunEventAppend, CacheError> {
+    if let Some(existing) = load_event_by_id(conn, run_id, &event.event_id)? {
+        return Ok(RunEventAppend::Duplicate(existing));
+    }
+    let mut run = load_run_on(conn, run_id)?
+        .ok_or_else(|| CacheError::Corrupt(format!("no run {run_id}")))?;
+    if run.status.is_terminal() {
+        return Err(CacheError::TerminalRun(run_id.to_string()));
+    }
+    let mut event = event.clone();
+    truncate_event(&mut event);
+    apply_event_to_run(&mut run, &event.event, event.occurred_at)?;
+    let sequence = run.last_event_sequence + 1;
+    run.last_event_sequence = sequence;
+    let stored = RunEventRecord {
+        run_id: run_id.to_string(),
+        sequence,
+        event_id: event.event_id,
+        occurred_at: event.occurred_at,
+        event: event.event,
+        truncated: event.truncated,
+    };
+    insert_event_row(conn, &stored)?;
+    update_run_row(conn, &run)?;
+    Ok(RunEventAppend::Appended(stored))
+}
+
+const MAX_RUN_EVENT_BYTES: usize = 64 * 1024;
+
+fn truncate_string(value: &mut String, max: usize) {
+    if value.len() <= max {
+        return;
+    }
+    let mut end = max.min(value.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value.push_str("\n[…truncated…]");
+}
+
+fn truncate_event(event: &mut NewRunEvent) {
+    if serde_json::to_vec(&event.event).is_ok_and(|json| json.len() <= MAX_RUN_EVENT_BYTES) {
+        return;
+    }
+    match &mut event.event {
+        RunEvent::Text { text } => truncate_string(text, 60 * 1024),
+        RunEvent::ToolCall { summary, .. }
+        | RunEvent::ToolResult { summary, .. }
+        | RunEvent::LegacyStep { summary, .. } => truncate_string(summary, 60 * 1024),
+        RunEvent::Completed { result, .. } => truncate_string(result, 60 * 1024),
+        RunEvent::Terminated { message, .. } => truncate_string(message, 60 * 1024),
+        _ => {}
+    }
+    // JSON escaping can make a byte-bounded string several times larger.
+    // Bound every string too, shrinking again only when the encoded payload
+    // still exceeds the storage contract.
+    for max in [8 * 1024, 2 * 1024, 512] {
+        if serde_json::to_vec(&event.event).is_ok_and(|json| json.len() <= MAX_RUN_EVENT_BYTES) {
+            break;
+        }
+        truncate_event_strings(&mut event.event, max);
+    }
+    event.truncated = true;
+}
+
+fn truncate_event_strings(event: &mut RunEvent, max: usize) {
+    match event {
+        RunEvent::State { .. } | RunEvent::Usage { .. } => {}
+        RunEvent::Started { session_id, model } => {
+            truncate_string(session_id, max);
+            if let Some(model) = model {
+                truncate_string(model, max);
+            }
+        }
+        RunEvent::Text { text } => truncate_string(text, max),
+        RunEvent::ToolCall { id, name, summary } => {
+            truncate_string(id, max);
+            truncate_string(name, max);
+            truncate_string(summary, max);
+        }
+        RunEvent::ToolResult { id, summary, .. } => {
+            truncate_string(id, max);
+            truncate_string(summary, max);
+        }
+        RunEvent::Completed {
+            session_id, result, ..
+        } => {
+            if let Some(session_id) = session_id {
+                truncate_string(session_id, max);
+            }
+            truncate_string(result, max);
+        }
+        RunEvent::Terminated { message, .. } => truncate_string(message, max),
+        RunEvent::LegacyStep { summary, .. } => truncate_string(summary, max),
+    }
+}
+
+/// Bridge for the pre-event app while it is moved to `append_run_event`.
+fn sync_legacy_steps(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> {
+    conn.execute(
+        "DELETE FROM run_events WHERE run_id=?1 AND kind='legacy_step'",
+        params![run.id],
+    )?;
+    let mut sequence: u64 = conn.query_row(
+        "SELECT COALESCE(max(sequence), 0) FROM run_events WHERE run_id=?1",
+        params![run.id],
+        |row| row.get::<_, i64>(0),
+    )? as u64;
+    for (index, step) in run.steps.iter().enumerate() {
+        sequence += 1;
+        insert_event_row(
+            conn,
+            &RunEventRecord {
+                run_id: run.id.clone(),
+                sequence,
+                event_id: format!("compat-step-{sequence}-{index}"),
+                occurred_at: run.started_at.unwrap_or(run.queued_at),
+                event: RunEvent::LegacyStep {
+                    summary: step.summary.clone(),
+                    ok: step.ok,
+                },
+                truncated: false,
+            },
+        )?;
+    }
+    conn.execute(
+        "UPDATE runs SET last_event_sequence=?2, latest_activity=COALESCE(?3, latest_activity) WHERE id=?1",
+        params![run.id, sequence as i64, run.steps.last().map(|step| step.summary.as_str())],
+    )?;
+    Ok(())
+}
+
+fn insert_comment_message_row(
+    conn: &Connection,
+    message: &CommentMessage,
+) -> Result<(), CacheError> {
+    let (kind, author) = comments::sql::author_columns(&message.author);
+    let model = match &message.author {
+        Author::Agent { model, .. } => Some(model.clone()),
+        _ => None,
+    };
+    conn.execute(
+        "INSERT INTO comment_messages
+         (id, thread_id, origin, author_kind, author, author_model, body, run_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            message.id,
+            message.thread_id,
+            message.origin.name(),
+            kind,
+            author,
+            model,
+            message.body,
+            message.run.as_ref().map(|run| run.id.as_str()),
+            message.created_at.to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Attach a newly admitted discussion run to its durable request. When the
+/// request already points at an earlier attempt, preserve that attempt as its
+/// own inline row before moving the request to the new run. This runs inside
+/// the admission transaction, so a crash cannot leave a queued run detached
+/// from its discussion.
+fn link_admitted_discussion_run(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> {
+    let RunOwner::Discussion {
+        thread_id,
+        request_id,
+        ..
+    } = &run.owner
+    else {
+        return Ok(());
+    };
+
+    let request = conn
+        .query_row(
+            "SELECT thread_id, author_kind, run_id FROM comment_messages WHERE id=?1",
+            params![request_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| CacheError::Corrupt(format!("no comment message {request_id}")))?;
+    if request.0 != *thread_id || request.1 != "user" {
+        return Err(CacheError::Corrupt(format!(
+            "request {request_id} is not the run's user message"
+        )));
+    }
+
+    if let Some(previous_id) = request.2.as_deref().filter(|id| *id != run.id) {
+        if run.retry_of.is_none() {
+            return Err(CacheError::Corrupt(format!(
+                "request {request_id} already points at run {previous_id}"
+            )));
+        }
+        let previous = load_run_on(conn, previous_id)?
+            .ok_or_else(|| CacheError::Corrupt(format!("no run {previous_id}")))?;
+        if !matches!(
+            &previous.owner,
+            RunOwner::Discussion {
+                thread_id: owner_thread,
+                request_id: owner_request,
+                ..
+            } if owner_thread == thread_id && owner_request == request_id
+        ) {
+            return Err(CacheError::Corrupt(format!(
+                "run {previous_id} does not belong to request {request_id}"
+            )));
+        }
+        let represented: bool = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM comment_messages
+                 WHERE id<>?1 AND thread_id=?2 AND run_id=?3
+             )",
+            params![request_id, thread_id, previous_id],
+            |row| row.get(0),
+        )?;
+        if !represented {
+            insert_comment_message_row(
+                conn,
+                &CommentMessage {
+                    id: comments::new_id(),
+                    thread_id: thread_id.clone(),
+                    origin: comments::ThreadOrigin::Local,
+                    author: Author::Agent {
+                        backend: previous.backend.clone(),
+                        model: previous.model.clone(),
+                    },
+                    body: String::new(),
+                    // Preserve the attempt at the point where it happened,
+                    // rather than appending it after newer conversation.
+                    created_at: previous.ended_at.unwrap_or(previous.queued_at),
+                    run: Some(previous),
+                },
+            )?;
+        }
+    }
+
+    let changed = conn.execute(
+        "UPDATE comment_messages SET run_id=?3
+         WHERE id=?1 AND thread_id=?2 AND author_kind='user'",
+        params![request_id, thread_id, run.id],
+    )?;
+    if changed != 1 {
+        return Err(CacheError::Corrupt(format!(
+            "request {request_id} could not be attached to run {}",
+            run.id
+        )));
+    }
+    Ok(())
+}
+
 impl Cache {
     pub fn open(db_path: &Path, avatar_dir: Option<PathBuf>) -> Result<Self, CacheError> {
-        let (cache, _) = Self::open_checked(db_path, avatar_dir)?;
+        let (cache, _) = Self::open_with_outcome(db_path, avatar_dir)?;
         Ok(cache)
     }
 
-    /// Open, migrating the two preceding schemas in place and resetting an
-    /// unknown schema. Returns whether it was reset, for the status line.
-    pub fn open_checked(db_path: &Path, avatar_dir: Option<PathBuf>) -> Result<(Self, bool), CacheError> {
-        let version = db_path.exists().then(|| Self::schema_version(db_path)).flatten();
-        let migratable = matches!(version, Some(13 | 14));
-        let reset = db_path.exists() && version != Some(SCHEMA_VERSION) && !migratable;
-        if reset {
-            tracing::info!(path = %db_path.display(), ?version, "schema is unknown; recreating the database");
-            for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
-            }
-        } else if migratable {
-            tracing::info!(path = %db_path.display(), ?version, to = SCHEMA_VERSION, "migrating database in place");
-        }
-        let conn = Connection::open(db_path)?;
-        let cache = Self::from_conn(conn, avatar_dir)?;
-        Ok((cache, reset))
+    /// Compatibility entry point for callers written before preserving
+    /// migrations. The boolean used to mean "reset"; resets no longer happen,
+    /// so it is always false. New callers should use `open_with_outcome`.
+    pub fn open_checked(
+        db_path: &Path,
+        avatar_dir: Option<PathBuf>,
+    ) -> Result<(Self, bool), CacheError> {
+        let (cache, _) = Self::open_with_outcome(db_path, avatar_dir)?;
+        Ok((cache, false))
     }
 
-    fn schema_version(db_path: &Path) -> Option<u32> {
-        let Ok(conn) = Connection::open(db_path) else {
-            return None;
-        };
-        let version: Option<String> = conn
-            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
-            .optional()
-            .unwrap_or(None);
-        version.and_then(|v| v.parse::<u32>().ok())
+    pub fn open_with_outcome(
+        db_path: &Path,
+        avatar_dir: Option<PathBuf>,
+    ) -> Result<(Self, CacheOpen), CacheError> {
+        let conn = Connection::open(db_path)?;
+        Self::from_conn(conn, avatar_dir)
     }
 
     /// In-memory cache, used by tests.
     pub fn open_in_memory() -> Result<Self, CacheError> {
-        Self::from_conn(Connection::open_in_memory()?, None)
+        Self::from_conn(Connection::open_in_memory()?, None).map(|(cache, _)| cache)
     }
 
-    fn from_conn(conn: Connection, avatar_dir: Option<PathBuf>) -> Result<Self, CacheError> {
+    fn from_conn(
+        mut conn: Connection,
+        avatar_dir: Option<PathBuf>,
+    ) -> Result<(Self, CacheOpen), CacheError> {
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let outcome = initialize_schema(&mut conn)?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS threads (
-                position    INTEGER NOT NULL UNIQUE,
-                id          TEXT PRIMARY KEY,
-                updated_at  TEXT NOT NULL,
-                json        TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS items (
-                id               TEXT PRIMARY KEY,
-                repo_full_name   TEXT NOT NULL,
-                subject_kind     TEXT,
-                subject_number   INTEGER,
-                subject_json     TEXT,
-                subject_repo     TEXT,
-                branch           TEXT,
-                base_ref         TEXT,
-                head_sha         TEXT,
-                checkout_path    TEXT,
-                owned            INTEGER NOT NULL DEFAULT 1,
-                on_disk          INTEGER NOT NULL DEFAULT 1,
-                from_item_id     TEXT REFERENCES items(id),
-                name             TEXT,
-                saved            INTEGER NOT NULL DEFAULT 0,
-                pinned_at        TEXT,
-                archived_at      TEXT,
-                created_at       TEXT NOT NULL,
-                last_opened_at   TEXT NOT NULL,
-                additions        INTEGER,
-                deletions        INTEGER,
-                last_seen_head   TEXT,
-                CHECK (subject_kind IS NOT NULL OR branch IS NOT NULL)
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS items_subject
-                ON items(subject_repo, subject_kind, subject_number)
-                WHERE subject_kind IS NOT NULL;
-            CREATE UNIQUE INDEX IF NOT EXISTS items_branch
-                ON items(repo_full_name, branch)
-                WHERE branch IS NOT NULL;
-            CREATE INDEX IF NOT EXISTS items_repo ON items(repo_full_name COLLATE NOCASE);
-            CREATE TABLE IF NOT EXISTS comment_threads (
-                id             TEXT PRIMARY KEY,
-                worktree_id    TEXT NOT NULL,
-                origin         TEXT NOT NULL,
-                github_id      TEXT,
-                path           TEXT,
-                start_line     INTEGER,
-                line           INTEGER,
-                side           TEXT,
-                commit_sha     TEXT,
-                outdated       INTEGER NOT NULL DEFAULT 0,
-                resolved       INTEGER NOT NULL DEFAULT 0,
-                created_at     TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS comment_threads_worktree ON comment_threads(worktree_id);
-            CREATE TABLE IF NOT EXISTS runs (
-                id             TEXT PRIMARY KEY,
-                thread_id      TEXT NOT NULL,
-                backend        TEXT NOT NULL,
-                model          TEXT NOT NULL,
-                effort         TEXT NOT NULL,
-                session_id     TEXT,
-                status         TEXT NOT NULL,
-                cost_usd       REAL,
-                duration_ms    INTEGER,
-                steps_json     TEXT NOT NULL DEFAULT '[]',
-                error          TEXT,
-                started_at     TEXT NOT NULL,
-                ended_at       TEXT
-            );
-            CREATE TABLE IF NOT EXISTS comment_messages (
-                id             TEXT PRIMARY KEY,
-                thread_id      TEXT NOT NULL REFERENCES comment_threads(id) ON DELETE CASCADE,
-                origin         TEXT NOT NULL,
-                github_id      TEXT,
-                author_kind    TEXT NOT NULL,
-                author         TEXT,
-                author_model   TEXT,
-                body           TEXT NOT NULL,
-                run_id         TEXT REFERENCES runs(id),
-                created_at     TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS comment_messages_thread ON comment_messages(thread_id);
-            CREATE TABLE IF NOT EXISTS discussions (
-                item_id     TEXT PRIMARY KEY,
-                fetched_at  TEXT NOT NULL,
-                json        TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS checks (
-                item_id     TEXT PRIMARY KEY,
-                head_sha    TEXT NOT NULL,
-                fetched_at  TEXT NOT NULL,
-                json        TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS viewed (
-                item_id    TEXT NOT NULL,
-                path       TEXT NOT NULL,
-                blob       TEXT NOT NULL,
-                viewed_at  TEXT NOT NULL,
-                PRIMARY KEY (item_id, path, blob)
-            );
-            CREATE TABLE IF NOT EXISTS reveals (
-                item_id    TEXT NOT NULL,
-                path       TEXT NOT NULL,
-                blob       TEXT NOT NULL,
-                first      INTEGER NOT NULL,
-                last       INTEGER NOT NULL,
-                PRIMARY KEY (item_id, path, blob, first, last)
-            );
-            "#,
-        )?;
-        conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
-            params![SCHEMA_VERSION.to_string()],
-        )?;
-        Ok(Self { conn, avatar_dir })
+        Ok((Self { conn, avatar_dir }, outcome))
     }
 
     // -----------------------------------------------------------------
@@ -222,7 +1433,11 @@ impl Cache {
     /// removed rather than accumulated. Keeping the validator in the same
     /// transaction prevents a crash from pairing an older list with a newer
     /// `Last-Modified` value (or the reverse).
-    pub fn store_threads(&self, threads: &[Thread], last_modified: Option<&str>) -> Result<(), CacheError> {
+    pub fn store_threads(
+        &self,
+        threads: &[Thread],
+        last_modified: Option<&str>,
+    ) -> Result<(), CacheError> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM threads", [])?;
         {
@@ -246,7 +1461,10 @@ impl Cache {
                 params![NOTIFICATIONS_LAST_MODIFIED_KEY, last_modified],
             )?;
         } else {
-            tx.execute("DELETE FROM meta WHERE key = ?1", params![NOTIFICATIONS_LAST_MODIFIED_KEY])?;
+            tx.execute(
+                "DELETE FROM meta WHERE key = ?1",
+                params![NOTIFICATIONS_LAST_MODIFIED_KEY],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -254,7 +1472,9 @@ impl Cache {
 
     /// Load the cached inbox in the same most-recent-first order GitHub sent.
     pub fn load_threads(&self) -> Result<Vec<Thread>, CacheError> {
-        let mut stmt = self.conn.prepare("SELECT json FROM threads ORDER BY position")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT json FROM threads ORDER BY position")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut threads = Vec::new();
         for row in rows {
@@ -273,7 +1493,10 @@ impl Cache {
     // -----------------------------------------------------------------
 
     /// Every thread in a worktree, with its messages and their runs.
-    pub fn load_comment_threads(&self, worktree_id: &str) -> Result<Vec<CommentThread>, CacheError> {
+    pub fn load_comment_threads(
+        &self,
+        worktree_id: &str,
+    ) -> Result<Vec<CommentThread>, CacheError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, origin, path, start_line, line, side, commit_sha, outdated, resolved, created_at
              FROM comment_threads WHERE worktree_id = ?1 ORDER BY created_at",
@@ -296,7 +1519,9 @@ impl Cache {
         let mut threads = Vec::new();
         for row in rows {
             let (id, origin, path, start, line, side, sha, outdated, resolved, created) = row?;
-            let Ok(created_at) = created.parse::<Timestamp>() else { continue };
+            let Ok(created_at) = created.parse::<Timestamp>() else {
+                continue;
+            };
             let anchor = match (path, start, line) {
                 (Some(path), Some(start), Some(line)) => Some(Anchor {
                     path,
@@ -342,7 +1567,9 @@ impl Cache {
         let mut out = Vec::new();
         for row in rows {
             let (id, origin, kind, author, model, body, run_id, created) = row?;
-            let Ok(created_at) = created.parse::<Timestamp>() else { continue };
+            let Ok(created_at) = created.parse::<Timestamp>() else {
+                continue;
+            };
             let run = match run_id {
                 Some(run_id) => self.load_run(&run_id)?,
                 None => None,
@@ -361,50 +1588,7 @@ impl Cache {
     }
 
     pub fn load_run(&self, id: &str) -> Result<Option<RunRecord>, CacheError> {
-        self.conn
-            .query_row(
-                "SELECT id, thread_id, backend, model, effort, session_id, status, cost_usd,
-                        duration_ms, steps_json, error, started_at, ended_at
-                 FROM runs WHERE id = ?1",
-                params![id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, Option<String>>(5)?,
-                        r.get::<_, String>(6)?,
-                        r.get::<_, Option<f64>>(7)?,
-                        r.get::<_, Option<i64>>(8)?,
-                        r.get::<_, String>(9)?,
-                        r.get::<_, Option<String>>(10)?,
-                        r.get::<_, String>(11)?,
-                        r.get::<_, Option<String>>(12)?,
-                    ))
-                },
-            )
-            .optional()?
-            .map(|(id, thread_id, backend, model, effort, session, status, cost, duration, steps, error, started, ended)| {
-                let steps: Vec<RunStep> = serde_json::from_str(&steps).unwrap_or_default();
-                Ok(RunRecord {
-                    id,
-                    thread_id,
-                    backend,
-                    model,
-                    effort,
-                    session_id: session,
-                    status: comments::sql::status(&status),
-                    cost_usd: cost,
-                    duration_ms: duration.map(|d| d as u64),
-                    steps,
-                    error,
-                    started_at: started.parse().map_err(|_| CacheError::Corrupt("run started_at".into()))?,
-                    ended_at: ended.and_then(|e| e.parse().ok()),
-                })
-            })
-            .transpose()
+        load_run_on(&self.conn, id)
     }
 
     pub fn insert_comment_thread(&self, t: &CommentThread) -> Result<(), CacheError> {
@@ -434,86 +1618,307 @@ impl Cache {
 
     /// Insert a message. A run it carries is inserted too if it is new.
     pub fn insert_comment_message(&self, m: &CommentMessage) -> Result<(), CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
         if let Some(run) = &m.run {
-            if self.load_run(&run.id)?.is_none() {
-                self.insert_run(run)?;
+            if load_run_on(&tx, &run.id)?.is_none() {
+                insert_run_row(&tx, run)?;
+                sync_legacy_steps(&tx, run)?;
             }
         }
-        let (kind, author) = comments::sql::author_columns(&m.author);
-        let model = match &m.author {
-            Author::Agent { model, .. } => Some(model.clone()),
-            _ => None,
-        };
-        self.conn.execute(
-            "INSERT INTO comment_messages
-             (id, thread_id, origin, author_kind, author, author_model, body, run_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                m.id,
-                m.thread_id,
-                m.origin.name(),
-                kind,
-                author,
-                model,
-                m.body,
-                m.run.as_ref().map(|r| r.id.clone()),
-                m.created_at.to_string(),
-            ],
+        insert_comment_message_row(&tx, m)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Publish a completed discussion answer and detach its run from the
+    /// originating user request in one transaction. The request must still
+    /// point at this exact run; a stale completion cannot clear a newer
+    /// attempt's link.
+    pub fn insert_completed_reply(
+        &self,
+        request_message_id: &str,
+        reply: &CommentMessage,
+    ) -> Result<(), CacheError> {
+        if !matches!(&reply.author, Author::Agent { .. }) {
+            return Err(CacheError::Corrupt(
+                "a completed reply must have an agent author".into(),
+            ));
+        }
+        let claimed_run = reply.run.as_ref().ok_or_else(|| {
+            CacheError::Corrupt("a completed reply must reference its run".into())
+        })?;
+        if claimed_run.status != RunStatus::Completed {
+            return Err(CacheError::Corrupt(
+                "a completed reply must reference a completed run".into(),
+            ));
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        let stored_run = load_run_on(&tx, &claimed_run.id)?
+            .ok_or_else(|| CacheError::Corrupt(format!("no run {}", claimed_run.id)))?;
+        if stored_run.status != RunStatus::Completed {
+            return Err(CacheError::Corrupt(format!(
+                "run {} is not completed",
+                stored_run.id
+            )));
+        }
+        match &stored_run.owner {
+            RunOwner::Discussion {
+                thread_id,
+                request_id,
+                ..
+            } if thread_id == &reply.thread_id && request_id == request_message_id => {}
+            _ => {
+                return Err(CacheError::Corrupt(
+                    "the reply does not match the run's discussion request".into(),
+                ));
+            }
+        }
+
+        insert_comment_message_row(&tx, reply)?;
+        let cleared = tx.execute(
+            "UPDATE comment_messages SET run_id = NULL
+             WHERE id = ?1 AND thread_id = ?2 AND author_kind = 'user' AND run_id = ?3",
+            params![request_message_id, reply.thread_id, stored_run.id],
         )?;
+        if cleared != 1 {
+            return Err(CacheError::Corrupt(format!(
+                "request {request_message_id} no longer points at run {}",
+                stored_run.id
+            )));
+        }
+        tx.commit()?;
         Ok(())
     }
 
     pub fn insert_run(&self, r: &RunRecord) -> Result<(), CacheError> {
-        self.conn.execute(
-            "INSERT INTO runs
-             (id, thread_id, backend, model, effort, session_id, status, cost_usd, duration_ms,
-              steps_json, error, started_at, ended_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                r.id,
-                r.thread_id,
-                r.backend,
-                r.model,
-                r.effort,
-                r.session_id,
-                r.status.name(),
-                r.cost_usd,
-                r.duration_ms.map(|d| d as i64),
-                serde_json::to_string(&r.steps)?,
-                r.error,
-                r.started_at.to_string(),
-                r.ended_at.map(|t| t.to_string()),
-            ],
-        )?;
+        let tx = self.conn.unchecked_transaction()?;
+        insert_run_row(&tx, r)?;
+        sync_legacy_steps(&tx, r)?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Persist a newly admitted run and its first event atomically. A
+    /// discussion run is also linked to its request in this transaction; a
+    /// retry preserves the request's previous attempt as a separate inline
+    /// row before replacing the link. If any part fails, no queued row or
+    /// partial discussion edit is left behind.
+    pub fn insert_run_with_event(
+        &self,
+        run: &RunRecord,
+        event: &NewRunEvent,
+    ) -> Result<RunEventAppend, CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        insert_run_row(&tx, run)?;
+        sync_legacy_steps(&tx, run)?;
+        let appended = append_run_event_on(&tx, &run.id, event)?;
+        link_admitted_discussion_run(&tx, run)?;
+        tx.commit()?;
+        Ok(appended)
     }
 
     /// Rewrite every column of a run that can move.
     pub fn update_run(&self, r: &RunRecord) -> Result<(), CacheError> {
-        self.conn.execute(
-            "UPDATE runs SET session_id = ?2, status = ?3, cost_usd = ?4, duration_ms = ?5,
-                             steps_json = ?6, error = ?7, ended_at = ?8
-             WHERE id = ?1",
-            params![
-                r.id,
-                r.session_id,
-                r.status.name(),
-                r.cost_usd,
-                r.duration_ms.map(|d| d as i64),
-                serde_json::to_string(&r.steps)?,
-                r.error,
-                r.ended_at.map(|t| t.to_string()),
-            ],
-        )?;
+        let tx = self.conn.unchecked_transaction()?;
+        update_run_row(&tx, r)?;
+        sync_legacy_steps(&tx, r)?;
+        tx.commit()?;
         Ok(())
     }
 
+    /// Nonterminal runs, in scheduler order.
+    pub fn active_runs(&self) -> Result<Vec<RunRecord>, CacheError> {
+        self.load_runs_where(
+            "status IN ('queued','starting','running','stopping') ORDER BY queued_at, id",
+            [],
+        )
+    }
+
+    /// Terminal runs newest first. The cursor is the last row of the
+    /// previous page and is exclusive.
+    pub fn run_history(
+        &self,
+        filter: &RunHistoryFilter,
+        cursor: Option<&RunHistoryCursor>,
+        limit: usize,
+    ) -> Result<Vec<RunRecord>, CacheError> {
+        let limit = limit.clamp(1, 500) as i64;
+        let ended = cursor.map(|cursor| cursor.ended_at.to_string());
+        let cursor_id = cursor.map(|cursor| cursor.id.as_str());
+        let sql = format!(
+            "SELECT {RUN_COLUMNS} FROM runs
+             WHERE status IN ('completed','failed','stopped','interrupted')
+               AND (?1 IS NULL OR owner_item_id=?1)
+               AND (?2 IS NULL OR backend=?2)
+               AND (?3 IS NULL OR status=?3)
+               AND (?4 IS NULL OR ended_at < ?4 OR (ended_at = ?4 AND id < ?5))
+             ORDER BY ended_at DESC, id DESC LIMIT ?6"
+        );
+        let rows = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mapped = stmt.query_map(
+                params![
+                    filter.item_id.as_deref(),
+                    filter.backend.as_deref(),
+                    filter.status.map(RunStatus::name),
+                    ended,
+                    cursor_id,
+                    limit,
+                ],
+                read_run_db_row,
+            )?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        self.finish_run_rows(rows)
+    }
+
+    pub fn runs_for_item(&self, item_id: &str) -> Result<Vec<RunRecord>, CacheError> {
+        let sql =
+            format!("SELECT {RUN_COLUMNS} FROM runs WHERE owner_item_id=?1 ORDER BY queued_at, id");
+        let rows = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mapped = stmt.query_map(params![item_id], read_run_db_row)?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        self.finish_run_rows(rows)
+    }
+
+    /// Every discussion-owned run for one thread, in attempt order. The
+    /// `runs_request` index serves this query by its `owner_thread_id` prefix.
+    pub fn runs_for_discussion(&self, thread_id: &str) -> Result<Vec<RunRecord>, CacheError> {
+        let sql = format!(
+            "SELECT {RUN_COLUMNS} FROM runs
+             WHERE owner_kind='discussion' AND owner_thread_id=?1
+             ORDER BY queued_at, id"
+        );
+        let rows = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mapped = stmt.query_map(params![thread_id], read_run_db_row)?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        self.finish_run_rows(rows)
+    }
+
+    pub fn runs_for_request(
+        &self,
+        thread_id: &str,
+        request_id: &str,
+    ) -> Result<Vec<RunRecord>, CacheError> {
+        let sql = format!(
+            "SELECT {RUN_COLUMNS} FROM runs
+             WHERE owner_kind='discussion' AND owner_thread_id=?1 AND owner_request_id=?2
+             ORDER BY queued_at, id"
+        );
+        let rows = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mapped = stmt.query_map(params![thread_id, request_id], read_run_db_row)?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        self.finish_run_rows(rows)
+    }
+
+    /// An event page in chronological order. `before_sequence` is exclusive;
+    /// `None` starts from the newest page.
+    pub fn load_run_events(
+        &self,
+        run_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<RunEventRecord>, CacheError> {
+        load_run_events_on(&self.conn, run_id, before_sequence, limit)
+    }
+
+    /// Persist an event and update the run projection in the same
+    /// transaction. Reusing `event_id` returns the original record.
+    pub fn append_run_event(
+        &self,
+        run_id: &str,
+        event: &NewRunEvent,
+    ) -> Result<RunEventAppend, CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let appended = append_run_event_on(&tx, run_id, event)?;
+        tx.commit()?;
+        Ok(appended)
+    }
+
+    /// Reconcile work which survived in the database but not as an owned
+    /// process. Nothing is replayed.
+    pub fn interrupt_active_runs(
+        &self,
+        reason: TerminalReason,
+        message: &str,
+    ) -> Result<usize, CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM runs WHERE status IN ('queued','starting','running','stopping') ORDER BY queued_at, id",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let now = Timestamp::now();
+        for id in &ids {
+            let mut run =
+                load_run_on(&tx, id)?.ok_or_else(|| CacheError::Corrupt(format!("no run {id}")))?;
+            let event = RunEventRecord {
+                run_id: id.clone(),
+                sequence: run.last_event_sequence + 1,
+                event_id: format!("interrupt-{}", run.last_event_sequence + 1),
+                occurred_at: now,
+                event: RunEvent::Terminated {
+                    status: RunStatus::Interrupted,
+                    reason,
+                    message: message.to_string(),
+                },
+                truncated: false,
+            };
+            apply_event_to_run(&mut run, &event.event, now)?;
+            run.last_event_sequence = event.sequence;
+            insert_event_row(&tx, &event)?;
+            update_run_row(&tx, &run)?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
+    fn finish_run_rows(&self, rows: Vec<RunDbRow>) -> Result<Vec<RunRecord>, CacheError> {
+        rows.into_iter()
+            .map(|row| {
+                let steps = load_steps_on(&self.conn, &row.id)?;
+                run_from_db(row, steps)
+            })
+            .collect()
+    }
+
+    fn load_runs_where<P>(&self, clause: &str, params: P) -> Result<Vec<RunRecord>, CacheError>
+    where
+        P: rusqlite::Params,
+    {
+        let sql = format!("SELECT {RUN_COLUMNS} FROM runs WHERE {clause}");
+        let rows = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mapped = stmt.query_map(params, read_run_db_row)?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        self.finish_run_rows(rows)
+    }
+
     /// Point a message at the run that answered it, or clear it.
-    pub fn set_message_run(&self, message_id: &str, run_id: Option<&str>) -> Result<(), CacheError> {
-        self.conn.execute(
+    pub fn set_message_run(
+        &self,
+        message_id: &str,
+        run_id: Option<&str>,
+    ) -> Result<(), CacheError> {
+        let changed = self.conn.execute(
             "UPDATE comment_messages SET run_id = ?2 WHERE id = ?1",
             params![message_id, run_id],
         )?;
+        if changed == 0 {
+            return Err(CacheError::Corrupt(format!(
+                "no comment message {message_id}"
+            )));
+        }
         Ok(())
     }
 
@@ -525,23 +1930,46 @@ impl Cache {
         Ok(())
     }
 
+    /// The item that owns a discussion, without loading its messages and
+    /// run history. Used to fence deletion against concurrent admission.
+    pub fn comment_thread_item_id(&self, id: &str) -> Result<Option<String>, CacheError> {
+        self.conn
+            .query_row(
+                "SELECT worktree_id FROM comment_threads WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(CacheError::from)
+    }
+
+    /// Remove a request that could not be admitted. Runs are linked only
+    /// after admission, so this never removes run history.
+    pub fn delete_comment_message(&self, id: &str) -> Result<(), CacheError> {
+        self.conn
+            .execute("DELETE FROM comment_messages WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn delete_comment_thread(&self, id: &str) -> Result<(), CacheError> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM comment_messages WHERE thread_id = ?1", params![id])?;
-        tx.execute("DELETE FROM runs WHERE thread_id = ?1", params![id])?;
+        tx.execute(
+            "DELETE FROM comment_messages WHERE thread_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE owner_thread_id=?1)",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM runs WHERE owner_thread_id = ?1", params![id])?;
         tx.execute("DELETE FROM comment_threads WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Mark every run still `running` as failed. For startup: such a row is
-    /// a run Perch died in the middle of, and nothing reattaches.
+    /// Compatibility wrapper for the old startup call.
     pub fn fail_running_runs(&self, reason: &str) -> Result<usize, CacheError> {
-        let n = self.conn.execute(
-            "UPDATE runs SET status = 'failed', error = ?1, ended_at = ?2 WHERE status = 'running'",
-            params![reason, Timestamp::now().to_string()],
-        )?;
-        Ok(n)
+        self.interrupt_active_runs(TerminalReason::AppRestart, reason)
     }
 
     // -----------------------------------------------------------------
@@ -590,7 +2018,11 @@ impl Cache {
             .optional()?)
     }
 
-    pub fn find_item_by_branch(&self, repo_full_name: &str, branch: &str) -> Result<Option<Item>, CacheError> {
+    pub fn find_item_by_branch(
+        &self,
+        repo_full_name: &str,
+        branch: &str,
+    ) -> Result<Option<Item>, CacheError> {
         Ok(self
             .conn
             .query_row(
@@ -608,7 +2040,9 @@ impl Cache {
     /// refused, as is a second row for the same subject or branch.
     pub fn insert_item(&self, item: &Item) -> Result<(), CacheError> {
         if !item.is_valid() {
-            return Err(CacheError::Corrupt("an item needs a subject or a checkout".into()));
+            return Err(CacheError::Corrupt(
+                "an item needs a subject or a checkout".into(),
+            ));
         }
         let c = ItemColumns::of(item)?;
         self.conn.execute(
@@ -640,7 +2074,9 @@ impl Cache {
     /// Rewrite every column of an item that can move.
     pub fn update_item(&self, item: &Item) -> Result<(), CacheError> {
         if !item.is_valid() {
-            return Err(CacheError::Corrupt("an item needs a subject or a checkout".into()));
+            return Err(CacheError::Corrupt(
+                "an item needs a subject or a checkout".into(),
+            ));
         }
         let c = ItemColumns::of(item)?;
         self.conn.execute(
@@ -652,10 +2088,19 @@ impl Cache {
                 additions = ?18, deletions = ?19, subject_repo = ?20, last_seen_head = ?21
              WHERE id = ?1",
             params![
-                item.id, item.repo_full_name,
-                c.subject_kind, c.subject_number, c.subject_json,
-                c.branch, c.base_ref, c.head_sha, c.checkout_path, c.owned, c.on_disk,
-                item.from_item_id, item.name,
+                item.id,
+                item.repo_full_name,
+                c.subject_kind,
+                c.subject_number,
+                c.subject_json,
+                c.branch,
+                c.base_ref,
+                c.head_sha,
+                c.checkout_path,
+                c.owned,
+                c.on_disk,
+                item.from_item_id,
+                item.name,
                 item.saved as i64,
                 item.pinned_at.map(|t| t.to_string()),
                 item.archived_at.map(|t| t.to_string()),
@@ -679,15 +2124,35 @@ impl Cache {
             params![id],
         )?;
         tx.execute(
-            "DELETE FROM runs WHERE thread_id IN (SELECT id FROM comment_threads WHERE worktree_id = ?1)",
+            "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE owner_item_id = ?1)",
             params![id],
         )?;
-        tx.execute("DELETE FROM comment_threads WHERE worktree_id = ?1", params![id])?;
+        tx.execute("DELETE FROM runs WHERE owner_item_id = ?1", params![id])?;
+        // An unavailable legacy run has no item id, but its retained thread
+        // can still belong to this item.
+        tx.execute(
+            "DELETE FROM run_events WHERE run_id IN (
+                 SELECT r.id FROM runs r JOIN comment_threads t ON t.id=r.owner_thread_id
+                 WHERE t.worktree_id=?1
+             )",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM runs WHERE owner_thread_id IN (SELECT id FROM comment_threads WHERE worktree_id=?1)",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM comment_threads WHERE worktree_id = ?1",
+            params![id],
+        )?;
         tx.execute("DELETE FROM discussions WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM checks WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM viewed WHERE item_id = ?1", params![id])?;
         tx.execute("DELETE FROM reveals WHERE item_id = ?1", params![id])?;
-        tx.execute("UPDATE items SET from_item_id = NULL WHERE from_item_id = ?1", params![id])?;
+        tx.execute(
+            "UPDATE items SET from_item_id = NULL WHERE from_item_id = ?1",
+            params![id],
+        )?;
         tx.execute("DELETE FROM items WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
@@ -699,17 +2164,28 @@ impl Cache {
 
     /// Keep the discussion, replacing whatever was kept before. One row per
     /// item, so Conversation can paint before the network answers.
-    pub fn store_discussion(&self, item_id: &str, discussion: &Discussion) -> Result<(), CacheError> {
+    pub fn store_discussion(
+        &self,
+        item_id: &str,
+        discussion: &Discussion,
+    ) -> Result<(), CacheError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO discussions (item_id, fetched_at, json) VALUES (?1, ?2, ?3)",
-            params![item_id, Timestamp::now().to_string(), serde_json::to_string(discussion)?],
+            params![
+                item_id,
+                Timestamp::now().to_string(),
+                serde_json::to_string(discussion)?
+            ],
         )?;
         Ok(())
     }
 
     /// The kept discussion and when it was fetched. A row an older build
     /// wrote that no longer reads is `None`, the same as no row.
-    pub fn load_discussion(&self, item_id: &str) -> Result<Option<(Timestamp, Discussion)>, CacheError> {
+    pub fn load_discussion(
+        &self,
+        item_id: &str,
+    ) -> Result<Option<(Timestamp, Discussion)>, CacheError> {
         let row: Option<(String, String)> = self
             .conn
             .query_row(
@@ -718,10 +2194,13 @@ impl Cache {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some((fetched_at, json)) = row else { return Ok(None) };
-        let (Ok(fetched_at), Ok(discussion)) =
-            (fetched_at.parse::<Timestamp>(), serde_json::from_str::<Discussion>(&json))
-        else {
+        let Some((fetched_at, json)) = row else {
+            return Ok(None);
+        };
+        let (Ok(fetched_at), Ok(discussion)) = (
+            fetched_at.parse::<Timestamp>(),
+            serde_json::from_str::<Discussion>(&json),
+        ) else {
             tracing::warn!(item_id, "skipping unreadable cached discussion");
             return Ok(None);
         };
@@ -730,7 +2209,12 @@ impl Cache {
 
     /// Keep the checks for the head they were read at, replacing whatever
     /// was kept before.
-    pub fn store_checks(&self, item_id: &str, head_sha: &str, checks: &Checks) -> Result<(), CacheError> {
+    pub fn store_checks(
+        &self,
+        item_id: &str,
+        head_sha: &str,
+        checks: &Checks,
+    ) -> Result<(), CacheError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO checks (item_id, head_sha, fetched_at, json) VALUES (?1, ?2, ?3, ?4)",
             params![item_id, head_sha, Timestamp::now().to_string(), serde_json::to_string(checks)?],
@@ -756,7 +2240,13 @@ impl Cache {
     /// Mark a file's content viewed, or not. The key is the blob, not the
     /// commit: a push that changes the file gives it a blob with no row,
     /// and a file that comes back to a viewed blob is viewed again.
-    pub fn set_viewed(&self, item_id: &str, path: &str, blob: &str, viewed: bool) -> Result<(), CacheError> {
+    pub fn set_viewed(
+        &self,
+        item_id: &str,
+        path: &str,
+        blob: &str,
+        viewed: bool,
+    ) -> Result<(), CacheError> {
         if viewed {
             self.conn.execute(
                 "INSERT OR REPLACE INTO viewed (item_id, path, blob, viewed_at) VALUES (?1, ?2, ?3, ?4)",
@@ -773,7 +2263,9 @@ impl Cache {
 
     /// Every `(path, blob)` marked viewed on an item.
     pub fn load_viewed(&self, item_id: &str) -> Result<HashSet<(String, String)>, CacheError> {
-        let mut stmt = self.conn.prepare("SELECT path, blob FROM viewed WHERE item_id = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, blob FROM viewed WHERE item_id = ?1")?;
         let rows = stmt.query_map(params![item_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
@@ -789,7 +2281,14 @@ impl Cache {
     /// same reason: a push that changes the file starts it folded again,
     /// and a file that comes back to the blob opens as it was left. Asking
     /// for the same range twice is one row.
-    pub fn set_reveal(&self, item_id: &str, path: &str, blob: &str, first: u32, last: u32) -> Result<(), CacheError> {
+    pub fn set_reveal(
+        &self,
+        item_id: &str,
+        path: &str,
+        blob: &str,
+        first: u32,
+        last: u32,
+    ) -> Result<(), CacheError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO reveals (item_id, path, blob, first, last) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![item_id, path, blob, first, last],
@@ -800,7 +2299,14 @@ impl Cache {
     /// Forget every reveal on a file's content that overlaps `first` to
     /// `last`, inclusive: a divider's Reset, which folds its run back to
     /// the default by taking every reveal the run has a piece of.
-    pub fn remove_reveals(&self, item_id: &str, path: &str, blob: &str, first: u32, last: u32) -> Result<(), CacheError> {
+    pub fn remove_reveals(
+        &self,
+        item_id: &str,
+        path: &str,
+        blob: &str,
+        first: u32,
+        last: u32,
+    ) -> Result<(), CacheError> {
         self.conn.execute(
             "DELETE FROM reveals WHERE item_id = ?1 AND path = ?2 AND blob = ?3 AND first <= ?5 AND last >= ?4",
             params![item_id, path, blob, first, last],
@@ -814,7 +2320,12 @@ impl Cache {
             .conn
             .prepare("SELECT path, blob, first, last FROM reveals WHERE item_id = ?1 ORDER BY path, blob, first, last")?;
         let rows = stmt.query_map(params![item_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, u32>(2)?, r.get::<_, u32>(3)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, u32>(2)?,
+                r.get::<_, u32>(3)?,
+            ))
         })?;
         let mut out = StoredReveals::new();
         for row in rows {
@@ -907,7 +2418,10 @@ impl ItemColumns {
             on_disk: c.map(|c| c.on_disk as i64).unwrap_or(1),
             additions: c.and_then(|c| c.churn).map(|(a, _)| a as i64),
             deletions: c.and_then(|c| c.churn).map(|(_, d)| d as i64),
-            subject_repo: item.subject.as_ref().map(|s| s.repo_full_name().to_lowercase()),
+            subject_repo: item
+                .subject
+                .as_ref()
+                .map(|s| s.repo_full_name().to_lowercase()),
             last_seen_head: c.and_then(|c| c.last_seen_head.clone()),
         })
     }
@@ -925,12 +2439,28 @@ fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
     let branch: Option<String> = r.get(5)?;
     let checkout = branch.map(|branch| ItemCheckout {
         branch,
-        base_ref: r.get::<_, Option<String>>(6).ok().flatten().unwrap_or_default(),
-        head_sha: r.get::<_, Option<String>>(7).ok().flatten().unwrap_or_default(),
-        path: PathBuf::from(r.get::<_, Option<String>>(8).ok().flatten().unwrap_or_default()),
+        base_ref: r
+            .get::<_, Option<String>>(6)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        head_sha: r
+            .get::<_, Option<String>>(7)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        path: PathBuf::from(
+            r.get::<_, Option<String>>(8)
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        ),
         owned: r.get::<_, i64>(9).unwrap_or(1) != 0,
         on_disk: r.get::<_, i64>(10).unwrap_or(1) != 0,
-        churn: match (r.get::<_, Option<i64>>(18).ok().flatten(), r.get::<_, Option<i64>>(19).ok().flatten()) {
+        churn: match (
+            r.get::<_, Option<i64>>(18).ok().flatten(),
+            r.get::<_, Option<i64>>(19).ok().flatten(),
+        ) {
             (Some(a), Some(d)) => Some((a as u32, d as u32)),
             _ => None,
         },
@@ -958,7 +2488,9 @@ mod tests {
     use super::*;
     use crate::comments::{RunStatus, Side, ThreadOrigin};
     use crate::items::{Subject as ItemSubject, SubjectKind as ItemKind};
-    use crate::model::{Reason, Repository, Subject as NotificationSubject, SubjectKind as NotificationSubjectKind};
+    use crate::model::{
+        Reason, Repository, Subject as NotificationSubject, SubjectKind as NotificationSubjectKind,
+    };
     use crate::pulls::PullRequest;
 
     fn pull_request(number: u64) -> PullRequest {
@@ -1007,7 +2539,9 @@ mod tests {
             subject: NotificationSubject {
                 title: format!("thread {id}"),
                 kind: NotificationSubjectKind::PullRequest,
-                url: Some(format!("https://api.github.com/repos/acme/widgets/pulls/{id}")),
+                url: Some(format!(
+                    "https://api.github.com/repos/acme/widgets/pulls/{id}"
+                )),
                 latest_comment_url: None,
             },
             repository: Repository {
@@ -1018,23 +2552,58 @@ mod tests {
     }
 
     fn run(id: &str, thread: &str, status: RunStatus) -> RunRecord {
+        let at = stamp("2026-09-18T10:00:00Z");
         RunRecord {
             id: id.into(),
-            thread_id: thread.into(),
+            owner: RunOwner::Discussion {
+                item_id: "w".into(),
+                thread_id: thread.into(),
+                request_id: format!("{thread}-m1"),
+            },
+            purpose: RunPurpose::Question,
             backend: "claude-code".into(),
+            executable: None,
+            executable_version: None,
+            requested_model: "sonnet".into(),
             model: "sonnet".into(),
+            requested_effort: "medium".into(),
             effort: "medium".into(),
             session_id: Some("sess".into()),
+            original_request: "why?".into(),
+            working_directory: None,
+            revision: RevisionContext::Unknown,
+            labels: RunLabels::default(),
             status,
+            terminal_reason: status
+                .is_terminal()
+                .then_some(if status == RunStatus::Completed {
+                    TerminalReason::Completed
+                } else {
+                    TerminalReason::Other
+                }),
             cost_usd: Some(0.03),
             duration_ms: Some(14_000),
+            usage: None,
+            retry_of: None,
             steps: vec![
-                RunStep { summary: "Read src/x.rs".into(), ok: true },
-                RunStep { summary: "Asked to edit src/x.rs".into(), ok: false },
+                RunStep {
+                    summary: "Read src/x.rs".into(),
+                    ok: true,
+                },
+                RunStep {
+                    summary: "Asked to edit src/x.rs".into(),
+                    ok: false,
+                },
             ],
             error: None,
-            started_at: stamp("2026-09-18T10:00:00Z"),
-            ended_at: Some(stamp("2026-09-18T10:00:14Z")),
+            queued_at: at,
+            started_at: Some(at),
+            ended_at: status
+                .is_terminal()
+                .then_some(stamp("2026-09-18T10:00:14Z")),
+            final_result: None,
+            latest_activity: None,
+            last_event_sequence: 0,
         }
     }
 
@@ -1067,10 +2636,13 @@ mod tests {
                     id: format!("{id}-m2"),
                     thread_id: id.into(),
                     origin: ThreadOrigin::Local,
-                    author: Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                    author: Author::Agent {
+                        backend: "claude-code".into(),
+                        model: "sonnet".into(),
+                    },
                     body: "because".into(),
                     created_at: stamp("2026-09-18T10:00:14Z"),
-                    run: Some(run(&format!("{id}-r1"), id, RunStatus::Finished)),
+                    run: Some(run(&format!("{id}-r1"), id, RunStatus::Completed)),
                 },
             ],
         }
@@ -1082,8 +2654,52 @@ mod tests {
         let t = comment_thread("t1", "acme/widgets#perch/pr-7");
         c.insert_comment_thread(&t).unwrap();
         let loaded = c.load_comment_threads("acme/widgets#perch/pr-7").unwrap();
-        assert_eq!(loaded, vec![t]);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, t.id);
+        assert_eq!(loaded[0].messages.len(), 2);
+        let loaded_run = loaded[0].messages[1].run.as_ref().unwrap();
+        assert_eq!(loaded_run.steps, t.messages[1].run.as_ref().unwrap().steps);
+        assert_eq!(loaded_run.last_event_sequence, 2);
         assert!(c.load_comment_threads("other").unwrap().is_empty());
+    }
+
+    #[test]
+    fn cache_connections_enforce_foreign_key_actions() {
+        let c = Cache::open_in_memory().unwrap();
+        let enabled: i64 = c
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(enabled, 1);
+
+        c.insert_comment_thread(&comment_thread("t1", "w")).unwrap();
+        assert_eq!(c.load_run_events("t1-r1", None, 10).unwrap().len(), 2);
+
+        c.conn
+            .execute("DELETE FROM runs WHERE id = ?1", params!["t1-r1"])
+            .unwrap();
+
+        let remaining_events: i64 = c
+            .conn
+            .query_row(
+                "SELECT count(*) FROM run_events WHERE run_id = ?1",
+                params!["t1-r1"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let message_run_id: Option<String> = c
+            .conn
+            .query_row(
+                "SELECT run_id FROM comment_messages WHERE id = ?1",
+                params!["t1-m2"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_events, 0, "run events cascade with their run");
+        assert_eq!(
+            message_run_id, None,
+            "answer messages survive with their run reference cleared"
+        );
     }
 
     #[test]
@@ -1091,13 +2707,18 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         let t = comment_thread("t1", "w");
         c.insert_comment_thread(&t).unwrap();
-        let mut r = run("t1-r1", "t1", RunStatus::Finished);
-        r.steps.push(RunStep { summary: "Ran git log".into(), ok: true });
+        let mut r = run("t1-r1", "t1", RunStatus::Completed);
+        r.steps.push(RunStep {
+            summary: "Ran git log".into(),
+            ok: true,
+        });
         r.cost_usd = Some(0.05);
         c.update_run(&r).unwrap();
         let loaded = c.load_run("t1-r1").unwrap().unwrap();
         assert_eq!(loaded.steps.len(), 3);
-        assert_eq!(loaded, r);
+        assert_eq!(loaded.cost_usd, r.cost_usd);
+        assert_eq!(loaded.steps, r.steps);
+        assert_eq!(loaded.last_event_sequence, 3);
     }
 
     #[test]
@@ -1116,14 +2737,651 @@ mod tests {
         let mut t = comment_thread("t1", "w");
         t.messages[1].run = Some(run("r-running", "t1", RunStatus::Running));
         c.insert_comment_thread(&t).unwrap();
-        c.insert_run(&run("r-done", "t1", RunStatus::Finished)).unwrap();
+        c.insert_run(&run("r-done", "t1", RunStatus::Completed))
+            .unwrap();
 
         assert_eq!(c.fail_running_runs("Perch quit").unwrap(), 1);
         let failed = c.load_run("r-running").unwrap().unwrap();
-        assert_eq!(failed.status, RunStatus::Failed);
+        assert_eq!(failed.status, RunStatus::Interrupted);
         assert_eq!(failed.error.as_deref(), Some("Perch quit"));
         assert!(failed.ended_at.is_some());
-        assert_eq!(c.load_run("r-done").unwrap().unwrap().status, RunStatus::Finished);
+        assert_eq!(
+            c.load_run("r-done").unwrap().unwrap().status,
+            RunStatus::Completed
+        );
+    }
+
+    fn event(id: &str, at: &str, event: RunEvent) -> NewRunEvent {
+        NewRunEvent {
+            event_id: id.into(),
+            occurred_at: stamp(at),
+            event,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn started_after_stop_requested_preserves_stopping_and_metadata() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut queued = run("stop-during-start", "thread", RunStatus::Queued);
+        queued.steps.clear();
+        queued.started_at = None;
+        queued.ended_at = None;
+        queued.terminal_reason = None;
+        c.insert_run(&queued).unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "starting",
+                "2026-09-18T10:00:01Z",
+                RunEvent::State {
+                    status: RunStatus::Starting,
+                },
+            ),
+        )
+        .unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "stopping",
+                "2026-09-18T10:00:02Z",
+                RunEvent::State {
+                    status: RunStatus::Stopping,
+                },
+            ),
+        )
+        .unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "late-started",
+                "2026-09-18T10:00:03Z",
+                RunEvent::Started {
+                    session_id: "session-late".into(),
+                    model: Some("model-actual".into()),
+                },
+            ),
+        )
+        .unwrap();
+
+        let stopping = c.load_run(&queued.id).unwrap().unwrap();
+        assert_eq!(stopping.status, RunStatus::Stopping);
+        assert_eq!(stopping.session_id.as_deref(), Some("session-late"));
+        assert_eq!(stopping.model, "model-actual");
+        assert_eq!(stopping.latest_activity.as_deref(), Some("Started"));
+
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "stopped",
+                "2026-09-18T10:00:04Z",
+                RunEvent::Terminated {
+                    status: RunStatus::Stopped,
+                    reason: TerminalReason::UserStopped,
+                    message: "Stopped by the reader".into(),
+                },
+            ),
+        )
+        .unwrap();
+        let stopped = c.load_run(&queued.id).unwrap().unwrap();
+        assert_eq!(stopped.status, RunStatus::Stopped);
+        assert_eq!(stopped.terminal_reason, Some(TerminalReason::UserStopped));
+        assert_eq!(stopped.session_id.as_deref(), Some("session-late"));
+    }
+
+    #[test]
+    fn completed_reply_insert_and_request_detach_are_atomic() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut thread = comment_thread("reply", "w");
+        thread.messages.truncate(1);
+        c.insert_comment_thread(&thread).unwrap();
+        let completed = run("reply-run", "reply", RunStatus::Completed);
+        c.insert_run(&completed).unwrap();
+        c.set_message_run("reply-m1", Some(&completed.id)).unwrap();
+        let reply = CommentMessage {
+            id: "reply-m2".into(),
+            thread_id: "reply".into(),
+            origin: ThreadOrigin::Local,
+            author: Author::Agent {
+                backend: completed.backend.clone(),
+                model: completed.model.clone(),
+            },
+            body: "because".into(),
+            created_at: stamp("2026-09-18T10:00:14Z"),
+            run: Some(completed.clone()),
+        };
+
+        c.insert_completed_reply("reply-m1", &reply).unwrap();
+
+        let loaded = c.load_comment_threads("w").unwrap().pop().unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert!(loaded.messages[0].run.is_none());
+        assert_eq!(
+            loaded.messages[1].run.as_ref().map(|run| run.id.as_str()),
+            Some("reply-run")
+        );
+    }
+
+    #[test]
+    fn completed_reply_rolls_back_when_the_request_link_is_missing() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut thread = comment_thread("rollback", "w");
+        thread.messages.clear();
+        c.insert_comment_thread(&thread).unwrap();
+        let completed = run("rollback-run", "rollback", RunStatus::Completed);
+        c.insert_run(&completed).unwrap();
+        let reply = CommentMessage {
+            id: "rollback-m2".into(),
+            thread_id: "rollback".into(),
+            origin: ThreadOrigin::Local,
+            author: Author::Agent {
+                backend: completed.backend.clone(),
+                model: completed.model.clone(),
+            },
+            body: "because".into(),
+            created_at: stamp("2026-09-18T10:00:14Z"),
+            run: Some(completed),
+        };
+
+        assert!(matches!(
+            c.insert_completed_reply("rollback-m1", &reply),
+            Err(CacheError::Corrupt(_))
+        ));
+        assert!(c.load_comment_threads("w").unwrap()[0].messages.is_empty());
+    }
+
+    #[test]
+    fn admitting_a_run_and_its_first_event_is_atomic() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut queued = run("atomic-admission", "thread", RunStatus::Queued);
+        queued.steps.clear();
+        queued.started_at = None;
+        queued.ended_at = None;
+        queued.terminal_reason = None;
+        let invalid = event(
+            "completed-too-soon",
+            "2026-09-18T10:00:01Z",
+            RunEvent::Completed {
+                session_id: None,
+                result: String::new(),
+                cost_usd: None,
+                duration_ms: None,
+                usage: None,
+            },
+        );
+
+        assert!(matches!(
+            c.insert_run_with_event(&queued, &invalid),
+            Err(CacheError::InvalidRunTransition {
+                from: RunStatus::Queued,
+                to: RunStatus::Completed
+            })
+        ));
+        assert!(c.load_run(&queued.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn discussion_admission_links_the_request_in_the_run_transaction() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut thread = comment_thread("admission", "w");
+        thread.messages.truncate(1);
+        c.insert_comment_thread(&thread).unwrap();
+        let mut queued = run("admission-run", "admission", RunStatus::Queued);
+        queued.steps.clear();
+        queued.started_at = None;
+        queued.ended_at = None;
+        queued.terminal_reason = None;
+        let queued_event = event(
+            "state-queued",
+            "2026-09-18T10:00:00Z",
+            RunEvent::State {
+                status: RunStatus::Queued,
+            },
+        );
+
+        c.insert_run_with_event(&queued, &queued_event).unwrap();
+
+        let loaded = c.load_comment_threads("w").unwrap().pop().unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(
+            loaded.messages[0].run.as_ref().map(|run| run.id.as_str()),
+            Some("admission-run")
+        );
+    }
+
+    #[test]
+    fn discussion_admission_rolls_back_when_its_request_is_missing() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut queued = run("detached-run", "missing", RunStatus::Queued);
+        queued.steps.clear();
+        queued.started_at = None;
+        queued.ended_at = None;
+        queued.terminal_reason = None;
+        let queued_event = event(
+            "state-queued",
+            "2026-09-18T10:00:00Z",
+            RunEvent::State {
+                status: RunStatus::Queued,
+            },
+        );
+
+        assert!(matches!(
+            c.insert_run_with_event(&queued, &queued_event),
+            Err(CacheError::Corrupt(_))
+        ));
+        assert!(c.load_run("detached-run").unwrap().is_none());
+        assert!(c
+            .load_run_events("detached-run", None, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn retry_admission_preserves_the_prior_attempt_beside_its_request() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut thread = comment_thread("retry", "w");
+        thread.messages.truncate(1);
+        c.insert_comment_thread(&thread).unwrap();
+
+        let previous = run("retry-old", "retry", RunStatus::Failed);
+        c.insert_run(&previous).unwrap();
+        c.set_message_run("retry-m1", Some(&previous.id)).unwrap();
+        c.insert_comment_message(&CommentMessage {
+            id: "retry-later".into(),
+            thread_id: "retry".into(),
+            origin: ThreadOrigin::Local,
+            author: Author::User,
+            body: "a later question".into(),
+            created_at: stamp("2026-09-18T11:00:00Z"),
+            run: None,
+        })
+        .unwrap();
+
+        let mut retry = run("retry-new", "retry", RunStatus::Queued);
+        retry.steps.clear();
+        retry.started_at = None;
+        retry.ended_at = None;
+        retry.terminal_reason = None;
+        retry.retry_of = Some(previous.id.clone());
+        retry.queued_at = stamp("2026-09-18T12:00:00Z");
+        c.insert_run_with_event(
+            &retry,
+            &event(
+                "state-queued",
+                "2026-09-18T12:00:00Z",
+                RunEvent::State {
+                    status: RunStatus::Queued,
+                },
+            ),
+        )
+        .unwrap();
+
+        let loaded = c.load_comment_threads("w").unwrap().pop().unwrap();
+        assert_eq!(loaded.messages.len(), 3);
+        assert_eq!(loaded.messages[0].id, "retry-m1");
+        assert_eq!(
+            loaded.messages[0].run.as_ref().map(|run| run.id.as_str()),
+            Some("retry-new")
+        );
+        assert_eq!(
+            loaded.messages[1].run.as_ref().map(|run| run.id.as_str()),
+            Some("retry-old")
+        );
+        assert_eq!(loaded.messages[2].id, "retry-later");
+    }
+
+    #[test]
+    fn streamed_text_survives_reload_and_completion_is_authoritative() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let c = Cache::open(&path, None).unwrap();
+        let mut queued = run("streamed", "thread", RunStatus::Queued);
+        queued.steps.clear();
+        queued.started_at = None;
+        queued.ended_at = None;
+        queued.terminal_reason = None;
+        queued.final_result = None;
+        c.insert_run(&queued).unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "starting",
+                "2026-09-18T10:00:01Z",
+                RunEvent::State {
+                    status: RunStatus::Starting,
+                },
+            ),
+        )
+        .unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "started",
+                "2026-09-18T10:00:02Z",
+                RunEvent::Started {
+                    session_id: "session".into(),
+                    model: None,
+                },
+            ),
+        )
+        .unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "text-1",
+                "2026-09-18T10:00:03Z",
+                RunEvent::Text {
+                    text: "first paragraph".into(),
+                },
+            ),
+        )
+        .unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "text-2",
+                "2026-09-18T10:00:04Z",
+                RunEvent::Text {
+                    text: "second paragraph".into(),
+                },
+            ),
+        )
+        .unwrap();
+        drop(c);
+
+        let c = Cache::open(&path, None).unwrap();
+        assert_eq!(
+            c.load_run(&queued.id)
+                .unwrap()
+                .unwrap()
+                .final_result
+                .as_deref(),
+            Some("first paragraph\n\nsecond paragraph")
+        );
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "completed",
+                "2026-09-18T10:00:05Z",
+                RunEvent::Completed {
+                    session_id: Some("session".into()),
+                    result: "authoritative final answer".into(),
+                    cost_usd: None,
+                    duration_ms: Some(3_000),
+                    usage: None,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            c.load_run(&queued.id)
+                .unwrap()
+                .unwrap()
+                .final_result
+                .as_deref(),
+            Some("authoritative final answer")
+        );
+    }
+
+    #[test]
+    fn events_append_idempotently_and_update_the_run_projection() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut queued = run("run-events", "thread-events", RunStatus::Queued);
+        queued.steps.clear();
+        queued.started_at = None;
+        queued.ended_at = None;
+        queued.terminal_reason = None;
+        queued.duration_ms = None;
+        c.insert_run(&queued).unwrap();
+
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "state-starting",
+                "2026-09-18T10:00:01Z",
+                RunEvent::State {
+                    status: RunStatus::Starting,
+                },
+            ),
+        )
+        .unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "started",
+                "2026-09-18T10:00:02Z",
+                RunEvent::Started {
+                    session_id: "session-new".into(),
+                    model: Some("sonnet-actual".into()),
+                },
+            ),
+        )
+        .unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "tool",
+                "2026-09-18T10:00:03Z",
+                RunEvent::ToolCall {
+                    id: "tool-1".into(),
+                    name: "Read".into(),
+                    summary: "Read src/lib.rs".into(),
+                },
+            ),
+        )
+        .unwrap();
+        c.append_run_event(
+            &queued.id,
+            &event(
+                "tool-result",
+                "2026-09-18T10:00:04Z",
+                RunEvent::ToolResult {
+                    id: "tool-1".into(),
+                    ok: false,
+                    summary: "permission denied".into(),
+                },
+            ),
+        )
+        .unwrap();
+        let completed = event(
+            "done",
+            "2026-09-18T10:00:05Z",
+            RunEvent::Completed {
+                session_id: Some("session-new".into()),
+                result: "Answer".into(),
+                cost_usd: Some(0.25),
+                duration_ms: Some(3_000),
+                usage: None,
+            },
+        );
+        assert!(matches!(
+            c.append_run_event(&queued.id, &completed).unwrap(),
+            RunEventAppend::Appended(_)
+        ));
+        assert!(matches!(
+            c.append_run_event(&queued.id, &completed).unwrap(),
+            RunEventAppend::Duplicate(_)
+        ));
+        assert!(matches!(
+            c.append_run_event(
+                &queued.id,
+                &event(
+                    "late",
+                    "2026-09-18T10:00:06Z",
+                    RunEvent::Text {
+                        text: "late".into()
+                    }
+                )
+            ),
+            Err(CacheError::TerminalRun(_))
+        ));
+
+        let loaded = c.load_run(&queued.id).unwrap().unwrap();
+        assert_eq!(loaded.status, RunStatus::Completed);
+        assert_eq!(loaded.model, "sonnet-actual");
+        assert_eq!(loaded.session_id.as_deref(), Some("session-new"));
+        assert_eq!(loaded.final_result.as_deref(), Some("Answer"));
+        assert_eq!(loaded.cost_usd, Some(0.25));
+        assert_eq!(loaded.steps.len(), 1);
+        assert!(!loaded.steps[0].ok);
+        assert!(loaded.steps[0].summary.contains("permission denied"));
+        let events = c.load_run_events(&queued.id, None, 3).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            [3, 4, 5]
+        );
+        let older = c.load_run_events(&queued.id, Some(3), 10).unwrap();
+        assert_eq!(
+            older.iter().map(|event| event.sequence).collect::<Vec<_>>(),
+            [1, 2]
+        );
+    }
+
+    #[test]
+    fn active_history_request_queries_and_interruption_are_stable() {
+        let c = Cache::open_in_memory().unwrap();
+        for (index, status) in [
+            RunStatus::Queued,
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::Stopping,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut active = run(
+                &format!("active-{index}"),
+                &format!("thread-{index}"),
+                status,
+            );
+            active.steps.clear();
+            active.terminal_reason = None;
+            active.ended_at = None;
+            active.owner = RunOwner::Discussion {
+                item_id: "item-active".into(),
+                thread_id: format!("thread-{index}"),
+                request_id: format!("request-{index}"),
+            };
+            c.insert_run(&active).unwrap();
+        }
+        let done = run("done-history", "thread-done", RunStatus::Completed);
+        c.insert_run(&done).unwrap();
+        assert_eq!(c.active_runs().unwrap().len(), 4);
+        assert_eq!(
+            c.interrupt_active_runs(TerminalReason::AppRestart, "Perch restarted")
+                .unwrap(),
+            4
+        );
+        assert!(c.active_runs().unwrap().is_empty());
+        for index in 0..4 {
+            let run = c.load_run(&format!("active-{index}")).unwrap().unwrap();
+            assert_eq!(run.status, RunStatus::Interrupted);
+            assert_eq!(run.terminal_reason, Some(TerminalReason::AppRestart));
+            assert_eq!(
+                c.load_run_events(&run.id, None, 20)
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .event_id,
+                "interrupt-1"
+            );
+        }
+        let history = c
+            .run_history(&RunHistoryFilter::default(), None, 3)
+            .unwrap();
+        assert_eq!(history.len(), 3);
+        let cursor = RunHistoryCursor {
+            ended_at: history.last().unwrap().ended_at.unwrap(),
+            id: history.last().unwrap().id.clone(),
+        };
+        assert!(!c
+            .run_history(&RunHistoryFilter::default(), Some(&cursor), 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(c.runs_for_item("item-active").unwrap().len(), 4);
+        assert_eq!(
+            c.runs_for_request("thread-2", "request-2").unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn only_one_nonterminal_attempt_per_request_can_be_inserted() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut first = run("attempt-1", "thread", RunStatus::Queued);
+        first.steps.clear();
+        first.started_at = None;
+        first.ended_at = None;
+        first.terminal_reason = None;
+        c.insert_run(&first).unwrap();
+        let mut second = first.clone();
+        second.id = "attempt-2".into();
+        second.retry_of = Some(first.id);
+        assert!(matches!(c.insert_run(&second), Err(CacheError::Sqlite(_))));
+    }
+
+    #[test]
+    fn runs_for_discussion_returns_all_requests_in_attempt_order() {
+        let c = Cache::open_in_memory().unwrap();
+        let first = run("discussion-1", "shared-thread", RunStatus::Completed);
+        let mut second = run("discussion-2", "shared-thread", RunStatus::Failed);
+        second.owner = RunOwner::Discussion {
+            item_id: "w".into(),
+            thread_id: "shared-thread".into(),
+            request_id: "shared-thread-m2".into(),
+        };
+        let other = run("other", "other-thread", RunStatus::Completed);
+        c.insert_run(&first).unwrap();
+        c.insert_run(&second).unwrap();
+        c.insert_run(&other).unwrap();
+
+        let ids: Vec<_> = c
+            .runs_for_discussion("shared-thread")
+            .unwrap()
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        assert_eq!(ids, ["discussion-1", "discussion-2"]);
+    }
+
+    #[test]
+    fn event_payloads_are_bounded_after_json_escaping() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut running = run("long-event", "long-thread", RunStatus::Running);
+        running.steps.clear();
+        running.ended_at = None;
+        running.terminal_reason = None;
+        c.insert_run(&running).unwrap();
+        let long = "\\\n".repeat(100_000);
+        let appended = c
+            .append_run_event(
+                &running.id,
+                &event(
+                    "long",
+                    "2026-09-18T10:00:01Z",
+                    RunEvent::Text { text: long },
+                ),
+            )
+            .unwrap();
+        let RunEventAppend::Appended(stored) = appended else {
+            panic!("first append was not new")
+        };
+        assert!(stored.truncated);
+        let bytes: i64 = c
+            .conn
+            .query_row(
+                "SELECT length(CAST(payload_json AS BLOB)) FROM run_events WHERE run_id=?1 AND event_id='long'",
+                params![running.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            bytes as usize <= MAX_RUN_EVENT_BYTES,
+            "stored {bytes} bytes"
+        );
     }
 
     #[test]
@@ -1132,7 +3390,8 @@ mod tests {
         c.insert_item(&pr_item(7)).unwrap();
         let id = pr_item(7).id;
         c.insert_comment_thread(&comment_thread("t1", &id)).unwrap();
-        c.insert_comment_thread(&comment_thread("t2", "elsewhere")).unwrap();
+        c.insert_comment_thread(&comment_thread("t2", "elsewhere"))
+            .unwrap();
 
         c.delete_item(&id).unwrap();
         assert!(c.load_comment_threads(&id).unwrap().is_empty());
@@ -1190,11 +3449,172 @@ mod tests {
     #[test]
     fn a_fresh_database_carries_the_schema_version() {
         let c = Cache::open_in_memory().unwrap();
-        assert_eq!(c.meta("schema_version").unwrap().as_deref(), Some(&*SCHEMA_VERSION.to_string()));
+        assert_eq!(
+            c.meta("schema_version").unwrap().as_deref(),
+            Some(&*SCHEMA_VERSION.to_string())
+        );
+    }
+
+    fn write_schema_13(path: &Path, status: &str) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(BASE_SCHEMA).unwrap();
+        conn.execute("DROP TABLE threads", []).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE runs (
+                id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, backend TEXT NOT NULL,
+                model TEXT NOT NULL, effort TEXT NOT NULL, session_id TEXT, status TEXT NOT NULL,
+                cost_usd REAL, duration_ms INTEGER, steps_json TEXT NOT NULL DEFAULT '[]',
+                error TEXT, started_at TEXT NOT NULL, ended_at TEXT
+             );
+             CREATE TABLE comment_messages (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL REFERENCES comment_threads(id) ON DELETE CASCADE,
+                origin TEXT NOT NULL, github_id TEXT, author_kind TEXT NOT NULL, author TEXT,
+                author_model TEXT, body TEXT NOT NULL, run_id TEXT REFERENCES runs(id),
+                created_at TEXT NOT NULL
+             );
+             CREATE INDEX comment_messages_thread ON comment_messages(thread_id);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meta(key,value) VALUES ('schema_version','13')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO items
+             (id,repo_full_name,branch,base_ref,head_sha,checkout_path,created_at,last_opened_at)
+             VALUES ('item-1','acme/widgets','feature','main','abc','/tmp/feature',?1,?1)",
+            params!["2026-09-18T09:00:00Z"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO comment_threads
+             (id,worktree_id,origin,outdated,resolved,created_at)
+             VALUES ('thread-1','item-1','local',0,0,?1)",
+            params!["2026-09-18T09:30:00Z"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runs
+             (id,thread_id,backend,model,effort,session_id,status,cost_usd,duration_ms,
+              steps_json,error,started_at,ended_at)
+             VALUES ('run-1','thread-1','claude-code','sonnet','high','session-1',?1,0.12,4200,
+                     '[{\"summary\":\"Read src/lib.rs\",\"ok\":true}]',NULL,?2,?3)",
+            params![status, "2026-09-18T10:00:00Z", "2026-09-18T10:00:04Z"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runs
+             (id,thread_id,backend,model,effort,status,steps_json,error,started_at,ended_at)
+             VALUES ('run-orphan','missing','codex','gpt','medium','failed','[]','gone',?1,?1)",
+            params!["2026-09-18T11:00:00Z"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO comment_messages
+             (id,thread_id,origin,author_kind,body,run_id,created_at)
+             VALUES ('request-1','thread-1','local','user','Why?',NULL,?1),
+                    ('answer-1','thread-1','local','agent','Because.','run-1',?2)",
+            params!["2026-09-18T09:59:00Z", "2026-09-18T10:00:04Z"],
+        )
+        .unwrap();
     }
 
     #[test]
-    fn a_database_with_no_version_is_recreated_on_open() {
+    fn schema_13_migrates_runs_messages_and_steps_without_new_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        write_schema_13(&path, "finished");
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 13,
+                to: SCHEMA_VERSION,
+            }
+        );
+        let run = cache.load_run("run-1").unwrap().unwrap();
+        assert_eq!(
+            run.owner,
+            RunOwner::Discussion {
+                item_id: "item-1".into(),
+                thread_id: "thread-1".into(),
+                request_id: "request-1".into(),
+            }
+        );
+        assert_eq!(run.status, RunStatus::Completed);
+        assert_eq!(run.session_id.as_deref(), Some("session-1"));
+        assert_eq!(run.original_request, "Why?");
+        assert_eq!(run.final_result.as_deref(), Some("Because."));
+        assert_eq!(run.labels.repository, "acme/widgets");
+        assert_eq!(run.labels.branch.as_deref(), Some("feature"));
+        assert_eq!(
+            run.steps,
+            vec![RunStep {
+                summary: "Read src/lib.rs".into(),
+                ok: true
+            }]
+        );
+        assert_eq!(cache.load_run_events("run-1", None, 20).unwrap().len(), 1);
+        assert!(matches!(
+            cache.load_run("run-orphan").unwrap().unwrap().owner,
+            RunOwner::Unavailable { legacy_thread_id: Some(ref id) } if id == "missing"
+        ));
+        let threads = cache.load_comment_threads("item-1").unwrap();
+        assert_eq!(threads[0].messages[1].run.as_ref().unwrap().id, "run-1");
+        assert!(
+            cache.load_threads().unwrap().is_empty(),
+            "the notification cache is added after the run migration"
+        );
+    }
+
+    #[test]
+    fn a_failed_migration_rolls_back_every_schema_and_data_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        write_schema_13(&path, "not-a-status");
+
+        assert!(matches!(
+            Cache::open_with_outcome(&path, None),
+            Err(CacheError::Corrupt(_))
+        ));
+        let conn = Connection::open(&path).unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "13");
+        let kept: i64 = conn
+            .query_row("SELECT count(*) FROM runs WHERE id='run-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept, 1);
+        let legacy_column: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('runs') WHERE name='thread_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_column, 1);
+        let new_column: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('runs') WHERE name='owner_kind'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_column, 0);
+    }
+
+    #[test]
+    fn a_database_with_no_version_is_retained_and_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("perch.db");
         {
@@ -1206,23 +3626,21 @@ mod tests {
             )
             .unwrap();
         }
-        let (c, reset) = Cache::open_checked(&path, None).unwrap();
-        assert!(reset);
-        let n: i64 = c
-            .conn
-            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'items'", [], |r| r.get(0))
+        assert!(matches!(
+            Cache::open_with_outcome(&path, None),
+            Err(CacheError::MissingSchemaVersion)
+        ));
+        let conn = Connection::open(&path).unwrap();
+        let old: i64 = conn
+            .query_row("SELECT count(*) FROM threads WHERE id='old'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(n, 1, "the new tables exist");
-        let old: i64 = c
-            .conn
-            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'threads'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(old, 1, "the notification cache table is recreated");
-        assert!(c.load_threads().unwrap().is_empty(), "the old row is gone");
+        assert_eq!(old, 1, "unsupported data remains intact");
     }
 
     #[test]
-    fn a_database_with_an_old_version_is_recreated_and_a_current_one_is_kept() {
+    fn an_unsupported_old_version_is_retained_and_a_current_one_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("perch.db");
         {
@@ -1231,48 +3649,138 @@ mod tests {
             c.insert_item(&pr_item(7)).unwrap();
             c.set_meta("schema_version", "6").unwrap();
         }
-        let (c, reset) = Cache::open_checked(&path, None).unwrap();
-        assert!(reset);
-        assert!(c.load_items().unwrap().is_empty());
-        c.insert_item(&pr_item(7)).unwrap();
-        drop(c);
+        assert!(matches!(
+            Cache::open_with_outcome(&path, None),
+            Err(CacheError::UnsupportedSchema { found: 6 })
+        ));
+        let conn = Connection::open(&path).unwrap();
+        let kept: i64 = conn
+            .query_row("SELECT count(*) FROM items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+        conn.execute(
+            "UPDATE meta SET value=?1 WHERE key='schema_version'",
+            params![SCHEMA_VERSION.to_string()],
+        )
+        .unwrap();
+        drop(conn);
         let (c, reset) = Cache::open_checked(&path, None).unwrap();
         assert!(!reset, "a current database is kept");
         assert_eq!(c.load_items().unwrap().len(), 1);
     }
 
     #[test]
-    fn notification_schema_migration_preserves_items_and_conversations() {
-        for version in [13_u32, 14] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("perch.db");
-            let item = pr_item(u64::from(version));
-            let thread = comment_thread(&format!("t{version}"), &item.id);
-            {
-                let c = Cache::open(&path, None).unwrap();
-                c.insert_item(&item).unwrap();
-                c.insert_comment_thread(&thread).unwrap();
-                c.conn.execute("DROP TABLE threads", []).unwrap();
-                c.set_meta("schema_version", &version.to_string()).unwrap();
-            }
-
-            let (c, reset) = Cache::open_checked(&path, None).unwrap();
-            assert!(!reset, "schema {version} migrates without deleting local state");
-            assert_eq!(c.meta("schema_version").unwrap().as_deref(), Some("15"));
-            assert_eq!(c.load_item(&item.id).unwrap(), Some(item));
-            assert_eq!(c.load_comment_threads(&thread.worktree_id).unwrap(), vec![thread]);
-            assert!(c.load_threads().unwrap().is_empty(), "the new notification table exists");
+    fn feature_schema_14_adds_notifications_without_losing_rich_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let item = pr_item(14);
+        let thread = comment_thread("feature-14", &item.id);
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&item).unwrap();
+            cache.insert_comment_thread(&thread).unwrap();
+            cache.conn.execute("DROP TABLE threads", []).unwrap();
+            cache.set_meta("schema_version", "14").unwrap();
         }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 14,
+                to: SCHEMA_VERSION,
+            }
+        );
+        assert_eq!(cache.load_item(&item.id).unwrap(), Some(item));
+        let loaded = cache.load_comment_threads(&thread.worktree_id).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, thread.id);
+        assert_eq!(
+            loaded[0].messages[1].run.as_ref().unwrap().id,
+            "feature-14-r1"
+        );
+        assert!(cache.load_threads().unwrap().is_empty());
+    }
+
+    #[test]
+    fn main_schema_15_migrates_legacy_runs_and_keeps_notifications() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        write_schema_13(&path, "finished");
+        let notification = notification_thread("15", "2026-09-19T12:00:00Z");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(NOTIFICATION_SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO threads (position, id, updated_at, json) VALUES (0, ?1, ?2, ?3)",
+                params![
+                    notification.id,
+                    notification.updated_at.to_string(),
+                    serde_json::to_string(&notification).unwrap(),
+                ],
+            )
+            .unwrap();
+            conn.execute("UPDATE meta SET value='15' WHERE key='schema_version'", [])
+                .unwrap();
+        }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 15,
+                to: SCHEMA_VERSION,
+            }
+        );
+        assert_eq!(cache.load_threads().unwrap(), vec![notification]);
+        let run = cache.load_run("run-1").unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Completed);
+        assert_eq!(run.original_request, "Why?");
+        assert_eq!(run.final_result.as_deref(), Some("Because."));
+    }
+
+    #[test]
+    fn a_newer_schema_is_retained_and_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&pr_item(9)).unwrap();
+            cache.set_meta("schema_version", "99").unwrap();
+        }
+        assert!(matches!(
+            Cache::open_with_outcome(&path, None),
+            Err(CacheError::NewerSchema {
+                found: 99,
+                current: SCHEMA_VERSION
+            })
+        ));
+        let conn = Connection::open(&path).unwrap();
+        let kept: i64 = conn
+            .query_row("SELECT count(*) FROM items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
     }
 
     #[test]
     fn the_schema_has_no_project_table_and_indexes_items_by_repository() {
         let c = Cache::open_in_memory().unwrap();
         let count = |sql: &str| -> i64 { c.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(count("SELECT count(*) FROM sqlite_master WHERE name = 'projects'"), 0);
+        assert_eq!(
+            count("SELECT count(*) FROM sqlite_master WHERE name = 'projects'"),
+            0
+        );
         assert_eq!(count("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'items_project'"), 0);
-        assert_eq!(count("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'items_repo'"), 1);
-        assert_eq!(count("SELECT count(*) FROM pragma_table_info('items') WHERE name = 'project_id'"), 0);
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'items_repo'"
+            ),
+            1
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM pragma_table_info('items') WHERE name = 'project_id'"),
+            0
+        );
     }
 
     #[test]
@@ -1295,9 +3803,20 @@ mod tests {
         c.insert_item(&i).unwrap();
         assert_eq!(c.load_items().unwrap(), vec![i.clone()]);
         assert_eq!(c.load_item(&i.id).unwrap(), Some(i.clone()));
-        assert_eq!(c.find_item_by_subject("ACME/widgets", ItemKind::PullRequest, 7).unwrap(), Some(i.clone()));
-        assert_eq!(c.find_item_by_branch("acme/widgets", "perch/pr-7").unwrap(), Some(i.clone()));
-        assert_eq!(c.find_item_by_subject("acme/widgets", ItemKind::Issue, 7).unwrap(), None);
+        assert_eq!(
+            c.find_item_by_subject("ACME/widgets", ItemKind::PullRequest, 7)
+                .unwrap(),
+            Some(i.clone())
+        );
+        assert_eq!(
+            c.find_item_by_branch("acme/widgets", "perch/pr-7").unwrap(),
+            Some(i.clone())
+        );
+        assert_eq!(
+            c.find_item_by_subject("acme/widgets", ItemKind::Issue, 7)
+                .unwrap(),
+            None
+        );
 
         i.archived_at = Some(stamp_of("2026-09-19T00:00:00Z"));
         i.repo_full_name = "acme/widgets-fork".into();
@@ -1315,8 +3834,17 @@ mod tests {
         i.repo_full_name = "chris/widgets".into();
         i.subject = Some(ItemSubject::PullRequest(pull_request(7)));
         c.insert_item(&i).unwrap();
-        assert_eq!(c.find_item_by_subject("acme/widgets", ItemKind::PullRequest, 7).unwrap().map(|i| i.id), Some(i.id.clone()));
-        assert_eq!(c.find_item_by_subject("chris/widgets", ItemKind::PullRequest, 7).unwrap(), None);
+        assert_eq!(
+            c.find_item_by_subject("acme/widgets", ItemKind::PullRequest, 7)
+                .unwrap()
+                .map(|i| i.id),
+            Some(i.id.clone())
+        );
+        assert_eq!(
+            c.find_item_by_subject("chris/widgets", ItemKind::PullRequest, 7)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1363,7 +3891,10 @@ mod tests {
         c.delete_item(&pr_item(7).id).unwrap();
         assert!(c.load_item(&pr_item(7).id).unwrap().is_none());
         let cut = c.load_item(&cut.id).unwrap().unwrap();
-        assert_eq!(cut.from_item_id, None, "the pointer is cleared, the row stays");
+        assert_eq!(
+            cut.from_item_id, None,
+            "the pointer is cleared, the row stays"
+        );
     }
 
     #[test]
@@ -1371,7 +3902,15 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         let mut i = branch_item("feature");
         c.insert_item(&i).unwrap();
-        assert_eq!(c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().last_seen_head, None);
+        assert_eq!(
+            c.load_item(&i.id)
+                .unwrap()
+                .unwrap()
+                .checkout
+                .unwrap()
+                .last_seen_head,
+            None
+        );
 
         i.checkout.as_mut().unwrap().last_seen_head = Some("abc".into());
         i.checkout.as_mut().unwrap().head_sha = "def".into();
@@ -1419,8 +3958,16 @@ mod tests {
                 html_url: String::new(),
             }],
             events: vec![
-                PullEvent { kind: PullEventKind::Opened, at: stamp_of("2026-09-14T14:02:00Z") },
-                PullEvent { kind: PullEventKind::Merged { by: Some("rohan".into()) }, at: stamp_of("2026-09-17T15:00:00Z") },
+                PullEvent {
+                    kind: PullEventKind::Opened,
+                    at: stamp_of("2026-09-14T14:02:00Z"),
+                },
+                PullEvent {
+                    kind: PullEventKind::Merged {
+                        by: Some("rohan".into()),
+                    },
+                    at: stamp_of("2026-09-17T15:00:00Z"),
+                },
             ],
         }
     }
@@ -1435,7 +3982,11 @@ mod tests {
         let (fetched_at, loaded) = c.load_discussion("item-pr-7").unwrap().unwrap();
         assert_eq!(loaded, discussion());
         assert!(fetched_at >= before);
-        assert_eq!(c.load_discussion("item-pr-8").unwrap(), None, "keyed by item");
+        assert_eq!(
+            c.load_discussion("item-pr-8").unwrap(),
+            None,
+            "keyed by item"
+        );
 
         // A second fetch replaces the row rather than adding to it.
         let mut newer = discussion();
@@ -1449,16 +4000,28 @@ mod tests {
         use crate::workflow_runs::CheckState;
         let c = Cache::open_in_memory().unwrap();
         let checks = Checks {
-            state: CheckState::Failing { workflow: "CI".into() },
+            state: CheckState::Failing {
+                workflow: "CI".into(),
+            },
             url: Some("https://github.com/acme/widgets/actions/runs/1".into()),
         };
         c.store_checks("item-pr-7", "abc123", &checks).unwrap();
-        assert_eq!(c.load_checks("item-pr-7", "abc123").unwrap(), Some(checks.clone()));
-        assert_eq!(c.load_checks("item-pr-7", "fff999").unwrap(), None, "a push makes them a miss");
+        assert_eq!(
+            c.load_checks("item-pr-7", "abc123").unwrap(),
+            Some(checks.clone())
+        );
+        assert_eq!(
+            c.load_checks("item-pr-7", "fff999").unwrap(),
+            None,
+            "a push makes them a miss"
+        );
         assert_eq!(c.load_checks("item-pr-8", "abc123").unwrap(), None);
 
         // Reading them at the new head replaces the row.
-        let green = Checks { state: CheckState::Passing, url: None };
+        let green = Checks {
+            state: CheckState::Passing,
+            url: None,
+        };
         c.store_checks("item-pr-7", "fff999", &green).unwrap();
         assert_eq!(c.load_checks("item-pr-7", "fff999").unwrap(), Some(green));
         assert_eq!(c.load_checks("item-pr-7", "abc123").unwrap(), None);
@@ -1469,8 +4032,10 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         assert!(c.load_viewed("item-pr-7").unwrap().is_empty());
 
-        c.set_viewed("item-pr-7", "src/x.rs", "blob-a", true).unwrap();
-        c.set_viewed("item-pr-7", "src/y.rs", "blob-y", true).unwrap();
+        c.set_viewed("item-pr-7", "src/x.rs", "blob-a", true)
+            .unwrap();
+        c.set_viewed("item-pr-7", "src/y.rs", "blob-y", true)
+            .unwrap();
         let viewed = c.load_viewed("item-pr-7").unwrap();
         assert!(viewed.contains(&("src/x.rs".into(), "blob-a".into())));
         assert!(viewed.contains(&("src/y.rs".into(), "blob-y".into())));
@@ -1479,18 +4044,24 @@ mod tests {
 
         // Viewing the new blob leaves the old one's row alone, so a revert
         // to it is still viewed.
-        c.set_viewed("item-pr-7", "src/x.rs", "blob-b", true).unwrap();
+        c.set_viewed("item-pr-7", "src/x.rs", "blob-b", true)
+            .unwrap();
         let viewed = c.load_viewed("item-pr-7").unwrap();
         assert!(viewed.contains(&("src/x.rs".into(), "blob-a".into())));
         assert!(viewed.contains(&("src/x.rs".into(), "blob-b".into())));
 
         // Unviewing is by blob too, and marking twice is one row.
-        c.set_viewed("item-pr-7", "src/x.rs", "blob-a", true).unwrap();
-        c.set_viewed("item-pr-7", "src/x.rs", "blob-a", false).unwrap();
+        c.set_viewed("item-pr-7", "src/x.rs", "blob-a", true)
+            .unwrap();
+        c.set_viewed("item-pr-7", "src/x.rs", "blob-a", false)
+            .unwrap();
         let viewed = c.load_viewed("item-pr-7").unwrap();
         assert!(!viewed.contains(&("src/x.rs".into(), "blob-a".into())));
         assert_eq!(viewed.len(), 2);
-        assert!(c.load_viewed("item-pr-8").unwrap().is_empty(), "keyed by item");
+        assert!(
+            c.load_viewed("item-pr-8").unwrap().is_empty(),
+            "keyed by item"
+        );
     }
 
     #[test]
@@ -1498,18 +4069,32 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         assert!(c.load_reveals("item-pr-7").unwrap().is_empty());
 
-        c.set_reveal("item-pr-7", "src/x.rs", "blob-a", 40, 59).unwrap();
-        c.set_reveal("item-pr-7", "src/x.rs", "blob-a", 4, 23).unwrap();
-        c.set_reveal("item-pr-7", "src/y.rs", "blob-y", 0, 19).unwrap();
+        c.set_reveal("item-pr-7", "src/x.rs", "blob-a", 40, 59)
+            .unwrap();
+        c.set_reveal("item-pr-7", "src/x.rs", "blob-a", 4, 23)
+            .unwrap();
+        c.set_reveal("item-pr-7", "src/y.rs", "blob-y", 0, 19)
+            .unwrap();
         // Asking for the same range twice is one row.
-        c.set_reveal("item-pr-7", "src/x.rs", "blob-a", 4, 23).unwrap();
+        c.set_reveal("item-pr-7", "src/x.rs", "blob-a", 4, 23)
+            .unwrap();
         let reveals = c.load_reveals("item-pr-7").unwrap();
         assert_eq!(reveals.len(), 2);
-        assert_eq!(reveals[&("src/x.rs".into(), "blob-a".into())], vec![(4, 23), (40, 59)], "each file's in order");
-        assert_eq!(reveals[&("src/y.rs".into(), "blob-y".into())], vec![(0, 19)]);
+        assert_eq!(
+            reveals[&("src/x.rs".into(), "blob-a".into())],
+            vec![(4, 23), (40, 59)],
+            "each file's in order"
+        );
+        assert_eq!(
+            reveals[&("src/y.rs".into(), "blob-y".into())],
+            vec![(0, 19)]
+        );
         // The file was pushed to: a new blob, and no rows for it.
         assert!(!reveals.contains_key(&("src/x.rs".to_string(), "blob-b".to_string())));
-        assert!(c.load_reveals("item-pr-8").unwrap().is_empty(), "keyed by item");
+        assert!(
+            c.load_reveals("item-pr-8").unwrap().is_empty(),
+            "keyed by item"
+        );
     }
 
     #[test]
@@ -1517,26 +4102,39 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         let key = ("src/x.rs".to_string(), "blob-a".to_string());
         for (first, last) in [(0, 9), (10, 29), (30, 30), (31, 50), (60, 79)] {
-            c.set_reveal("item-pr-7", "src/x.rs", "blob-a", first, last).unwrap();
+            c.set_reveal("item-pr-7", "src/x.rs", "blob-a", first, last)
+                .unwrap();
         }
-        c.set_reveal("item-pr-7", "src/x.rs", "blob-b", 10, 29).unwrap();
+        c.set_reveal("item-pr-7", "src/x.rs", "blob-b", 10, 29)
+            .unwrap();
         c.set_reveal("other", "src/x.rs", "blob-a", 10, 29).unwrap();
 
         // A run of 10 to 30: the reveal that ends on its first line and the
         // one that begins on its last both overlap it; the ones either side
         // of those do not.
-        c.remove_reveals("item-pr-7", "src/x.rs", "blob-a", 10, 30).unwrap();
+        c.remove_reveals("item-pr-7", "src/x.rs", "blob-a", 10, 30)
+            .unwrap();
         let reveals = c.load_reveals("item-pr-7").unwrap();
         assert_eq!(reveals[&key], vec![(0, 9), (31, 50), (60, 79)]);
-        assert_eq!(reveals[&("src/x.rs".into(), "blob-b".into())], vec![(10, 29)], "another blob's rows stay");
-        assert_eq!(c.load_reveals("other").unwrap().len(), 1, "another item's rows stay");
+        assert_eq!(
+            reveals[&("src/x.rs".into(), "blob-b".into())],
+            vec![(10, 29)],
+            "another blob's rows stay"
+        );
+        assert_eq!(
+            c.load_reveals("other").unwrap().len(),
+            1,
+            "another item's rows stay"
+        );
 
         // A range that touches a reveal's edge takes it.
-        c.remove_reveals("item-pr-7", "src/x.rs", "blob-a", 50, 60).unwrap();
+        c.remove_reveals("item-pr-7", "src/x.rs", "blob-a", 50, 60)
+            .unwrap();
         let reveals = c.load_reveals("item-pr-7").unwrap();
         assert_eq!(reveals[&key], vec![(0, 9)]);
         // A file with nothing left has no entry at all.
-        c.remove_reveals("item-pr-7", "src/x.rs", "blob-a", 0, 0).unwrap();
+        c.remove_reveals("item-pr-7", "src/x.rs", "blob-a", 0, 0)
+            .unwrap();
         assert!(!c.load_reveals("item-pr-7").unwrap().contains_key(&key));
     }
 
@@ -1547,7 +4145,15 @@ mod tests {
         c.insert_item(&pr_item(7)).unwrap();
         let id = pr_item(7).id;
         c.store_discussion(&id, &discussion()).unwrap();
-        c.store_checks(&id, "abc123", &Checks { state: CheckState::Passing, url: None }).unwrap();
+        c.store_checks(
+            &id,
+            "abc123",
+            &Checks {
+                state: CheckState::Passing,
+                url: None,
+            },
+        )
+        .unwrap();
         c.set_viewed(&id, "src/x.rs", "blob-a", true).unwrap();
         c.set_viewed("other", "src/x.rs", "blob-a", true).unwrap();
         c.set_reveal(&id, "src/x.rs", "blob-a", 4, 23).unwrap();
@@ -1557,7 +4163,11 @@ mod tests {
         assert_eq!(c.load_discussion(&id).unwrap(), None);
         assert_eq!(c.load_checks(&id, "abc123").unwrap(), None);
         assert!(c.load_viewed(&id).unwrap().is_empty());
-        assert_eq!(c.load_viewed("other").unwrap().len(), 1, "another item's rows stay");
+        assert_eq!(
+            c.load_viewed("other").unwrap().len(),
+            1,
+            "another item's rows stay"
+        );
         assert!(c.load_reveals(&id).unwrap().is_empty());
         assert_eq!(c.load_reveals("other").unwrap().len(), 1, "and its reveals");
     }
@@ -1566,7 +4176,8 @@ mod tests {
     fn meta_round_trips() {
         let c = Cache::open_in_memory().unwrap();
         assert_eq!(c.meta("last_modified").unwrap(), None);
-        c.set_meta("last_modified", "Wed, 17 Sep 2026 18:00:00 GMT").unwrap();
+        c.set_meta("last_modified", "Wed, 17 Sep 2026 18:00:00 GMT")
+            .unwrap();
         assert_eq!(
             c.meta("last_modified").unwrap().as_deref(),
             Some("Wed, 17 Sep 2026 18:00:00 GMT")
@@ -1604,7 +4215,8 @@ mod tests {
         .unwrap();
 
         let replacement = notification_thread("3", "2026-09-19T09:00:00Z");
-        c.store_threads(std::slice::from_ref(&replacement), None).unwrap();
+        c.store_threads(std::slice::from_ref(&replacement), None)
+            .unwrap();
 
         assert_eq!(c.load_threads().unwrap(), vec![replacement]);
         assert_eq!(c.notifications_last_modified().unwrap(), None);

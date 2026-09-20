@@ -11,13 +11,15 @@ use std::rc::Rc;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
 use floem::text::FontWeight;
-use floem::views::{Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack};
+use floem::views::{
+    dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
+};
 
 use crate::backend::Backend;
 use crate::review::cards;
 use crate::review::model::ReviewState;
 use crate::review::threads::{self, ThreadFace};
-use crate::review::timeline::{Card, timeline};
+use crate::review::timeline::{timeline, Card};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
@@ -52,7 +54,9 @@ pub fn view(
         for card in &cards {
             let gap = match previous {
                 None => 0.0,
-                Some(p) if matches!(p, Card::Event(_)) || matches!(card, Card::Event(_)) => theme::EVENT_GAP,
+                Some(p) if matches!(p, Card::Event(_)) || matches!(card, Card::Event(_)) => {
+                    theme::EVENT_GAP
+                }
                 Some(_) => theme::CARD_GAP,
             };
             rows.push((card.clone(), gap));
@@ -75,32 +79,57 @@ pub fn view(
                 cards,
                 |(card, gap)| format!("{}:{gap}", cards::key(card)),
                 move |(card, gap)| {
-                    card_view(app, state, card_backend.clone(), open_file.clone(), card, gap)
+                    card_view(
+                        app,
+                        state,
+                        card_backend.clone(),
+                        open_file.clone(),
+                        card,
+                        gap,
+                    )
                 },
             )
             .style(|s| s.flex_col().width_full()),
-            Label::derived(|| "Nothing here yet. Ask about the branch below.".to_string()).style(move |s| {
-                // Hidden rather than absent, so it takes no share of the
-                // column's gap while there is something here.
-                s.font_size(theme::TEXT_BODY)
-                    .color(theme::FG_SUBTLE)
-                    .width_full()
-                    .text_align(floem::text::Alignment::Center)
-                    .padding_vert(28.0)
-                    .selectable(false)
-                    .apply_if(!empty(), |s| s.hide())
+            Label::derived(|| "Nothing here yet. Ask about the branch below.".to_string()).style(
+                move |s| {
+                    // Hidden rather than absent, so it takes no share of the
+                    // column's gap while there is something here.
+                    s.font_size(theme::TEXT_BODY)
+                        .color(theme::FG_SUBTLE)
+                        .width_full()
+                        .text_align(floem::text::Alignment::Center)
+                        .padding_vert(28.0)
+                        .selectable(false)
+                        .apply_if(!empty(), |s| s.hide())
+                },
+            ),
+            composer(app, state, composer_backend).style(|s| {
+                s.width_full()
+                    .padding_top(theme::CONVERSATION_ENTRY_PADDING)
             }),
-            composer(app, state, composer_backend)
-                .style(|s| s.width_full().padding_top(theme::CONVERSATION_ENTRY_PADDING)),
         ))
-        .style(|s| s.flex_col().width_full().max_width(theme::CONVERSATION_WIDTH)),
+        .style(|s| {
+            s.flex_col()
+                .width_full()
+                .max_width(theme::CONVERSATION_WIDTH)
+        }),
     )
-    .style(|s| s.width_full().items_start().justify_center().padding(theme::CONVERSATION_PADDING))
+    .style(|s| {
+        s.width_full()
+            .items_start()
+            .justify_center()
+            .padding(theme::CONVERSATION_PADDING)
+    })
     .scroll()
     // A bare key goes to the focused view and bubbles up from there, and
     // a click on the page would otherwise focus nothing: the column takes
     // the focus so `a` reaches the window's handler.
-    .style(|s| s.size_full().min_height(0.0).background(theme::CANVAS).focusable())
+    .style(|s| {
+        s.size_full()
+            .min_height(0.0)
+            .background(theme::CANVAS)
+            .focusable()
+    })
 }
 
 /// The full item title belongs in the reading surface as well as the compact
@@ -111,7 +140,11 @@ fn conversation_title(state: ReviewState) -> impl IntoView {
         state
             .pull_request
             .with(|p| p.as_ref().map(|p| p.title.clone()))
-            .or_else(|| state.item.with(|i| i.as_ref().map(|i| i.title().to_string())))
+            .or_else(|| {
+                state
+                    .item
+                    .with(|i| i.as_ref().map(|i| i.title().to_string()))
+            })
             .unwrap_or_default()
     };
     Label::derived(title)
@@ -140,13 +173,22 @@ fn card_view(
     let view: floem::AnyView = match card {
         // What Perch started from an issue is in the strip under the
         // header, as chips, not repeated under the description.
-        Card::Description { author, avatar_url, at, body } => {
-            cards::description_card(app, author, avatar_url, at, body).into_any()
-        }
+        Card::Description {
+            author,
+            avatar_url,
+            at,
+            body,
+        } => cards::description_card(app, author, avatar_url, at, body).into_any(),
         Card::Comment(comment) => cards::comment_card(app, state, comment).into_any(),
-        Card::Review { review, comments } => cards::review_card(app, state, backend, open_file, review, comments).into_any(),
-        Card::Event(event) => cards::event_row(app, event, pull.map(|p| p.author_login.clone())).into_any(),
-        Card::Thread(thread) => cards::thread_card(app, state, backend, open_file, thread).into_any(),
+        Card::Review { review, comments } => {
+            cards::review_card(app, state, backend, open_file, review, comments).into_any()
+        }
+        Card::Event(event) => {
+            cards::event_row(app, event, pull.map(|p| p.author_login.clone())).into_any()
+        }
+        Card::Thread(thread) => {
+            cards::thread_card(app, state, backend, open_file, thread).into_any()
+        }
     };
     view.debug_name(format!("card:{debug}"))
         .style(move |s| s.width_full().margin_top(gap))
@@ -164,15 +206,18 @@ fn composer(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
     // opens a composer about the same thing with another quote, gets a
     // fresh box rather than the first one's text.
     let open = floem::reactive::Memo::new(move |_| {
-        state
-            .composer
-            .with(|c| c.as_ref().filter(|c| c.thread_id.is_none()).map(|c| (c.anchor.clone(), c.opening)))
+        state.composer.with(|c| {
+            c.as_ref()
+                .filter(|c| c.thread_id.is_none())
+                .map(|c| (c.anchor.clone(), c.opening))
+        })
     });
     dyn_container(
         move || open.get(),
         move |open| match open {
             Some(_) => match state.composer.get_untracked() {
-                Some(c) => threads::composer_view(app, state, backend.clone(), c, ThreadFace::Card).into_any(),
+                Some(c) => threads::composer_view(app, state, backend.clone(), c, ThreadFace::Card)
+                    .into_any(),
                 None => Empty::new().into_any(),
             },
             None => cards::ask_box(app, state).into_any(),
@@ -191,8 +236,9 @@ mod tests {
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::reactive::{SignalGet, SignalUpdate};
     use perch_github::{
-        Anchor, Author, CommentMessage, CommentThread, Discussion, Item, ItemCheckout, ItemSubject, IssueComment,
-        PullEvent, PullEventKind, PullRequest, Review, ReviewComment, RunRecord, RunStatus, RunStep, Side, ThreadOrigin,
+        Anchor, Author, CommentMessage, CommentThread, Discussion, IssueComment, Item,
+        ItemCheckout, ItemSubject, PullEvent, PullEventKind, PullRequest, Review, ReviewComment,
+        RunRecord, RunStatus, RunStep, Side, ThreadOrigin,
     };
 
     use crate::review::model::ReviewState;
@@ -278,8 +324,16 @@ mod tests {
                 line(32, Some(31), "2026-09-16T12:00:00Z", "the reply"),
             ],
             events: vec![
-                PullEvent { kind: PullEventKind::Opened, at: at("2026-09-14T14:02:00Z") },
-                PullEvent { kind: PullEventKind::Merged { by: Some("rohan".into()) }, at: at("2026-09-17T15:00:00Z") },
+                PullEvent {
+                    kind: PullEventKind::Opened,
+                    at: at("2026-09-14T14:02:00Z"),
+                },
+                PullEvent {
+                    kind: PullEventKind::Merged {
+                        by: Some("rohan".into()),
+                    },
+                    at: at("2026-09-17T15:00:00Z"),
+                },
             ],
         }
     }
@@ -287,21 +341,32 @@ mod tests {
     fn run() -> RunRecord {
         RunRecord {
             id: "r1".into(),
-            thread_id: "t1".into(),
+            owner: perch_github::RunOwner::Discussion {
+                item_id: "wt".into(),
+                thread_id: "t1".into(),
+                request_id: "q1".into(),
+            },
             backend: "claude-code".into(),
             model: "sonnet".into(),
             effort: "high".into(),
             session_id: Some("sess".into()),
-            status: RunStatus::Finished,
+            status: RunStatus::Completed,
             cost_usd: Some(0.03),
             duration_ms: Some(14_000),
             steps: vec![
-                RunStep { summary: "Read src/manifest.rs".into(), ok: true },
-                RunStep { summary: "Ran git log".into(), ok: true },
+                RunStep {
+                    summary: "Read src/manifest.rs".into(),
+                    ok: true,
+                },
+                RunStep {
+                    summary: "Ran git log".into(),
+                    ok: true,
+                },
             ],
             error: None,
-            started_at: at("2026-09-16T13:00:00Z"),
+            started_at: Some(at("2026-09-16T13:00:00Z")),
             ended_at: Some(at("2026-09-16T13:00:14Z")),
+            ..RunRecord::default()
         }
     }
 
@@ -320,7 +385,13 @@ mod tests {
             id: "t1".into(),
             worktree_id: "wt".into(),
             origin: ThreadOrigin::Local,
-            anchor: Some(Anchor { path: "src/manifest.rs".into(), start_line: 41, line: 58, side: Side::Right, commit_sha: "h".into() }),
+            anchor: Some(Anchor {
+                path: "src/manifest.rs".into(),
+                start_line: 41,
+                line: 58,
+                side: Side::Right,
+                commit_sha: "h".into(),
+            }),
             outdated: false,
             resolved: false,
             created_at: at("2026-09-16T13:00:00Z"),
@@ -328,7 +399,10 @@ mod tests {
                 message("m1", Author::User, "why the fence?", "2026-09-16T13:00:00Z"),
                 message(
                     "m2",
-                    Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                    Author::Agent {
+                        backend: "claude-code".into(),
+                        model: "sonnet".into(),
+                    },
                     "because",
                     "2026-09-16T13:00:14Z",
                 ),
@@ -396,7 +470,11 @@ mod tests {
         let mut all = Vec::new();
         names(harness.root_id(), &mut all);
         all.into_iter()
-            .filter_map(|n| n.split_whitespace().find(|w| w.starts_with("card:")).map(str::to_string))
+            .filter_map(|n| {
+                n.split_whitespace()
+                    .find(|w| w.starts_with("card:"))
+                    .map(str::to_string)
+            })
             .collect()
     }
 
@@ -406,12 +484,27 @@ mod tests {
         assert_eq!(state.tab.get(), crate::review::model::ItemTab::Conversation);
         assert_eq!(
             cards_in_order(&harness),
-            ["card:description", "card:event", "card:comment", "card:review", "card:thread", "card:event"]
+            [
+                "card:description",
+                "card:event",
+                "card:comment",
+                "card:review",
+                "card:thread",
+                "card:event"
+            ]
         );
         let mut all = Vec::new();
         names(harness.root_id(), &mut all);
         let text = all.join("\n");
-        for expected in ["Thanks", "approved", "Local", "You", "merged", "src/manifest.rs:41", "Ask about this pull request"] {
+        for expected in [
+            "Thanks",
+            "approved",
+            "Local",
+            "You",
+            "merged",
+            "src/manifest.rs:41",
+            "Ask about this pull request",
+        ] {
             assert!(text.contains(expected), "no {expected:?} on screen");
         }
         assert!(!shown(&harness, "Nothing here yet"));
@@ -433,13 +526,28 @@ mod tests {
     #[test]
     fn the_composer_opens_in_place_and_a_follow_up_under_its_thread() {
         let (mut harness, _, state) = app_harness();
-        state.open_composer(None, None, "why?".into(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
+        state.open_composer(
+            None,
+            None,
+            "why?".into(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
         harness.rebuild();
         harness.paint();
         let mut all = Vec::new();
         names(harness.root_id(), &mut all);
-        assert!(all.iter().any(|n| n.contains("composer")), "the in-place composer is not in the tree");
-        assert!(state.composer_box.get().is_some(), "the box did not register itself for `a`");
+        assert!(
+            all.iter().any(|n| n.contains("composer")),
+            "the in-place composer is not in the tree"
+        );
+        assert!(
+            state.composer_box.get().is_some(),
+            "the box did not register itself for `a`"
+        );
 
         // Picking a model keeps the box: the container is keyed on what
         // the composer is about, not on the composer.
@@ -456,7 +564,10 @@ mod tests {
         state.close_composer();
         harness.rebuild();
         harness.paint();
-        assert!(state.composer_box.get().is_none(), "closing the composer left its box registered");
+        assert!(
+            state.composer_box.get().is_none(),
+            "closing the composer left its box registered"
+        );
     }
 
     /// The thread views build for both faces, from the same thread.
@@ -470,14 +581,63 @@ mod tests {
         let backend = Rc::new(crate::backend::Backend::detached());
         let open_file: crate::review::OpenFile = Rc::new(|_| {});
         let view = Stack::vertical((
-            crate::review::threads::messages_view(app, state, backend.clone(), "t1".into(), ThreadFace::Column),
-            crate::review::threads::messages_view(app, state, backend.clone(), "t1".into(), ThreadFace::Card),
-            crate::review::threads::messages_view(app, state, backend.clone(), "t1".into(), ThreadFace::Inline),
-            crate::review::threads::follow_up(app, state, backend.clone(), "t1".into(), ThreadFace::Column),
-            crate::review::threads::follow_up(app, state, backend.clone(), "t1".into(), ThreadFace::Card),
-            crate::review::threads::follow_up(app, state, backend.clone(), "t1".into(), ThreadFace::Inline),
-            crate::review::cards::thread_card(app, state, backend.clone(), open_file.clone(), thread()),
-            crate::review::threads::thread_card(app, state, backend, open_file, thread(), ThreadFace::Inline),
+            crate::review::threads::messages_view(
+                app,
+                state,
+                backend.clone(),
+                "t1".into(),
+                ThreadFace::Column,
+            ),
+            crate::review::threads::messages_view(
+                app,
+                state,
+                backend.clone(),
+                "t1".into(),
+                ThreadFace::Card,
+            ),
+            crate::review::threads::messages_view(
+                app,
+                state,
+                backend.clone(),
+                "t1".into(),
+                ThreadFace::Inline,
+            ),
+            crate::review::threads::follow_up(
+                app,
+                state,
+                backend.clone(),
+                "t1".into(),
+                ThreadFace::Column,
+            ),
+            crate::review::threads::follow_up(
+                app,
+                state,
+                backend.clone(),
+                "t1".into(),
+                ThreadFace::Card,
+            ),
+            crate::review::threads::follow_up(
+                app,
+                state,
+                backend.clone(),
+                "t1".into(),
+                ThreadFace::Inline,
+            ),
+            crate::review::cards::thread_card(
+                app,
+                state,
+                backend.clone(),
+                open_file.clone(),
+                thread(),
+            ),
+            crate::review::threads::thread_card(
+                app,
+                state,
+                backend,
+                open_file,
+                thread(),
+                ThreadFace::Inline,
+            ),
         ));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 1600.0);
         harness.rebuild();
@@ -485,10 +645,18 @@ mod tests {
         let mut all = Vec::new();
         names(harness.root_id(), &mut all);
         let text = all.join("\n");
-        assert_eq!(text.matches("Read 1 file, ran 1 command").count(), 10, "each face folds the run's steps to one line");
+        assert_eq!(
+            text.matches("Read 1 file, ran 1 command").count(),
+            10,
+            "each face folds the run's steps to one line"
+        );
         assert_eq!(text.matches("Follow up…").count(), 5);
         // The inline card has no anchor label: it is under its lines.
-        assert_eq!(text.matches("src/manifest.rs:41").count(), 1, "Conversation's card names the lines; the inline one does not");
+        assert_eq!(
+            text.matches("src/manifest.rs:41").count(),
+            1,
+            "Conversation's card names the lines; the inline one does not"
+        );
     }
 
     fn key_a() -> floem::event::Event {

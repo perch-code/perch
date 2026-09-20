@@ -1,6 +1,7 @@
 //! Perch: a desktop reader for the pull requests and issues in the
 //! repositories the reader declares.
 
+mod agents_cli;
 mod app_icon;
 mod ask;
 mod backend;
@@ -48,6 +49,11 @@ fn main() {
     // and its rows.
     if args.get(1).map(String::as_str) == Some("--items") {
         items_cli::run(&args[2..]);
+        return;
+    }
+    // App-wide agent activity and retained history, from the cache alone.
+    if args.get(1).map(String::as_str) == Some("--agents") {
+        agents_cli::run(&args[2..]);
         return;
     }
     // What the root scan finds under each repository's roots, without writing.
@@ -107,9 +113,7 @@ fn main() {
                         // that a signal this happens to read on the way past
                         // cannot subscribe the effect to its own output and
                         // have the last event applied twice.
-                        floem::reactive::Effect::untrack(|| {
-                            state.apply_with_review(event, review)
-                        });
+                        floem::reactive::Effect::untrack(|| state.apply_with_review(event, review));
                     }
                 });
 
@@ -125,12 +129,15 @@ fn main() {
                             }
                             let found = state.items.with(|all| {
                                 all.iter()
-                                    .find(|i| i.repo_full_name.eq_ignore_ascii_case(&repo) && i.branch() == Some(branch.as_str()))
+                                    .find(|i| {
+                                        i.repo_full_name.eq_ignore_ascii_case(&repo)
+                                            && i.branch() == Some(branch.as_str())
+                                    })
                                     .map(|i| i.id.clone())
                             });
                             match found {
                                 Some(id) => {
-                                    review.opening.set(true);
+                                    state.begin_item_review(review, "Reading the branch", &id);
                                     backend.open_item(&id);
                                     true
                                 }
@@ -141,10 +148,12 @@ fn main() {
                 }
 
                 // PERCH_OPEN_ISSUE=owner/repo#N opens an issue the same way.
-                if let Some((repo, number)) = std::env::var("PERCH_OPEN_ISSUE").ok().and_then(|spec| {
-                    let (repo, number) = spec.split_once('#')?;
-                    Some((repo.to_string(), number.parse::<u64>().ok()?))
-                }) {
+                if let Some((repo, number)) =
+                    std::env::var("PERCH_OPEN_ISSUE").ok().and_then(|spec| {
+                        let (repo, number) = spec.split_once('#')?;
+                        Some((repo.to_string(), number.parse::<u64>().ok()?))
+                    })
+                {
                     review.opening.set(true);
                     backend.open_subject(&repo, perch_github::ItemKind::Issue, number);
                 }
@@ -156,11 +165,14 @@ fn main() {
                         if pressed == Some(true) {
                             return true;
                         }
-                        let issue_item = review.issue.with(|i| i.is_some())
+                        let issue_item = review
+                            .issue
+                            .with(|i| i.is_some())
                             .then(|| review.item.with(|i| i.as_ref().map(|i| i.id.clone())))
                             .flatten();
                         match issue_item {
                             Some(id) => {
+                                state.begin_open("Cutting a branch");
                                 backend.start_work(&id);
                                 true
                             }

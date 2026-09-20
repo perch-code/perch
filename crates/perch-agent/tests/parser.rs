@@ -67,9 +67,22 @@ fn the_agent_text_arrives_per_message_and_thinking_is_dropped() {
 
 #[test]
 fn the_result_line_ends_the_run_with_cost_and_time() {
-    let last = events().into_iter().last().unwrap();
+    let events = events();
+    assert_eq!(
+        events.get(events.len() - 2),
+        Some(&RunEvent::Usage {
+            input_tokens: Some(34),
+            output_tokens: Some(1163),
+            cached_input_tokens: Some(152655),
+        })
+    );
+    let last = events.last().cloned().unwrap();
     match last {
-        RunEvent::Finished { session_id, cost_usd, duration_ms } => {
+        RunEvent::Finished {
+            session_id,
+            cost_usd,
+            duration_ms,
+        } => {
             assert_eq!(session_id, "b0ceb2e4-9e94-4a98-8822-008ee87e297f");
             assert!((cost_usd.unwrap() - 0.0425).abs() < 0.001);
             assert_eq!(duration_ms, 14418);
@@ -77,7 +90,10 @@ fn the_result_line_ends_the_run_with_cost_and_time() {
         other => panic!("{other:?}"),
     }
     assert_eq!(
-        events().iter().filter(|e| matches!(e, RunEvent::Finished { .. } | RunEvent::Failed { .. })).count(),
+        events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::Finished { .. } | RunEvent::Failed { .. }))
+            .count(),
         1
     );
 }

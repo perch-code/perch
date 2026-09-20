@@ -42,12 +42,7 @@ fn print(filters: &ItemFilters) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("no cache at {}; run the app once", path.display()));
     }
-    // The same open the app does, reset included: a stale database is not
-    // something this harness can read either way.
-    let (cache, reset) = Cache::open_checked(&path, None).map_err(|e| e.to_string())?;
-    if reset {
-        eprintln!("note: the database was older than this build and has been recreated");
-    }
+    let (cache, _) = Cache::open_with_outcome(&path, None).map_err(|e| e.to_string())?;
     let items = cache.load_items().map_err(|e| e.to_string())?;
     let viewer = cache.meta("viewer.login").map_err(|e| e.to_string())?;
     let visible = items::visible_items(&items, filters, viewer.as_deref());

@@ -178,6 +178,15 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M5.5 4 H10.5 A1.5 1.5 0 0 1 12 5.5 V10.5 A1.5 1.5 0 0 1 10.5 12 H5.5
                        A1.5 1.5 0 0 1 4 10.5 V5.5 A1.5 1.5 0 0 1 5.5 4 Z" fill="{c}"/>"#
         ),
+        // Three connected points: one coordinator and two workers. Kept
+        // abstract so it reads as activity rather than either vendor's logo.
+        SidebarIcon::Agents => format!(
+            r#"<circle cx="8" cy="4" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <circle cx="4" cy="11.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <circle cx="12" cy="11.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <path d="M7.1 5.5 L4.9 10 M8.9 5.5 L11.1 10 M5.8 11.5 H10.2" fill="none"
+                     stroke="{c}" stroke-width="1.3" stroke-linecap="round"/>"#
+        ),
         SidebarIcon::Thread => format!(
             r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="{c}"
                      stroke="{c}" stroke-width="1.2" stroke-linejoin="round"/>"#
@@ -274,6 +283,8 @@ pub enum SidebarIcon {
     Plus,
     /// A filled square: stop.
     Stop,
+    /// Three connected points: app-wide agent activity.
+    Agents,
     /// A speech bubble with a dot: a thread anchored here.
     Thread,
     Pin,
@@ -300,7 +311,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 29] = [
+    pub const ALL: [SidebarIcon; 30] = [
         SidebarIcon::Link,
         SidebarIcon::ThreadHollow,
         SidebarIcon::ChangesRequested,
@@ -312,6 +323,7 @@ impl SidebarIcon {
         SidebarIcon::Filter,
         SidebarIcon::Plus,
         SidebarIcon::Stop,
+        SidebarIcon::Agents,
         SidebarIcon::Thread,
         SidebarIcon::Branch,
         SidebarIcon::Trash,

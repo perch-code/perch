@@ -65,6 +65,50 @@ under `~/.perch`. The database also holds local items, conversations, and
 review state, so it is not disposable. GitHub notifications and fetched
 remote data within it are refreshed on demand.
 
+Schema upgrades use preserving, transactional migrations: local discussions,
+agent attempts, session IDs, and activity history survive. Perch refuses an
+unsupported or newer schema without deleting it, and a failed migration leaves
+the original database in place.
+
+## Agents
+
+Questions about an item or selected lines in its Files view run through Claude
+Code or Codex in that item's worktree. Follow-ups remain attached to the local
+conversation, and the agents retain their read-only permissions.
+
+The persistent **Agents** control in the status bar opens an app-wide activity
+inspector. Active work is grouped by worktree and continues while another item
+is open or while the panel is closed. Each row shows the agent, model, effort,
+queue or execution time, and latest tool activity. Selecting one shows its
+retained request, ordered activity, streamed response, usage, and errors.
+Active rows can be stopped, queued rows can be cancelled, and failed, stopped,
+or interrupted attempts can be retried without replacing their history.
+
+Perch executes at most four top-level agents by default and queues the rest in
+FIFO order. Stopping a run terminates and reaps its process group. Closing
+Perch does the same for every process it owns; after an abnormal exit,
+nonterminal rows return as Interrupted and are not replayed automatically.
+
+Perch discovers both CLIs automatically. Their optional settings are:
+
+```toml
+[agent]
+binary = "claude"
+model = "sonnet"
+effort = "medium"              # low | medium | high | xhigh | max | ultra
+models = ["fable", "opus", "sonnet", "haiku"]
+max_concurrent_runs = 4
+
+[agent.codex]
+binary = "codex"
+models = ["gpt-6-astra"]       # omit to use Codex's own model catalog
+```
+
+`perch --agents [limit]` prints active runs and retained history without
+launching an agent. `perch --ask owner/repo#N path:start-end "question"`
+runs the same question flow from a terminal; omit the path to ask about the
+whole item.
+
 Older `~/.perch/knowledge` directories are no longer read. They can be
 removed manually after any files worth keeping have been copied elsewhere.
 

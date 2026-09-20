@@ -7,29 +7,37 @@
 //! thread without a runtime context. Events travel back on a std channel,
 //! because that is what floem's `update_signal_from_channel` consumes.
 
-use std::sync::mpsc::Sender as EventSender;
 use std::path::Path;
+use std::sync::mpsc::Sender as EventSender;
 use std::sync::Arc;
 use std::time::Duration;
 
 use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, Store};
 use perch_github::{
-    resolve_token, Anchor, Author, Cache, CacheError, CommentMessage, CommentThread, Config,
-    GitHub, Item, ItemCheckout, ItemKind, ItemSubject, PullRequest, RunRecord, RunStatus,
-    SubjectKind, Thread, ThreadOrigin,
+    resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentThread,
+    Config, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, NewRunEvent, PullRequest,
+    RevisionContext, RunEvent as StoredRunEvent, RunEventRecord, RunHistoryFilter, RunLabels,
+    RunOwner, RunPurpose, RunRecord, RunStatus, SubjectKind, TerminalReason, Thread, ThreadOrigin,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
+pub(crate) mod runs;
 
 /// How many avatar downloads may be in flight at once.
 const AVATAR_CONCURRENCY: usize = 6;
 /// Settings the UI keeps between launches. Sent back at startup. Show
 /// whole is not here: its key is per item, `review.folded.<item_id>`, so
 /// it is read when the item opens and carried on `ViewedReady`.
-pub const UI_META_KEYS: [&str; 4] =
-    ["item_filters", "review.layout", "viewer.login", "viewer.avatar_url"];
+pub const UI_META_KEYS: [&str; 6] = [
+    "item_filters",
+    "review.layout",
+    "agents.open",
+    "agents.width",
+    "viewer.login",
+    "viewer.avatar_url",
+];
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -37,64 +45,142 @@ pub enum Command {
     /// Open an item's view: the review for a pull request or a branch, the
     /// issue view for an issue. Prepares the checkout when there is one to
     /// prepare.
-    OpenItem { id: String },
+    OpenItem {
+        id: String,
+    },
+    /// Open an agent's owner for reading. Archived items use their cached
+    /// conversation without restoring a checkout or clearing Archive.
+    ViewAgentOwner {
+        id: String,
+    },
     /// Find or make the item for a pull request or issue named by number,
     /// and open it. Every sidebar row opens by id; this is for the launch
     /// hooks and the review header's "Closes #N" chip, which name a subject
     /// that may have no row yet.
-    OpenSubject { repo_full_name: String, kind: ItemKind, number: u64 },
+    OpenSubject {
+        repo_full_name: String,
+        kind: ItemKind,
+        number: u64,
+    },
     /// Mark a GitHub notification read and open its pull request or issue.
     /// Other subject kinds are opened by the UI in the browser instead.
-    OpenNotification { thread: Thread },
+    OpenNotification {
+        thread: Thread,
+    },
     /// Remove a notification from GitHub's inbox.
-    DoneNotification { thread_id: String },
+    DoneNotification {
+        thread_id: String,
+    },
     /// Ignore future notifications for the thread, then remove this one
     /// from GitHub's inbox.
-    UnsubscribeNotification { thread_id: String },
+    UnsubscribeNotification {
+        thread_id: String,
+    },
     /// Read, diff, and highlight one file of the open checkout, over the
     /// scope that is set.
-    OpenFile { path: String },
+    OpenFile {
+        path: String,
+    },
     /// What the diff is over: the branch, a commit, the uncommitted work.
     /// The changed list is recomputed and every open file reloads.
-    SetScope { item_id: String, scope: perch_git::Scope },
+    SetScope {
+        item_id: String,
+        scope: perch_git::Scope,
+    },
     /// Look at the checkout again: its head, its dirt and its commits, and
     /// the changed list if the head moved. Sent as the scope menu is about
     /// to open, and on every poll, so terminal work shows up.
-    RefreshScope { item_id: String },
+    RefreshScope {
+        item_id: String,
+    },
     /// Check or uncheck a file's content as viewed.
-    SetViewed { item_id: String, path: String, blob: String, viewed: bool },
+    SetViewed {
+        item_id: String,
+        path: String,
+        blob: String,
+        viewed: bool,
+    },
     /// Remember that head lines `first` to `last` of a file's content were
     /// opened out of a fold, and forget every reveal overlapping a range:
     /// a divider's Reset. Both keyed as Viewed is.
-    Reveal { item_id: String, path: String, blob: String, first: u32, last: u32 },
-    ResetReveals { item_id: String, path: String, blob: String, first: u32, last: u32 },
+    Reveal {
+        item_id: String,
+        path: String,
+        blob: String,
+        first: u32,
+        last: u32,
+    },
+    ResetReveals {
+        item_id: String,
+        path: String,
+        blob: String,
+        first: u32,
+        last: u32,
+    },
     /// Ask the language server about a position. `token` lets the UI drop an
     /// answer that arrives after the pointer has moved on.
-    Hover { token: u64, path: String, line: u32, character: u32 },
-    Definition { token: u64, path: String, line: u32, character: u32 },
-    References { token: u64, path: String, line: u32, character: u32 },
+    Hover {
+        token: u64,
+        path: String,
+        line: u32,
+        character: u32,
+    },
+    Definition {
+        token: u64,
+        path: String,
+        line: u32,
+        character: u32,
+    },
+    References {
+        token: u64,
+        path: String,
+        line: u32,
+        character: u32,
+    },
     CloseReview,
 
     /// Leave Active. An owned checkout's directory goes too, refused when
     /// there is uncommitted work in it; a checkout under a root is left
     /// alone and only the row is hidden.
-    ArchiveItem { id: String },
+    ArchiveItem {
+        id: String,
+    },
     /// Back to Active, and an owned checkout back on disk.
-    RestoreItem { id: String },
+    RestoreItem {
+        id: String,
+    },
     /// Remove the row and its threads. An owned checkout's directory and
     /// branch go too; anything under a root is not touched.
-    DeleteItem { id: String },
+    DeleteItem {
+        id: String,
+    },
     /// Keep or remove a local bookmark for an item.
-    SetSaved { id: String, saved: bool },
-    PinItem { id: String, pinned: bool },
-    RenameItem { id: String, name: Option<String> },
+    SetSaved {
+        id: String,
+        saved: bool,
+    },
+    PinItem {
+        id: String,
+        pinned: bool,
+    },
+    RenameItem {
+        id: String,
+        name: Option<String>,
+    },
     /// Cut `perch/issue-<n>` from the default branch and make a
     /// checkout-only item pointing back at the issue.
-    StartWork { issue_item_id: String },
+    StartWork {
+        issue_item_id: String,
+    },
     /// Cut a branch from the item's head into a new checkout-only item.
-    ForkItem { id: String },
+    ForkItem {
+        id: String,
+    },
     /// Remember a setting across launches.
-    SetMeta { key: String, value: String },
+    SetMeta {
+        key: String,
+        value: String,
+    },
 
     /// Ask the agent a question in an item's checkout. `thread_id` of `None`
     /// starts a thread; the anchor is ignored on a follow-up.
@@ -107,13 +193,33 @@ pub enum Command {
         model: String,
         effort: perch_agent::Effort,
     },
-    CancelRun { run_id: String },
-    DeleteCommentThread { id: String },
+    CancelRun {
+        run_id: String,
+    },
+    RetryRun {
+        run_id: String,
+    },
+    LoadAgentRuns {
+        history_limit: usize,
+    },
+    LoadAgentRunDetail {
+        run_id: String,
+    },
+    LoadAgentRunEvents {
+        run_id: String,
+        before_sequence: u64,
+    },
+    DeleteCommentThread {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    Avatar { url: String, bytes: Vec<u8> },
+    Avatar {
+        url: String,
+        bytes: Vec<u8>,
+    },
     /// Declared repository identities and display names for filters and
     /// item context. Sent once at startup; the file is read once.
     Repos(Vec<perch_github::DeclaredRepo>),
@@ -124,7 +230,10 @@ pub enum Event {
     Notifications(Vec<Thread>),
     /// A remembered setting, sent once at startup for each key the UI
     /// asked to keep.
-    Meta { key: String, value: String },
+    Meta {
+        key: String,
+        value: String,
+    },
     /// An issue is open: its snapshot, its comments, and the item.
     IssueReady {
         item: Arc<Item>,
@@ -138,13 +247,45 @@ pub enum Event {
     /// What config.toml says about the agent, for the pickers.
     AgentConfig(perch_github::AgentConfig),
     /// Every thread on an item. Whole, like `Items`.
-    CommentThreads { item_id: String, threads: Vec<CommentThread> },
+    CommentThreads {
+        item_id: String,
+        threads: Vec<CommentThread>,
+    },
     /// One step of a run, applied in place to the run it names.
-    AgentStep { run_id: String, thread_id: String, event: perch_agent::RunEvent },
+    AgentStep {
+        run_id: String,
+        thread_id: String,
+        event: perch_agent::RunEvent,
+    },
+    /// App-wide run summaries. Active runs are always complete; terminal
+    /// history is the requested newest-first page.
+    AgentRuns {
+        runs: Vec<RunRecord>,
+        has_more: bool,
+    },
+    /// One durable state change, sent after it has committed.
+    AgentRunUpdated {
+        run: RunRecord,
+    },
+    /// The selected run and its ordered persisted activity.
+    AgentRunDetail {
+        run: RunRecord,
+        events: Vec<RunEventRecord>,
+        has_more: bool,
+    },
+    /// One older, bounded page for a detail the reader already opened.
+    AgentRunEvents {
+        run_id: String,
+        events: Vec<RunEventRecord>,
+        has_more: bool,
+    },
     Status(Status),
 
     /// A step of preparing a checkout.
-    ReviewProgress { message: String, percent: Option<u8> },
+    ReviewProgress {
+        message: String,
+        percent: Option<u8>,
+    },
     ReviewReady {
         item: Arc<Item>,
         /// `None` for a branch of the reader's own with no pull request.
@@ -158,23 +299,50 @@ pub enum Event {
         /// is showing the checkout as it was last left.
         offline: bool,
     },
-    ReviewFailed { message: String },
-    FileLoaded { item_id: String, path: String, file: Arc<crate::review::model::LoadedFile> },
-    FileFailed { path: String, message: String },
+    ReviewFailed {
+        message: String,
+    },
+    FileLoaded {
+        item_id: String,
+        path: String,
+        file: Arc<crate::review::model::LoadedFile>,
+    },
+    FileFailed {
+        path: String,
+        message: String,
+    },
 
     /// Everything said on the pull request: from the cache first, then
     /// from GitHub.
-    DiscussionReady { item_id: String, discussion: Arc<perch_github::Discussion> },
+    DiscussionReady {
+        item_id: String,
+        discussion: Arc<perch_github::Discussion>,
+    },
     /// An issue's comments, fetched again after a notification about it.
-    IssueComments { item_id: String, comments: Arc<Vec<perch_github::IssueComment>> },
+    IssueComments {
+        item_id: String,
+        comments: Arc<Vec<perch_github::IssueComment>>,
+    },
     /// The workflow runs' verdict for the item's head.
-    ChecksReady { item_id: String, checks: Arc<perch_github::Checks> },
+    ChecksReady {
+        item_id: String,
+        checks: Arc<perch_github::Checks>,
+    },
     /// The commits over the base and whether the checkout has work in it,
     /// for the scope menu, and the head as it was at the previous open,
     /// which "Since you last looked" ranges from.
-    CommitsReady { item_id: String, commits: Arc<Vec<perch_git::Commit>>, dirt: perch_git::Dirt, since: Option<String> },
+    CommitsReady {
+        item_id: String,
+        commits: Arc<Vec<perch_git::Commit>>,
+        dirt: perch_git::Dirt,
+        since: Option<String>,
+    },
     /// The changed list under a scope, after `SetScope`.
-    ScopeReady { item_id: String, scope: perch_git::Scope, files: Arc<Vec<perch_git::ChangedFile>> },
+    ScopeReady {
+        item_id: String,
+        scope: perch_git::Scope,
+        files: Arc<Vec<perch_git::ChangedFile>>,
+    },
     /// What the reader marked on the item's files, whole: every (path,
     /// blob) viewed, and, when the item opens, every run of head lines
     /// revealed out of a fold by (path, blob) and whether the item's files
@@ -191,23 +359,43 @@ pub enum Event {
     },
 
     LspStatus(perch_lsp::Status),
-    LspHover { token: u64, text: String },
+    LspHover {
+        token: u64,
+        text: String,
+    },
     /// A definition inside the worktree, or `None` when it lands outside it.
-    LspDefinition { token: u64, path: Option<String>, line: u32 },
+    LspDefinition {
+        token: u64,
+        path: Option<String>,
+        line: u32,
+    },
     /// Every use of a symbol inside the worktree, with the line's text, and
     /// how many uses lie outside it.
-    LspReferences { token: u64, references: Vec<crate::review::model::Reference>, elsewhere: usize },
+    LspReferences {
+        token: u64,
+        references: Vec<crate::review::model::Reference>,
+        elsewhere: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     /// No usable token. The app shows setup instructions instead of a list.
-    NoToken { detail: String },
+    NoToken {
+        detail: String,
+    },
     Refreshing,
-    Idle { at: Timestamp, source: String },
+    Idle {
+        at: Timestamp,
+        source: String,
+    },
     /// Network or API trouble. Any cached list stays on screen.
-    Error { message: String },
-    RateLimited { message: String },
+    Error {
+        message: String,
+    },
+    RateLimited {
+        message: String,
+    },
 }
 
 /// Handle the UI keeps. Dropping it ends the worker.
@@ -232,33 +420,50 @@ impl Backend {
     }
 
     pub fn open_notification(&self, thread: &Thread) {
-        let _ = self.commands.send(Command::OpenNotification { thread: thread.clone() });
+        let _ = self.commands.send(Command::OpenNotification {
+            thread: thread.clone(),
+        });
     }
 
     pub fn done_notification(&self, thread_id: &str) {
-        let _ = self.commands.send(Command::DoneNotification { thread_id: thread_id.to_string() });
+        let _ = self.commands.send(Command::DoneNotification {
+            thread_id: thread_id.to_string(),
+        });
     }
 
     pub fn unsubscribe_notification(&self, thread_id: &str) {
-        let _ = self
-            .commands
-            .send(Command::UnsubscribeNotification { thread_id: thread_id.to_string() });
+        let _ = self.commands.send(Command::UnsubscribeNotification {
+            thread_id: thread_id.to_string(),
+        });
     }
 
     pub fn open_item(&self, id: &str) {
         let _ = self.commands.send(Command::OpenItem { id: id.to_string() });
     }
 
+    pub fn view_agent_owner(&self, id: &str) {
+        let _ = self
+            .commands
+            .send(Command::ViewAgentOwner { id: id.to_string() });
+    }
+
     pub fn open_file(&self, path: &str) {
-        let _ = self.commands.send(Command::OpenFile { path: path.to_string() });
+        let _ = self.commands.send(Command::OpenFile {
+            path: path.to_string(),
+        });
     }
 
     pub fn set_scope(&self, item_id: &str, scope: perch_git::Scope) {
-        let _ = self.commands.send(Command::SetScope { item_id: item_id.to_string(), scope });
+        let _ = self.commands.send(Command::SetScope {
+            item_id: item_id.to_string(),
+            scope,
+        });
     }
 
     pub fn refresh_scope(&self, item_id: &str) {
-        let _ = self.commands.send(Command::RefreshScope { item_id: item_id.to_string() });
+        let _ = self.commands.send(Command::RefreshScope {
+            item_id: item_id.to_string(),
+        });
     }
 
     pub fn set_viewed(&self, item_id: &str, path: &str, blob: &str, viewed: bool) {
@@ -291,7 +496,12 @@ impl Backend {
     }
 
     pub fn references(&self, token: u64, path: &str, line: u32, character: u32) {
-        let _ = self.commands.send(Command::References { token, path: path.to_string(), line, character });
+        let _ = self.commands.send(Command::References {
+            token,
+            path: path.to_string(),
+            line,
+            character,
+        });
     }
 
     pub fn close_review(&self) {
@@ -299,31 +509,48 @@ impl Backend {
     }
 
     pub fn archive_item(&self, id: &str) {
-        let _ = self.commands.send(Command::ArchiveItem { id: id.to_string() });
+        let _ = self
+            .commands
+            .send(Command::ArchiveItem { id: id.to_string() });
     }
 
     pub fn restore_item(&self, id: &str) {
-        let _ = self.commands.send(Command::RestoreItem { id: id.to_string() });
+        let _ = self
+            .commands
+            .send(Command::RestoreItem { id: id.to_string() });
     }
 
     pub fn delete_item(&self, id: &str) {
-        let _ = self.commands.send(Command::DeleteItem { id: id.to_string() });
+        let _ = self
+            .commands
+            .send(Command::DeleteItem { id: id.to_string() });
     }
 
     pub fn mark_saved(&self, id: &str, saved: bool) {
-        let _ = self.commands.send(Command::SetSaved { id: id.to_string(), saved });
+        let _ = self.commands.send(Command::SetSaved {
+            id: id.to_string(),
+            saved,
+        });
     }
 
     pub fn pin_item(&self, id: &str, pinned: bool) {
-        let _ = self.commands.send(Command::PinItem { id: id.to_string(), pinned });
+        let _ = self.commands.send(Command::PinItem {
+            id: id.to_string(),
+            pinned,
+        });
     }
 
     pub fn rename_item(&self, id: &str, name: Option<String>) {
-        let _ = self.commands.send(Command::RenameItem { id: id.to_string(), name });
+        let _ = self.commands.send(Command::RenameItem {
+            id: id.to_string(),
+            name,
+        });
     }
 
     pub fn start_work(&self, issue_item_id: &str) {
-        let _ = self.commands.send(Command::StartWork { issue_item_id: issue_item_id.to_string() });
+        let _ = self.commands.send(Command::StartWork {
+            issue_item_id: issue_item_id.to_string(),
+        });
     }
 
     pub fn fork_item(&self, id: &str) {
@@ -331,7 +558,10 @@ impl Backend {
     }
 
     pub fn set_meta(&self, key: &str, value: &str) {
-        let _ = self.commands.send(Command::SetMeta { key: key.to_string(), value: value.to_string() });
+        let _ = self.commands.send(Command::SetMeta {
+            key: key.to_string(),
+            value: value.to_string(),
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -357,11 +587,38 @@ impl Backend {
     }
 
     pub fn cancel_run(&self, run_id: &str) {
-        let _ = self.commands.send(Command::CancelRun { run_id: run_id.to_string() });
+        let _ = self.commands.send(Command::CancelRun {
+            run_id: run_id.to_string(),
+        });
+    }
+
+    pub fn retry_run(&self, run_id: &str) {
+        let _ = self.commands.send(Command::RetryRun {
+            run_id: run_id.to_string(),
+        });
+    }
+
+    pub fn load_agent_runs(&self, history_limit: usize) {
+        let _ = self.commands.send(Command::LoadAgentRuns { history_limit });
+    }
+
+    pub fn load_agent_run_detail(&self, run_id: &str) {
+        let _ = self.commands.send(Command::LoadAgentRunDetail {
+            run_id: run_id.to_string(),
+        });
+    }
+
+    pub fn load_agent_run_events(&self, run_id: &str, before_sequence: u64) {
+        let _ = self.commands.send(Command::LoadAgentRunEvents {
+            run_id: run_id.to_string(),
+            before_sequence,
+        });
     }
 
     pub fn delete_comment_thread(&self, id: &str) {
-        let _ = self.commands.send(Command::DeleteCommentThread { id: id.to_string() });
+        let _ = self
+            .commands
+            .send(Command::DeleteCommentThread { id: id.to_string() });
     }
 
     pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
@@ -453,56 +710,26 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
         })
     };
 
-    let Some(token) = resolve_token(&config) else {
-        tracing::warn!("no token resolved");
-        let _ = events.send(Event::Status(Status::NoToken {
-            detail: "Set GITHUB_TOKEN, or run `gh auth login` in a terminal.".into(),
-        }));
-        return;
-    };
-
-    let github = match GitHub::new(&token.value) {
-        Ok(g) => Arc::new(g),
-        Err(e) => {
-            let _ = events.send(Event::Status(Status::Error {
-                message: format!("could not build the GitHub client: {e}"),
-            }));
-            return;
-        }
-    };
-
-    tracing::info!("github client ready");
-    let (cache, reset) = open_cache();
+    // Local state and agent history do not depend on GitHub credentials.
+    // Reconcile them before token setup so a launch without a token cannot
+    // leave crashed work looking active indefinitely.
+    let (cache, reset) = open_cache_for_app(&events);
     tracing::info!(cache = cache.is_some(), reset, "cache opened");
-    if reset {
-        let _ = events.send(Event::Notice(
-            "The database was from an older Perch and has been reset; open a pull request to check it out again".into(),
-        ));
-    }
     for warning in &config.warnings {
         let _ = events.send(Event::Notice(warning.clone()));
     }
-    // The sidebar's order, before the items it orders.
     let _ = events.send(Event::Repos(config.declared_repos()));
-    if let Some(cache) = cache.as_ref() {
-        // A run still marked running is one Perch died in the middle of.
-        if let Ok(guard) = cache.lock() {
-            match guard.fail_running_runs("Perch quit") {
-                Ok(n) if n > 0 => tracing::info!(n, "marked interrupted runs failed"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "could not clean up runs"),
-            }
-        }
-    }
-
-    let avatars = Arc::new(Semaphore::new(AVATAR_CONCURRENCY));
-
-    // Paint from the cache first. A cold launch with no network still shows
-    // the sidebar and GitHub inbox as they were, with the settings they were
-    // left with.
     let mut initial_notifications = Vec::new();
     if let Some(cache) = cache.as_ref() {
         if let Ok(guard) = cache.lock() {
+            match guard.interrupt_active_runs(
+                perch_github::TerminalReason::AppRestart,
+                "Perch quit before the agent finished",
+            ) {
+                Ok(n) if n > 0 => tracing::info!(n, "marked interrupted runs"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "could not reconcile runs"),
+            }
             send_items(&guard, &events);
             match guard.load_threads() {
                 Ok(threads) => {
@@ -513,13 +740,57 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
             }
             for key in UI_META_KEYS {
                 if let Ok(Some(value)) = guard.meta(key) {
-                    let _ = events.send(Event::Meta { key: key.to_string(), value });
+                    let _ = events.send(Event::Meta {
+                        key: key.to_string(),
+                        value,
+                    });
                 }
             }
         }
     }
-    let source = token.source.describe().to_string();
+    send_agent_runs_from_cache(&cache, &events, 50);
 
+    // Checkout retirement is local bookkeeping. Finish an archive that was
+    // interrupted by a crash before entering the command loop.
+    let local_preparer = Preparer::new(
+        Store::new(
+            perch_github::config::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
+        ),
+        None,
+    );
+    retire_archived_checkouts_from_cache(&cache, &local_preparer, &events).await;
+
+    // GitHub is optional. The cache, local checkouts and agent history stay
+    // useful without a token, so only polling and remote actions are gated
+    // on a client below.
+    let token = resolve_token(&config);
+    let source = token
+        .as_ref()
+        .map(|token| token.source.describe().to_string())
+        .unwrap_or_default();
+    let github = match token.as_ref() {
+        Some(token) => match GitHub::new(&token.value) {
+            Ok(github) => {
+                tracing::info!("github client ready");
+                Some(Arc::new(github))
+            }
+            Err(e) => {
+                let _ = events.send(Event::Status(Status::Error {
+                    message: format!("could not build the GitHub client: {e}"),
+                }));
+                None
+            }
+        },
+        None => {
+            tracing::warn!("no token resolved");
+            let _ = events.send(Event::Status(Status::NoToken {
+                detail: "Set GITHUB_TOKEN, or run `gh auth login` in a terminal.".into(),
+            }));
+            None
+        }
+    };
+
+    let avatars = Arc::new(Semaphore::new(AVATAR_CONCURRENCY));
     // The review side of the app. Long operations run as their own tasks so a
     // clone never stalls the notification poll, and the active checkout is
     // shared so a file open knows where to read from.
@@ -527,7 +798,7 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
         Store::new(
             perch_github::config::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
         ),
-        Some(token.value.clone()),
+        token.as_ref().map(|token| token.value.clone()),
     ));
     let checkout: Arc<std::sync::Mutex<Option<ReviewContext>>> =
         Arc::new(std::sync::Mutex::new(None));
@@ -540,6 +811,11 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
         config.agent = agent;
     }
     let config = Arc::new(config);
+    let run_manager = runs::RunManager::new(
+        config.agent.max_concurrent_runs,
+        cache.clone(),
+        events.clone(),
+    );
     let ctx = Ctx {
         github: github.clone(),
         preparer: preparer.clone(),
@@ -548,23 +824,34 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
         slot: checkout.clone(),
         language_server: language_server.clone(),
         events: events.clone(),
-        runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        runs: run_manager,
+        item_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         avatars,
         seen_notifications: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         notifications: Arc::new(std::sync::Mutex::new(initial_notifications)),
     };
+    send_agent_runs(&ctx, 50);
 
     // Who the reader is on GitHub, for their own byline: once per launch,
     // kept in meta so the next launch has it before the network does.
-    {
+    if ctx.github.is_some() {
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            match ctx.github.viewer().await {
+            let Some(github) = ctx.github.as_ref() else {
+                return;
+            };
+            match github.viewer().await {
                 Ok(user) if !user.login.is_empty() => {
-                    for (key, value) in [("viewer.login", &user.login), ("viewer.avatar_url", &user.avatar_url)] {
+                    for (key, value) in [
+                        ("viewer.login", &user.login),
+                        ("viewer.avatar_url", &user.avatar_url),
+                    ] {
                         ctx.with_cache(|c| c.set_meta(key, value));
-                        let _ = ctx.events.send(Event::Meta { key: key.into(), value: value.clone() });
+                        let _ = ctx.events.send(Event::Meta {
+                            key: key.into(),
+                            value: value.clone(),
+                        });
                     }
                     ctx.want_avatars(std::iter::once(user.avatar_url));
                 }
@@ -594,7 +881,7 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
     if scan_roots(&ctx).await {
         ctx.send_items();
     }
-    {
+    if ctx.github.is_some() {
         let ctx = ctx.clone();
         tokio::spawn(async move {
             if attach_pull_requests(&ctx).await {
@@ -611,11 +898,20 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
 
     loop {
         let (command, automatic) = tokio::select! {
-            _ = tokio::time::sleep_until(next_auto_poll) => (Command::Refresh, true),
+            _ = tokio::time::sleep_until(next_auto_poll), if ctx.github.is_some() => {
+                (Command::Refresh, true)
+            },
             cmd = commands.recv() => match cmd {
                 Some(cmd) => (cmd, false),
                 // The UI is gone.
-                None => return,
+                None => {
+                    ctx.runs.shutdown().await;
+                    // Deferred archive waiters are detached tasks. Complete
+                    // their local work synchronously before this runtime can
+                    // disappear underneath them.
+                    retire_archived_checkouts(&ctx).await;
+                    return;
+                },
             },
         };
 
@@ -635,7 +931,11 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 let now = tokio::time::Instant::now();
                 next_auto_poll = now + poll_after.automatic;
                 next_allowed_poll = now + poll_after.manual;
-                let open = ctx.slot.lock().ok().and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
+                let open = ctx
+                    .slot
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
                 if let Some(item_id) = open {
                     let ctx = ctx.clone();
                     tokio::spawn(async move { refresh_scope(&ctx, &item_id).await });
@@ -643,7 +943,11 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 let ctx = ctx.clone();
                 tokio::spawn(async move { refresh_items(&ctx).await });
             }
-            Command::OpenSubject { repo_full_name, kind, number } => {
+            Command::OpenSubject {
+                repo_full_name,
+                kind,
+                number,
+            } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
@@ -655,25 +959,29 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
             Command::OpenNotification { thread } => {
                 ctx.clear_notice();
                 if thread.unread {
-                    match ctx.github.mark_thread_read(&thread.id).await {
-                        Ok(()) => {
-                            let id = thread.id.clone();
-                            ctx.edit_notifications(|threads| {
-                                if let Some(thread) = threads.iter_mut().find(|t| t.id == id) {
-                                    thread.unread = false;
-                                    thread.last_read_at = Some(Timestamp::now());
-                                }
-                            });
+                    if let Some(github) = ctx.github.as_ref() {
+                        match github.mark_thread_read(&thread.id).await {
+                            Ok(()) => {
+                                let id = thread.id.clone();
+                                ctx.edit_notifications(|threads| {
+                                    if let Some(thread) = threads.iter_mut().find(|t| t.id == id) {
+                                        thread.unread = false;
+                                        thread.last_read_at = Some(Timestamp::now());
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                defer_polls_for_error(
+                                    &e,
+                                    &mut next_auto_poll,
+                                    &mut next_allowed_poll,
+                                );
+                                tracing::warn!(thread = %thread.id, error = %e, "could not mark notification read");
+                                ctx.notice(format!("Could not mark the notification read: {e}"));
+                            }
                         }
-                        Err(e) => {
-                            defer_polls_for_error(
-                                &e,
-                                &mut next_auto_poll,
-                                &mut next_allowed_poll,
-                            );
-                            tracing::warn!(thread = %thread.id, error = %e, "could not mark notification read");
-                            ctx.notice(format!("Could not mark the notification read: {e}"));
-                        }
+                    } else {
+                        ctx.notice("A GitHub token is required to mark notifications read");
                     }
                 }
                 let kind = match &thread.subject.kind {
@@ -693,40 +1001,40 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
             }
             Command::DoneNotification { thread_id } => {
                 ctx.clear_notice();
-                match ctx.github.mark_thread_done(&thread_id).await {
-                    Ok(()) => ctx.edit_notifications(|threads| {
-                        threads.retain(|thread| thread.id != thread_id);
-                    }),
-                    Err(e) => {
-                        defer_polls_for_error(
-                            &e,
-                            &mut next_auto_poll,
-                            &mut next_allowed_poll,
-                        );
-                        tracing::warn!(thread = %thread_id, error = %e, "could not mark notification done");
-                        ctx.notice(format!("Could not mark the notification done: {e}"));
+                if let Some(github) = ctx.github.as_ref() {
+                    match github.mark_thread_done(&thread_id).await {
+                        Ok(()) => ctx.edit_notifications(|threads| {
+                            threads.retain(|thread| thread.id != thread_id);
+                        }),
+                        Err(e) => {
+                            defer_polls_for_error(&e, &mut next_auto_poll, &mut next_allowed_poll);
+                            tracing::warn!(thread = %thread_id, error = %e, "could not mark notification done");
+                            ctx.notice(format!("Could not mark the notification done: {e}"));
+                        }
                     }
+                } else {
+                    ctx.notice("A GitHub token is required to change notifications");
                 }
             }
             Command::UnsubscribeNotification { thread_id } => {
                 ctx.clear_notice();
-                let result = match ctx.github.ignore_thread(&thread_id).await {
-                    Ok(()) => ctx.github.mark_thread_done(&thread_id).await,
-                    Err(e) => Err(e),
-                };
-                match result {
-                    Ok(()) => ctx.edit_notifications(|threads| {
-                        threads.retain(|thread| thread.id != thread_id);
-                    }),
-                    Err(e) => {
-                        defer_polls_for_error(
-                            &e,
-                            &mut next_auto_poll,
-                            &mut next_allowed_poll,
-                        );
-                        tracing::warn!(thread = %thread_id, error = %e, "could not unsubscribe from notification");
-                        ctx.notice(format!("Could not unsubscribe from the notification: {e}"));
+                if let Some(github) = ctx.github.as_ref() {
+                    let result = match github.ignore_thread(&thread_id).await {
+                        Ok(()) => github.mark_thread_done(&thread_id).await,
+                        Err(e) => Err(e),
+                    };
+                    match result {
+                        Ok(()) => ctx.edit_notifications(|threads| {
+                            threads.retain(|thread| thread.id != thread_id);
+                        }),
+                        Err(e) => {
+                            defer_polls_for_error(&e, &mut next_auto_poll, &mut next_allowed_poll);
+                            tracing::warn!(thread = %thread_id, error = %e, "could not unsubscribe from notification");
+                            ctx.notice(format!("Could not unsubscribe from the notification: {e}"));
+                        }
                     }
+                } else {
+                    ctx.notice("A GitHub token is required to change notifications");
                 }
             }
             Command::OpenItem { id } | Command::RestoreItem { id } => {
@@ -736,6 +1044,30 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if open_item(&ctx, &id).await {
+                        start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                    }
+                });
+            }
+            Command::ViewAgentOwner { id } => {
+                ctx.clear_notice();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let Some(item) = ctx.item(&id) else {
+                        ctx.notice("That item is gone");
+                        return;
+                    };
+                    if item.is_archived() {
+                        let pull_request = item.pull_request().cloned().map(Arc::new);
+                        let _ = ctx.events.send(Event::ReviewReady {
+                            item: Arc::new(item),
+                            pull_request,
+                            files: Arc::new(Vec::new()),
+                            tree: Arc::new(Vec::new()),
+                            stale_head: None,
+                            offline: true,
+                        });
+                        ctx.send_threads(&id);
+                    } else if open_item(&ctx, &id).await {
                         start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
                     }
                 });
@@ -782,7 +1114,8 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     match start_work(&ctx, &issue_item_id).await {
                         Ok(id) => {
                             if open_item(&ctx, &id).await {
-                                start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                                start_language_server(ctx.slot, ctx.language_server, ctx.events)
+                                    .await;
                             }
                         }
                         Err(message) => {
@@ -798,7 +1131,8 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     match fork_item(&ctx, &id).await {
                         Ok(id) => {
                             if open_item(&ctx, &id).await {
-                                start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                                start_language_server(ctx.slot, ctx.language_server, ctx.events)
+                                    .await;
                             }
                         }
                         Err(message) => {
@@ -810,18 +1144,41 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
             Command::SetMeta { key, value } => {
                 ctx.with_cache(|c| c.set_meta(&key, &value));
             }
-            Command::Ask { item_id, thread_id, anchor, question, backend, model, effort } => {
+            Command::Ask {
+                item_id,
+                thread_id,
+                anchor,
+                question,
+                backend,
+                model,
+                effort,
+            } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    ask(&ctx, item_id, thread_id, anchor, question, backend, model, effort).await;
+                    ask(
+                        &ctx, item_id, thread_id, anchor, question, backend, model, effort,
+                    )
+                    .await;
                 });
             }
             Command::CancelRun { run_id } => {
-                if let Ok(runs) = ctx.runs.lock() {
-                    if let Some((run, _)) = runs.get(&run_id) {
-                        run.cancel();
-                    }
-                }
+                ctx.runs.cancel(&run_id);
+            }
+            Command::RetryRun { run_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { retry_run(&ctx, &run_id).await });
+            }
+            Command::LoadAgentRuns { history_limit } => {
+                send_agent_runs(&ctx, history_limit);
+            }
+            Command::LoadAgentRunDetail { run_id } => {
+                send_agent_run_detail(&ctx, &run_id);
+            }
+            Command::LoadAgentRunEvents {
+                run_id,
+                before_sequence,
+            } => {
+                send_agent_run_events(&ctx, &run_id, before_sequence);
             }
             Command::DeleteCommentThread { id } => {
                 let ctx = ctx.clone();
@@ -837,13 +1194,17 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     announce_file(checkout, language_server, path).await;
                 });
             }
-            Command::Hover { token, path, line, character } => {
+            Command::Hover {
+                token,
+                path,
+                line,
+                character,
+            } => {
                 let checkout = checkout.clone();
                 let language_server = language_server.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let Some((client, full)) =
-                        resolve(&checkout, &language_server, &path).await
+                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
                     else {
                         return;
                     };
@@ -863,30 +1224,59 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 let ctx = ctx.clone();
                 tokio::spawn(async move { refresh_scope(&ctx, &item_id).await });
             }
-            Command::SetViewed { item_id, path, blob, viewed } => {
-                if let Some(Err(e)) = ctx.with_cache(|c| c.set_viewed(&item_id, &path, &blob, viewed)) {
+            Command::SetViewed {
+                item_id,
+                path,
+                blob,
+                viewed,
+            } => {
+                if let Some(Err(e)) =
+                    ctx.with_cache(|c| c.set_viewed(&item_id, &path, &blob, viewed))
+                {
                     tracing::warn!(error = %e, "could not record viewed");
                 }
                 send_viewed(&ctx, &item_id, false);
             }
             // The window applied these as they were clicked; nothing is
             // sent back.
-            Command::Reveal { item_id, path, blob, first, last } => {
-                if let Some(Err(e)) = ctx.with_cache(|c| c.set_reveal(&item_id, &path, &blob, first, last)) {
+            Command::Reveal {
+                item_id,
+                path,
+                blob,
+                first,
+                last,
+            } => {
+                if let Some(Err(e)) =
+                    ctx.with_cache(|c| c.set_reveal(&item_id, &path, &blob, first, last))
+                {
                     tracing::warn!(error = %e, "could not record the reveal");
                 }
             }
-            Command::ResetReveals { item_id, path, blob, first, last } => {
-                if let Some(Err(e)) = ctx.with_cache(|c| c.remove_reveals(&item_id, &path, &blob, first, last)) {
+            Command::ResetReveals {
+                item_id,
+                path,
+                blob,
+                first,
+                last,
+            } => {
+                if let Some(Err(e)) =
+                    ctx.with_cache(|c| c.remove_reveals(&item_id, &path, &blob, first, last))
+                {
                     tracing::warn!(error = %e, "could not forget the reveals");
                 }
             }
-            Command::References { token, path, line, character } => {
+            Command::References {
+                token,
+                path,
+                line,
+                character,
+            } => {
                 let checkout = checkout.clone();
                 let language_server = language_server.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await else {
+                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    else {
                         return;
                     };
                     let worktree = checkout
@@ -896,16 +1286,24 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     let Some(worktree) = worktree else { return };
                     let locations = client.references(&full, line, character).await;
                     let (references, elsewhere) = read_references(&worktree, &locations).await;
-                    let _ = events.send(Event::LspReferences { token, references, elsewhere });
+                    let _ = events.send(Event::LspReferences {
+                        token,
+                        references,
+                        elsewhere,
+                    });
                 });
             }
-            Command::Definition { token, path, line, character } => {
+            Command::Definition {
+                token,
+                path,
+                line,
+                character,
+            } => {
                 let checkout = checkout.clone();
                 let language_server = language_server.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let Some((client, full)) =
-                        resolve(&checkout, &language_server, &path).await
+                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
                     else {
                         return;
                     };
@@ -954,15 +1352,20 @@ const CHECKOUT_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 /// rather than six.
 #[derive(Clone)]
 struct Ctx {
-    github: Arc<GitHub>,
+    /// Present when remote polling and GitHub mutations are available.
+    /// Local items, cached conversations and agent runs do not require it.
+    github: Option<Arc<GitHub>>,
     preparer: Arc<Preparer>,
     cache: SharedCache,
     config: Arc<Config>,
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
     events: EventSender<Event>,
-    /// Running agents by run id, so a cancel can find its child.
-    runs: Arc<std::sync::Mutex<std::collections::HashMap<String, (perch_agent::Run, String)>>>,
+    /// Durable admission, the shared execution limit, and live children.
+    runs: runs::RunManager,
+    /// Serializes checkout archive/restore/delete so deferred agent cleanup
+    /// cannot remove a worktree while it is being restored or deleted.
+    item_lifecycle: Arc<tokio::sync::Mutex<()>>,
     /// The avatar download limit, shared by everything that wants a face.
     avatars: Arc<Semaphore>,
     /// Notifications already acted on, by id and time, so one GitHub keeps
@@ -984,7 +1387,13 @@ impl Ctx {
             if url.is_empty() || !seen.insert(url.clone()) {
                 continue;
             }
-            spawn_avatar(self.github.clone(), self.cache.clone(), self.events.clone(), self.avatars.clone(), url);
+            spawn_avatar(
+                self.github.clone(),
+                self.cache.clone(),
+                self.events.clone(),
+                self.avatars.clone(),
+                url,
+            );
         }
     }
 
@@ -1010,7 +1419,8 @@ impl Ctx {
     }
 
     fn item(&self, id: &str) -> Option<Item> {
-        self.with_cache(|c| c.load_item(id).ok().flatten()).flatten()
+        self.with_cache(|c| c.load_item(id).ok().flatten())
+            .flatten()
     }
 
     fn send_items(&self) {
@@ -1044,7 +1454,11 @@ impl Ctx {
         if let Some(Err(e)) = self.with_cache(|c| c.store_threads(&threads, last_modified)) {
             tracing::warn!(error = %e, "could not cache notifications");
         }
-        self.want_avatars(threads.iter().map(|t| t.repository.owner_avatar_url.clone()));
+        self.want_avatars(
+            threads
+                .iter()
+                .map(|t| t.repository.owner_avatar_url.clone()),
+        );
         let _ = self.events.send(Event::Notifications(threads));
     }
 
@@ -1106,6 +1520,108 @@ fn send_items(cache: &Cache, events: &EventSender<Event>) {
     }
 }
 
+/// Publish every active summary plus one bounded page of terminal history.
+/// The panel filters this snapshot locally; loading an older page asks again
+/// with a larger limit, so startup never reads every transcript.
+fn send_agent_runs(ctx: &Ctx, history_limit: usize) {
+    send_agent_runs_from_cache(&ctx.cache, &ctx.events, history_limit);
+}
+
+fn send_agent_runs_from_cache(
+    cache: &SharedCache,
+    events: &EventSender<Event>,
+    history_limit: usize,
+) {
+    let Some(cache) = cache.as_ref() else {
+        return;
+    };
+    let Ok(guard) = cache.lock() else { return };
+    let mut runs = match guard.active_runs() {
+        Ok(runs) => runs,
+        Err(error) => {
+            tracing::warn!(%error, "could not load active agents");
+            return;
+        }
+    };
+    let wanted = history_limit.max(1);
+    let mut history = match guard.run_history(&RunHistoryFilter::default(), None, wanted + 1) {
+        Ok(history) => history,
+        Err(error) => {
+            tracing::warn!(%error, "could not load agent history");
+            return;
+        }
+    };
+    let has_more = history.len() > wanted;
+    history.truncate(wanted);
+    runs.extend(history);
+    let _ = events.send(Event::AgentRuns { runs, has_more });
+}
+
+const AGENT_EVENT_PAGE: usize = 100;
+
+fn load_agent_event_page(
+    cache: &Cache,
+    run_id: &str,
+    before_sequence: Option<u64>,
+) -> Result<(Vec<RunEventRecord>, bool), perch_github::CacheError> {
+    let mut events = cache.load_run_events(run_id, before_sequence, AGENT_EVENT_PAGE + 1)?;
+    let has_more = events.len() > AGENT_EVENT_PAGE;
+    if has_more {
+        // The cache returns a chronological window over the newest rows
+        // before the cursor. The extra oldest row proves another page.
+        events.remove(0);
+    }
+    Ok((events, has_more))
+}
+
+fn send_agent_run_detail(ctx: &Ctx, run_id: &str) {
+    let Some(cache) = ctx.cache.as_ref() else {
+        return;
+    };
+    let Ok(guard) = cache.lock() else { return };
+    let Ok(Some(run)) = guard.load_run(run_id) else {
+        ctx.notice("That agent run is no longer available");
+        return;
+    };
+    let (events, has_more) = match load_agent_event_page(&guard, run_id, None) {
+        Ok(page) => page,
+        Err(error) => {
+            tracing::warn!(run = run_id, %error, "could not load agent activity");
+            (Vec::new(), false)
+        }
+    };
+    let _ = ctx.events.send(Event::AgentRunDetail {
+        run,
+        events,
+        has_more,
+    });
+}
+
+fn send_agent_run_events(ctx: &Ctx, run_id: &str, before_sequence: u64) {
+    let Some(cache) = ctx.cache.as_ref() else {
+        return;
+    };
+    let Ok(guard) = cache.lock() else { return };
+    match load_agent_event_page(&guard, run_id, Some(before_sequence)) {
+        Ok((events, has_more)) => {
+            let _ = ctx.events.send(Event::AgentRunEvents {
+                run_id: run_id.to_string(),
+                events,
+                has_more,
+            });
+        }
+        Err(error) => {
+            tracing::warn!(run = run_id, %error, "could not load earlier agent activity");
+            let _ = ctx.events.send(Event::AgentRunEvents {
+                run_id: run_id.to_string(),
+                events: Vec::new(),
+                has_more: true,
+            });
+            ctx.notice("Could not load earlier agent activity");
+        }
+    }
+}
+
 /// Apply one change to an item's row and tell the UI.
 fn edit_item(ctx: &Ctx, id: &str, edit: impl FnOnce(&mut Item)) {
     let Some(mut item) = ctx.item(id) else {
@@ -1133,7 +1649,9 @@ async fn reconcile_checkouts(ctx: &Ctx, reset: bool) {
 
     let mut changed = false;
     for item in &items {
-        let Some(checkout) = &item.checkout else { continue };
+        let Some(checkout) = &item.checkout else {
+            continue;
+        };
         if !checkout.owned {
             continue;
         }
@@ -1148,6 +1666,12 @@ async fn reconcile_checkouts(ctx: &Ctx, reset: bool) {
             changed = true;
         }
     }
+
+    // An archive can intentionally leave its checkout in place while an
+    // agent is still using it. A clean shutdown normally retires it through
+    // the deferred waiter; after a crash, startup reconciliation completes
+    // that same cleanup once persisted runs have been marked Interrupted.
+    retire_archived_checkouts(ctx).await;
 
     // Directories no row claims. After a reset they are every checkout
     // there was, and they stay: opening the pull request again finds its
@@ -1201,9 +1725,13 @@ async fn reconcile_checkouts(ctx: &Ctx, reset: bool) {
 /// without knowing which clone they belonged to.
 async fn prune_every_clone(ctx: &Ctx) {
     let repos = ctx.preparer.store().root().join("repos").join("github.com");
-    let Ok(owners) = std::fs::read_dir(repos) else { return };
+    let Ok(owners) = std::fs::read_dir(repos) else {
+        return;
+    };
     for owner in owners.flatten() {
-        let Ok(clones) = std::fs::read_dir(owner.path()) else { continue };
+        let Ok(clones) = std::fs::read_dir(owner.path()) else {
+            continue;
+        };
         for clone in clones.flatten() {
             let path = clone.path();
             if path.join("HEAD").is_file() {
@@ -1224,8 +1752,12 @@ async fn prune_every_clone(ctx: &Ctx) {
 /// directory's mtime is not: an agent reading it, or a fetch touching
 /// `.git`, would keep a forgotten checkout young for ever.
 async fn sweep_items(ctx: &Ctx) {
-    let items = ctx.with_cache(|c| c.load_items().ok()).flatten().unwrap_or_default();
-    let cutoff = Timestamp::now() - jiff::SignedDuration::try_from(CHECKOUT_MAX_AGE).unwrap_or_default();
+    let items = ctx
+        .with_cache(|c| c.load_items().ok())
+        .flatten()
+        .unwrap_or_default();
+    let cutoff =
+        Timestamp::now() - jiff::SignedDuration::try_from(CHECKOUT_MAX_AGE).unwrap_or_default();
 
     for item in &items {
         let owned = item.checkout.as_ref().is_some_and(|c| c.owned && c.on_disk);
@@ -1240,62 +1772,198 @@ async fn sweep_items(ctx: &Ctx) {
     }
 }
 
-/// Leave Active. An owned checkout's directory goes; the branch, the row,
-/// and its local conversation stay.
+/// Leave Active. The row, branch, discussions, and run history stay. An
+/// executing agent keeps its checkout until the owner's final run exits.
 async fn archive_item(ctx: &Ctx, id: &str) -> Result<(), String> {
+    let lifecycle = ctx.item_lifecycle.lock().await;
     let Some(item) = ctx.item(id) else {
         return Err("That item is gone".into());
     };
-    let Some(repo) = RepoId::parse(&item.repo_full_name) else {
-        return Err(format!("{} is not a repository name", item.repo_full_name));
-    };
-    let mut removed = false;
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned && c.on_disk) {
         if checkout.path.join(".git").exists() {
-            let dirty = ctx.preparer.is_dirty(&checkout.path).await.map_err(|e| e.to_string())?;
+            let dirty = ctx
+                .preparer
+                .is_dirty(&checkout.path)
+                .await
+                .map_err(|e| e.to_string())?;
             if dirty {
                 return Err(format!("{} has uncommitted changes", checkout.branch));
             }
-            if ctx.is_open(id) {
-                ctx.close_review().await;
-            }
-            let bare = ctx.preparer.store().bare_path(&repo);
-            ctx.preparer
-                .remove_worktree(&bare, &checkout.path)
-                .await
-                .map_err(|e| e.to_string())?;
         }
-        removed = true;
-    } else if ctx.is_open(id) {
+    }
+    if ctx.is_open(id) {
         ctx.close_review().await;
     }
-    // Written from the row as it is after the git work, not before.
+
+    // Persist the archive first. Admission validates this row under the
+    // cache mutex, so work admitted before this point is visible to the run
+    // manager and work arriving after it is rejected.
     let mut item = ctx.item(id).unwrap_or(item);
-    if removed {
-        if let Some(c) = item.checkout.as_mut() {
-            c.on_disk = false;
-        }
-    }
     item.archived_at = Some(Timestamp::now());
     ctx.with_cache(|c| c.update_item(&item))
         .transpose()
         .map_err(|e| e.to_string())?;
     ctx.send_items();
+
+    let active = ctx.runs.has_active_owner(id, None);
+    drop(lifecycle);
+    if active {
+        let ctx = ctx.clone();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            ctx.runs.wait_owner_idle(&id, None).await;
+            if let Err(error) = retire_archived_checkout(&ctx, &id).await {
+                tracing::info!(item = id, %error, "kept an archived checkout on disk");
+            }
+        });
+        Ok(())
+    } else {
+        retire_archived_checkout(ctx, id).await
+    }
+}
+
+/// Remove an archived owned checkout once no process can still be using it.
+/// Re-read under the lifecycle lock so Restore or Delete always wins cleanly.
+async fn retire_archived_checkout(ctx: &Ctx, id: &str) -> Result<(), String> {
+    let _lifecycle = ctx.item_lifecycle.lock().await;
+    if ctx.runs.has_active_owner(id, None) {
+        return Ok(());
+    }
+    retire_archived_checkout_from_cache(&ctx.cache, &ctx.preparer, &ctx.events, id).await
+}
+
+/// Finish every archive whose checkout is still present. The live wrapper
+/// checks process ownership and serializes item operations; the startup path
+/// calls the cache form directly after nonterminal runs have been reconciled.
+async fn retire_archived_checkouts(ctx: &Ctx) {
+    let items = ctx
+        .with_cache(|cache| cache.load_items().unwrap_or_default())
+        .unwrap_or_default();
+    for item in items.iter().filter(|item| archived_checkout_on_disk(item)) {
+        if let Err(error) = retire_archived_checkout(ctx, &item.id).await {
+            tracing::info!(item = %item.id, %error, "kept an archived checkout on disk");
+        }
+    }
+}
+
+async fn retire_archived_checkouts_from_cache(
+    cache: &SharedCache,
+    preparer: &Preparer,
+    events: &EventSender<Event>,
+) {
+    let items = cache
+        .as_ref()
+        .and_then(|cache| cache.lock().ok())
+        .and_then(|cache| cache.load_items().ok())
+        .unwrap_or_default();
+    for item in items.iter().filter(|item| archived_checkout_on_disk(item)) {
+        if let Err(error) =
+            retire_archived_checkout_from_cache(cache, preparer, events, &item.id).await
+        {
+            tracing::info!(item = %item.id, %error, "kept an archived checkout on disk");
+        }
+    }
+}
+
+fn archived_checkout_on_disk(item: &Item) -> bool {
+    item.is_archived()
+        && item
+            .checkout
+            .as_ref()
+            .is_some_and(|checkout| checkout.owned && checkout.on_disk)
+}
+
+async fn retire_archived_checkout_from_cache(
+    cache: &SharedCache,
+    preparer: &Preparer,
+    events: &EventSender<Event>,
+    id: &str,
+) -> Result<(), String> {
+    let item = cache
+        .as_ref()
+        .ok_or_else(|| "the local database is unavailable".to_string())?
+        .lock()
+        .map_err(|_| "the local database is unavailable".to_string())?
+        .load_item(id)
+        .map_err(|error| error.to_string())?;
+    let Some(item) = item.filter(archived_checkout_on_disk) else {
+        return Ok(());
+    };
+    let checkout = item.checkout.as_ref().cloned().unwrap();
+    if checkout.path.join(".git").exists() {
+        if preparer
+            .is_dirty(&checkout.path)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Err(format!("{} has uncommitted changes", checkout.branch));
+        }
+        let repo = RepoId::parse(&item.repo_full_name)
+            .ok_or_else(|| format!("{} is not a repository name", item.repo_full_name))?;
+        let bare = preparer.store().bare_path(&repo);
+        preparer
+            .remove_worktree(&bare, &checkout.path)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let guard = cache
+        .as_ref()
+        .ok_or_else(|| "the local database is unavailable".to_string())?
+        .lock()
+        .map_err(|_| "the local database is unavailable".to_string())?;
+    let Some(mut item) = guard
+        .load_item(id)
+        .map_err(|error| error.to_string())?
+        .filter(|item| item.is_archived())
+    else {
+        return Ok(());
+    };
+    if let Some(checkout) = item.checkout.as_mut() {
+        checkout.on_disk = false;
+    }
+    guard
+        .update_item(&item)
+        .map_err(|error| error.to_string())?;
+    send_items(&guard, events);
     Ok(())
 }
 
 /// Remove the row and its threads. An owned checkout's directory and
 /// branch go too; a checkout under a root is not touched.
 async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
+    let _lifecycle = ctx.item_lifecycle.lock().await;
     let Some(item) = ctx.item(id) else {
         return Err("That item is gone".into());
     };
+    // Refuse before disturbing its work, then stop and fully reap every
+    // owned process before either the checkout or its database rows go.
+    if let Some(checkout) = item.checkout.as_ref().filter(|checkout| checkout.owned) {
+        if checkout.path.join(".git").exists()
+            && ctx
+                .preparer
+                .is_dirty(&checkout.path)
+                .await
+                .map_err(|error| error.to_string())?
+        {
+            return Err(format!("{} has uncommitted changes", checkout.branch));
+        }
+    }
+    let _deletion = ctx.runs.block_owner(id, None)?;
+    ctx.runs.cancel_owner(id, None).await;
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned) {
         if let Some(repo) = RepoId::parse(&item.repo_full_name) {
             let bare = ctx.preparer.store().bare_path(&repo);
             if checkout.path.join(".git").exists() {
-                let dirty = ctx.preparer.is_dirty(&checkout.path).await.map_err(|e| e.to_string())?;
-                if dirty {
+                // Cancellation is asynchronous and the checkout is also a
+                // normal directory the reader can edit. The first check
+                // protects existing work; this one protects changes made
+                // while Perch was waiting for the agent process to exit.
+                if ctx
+                    .preparer
+                    .is_dirty(&checkout.path)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
                     return Err(format!("{} has uncommitted changes", checkout.branch));
                 }
                 if ctx.is_open(id) {
@@ -1316,20 +1984,6 @@ async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
     } else if ctx.is_open(id) {
         ctx.close_review().await;
     }
-    // Stop anything still running in its threads.
-    let thread_ids: Vec<String> = ctx
-        .with_cache(|c| c.load_comment_threads(id).unwrap_or_default())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|t| t.id)
-        .collect();
-    if let Ok(runs) = ctx.runs.lock() {
-        for (run, thread) in runs.values() {
-            if thread_ids.contains(thread) {
-                run.cancel();
-            }
-        }
-    }
     ctx.with_cache(|c| c.delete_item(id))
         .transpose()
         .map_err(|e| e.to_string())?;
@@ -1339,16 +1993,31 @@ async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
 
 /// Open whatever an item is.
 async fn open_item(ctx: &Ctx, id: &str) -> bool {
+    let _lifecycle = ctx.item_lifecycle.lock().await;
     let Some(item) = ctx.item(id) else {
-        let _ = ctx.events.send(Event::ReviewFailed { message: "That item is gone".into() });
+        let _ = ctx.events.send(Event::ReviewFailed {
+            message: "That item is gone".into(),
+        });
         return false;
     };
     match (&item.subject, &item.checkout) {
         (Some(ItemSubject::PullRequest(pr)), _) => {
-            open_subject(ctx, pr.repo_full_name.clone(), ItemKind::PullRequest, pr.number).await
+            open_subject(
+                ctx,
+                pr.repo_full_name.clone(),
+                ItemKind::PullRequest,
+                pr.number,
+            )
+            .await
         }
         (Some(ItemSubject::Issue(issue)), _) => {
-            open_subject(ctx, issue.repo_full_name.clone(), ItemKind::Issue, issue.number).await
+            open_subject(
+                ctx,
+                issue.repo_full_name.clone(),
+                ItemKind::Issue,
+                issue.number,
+            )
+            .await
         }
         (None, Some(_)) => open_branch_item(ctx, item).await,
         (None, None) => {
@@ -1365,14 +2034,21 @@ async fn open_item(ctx: &Ctx, id: &str) -> bool {
 async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
     let events = &ctx.events;
     let Some(checkout) = item.checkout.clone() else {
-        let _ = events.send(Event::ReviewFailed { message: "That item has no checkout".into() });
+        let _ = events.send(Event::ReviewFailed {
+            message: "That item has no checkout".into(),
+        });
         return false;
     };
     let Some(repo) = RepoId::parse(&item.repo_full_name) else {
-        let _ = events.send(Event::ReviewFailed { message: format!("{} is not a repository name", item.repo_full_name) });
+        let _ = events.send(Event::ReviewFailed {
+            message: format!("{} is not a repository name", item.repo_full_name),
+        });
         return false;
     };
-    let _ = events.send(Event::ReviewProgress { message: "Checking out the files".into(), percent: None });
+    let _ = events.send(Event::ReviewProgress {
+        message: "Checking out the files".into(),
+        percent: None,
+    });
 
     let git_checkout = if checkout.owned {
         // A checkout under the store is cut in a clone from GitHub, which
@@ -1392,7 +2068,9 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
         match open_owned_branch(ctx, &repo, &checkout).await {
             Ok(c) => c,
             Err(e) => {
-                let _ = events.send(Event::ReviewFailed { message: e.to_string() });
+                let _ = events.send(Event::ReviewFailed {
+                    message: e.to_string(),
+                });
                 return false;
             }
         }
@@ -1400,7 +2078,9 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
         match open_own_checkout(ctx, &repo, &checkout, &checkout.base_ref).await {
             Ok(c) => c,
             Err(e) => {
-                let _ = events.send(Event::ReviewFailed { message: e.to_string() });
+                let _ = events.send(Event::ReviewFailed {
+                    message: e.to_string(),
+                });
                 return false;
             }
         }
@@ -1409,7 +2089,10 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
     // The row as it is now: the git work took a while, and a refresh may
     // have attached a pull request or a poll marked it since.
     let mut item = ctx.item(&item.id).unwrap_or(item);
-    let since = item.checkout.as_ref().and_then(|c| c.last_seen_head.clone());
+    let since = item
+        .checkout
+        .as_ref()
+        .and_then(|c| c.last_seen_head.clone());
     if let Some(c) = item.checkout.as_mut() {
         // The scan moves head_sha with the worktree, so the previous
         // open's head is kept on its own, and replaced by this one's.
@@ -1437,23 +2120,45 @@ async fn open_owned_branch(
     if !checkout.path.join(".git").exists() {
         // Archived: the branch is still in the bare clone.
         let path = checkout.path.to_string_lossy().into_owned();
-        let _ = ctx.preparer.git().run(Some(&bare), ["worktree", "prune"], Duration::from_secs(30)).await;
+        let _ = ctx
+            .preparer
+            .git()
+            .run(Some(&bare), ["worktree", "prune"], Duration::from_secs(30))
+            .await;
         ctx.preparer
             .git()
-            .run(Some(&bare), ["worktree", "add", &path, &checkout.branch], Duration::from_secs(60))
+            .run(
+                Some(&bare),
+                ["worktree", "add", &path, &checkout.branch],
+                Duration::from_secs(60),
+            )
             .await?;
     }
     let git = ctx.preparer.git();
-    let head_sha = git.run(Some(&checkout.path), ["rev-parse", "HEAD"], Duration::from_secs(30)).await?.trim().to_string();
+    let head_sha = git
+        .run(
+            Some(&checkout.path),
+            ["rev-parse", "HEAD"],
+            Duration::from_secs(30),
+        )
+        .await?
+        .trim()
+        .to_string();
     // The base: a branch name resolves through the home ref the last
     // ensure_home fetched; a fork's base is the source's commit itself.
-    let base = if checkout.base_ref.len() == 40 && checkout.base_ref.chars().all(|c| c.is_ascii_hexdigit()) {
+    let base = if checkout.base_ref.len() == 40
+        && checkout.base_ref.chars().all(|c| c.is_ascii_hexdigit())
+    {
         checkout.base_ref.clone()
     } else {
         perch_git::home_ref(&checkout.base_ref)
     };
     let merge_base = git
-        .run(Some(&bare), ["merge-base", &base, &head_sha], Duration::from_secs(30))
+        .run(
+            Some(&bare),
+            ["merge-base", &base, &head_sha],
+            Duration::from_secs(30),
+        )
         .await
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| head_sha.clone());
@@ -1471,10 +2176,15 @@ async fn open_owned_branch(
 /// no subject yet, that the pull request can attach to.
 fn branch_item_for(ctx: &Ctx, pr: &PullRequest) -> Option<Item> {
     let head_repo = pr.head_repo_full_name.as_deref()?;
-    ctx.with_cache(|cache| cache.find_item_by_branch(head_repo, &pr.head_ref).ok().flatten())
-        .flatten()
-        .filter(|item| item.subject.is_none())
-        .filter(|item| !item.is_archived() || item.checkout.as_ref().is_some_and(|c| c.owned))
+    ctx.with_cache(|cache| {
+        cache
+            .find_item_by_branch(head_repo, &pr.head_ref)
+            .ok()
+            .flatten()
+    })
+    .flatten()
+    .filter(|item| item.subject.is_none())
+    .filter(|item| !item.is_archived() || item.checkout.as_ref().is_some_and(|c| c.owned))
 }
 
 fn stored_is_newer(stored: Option<Timestamp>, fetched: Option<Timestamp>) -> bool {
@@ -1540,20 +2250,27 @@ async fn finish_open(
     since: Option<String>,
 ) -> bool {
     let events = &ctx.events;
-    let _ = events.send(Event::ReviewProgress { message: "Computing the diff".into(), percent: None });
+    let _ = events.send(Event::ReviewProgress {
+        message: "Computing the diff".into(),
+        percent: None,
+    });
 
     let scope = perch_git::Scope::Branch;
     let files = match scoped_files(&ctx.preparer, &checkout, &scope).await {
         Ok(f) => Arc::new(f),
         Err(e) => {
-            let _ = events.send(Event::ReviewFailed { message: e.to_string() });
+            let _ = events.send(Event::ReviewFailed {
+                message: e.to_string(),
+            });
             return false;
         }
     };
     let worktree = checkout.worktree.clone();
-    let tree = tokio::task::spawn_blocking(move || perch_git::list_tree(&worktree, 50_000).unwrap_or_default())
-        .await
-        .unwrap_or_default();
+    let tree = tokio::task::spawn_blocking(move || {
+        perch_git::list_tree(&worktree, 50_000).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
 
     let stale_head = checkout.stale.clone();
     let head = checkout.head_sha.clone();
@@ -1610,14 +2327,18 @@ async fn finish_open(
         let ctx = ctx.clone();
         let item_id = item.id.clone();
         let head = head.clone();
-        tokio::spawn(async move { send_commits(&ctx, &item_id, &worktree, &merge_base, &head, since).await });
+        tokio::spawn(async move {
+            send_commits(&ctx, &item_id, &worktree, &merge_base, &head, since).await
+        });
     }
 
     if let Some(pr) = pull_request {
         // The cached discussion and checks paint before GitHub answers,
         // with the faces the last open left on disk and the description a
         // question needs. A checkout with no pull request has neither.
-        let cached = ctx.with_cache(|c| c.load_discussion(&item.id).ok().flatten()).flatten();
+        let cached = ctx
+            .with_cache(|c| c.load_discussion(&item.id).ok().flatten())
+            .flatten();
         if let Some((_, d)) = cached {
             if let Ok(mut guard) = ctx.slot.lock() {
                 if let Some(open) = guard.as_mut().filter(|c| c.item_id == item.id) {
@@ -1625,7 +2346,10 @@ async fn finish_open(
                 }
             }
             ctx.want_avatars(d.comments.iter().map(|c| c.user_avatar_url.clone()));
-            let _ = ctx.events.send(Event::DiscussionReady { item_id: item.id.clone(), discussion: Arc::new(d) });
+            let _ = ctx.events.send(Event::DiscussionReady {
+                item_id: item.id.clone(),
+                discussion: Arc::new(d),
+            });
         }
         // The author's face is on the header, whether or not they said
         // anything in the discussion.
@@ -1633,9 +2357,14 @@ async fn finish_open(
             std::iter::once(pr.author_avatar_url.clone())
                 .chain(pr.requested_reviewers.iter().map(|r| r.avatar_url.clone())),
         );
-        let cached = ctx.with_cache(|c| c.load_checks(&item.id, &pr.head_sha).ok().flatten()).flatten();
+        let cached = ctx
+            .with_cache(|c| c.load_checks(&item.id, &pr.head_sha).ok().flatten())
+            .flatten();
         if let Some(checks) = cached {
-            let _ = ctx.events.send(Event::ChecksReady { item_id: item.id.clone(), checks: Arc::new(checks) });
+            let _ = ctx.events.send(Event::ChecksReady {
+                item_id: item.id.clone(),
+                checks: Arc::new(checks),
+            });
         }
         if !offline {
             let (ctx2, item_id2, pr2) = (ctx.clone(), item.id.clone(), pr.clone());
@@ -1654,7 +2383,14 @@ async fn scoped_files(
     checkout: &perch_git::Checkout,
     scope: &perch_git::Scope,
 ) -> Result<Vec<perch_git::ChangedFile>, perch_git::Error> {
-    perch_git::changed_files(preparer.git(), &checkout.worktree, scope, &checkout.merge_base, &checkout.head_sha).await
+    perch_git::changed_files(
+        preparer.git(),
+        &checkout.worktree,
+        scope,
+        &checkout.merge_base,
+        &checkout.head_sha,
+    )
+    .await
 }
 
 /// What the reader marked on an item's files: every (path, blob) viewed,
@@ -1675,7 +2411,12 @@ fn send_viewed(ctx: &Ctx, item_id: &str, opening: bool) {
             });
             (viewed, folds)
         })
-        .unwrap_or_else(|| (Default::default(), opening.then(|| (Default::default(), folded_from_meta(None)))));
+        .unwrap_or_else(|| {
+            (
+                Default::default(),
+                opening.then(|| (Default::default(), folded_from_meta(None))),
+            )
+        });
     let (reveals, folded) = folds.unzip();
     let _ = ctx.events.send(Event::ViewedReady {
         item_id: item_id.to_string(),
@@ -1689,7 +2430,14 @@ fn send_viewed(ctx: &Ctx, item_id: &str, opening: bool) {
 /// for the scope menu, with the head as it was at the previous open. A
 /// checkout with no history over its base, an issue's home say, sends an
 /// empty list.
-async fn send_commits(ctx: &Ctx, item_id: &str, worktree: &Path, merge_base: &str, head: &str, since: Option<String>) {
+async fn send_commits(
+    ctx: &Ctx,
+    item_id: &str,
+    worktree: &Path,
+    merge_base: &str,
+    head: &str,
+    since: Option<String>,
+) {
     let git = ctx.preparer.git();
     let commits = if merge_base.is_empty() || merge_base == head {
         Vec::new()
@@ -1703,7 +2451,12 @@ async fn send_commits(ctx: &Ctx, item_id: &str, worktree: &Path, merge_base: &st
         }
     };
     let dirt = perch_git::dirt(git, worktree).await.unwrap_or_default();
-    let _ = ctx.events.send(Event::CommitsReady { item_id: item_id.to_string(), commits: Arc::new(commits), dirt, since });
+    let _ = ctx.events.send(Event::CommitsReady {
+        item_id: item_id.to_string(),
+        commits: Arc::new(commits),
+        dirt,
+        since,
+    });
 }
 
 /// Look at the checkout again. The head may have moved under a terminal
@@ -1712,17 +2465,28 @@ async fn send_commits(ctx: &Ctx, item_id: &str, worktree: &Path, merge_base: &st
 /// read again either way.
 async fn refresh_scope(ctx: &Ctx, item_id: &str) {
     let open = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref()
-            .filter(|c| c.item_id == item_id)
-            .map(|c| (c.checkout.clone(), c.scope.clone(), c.since.clone(), c.scope_gen))
+        g.as_ref().filter(|c| c.item_id == item_id).map(|c| {
+            (
+                c.checkout.clone(),
+                c.scope.clone(),
+                c.since.clone(),
+                c.scope_gen,
+            )
+        })
     });
-    let Some((mut checkout, scope, since, gen)) = open else { return };
+    let Some((mut checkout, scope, since, gen)) = open else {
+        return;
+    };
     if !checkout.worktree.join(".git").exists() {
         return;
     }
     let git = ctx.preparer.git();
     let head = git
-        .run(Some(&checkout.worktree), ["rev-parse", "HEAD"], Duration::from_secs(30))
+        .run(
+            Some(&checkout.worktree),
+            ["rev-parse", "HEAD"],
+            Duration::from_secs(30),
+        )
         .await
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
@@ -1733,7 +2497,14 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
         checkout.head_sha = head.clone();
         if let Some(item) = ctx.item(item_id) {
             for base in base_revs_for(ctx, &item).await {
-                if let Ok(mb) = git.run(Some(&checkout.worktree), ["merge-base", &base, &head], Duration::from_secs(30)).await {
+                if let Ok(mb) = git
+                    .run(
+                        Some(&checkout.worktree),
+                        ["merge-base", &base, &head],
+                        Duration::from_secs(30),
+                    )
+                    .await
+                {
                     let mb = mb.trim().to_string();
                     if !mb.is_empty() {
                         checkout.merge_base = mb;
@@ -1752,7 +2523,10 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
         // The reader may have picked a scope while this looked; theirs
         // wins, and the next look reads under it.
         let written = ctx.slot.lock().ok().is_some_and(|mut guard| {
-            match guard.as_mut().filter(|c| c.item_id == item_id && c.scope_gen == gen) {
+            match guard
+                .as_mut()
+                .filter(|c| c.item_id == item_id && c.scope_gen == gen)
+            {
                 Some(open) => {
                     open.checkout.head_sha = head.clone();
                     open.checkout.merge_base = checkout.merge_base.clone();
@@ -1774,9 +2548,21 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
             ctx.with_cache(|c| c.update_item(&item));
             ctx.send_items();
         }
-        let _ = ctx.events.send(Event::ScopeReady { item_id: item_id.to_string(), scope, files });
+        let _ = ctx.events.send(Event::ScopeReady {
+            item_id: item_id.to_string(),
+            scope,
+            files,
+        });
     }
-    send_commits(ctx, item_id, &checkout.worktree, &checkout.merge_base, &checkout.head_sha, since).await;
+    send_commits(
+        ctx,
+        item_id,
+        &checkout.worktree,
+        &checkout.merge_base,
+        &checkout.head_sha,
+        since,
+    )
+    .await;
 }
 
 /// A number no earlier review context or scope pick has had, so a look at
@@ -1793,7 +2579,9 @@ fn next_scope_gen() -> u64 {
 /// ref or the commit the branch was forked from. The first that resolves
 /// is the one.
 async fn base_revs_for(ctx: &Ctx, item: &Item) -> Vec<String> {
-    let Some(checkout) = item.checkout.as_ref() else { return Vec::new() };
+    let Some(checkout) = item.checkout.as_ref() else {
+        return Vec::new();
+    };
     let base = &checkout.base_ref;
     let is_sha = base.len() == 40 && base.chars().all(|c| c.is_ascii_hexdigit());
     if !checkout.owned {
@@ -1803,7 +2591,11 @@ async fn base_revs_for(ctx: &Ctx, item: &Item) -> Vec<String> {
     if let Some(pr) = item.pull_request() {
         out.push(format!("refs/perch/base/{}", pr.number));
     }
-    out.push(if is_sha { base.clone() } else { perch_git::home_ref(base) });
+    out.push(if is_sha {
+        base.clone()
+    } else {
+        perch_git::home_ref(base)
+    });
     out
 }
 
@@ -1818,7 +2610,9 @@ async fn base_revs_for(ctx: &Ctx, item: &Item) -> Vec<String> {
 async fn root_base_revs(ctx: &Ctx, path: &Path, base: &str) -> Vec<String> {
     let hosts = ctx.config.github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
-    let remotes = perch_git::remotes(ctx.preparer.git(), path).await.unwrap_or_default();
+    let remotes = perch_git::remotes(ctx.preparer.git(), path)
+        .await
+        .unwrap_or_default();
     let mut revs = Vec::new();
     if let Some((remote, _)) = perch_git::github_remote(&remotes, &hosts) {
         revs.push(format!("{remote}/{base}"));
@@ -1837,13 +2631,22 @@ async fn root_base_revs(ctx: &Ctx, path: &Path, base: &str) -> Vec<String> {
 /// shows nothing: absent means unknown.
 ///
 async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
+    let Some(github) = ctx.github.as_ref() else {
+        return;
+    };
     let head = pr.head_sha.as_str();
-    match ctx.github.list_workflow_runs_for_sha(&pr.repo_full_name, head).await {
+    match github
+        .list_workflow_runs_for_sha(&pr.repo_full_name, head)
+        .await
+    {
         Ok(runs) => {
             let checks = perch_github::Checks::of(&runs);
             ctx.with_cache(|c| c.store_checks(item_id, head, &checks));
             if ctx.is_open(item_id) {
-                let _ = ctx.events.send(Event::ChecksReady { item_id: item_id.to_string(), checks: Arc::new(checks) });
+                let _ = ctx.events.send(Event::ChecksReady {
+                    item_id: item_id.to_string(),
+                    checks: Arc::new(checks),
+                });
             }
         }
         Err(e) => tracing::info!(item = item_id, error = %e, "could not fetch the checks"),
@@ -1854,7 +2657,9 @@ async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
 /// review context for the file loads that follow, and sent.
 async fn set_scope(ctx: &Ctx, item_id: &str, scope: perch_git::Scope) {
     let checkout = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref().filter(|c| c.item_id == item_id).map(|c| c.checkout.clone())
+        g.as_ref()
+            .filter(|c| c.item_id == item_id)
+            .map(|c| c.checkout.clone())
     });
     let Some(checkout) = checkout else { return };
     match scoped_files(&ctx.preparer, &checkout, &scope).await {
@@ -1867,7 +2672,11 @@ async fn set_scope(ctx: &Ctx, item_id: &str, scope: perch_git::Scope) {
                     open.scope_gen = next_scope_gen();
                 }
             }
-            let _ = ctx.events.send(Event::ScopeReady { item_id: item_id.to_string(), scope, files });
+            let _ = ctx.events.send(Event::ScopeReady {
+                item_id: item_id.to_string(),
+                scope,
+                files,
+            });
         }
         Err(e) => ctx.notice(format!("Could not read that scope: {e}")),
     }
@@ -1879,7 +2688,10 @@ async fn set_scope(ctx: &Ctx, item_id: &str, scope: perch_git::Scope) {
 /// neither, and the clone that would fail is one that must not be tried.
 fn no_home_for_local(ctx: &Ctx, repo_full_name: &str) -> Option<String> {
     perch_github::is_local(repo_full_name).then(|| {
-        format!("{} is not on GitHub, so there is no home checkout to cut from", ctx.config.display_name(repo_full_name))
+        format!(
+            "{} is not on GitHub, so there is no home checkout to cut from",
+            ctx.config.display_name(repo_full_name)
+        )
     })
 }
 
@@ -1893,41 +2705,70 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str) -> Result<String, String> {
         return Err("Start work needs an issue".into());
     };
     let Some(repo) = RepoId::parse(&issue_item.repo_full_name) else {
-        return Err(format!("{} is not a repository name", issue_item.repo_full_name));
+        return Err(format!(
+            "{} is not a repository name",
+            issue_item.repo_full_name
+        ));
     };
     if let Some(message) = no_home_for_local(ctx, &issue_item.repo_full_name) {
         return Err(message);
     }
     let wanted = format!("perch/issue-{}", issue.number);
     if let Some(existing) = ctx
-        .with_cache(|c| c.find_item_by_branch(&issue_item.repo_full_name, &wanted).ok().flatten())
+        .with_cache(|c| {
+            c.find_item_by_branch(&issue_item.repo_full_name, &wanted)
+                .ok()
+                .flatten()
+        })
         .flatten()
     {
         return Ok(existing.id);
     }
 
-    let _ = ctx.events.send(Event::ReviewProgress { message: "Fetching the default branch".into(), percent: None });
+    let _ = ctx.events.send(Event::ReviewProgress {
+        message: "Fetching the default branch".into(),
+        percent: None,
+    });
     let progress = ctx.events.clone();
     let label = repo.full_name();
     ctx.preparer
         .ensure_bare(&repo, move |step| {
             if let perch_git::Step::Cloning { phase, percent } = step {
-                let _ = progress.send(Event::ReviewProgress { message: format!("Cloning {label}: {phase}"), percent });
+                let _ = progress.send(Event::ReviewProgress {
+                    message: format!("Cloning {label}: {phase}"),
+                    percent,
+                });
             }
         })
         .await
         .map_err(|e| e.to_string())?;
-    let default = ctx.preparer.default_branch(&repo).await.map_err(|e| e.to_string())?;
-    ctx.preparer.ensure_home(&repo, &default).await.map_err(|e| e.to_string())?;
+    let default = ctx
+        .preparer
+        .default_branch(&repo)
+        .await
+        .map_err(|e| e.to_string())?;
+    ctx.preparer
+        .ensure_home(&repo, &default)
+        .await
+        .map_err(|e| e.to_string())?;
     let cut = ctx
         .preparer
-        .cut_branch(&repo, &wanted, &perch_git::home_ref(&default), &branches_in(ctx, &issue_item.repo_full_name))
+        .cut_branch(
+            &repo,
+            &wanted,
+            &perch_git::home_ref(&default),
+            &branches_in(ctx, &issue_item.repo_full_name),
+        )
         .await
         .map_err(|e| e.to_string())?;
     let head_sha = ctx
         .preparer
         .git()
-        .run(Some(&cut.worktree), ["rev-parse", "HEAD"], Duration::from_secs(30))
+        .run(
+            Some(&cut.worktree),
+            ["rev-parse", "HEAD"],
+            Duration::from_secs(30),
+        )
         .await
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
@@ -1945,7 +2786,9 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str) -> Result<String, String> {
         last_seen_head: None,
     });
     item.from_item_id = Some(issue_item.id.clone());
-    ctx.with_cache(|c| c.insert_item(&item)).transpose().map_err(|e| e.to_string())?;
+    ctx.with_cache(|c| c.insert_item(&item))
+        .transpose()
+        .map_err(|e| e.to_string())?;
     ctx.send_items();
     Ok(item.id)
 }
@@ -1962,12 +2805,18 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         return Err("Fork needs a checkout; open the pull request first".into());
     };
     let Some(repo) = RepoId::parse(&source.repo_full_name) else {
-        return Err(format!("{} is not a repository name", source.repo_full_name));
+        return Err(format!(
+            "{} is not a repository name",
+            source.repo_full_name
+        ));
     };
     if let Some(message) = no_home_for_local(ctx, &source.repo_full_name) {
         return Err(message);
     }
-    ctx.preparer.ensure_bare(&repo, |_| {}).await.map_err(|e| e.to_string())?;
+    ctx.preparer
+        .ensure_bare(&repo, |_| {})
+        .await
+        .map_err(|e| e.to_string())?;
     // A root's branch may not be in the store's clone; fetch its head
     // there by commit so the cut has something to start from.
     let head = if checkout.owned {
@@ -1977,30 +2826,52 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         // The root may have been switched since the row was made; a fork
         // of another branch under this one's name would be a lie.
         let on_branch = git
-            .run(Some(&checkout.path), ["rev-parse", "--abbrev-ref", "HEAD"], Duration::from_secs(30))
+            .run(
+                Some(&checkout.path),
+                ["rev-parse", "--abbrev-ref", "HEAD"],
+                Duration::from_secs(30),
+            )
             .await
             .map_err(|e| e.to_string())?;
         if on_branch.trim() != checkout.branch {
-            return Err(format!("{} has {} checked out now, not {}", checkout.path.display(), on_branch.trim(), checkout.branch));
+            return Err(format!(
+                "{} has {} checked out now, not {}",
+                checkout.path.display(),
+                on_branch.trim(),
+                checkout.branch
+            ));
         }
         let sha = git
-            .run(Some(&checkout.path), ["rev-parse", "HEAD"], Duration::from_secs(30))
+            .run(
+                Some(&checkout.path),
+                ["rev-parse", "HEAD"],
+                Duration::from_secs(30),
+            )
             .await
             .map_err(|e| e.to_string())?
             .trim()
             .to_string();
         let bare = ctx.preparer.store().bare_path(&repo);
         let from = checkout.path.to_string_lossy().into_owned();
-        git.run(Some(&bare), ["fetch", "--no-tags", &from, &sha], Duration::from_secs(120))
-            .await
-            .map_err(|e| e.to_string())?;
+        git.run(
+            Some(&bare),
+            ["fetch", "--no-tags", &from, &sha],
+            Duration::from_secs(120),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         sha
     };
     // The source's own name is spoken for by the source; the cut takes
     // the next one, whether or not this clone has heard of it.
     let cut = ctx
         .preparer
-        .cut_branch(&repo, &checkout.branch, &head, &branches_in(ctx, &source.repo_full_name))
+        .cut_branch(
+            &repo,
+            &checkout.branch,
+            &head,
+            &branches_in(ctx, &source.repo_full_name),
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -2018,7 +2889,9 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         last_seen_head: None,
     });
     item.from_item_id = Some(source.id.clone());
-    ctx.with_cache(|c| c.insert_item(&item)).transpose().map_err(|e| e.to_string())?;
+    ctx.with_cache(|c| c.insert_item(&item))
+        .transpose()
+        .map_err(|e| e.to_string())?;
     ctx.send_items();
     Ok(item.id)
 }
@@ -2084,10 +2957,20 @@ fn defer_polls_for_error(
 async fn refresh(ctx: &Ctx, source: &str) -> PollAfter {
     let events = &ctx.events;
     let config = ctx.config.as_ref();
+    let Some(github) = ctx.github.as_ref() else {
+        let wait = Duration::from_secs(config.poll_interval_secs.max(30));
+        let _ = events.send(Event::Status(Status::NoToken {
+            detail: "Set GITHUB_TOKEN, or run `gh auth login` in a terminal.".into(),
+        }));
+        return PollAfter {
+            automatic: wait,
+            manual: wait,
+        };
+    };
     let _ = events.send(Event::Status(Status::Refreshing));
 
     let last_modified = ctx.notifications_last_modified();
-    match ctx.github.list_threads_since(last_modified.as_deref()).await {
+    match github.list_threads_since(last_modified.as_deref()).await {
         Ok(result) => {
             let manual = result.poll_interval;
             let automatic = manual.max(Duration::from_secs(config.poll_interval_secs.max(1)));
@@ -2118,7 +3001,10 @@ async fn refresh(ctx: &Ctx, source: &str) -> PollAfter {
                 Duration::from_secs(config.poll_interval_secs.max(30))
             };
             let _ = events.send(Event::Status(status));
-            PollAfter { automatic: wait, manual: wait }
+            PollAfter {
+                automatic: wait,
+                manual: wait,
+            }
         }
     }
 }
@@ -2141,7 +3027,9 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
             SubjectKind::Issue => ItemKind::Issue,
             _ => continue,
         };
-        let Some(number) = thread.number_hint() else { continue };
+        let Some(number) = thread.number_hint() else {
+            continue;
+        };
         let repo = thread.repository.full_name.as_str();
         let item = ctx
             .with_cache(|c| c.find_item_by_subject(repo, kind, number).ok().flatten())
@@ -2172,7 +3060,11 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
 async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
     // One at a time per item: two notifications in one poll would fetch
     // and archive the same discussion twice, side by side.
-    let taken = ctx.refreshing.lock().map(|mut s| s.insert(item_id.to_string())).unwrap_or(false);
+    let taken = ctx
+        .refreshing
+        .lock()
+        .map(|mut s| s.insert(item_id.to_string()))
+        .unwrap_or(false);
     if !taken {
         return;
     }
@@ -2183,13 +3075,23 @@ async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
 }
 
 async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
+    let Some(github) = ctx.github.as_ref() else {
+        return;
+    };
     let open = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref().filter(|c| c.item_id == item_id).map(|c| (c.pull_request.clone(), c.issue.clone()))
+        g.as_ref()
+            .filter(|c| c.item_id == item_id)
+            .map(|c| (c.pull_request.clone(), c.issue.clone()))
     });
-    let Some((pull_request, issue)) = open else { return };
+    let Some((pull_request, issue)) = open else {
+        return;
+    };
     if let Some(pr) = pull_request {
         // The snapshot first, so the checks are for the head GitHub ran.
-        let pr = match ctx.github.fetch_pull_request(&pr.repo_full_name, pr.number).await {
+        let pr = match github
+            .fetch_pull_request(&pr.repo_full_name, pr.number)
+            .await
+        {
             Ok(fresh) => {
                 let fresh = Arc::new(fresh);
                 if let Ok(mut guard) = ctx.slot.lock() {
@@ -2218,7 +3120,10 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
         fetch_checks(ctx, item_id, &pr).await;
     } else if let Some(issue) = issue {
         let (issue, _) = &*issue;
-        match ctx.github.fetch_issue_comments(&issue.repo_full_name, issue.number).await {
+        match github
+            .fetch_issue_comments(&issue.repo_full_name, issue.number)
+            .await
+        {
             Ok(comments) => {
                 keep_issue_comments(ctx, item_id, issue, &comments);
                 // A question asked next is prompted with these.
@@ -2229,10 +3134,15 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
                 }
                 if ctx.is_open(item_id) {
                     ctx.want_avatars(comments.iter().map(|c| c.user_avatar_url.clone()));
-                    let _ = ctx.events.send(Event::IssueComments { item_id: item_id.to_string(), comments: Arc::new(comments) });
+                    let _ = ctx.events.send(Event::IssueComments {
+                        item_id: item_id.to_string(),
+                        comments: Arc::new(comments),
+                    });
                 }
             }
-            Err(e) => tracing::info!(item = item_id, error = %e, "could not fetch the comments again"),
+            Err(e) => {
+                tracing::info!(item = item_id, error = %e, "could not fetch the comments again")
+            }
         }
     }
 }
@@ -2240,13 +3150,21 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
 /// An issue's comments are kept the way a pull request's discussion is,
 /// in the same table, so the next open paints them before the network
 /// answers and the harness can print them.
-fn keep_issue_comments(ctx: &Ctx, item_id: &str, issue: &perch_github::Issue, comments: &[perch_github::IssueComment]) {
+fn keep_issue_comments(
+    ctx: &Ctx,
+    item_id: &str,
+    issue: &perch_github::Issue,
+    comments: &[perch_github::IssueComment],
+) {
     ctx.with_cache(|c| c.store_discussion(item_id, &issue_discussion(issue, comments)));
 }
 
 /// An issue and its comments in the shape a pull request's discussion
 /// has, which is the one shape the table keeps.
-pub(super) fn issue_discussion(issue: &perch_github::Issue, comments: &[perch_github::IssueComment]) -> perch_github::Discussion {
+pub(super) fn issue_discussion(
+    issue: &perch_github::Issue,
+    comments: &[perch_github::IssueComment],
+) -> perch_github::Discussion {
     perch_github::Discussion {
         opened_at: issue.created_at,
         body: issue.body.clone(),
@@ -2261,12 +3179,19 @@ pub(super) fn issue_discussion(issue: &perch_github::Issue, comments: &[perch_gi
 /// request's repository and head branch. A run on any other branch waits
 /// until the reader opens it.
 async fn refresh_open_checks(ctx: &Ctx, thread: &Thread) {
-    let Some(query) = perch_github::WorkflowRunQuery::from_thread(thread) else { return };
+    let Some(query) = perch_github::WorkflowRunQuery::from_thread(thread) else {
+        return;
+    };
     let open = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref().and_then(|c| c.pull_request.clone().map(|p| (c.item_id.clone(), p)))
+        g.as_ref()
+            .and_then(|c| c.pull_request.clone().map(|p| (c.item_id.clone(), p)))
     });
     let Some((item_id, pr)) = open else { return };
-    if !(pr.repo_full_name.eq_ignore_ascii_case(&query.repo_full_name) && pr.head_ref == query.branch) {
+    if !(pr
+        .repo_full_name
+        .eq_ignore_ascii_case(&query.repo_full_name)
+        && pr.head_ref == query.branch)
+    {
         return;
     }
     // The snapshot is refetched on the way, so the checks are for the head
@@ -2307,7 +3232,8 @@ async fn scan_roots(ctx: &Ctx) -> bool {
     // repository out of the judgement: its worktrees are not in any other
     // root's listing when it is a clone of its own, and which repository
     // it was for is exactly what the scan would have said.
-    let mut seen: std::collections::HashSet<(std::path::PathBuf, String)> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<(std::path::PathBuf, String)> =
+        std::collections::HashSet::new();
     let mut scanned_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut failed_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
     let hosts = ctx.config.github_hosts();
@@ -2317,18 +3243,21 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         // Every entry has its identity by the time the backend runs. One
         // without would have nothing to key its rows by, so it is passed
         // over rather than guessed at.
-        let Some(identity) = declared.identity() else { continue };
+        let Some(identity) = declared.identity() else {
+            continue;
+        };
         let local = perch_github::is_local(identity);
         let name = declared.display_name();
         for root in declared.root_paths() {
-            let scan = match perch_git::scan_root(git, &root, declared.base.as_deref(), &hosts).await {
-                Ok(s) => s,
-                Err(e) => {
-                    ctx.notice(format!("{}: {e}", root.display()));
-                    failed_repos.insert(identity.to_lowercase());
-                    continue;
-                }
-            };
+            let scan =
+                match perch_git::scan_root(git, &root, declared.base.as_deref(), &hosts).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        ctx.notice(format!("{}: {e}", root.display()));
+                        failed_repos.insert(identity.to_lowercase());
+                        continue;
+                    }
+                };
             // A root belongs to the one repository its remote names, and a
             // local repository's roots have no GitHub remote at all. A
             // root that says otherwise is left out of the entry rather
@@ -2339,11 +3268,17 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                     continue;
                 }
                 (Some(slug), false) if !slug.eq_ignore_ascii_case(identity) => {
-                    ctx.notice(format!("{}: its remote is {slug}, not {identity}", root.display()));
+                    ctx.notice(format!(
+                        "{}: its remote is {slug}, not {identity}",
+                        root.display()
+                    ));
                     continue;
                 }
                 (Some(slug), true) => {
-                    ctx.notice(format!("{}: its remote is {slug}, but {name} is local", root.display()));
+                    ctx.notice(format!(
+                        "{}: its remote is {slug}, but {name} is local",
+                        root.display()
+                    ));
                     continue;
                 }
                 _ => {}
@@ -2355,21 +3290,35 @@ async fn scan_roots(ctx: &Ctx) -> bool {
             // remote has not been fetched yet.
             let base_ref = scan.base_ref.as_str();
             for entry in &scan.entries {
-                let Some(branch) = entry.branch.clone() else { continue };
+                let Some(branch) = entry.branch.clone() else {
+                    continue;
+                };
                 if branch == scan.base || entry.prunable || !entry.path.join(".git").exists() {
                     continue;
                 }
-                let path = entry.path.canonicalize().unwrap_or_else(|_| entry.path.clone());
+                let path = entry
+                    .path
+                    .canonicalize()
+                    .unwrap_or_else(|_| entry.path.clone());
                 seen.insert((path.clone(), branch.clone()));
-                let churn = perch_git::branch_churn(git, &entry.path, base_ref).await.ok();
-                let existing = ctx.with_cache(|c| c.find_item_by_branch(identity, &branch).ok().flatten()).flatten();
+                let churn = perch_git::branch_churn(git, &entry.path, base_ref)
+                    .await
+                    .ok();
+                let existing = ctx
+                    .with_cache(|c| c.find_item_by_branch(identity, &branch).ok().flatten())
+                    .flatten();
                 match existing {
                     Some(mut item) => {
-                        let Some(c) = item.checkout.as_mut() else { continue };
+                        let Some(c) = item.checkout.as_mut() else {
+                            continue;
+                        };
                         if c.owned {
                             continue;
                         }
-                        let moved = c.head_sha != entry.head_sha || !c.on_disk || c.churn != churn || c.path != path;
+                        let moved = c.head_sha != entry.head_sha
+                            || !c.on_disk
+                            || c.churn != churn
+                            || c.path != path;
                         // A row the scan put away, because the branch was
                         // not checked out anywhere, comes back when it is.
                         // One the reader archived keeps its directory in
@@ -2420,9 +3369,13 @@ async fn scan_roots(ctx: &Ctx) -> bool {
     // directory marked gone, and the scan brings it back when the branch
     // is checked out again. A row the reader archived is theirs, and is
     // left exactly as it is.
-    let items = ctx.with_cache(|c| c.load_items().unwrap_or_default()).unwrap_or_default();
+    let items = ctx
+        .with_cache(|c| c.load_items().unwrap_or_default())
+        .unwrap_or_default();
     for item in items {
-        let Some(c) = item.checkout.as_ref() else { continue };
+        let Some(c) = item.checkout.as_ref() else {
+            continue;
+        };
         if c.owned
             || item.is_archived()
             || failed_repos.contains(&item.repo_full_name.to_lowercase())
@@ -2436,7 +3389,12 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         }
         let still_there = c.path.join(".git").exists();
         let has_threads = ctx
-            .with_cache(|cache| cache.load_comment_threads(&item.id).map(|t| !t.is_empty()).unwrap_or(false))
+            .with_cache(|cache| {
+                cache
+                    .load_comment_threads(&item.id)
+                    .map(|t| !t.is_empty())
+                    .unwrap_or(false)
+            })
             .unwrap_or(false);
         if still_there || has_threads {
             let mut item = item;
@@ -2458,31 +3416,52 @@ async fn scan_roots(ctx: &Ctx) -> bool {
 /// becomes that pull request's, in the same row. A branch of a local
 /// repository is on nobody's GitHub, and is not asked about.
 async fn attach_pull_requests(ctx: &Ctx) -> bool {
-    let items = ctx.with_cache(|c| c.load_items().unwrap_or_default()).unwrap_or_default();
+    let Some(github) = ctx.github.as_ref() else {
+        return false;
+    };
+    let items = ctx
+        .with_cache(|c| c.load_items().unwrap_or_default())
+        .unwrap_or_default();
     let mut changed = false;
     for item in items {
-        if item.subject.is_some() || item.is_archived() || perch_github::is_local(&item.repo_full_name) {
+        if item.subject.is_some()
+            || item.is_archived()
+            || perch_github::is_local(&item.repo_full_name)
+        {
             continue;
         }
-        let Some(checkout) = item.checkout.as_ref() else { continue };
+        let Some(checkout) = item.checkout.as_ref() else {
+            continue;
+        };
         // The pull request's head is the repository the branch is pushed
         // to, which for a checkout in a fork is the fork, not the item's
         // repository.
         let head_repo = head_repo_of(ctx, &item, checkout).await;
-        let Some((head_owner, _)) = head_repo.split_once('/') else { continue };
+        let Some((head_owner, _)) = head_repo.split_once('/') else {
+            continue;
+        };
         // The pull request may be against any declared repository when the
         // checkout is a fork of one. The lookups are conditional, so a
         // repository asked every poll is one request that mostly says 304.
         let mut candidates: Vec<String> = vec![item.repo_full_name.clone()];
         for r in ctx.config.declared() {
-            if !perch_github::is_local(&r) && !candidates.iter().any(|c| c.eq_ignore_ascii_case(&r)) {
+            if !perch_github::is_local(&r) && !candidates.iter().any(|c| c.eq_ignore_ascii_case(&r))
+            {
                 candidates.push(r);
             }
         }
         for repo in candidates {
-            let key = format!("pull_lookup_etag:{}:{}:{}", repo.to_lowercase(), head_owner, checkout.branch);
+            let key = format!(
+                "pull_lookup_etag:{}:{}:{}",
+                repo.to_lowercase(),
+                head_owner,
+                checkout.branch
+            );
             let etag = ctx.with_cache(|c| c.meta(&key).ok().flatten()).flatten();
-            match ctx.github.find_pull_for_branch(&repo, head_owner, &checkout.branch, etag.as_deref()).await {
+            match github
+                .find_pull_for_branch(&repo, head_owner, &checkout.branch, etag.as_deref())
+                .await
+            {
                 Ok(perch_github::PullLookup::Unchanged) => {}
                 Ok(perch_github::PullLookup::Answer { pull, etag }) => {
                     // `head=owner:branch` matches a branch of that name on
@@ -2503,7 +3482,9 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
                     };
                     // The row as it is now, not as it was when the loop
                     // began: a click may have opened it since.
-                    let Some(mut item) = ctx.item(&item.id) else { break };
+                    let Some(mut item) = ctx.item(&item.id) else {
+                        break;
+                    };
                     if item.subject.is_some() {
                         break;
                     }
@@ -2523,7 +3504,9 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
                                 ctx.with_cache(|c| c.set_meta(&key, &etag));
                             }
                         }
-                        Some(Err(e)) => tracing::warn!(error = %e, "could not attach the pull request"),
+                        Some(Err(e)) => {
+                            tracing::warn!(error = %e, "could not attach the pull request")
+                        }
                         None => {}
                     }
                     break;
@@ -2550,7 +3533,9 @@ async fn head_repo_of(ctx: &Ctx, item: &Item, checkout: &ItemCheckout) -> String
     }
     let hosts = ctx.config.github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
-    let remotes = perch_git::remotes(ctx.preparer.git(), &checkout.path).await.unwrap_or_default();
+    let remotes = perch_git::remotes(ctx.preparer.git(), &checkout.path)
+        .await
+        .unwrap_or_default();
     remotes
         .iter()
         .find(|(name, _)| name == "origin")
@@ -2599,7 +3584,10 @@ fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<
 async fn open_subject(ctx: &Ctx, repo_full_name: String, kind: ItemKind, number: u64) -> bool {
     if perch_github::is_local(&repo_full_name) {
         let _ = ctx.events.send(Event::ReviewFailed {
-            message: format!("{} is not on GitHub, so it has no #{number}", ctx.config.display_name(&repo_full_name)),
+            message: format!(
+                "{} is not on GitHub, so it has no #{number}",
+                ctx.config.display_name(&repo_full_name)
+            ),
         });
         return false;
     }
@@ -2615,41 +3603,68 @@ async fn open_subject(ctx: &Ctx, repo_full_name: String, kind: ItemKind, number:
 /// no language server to start for an issue.
 async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
     let events = &ctx.events;
-    let _ = events.send(Event::ReviewProgress { message: "Reading the issue".into(), percent: None });
+    let _ = events.send(Event::ReviewProgress {
+        message: "Reading the issue".into(),
+        percent: None,
+    });
 
     let existing = ctx
-        .with_cache(|c| c.find_item_by_subject(&repo_full_name, ItemKind::Issue, number).ok().flatten())
+        .with_cache(|c| {
+            c.find_item_by_subject(&repo_full_name, ItemKind::Issue, number)
+                .ok()
+                .flatten()
+        })
         .flatten();
 
     // The comments as they were last kept, for offline and for a first
     // paint that does not wait on the network.
     let kept: Vec<perch_github::IssueComment> = existing
         .as_ref()
-        .and_then(|i| ctx.with_cache(|c| c.load_discussion(&i.id).ok().flatten()).flatten())
+        .and_then(|i| {
+            ctx.with_cache(|c| c.load_discussion(&i.id).ok().flatten())
+                .flatten()
+        })
         .map(|(_, d)| d.comments)
         .unwrap_or_default();
-    let (issue, comments, offline) = match ctx.github.fetch_issue(&repo_full_name, number).await {
-        Ok(issue) => {
-            let comments = match ctx.github.fetch_issue_comments(&repo_full_name, number).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(repo = %repo_full_name, number, error = %e, "could not fetch the comments");
-                    kept.clone()
+    let (issue, comments, offline) = if let Some(github) = ctx.github.as_ref() {
+        match github.fetch_issue(&repo_full_name, number).await {
+            Ok(issue) => {
+                let comments = match github.fetch_issue_comments(&repo_full_name, number).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(repo = %repo_full_name, number, error = %e, "could not fetch the comments");
+                        kept.clone()
+                    }
+                };
+                (issue, comments, false)
+            }
+            Err(e) => match existing.as_ref().and_then(|i| i.issue().cloned()) {
+                Some(snapshot) => {
+                    tracing::info!(repo = %repo_full_name, number, error = %e, "showing the issue from its snapshot");
+                    ctx.notice("Offline; showing the issue as it was last fetched");
+                    (snapshot, kept.clone(), true)
                 }
-            };
-            (issue, comments, false)
+                None => {
+                    let _ = events.send(Event::ReviewFailed {
+                        message: e.to_string(),
+                    });
+                    return false;
+                }
+            },
         }
-        Err(e) => match existing.as_ref().and_then(|i| i.issue().cloned()) {
+    } else {
+        match existing.as_ref().and_then(|item| item.issue().cloned()) {
             Some(snapshot) => {
-                tracing::info!(repo = %repo_full_name, number, error = %e, "showing the issue from its snapshot");
                 ctx.notice("Offline; showing the issue as it was last fetched");
                 (snapshot, kept.clone(), true)
             }
             None => {
-                let _ = events.send(Event::ReviewFailed { message: e.to_string() });
+                let _ = events.send(Event::ReviewFailed {
+                    message: "A GitHub token is required to fetch that issue".into(),
+                });
                 return false;
             }
-        },
+        }
     };
 
     let now = Timestamp::now();
@@ -2677,7 +3692,10 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
                 .preparer
                 .ensure_bare(&repo, move |step| {
                     if let perch_git::Step::Cloning { phase, percent } = step {
-                        let _ = progress.send(Event::ReviewProgress { message: format!("Cloning {label}: {phase}"), percent });
+                        let _ = progress.send(Event::ReviewProgress {
+                            message: format!("Cloning {label}: {phase}"),
+                            percent,
+                        });
                     }
                 })
                 .await;
@@ -2704,7 +3722,9 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
         Some(repo) => {
             let bare = ctx.preparer.store().bare_path(&repo);
             let home = ctx.preparer.store().home_path(&repo);
-            home.join(".git").exists().then(|| (bare, home, String::from("HEAD")))
+            home.join(".git")
+                .exists()
+                .then(|| (bare, home, String::from("HEAD")))
         }
         None => None,
     };
@@ -2713,11 +3733,22 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
             let head_sha = ctx
                 .preparer
                 .git()
-                .run(Some(&worktree), ["rev-parse", "HEAD"], Duration::from_secs(30))
+                .run(
+                    Some(&worktree),
+                    ["rev-parse", "HEAD"],
+                    Duration::from_secs(30),
+                )
                 .await
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default();
-            perch_git::Checkout { worktree, bare, branch, merge_base: head_sha.clone(), head_sha, stale: None }
+            perch_git::Checkout {
+                worktree,
+                bare,
+                branch,
+                merge_base: head_sha.clone(),
+                head_sha,
+                stale: None,
+            }
         }
         None => {
             // No checkout at all: questions cannot run, but the issue can
@@ -2754,7 +3785,12 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
     if !offline {
         keep_issue_comments(ctx, &item.id, &issue, &comments);
     }
-    let _ = events.send(Event::IssueReady { item: item.clone(), issue: issue.clone(), comments: comments.clone(), offline });
+    let _ = events.send(Event::IssueReady {
+        item: item.clone(),
+        issue: issue.clone(),
+        comments: comments.clone(),
+        offline,
+    });
     ctx.want_avatars(
         std::iter::once(issue.author_avatar_url.clone())
             .chain(comments.iter().map(|c| c.user_avatar_url.clone())),
@@ -2801,22 +3837,38 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         })
         .flatten();
 
-    let (pull_request, offline) = match ctx.github.fetch_pull_request(&repo_full_name, number).await {
-        Ok(pr) => (pr, false),
-        Err(e) => {
-            // No network, or no GitHub. A checkout that is already on disk
-            // opens anyway, as it was last left, from the snapshot.
-            let on_disk = existing
-                .as_ref()
-                .and_then(|i| i.checkout.as_ref())
-                .is_some_and(|c| c.path.join(".git").exists());
-            match existing.as_ref().and_then(|i| i.pull_request().cloned()) {
-                Some(snapshot) if on_disk => {
-                    tracing::info!(repo = %repo_full_name, number, error = %e, "opening the checkout offline");
-                    (snapshot, true)
+    let on_disk = existing
+        .as_ref()
+        .and_then(|item| item.checkout.as_ref())
+        .is_some_and(|checkout| checkout.path.join(".git").exists());
+    let (pull_request, offline) = if let Some(github) = ctx.github.as_ref() {
+        match github.fetch_pull_request(&repo_full_name, number).await {
+            Ok(pr) => (pr, false),
+            Err(e) => {
+                // No network, or no GitHub. A checkout that is already on disk
+                // opens anyway, as it was last left, from the snapshot.
+                match existing
+                    .as_ref()
+                    .and_then(|item| item.pull_request().cloned())
+                {
+                    Some(snapshot) if on_disk => {
+                        tracing::info!(repo = %repo_full_name, number, error = %e, "opening the checkout offline");
+                        (snapshot, true)
+                    }
+                    _ => fail!("{e}"),
                 }
-                _ => fail!("{e}"),
             }
+        }
+    } else {
+        match existing
+            .as_ref()
+            .and_then(|item| item.pull_request().cloned())
+        {
+            Some(snapshot) if on_disk => {
+                ctx.notice("Offline; opening the checkout as it was last fetched");
+                (snapshot, true)
+            }
+            _ => fail!("A GitHub token is required to fetch that pull request"),
         }
     };
 
@@ -2839,10 +3891,15 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         .and_then(|i| RepoId::parse(&i.repo_full_name))
         .unwrap_or_else(|| repo.clone());
     let pr_branch = format!("perch/pr-{number}");
-    let branch = kept.as_ref().map(|c| c.branch.clone()).unwrap_or_else(|| pr_branch.clone());
+    let branch = kept
+        .as_ref()
+        .map(|c| c.branch.clone())
+        .unwrap_or_else(|| pr_branch.clone());
 
     let checkout = match &kept {
-        Some(own) if !own.owned => open_own_checkout(ctx, &clone, own, &pull_request.base_ref).await,
+        Some(own) if !own.owned => {
+            open_own_checkout(ctx, &clone, own, &pull_request.base_ref).await
+        }
         _ if offline => {
             let path = kept.as_ref().map(|c| c.path.clone());
             reopen_from_disk(ctx, &clone, number, &branch, path).await
@@ -2850,8 +3907,16 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         // Cut for something else, an issue most likely, and since pushed
         // as this pull request. Read as it is: its commits are the reader's.
         Some(owned) if owned.branch != pr_branch => {
-            open_owned_branch_for_pull(ctx, &clone, &repo, owned, number, &pull_request.head_sha, &pull_request.base_ref)
-                .await
+            open_owned_branch_for_pull(
+                ctx,
+                &clone,
+                &repo,
+                owned,
+                number,
+                &pull_request.head_sha,
+                &pull_request.base_ref,
+            )
+            .await
         }
         _ => {
             let progress = events.clone();
@@ -2869,7 +3934,9 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
                                 (format!("Cloning {label}: {phase}"), percent)
                             }
                             perch_git::Step::Fetching => ("Fetching the pull request".into(), None),
-                            perch_git::Step::CreatingWorktree => ("Checking out the files".into(), None),
+                            perch_git::Step::CreatingWorktree => {
+                                ("Checking out the files".into(), None)
+                            }
                             perch_git::Step::ComputingDiff => ("Computing the diff".into(), None),
                         };
                         let _ = progress.send(Event::ReviewProgress { message, percent });
@@ -2926,7 +3993,15 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
     }
     ctx.send_items();
 
-    finish_open(ctx, item, Some(Arc::new(pull_request)), checkout, offline, since).await
+    finish_open(
+        ctx,
+        item,
+        Some(Arc::new(pull_request)),
+        checkout,
+        offline,
+        since,
+    )
+    .await
 }
 
 /// A branch Perch cut, read against a pull request that was opened from
@@ -2950,17 +4025,33 @@ async fn open_owned_branch_for_pull(
     base_ref: &str,
 ) -> Result<perch_git::Checkout, perch_git::Error> {
     let events = &ctx.events;
-    let _ = events.send(Event::ReviewProgress { message: "Fetching the pull request".into(), percent: None });
+    let _ = events.send(Event::ReviewProgress {
+        message: "Fetching the pull request".into(),
+        percent: None,
+    });
     let bare = ctx.preparer.ensure_bare(clone, |_| {}).await?;
-    let from = if clone == upstream { "origin".to_string() } else { upstream.clone_url() };
-    ctx.preparer.fetch_pull(&bare, &from, number, base_ref).await?;
-    let _ = events.send(Event::ReviewProgress { message: "Checking out the files".into(), percent: None });
+    let from = if clone == upstream {
+        "origin".to_string()
+    } else {
+        upstream.clone_url()
+    };
+    ctx.preparer
+        .fetch_pull(&bare, &from, number, base_ref)
+        .await?;
+    let _ = events.send(Event::ReviewProgress {
+        message: "Checking out the files".into(),
+        percent: None,
+    });
     let mut checkout = open_owned_branch(ctx, clone, owned).await?;
     let base = format!("refs/perch/base/{number}");
     checkout.merge_base = ctx
         .preparer
         .git()
-        .run(Some(&bare), ["merge-base", &base, &checkout.head_sha], Duration::from_secs(30))
+        .run(
+            Some(&bare),
+            ["merge-base", &base, &checkout.head_sha],
+            Duration::from_secs(30),
+        )
         .await
         .map(|s| s.trim().to_string())
         .unwrap_or(checkout.merge_base);
@@ -2986,12 +4077,23 @@ async fn open_own_checkout(
     let git = ctx.preparer.git();
     let timeout = Duration::from_secs(30);
     if !own.path.join(".git").exists() {
-        return Err(perch_git::Error::Io(format!("{} is not there any more", own.path.display())));
+        return Err(perch_git::Error::Io(format!(
+            "{} is not there any more",
+            own.path.display()
+        )));
     }
     // The directory is the reader's to switch branches in, and the item
     // is about one branch. Showing another's files under its name would
     // be worse than saying so.
-    let on_branch = git.run(Some(&own.path), ["rev-parse", "--abbrev-ref", "HEAD"], timeout).await?.trim().to_string();
+    let on_branch = git
+        .run(
+            Some(&own.path),
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            timeout,
+        )
+        .await?
+        .trim()
+        .to_string();
     if on_branch != own.branch {
         return Err(perch_git::Error::Io(format!(
             "{} has {on_branch} checked out now, not {}",
@@ -2999,10 +4101,21 @@ async fn open_own_checkout(
             own.branch
         )));
     }
-    let head_sha = git.run(Some(&own.path), ["rev-parse", "HEAD"], timeout).await?.trim().to_string();
+    let head_sha = git
+        .run(Some(&own.path), ["rev-parse", "HEAD"], timeout)
+        .await?
+        .trim()
+        .to_string();
     let mut base = None;
     for candidate in root_base_revs(ctx, &own.path, base_ref).await {
-        if let Ok(sha) = git.run(Some(&own.path), ["rev-parse", "--verify", "--quiet", &candidate], timeout).await {
+        if let Ok(sha) = git
+            .run(
+                Some(&own.path),
+                ["rev-parse", "--verify", "--quiet", &candidate],
+                timeout,
+            )
+            .await
+        {
             if !sha.trim().is_empty() {
                 base = Some(sha.trim().to_string());
                 break;
@@ -3010,7 +4123,10 @@ async fn open_own_checkout(
         }
     }
     let Some(base) = base else {
-        return Err(perch_git::Error::Io(format!("{} has no {base_ref} to diff against", own.path.display())));
+        return Err(perch_git::Error::Io(format!(
+            "{} has no {base_ref} to diff against",
+            own.path.display()
+        )));
     };
     let merge_base = git
         .run(Some(&own.path), ["merge-base", &base, &head_sha], timeout)
@@ -3030,11 +4146,16 @@ async fn open_own_checkout(
 /// Fetch what was said on a pull request and cache it for the reader.
 /// A fetch error is a line in the status bar, not a failed review.
 async fn fetch_discussion(ctx: &Ctx, item_id: &str, pr: &perch_github::PullRequest) {
-    let discussion = match ctx.github.fetch_discussion(&pr.repo_full_name, pr.number).await {
+    let Some(github) = ctx.github.as_ref() else {
+        return;
+    };
+    let discussion = match github.fetch_discussion(&pr.repo_full_name, pr.number).await {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!(repo = %pr.repo_full_name, number = pr.number, error = %e, "could not fetch the discussion");
-            let _ = ctx.events.send(Event::Notice(format!("Could not fetch the discussion: {e}")));
+            let _ = ctx.events.send(Event::Notice(format!(
+                "Could not fetch the discussion: {e}"
+            )));
             return;
         }
     };
@@ -3048,13 +4169,17 @@ async fn fetch_discussion(ctx: &Ctx, item_id: &str, pr: &perch_github::PullReque
         }
     }
     if ctx.is_open(item_id) {
-        ctx.want_avatars(discussion.comments.iter().map(|c| c.user_avatar_url.clone()));
+        ctx.want_avatars(
+            discussion
+                .comments
+                .iter()
+                .map(|c| c.user_avatar_url.clone()),
+        );
         let _ = ctx.events.send(Event::DiscussionReady {
             item_id: item_id.to_string(),
             discussion: Arc::new(discussion.clone()),
         });
     }
-
 }
 
 /// A thread whose file changed since its anchor was made may have moved.
@@ -3066,7 +4191,9 @@ async fn mark_outdated_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &
         return;
     };
     for thread in threads {
-        let Some(anchor) = &thread.anchor else { continue };
+        let Some(anchor) = &thread.anchor else {
+            continue;
+        };
         if anchor.commit_sha == head || thread.outdated {
             continue;
         }
@@ -3075,7 +4202,14 @@ async fn mark_outdated_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &
             .git()
             .run(
                 Some(worktree),
-                ["diff", "--quiet", &anchor.commit_sha, head, "--", &anchor.path],
+                [
+                    "diff",
+                    "--quiet",
+                    &anchor.commit_sha,
+                    head,
+                    "--",
+                    &anchor.path,
+                ],
                 Duration::from_secs(30),
             )
             .await
@@ -3102,18 +4236,32 @@ async fn ask(
 ) {
     let open = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref().filter(|c| c.item_id == item_id).map(|c| {
-            (c.checkout.clone(), c.pull_request.clone(), c.body.clone(), c.issue.clone(), c.scope.clone())
+            (
+                c.checkout.clone(),
+                c.pull_request.clone(),
+                c.body.clone(),
+                c.issue.clone(),
+                c.scope.clone(),
+            )
         })
     });
     let Some((checkout, pull_request, body, issue, scope)) = open else {
-        let _ = ctx.events.send(Event::Notice("That item is no longer open".into()));
+        let _ = ctx
+            .events
+            .send(Event::Notice("That item is no longer open".into()));
         return;
     };
     if !checkout.worktree.join(".git").exists() {
-        let _ = ctx.events.send(Event::Notice("There is no checkout to ask in".into()));
+        let _ = ctx
+            .events
+            .send(Event::Notice("There is no checkout to ask in".into()));
         return;
     }
     let now = Timestamp::now();
+    let Some(item) = ctx.item(&item_id) else {
+        let _ = ctx.events.send(Event::Notice("That item is gone".into()));
+        return;
+    };
 
     // The thread: found, or made with the question as its first message.
     let existing = match &thread_id {
@@ -3137,32 +4285,84 @@ async fn ask(
         },
     };
     let is_new = thread_id.is_none();
+    if !is_new {
+        let already_active = ctx
+            .with_cache(|cache| {
+                cache.active_runs().map(|runs| {
+                    runs.into_iter().any(|run| {
+                        matches!(
+                            run.owner,
+                            RunOwner::Discussion { ref thread_id, .. } if thread_id == &thread.id
+                        )
+                    })
+                })
+            })
+            .and_then(Result::ok)
+            .unwrap_or(false);
+        if already_active {
+            ctx.notice("That discussion already has an active answer");
+            return;
+        }
+    }
 
-    let run = RunRecord {
+    let request_id = perch_github::comments::new_id();
+    let mut run = RunRecord {
         id: perch_github::comments::new_id(),
-        thread_id: thread.id.clone(),
+        owner: RunOwner::Discussion {
+            item_id: item_id.clone(),
+            thread_id: thread.id.clone(),
+            request_id: request_id.clone(),
+        },
+        purpose: if is_new {
+            RunPurpose::Question
+        } else {
+            RunPurpose::FollowUp
+        },
         backend: backend.name().into(),
+        executable: Some(ctx.config.agent.binary_for(backend.name()).to_string()),
+        executable_version: ctx
+            .config
+            .agent
+            .binary_version_for(backend.name())
+            .map(str::to_string),
+        requested_model: model.clone(),
         model: model.clone(),
+        requested_effort: effort.name().into(),
         effort: effort.name().into(),
         session_id: None,
-        status: RunStatus::Running,
+        original_request: question.clone(),
+        working_directory: Some(checkout.worktree.to_string_lossy().into_owned()),
+        revision: RevisionContext::LiveCheckout {
+            head_sha: Some(checkout.head_sha.clone()),
+            base_ref: pull_request.as_ref().map(|pr| pr.base_ref.clone()),
+            dirty: None,
+        },
+        labels: run_labels(&item),
+        status: RunStatus::Queued,
+        terminal_reason: None,
         cost_usd: None,
         duration_ms: None,
+        usage: None,
+        retry_of: None,
         steps: Vec::new(),
         error: None,
-        started_at: now,
+        queued_at: now,
+        started_at: None,
         ended_at: None,
+        final_result: None,
+        latest_activity: Some("Waiting for an execution slot".into()),
+        last_event_sequence: 0,
     };
-    // The question carries the run while it runs, so the thread has
-    // somewhere to show the steps before there is an answer.
+    // The request is one durable message. Each retry points a new run at
+    // this same id rather than adding another copy of what the reader asked.
     let question_message = CommentMessage {
-        id: perch_github::comments::new_id(),
+        id: request_id,
         thread_id: thread.id.clone(),
         origin: ThreadOrigin::Local,
         author: Author::User,
         body: question.clone(),
         created_at: now,
-        run: Some(run.clone()),
+        run: None,
     };
     let written = ctx.with_cache(|c| {
         if is_new {
@@ -3171,20 +4371,27 @@ async fn ask(
         c.insert_comment_message(&question_message)
     });
     if let Some(Err(e)) = written {
-        let _ = ctx.events.send(Event::Notice(format!("Could not save the question: {e}")));
+        let _ = ctx
+            .events
+            .send(Event::Notice(format!("Could not save the question: {e}")));
         return;
     }
-    ctx.send_threads(&item_id);
-
     // The prompt. A follow-up resumes the last finished run when it was
     // this backend's; a thread with none, or one that switched backends,
     // starts over with its history folded in.
     let file = match &thread.anchor {
-        Some(a) => crate::ask::load_display(&ctx.preparer, &checkout, &scope, &a.commit_sha, &a.path).await.ok(),
+        Some(a) => {
+            crate::ask::load_display(&ctx.preparer, &checkout, &scope, &a.commit_sha, &a.path)
+                .await
+                .ok()
+        }
         None => None,
     };
-    let history: Vec<(Author, String)> =
-        thread.messages.iter().map(|m| (m.author.clone(), m.body.clone())).collect();
+    let history: Vec<(Author, String)> = thread
+        .messages
+        .iter()
+        .map(|m| (m.author.clone(), m.body.clone()))
+        .collect();
     let resume = thread.resumable_session(backend.name());
     let input = crate::ask::PromptInput {
         pull_request: pull_request.as_deref(),
@@ -3194,85 +4401,623 @@ async fn ask(
         file: file.as_ref(),
         outdated: thread.outdated,
         question: &question,
-        history: if is_new || resume.is_some() { &[] } else { &history },
+        history: if is_new || resume.is_some() {
+            &[]
+        } else {
+            &history
+        },
     };
-    let prompt = if is_new { crate::ask::first_prompt(&input) } else { crate::ask::follow_up_prompt(&input) };
-    let spec = crate::ask::run_spec(&ctx.config.agent, backend, &model, effort, checkout.worktree.clone(), &prompt, resume);
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut run = run;
-    let handle = match perch_agent::Run::spawn(spec, tx) {
-        Ok(h) => h,
-        Err(e) => {
-            let message = format!("{e}. {}", crate::ask::binary_hint(backend));
-            crate::ask::apply_run_event(&mut run, &perch_agent::RunEvent::Failed { message });
-            ctx.with_cache(|c| c.update_run(&run));
-            ctx.send_threads(&item_id);
+    let prompt = if is_new {
+        crate::ask::first_prompt(&input)
+    } else {
+        crate::ask::follow_up_prompt(&input)
+    };
+    let spec = crate::ask::run_spec(
+        &ctx.config.agent,
+        backend,
+        &model,
+        effort,
+        checkout.worktree.clone(),
+        &prompt,
+        resume,
+    );
+    // Queue time begins at admission, after local prompt preparation. This
+    // keeps the displayed FIFO order aligned with the scheduler's order.
+    run.queued_at = Timestamp::now();
+    let admission = match ctx.runs.admit(run.clone()) {
+        Ok(admission) => admission,
+        Err(message) => {
+            let _ = ctx.with_cache(|cache| {
+                if is_new {
+                    cache.delete_comment_thread(&thread.id)
+                } else {
+                    cache.delete_comment_message(&question_message.id)
+                }
+            });
+            let _ = ctx.events.send(Event::Notice(message));
             return;
         }
     };
-    if let Ok(mut runs) = ctx.runs.lock() {
-        runs.insert(run.id.clone(), (handle, thread.id.clone()));
-    }
-
-    let mut answer: Vec<String> = Vec::new();
-    while let Some(event) = rx.recv().await {
-        if let Some(text) = crate::ask::apply_run_event(&mut run, &event) {
-            answer.push(text);
-        }
-        // Persist every step as it comes, so a crash mid-run loses nothing
-        // that was shown.
-        ctx.with_cache(|c| c.update_run(&run));
-        let _ = ctx.events.send(Event::AgentStep {
-            run_id: run.id.clone(),
-            thread_id: thread.id.clone(),
-            event: event.clone(),
-        });
-        match event {
-            perch_agent::RunEvent::Finished { .. } => {
-                let reply = CommentMessage {
-                    id: perch_github::comments::new_id(),
-                    thread_id: thread.id.clone(),
-                    origin: ThreadOrigin::Local,
-                    author: Author::Agent { backend: run.backend.clone(), model: run.model.clone() },
-                    body: answer.join("\n\n"),
-                    created_at: Timestamp::now(),
-                    run: Some(run.clone()),
-                };
-                ctx.with_cache(|c| {
-                    c.insert_comment_message(&reply)?;
-                    // The answer carries the run now; the question lets go.
-                    c.set_message_run(&question_message.id, None)
-                });
-                break;
-            }
-            perch_agent::RunEvent::Failed { .. } => break,
-            _ => {}
-        }
-    }
-    if let Ok(mut runs) = ctx.runs.lock() {
-        runs.remove(&run.id);
-    }
-    tracing::info!(thread = %thread.id, run = %run.id, status = run.status.name(), steps = run.steps.len(), "run ended");
+    // Admission atomically links this request to the queued run before the
+    // manager publishes it. There is no detached-run crash window here.
     ctx.send_threads(&item_id);
+    execute_question(
+        ctx,
+        item_id,
+        thread,
+        question_message.id,
+        run,
+        spec,
+        admission,
+    )
+    .await;
+}
 
+/// Execute one admitted attempt. The request and its context have already
+/// been captured, so navigation while this waits in the queue is irrelevant.
+async fn execute_question(
+    ctx: &Ctx,
+    item_id: String,
+    thread: CommentThread,
+    request_id: String,
+    mut run: RunRecord,
+    spec: perch_agent::RunSpec,
+    admission: runs::Admission,
+) {
+    let Some(lease) = ctx.runs.start(admission).await else {
+        ctx.send_threads(&item_id);
+        send_agent_runs(ctx, 50);
+        return;
+    };
+    run = ctx.runs.load(&run.id).unwrap_or(run);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = match perch_agent::Run::spawn(spec, tx) {
+        Ok(handle) => handle,
+        Err(error) => {
+            let message = format!(
+                "{error}. {}",
+                crate::ask::binary_hint(
+                    perch_agent::Backend::parse(&run.backend)
+                        .unwrap_or(perch_agent::Backend::ClaudeCode),
+                )
+            );
+            let persisted = append_stored_event(
+                ctx,
+                &run.id,
+                "terminal",
+                StoredRunEvent::Terminated {
+                    status: RunStatus::Failed,
+                    reason: TerminalReason::SpawnFailed,
+                    message: message.clone(),
+                },
+            );
+            match persisted {
+                Ok(run) => {
+                    let _ = ctx.events.send(Event::AgentRunUpdated { run });
+                }
+                Err(persist_error) => {
+                    tracing::warn!(run = %run.id, %persist_error, "could not persist spawn failure");
+                    ctx.runs.transition(
+                        &run.id,
+                        RunStatus::Failed,
+                        Some(TerminalReason::SpawnFailed),
+                        Some(message),
+                    );
+                }
+            }
+            ctx.runs.finish(lease);
+            ctx.send_threads(&item_id);
+            send_agent_runs(ctx, 50);
+            return;
+        }
+    };
+    ctx.runs.attach(&lease, handle.clone());
+    run = ctx.runs.load(&run.id).unwrap_or(run);
+
+    let mut answer = Vec::new();
+    let mut event_index = 0_u64;
+    let mut persistence_error = None;
+    while let Some(event) = rx.recv().await {
+        event_index += 1;
+        let terminal = matches!(
+            &event,
+            perch_agent::RunEvent::Finished { .. }
+                | perch_agent::RunEvent::Failed { .. }
+                | perch_agent::RunEvent::Stopped { .. }
+        );
+        let stored = match &event {
+            perch_agent::RunEvent::Started { session_id, model } => Some(StoredRunEvent::Started {
+                session_id: session_id.clone(),
+                model: Some(model.clone()),
+            }),
+            perch_agent::RunEvent::Text(text) => Some(StoredRunEvent::Text { text: text.clone() }),
+            perch_agent::RunEvent::ToolCall { id, name, summary } => {
+                Some(StoredRunEvent::ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    summary: summary.clone(),
+                })
+            }
+            perch_agent::RunEvent::ToolResult { id, ok, summary } => {
+                Some(StoredRunEvent::ToolResult {
+                    id: id.clone(),
+                    ok: *ok,
+                    summary: summary.clone(),
+                })
+            }
+            perch_agent::RunEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+            } => Some(StoredRunEvent::Usage {
+                usage: perch_github::RunUsage {
+                    input_tokens: *input_tokens,
+                    output_tokens: *output_tokens,
+                    cached_input_tokens: *cached_input_tokens,
+                },
+                cost_usd: None,
+                duration_ms: None,
+            }),
+            // Terminal state is committed only after `wait` proves the child
+            // and its process group have been reaped.
+            perch_agent::RunEvent::Finished { .. }
+            | perch_agent::RunEvent::Failed { .. }
+            | perch_agent::RunEvent::Stopped { .. } => None,
+        };
+        if !terminal && persistence_error.is_none() {
+            let Some(stored) = stored else { continue };
+            match append_stored_event(ctx, &run.id, &format!("process-{event_index}"), stored) {
+                Ok(updated) => {
+                    if let perch_agent::RunEvent::Text(text) = &event {
+                        answer.push(text.clone());
+                    }
+                    run = updated;
+                    let _ = ctx.events.send(Event::AgentRunUpdated { run: run.clone() });
+                    let _ = ctx.events.send(Event::AgentStep {
+                        run_id: run.id.clone(),
+                        thread_id: thread.id.clone(),
+                        event,
+                    });
+                }
+                Err(error) => {
+                    let message = format!("Could not save agent activity: {error}");
+                    tracing::warn!(run = %run.id, %error, "stopping after a run event could not be persisted");
+                    persistence_error = Some(message);
+                    handle.cancel();
+                }
+            }
+        }
+    }
+
+    let outcome = handle.wait().await;
+    let (mut status, mut reason, error, session, cost, duration) =
+        if let Some(message) = persistence_error {
+            (
+                RunStatus::Failed,
+                TerminalReason::Other,
+                Some(message),
+                run.session_id.clone(),
+                run.cost_usd,
+                run.duration_ms,
+            )
+        } else {
+            match outcome {
+                perch_agent::RunOutcome::Finished {
+                    session_id,
+                    cost_usd,
+                    duration_ms,
+                } => (
+                    RunStatus::Completed,
+                    TerminalReason::Completed,
+                    None,
+                    Some(session_id),
+                    cost_usd,
+                    Some(duration_ms),
+                ),
+                perch_agent::RunOutcome::Stopped { .. } => {
+                    let (status, reason) = ctx.runs.stop_terminal(&run.id);
+                    let message = if reason == TerminalReason::AppShutdown {
+                        "Perch shut down while the agent was running"
+                    } else {
+                        "Stopped by the reader"
+                    };
+                    (
+                        status,
+                        reason,
+                        Some(message.into()),
+                        run.session_id.clone(),
+                        run.cost_usd,
+                        run.duration_ms,
+                    )
+                }
+                perch_agent::RunOutcome::Failed { kind, message } => {
+                    let reason = match kind {
+                        perch_agent::RunFailureKind::Output => TerminalReason::MalformedStream,
+                        perch_agent::RunFailureKind::PermissionDenied => {
+                            TerminalReason::PermissionDenied
+                        }
+                        perch_agent::RunFailureKind::UnexpectedExit
+                        | perch_agent::RunFailureKind::Wait => TerminalReason::UnexpectedExit,
+                        perch_agent::RunFailureKind::Reported
+                        | perch_agent::RunFailureKind::ConsumerGone => TerminalReason::Other,
+                    };
+                    (
+                        RunStatus::Failed,
+                        reason,
+                        Some(message),
+                        run.session_id.clone(),
+                        run.cost_usd,
+                        run.duration_ms,
+                    )
+                }
+            }
+        };
+    let final_text = answer.join("\n\n");
+    let terminal_event = if status == RunStatus::Completed {
+        StoredRunEvent::Completed {
+            session_id: session.clone(),
+            result: final_text.clone(),
+            cost_usd: cost,
+            duration_ms: duration,
+            usage: run.usage.clone(),
+        }
+    } else {
+        StoredRunEvent::Terminated {
+            status,
+            reason,
+            message: error.clone().unwrap_or_default(),
+        }
+    };
+    let final_run = match append_stored_event(ctx, &run.id, "terminal", terminal_event) {
+        Ok(run) => run,
+        Err(terminal_error) => {
+            // A completion is only real after its full result is durable.
+            // If that write fails, record a distinct failure event instead
+            // of using the generic transition helper, whose terminal event
+            // intentionally cannot represent Completed.
+            let message = format!("Could not save the agent result: {terminal_error}");
+            tracing::warn!(run = %run.id, %terminal_error, "could not persist terminal run event");
+            status = RunStatus::Failed;
+            reason = TerminalReason::Other;
+            match append_stored_event(
+                ctx,
+                &run.id,
+                "terminal-persistence-failure",
+                StoredRunEvent::Terminated {
+                    status,
+                    reason,
+                    message,
+                },
+            ) {
+                Ok(run) => run,
+                Err(fallback_error) => {
+                    tracing::error!(run = %run.id, %fallback_error, "could not persist terminal fallback");
+                    ctx.runs.finish(lease);
+                    ctx.notice("The agent exited, but Perch could not save its final state");
+                    ctx.send_threads(&item_id);
+                    send_agent_runs(ctx, 50);
+                    return;
+                }
+            }
+        }
+    };
+
+    if final_run.status == RunStatus::Completed {
+        let reply = CommentMessage {
+            id: perch_github::comments::new_id(),
+            thread_id: thread.id.clone(),
+            origin: ThreadOrigin::Local,
+            author: Author::Agent {
+                backend: final_run.backend.clone(),
+                model: final_run.model.clone(),
+            },
+            body: final_text,
+            created_at: Timestamp::now(),
+            run: Some(final_run.clone()),
+        };
+        match ctx.with_cache(|cache| cache.insert_completed_reply(&request_id, &reply)) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                tracing::error!(run = %final_run.id, %error, "could not attach completed answer to its discussion");
+                ctx.notice(
+                    "The agent completed, but Perch could not attach its answer to the discussion",
+                );
+            }
+            None => ctx.notice(
+                "The agent completed, but the local database is unavailable for its answer",
+            ),
+        }
+    }
+    let _ = ctx.events.send(Event::AgentRunUpdated {
+        run: final_run.clone(),
+    });
+    ctx.runs.finish(lease);
+    tracing::info!(thread = %thread.id, run = %final_run.id, status = final_run.status.name(), steps = final_run.steps.len(), "run ended");
+    ctx.send_threads(&item_id);
+    send_agent_runs(ctx, 50);
+}
+
+fn run_labels(item: &Item) -> RunLabels {
+    RunLabels {
+        repository: item.repo_full_name.clone(),
+        item: item.title().to_string(),
+        branch: item.branch().map(str::to_string),
+    }
+}
+
+fn append_stored_event(
+    ctx: &Ctx,
+    run_id: &str,
+    event_id: &str,
+    event: StoredRunEvent,
+) -> Result<RunRecord, String> {
+    let event = NewRunEvent {
+        event_id: event_id.to_string(),
+        occurred_at: Timestamp::now(),
+        event,
+        truncated: false,
+    };
+    let result = ctx
+        .with_cache(|cache| cache.append_run_event(run_id, &event))
+        .ok_or_else(|| "the local database is unavailable".to_string())?;
+    result.map_err(|error| error.to_string())?;
+    ctx.runs
+        .load(run_id)
+        .ok_or_else(|| format!("run {run_id} disappeared after its event was saved"))
+}
+
+/// Start another attempt for the same durable request. The old attempt and
+/// all of its events remain in history; the discussion's request row points
+/// at the new attempt while it is active.
+fn retry_conversation_context(
+    thread: &CommentThread,
+    request_id: &str,
+    backend: &str,
+    purpose: RunPurpose,
+) -> Option<(Vec<(Author, String)>, Option<String>)> {
+    let request_index = thread
+        .messages
+        .iter()
+        .position(|message| message.id == request_id)?;
+    if purpose == RunPurpose::Question {
+        return Some((Vec::new(), None));
+    }
+
+    // A retry belongs at the same point in the conversation as its original
+    // request. Later replies must neither enter its prompt nor choose the CLI
+    // session it resumes.
+    let prefix = &thread.messages[..request_index];
+    let resume = prefix
+        .iter()
+        .rev()
+        .filter_map(|message| message.run.as_ref())
+        .find(|run| run.status == RunStatus::Completed)
+        .filter(|run| run.backend == backend)
+        .and_then(|run| run.session_id.clone());
+    let history = if resume.is_some() {
+        Vec::new()
+    } else {
+        prefix
+            .iter()
+            .filter_map(|message| {
+                let body = if message.body.trim().is_empty() {
+                    message
+                        .run
+                        .as_ref()
+                        .and_then(|run| run.final_result.clone())
+                        .unwrap_or_default()
+                } else {
+                    message.body.clone()
+                };
+                (!body.trim().is_empty()).then(|| (message.author.clone(), body))
+            })
+            .collect()
+    };
+    Some((history, resume))
+}
+
+async fn retry_run(ctx: &Ctx, old_run_id: &str) {
+    let Some(old) = ctx.runs.load(old_run_id) else {
+        ctx.notice("That agent run is no longer available");
+        return;
+    };
+    if !matches!(
+        old.status,
+        RunStatus::Failed | RunStatus::Stopped | RunStatus::Interrupted
+    ) {
+        ctx.notice("Only a failed, stopped, or interrupted run can be retried");
+        return;
+    }
+    let RunOwner::Discussion {
+        item_id,
+        thread_id,
+        request_id,
+    } = old.owner.clone()
+    else {
+        ctx.notice("This run has no retryable discussion owner");
+        return;
+    };
+    let request_already_completed = ctx
+        .with_cache(|cache| cache.runs_for_request(&thread_id, &request_id))
+        .and_then(Result::ok)
+        .is_some_and(|attempts| {
+            attempts
+                .iter()
+                .any(|attempt| attempt.id != old.id && attempt.status == RunStatus::Completed)
+        });
+    if request_already_completed {
+        ctx.notice("That request already has a completed answer");
+        return;
+    }
+    let Some(backend) = perch_agent::Backend::parse(&old.backend) else {
+        ctx.notice(format!("{} is no longer an available agent", old.backend));
+        return;
+    };
+    let model = old.requested_model.clone();
+    let configured = match backend {
+        perch_agent::Backend::ClaudeCode => ctx
+            .config
+            .agent
+            .models
+            .iter()
+            .any(|candidate| candidate == &model),
+        perch_agent::Backend::Codex => ctx
+            .config
+            .agent
+            .codex_models()
+            .iter()
+            .any(|candidate| candidate == &model),
+    };
+    if !configured {
+        ctx.notice(format!(
+            "{model} is no longer available for {}",
+            old.backend
+        ));
+        return;
+    }
+    let Some(effort) = perch_agent::Effort::parse(&old.requested_effort) else {
+        ctx.notice(format!(
+            "{} is no longer a supported effort",
+            old.requested_effort
+        ));
+        return;
+    };
+    if !ctx.config.agent.effort_supported(&model, effort.name()) {
+        ctx.notice(format!(
+            "{model} does not support {} effort",
+            effort.label()
+        ));
+        return;
+    }
+    let Some(directory) = old.working_directory.as_deref().map(Path::new) else {
+        ctx.notice("The original checkout is unavailable");
+        return;
+    };
+    if !directory.join(".git").exists() {
+        ctx.notice("The original checkout is unavailable");
+        return;
+    }
+    let Some(item) = ctx.item(&item_id) else {
+        ctx.notice("The owning item is gone");
+        return;
+    };
+    let Some(thread) = ctx
+        .with_cache(|cache| cache.load_comment_threads(&item_id).ok())
+        .flatten()
+        .and_then(|threads| threads.into_iter().find(|thread| thread.id == thread_id))
+    else {
+        ctx.notice("The owning discussion is gone");
+        return;
+    };
+    let Some((history, resume)) =
+        retry_conversation_context(&thread, &request_id, backend.name(), old.purpose)
+    else {
+        ctx.notice("The original request is gone");
+        return;
+    };
+    let input = crate::ask::PromptInput {
+        pull_request: item.pull_request(),
+        issue: None,
+        body: None,
+        anchor: thread.anchor.as_ref(),
+        file: None,
+        outdated: thread.outdated,
+        question: &old.original_request,
+        history: &history,
+    };
+    let prompt = if old.purpose == RunPurpose::Question {
+        crate::ask::first_prompt(&input)
+    } else {
+        crate::ask::follow_up_prompt(&input)
+    };
+    let spec = crate::ask::run_spec(
+        &ctx.config.agent,
+        backend,
+        &model,
+        effort,
+        directory.to_path_buf(),
+        &prompt,
+        resume,
+    );
+    let now = Timestamp::now();
+    let run = RunRecord {
+        id: perch_github::comments::new_id(),
+        owner: RunOwner::Discussion {
+            item_id: item_id.clone(),
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        },
+        purpose: old.purpose,
+        backend: old.backend.clone(),
+        executable: Some(ctx.config.agent.binary_for(backend.name()).to_string()),
+        executable_version: ctx
+            .config
+            .agent
+            .binary_version_for(backend.name())
+            .map(str::to_string),
+        requested_model: model.clone(),
+        model,
+        requested_effort: effort.name().into(),
+        effort: effort.name().into(),
+        session_id: None,
+        original_request: old.original_request.clone(),
+        working_directory: old.working_directory.clone(),
+        revision: old.revision.clone(),
+        labels: run_labels(&item),
+        status: RunStatus::Queued,
+        terminal_reason: None,
+        cost_usd: None,
+        duration_ms: None,
+        usage: None,
+        retry_of: Some(old.id.clone()),
+        steps: Vec::new(),
+        error: None,
+        queued_at: now,
+        started_at: None,
+        ended_at: None,
+        final_result: None,
+        latest_activity: Some("Waiting for an execution slot".into()),
+        last_event_sequence: 0,
+    };
+    let admission = match ctx.runs.admit(run.clone()) {
+        Ok(admission) => admission,
+        Err(message) => {
+            ctx.notice(message);
+            return;
+        }
+    };
+    // Admission moved the request link and preserved its previous attempt in
+    // the same transaction as the queued row and event.
+    ctx.send_threads(&item_id);
+    execute_question(ctx, item_id, thread, request_id, run, spec, admission).await;
 }
 
 async fn delete_comment_thread(ctx: &Ctx, id: &str) {
-    // Stop anything still running in it first.
-    let running: Vec<perch_agent::Run> = ctx
-        .runs
-        .lock()
-        .map(|runs| runs.values().filter(|(_, t)| t == id).map(|(r, _)| r.clone()).collect())
-        .unwrap_or_default();
-    for run in running {
-        run.cancel();
+    // Stop and reap before deleting the request rows. That prevents a late
+    // process event from recreating an orphaned discussion.
+    let item_id = ctx
+        .with_cache(|cache| cache.comment_thread_item_id(id).ok().flatten())
+        .flatten();
+    let deletion = match item_id.as_deref() {
+        Some(item_id) => match ctx.runs.block_owner(item_id, Some(id)) {
+            Ok(deletion) => Some(deletion),
+            Err(message) => {
+                ctx.notice(message);
+                return;
+            }
+        },
+        None => None,
+    };
+    if let Some(item_id) = item_id.as_deref() {
+        ctx.runs.cancel_owner(item_id, Some(id)).await;
     }
     if let Some(Err(e)) = ctx.with_cache(|c| c.delete_comment_thread(id)) {
-        let _ = ctx.events.send(Event::Notice(format!("Could not delete the thread: {e}")));
+        let _ = ctx
+            .events
+            .send(Event::Notice(format!("Could not delete the thread: {e}")));
         return;
     }
-    let item_id = ctx.slot.lock().ok().and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
+    drop(deletion);
     if let Some(item_id) = item_id {
         ctx.send_threads(&item_id);
     }
@@ -3327,11 +5072,16 @@ async fn open_file(
     events: EventSender<Event>,
     path: String,
 ) {
-    let Some((checkout, changed, scope, item_id)) = slot
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|c| (c.checkout.clone(), c.files.clone(), c.scope.clone(), c.item_id.clone())))
-    else {
+    let Some((checkout, changed, scope, item_id)) = slot.lock().ok().and_then(|g| {
+        g.as_ref().map(|c| {
+            (
+                c.checkout.clone(),
+                c.files.clone(),
+                c.scope.clone(),
+                c.item_id.clone(),
+            )
+        })
+    }) else {
         let _ = events.send(Event::FileFailed {
             path,
             message: "no checkout is open".into(),
@@ -3351,39 +5101,61 @@ async fn open_file(
         Some(f) if f.status == perch_git::ChangeStatus::Deleted => String::new(),
         Some(_) => match perch_git::read_side(git, &checkout.worktree, &head_rev, &path).await {
             Ok(Some(text)) if text.len() > MAX_FILE_BYTES => {
-                let _ = events.send(Event::FileFailed { path, message: "file is too large to display".into() });
+                let _ = events.send(Event::FileFailed {
+                    path,
+                    message: "file is too large to display".into(),
+                });
                 return;
             }
             Ok(Some(text)) => text,
             Ok(None) => {
-                let _ = events.send(Event::FileFailed { path, message: "file is not there".into() });
+                let _ = events.send(Event::FileFailed {
+                    path,
+                    message: "file is not there".into(),
+                });
                 return;
             }
             Err(e) => {
-                let _ = events.send(Event::FileFailed { path, message: e.to_string() });
+                let _ = events.send(Event::FileFailed {
+                    path,
+                    message: e.to_string(),
+                });
                 return;
             }
         },
         None => match tokio::fs::read(checkout.worktree.join(&path)).await {
             Ok(bytes) if bytes.len() > MAX_FILE_BYTES => {
-                let _ = events.send(Event::FileFailed { path, message: "file is too large to display".into() });
+                let _ = events.send(Event::FileFailed {
+                    path,
+                    message: "file is too large to display".into(),
+                });
                 return;
             }
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => text,
                 Err(_) => {
-                    let _ = events.send(Event::FileFailed { path, message: "file is not text".into() });
+                    let _ = events.send(Event::FileFailed {
+                        path,
+                        message: "file is not text".into(),
+                    });
                     return;
                 }
             },
             Err(e) => {
-                let _ = events.send(Event::FileFailed { path, message: e.to_string() });
+                let _ = events.send(Event::FileFailed {
+                    path,
+                    message: e.to_string(),
+                });
                 return;
             }
         },
     };
     let base = match &entry {
-        None | Some(perch_git::ChangedFile { status: perch_git::ChangeStatus::Added, .. }) => String::new(),
+        None
+        | Some(perch_git::ChangedFile {
+            status: perch_git::ChangeStatus::Added,
+            ..
+        }) => String::new(),
         Some(f) => {
             let source = f.old_path.clone().unwrap_or_else(|| f.path.clone());
             perch_git::read_side(git, &checkout.worktree, &base_rev, &source)
@@ -3400,7 +5172,10 @@ async fn open_file(
     // the changed list has none, and neither has a deletion or a working
     // tree file git has not hashed; their reveals live and die with the
     // window.
-    let blob = entry.as_ref().and_then(|f| f.head_blob.clone()).unwrap_or_default();
+    let blob = entry
+        .as_ref()
+        .and_then(|f| f.head_blob.clone())
+        .unwrap_or_default();
 
     // Parsing and diffing are CPU work; keep them off the async runtime's
     // reactor threads.
@@ -3418,7 +5193,11 @@ async fn open_file(
                 scope = %file.scope,
                 "file loaded"
             );
-            let _ = events.send(Event::FileLoaded { item_id, path: file.path.clone(), file: Arc::new(file) });
+            let _ = events.send(Event::FileLoaded {
+                item_id,
+                path: file.path.clone(),
+                file: Arc::new(file),
+            });
         }
         Err(e) => tracing::warn!(error = %e, "file load panicked"),
     }
@@ -3509,14 +5288,17 @@ async fn read_references(
     worktree: &Path,
     locations: &[perch_lsp::lsp_types::Location],
 ) -> (Vec<crate::review::model::Reference>, usize) {
-    let mut texts: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut texts: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     let mut out = Vec::new();
     let mut elsewhere = 0;
     for location in locations {
         let target = perch_lsp::client::uri_to_path(&location.uri.to_string());
-        let Some(relative) = target
-            .and_then(|p| p.strip_prefix(worktree).ok().map(|r| r.to_string_lossy().into_owned()))
-        else {
+        let Some(relative) = target.and_then(|p| {
+            p.strip_prefix(worktree)
+                .ok()
+                .map(|r| r.to_string_lossy().into_owned())
+        }) else {
             elsewhere += 1;
             continue;
         };
@@ -3528,7 +5310,10 @@ async fn read_references(
             texts.insert(relative.clone(), lines);
         }
         let line = location.range.start.line as usize;
-        let text = texts[&relative].get(line).map(|l| l.trim().to_string()).unwrap_or_default();
+        let text = texts[&relative]
+            .get(line)
+            .map(|l| l.trim().to_string())
+            .unwrap_or_default();
         out.push(crate::review::model::Reference {
             path: relative,
             line: line + 1,
@@ -3601,7 +5386,11 @@ pub(crate) fn build_loaded_file(
             let diff = file_diff(&base, &head);
             let alignment = perch_git::alignment(&diff, &base, &head);
             let base_buffer = (!base.is_empty()).then(|| DisplayBuffer::plain(&base));
-            (DisplayBuffer::unified(&head, &base, &diff), base_buffer, alignment)
+            (
+                DisplayBuffer::unified(&head, &base, &diff),
+                base_buffer,
+                alignment,
+            )
         }
         None => (DisplayBuffer::plain(&head), None, Vec::new()),
     };
@@ -3628,24 +5417,32 @@ pub(crate) fn build_loaded_file(
 
 type SharedCache = Option<Arc<std::sync::Mutex<Cache>>>;
 
-/// The cache, and whether an older one had to be thrown away.
-pub(crate) fn open_cache() -> (SharedCache, bool) {
+fn open_cache_for_app(events: &EventSender<Event>) -> (SharedCache, bool) {
     let Some(path) = perch_github::config::db_path() else {
         return (None, false);
     };
     let avatars = perch_github::config::avatar_dir();
-    match Cache::open_checked(&path, avatars) {
-        Ok((c, reset)) => (Some(Arc::new(std::sync::Mutex::new(c))), reset),
-        Err(e) => {
-            // A broken cache must not stop the app; it only costs a cold start.
-            tracing::warn!(error = %e, "running without a local cache");
+    match Cache::open_with_outcome(&path, avatars) {
+        Ok((cache, outcome)) => {
+            if let CacheOpen::Migrated { from, to } = outcome {
+                let _ = events.send(Event::Notice(format!(
+                    "Updated the local database from schema {from} to {to}; discussions and agent history were preserved"
+                )));
+            }
+            (Some(Arc::new(std::sync::Mutex::new(cache))), false)
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "running without a local cache");
+            let _ = events.send(Event::Notice(format!(
+                "Could not open the local database: {error}. The existing file was left unchanged."
+            )));
             (None, false)
         }
     }
 }
 
 fn spawn_avatar(
-    github: Arc<GitHub>,
+    github: Option<Arc<GitHub>>,
     cache: SharedCache,
     events: EventSender<Event>,
     limit: Arc<Semaphore>,
@@ -3661,6 +5458,8 @@ fn spawn_avatar(
             }
         }
     }
+
+    let Some(github) = github else { return };
 
     tokio::spawn(async move {
         let Ok(_permit) = limit.acquire().await else {
@@ -3698,7 +5497,9 @@ fn describe_error(e: &perch_github::Error) -> Status {
                 None => "Rate limited. Retrying shortly.".into(),
             },
         },
-        other => Status::Error { message: other.to_string() },
+        other => Status::Error {
+            message: other.to_string(),
+        },
     }
 }
 
@@ -3864,7 +5665,9 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
-                let Some(path) = request_path(&mut stream) else { continue };
+                let Some(path) = request_path(&mut stream) else {
+                    continue;
+                };
                 let (status, body) = answer(&path);
                 seen.lock().unwrap().push(path);
                 let _ = write!(
@@ -3903,7 +5706,11 @@ mod tests {
     /// A context with no window behind it: a client at `base`, a cache,
     /// and the events kept so a test can say what the sidebar was told.
     fn ctx(dir: &Path, base: &str, declared: &[&str]) -> (Ctx, Receiver<Event>) {
-        ctx_declaring(dir, base, declared.iter().map(|name| github_repo(name)).collect())
+        ctx_declaring(
+            dir,
+            base,
+            declared.iter().map(|name| github_repo(name)).collect(),
+        )
     }
 
     /// A `[[repo]]` with `github = "owner/repo"`, resolved from the file.
@@ -3924,20 +5731,27 @@ mod tests {
         repo
     }
 
-    fn ctx_declaring(dir: &Path, base: &str, repos: Vec<perch_github::RepoConfig>) -> (Ctx, Receiver<Event>) {
+    fn ctx_declaring(
+        dir: &Path,
+        base: &str,
+        repos: Vec<perch_github::RepoConfig>,
+    ) -> (Ctx, Receiver<Event>) {
         let (events, received) = std::sync::mpsc::channel();
         let cache = Cache::open(&dir.join("perch.db"), None).unwrap();
         let mut config = Config::default();
         config.repo = repos;
+        let cache = Some(Arc::new(std::sync::Mutex::new(cache)));
+        let runs = runs::RunManager::new(4, cache.clone(), events.clone());
         let ctx = Ctx {
-            github: Arc::new(GitHub::with_base_uri("token", base).unwrap()),
+            github: Some(Arc::new(GitHub::with_base_uri("token", base).unwrap())),
             preparer: Arc::new(Preparer::new(Store::new(dir.join("store")), None)),
-            cache: Some(Arc::new(std::sync::Mutex::new(cache))),
+            cache,
             config: Arc::new(config),
             slot: Arc::new(std::sync::Mutex::new(None)),
             language_server: Arc::new(tokio::sync::Mutex::new(None)),
             events,
-            runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            runs,
+            item_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             avatars: Arc::new(Semaphore::new(1)),
             seen_notifications: Default::default(),
             refreshing: Default::default(),
@@ -3992,7 +5806,10 @@ mod tests {
     }
 
     fn items_sent(received: &Receiver<Event>) -> usize {
-        received.try_iter().filter(|e| matches!(e, Event::Items(_))).count()
+        received
+            .try_iter()
+            .filter(|e| matches!(e, Event::Items(_)))
+            .count()
     }
 
     #[tokio::test]
@@ -4020,7 +5837,10 @@ mod tests {
         assert!(!ctx.with_cache(|c| c.load_threads().unwrap()).unwrap()[0].unread);
 
         ctx.edit_notifications(|threads| threads.clear());
-        assert!(ctx.with_cache(|c| c.load_threads().unwrap()).unwrap().is_empty());
+        assert!(ctx
+            .with_cache(|c| c.load_threads().unwrap())
+            .unwrap()
+            .is_empty());
         assert_eq!(ctx.item(&item.id), Some(item.clone()));
         assert_eq!(
             ctx.with_cache(|c| c.load_discussion(&item.id).unwrap().unwrap().1)
@@ -4035,7 +5855,11 @@ mod tests {
         let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
         let item = store_pull(&ctx, 7);
 
-        attend(&ctx, &[with_reason(thread("7", "seven"), Reason::Subscribed)]).await;
+        attend(
+            &ctx,
+            &[with_reason(thread("7", "seven"), Reason::Subscribed)],
+        )
+        .await;
 
         assert_eq!(ctx.item(&item.id), Some(item));
         assert_eq!(items_sent(&received), 0);
@@ -4055,6 +5879,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_offline_refresh_reports_no_token_without_a_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("200 OK", "[]");
+        let (mut ctx, received) = ctx(dir.path(), &base, &["a/b"]);
+        ctx.github = None;
+
+        refresh(&ctx, "test").await;
+
+        assert!(paths.lock().unwrap().is_empty());
+        assert!(received
+            .try_iter()
+            .any(|event| matches!(event, Event::Status(Status::NoToken { .. }))));
+    }
+
+    #[tokio::test]
+    async fn cached_agent_history_and_detail_do_not_need_github() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        ctx.github = None;
+        let run = RunRecord {
+            id: "offline-run".into(),
+            backend: "codex".into(),
+            original_request: "Explain the cache".into(),
+            status: RunStatus::Completed,
+            queued_at: Timestamp::now(),
+            ended_at: Some(Timestamp::now()),
+            final_result: Some("The cached answer".into()),
+            ..RunRecord::default()
+        };
+        ctx.with_cache(|cache| cache.insert_run(&run))
+            .unwrap()
+            .unwrap();
+
+        send_agent_runs(&ctx, 50);
+        send_agent_run_detail(&ctx, &run.id);
+
+        let events: Vec<_> = received.try_iter().collect();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::AgentRuns { runs, .. } if runs.iter().any(|stored| stored.id == run.id)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::AgentRunDetail { run: stored, .. } if stored.id == run.id
+        )));
+    }
+
     /// `a/b#7` as `GET /repos/a/b/pulls/7` sends it, so an `attend` that
     /// still fetched and made a row could, and would be seen to.
     const PULL_7: &str = r#"{"number":7,"title":"seven","state":"open","draft":false,
@@ -4072,12 +5944,22 @@ mod tests {
         let (base, paths) = serve("200 OK", PULL_7);
         let (ctx, received) = ctx(dir.path(), &base, &[]);
 
-        attend(&ctx, &[with_reason(thread("7", "seven"), Reason::ReviewRequested)]).await;
+        attend(
+            &ctx,
+            &[with_reason(thread("7", "seven"), Reason::ReviewRequested)],
+        )
+        .await;
 
         let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
-        assert!(items.is_empty(), "a notification does not decide what exists");
+        assert!(
+            items.is_empty(),
+            "a notification does not decide what exists"
+        );
         assert_eq!(items_sent(&received), 0);
-        assert!(paths.lock().unwrap().is_empty(), "and nothing was asked to find out");
+        assert!(
+            paths.lock().unwrap().is_empty(),
+            "and nothing was asked to find out"
+        );
     }
 
     const FAILING_RUN: &str = r#"{"workflow_runs":[{"name":"ci","run_number":1,"status":"completed","conclusion":"failure","head_branch":"branch-7","html_url":"https://github.com/a/b/actions/runs/1","created_at":"2026-09-18T11:00:00Z","updated_at":"2026-09-18T11:05:00Z"}]}"#;
@@ -4091,12 +5973,22 @@ mod tests {
 
         fetch_checks(&ctx, &item.id, &pull_request(7)).await;
 
-        let checks = ctx.with_cache(|c| c.load_checks(&item.id, "h7").unwrap()).unwrap();
-        assert!(matches!(checks, Some(perch_github::Checks { state: perch_github::CheckState::Failing { .. }, .. })));
+        let checks = ctx
+            .with_cache(|c| c.load_checks(&item.id, "h7").unwrap())
+            .unwrap();
+        assert!(matches!(
+            checks,
+            Some(perch_github::Checks {
+                state: perch_github::CheckState::Failing { .. },
+                ..
+            })
+        ));
         assert_eq!(items_sent(&received), 0);
-        assert_eq!(paths.lock().unwrap().as_slice(), ["/repos/a/b/actions/runs?head_sha=h7&per_page=100"]);
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/repos/a/b/actions/runs?head_sha=h7&per_page=100"]
+        );
     }
-
 
     #[tokio::test]
     async fn a_branch_of_a_local_repository_is_not_looked_up_on_github() {
@@ -4104,7 +5996,11 @@ mod tests {
         let (base, paths) = serve("200 OK", "[]");
         // A GitHub repository is declared too, so the candidates a branch
         // is looked up under would have somewhere to go.
-        let (ctx, _received) = ctx_declaring(dir.path(), &base, vec![local_repo("notes"), github_repo("a/b")]);
+        let (ctx, _received) = ctx_declaring(
+            dir.path(),
+            &base,
+            vec![local_repo("notes"), github_repo("a/b")],
+        );
         let mut branch = Item::new("local/notes", "2026-09-10T00:00:00Z".parse().unwrap());
         branch.checkout = Some(root_checkout("feature"));
         ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
@@ -4112,20 +6008,30 @@ mod tests {
         let changed = attach_pull_requests(&ctx).await;
 
         assert!(!changed);
-        assert!(paths.lock().unwrap().is_empty(), "no request for a local branch");
+        assert!(
+            paths.lock().unwrap().is_empty(),
+            "no request for a local branch"
+        );
         assert!(ctx.item(&branch.id).unwrap().subject.is_none());
 
         // A branch of the GitHub repository is looked up under it alone:
         // the local repository is not a candidate.
         let mut hub = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
-        hub.checkout = Some(ItemCheckout { path: "/x/b2".into(), ..root_checkout("feature-2") });
+        hub.checkout = Some(ItemCheckout {
+            path: "/x/b2".into(),
+            ..root_checkout("feature-2")
+        });
         ctx.with_cache(|c| c.insert_item(&hub)).unwrap().unwrap();
 
         attach_pull_requests(&ctx).await;
 
         let paths = paths.lock().unwrap();
         assert_eq!(paths.len(), 1, "{paths:?}");
-        assert!(paths[0].starts_with("/repos/a/b/pulls?head="), "{}", paths[0]);
+        assert!(
+            paths[0].starts_with("/repos/a/b/pulls?head="),
+            "{}",
+            paths[0]
+        );
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {
@@ -4138,7 +6044,11 @@ mod tests {
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .output()
             .expect("git runs");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -4152,12 +6062,144 @@ mod tests {
         std::fs::write(root.join("one.txt"), "one\n").unwrap();
         git(root, &["add", "."]);
         git(root, &["commit", "-q", "-m", "one"]);
-        let worktree = root.with_file_name(format!("{}-{}", root.file_name().unwrap().to_string_lossy(), branch));
-        git(root, &["worktree", "add", "-q", "-b", branch, worktree.to_str().unwrap()]);
+        let worktree = root.with_file_name(format!(
+            "{}-{}",
+            root.file_name().unwrap().to_string_lossy(),
+            branch
+        ));
+        git(
+            root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+            ],
+        );
         std::fs::write(worktree.join("two.txt"), "two\n").unwrap();
         git(&worktree, &["add", "."]);
         git(&worktree, &["commit", "-q", "-m", "two"]);
         worktree
+    }
+
+    #[tokio::test]
+    async fn archiving_waits_for_active_work_before_retiring_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let repo = RepoId::parse("a/b").unwrap();
+
+        // Put a real linked worktree where Perch's store expects it so the
+        // assertion covers both the database fence and filesystem cleanup.
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-q", "-b", "main"]);
+        std::fs::write(source.join("one.txt"), "one\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-q", "-m", "one"]);
+        let bare = ctx.preparer.store().bare_path(&repo);
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            &source,
+            &["clone", "-q", "--bare", ".", bare.to_str().unwrap()],
+        );
+        let branch = "perch/pr-7";
+        let worktree = ctx.preparer.store().worktree_path(&repo, branch);
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let head = git(&worktree, &["rev-parse", "HEAD"]);
+
+        let mut item = store_pull(&ctx, 7);
+        item.checkout = Some(ItemCheckout {
+            branch: branch.into(),
+            base_ref: "main".into(),
+            head_sha: head,
+            path: worktree.clone(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+        });
+        ctx.with_cache(|cache| cache.update_item(&item))
+            .unwrap()
+            .unwrap();
+
+        let run = RunRecord {
+            id: "archive-run".into(),
+            owner: RunOwner::Review {
+                item_id: item.id.clone(),
+                reviewer_run_id: "reviewer-run".into(),
+            },
+            purpose: RunPurpose::WorktreeReview,
+            backend: "codex".into(),
+            requested_model: "gpt".into(),
+            model: "gpt".into(),
+            requested_effort: "high".into(),
+            effort: "high".into(),
+            original_request: "Review this worktree".into(),
+            working_directory: Some(worktree.to_string_lossy().into_owned()),
+            queued_at: Timestamp::now(),
+            ..RunRecord::default()
+        };
+        let admission = ctx.runs.admit(run).unwrap();
+        let lease = ctx.runs.start(admission).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), archive_item(&ctx, &item.id))
+            .await
+            .expect("archive did not wait on the active run")
+            .unwrap();
+        let archived = ctx.item(&item.id).unwrap();
+        assert!(archived.is_archived());
+        assert!(archived.checkout.as_ref().unwrap().on_disk);
+        assert!(worktree.join(".git").exists());
+        assert_eq!(
+            ctx.runs.load("archive-run").unwrap().status,
+            RunStatus::Starting,
+            "archive must not cancel the work it is retaining"
+        );
+
+        ctx.runs.transition(
+            "archive-run",
+            RunStatus::Failed,
+            Some(TerminalReason::Other),
+            Some("fixture complete".into()),
+        );
+        ctx.runs.finish(lease);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !worktree.exists()
+                    && ctx
+                        .item(&item.id)
+                        .and_then(|item| item.checkout)
+                        .is_some_and(|checkout| !checkout.on_disk)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("deferred archive cleanup did not finish");
+        assert_eq!(
+            git(
+                &bare,
+                &["branch", "--format=%(refname:short)", "--list", branch],
+            ),
+            branch,
+            "archiving removes the checkout but retains its branch"
+        );
     }
 
     /// A `[[repo]]` with one root and, when given, a `github`.
@@ -4199,18 +6241,30 @@ mod tests {
         let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
         assert_eq!(items.len(), 1, "{items:?}");
         let item = &items[0];
-        assert_eq!(item.repo_full_name, "local/notes", "the entry's identity, not the scan's");
+        assert_eq!(
+            item.repo_full_name, "local/notes",
+            "the entry's identity, not the scan's"
+        );
         let checkout = item.checkout.as_ref().expect("a checkout");
         assert_eq!(checkout.branch, "feature");
-        assert_eq!(checkout.base_ref, "main", "the base branch, with no remote to prefix it");
+        assert_eq!(
+            checkout.base_ref, "main",
+            "the base branch, with no remote to prefix it"
+        );
         assert_eq!(checkout.churn, Some((1, 0)), "counted against main");
         assert!(!checkout.owned);
         assert!(notices(&received).is_empty(), "nothing to complain about");
 
         assert!(!attach_pull_requests(&ctx).await);
 
-        assert!(paths.lock().unwrap().is_empty(), "no GitHub call for a local repository");
-        assert!(!scan_roots(&ctx).await, "a second scan over the same tree changes nothing");
+        assert!(
+            paths.lock().unwrap().is_empty(),
+            "no GitHub call for a local repository"
+        );
+        assert!(
+            !scan_roots(&ctx).await,
+            "a second scan over the same tree changes nothing"
+        );
     }
 
     #[tokio::test]
@@ -4218,15 +6272,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("b");
         root_with_branch(&root, "feature");
-        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![rooted(Some("a/b"), &root)]);
+        let (ctx, received) =
+            ctx_declaring(dir.path(), &nowhere(), vec![rooted(Some("a/b"), &root)]);
 
         assert!(!scan_roots(&ctx).await);
 
-        assert!(ctx.with_cache(|c| c.load_items().unwrap()).unwrap().is_empty());
+        assert!(ctx
+            .with_cache(|c| c.load_items().unwrap())
+            .unwrap()
+            .is_empty());
         let notices = notices(&received);
         assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(notices[0].contains("no GitHub remote for b"), "{}", notices[0]);
-        assert!(notices[0].starts_with(&root.display().to_string()), "names the root: {}", notices[0]);
+        assert!(
+            notices[0].contains("no GitHub remote for b"),
+            "{}",
+            notices[0]
+        );
+        assert!(
+            notices[0].starts_with(&root.display().to_string()),
+            "names the root: {}",
+            notices[0]
+        );
     }
 
     #[tokio::test]
@@ -4239,8 +6305,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("widgets");
         root_with_branch(&root, "fence");
-        git(&root, &["remote", "add", "origin", "https://github.com/me/widgets.git"]);
-        git(&root, &["remote", "add", "upstream", "https://github.com/acme/widgets.git"]);
+        git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/me/widgets.git",
+            ],
+        );
+        git(
+            &root,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/acme/widgets.git",
+            ],
+        );
         let (base, paths) = serve_by_path(|path| {
             if path.starts_with("/repos/acme/widgets/pulls?head=me%3Afence") {
                 ("200 OK", format!("[{PULL_FROM_FORK}]"))
@@ -4248,23 +6330,37 @@ mod tests {
                 ("200 OK", "[]".to_string())
             }
         });
-        let (ctx, _received) = ctx_declaring(dir.path(), &base, vec![rooted(Some("acme/widgets"), &root)]);
+        let (ctx, _received) =
+            ctx_declaring(dir.path(), &base, vec![rooted(Some("acme/widgets"), &root)]);
 
         assert!(scan_roots(&ctx).await);
 
         let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
         assert_eq!(items.len(), 1, "{items:?}");
-        assert_eq!(items[0].repo_full_name, "acme/widgets", "the entry's identity, which upstream names");
+        assert_eq!(
+            items[0].repo_full_name, "acme/widgets",
+            "the entry's identity, which upstream names"
+        );
         let checkout = items[0].checkout.as_ref().unwrap();
-        assert_eq!(checkout.base_ref, "main", "the base's name, without the remote");
-        assert_eq!(checkout.churn, Some((1, 0)), "upstream was never fetched, so against main itself");
+        assert_eq!(
+            checkout.base_ref, "main",
+            "the base's name, without the remote"
+        );
+        assert_eq!(
+            checkout.churn,
+            Some((1, 0)),
+            "upstream was never fetched, so against main itself"
+        );
 
         assert!(attach_pull_requests(&ctx).await);
 
         let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
         assert_eq!(items.len(), 1, "the same row, not a second: {items:?}");
         assert_eq!(items[0].pull_request().map(|p| p.number), Some(9));
-        assert_eq!(items[0].checkout.as_ref().map(|c| c.branch.as_str()), Some("fence"));
+        assert_eq!(
+            items[0].checkout.as_ref().map(|c| c.branch.as_str()),
+            Some("fence")
+        );
         let paths = paths.lock().unwrap();
         assert_eq!(paths.len(), 1, "{paths:?}");
         assert!(
@@ -4304,20 +6400,39 @@ mod tests {
         // the reader then pinned that subject-only row.
         let mut subject_only = store_pull(&ctx, 7);
         subject_only.pinned_at = Some("2026-09-17T09:00:00Z".parse().unwrap());
-        ctx.with_cache(|c| c.update_item(&subject_only)).unwrap().unwrap();
+        ctx.with_cache(|c| c.update_item(&subject_only))
+            .unwrap()
+            .unwrap();
         let mut branch = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
         branch.checkout = Some(root_checkout("branch-7"));
         ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
 
-        let taken = ctx.with_cache(|c| take_pull_request(c, &mut branch, pull_request(7))).unwrap().unwrap();
+        let taken = ctx
+            .with_cache(|c| take_pull_request(c, &mut branch, pull_request(7)))
+            .unwrap()
+            .unwrap();
 
         assert!(taken);
         let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
-        assert_eq!(items.len(), 1, "one row for the branch and its pull request");
-        assert_eq!(items[0].id, branch.id, "the reader's row, with its threads, is the one kept");
+        assert_eq!(
+            items.len(),
+            1,
+            "one row for the branch and its pull request"
+        );
+        assert_eq!(
+            items[0].id, branch.id,
+            "the reader's row, with its threads, is the one kept"
+        );
         assert_eq!(items[0].pull_request().map(|p| p.number), Some(7));
-        assert_eq!(items[0].checkout.as_ref().map(|c| c.base_ref.as_str()), Some("main"), "the pull request's base");
-        assert_eq!(items[0].pinned_at, subject_only.pinned_at, "the pin on the subject-only row came across");
+        assert_eq!(
+            items[0].checkout.as_ref().map(|c| c.base_ref.as_str()),
+            Some("main"),
+            "the pull request's base"
+        );
+        assert_eq!(
+            items[0].pinned_at, subject_only.pinned_at,
+            "the pin on the subject-only row came across"
+        );
     }
 
     #[tokio::test]
@@ -4327,13 +6442,20 @@ mod tests {
         // Opened in Perch first, so the pull request's row has a checkout
         // Perch cut for it.
         let mut opened = store_pull(&ctx, 7);
-        opened.checkout = Some(ItemCheckout { branch: "perch/pr-7".into(), owned: true, ..root_checkout("perch/pr-7") });
+        opened.checkout = Some(ItemCheckout {
+            branch: "perch/pr-7".into(),
+            owned: true,
+            ..root_checkout("perch/pr-7")
+        });
         ctx.with_cache(|c| c.update_item(&opened)).unwrap().unwrap();
         let mut branch = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
         branch.checkout = Some(root_checkout("branch-7"));
         ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
 
-        let taken = ctx.with_cache(|c| take_pull_request(c, &mut branch, pull_request(7))).unwrap().unwrap();
+        let taken = ctx
+            .with_cache(|c| take_pull_request(c, &mut branch, pull_request(7)))
+            .unwrap()
+            .unwrap();
 
         assert!(!taken, "the row that has it keeps it");
         let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
@@ -4356,16 +6478,33 @@ mod tests {
         let now: Timestamp = "2026-09-18T12:00:00Z".parse().unwrap();
         let mut opened = Item::new("a/b", now);
         opened.subject = Some(ItemSubject::PullRequest(pull_request(7)));
-        opened.checkout = Some(ItemCheckout { branch: "perch/pr-7".into(), owned: true, ..root_checkout("perch/pr-7") });
+        opened.checkout = Some(ItemCheckout {
+            branch: "perch/pr-7".into(),
+            owned: true,
+            ..root_checkout("perch/pr-7")
+        });
 
-        ctx.with_cache(|c| record_open(c, &mut opened, true)).unwrap().expect("no collision on the subject index");
+        ctx.with_cache(|c| record_open(c, &mut opened, true))
+            .unwrap()
+            .expect("no collision on the subject index");
 
-        assert_eq!(opened.id, listed.id, "the review runs as the row that exists");
+        assert_eq!(
+            opened.id, listed.id,
+            "the review runs as the row that exists"
+        );
         let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].checkout.as_ref().map(|c| c.branch.as_str()), Some("perch/pr-7"), "with the open's checkout");
+        assert_eq!(
+            items[0].checkout.as_ref().map(|c| c.branch.as_str()),
+            Some("perch/pr-7"),
+            "with the open's checkout"
+        );
         assert_eq!(items[0].last_opened_at, now);
-        assert_eq!(items[0].title(), "seven, renamed", "the later snapshot stands over the one fetched before the clone");
+        assert_eq!(
+            items[0].title(),
+            "seven, renamed",
+            "the later snapshot stands over the one fetched before the clone"
+        );
     }
 
     #[tokio::test]
@@ -4374,9 +6513,15 @@ mod tests {
         let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
         let mut opened = Item::new("a/b", "2026-09-18T12:00:00Z".parse().unwrap());
         opened.subject = Some(ItemSubject::PullRequest(pull_request(7)));
-        opened.checkout = Some(ItemCheckout { branch: "perch/pr-7".into(), owned: true, ..root_checkout("perch/pr-7") });
+        opened.checkout = Some(ItemCheckout {
+            branch: "perch/pr-7".into(),
+            owned: true,
+            ..root_checkout("perch/pr-7")
+        });
 
-        ctx.with_cache(|c| record_open(c, &mut opened, true)).unwrap().unwrap();
+        ctx.with_cache(|c| record_open(c, &mut opened, true))
+            .unwrap()
+            .unwrap();
 
         assert_eq!(ctx.item(&opened.id).unwrap(), opened);
     }

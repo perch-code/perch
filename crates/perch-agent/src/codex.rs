@@ -33,27 +33,58 @@ impl CodexParser {
         match v.get("type").and_then(Value::as_str).unwrap_or("") {
             "thread.started" => {
                 self.thread_id = str_of(&v, "thread_id");
-                vec![RunEvent::Started { session_id: self.thread_id.clone(), model: String::new() }]
+                vec![RunEvent::Started {
+                    session_id: self.thread_id.clone(),
+                    model: String::new(),
+                }]
             }
             "item.started" => self.item_started(v.get("item").unwrap_or(&Value::Null)),
             "item.completed" => self.item_completed(v.get("item").unwrap_or(&Value::Null)),
             "error" => {
                 self.errors += 1;
-                failed_step(format!("error_{}", self.errors), &human_message(&str_of(&v, "message")))
+                failed_step(
+                    format!("error_{}", self.errors),
+                    &human_message(&str_of(&v, "message")),
+                )
             }
             "turn.failed" => {
-                let raw = v.pointer("/error/message").and_then(Value::as_str).unwrap_or("");
+                let raw = v
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 let message = human_message(raw);
                 // The thread prints the message as the error line, so an
                 // empty one would fail the run in silence.
-                let message = if message.is_empty() { "The turn failed".to_string() } else { message };
+                let message = if message.is_empty() {
+                    "The turn failed".to_string()
+                } else {
+                    message
+                };
                 vec![RunEvent::Failed { message }]
             }
-            "turn.completed" => vec![RunEvent::Finished {
-                session_id: self.thread_id.clone(),
-                cost_usd: None,
-                duration_ms: 0,
-            }],
+            "turn.completed" => {
+                let usage = v.get("usage").unwrap_or(&Value::Null);
+                let input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
+                let output_tokens = usage.get("output_tokens").and_then(Value::as_u64);
+                let cached_input_tokens = usage.get("cached_input_tokens").and_then(Value::as_u64);
+                let mut events = Vec::with_capacity(2);
+                if input_tokens.is_some()
+                    || output_tokens.is_some()
+                    || cached_input_tokens.is_some()
+                {
+                    events.push(RunEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                        cached_input_tokens,
+                    });
+                }
+                events.push(RunEvent::Finished {
+                    session_id: self.thread_id.clone(),
+                    cost_usd: None,
+                    duration_ms: 0,
+                });
+                events
+            }
             // turn.started, item.updated, and whatever comes next.
             _ => Vec::new(),
         }
@@ -73,8 +104,16 @@ impl CodexParser {
         match str_of(item, "type").as_str() {
             "command_execution" => {
                 let ok = item.get("exit_code").and_then(Value::as_i64) == Some(0);
-                let summary = if ok { String::new() } else { last_line(&str_of(item, "aggregated_output")) };
-                let result = RunEvent::ToolResult { id: id.clone(), ok, summary };
+                let summary = if ok {
+                    String::new()
+                } else {
+                    last_line(&str_of(item, "aggregated_output"))
+                };
+                let result = RunEvent::ToolResult {
+                    id: id.clone(),
+                    ok,
+                    summary,
+                };
                 if self.started.remove(&id) {
                     vec![result]
                 } else {
@@ -98,7 +137,11 @@ impl CodexParser {
 
 fn command_call(id: String, item: &Value) -> RunEvent {
     let command = strip_shell(&str_of(item, "command"));
-    RunEvent::ToolCall { id, name: "command_execution".into(), summary: one_line(&format!("Ran {command}"), 120) }
+    RunEvent::ToolCall {
+        id,
+        name: "command_execution".into(),
+        summary: one_line(&format!("Ran {command}"), 120),
+    }
 }
 
 /// An error is shown as a step that failed, not as the end of the run: a
@@ -106,8 +149,16 @@ fn command_call(id: String, item: &Value) -> RunEvent {
 /// to complete, and an API error precedes the `turn.failed` that ends it.
 fn failed_step(id: String, message: &str) -> Vec<RunEvent> {
     vec![
-        RunEvent::ToolCall { id: id.clone(), name: "error".into(), summary: one_line(message, 120) },
-        RunEvent::ToolResult { id, ok: false, summary: String::new() },
+        RunEvent::ToolCall {
+            id: id.clone(),
+            name: "error".into(),
+            summary: one_line(message, 120),
+        },
+        RunEvent::ToolResult {
+            id,
+            ok: false,
+            summary: String::new(),
+        },
     ]
 }
 
@@ -116,13 +167,25 @@ fn failed_step(id: String, message: &str) -> Vec<RunEvent> {
 fn human_message(raw: &str) -> String {
     let inner = serde_json::from_str::<Value>(raw.trim())
         .ok()
-        .and_then(|v| v.pointer("/error/message").and_then(Value::as_str).map(str::to_string));
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
     let text = inner.unwrap_or_else(|| raw.to_string());
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn last_line(output: &str) -> String {
-    let line = output.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let line = output
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
     one_line(line, 100)
 }
 
@@ -135,7 +198,8 @@ fn strip_shell(command: &str) -> String {
         return trimmed.to_string();
     };
     let shell = shell.rsplit('/').next().unwrap_or(shell);
-    let is_shell = matches!(shell, "zsh" | "bash" | "sh") && flag.starts_with('-') && flag.contains('c');
+    let is_shell =
+        matches!(shell, "zsh" | "bash" | "sh") && flag.starts_with('-') && flag.contains('c');
     if !is_shell {
         return trimmed.to_string();
     }
@@ -146,7 +210,8 @@ fn strip_shell(command: &str) -> String {
 /// escapes the next character; inside single quotes nothing does.
 fn unquote(script: &str) -> String {
     let inner = |q: char| {
-        (script.len() >= 2 && script.starts_with(q) && script.ends_with(q)).then(|| &script[1..script.len() - 1])
+        (script.len() >= 2 && script.starts_with(q) && script.ends_with(q))
+            .then(|| &script[1..script.len() - 1])
     };
     if let Some(inner) = inner('\'') {
         return inner.to_string();
@@ -172,7 +237,8 @@ fn unquote(script: &str) -> String {
 mod tests {
     use super::*;
 
-    const THREAD: &str = r#"{"type":"thread.started","thread_id":"01a0b584-d485-7d52-84b0-231e5b9b82d4"}"#;
+    const THREAD: &str =
+        r#"{"type":"thread.started","thread_id":"01a0b584-d485-7d52-84b0-231e5b9b82d4"}"#;
     const CMD_STARTED: &str = r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,240p' main.rs && git log --oneline\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#;
     const CMD_COMPLETED: &str = r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,240p' main.rs && git log --oneline\"","aggregated_output":"fn main() {}\n\nabc123 init\n","exit_code":0,"status":"completed"}}"#;
     const CMD_FAILED: &str = r#"{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'cat nope.txt'","aggregated_output":"cat: nope.txt: No such file or directory\n","exit_code":1,"status":"completed"}}"#;
@@ -193,7 +259,15 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                RunEvent::Started { session_id: "01a0b584-d485-7d52-84b0-231e5b9b82d4".into(), model: "".into() },
+                RunEvent::Started {
+                    session_id: "01a0b584-d485-7d52-84b0-231e5b9b82d4".into(),
+                    model: "".into()
+                },
+                RunEvent::Usage {
+                    input_tokens: Some(40389),
+                    output_tokens: Some(214),
+                    cached_input_tokens: Some(25088),
+                },
                 RunEvent::Finished {
                     session_id: "01a0b584-d485-7d52-84b0-231e5b9b82d4".into(),
                     cost_usd: None,
@@ -214,7 +288,11 @@ mod tests {
                     name: "command_execution".into(),
                     summary: "Ran sed -n '1,240p' main.rs && git log --oneline".into(),
                 },
-                RunEvent::ToolResult { id: "item_1".into(), ok: true, summary: "".into() },
+                RunEvent::ToolResult {
+                    id: "item_1".into(),
+                    ok: true,
+                    summary: "".into()
+                },
             ]
         );
     }
@@ -225,7 +303,11 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                RunEvent::ToolCall { id: "item_3".into(), name: "command_execution".into(), summary: "Ran cat nope.txt".into() },
+                RunEvent::ToolCall {
+                    id: "item_3".into(),
+                    name: "command_execution".into(),
+                    summary: "Ran cat nope.txt".into()
+                },
                 RunEvent::ToolResult {
                     id: "item_3".into(),
                     ok: false,
@@ -237,7 +319,12 @@ mod tests {
 
     #[test]
     fn a_message_is_text_and_a_blank_one_is_nothing() {
-        assert_eq!(parse_all(&[MESSAGE]), vec![RunEvent::Text("`main.rs` defines a Rust program that prints `hi`.".into())]);
+        assert_eq!(
+            parse_all(&[MESSAGE]),
+            vec![RunEvent::Text(
+                "`main.rs` defines a Rust program that prints `hi`.".into()
+            )]
+        );
         let blank = r#"{"type":"item.completed","item":{"id":"item_9","type":"agent_message","text":"  \n"}}"#;
         assert!(parse_all(&[blank]).is_empty());
     }
@@ -253,9 +340,17 @@ mod tests {
                 summary: "This session was recorded with model `gpt-6-astra` but is resuming with `gpt-5.6-luna`. Consider switching back.".into(),
             }
         );
-        assert_eq!(events[2], RunEvent::ToolResult { id: "item_0".into(), ok: false, summary: "".into() });
+        assert_eq!(
+            events[2],
+            RunEvent::ToolResult {
+                id: "item_0".into(),
+                ok: false,
+                summary: "".into()
+            }
+        );
         assert!(matches!(events[3], RunEvent::Text(_)));
-        assert!(matches!(events[4], RunEvent::Finished { .. }));
+        assert!(matches!(events[4], RunEvent::Usage { .. }));
+        assert!(matches!(events[5], RunEvent::Finished { .. }));
         assert!(!events.iter().any(|e| matches!(e, RunEvent::Failed { .. })));
     }
 
@@ -270,7 +365,11 @@ mod tests {
                     name: "error".into(),
                     summary: "The 'gpt-6-astra' model requires a newer version of Codex.".into(),
                 },
-                RunEvent::ToolResult { id: "error_1".into(), ok: false, summary: "".into() },
+                RunEvent::ToolResult {
+                    id: "error_1".into(),
+                    ok: false,
+                    summary: "".into()
+                },
             ]
         );
     }
@@ -280,35 +379,61 @@ mod tests {
         let events = parse_all(&[THREAD, TOP_ERROR, TURN_FAILED]);
         assert_eq!(
             events.last(),
-            Some(&RunEvent::Failed { message: "The 'gpt-6-astra' model requires a newer version of Codex.".into() })
+            Some(&RunEvent::Failed {
+                message: "The 'gpt-6-astra' model requires a newer version of Codex.".into()
+            })
         );
         let plain = r#"{"type":"turn.failed","error":{"message":"  stream closed\n"}}"#;
-        assert_eq!(parse_all(&[plain]), vec![RunEvent::Failed { message: "stream closed".into() }]);
+        assert_eq!(
+            parse_all(&[plain]),
+            vec![RunEvent::Failed {
+                message: "stream closed".into()
+            }]
+        );
     }
 
     #[test]
     fn a_failed_turn_with_no_message_still_says_something() {
-        let expected = vec![RunEvent::Failed { message: "The turn failed".into() }];
+        let expected = vec![RunEvent::Failed {
+            message: "The turn failed".into(),
+        }];
         assert_eq!(parse_all(&[r#"{"type":"turn.failed"}"#]), expected);
-        assert_eq!(parse_all(&[r#"{"type":"turn.failed","error":{"message":"  \n"}}"#]), expected);
+        assert_eq!(
+            parse_all(&[r#"{"type":"turn.failed","error":{"message":"  \n"}}"#]),
+            expected
+        );
     }
 
     #[test]
     fn other_items_and_garbage_yield_nothing() {
         assert!(parse_all(&["", "not json", r#"{"type":"turn.started"}"#]).is_empty());
-        let reasoning = r#"{"type":"item.completed","item":{"id":"item_4","type":"reasoning","text":"hmm"}}"#;
-        let started_reasoning = r#"{"type":"item.started","item":{"id":"item_4","type":"reasoning"}}"#;
+        let reasoning =
+            r#"{"type":"item.completed","item":{"id":"item_4","type":"reasoning","text":"hmm"}}"#;
+        let started_reasoning =
+            r#"{"type":"item.started","item":{"id":"item_4","type":"reasoning"}}"#;
         assert!(parse_all(&[started_reasoning, reasoning]).is_empty());
     }
 
     #[test]
     fn the_shell_wrapper_is_stripped_from_commands() {
-        assert_eq!(strip_shell(r#"/bin/zsh -lc "sed -n '1,240p' main.rs && git log --oneline""#), "sed -n '1,240p' main.rs && git log --oneline");
-        assert_eq!(strip_shell("/bin/zsh -lc 'find crates -maxdepth 3 -type f | sort'"), "find crates -maxdepth 3 -type f | sort");
-        assert_eq!(strip_shell(r#"bash -lc "rg -n \"x y\" src""#), r#"rg -n "x y" src"#);
+        assert_eq!(
+            strip_shell(r#"/bin/zsh -lc "sed -n '1,240p' main.rs && git log --oneline""#),
+            "sed -n '1,240p' main.rs && git log --oneline"
+        );
+        assert_eq!(
+            strip_shell("/bin/zsh -lc 'find crates -maxdepth 3 -type f | sort'"),
+            "find crates -maxdepth 3 -type f | sort"
+        );
+        assert_eq!(
+            strip_shell(r#"bash -lc "rg -n \"x y\" src""#),
+            r#"rg -n "x y" src"#
+        );
         // An escaped backslash is one backslash, and does not swallow the
         // quote after it.
-        assert_eq!(strip_shell(r#"bash -lc "rg -n \"\\\\bfoo\" src""#), r#"rg -n "\\bfoo" src"#);
+        assert_eq!(
+            strip_shell(r#"bash -lc "rg -n \"\\\\bfoo\" src""#),
+            r#"rg -n "\\bfoo" src"#
+        );
         assert_eq!(strip_shell(r#"bash -lc "echo a\\\"b""#), r#"echo a\"b"#);
         assert_eq!(strip_shell("/bin/sh -c ls"), "ls");
         assert_eq!(strip_shell("git log --oneline"), "git log --oneline");

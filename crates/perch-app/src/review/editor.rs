@@ -40,7 +40,8 @@ use floem::views::editor::core::editor::EditType;
 use floem::views::editor::core::selection::Selection;
 use floem::views::scroll::ScrollCustomStyle;
 use floem::views::{
-    ClipExt, Container, Decorators, Empty, Label, ScrollExt, Stack, TextEditor, dyn_container, dyn_stack, text_editor,
+    dyn_container, dyn_stack, text_editor, ClipExt, Container, Decorators, Empty, Label, ScrollExt,
+    Stack, TextEditor,
 };
 use perch_github::CommentThread;
 
@@ -50,7 +51,9 @@ use crate::review::cards;
 use crate::review::doc::{self, Card, CardId, Doc, Reveals, Run};
 use crate::review::gutter::{diff_gutter, side_gutter, visible_lines};
 use crate::review::hover;
-use crate::review::model::{Composer, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState};
+use crate::review::model::{
+    Composer, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState,
+};
 use crate::review::references;
 use crate::review::styling::PerchStyling;
 use crate::review::threads::{self, ThreadFace};
@@ -90,7 +93,13 @@ pub fn editor_pane(
             // the layout caches cleanly, and nothing of the old is worth
             // keeping. What changes under the one file is for editing the
             // document in place, through the live documents held below.
-            move || (state.active.get(), state.editor_epoch.get(), state.layout.get()),
+            move || {
+                (
+                    state.active.get(),
+                    state.editor_epoch.get(),
+                    state.layout.get(),
+                )
+            },
             move |(path, epoch, layout)| {
                 // Whatever editor stood here is going with its documents;
                 // the one built below registers its own.
@@ -103,15 +112,27 @@ pub fn editor_pane(
                     )
                     .into_any(),
                     Some(path) => match state.file(&path) {
-                        Some(file) => {
-                            code_view(app, state, file, epoch, layout, code_backend.clone(), code_open.clone()).into_any()
-                        }
+                        Some(file) => code_view(
+                            app,
+                            state,
+                            file,
+                            epoch,
+                            layout,
+                            code_backend.clone(),
+                            code_open.clone(),
+                        )
+                        .into_any(),
                         None => loading_view(path).into_any(),
                     },
                 }
             },
         )
-        .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full().background(theme::CODE_BG)),
+        .style(|s| {
+            s.flex_grow(1.0_f32)
+                .min_height(0.0)
+                .width_full()
+                .background(theme::CODE_BG)
+        }),
         symbol_panel(state, backend),
         references::panel(state, open_file),
     ))
@@ -180,12 +201,20 @@ fn code_view(
     let split = Effect::untrack(|| match layout {
         Layout::Split => {
             let inputs = memos.inputs(state, &file);
-            split_doc(&file, inputs.folded, &inputs.anchors, &inputs.reveals, &inputs.cards)
+            split_doc(
+                &file,
+                inputs.folded,
+                &inputs.anchors,
+                &inputs.reveals,
+                &inputs.cards,
+            )
         }
         Layout::Stacked => None,
     });
     match split {
-        Some(split) => split_view(app, state, file, memos, split, epoch, backend, open_file).into_any(),
+        Some(split) => {
+            split_view(app, state, file, memos, split, epoch, backend, open_file).into_any()
+        }
         None => stacked_view(app, state, file, memos, epoch, backend, open_file).into_any(),
     }
 }
@@ -202,13 +231,25 @@ fn stacked_view(
 ) -> impl IntoView {
     let built = Effect::untrack(|| {
         let inputs = memos.inputs(state, &file);
-        stacked_doc(&file, inputs.folded, &inputs.anchors, &inputs.reveals, &inputs.cards)
+        stacked_doc(
+            &file,
+            inputs.folded,
+            &inputs.anchors,
+            &inputs.reveals,
+            &inputs.cards,
+        )
     });
     let text = built.text.clone();
     let doc = RwSignal::new(Arc::new(built));
     let editor = code_editor(text, PerchStyling::new(file.clone(), doc, epoch));
-    let live = LiveDoc { handle: editor.doc(), doc };
-    state.docs.set(Some(LiveDocs { epoch, layout: LiveLayout::Stacked(live.clone()) }));
+    let live = LiveDoc {
+        handle: editor.doc(),
+        doc,
+    };
+    state.docs.set(Some(LiveDocs {
+        epoch,
+        layout: LiveLayout::Stacked(live.clone()),
+    }));
 
     // The gutter and the divider layer track the same signals the editor
     // lays out from, so they stay aligned without any scroll plumbing of
@@ -230,7 +271,13 @@ fn stacked_view(
     wire_folds(state, file.clone(), memos, epoch, {
         let file = file.clone();
         move |inputs: &Inputs| {
-            let new = stacked_doc(&file, inputs.folded, &inputs.anchors, &inputs.reveals, &inputs.cards);
+            let new = stacked_doc(
+                &file,
+                inputs.folded,
+                &inputs.anchors,
+                &inputs.reveals,
+                &inputs.cards,
+            );
             apply(&live, new, viewport, scroll_to, cursor, shifted)
         }
     });
@@ -246,9 +293,25 @@ fn stacked_view(
         Stack::vertical((
             editor,
             divider_layer(state, doc, viewport, scroll_delta, Bars::Editor),
-            card_layer(app, state, backend, open_file, path, doc, viewport, scroll_delta, scroll_to, theme::CODE_GUTTER_GAP),
+            card_layer(
+                app,
+                state,
+                backend,
+                open_file,
+                path,
+                doc,
+                viewport,
+                scroll_delta,
+                scroll_to,
+                theme::CODE_GUTTER_GAP,
+            ),
         ))
-        .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().position(Position::Relative)),
+        .style(|s| {
+            s.flex_grow(1.0_f32)
+                .min_width(0.0)
+                .height_full()
+                .position(Position::Relative)
+        }),
     ))
     .style(|s| s.size_full().min_height(0.0))
 }
@@ -258,7 +321,12 @@ fn stacked_view(
 /// outside the changed list has no status and is never folded, whatever
 /// is anchored in it: there is no change to fold around, and it opens
 /// whole as it did before there were folds.
-fn folds_of(file: &LoadedFile, folded: bool, anchors: &[(usize, usize)], reveals: &Reveals) -> Vec<Run> {
+fn folds_of(
+    file: &LoadedFile,
+    folded: bool,
+    anchors: &[(usize, usize)],
+    reveals: &Reveals,
+) -> Vec<Run> {
     if folded && file.status.is_some() {
         reveals.apply(&doc::runs(&file.buffer, anchors))
     } else {
@@ -276,7 +344,11 @@ pub(crate) fn stacked_doc(
     reveals: &Reveals,
     cards: &[Card],
 ) -> Doc {
-    doc::build(&file.buffer, &folds_of(file, folded, anchors, reveals), cards)
+    doc::build(
+        &file.buffer,
+        &folds_of(file, folded, anchors, reveals),
+        cards,
+    )
 }
 
 /// The two documents of a file's split, folded as the stacked one is, or
@@ -297,7 +369,13 @@ pub(crate) fn split_doc(
         return None;
     }
     let folds = folds_of(file, folded, anchors, reveals);
-    Some(doc::build_split(&file.alignment, &base.text, &file.buffer, &folds, cards))
+    Some(doc::build_split(
+        &file.alignment,
+        &base.text,
+        &file.buffer,
+        &folds,
+        cards,
+    ))
 }
 
 /// Runs `rebuild` whenever what a document is built from changes, so it
@@ -306,7 +384,13 @@ pub(crate) fn split_doc(
 /// file's reveals, and the anchors and the cards, which are memos so that
 /// a thread's messages changing under them, as they do every line of a
 /// streaming answer, do not rebuild a document that would be the same.
-fn wire_folds(state: ReviewState, file: Arc<LoadedFile>, memos: Memos, epoch: u64, rebuild: impl Fn(&Inputs) + 'static) {
+fn wire_folds(
+    state: ReviewState,
+    file: Arc<LoadedFile>,
+    memos: Memos,
+    epoch: u64,
+    rebuild: impl Fn(&Inputs) + 'static,
+) {
     Effect::new(move |first: Option<bool>| {
         let inputs = memos.inputs(state, &file);
         // The editor was just built from these; nothing to do but subscribe.
@@ -354,7 +438,11 @@ fn apply(
     };
     let replacement = new.text[region.new_bytes.clone()].to_string();
     live.handle.edit_single(
-        Selection::region(region.old_bytes.start, region.old_bytes.end, CursorAffinity::Backward),
+        Selection::region(
+            region.old_bytes.start,
+            region.old_bytes.end,
+            CursorAffinity::Backward,
+        ),
         &replacement,
         EditType::Other,
     );
@@ -363,7 +451,11 @@ fn apply(
     let delta = region.byte_delta();
     if cursor.with_untracked(|c| c.regions_iter().any(|(a, b, _)| a.max(b) >= start)) {
         // Said before the move, which runs the cursor's effect.
-        shifted.set(Some(shifted_offset(cursor.with_untracked(|c| c.offset()), start, delta)));
+        shifted.set(Some(shifted_offset(
+            cursor.with_untracked(|c| c.offset()),
+            start,
+            delta,
+        )));
         cursor.update(|c| shift_cursor(c, start, delta));
     }
 
@@ -381,7 +473,9 @@ fn apply(
         // When no line from the top of the view down is still shown, the
         // rows after the region keep their place instead.
         let shift = (first_visible..old.len())
-            .find_map(|row| Some(new.row_of_display(old.display_line(row)?)? as isize - row as isize))
+            .find_map(|row| {
+                Some(new.row_of_display(old.display_line(row)?)? as isize - row as isize)
+            })
             .unwrap_or_else(|| region.row_delta());
         vp.y0 + shift as f64 * line_height
     } else {
@@ -458,9 +552,11 @@ fn divider_layer(
                 .collect::<Vec<_>>()
         })
     };
-    let stack = dyn_stack(visible, |(row, run)| (*row, *run), move |(row, run)| {
-        divider_bar(state, row, run, viewport, scroll_delta, bars)
-    })
+    let stack = dyn_stack(
+        visible,
+        |(row, run)| (*row, *run),
+        move |(row, run)| divider_bar(state, row, run, viewport, scroll_delta, bars),
+    )
     .style(|s| s.size_full());
 
     Container::new(stack)
@@ -498,12 +594,18 @@ fn divider_bar(
             .color(theme::DIFF_DIVIDER_FG)
             .apply_if(!fits.get(), |s| s.hide())
     }))
-    .on_event_cont(LayoutChanged::listener(), move |_, LayoutChanged { new_content_box, .. }| {
-        let fit = new_content_box.width() >= width;
-        if fits.get_untracked() != fit {
-            fits.set(fit);
-        }
-    })
+    .on_event_cont(
+        LayoutChanged::listener(),
+        move |_,
+              LayoutChanged {
+                  new_content_box, ..
+              }| {
+            let fit = new_content_box.width() >= width;
+            if fits.get_untracked() != fit {
+                fits.set(fit);
+            }
+        },
+    )
     .on_event_stop(el::PointerWheel, move |_, wheel| {
         let size = viewport.get_untracked().size();
         let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
@@ -532,12 +634,21 @@ fn divider_bar(
             // so the gutter's own edge shows, and the rest tinted for the
             // same reason the label's container is.
             let base = Stack::horizontal((
-                Empty::new().style(|s| s.width(theme::GUTTER_WIDTH).height_full().flex_shrink(0.0_f32)),
-                Empty::new().style(|s| s.flex_grow(1.0_f32).height_full().background(theme::DIFF_DIVIDER_BG)),
+                Empty::new().style(|s| {
+                    s.width(theme::GUTTER_WIDTH)
+                        .height_full()
+                        .flex_shrink(0.0_f32)
+                }),
+                Empty::new().style(|s| {
+                    s.flex_grow(1.0_f32)
+                        .height_full()
+                        .background(theme::DIFF_DIVIDER_BG)
+                }),
             ))
             .on_event_stop(el::PointerWheel, move |_, wheel| {
                 let size = viewport.get_untracked().size();
-                let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
+                let delta =
+                    wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
                 // Down the file is the head side's; across is the
                 // base side's own.
                 scroll_delta.set(Vec2::new(0.0, -delta.y));
@@ -548,10 +659,19 @@ fn divider_bar(
                 records_hover(state, row, base),
                 Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32)),
                 Stack::horizontal((
-                    Empty::new().style(|s| s.width(theme::GUTTER_WIDTH).height_full().flex_shrink(0.0_f32)),
+                    Empty::new().style(|s| {
+                        s.width(theme::GUTTER_WIDTH)
+                            .height_full()
+                            .flex_shrink(0.0_f32)
+                    }),
                     label,
                 ))
-                .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0).height_full()),
+                .style(|s| {
+                    s.flex_basis(0.0)
+                        .flex_grow(1.0_f32)
+                        .min_width(0.0)
+                        .height_full()
+                }),
             ))
             .into_any()
         }
@@ -560,7 +680,11 @@ fn divider_bar(
         // Read live, as the gutter reads its offset: the bar outlives a
         // scroll, and a position captured when it was built would not.
         let top = row as f64 * line_height - viewport.get().y0;
-        s.absolute().inset_top(top).inset_left(0.0).width_full().height(line_height)
+        s.absolute()
+            .inset_top(top)
+            .inset_left(0.0)
+            .width_full()
+            .height(line_height)
     })
 }
 
@@ -574,16 +698,22 @@ fn divider_label_width(label: &str) -> f64 {
     use floem::text::{Attrs, AttrsList, FamilyOwned, TextLayout};
     let family: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
     let mut layout = TextLayout::new();
-    layout.set_text(label, AttrsList::new(Attrs::new().family(&family).font_size(DIVIDER_LABEL_SIZE)), None);
+    layout.set_text(
+        label,
+        AttrsList::new(Attrs::new().family(&family).font_size(DIVIDER_LABEL_SIZE)),
+        None,
+    );
     layout.size().width
 }
 
 /// A part of a divider's bar that records the pointer as the gutter's row
 /// does, so that the controls show while the pointer is on the row.
 fn records_hover(state: ReviewState, row: usize, part: impl IntoView + 'static) -> impl IntoView {
-    part.on_event_cont(el::PointerEnter, move |cx, _| state.enter_row(cx.target, row))
-        .on_event_cont(el::PointerLeave, move |cx, _| state.leave_row(cx.target))
-        .style(|s| s.pointer_events_auto())
+    part.on_event_cont(el::PointerEnter, move |cx, _| {
+        state.enter_row(cx.target, row)
+    })
+    .on_event_cont(el::PointerLeave, move |cx, _| state.leave_row(cx.target))
+    .style(|s| s.pointer_events_auto())
 }
 
 /// What a card in the layer is built from: a thread of the reader's own,
@@ -618,7 +748,10 @@ impl CardItem {
         match self {
             CardItem::Thread(t) => format!("thread:{}:{}:{}", t.id, t.outdated, t.messages.len()),
             CardItem::GitHub(t) => {
-                let edited = std::iter::once(&t.comment).chain(t.replies.iter()).filter_map(|c| c.updated_at).max();
+                let edited = std::iter::once(&t.comment)
+                    .chain(t.replies.iter())
+                    .filter_map(|c| c.updated_at)
+                    .max();
                 format!("github:{}:{}:{edited:?}", t.comment.id, t.replies.len())
             }
             CardItem::Composer(c) => format!("composer:{}", c.opening),
@@ -665,23 +798,42 @@ fn card_layer(
         let github = state.github_threads_in(&path);
         let composer = state.composer.with(|c| {
             c.as_ref()
-                .filter(|c| c.thread_id.is_none() && c.anchor.as_ref().is_some_and(|a| a.path == path))
+                .filter(|c| {
+                    c.thread_id.is_none() && c.anchor.as_ref().is_some_and(|a| a.path == path)
+                })
                 .cloned()
         });
         state.comment_threads.with(|threads| {
             ids.into_iter()
                 .filter_map(|id| match &id {
-                    CardId::Thread(thread_id) => threads.iter().find(|t| t.id == *thread_id).cloned().map(CardItem::Thread),
-                    CardId::GitHub(comment_id) => {
-                        github.iter().find(|t| t.comment.id == *comment_id).cloned().map(CardItem::GitHub)
-                    }
+                    CardId::Thread(thread_id) => threads
+                        .iter()
+                        .find(|t| t.id == *thread_id)
+                        .cloned()
+                        .map(CardItem::Thread),
+                    CardId::GitHub(comment_id) => github
+                        .iter()
+                        .find(|t| t.comment.id == *comment_id)
+                        .cloned()
+                        .map(CardItem::GitHub),
                     CardId::Composer => composer.clone().map(CardItem::Composer),
                 })
                 .collect::<Vec<_>>()
         })
     };
     let stack = dyn_stack(cards, CardItem::key, move |item| {
-        inline_card(app, state, backend.clone(), open_file.clone(), doc, viewport, scroll_delta, scroll_to, item, left)
+        inline_card(
+            app,
+            state,
+            backend.clone(),
+            open_file.clone(),
+            doc,
+            viewport,
+            scroll_delta,
+            scroll_to,
+            item,
+            left,
+        )
     })
     .style(|s| s.size_full());
 
@@ -738,7 +890,10 @@ fn inline_card(
             return;
         };
         let vp = viewport.get_untracked();
-        let (top, bottom) = (span.start as f64 * line_height, span.end as f64 * line_height);
+        let (top, bottom) = (
+            span.start as f64 * line_height,
+            span.end as f64 * line_height,
+        );
         if let Some(y) = scroll_for_card(vp, top, bottom, line_height) {
             scroll_to.set(Some(Vec2::new(vp.x0, y)));
         }
@@ -746,26 +901,35 @@ fn inline_card(
 
     let view = match item {
         CardItem::Thread(thread) => {
-            threads::thread_card(app, state, backend, open_file, thread, ThreadFace::Inline).into_any()
+            threads::thread_card(app, state, backend, open_file, thread, ThreadFace::Inline)
+                .into_any()
         }
-        CardItem::GitHub(thread) => cards::line_thread_block(app, state, backend, open_file, thread, ThreadFace::Inline),
-        CardItem::Composer(composer) => threads::composer_view(app, state, backend, composer, ThreadFace::Inline).into_any(),
+        CardItem::GitHub(thread) => {
+            cards::line_thread_block(app, state, backend, open_file, thread, ThreadFace::Inline)
+        }
+        CardItem::Composer(composer) => {
+            threads::composer_view(app, state, backend, composer, ThreadFace::Inline).into_any()
+        }
     };
     let measured_id = card_id.clone();
     view.debug_name(name)
-        .on_event_stop(LayoutChanged::listener(), move |_, LayoutChanged { new_box, .. }| {
-            if state.is_collapsed(&measured_id) {
-                return;
-            }
-            let rows = rows_for_height(new_box.height(), line_height, theme::CARD_INSET);
-            let has = doc.with_untracked(|d| d.card_span(&measured_id).map(|span| span.len()));
-            if has.is_some_and(|has| has != rows) {
-                state.set_card_rows(&measured_id, rows);
-            }
-        })
+        .on_event_stop(
+            LayoutChanged::listener(),
+            move |_, LayoutChanged { new_box, .. }| {
+                if state.is_collapsed(&measured_id) {
+                    return;
+                }
+                let rows = rows_for_height(new_box.height(), line_height, theme::CARD_INSET);
+                let has = doc.with_untracked(|d| d.card_span(&measured_id).map(|span| span.len()));
+                if has.is_some_and(|has| has != rows) {
+                    state.set_card_rows(&measured_id, rows);
+                }
+            },
+        )
         .on_event_stop(el::PointerWheel, move |_, wheel| {
             let size = viewport.get_untracked().size();
-            let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
+            let delta =
+                wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
             scroll_delta.set(Vec2::new(-delta.x, -delta.y));
         })
         .style(move |s| {
@@ -773,7 +937,11 @@ fn inline_card(
             // a scroll and an edit above it, and a position captured when
             // it was built would not.
             let row = doc.with(|d| d.first_spacer_row(&card_id)).unwrap_or(0);
-            let inset = if state.is_collapsed(&card_id) { 0.0 } else { theme::CARD_INSET };
+            let inset = if state.is_collapsed(&card_id) {
+                0.0
+            } else {
+                theme::CARD_INSET
+            };
             let top = row as f64 * line_height - viewport.get().y0 + inset;
             s.absolute()
                 .inset_top(top)
@@ -841,7 +1009,10 @@ fn split_view(
     open_file: OpenFile,
 ) -> impl IntoView {
     let (left_text, right_text) = (split.0.text.clone(), split.1.text.clone());
-    let (left_doc, right_doc) = (RwSignal::new(Arc::new(split.0)), RwSignal::new(Arc::new(split.1)));
+    let (left_doc, right_doc) = (
+        RwSignal::new(Arc::new(split.0)),
+        RwSignal::new(Arc::new(split.1)),
+    );
     let line_height = theme::CODE_LINE_HEIGHT as f64;
 
     // Distinct cache keys, in case the two ever share a layout cache.
@@ -855,19 +1026,41 @@ fn split_view(
     });
     let right = code_editor(
         right_text,
-        PerchStyling::side(file.clone(), Side::Head, right_doc, epoch.wrapping_mul(2) + 1),
+        PerchStyling::side(
+            file.clone(),
+            Side::Head,
+            right_doc,
+            epoch.wrapping_mul(2) + 1,
+        ),
     );
-    let left_live = LiveDoc { handle: left.doc(), doc: left_doc };
-    let right_live = LiveDoc { handle: right.doc(), doc: right_doc };
+    let left_live = LiveDoc {
+        handle: left.doc(),
+        doc: left_doc,
+    };
+    let right_live = LiveDoc {
+        handle: right.doc(),
+        doc: right_doc,
+    };
     state.docs.set(Some(LiveDocs {
         epoch,
-        layout: LiveLayout::Split { left: left_live.clone(), right: right_live.clone() },
+        layout: LiveLayout::Split {
+            left: left_live.clone(),
+            right: right_live.clone(),
+        },
     }));
 
-    let (left_viewport, left_scroll_to, left_delta, left_cursor) =
-        (left.editor().viewport, left.editor().scroll_to, left.editor().scroll_delta, left.editor().cursor);
-    let (right_viewport, right_scroll_to, right_delta, right_cursor) =
-        (right.editor().viewport, right.editor().scroll_to, right.editor().scroll_delta, right.editor().cursor);
+    let (left_viewport, left_scroll_to, left_delta, left_cursor) = (
+        left.editor().viewport,
+        left.editor().scroll_to,
+        left.editor().scroll_delta,
+        left.editor().cursor,
+    );
+    let (right_viewport, right_scroll_to, right_delta, right_cursor) = (
+        right.editor().viewport,
+        right.editor().scroll_to,
+        right.editor().scroll_delta,
+        right.editor().cursor,
+    );
     // Where an edit last moved each cursor to; only the right's is read,
     // since only the right's cursor is wired.
     let (left_shifted, right_shifted) = (RwSignal::new(None), RwSignal::new(None));
@@ -877,16 +1070,41 @@ fn split_view(
     wire_folds(state, file.clone(), memos, epoch, {
         let file = file.clone();
         move |inputs: &Inputs| {
-            let Some((new_left, new_right)) =
-                split_doc(&file, inputs.folded, &inputs.anchors, &inputs.reveals, &inputs.cards)
-            else {
+            let Some((new_left, new_right)) = split_doc(
+                &file,
+                inputs.folded,
+                &inputs.anchors,
+                &inputs.reveals,
+                &inputs.cards,
+            ) else {
                 return;
             };
-            apply(&right_live, new_right, right_viewport, right_scroll_to, right_cursor, right_shifted);
-            apply(&left_live, new_left, left_viewport, left_scroll_to, left_cursor, left_shifted);
+            apply(
+                &right_live,
+                new_right,
+                right_viewport,
+                right_scroll_to,
+                right_cursor,
+                right_shifted,
+            );
+            apply(
+                &left_live,
+                new_left,
+                left_viewport,
+                left_scroll_to,
+                left_cursor,
+                left_shifted,
+            );
         }
     });
-    wire_cursor(state, backend.clone(), file.clone(), right_doc, right_cursor, right_shifted);
+    wire_cursor(
+        state,
+        backend.clone(),
+        file.clone(),
+        right_doc,
+        right_cursor,
+        right_shifted,
+    );
     wire_jump(state, file.clone(), right_doc, right_scroll_to, epoch);
 
     // The left follows the right down the file. Sideways it keeps its own
@@ -902,25 +1120,52 @@ fn split_view(
     SPLIT_VIEWPORTS.with(|v| v.set(Some((left_viewport, right_viewport))));
 
     let left_pane = Stack::horizontal((
-        side_gutter(state, app, file.clone(), Side::Base, left_doc, left_viewport, right_delta),
+        side_gutter(
+            state,
+            app,
+            file.clone(),
+            Side::Base,
+            left_doc,
+            left_viewport,
+            right_delta,
+        ),
         Container::new(left)
             .on_event_stop(el::PointerWheel, move |_, wheel| {
                 let size = left_viewport.get_untracked().size();
-                let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
+                let delta =
+                    wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
                 // Down the file is the right's; across is the left's own.
                 right_delta.set(Vec2::new(0.0, -delta.y));
                 left_delta.set(Vec2::new(-delta.x, 0.0));
             })
             .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full()),
     ))
-    .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0).height_full());
+    .style(|s| {
+        s.flex_basis(0.0)
+            .flex_grow(1.0_f32)
+            .min_width(0.0)
+            .height_full()
+    });
 
     let path = file.path.clone();
     let right_pane = Stack::horizontal((
-        side_gutter(state, app, file, Side::Head, right_doc, right_viewport, right_delta),
+        side_gutter(
+            state,
+            app,
+            file,
+            Side::Head,
+            right_doc,
+            right_viewport,
+            right_delta,
+        ),
         right,
     ))
-    .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0).height_full());
+    .style(|s| {
+        s.flex_basis(0.0)
+            .flex_grow(1.0_f32)
+            .min_width(0.0)
+            .height_full()
+    });
 
     // The layers are placed against the outer stack, so it takes the
     // relative position; the bars are set into it where the head side is,
@@ -928,9 +1173,22 @@ fn split_view(
     // past its gutter.
     Stack::horizontal((
         left_pane,
-        Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32).background(theme::BORDER)),
+        Empty::new().style(|s| {
+            s.width(1.0)
+                .height_full()
+                .flex_shrink(0.0_f32)
+                .background(theme::BORDER)
+        }),
         right_pane,
-        divider_layer(state, right_doc, right_viewport, right_delta, Bars::HeadSide { base_delta: left_delta }),
+        divider_layer(
+            state,
+            right_doc,
+            right_viewport,
+            right_delta,
+            Bars::HeadSide {
+                base_delta: left_delta,
+            },
+        ),
         card_layer(
             app,
             state,
@@ -1023,15 +1281,19 @@ fn wire_cursor(
         // is a one-line selection. Rows that are no line at all fall out,
         // and a selection of nothing but those is no selection.
         let (lo, hi) = cursor.with(|c| {
-            c.mode.regions_iter().fold((usize::MAX, 0usize), |(lo, hi), (a, b, _)| {
-                (lo.min(a.min(b)), hi.max(a.max(b)))
-            })
+            c.mode
+                .regions_iter()
+                .fold((usize::MAX, 0usize), |(lo, hi), (a, b, _)| {
+                    (lo.min(a.min(b)), hi.max(a.max(b)))
+                })
         });
         if lo != usize::MAX {
             let (first_row, _) = hover::line_col_of_offset(doc.text(), lo);
             let (last_row, _) = hover::line_col_of_offset(doc.text(), hi);
             let first = (first_row..=last_row).find_map(|r| doc.display_line(r));
-            let last = (first_row..=last_row).rev().find_map(|r| doc.display_line(r));
+            let last = (first_row..=last_row)
+                .rev()
+                .find_map(|r| doc.display_line(r));
             state.selection.set(first.zip(last));
         }
 
@@ -1076,7 +1338,10 @@ fn wire_jump(
         }
         state.jump_to_line.set(None);
         let mut row = doc.with_untracked(|d| d.row_of_head(head_line));
-        if row.is_none() && state.folded.get_untracked() && file.buffer.display_line(head_line).is_some() {
+        if row.is_none()
+            && state.folded.get_untracked()
+            && file.buffer.display_line(head_line).is_some()
+        {
             // The reveal reaches the editor before this returns: the
             // effect that rebuilds the document runs on the write.
             state.reveal(
@@ -1092,7 +1357,10 @@ fn wire_jump(
         // Land the target a few lines below the top rather than flush
         // against it, so its context is visible.
         let target = row.saturating_sub(4) as f64;
-        scroll_to.set(Some(Vec2::new(0.0, target * theme::CODE_LINE_HEIGHT as f64)));
+        scroll_to.set(Some(Vec2::new(
+            0.0,
+            target * theme::CODE_LINE_HEIGHT as f64,
+        )));
     });
 }
 
@@ -1170,8 +1438,12 @@ fn panel_body(state: ReviewState, backend: Rc<Backend>, text: String) -> impl In
 
 fn definition_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     panel_button("Go to definition", move || {
-        let Some(file) = state.active_file() else { return };
-        let Some(position) = state.last_position.get() else { return };
+        let Some(file) = state.active_file() else {
+            return;
+        };
+        let Some(position) = state.last_position.get() else {
+            return;
+        };
         let token = state.next_token();
         backend.definition(token, &file.path, position.0 as u32, position.1 as u32);
     })
@@ -1181,22 +1453,28 @@ fn definition_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView 
 /// definition button does.
 fn references_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     panel_button("Find references", move || {
-        let Some((line, column)) = state.last_position.get() else { return };
+        let Some((line, column)) = state.last_position.get() else {
+            return;
+        };
         references::find(state, &backend, line, Some(column));
     })
 }
 
 /// A text button in the panel's header row.
 fn panel_button(text: &'static str, on_click: impl Fn() + 'static) -> impl IntoView {
-    Container::new(Label::derived(move || text.to_string()).style(|s| {
-        s.font_size(theme::TEXT_BADGE).color(theme::ACCENT)
-    }))
+    Container::new(
+        Label::derived(move || text.to_string())
+            .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::ACCENT)),
+    )
     .on_event_stop(el::Click, move |_, _| on_click())
     .style(|s| {
         s.padding_horiz(8.0)
             .padding_vert(2.0)
             .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::ACCENT_SUBTLE).cursor(CursorStyle::Pointer))
+            .hover(|s| {
+                s.background(theme::ACCENT_SUBTLE)
+                    .cursor(CursorStyle::Pointer)
+            })
     })
 }
 
@@ -1218,9 +1496,8 @@ fn dismiss_button(state: ReviewState) -> impl IntoView {
 fn loading_view(path: String) -> impl IntoView {
     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
     Container::new(
-        Label::derived(move || format!("Opening {name}…")).style(|s| {
-            s.font_size(theme::TEXT_BODY).color(theme::FG_MUTED)
-        }),
+        Label::derived(move || format!("Opening {name}…"))
+            .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG_MUTED)),
     )
     .style(|s| s.size_full().items_center().justify_center())
 }
@@ -1249,7 +1526,10 @@ mod tests {
             perch_git::Scope::Branch,
             String::new(),
         );
-        assert!(split_of(&added).is_none(), "an added file has nothing on the left");
+        assert!(
+            split_of(&added).is_none(),
+            "an added file has nothing on the left"
+        );
 
         let plain = crate::backend::build_loaded_file(
             "lib.rs".into(),
@@ -1260,7 +1540,10 @@ mod tests {
             perch_git::Scope::Branch,
             String::new(),
         );
-        assert!(split_of(&plain).is_none(), "a file outside the changed list is shown plainly");
+        assert!(
+            split_of(&plain).is_none(),
+            "a file outside the changed list is shown plainly"
+        );
 
         let binary = crate::backend::build_loaded_file(
             "a.png".into(),
@@ -1304,7 +1587,11 @@ mod tests {
         let (_, right) = split_of(&file).unwrap();
         assert_eq!(right.display_line(1), Some(2));
         assert_eq!(right.display_line(3), None);
-        assert_eq!(right.nearest_display_line(3), Some(3), "the row above, c, when nothing follows");
+        assert_eq!(
+            right.nearest_display_line(3),
+            Some(3),
+            "the row above, c, when nothing follows"
+        );
         assert_eq!(right.row_of_head(2), Some(2));
         // And the stacked document over the same file is the buffer.
         let stacked = doc::build(&file.buffer, &[], &[]);
@@ -1328,7 +1615,11 @@ mod tests {
         // A thread on line 11 would split the file into two runs, were it
         // a changed file; there is no change to fold around, so it is not.
         let anchors = [(10, 10)];
-        assert_eq!(doc::runs(&plain.buffer, &anchors).len(), 2, "the runs are there to fold");
+        assert_eq!(
+            doc::runs(&plain.buffer, &anchors).len(),
+            2,
+            "the runs are there to fold"
+        );
         let doc = stacked_doc(&plain, true, &anchors, &Reveals::default(), &[]);
         assert!(doc.folds.is_empty());
         assert_eq!(doc.hidden_lines(), 0);
@@ -1362,7 +1653,11 @@ mod tests {
         let (top, bottom) = card(4.0, 5.0);
         assert_eq!(scroll_for_card(vp, top, bottom, lh), Some(3.0 * lh));
         let (top, bottom) = card(0.0, 5.0);
-        assert_eq!(scroll_for_card(vp, top, bottom, lh), Some(0.0), "never above the file");
+        assert_eq!(
+            scroll_for_card(vp, top, bottom, lh),
+            Some(0.0),
+            "never above the file"
+        );
         // Below, or hanging out of the bottom: up to the bottom.
         let (top, bottom) = card(40.0, 5.0);
         assert_eq!(scroll_for_card(vp, top, bottom, lh), Some(25.0 * lh));
@@ -1389,8 +1684,15 @@ mod tests {
         let step_over = |px: f64| f64::from(f32::from_bits((px as f32).to_bits() + 1));
         assert!(step_over(five) > five);
         assert_eq!(rows_for_height(step_over(five), lh, inset), 5);
-        assert_eq!(rows_for_height(step_over(11.0 * lh - 2.0 * inset), lh, inset), 11);
-        assert_eq!(rows_for_height(five + 0.01, lh, inset), 6, "a hundredth of a pixel is a real height");
+        assert_eq!(
+            rows_for_height(step_over(11.0 * lh - 2.0 * inset), lh, inset),
+            11
+        );
+        assert_eq!(
+            rows_for_height(five + 0.01, lh, inset),
+            6,
+            "a hundredth of a pixel is a real height"
+        );
         // Never fewer than one, however little is there.
         assert_eq!(rows_for_height(0.0, lh, inset), 1);
         assert_eq!(rows_for_height(lh - 2.0 * inset, lh, inset), 1);
@@ -1399,7 +1701,10 @@ mod tests {
         let cap = doc::CARD_MAX_ROWS as f64 * lh - 2.0 * inset;
         assert_eq!(rows_for_height(cap, lh, inset), doc::CARD_MAX_ROWS);
         assert_eq!(rows_for_height(cap - lh, lh, inset), doc::CARD_MAX_ROWS - 1);
-        assert_eq!(rows_for_height(cap + 100.0 * lh, lh, inset), doc::CARD_MAX_ROWS);
+        assert_eq!(
+            rows_for_height(cap + 100.0 * lh, lh, inset),
+            doc::CARD_MAX_ROWS
+        );
     }
 }
 
@@ -1486,7 +1791,10 @@ mod window {
         state.jump_to_line.set(Some(40));
         harness.rebuild();
         harness.paint();
-        assert!(state.jump_to_line.get().is_none(), "the split's right editor took the jump");
+        assert!(
+            state.jump_to_line.get().is_none(),
+            "the split's right editor took the jump"
+        );
 
         state.layout.set(Layout::Stacked);
         harness.rebuild();
@@ -1502,7 +1810,10 @@ mod window {
     #[test]
     fn every_editor_registers_its_live_document_for_the_epoch_it_was_built_in() {
         let (mut harness, state) = harness();
-        let docs = state.docs.get().expect("the stacked editor registered its document");
+        let docs = state
+            .docs
+            .get()
+            .expect("the stacked editor registered its document");
         assert_eq!(docs.epoch, state.editor_epoch.get());
         let LiveLayout::Stacked(live) = docs.layout else {
             panic!("the stacked layout holds one document");
@@ -1516,12 +1827,19 @@ mod window {
         state.layout.set(Layout::Split);
         harness.rebuild();
         harness.paint();
-        let docs = state.docs.get().expect("the split registered both documents");
+        let docs = state
+            .docs
+            .get()
+            .expect("the split registered both documents");
         assert_eq!(docs.epoch, state.editor_epoch.get());
         let LiveLayout::Split { left, right } = docs.layout else {
             panic!("the split layout holds two documents");
         };
-        assert_eq!(left.doc.get().len(), right.doc.get().len(), "the two sides are the same height");
+        assert_eq!(
+            left.doc.get().len(),
+            right.doc.get().len(),
+            "the two sides are the same height"
+        );
         assert_eq!(right.doc.get().len(), 90);
         assert_eq!(laid_out_text(&left), left.doc.get().text);
         assert_eq!(laid_out_text(&right), right.doc.get().text);
@@ -1536,7 +1854,9 @@ mod window {
     /// Where the two editors sit: the activity rail, the sidebar and the
     /// file rail on the left, then the rest of the window in halves.
     fn pane_centers() -> (f64, f64, f64) {
-        let left_edge = crate::theme::ACTIVITY_RAIL_WIDTH + crate::theme::SIDEBAR_WIDTH + crate::theme::RAIL_WIDTH;
+        let left_edge = crate::theme::ACTIVITY_RAIL_WIDTH
+            + crate::theme::SIDEBAR_WIDTH
+            + crate::theme::RAIL_WIDTH;
         let half = (1400.0 - left_edge) / 2.0;
         let y = crate::theme::REVIEW_HEADER_HEIGHT + 2.0 * crate::theme::TAB_HEIGHT + 300.0;
         (left_edge + half * 0.6, left_edge + half * 1.6, y)
@@ -1548,7 +1868,9 @@ mod window {
         state.layout.set(Layout::Split);
         harness.rebuild();
         harness.paint();
-        let (left, right) = super::SPLIT_VIEWPORTS.with(|v| v.get()).expect("a split was built");
+        let (left, right) = super::SPLIT_VIEWPORTS
+            .with(|v| v.get())
+            .expect("a split was built");
         let (x_left, x_right, y) = pane_centers();
 
         // The wheel over the right moves the right, and the left follows.
@@ -1564,7 +1886,10 @@ mod window {
         harness.scroll_down(x_left, y, 100.0);
         harness.rebuild();
         harness.paint();
-        assert!(right.get().y0 > before, "a wheel over the left did not scroll the right");
+        assert!(
+            right.get().y0 > before,
+            "a wheel over the left did not scroll the right"
+        );
         assert_eq!(left.get().y0, right.get().y0);
 
         // And a jump lands both on the same row.
@@ -1572,7 +1897,10 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert_eq!(left.get().y0, right.get().y0);
-        assert_eq!(right.get().y0, (60.0 - 4.0) * crate::theme::CODE_LINE_HEIGHT as f64);
+        assert_eq!(
+            right.get().y0,
+            (60.0 - 4.0) * crate::theme::CODE_LINE_HEIGHT as f64
+        );
     }
 
     /// The left takes no pointer events, so a click there moves no cursor
@@ -1605,7 +1933,9 @@ mod window {
             Layout::Split => 1400.0 - 8.0 - tile / 2.0,
             Layout::Stacked => 1400.0 - 8.0 - tile - 2.0 - tile / 2.0,
         };
-        let y = crate::theme::REVIEW_HEADER_HEIGHT + crate::theme::TAB_HEIGHT + crate::theme::TAB_HEIGHT / 2.0;
+        let y = crate::theme::REVIEW_HEADER_HEIGHT
+            + crate::theme::TAB_HEIGHT
+            + crate::theme::TAB_HEIGHT / 2.0;
         (x, y)
     }
 
@@ -1617,7 +1947,11 @@ mod window {
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.layout.get(), Layout::Split, "click at ({x}, {y}) over {under:?} did not split");
+        assert_eq!(
+            state.layout.get(),
+            Layout::Split,
+            "click at ({x}, {y}) over {under:?} did not split"
+        );
 
         let (x, y) = tile_center(Layout::Stacked);
         harness.click(x, y);
@@ -1631,7 +1965,15 @@ mod window {
     fn fold_tile_center() -> (f64, f64) {
         let (stacked, y) = tile_center(Layout::Stacked);
         let tile = crate::theme::LAYOUT_TILE;
-        (stacked - tile / 2.0 - crate::theme::TILE_RULE_GAP - 1.0 - crate::theme::TILE_RULE_GAP - tile / 2.0, y)
+        (
+            stacked
+                - tile / 2.0
+                - crate::theme::TILE_RULE_GAP
+                - 1.0
+                - crate::theme::TILE_RULE_GAP
+                - tile / 2.0,
+            y,
+        )
     }
 
     /// A pull request for the item, so the status bar draws the review's
@@ -1695,18 +2037,29 @@ mod window {
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert!(!state.folded.get(), "click at ({x}, {y}) over {under:?} did not show the files whole");
+        assert!(
+            !state.folded.get(),
+            "click at ({x}, {y}) over {under:?} did not show the files whole"
+        );
         let doc = live.doc.get();
         assert_eq!(doc.len(), 64 + 72, "every line, no divider");
         assert!(doc.folds.is_empty());
-        assert_eq!(state.hidden_lines(), 0, "nothing hidden, so the status line says nothing");
+        assert_eq!(
+            state.hidden_lines(),
+            0,
+            "nothing hidden, so the status line says nothing"
+        );
         assert_eq!(laid_out_text(&live), doc.text);
 
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
         assert!(state.folded.get());
-        assert_eq!(live.doc.get().len(), 103, "folded again, with the reveal as it was");
+        assert_eq!(
+            live.doc.get().len(),
+            103,
+            "folded again, with the reveal as it was"
+        );
         assert_eq!(state.hidden_lines(), 34);
         assert_eq!(laid_out_text(&live), live.doc.get().text);
     }
@@ -1723,7 +2076,11 @@ mod window {
     /// enough to scroll: one run of fifty-four behind a divider at row 5,
     /// with Up and Down, and nothing else folded.
     fn one_long_run() -> (HeadlessHarness, ReviewState) {
-        let blocks = |word: &str| (0..12).map(|i| format!("{word}{i}\n{}", context(60 + i * 4, 4))).collect::<String>();
+        let blocks = |word: &str| {
+            (0..12)
+                .map(|i| format!("{word}{i}\n{}", context(60 + i * 4, 4)))
+                .collect::<String>()
+        };
         harness_with(
             format!("new top\n{}new bottom\n{}", context(0, 60), blocks("new")),
             format!("old top\n{}old bottom\n{}", context(0, 60), blocks("old")),
@@ -1768,7 +2125,9 @@ mod window {
         let run = doc.run_of(5).expect("row 5 is the divider");
         assert_eq!(run.len(), 54);
         assert_eq!(laid_out_text(&live), doc.text);
-        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        let viewport = super::STACKED_VIEWPORT
+            .with(|v| v.get())
+            .expect("a stacked editor was built");
         let y0 = viewport.get().y0;
 
         // The controls show while the row is hovered: Up and Down, 16
@@ -1780,19 +2139,41 @@ mod window {
         harness.pointer_move(x, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.hovered_line.get(), Some(5), "the divider's gutter row records the pointer");
+        assert_eq!(
+            state.hovered_line.get(),
+            Some(5),
+            "the divider's gutter row records the pointer"
+        );
         let under = harness.element_id_at(x, y);
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
 
         let doc = live.doc.get();
-        assert_eq!(doc.len(), 83 + 20, "click at ({x}, {y}) over {under:?} did not reveal twenty lines");
-        assert_eq!(doc.run_of(5).map(|r| r.len()), Some(34), "the divider stays, hiding twenty fewer");
-        assert_eq!(doc.row_of_head(38), Some(6), "the first revealed line follows the divider");
-        assert_eq!(laid_out_text(&live), doc.text, "the editor's text is the document's");
+        assert_eq!(
+            doc.len(),
+            83 + 20,
+            "click at ({x}, {y}) over {under:?} did not reveal twenty lines"
+        );
+        assert_eq!(
+            doc.run_of(5).map(|r| r.len()),
+            Some(34),
+            "the divider stays, hiding twenty fewer"
+        );
+        assert_eq!(
+            doc.row_of_head(38),
+            Some(6),
+            "the first revealed line follows the divider"
+        );
+        assert_eq!(
+            laid_out_text(&live),
+            doc.text,
+            "the editor's text is the document's"
+        );
         assert_eq!(viewport.get().y0, y0, "the viewport did not move");
-        assert!(state.reveals_for("src/x.rs", "").overlaps(run.default_heads.0, run.default_heads.1));
+        assert!(state
+            .reveals_for("src/x.rs", "")
+            .overlaps(run.default_heads.0, run.default_heads.1));
     }
 
     /// An unshifted bracket key, as the window receives it.
@@ -1844,10 +2225,17 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.cursor_line.get(), 62);
-        assert!(state.jump_to_line.get().is_none(), "the editor took the jump");
+        assert!(
+            state.jump_to_line.get().is_none(),
+            "the editor took the jump"
+        );
         assert_eq!(live.doc.get().row_of_head(61), Some(11));
         assert_eq!(viewport.get().y0, (11.0 - 4.0) * line_height);
-        assert_eq!(live.doc.get().len(), 83, "a change is never folded, so nothing was revealed");
+        assert_eq!(
+            live.doc.get().len(),
+            83,
+            "a change is never folded, so nothing was revealed"
+        );
 
         harness.dispatch_event(bracket(false));
         harness.rebuild();
@@ -1861,12 +2249,23 @@ mod window {
         // A hundred unchanged lines, then eight changes four lines apart:
         // the run at the top folds from line one, and the rest is long
         // enough to scroll.
-        let blocks = |word: &str| (0..8).map(|i| format!("{word}{i}\n{}", context(100 + i * 4, 4))).collect::<String>();
-        let (head, base) = (format!("{}{}", context(0, 100), blocks("new")), format!("{}{}", context(0, 100), blocks("old")));
+        let blocks = |word: &str| {
+            (0..8)
+                .map(|i| format!("{word}{i}\n{}", context(100 + i * 4, 4)))
+                .collect::<String>()
+        };
+        let (head, base) = (
+            format!("{}{}", context(0, 100), blocks("new")),
+            format!("{}{}", context(0, 100), blocks("old")),
+        );
         let (mut harness, state) = harness_with(head, base);
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
-        let run = live.doc.get().run_of(0).expect("the top run folds from line one");
+        let run = live
+            .doc
+            .get()
+            .run_of(0)
+            .expect("the top run folds from line one");
         assert_eq!(run.len(), 97);
         let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
 
@@ -1875,7 +2274,10 @@ mod window {
         harness.rebuild();
         harness.paint();
         let before = viewport.get().y0;
-        assert!(before >= line_height, "the editor did not scroll past the divider");
+        assert!(
+            before >= line_height,
+            "the editor did not scroll past the divider"
+        );
         let first_row = (before / line_height).floor() as usize;
         let first_line = live.doc.get().display_line(first_row);
 
@@ -1884,9 +2286,17 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert_eq!(live.doc.get().len(), 52 + 20);
-        assert_eq!(viewport.get().y0, before + 20.0 * line_height, "the scroll moved by the rows added above it");
+        assert_eq!(
+            viewport.get().y0,
+            before + 20.0 * line_height,
+            "the scroll moved by the rows added above it"
+        );
         let doc = live.doc.get();
-        assert_eq!(doc.display_line(first_row + 20), first_line, "the same line is first in view");
+        assert_eq!(
+            doc.display_line(first_row + 20),
+            first_line,
+            "the same line is first in view"
+        );
     }
 
     /// Three changes fifty lines apart, then twelve four lines apart so
@@ -1895,7 +2305,11 @@ mod window {
     /// lines 5 to 48, 57 to 100 and 109 to 152 of 228, and the folded
     /// document's dividers are at rows 5, 14 and 23 of 99.
     fn three_runs() -> (HeadlessHarness, ReviewState) {
-        let blocks = |word: &str| (0..12).map(|i| format!("{word}{i}\n{}", context(150 + i * 4, 4))).collect::<String>();
+        let blocks = |word: &str| {
+            (0..12)
+                .map(|i| format!("{word}{i}\n{}", context(150 + i * 4, 4)))
+                .collect::<String>()
+        };
         harness_with(
             format!(
                 "new top\n{}new mid\n{}new bottom\n{}{}",
@@ -1919,7 +2333,9 @@ mod window {
         let (mut harness, state) = three_runs();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
-        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        let viewport = super::STACKED_VIEWPORT
+            .with(|v| v.get())
+            .expect("a stacked editor was built");
         let doc = live.doc.get();
         assert_eq!(doc.len(), 99);
         for row in [5, 14, 23] {
@@ -1934,8 +2350,13 @@ mod window {
         harness.paint();
         let before = viewport.get().y0;
         let first_row = (before / line_height).floor() as usize;
-        assert!((15..23).contains(&first_row), "the editor scrolled to row {first_row}, not between the dividers");
-        let first_line = doc.display_line(first_row).expect("a line is first in view");
+        assert!(
+            (15..23).contains(&first_row),
+            "the editor scrolled to row {first_row}, not between the dividers"
+        );
+        let first_line = doc
+            .display_line(first_row)
+            .expect("a line is first in view");
         let within = before - first_row as f64 * line_height;
 
         state.folded.set(false);
@@ -1945,7 +2366,11 @@ mod window {
         assert_eq!(doc.len(), 228, "every line, no divider");
         let row = doc.row_of_display(first_line).expect("every line is shown");
         assert_eq!(row, first_line);
-        assert_eq!(viewport.get().y0, row as f64 * line_height + within, "the same line is first in view");
+        assert_eq!(
+            viewport.get().y0,
+            row as f64 * line_height + within,
+            "the same line is first in view"
+        );
         assert_eq!(laid_out_text(&live), doc.text);
 
         state.folded.set(true);
@@ -1954,7 +2379,11 @@ mod window {
         let doc = live.doc.get();
         assert_eq!(doc.len(), 99);
         assert_eq!(doc.display_line(first_row), Some(first_line));
-        assert_eq!(viewport.get().y0, before, "folded again, the line is where it was");
+        assert_eq!(
+            viewport.get().y0,
+            before,
+            "folded again, the line is where it was"
+        );
     }
 
     #[test]
@@ -1991,7 +2420,11 @@ mod window {
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(live.doc.get().len(), 99, "click at ({x}, {y}) over {under:?} did not fold the run again");
+        assert_eq!(
+            live.doc.get().len(),
+            99,
+            "click at ({x}, {y}) over {under:?} did not fold the run again"
+        );
         assert!(state.reveals_for("src/x.rs", "").is_empty());
         assert_eq!(laid_out_text(&live), live.doc.get().text);
     }
@@ -2000,7 +2433,9 @@ mod window {
     fn a_reveal_above_the_cursor_moves_it_without_asking_about_its_symbol_again() {
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
-        let cursor = super::STACKED_CURSOR.with(|c| c.get()).expect("a stacked editor was built");
+        let cursor = super::STACKED_CURSOR
+            .with(|c| c.get())
+            .expect("a stacked editor was built");
         // The editor's cursor starts on row 0, a ghost, which is nowhere
         // in the head file: nothing was asked.
         assert_eq!(state.last_position.get(), None);
@@ -2016,8 +2451,16 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.last_position.get(), Some((61, 3)));
-        assert_eq!(state.request_token.get(), 1, "the symbol under the cursor was asked about");
-        assert_eq!(state.cursor_line.get(), 64, "new bottom is display line 64, after the pair's two ghosts");
+        assert_eq!(
+            state.request_token.get(),
+            1,
+            "the symbol under the cursor was asked about"
+        );
+        assert_eq!(
+            state.cursor_line.get(),
+            64,
+            "new bottom is display line 64, after the pair's two ghosts"
+        );
         state.hover_text.set(Some("fn new_bottom()".into()));
 
         // Down on the divider above: twenty lines come in above the cursor,
@@ -2035,7 +2478,11 @@ mod window {
         assert_eq!(state.cursor_line.get(), 64);
         assert_eq!(state.last_position.get(), Some((61, 3)));
         assert_eq!(state.request_token.get(), 1, "nothing was asked again");
-        assert_eq!(state.hover_text.get().as_deref(), Some("fn new_bottom()"), "the panel stays as it was");
+        assert_eq!(
+            state.hover_text.get().as_deref(),
+            Some("fn new_bottom()"),
+            "the panel stays as it was"
+        );
 
         // Reset folds them away again, moving the cursor back up: the same.
         state.reset("src/x.rs", "", &[run.default_heads]);
@@ -2073,12 +2520,18 @@ mod window {
         assert_eq!(left_doc.len(), right_doc.len());
         assert_eq!(right_doc.hidden_lines(), 3 * 44);
         for row in [4, 12, 20] {
-            assert_eq!(right_doc.run_of(row).map(|r| r.len()), left_doc.run_of(row).map(|r| r.len()), "row {row}");
+            assert_eq!(
+                right_doc.run_of(row).map(|r| r.len()),
+                left_doc.run_of(row).map(|r| r.len()),
+                "row {row}"
+            );
             assert!(right_doc.run_of(row).is_some(), "row {row} is a divider");
         }
         assert_eq!(laid_out_text(&left), left_doc.text);
         assert_eq!(laid_out_text(&right), right_doc.text);
-        let (left_viewport, right_viewport) = super::SPLIT_VIEWPORTS.with(|v| v.get()).expect("a split was built");
+        let (left_viewport, right_viewport) = super::SPLIT_VIEWPORTS
+            .with(|v| v.get())
+            .expect("a split was built");
         let y0 = right_viewport.get().y0;
 
         // The head side's gutter is at the right pane's left edge, past
@@ -2087,27 +2540,66 @@ mod window {
         // opens the run's last lines, which follow the divider.
         let (pane_left, top) = pane_origin();
         let right_gutter = pane_left + (1400.0 - pane_left - 1.0) / 2.0 + 1.0;
-        let (x, y) = (right_gutter + 26.0, top + 4.0 * line_height + line_height / 2.0);
+        let (x, y) = (
+            right_gutter + 26.0,
+            top + 4.0 * line_height + line_height / 2.0,
+        );
         harness.pointer_move(x, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.hovered_line.get(), Some(4), "the head side's divider row records the pointer");
+        assert_eq!(
+            state.hovered_line.get(),
+            Some(4),
+            "the head side's divider row records the pointer"
+        );
         let under = harness.element_id_at(x, y);
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
 
         let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
-        assert_eq!(right_doc.len(), 84 + 20, "click at ({x}, {y}) over {under:?} did not reveal twenty lines");
-        assert_eq!(left_doc.len(), right_doc.len(), "the base side grew with the head side");
-        assert_eq!(right_doc.run_of(4).map(|r| r.len()), Some(24), "the divider stays, hiding twenty fewer");
+        assert_eq!(
+            right_doc.len(),
+            84 + 20,
+            "click at ({x}, {y}) over {under:?} did not reveal twenty lines"
+        );
+        assert_eq!(
+            left_doc.len(),
+            right_doc.len(),
+            "the base side grew with the head side"
+        );
+        assert_eq!(
+            right_doc.run_of(4).map(|r| r.len()),
+            Some(24),
+            "the divider stays, hiding twenty fewer"
+        );
         assert_eq!(left_doc.run_of(4).map(|r| r.len()), Some(24));
-        assert_eq!(right_doc.row_of_head(28), Some(5), "the first revealed head line follows the divider");
-        assert_eq!(left_doc.display_line(5), Some(28), "beside its own base line");
-        assert_eq!(laid_out_text(&left), left_doc.text, "the left editor's text is its document's");
-        assert_eq!(laid_out_text(&right), right_doc.text, "the right editor's text is its document's");
+        assert_eq!(
+            right_doc.row_of_head(28),
+            Some(5),
+            "the first revealed head line follows the divider"
+        );
+        assert_eq!(
+            left_doc.display_line(5),
+            Some(28),
+            "beside its own base line"
+        );
+        assert_eq!(
+            laid_out_text(&left),
+            left_doc.text,
+            "the left editor's text is its document's"
+        );
+        assert_eq!(
+            laid_out_text(&right),
+            right_doc.text,
+            "the right editor's text is its document's"
+        );
         assert_eq!(right_viewport.get().y0, y0, "the viewport did not move");
-        assert_eq!(left_viewport.get().y0, right_viewport.get().y0, "the left is where the right is");
+        assert_eq!(
+            left_viewport.get().y0,
+            right_viewport.get().y0,
+            "the left is where the right is"
+        );
 
         // The base side's gutter has no controls: the same click there
         // reveals nothing.
@@ -2118,7 +2610,11 @@ mod window {
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(right.doc.get().len(), 104, "the base side's divider row is the tint alone");
+        assert_eq!(
+            right.doc.get().len(),
+            104,
+            "the base side's divider row is the tint alone"
+        );
         assert_eq!(left.doc.get().len(), 104);
 
         // The bar's label is over the head side's editor, and records the
@@ -2127,27 +2623,50 @@ mod window {
         harness.pointer_move(right_gutter + crate::theme::GUTTER_WIDTH + 100.0, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.hovered_line.get(), Some(4), "the label over the head side records the row");
+        assert_eq!(
+            state.hovered_line.get(),
+            Some(4),
+            "the label over the head side records the row"
+        );
         harness.pointer_move(pane_left + crate::theme::GUTTER_WIDTH + 100.0, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.hovered_line.get(), Some(4), "the bar over the base side records the row too");
+        assert_eq!(
+            state.hovered_line.get(),
+            Some(4),
+            "the bar over the base side records the row too"
+        );
 
         // A jump into the second run reveals around the target on both
         // sides and scrolls both to it.
-        assert_eq!(right.doc.get().row_of_head(80), None, "head line 80 is folded");
+        assert_eq!(
+            right.doc.get().row_of_head(80),
+            None,
+            "head line 80 is folded"
+        );
         state.jump_to_line.set(Some(80));
         harness.rebuild();
         harness.paint();
-        assert!(state.jump_to_line.get().is_none(), "the split's right editor took the jump");
+        assert!(
+            state.jump_to_line.get().is_none(),
+            "the split's right editor took the jump"
+        );
         let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
-        assert_eq!(right_doc.len(), 104 + 7 + 1, "seven lines and a second divider for the run's other piece");
+        assert_eq!(
+            right_doc.len(),
+            104 + 7 + 1,
+            "seven lines and a second divider for the run's other piece"
+        );
         assert_eq!(left_doc.len(), right_doc.len());
         let row = right_doc.row_of_head(80).expect("the target is shown");
         assert_eq!(left_doc.display_line(row), Some(80));
         assert_eq!(laid_out_text(&left), left_doc.text);
         assert_eq!(laid_out_text(&right), right_doc.text);
-        assert_eq!(right_viewport.get().y0, (row as f64 - 4.0) * line_height, "scrolled to the target");
+        assert_eq!(
+            right_viewport.get().y0,
+            (row as f64 - 4.0) * line_height,
+            "scrolled to the target"
+        );
         assert_eq!(left_viewport.get().y0, right_viewport.get().y0);
     }
 
@@ -2156,27 +2675,41 @@ mod window {
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
-        assert_eq!(live.doc.get().row_of_head(30), None, "head line 30 is folded");
+        assert_eq!(
+            live.doc.get().row_of_head(30),
+            None,
+            "head line 30 is folded"
+        );
         let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
 
         state.jump_to_line.set(Some(30));
         harness.rebuild();
         harness.paint();
-        assert!(state.jump_to_line.get().is_none(), "the editor took the jump");
+        assert!(
+            state.jump_to_line.get().is_none(),
+            "the editor took the jump"
+        );
         let doc = live.doc.get();
         // Three lines each side: head lines 27 to 33 are shown between
         // two dividers, and the run is two runs.
         assert!(state.reveals_for("src/x.rs", "").overlaps(27, 33));
         assert_eq!(doc.folds.len(), 2);
         for head in 27..=33 {
-            assert!(doc.row_of_head(head).is_some(), "head line {head} is in view");
+            assert!(
+                doc.row_of_head(head).is_some(),
+                "head line {head} is in view"
+            );
         }
         assert_eq!(doc.row_of_head(26), None);
         assert_eq!(doc.row_of_head(34), None);
         let row = doc.row_of_head(30).unwrap();
         assert_eq!(row, 9);
         assert_eq!(laid_out_text(&live), doc.text);
-        assert_eq!(viewport.get().y0, (row as f64 - 4.0) * line_height, "scrolled to the target");
+        assert_eq!(
+            viewport.get().y0,
+            (row as f64 - 4.0) * line_height,
+            "scrolled to the target"
+        );
 
         // Reset on the divider above folds it again.
         state.reset("src/x.rs", "", &[doc.run_of(5).unwrap().default_heads]);
@@ -2191,37 +2724,55 @@ mod window {
     /// A question and its answer on head lines `start` to `line` of the
     /// open file, one-based, both finished.
     fn thread_on(id: &str, start: u32, line: u32, outdated: bool) -> perch_github::CommentThread {
-        use perch_github::{Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStatus, RunStep, Side, ThreadOrigin};
+        use perch_github::{
+            Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStatus, RunStep, Side,
+            ThreadOrigin,
+        };
         let created_at = "2026-09-18T09:59:00Z".parse().unwrap();
         let run = RunRecord {
             id: format!("{id}-run"),
-            thread_id: id.into(),
+            owner: perch_github::RunOwner::Discussion {
+                item_id: "wt".into(),
+                thread_id: id.into(),
+                request_id: format!("{id}-q"),
+            },
             backend: "claude-code".into(),
             model: "sonnet".into(),
             effort: "medium".into(),
             session_id: Some("sess".into()),
-            status: RunStatus::Finished,
+            status: RunStatus::Completed,
             cost_usd: Some(0.03),
             duration_ms: Some(14_000),
-            steps: vec![RunStep { summary: "Read src/x.rs".into(), ok: true }],
+            steps: vec![RunStep {
+                summary: "Read src/x.rs".into(),
+                ok: true,
+            }],
             error: None,
-            started_at: "2026-09-18T10:00:00Z".parse().unwrap(),
+            started_at: Some("2026-09-18T10:00:00Z".parse().unwrap()),
             ended_at: Some("2026-09-18T10:00:14Z".parse().unwrap()),
+            ..RunRecord::default()
         };
-        let message = |suffix: &str, author: Author, body: &str, run: Option<RunRecord>| CommentMessage {
-            id: format!("{id}-{suffix}"),
-            thread_id: id.into(),
-            origin: ThreadOrigin::Local,
-            author,
-            body: body.into(),
-            created_at,
-            run,
-        };
+        let message =
+            |suffix: &str, author: Author, body: &str, run: Option<RunRecord>| CommentMessage {
+                id: format!("{id}-{suffix}"),
+                thread_id: id.into(),
+                origin: ThreadOrigin::Local,
+                author,
+                body: body.into(),
+                created_at,
+                run,
+            };
         CommentThread {
             id: id.into(),
             worktree_id: "wt".into(),
             origin: ThreadOrigin::Local,
-            anchor: Some(Anchor { path: "src/x.rs".into(), start_line: start, line, side: Side::Right, commit_sha: "h".into() }),
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: start,
+                line,
+                side: Side::Right,
+                commit_sha: "h".into(),
+            }),
             outdated,
             resolved: false,
             created_at,
@@ -2229,7 +2780,10 @@ mod window {
                 message("m1", Author::User, "why?", None),
                 message(
                     "m2",
-                    Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                    Author::Agent {
+                        backend: "claude-code".into(),
+                        model: "sonnet".into(),
+                    },
                     "because\n\n```rust\nfn x() {}\n```\n\n- one\n- two",
                     Some(run),
                 ),
@@ -2240,14 +2794,25 @@ mod window {
     /// A thread of the given message bodies, the reader's and the agent's
     /// in turn with no runs, on head lines `start` to `line` of the open
     /// file, one-based.
-    fn thread_with(id: &str, start: u32, line: u32, bodies: &[&str]) -> perch_github::CommentThread {
+    fn thread_with(
+        id: &str,
+        start: u32,
+        line: u32,
+        bodies: &[&str],
+    ) -> perch_github::CommentThread {
         use perch_github::{Anchor, Author, CommentMessage, CommentThread, Side, ThreadOrigin};
         let created_at = "2026-09-18T09:59:00Z".parse().unwrap();
         CommentThread {
             id: id.into(),
             worktree_id: "wt".into(),
             origin: ThreadOrigin::Local,
-            anchor: Some(Anchor { path: "src/x.rs".into(), start_line: start, line, side: Side::Right, commit_sha: "h".into() }),
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: start,
+                line,
+                side: Side::Right,
+                commit_sha: "h".into(),
+            }),
             outdated: false,
             resolved: false,
             created_at,
@@ -2261,7 +2826,10 @@ mod window {
                     author: if i % 2 == 0 {
                         Author::User
                     } else {
-                        Author::Agent { backend: "claude-code".into(), model: "sonnet".into() }
+                        Author::Agent {
+                            backend: "claude-code".into(),
+                            model: "sonnet".into(),
+                        }
                     },
                     body: body.to_string(),
                     created_at,
@@ -2282,14 +2850,19 @@ mod window {
     /// How many views under `id`, itself included, have `text` in their
     /// debug name.
     fn count(id: floem::ViewId, text: &str) -> usize {
-        usize::from(id.debug_name().contains(text)) + id.children().into_iter().map(|c| count(c, text)).sum::<usize>()
+        usize::from(id.debug_name().contains(text))
+            + id.children()
+                .into_iter()
+                .map(|c| count(c, text))
+                .sum::<usize>()
     }
 
     /// The card layer's card for a thread: its box, relative to the layer,
     /// which sits over the editor at the code pane's origin past the
     /// gutter.
     fn card_rect(harness: &HeadlessHarness, thread_id: &str) -> floem::kurbo::Rect {
-        let id = find(harness.root_id(), &format!("inline-card:{thread_id}")).expect("the card is in the layer");
+        let id = find(harness.root_id(), &format!("inline-card:{thread_id}"))
+            .expect("the card is in the layer");
         harness.get_layout_rect(id)
     }
 
@@ -2298,7 +2871,11 @@ mod window {
     /// against.
     fn laid_out_rows(harness: &HeadlessHarness, thread_id: &str) -> usize {
         let rect = card_rect(harness, thread_id);
-        super::rows_for_height(rect.height(), crate::theme::CODE_LINE_HEIGHT as f64, crate::theme::CARD_INSET)
+        super::rows_for_height(
+            rect.height(),
+            crate::theme::CODE_LINE_HEIGHT as f64,
+            crate::theme::CARD_INSET,
+        )
     }
 
     #[test]
@@ -2307,9 +2884,18 @@ mod window {
         let (mut harness, state) = harness();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
-        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
-        assert_eq!(live.doc.get().len(), 120, "the buffer, with a ghost under every rewritten line");
-        assert!(find(harness.root_id(), "inline-card:").is_none(), "no thread, no card");
+        let viewport = super::STACKED_VIEWPORT
+            .with(|v| v.get())
+            .expect("a stacked editor was built");
+        assert_eq!(
+            live.doc.get().len(),
+            120,
+            "the buffer, with a ghost under every rewritten line"
+        );
+        assert!(
+            find(harness.root_id(), "inline-card:").is_none(),
+            "no thread, no card"
+        );
 
         // A thread on head lines 5 to 7 arrives, as the backend sends it.
         // Line 7 is an `fn a`, display line 8; the ghost at 9 is the old
@@ -2319,21 +2905,43 @@ mod window {
         let card = CardId::Thread("t1".into());
         let estimate = crate::review::doc::estimate_rows(&thread, false);
         state.set_comment_threads(Arc::new(vec![thread]));
-        assert_eq!(live.doc.get().card_span(&card), Some(9..9 + estimate), "the estimate, until the card is laid out");
+        assert_eq!(
+            live.doc.get().card_span(&card),
+            Some(9..9 + estimate),
+            "the estimate, until the card is laid out"
+        );
         harness.rebuild();
         harness.paint();
         // Laid out, the card has the rows its height takes.
         let rows = laid_out_rows(&harness, "t1");
         let doc = live.doc.get();
-        assert_eq!(doc.len(), 120 + rows, "the card's rows were spliced in place");
+        assert_eq!(
+            doc.len(),
+            120 + rows,
+            "the card's rows were spliced in place"
+        );
         assert_eq!(doc.display_line(8), Some(8));
         assert_eq!(state.active_file().unwrap().buffer.head_line(8), Some(6));
-        assert_eq!(state.active_file().unwrap().buffer.head_line(9), None, "display line 9 is the ghost");
+        assert_eq!(
+            state.active_file().unwrap().buffer.head_line(9),
+            None,
+            "display line 9 is the ghost"
+        );
         assert_eq!(doc.card_span(&card), Some(9..9 + rows));
         for row in 9..9 + rows {
-            assert_eq!(doc.rows[row], DocRow::Spacer { card: card.clone(), row: row - 9 });
+            assert_eq!(
+                doc.rows[row],
+                DocRow::Spacer {
+                    card: card.clone(),
+                    row: row - 9
+                }
+            );
         }
-        assert_eq!(doc.display_line(9 + rows), Some(9), "the code goes on under the card");
+        assert_eq!(
+            doc.display_line(9 + rows),
+            Some(9),
+            "the code goes on under the card"
+        );
         assert_eq!(laid_out_text(&live), doc.text);
         assert_eq!(viewport.get().y0, 0.0);
 
@@ -2343,8 +2951,14 @@ mod window {
         let rect = card_rect(&harness, "t1");
         assert_eq!(rect.y0, 9.0 * line_height + crate::theme::CARD_INSET);
         assert_eq!(rect.x0, crate::theme::CODE_GUTTER_GAP);
-        assert!(rect.height() > line_height, "an open card is more than one row");
-        assert!(!state.is_collapsed(&card), "a thread that is not outdated starts open");
+        assert!(
+            rect.height() > line_height,
+            "an open card is more than one row"
+        );
+        assert!(
+            !state.is_collapsed(&card),
+            "a thread that is not outdated starts open"
+        );
 
         // Collapsed, the card is one row, and the document is shorter by
         // the rows the card gave back.
@@ -2357,20 +2971,36 @@ mod window {
         assert_eq!(doc.display_line(10), Some(9));
         assert_eq!(laid_out_text(&live), doc.text);
         let rect = card_rect(&harness, "t1");
-        assert_eq!(rect.y0, 9.0 * line_height, "a collapsed card takes its row whole");
+        assert_eq!(
+            rect.y0,
+            9.0 * line_height,
+            "a collapsed card takes its row whole"
+        );
         assert_eq!(rect.height(), line_height);
 
         // The chevron at the row's left opens it again: past the gutter,
         // the margin, the border and the row's padding, in its slot.
         let (left, top) = pane_origin();
-        let x = left + crate::theme::GUTTER_WIDTH + rect.x0 + 1.0 + crate::theme::COLLAPSED_CARD_PADDING + crate::theme::CHEVRON_SLOT / 2.0;
+        let x = left
+            + crate::theme::GUTTER_WIDTH
+            + rect.x0
+            + 1.0
+            + crate::theme::COLLAPSED_CARD_PADDING
+            + crate::theme::CHEVRON_SLOT / 2.0;
         let y = top + rect.y0 + line_height / 2.0;
         let under = harness.element_id_at(x, y);
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert!(!state.is_collapsed(&card), "click at ({x}, {y}) over {under:?} did not open the card");
-        assert_eq!(live.doc.get().len(), 120 + rows, "open again at the rows the layout gave it, not the estimate");
+        assert!(
+            !state.is_collapsed(&card),
+            "click at ({x}, {y}) over {under:?} did not open the card"
+        );
+        assert_eq!(
+            live.doc.get().len(),
+            120 + rows,
+            "open again at the rows the layout gave it, not the estimate"
+        );
         assert_eq!(laid_out_text(&live), live.doc.get().text);
 
         // The thread going takes its rows with it.
@@ -2394,14 +3024,20 @@ mod window {
         let card = CardId::Thread("t1".into());
         // The thread is drawn in the code, so the column is not opened
         // for it, and it stays shut through the click.
-        assert!(!state.threads_open.get(), "the column opened itself for a thread drawn in the code");
+        assert!(
+            !state.threads_open.get(),
+            "the column opened itself for a thread drawn in the code"
+        );
 
         // The marker sits in the gutter's slot on the anchor's first line,
         // head line 5, display line 6, on row 6 of a document with nothing
         // folded above it.
         let (left, top) = pane_origin();
         assert_eq!(live.doc.get().row_of_head(4), Some(6));
-        let (x, y) = (left + 3.0 + 8.0, top + 6.0 * line_height + line_height / 2.0);
+        let (x, y) = (
+            left + 3.0 + 8.0,
+            top + 6.0 * line_height + line_height / 2.0,
+        );
         // The slot is rebuilt when the pointer arrives on its row, so the
         // pointer settles there before the click, as it would in a hand.
         harness.pointer_move(x, y);
@@ -2411,20 +3047,35 @@ mod window {
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.focus_card.get(), Some(card.clone()), "click at ({x}, {y}) over {under:?} did not focus the card");
+        assert_eq!(
+            state.focus_card.get(),
+            Some(card.clone()),
+            "click at ({x}, {y}) over {under:?} did not focus the card"
+        );
         assert!(!state.threads_open.get(), "the column is not opened for it");
-        assert_eq!(viewport.get().y0, 0.0, "the card is in view, so nothing scrolled");
+        assert_eq!(
+            viewport.get().y0,
+            0.0,
+            "the card is in view, so nothing scrolled"
+        );
 
         // Scrolled past the card, a click on its marker brings it back
         // into view with the line above it.
         harness.scroll_down(left + 300.0, top + 300.0, 40.0 * line_height);
         harness.rebuild();
         harness.paint();
-        assert!(viewport.get().y0 > 20.0 * line_height, "the editor did not scroll past the card");
+        assert!(
+            viewport.get().y0 > 20.0 * line_height,
+            "the editor did not scroll past the card"
+        );
         state.focus_card.set(Some(card));
         harness.rebuild();
         harness.paint();
-        assert_eq!(viewport.get().y0, 8.0 * line_height, "the anchor's last line, above the card, is the first row in view");
+        assert_eq!(
+            viewport.get().y0,
+            8.0 * line_height,
+            "the anchor's last line, above the card, is the first row in view"
+        );
     }
 
     #[test]
@@ -2461,9 +3112,16 @@ mod window {
         // code column, past its gutter.
         let rect = card_rect(&harness, "t1");
         assert_eq!(rect.y0, 7.0 * line_height + crate::theme::CARD_INSET);
-        assert_eq!(rect.x0, crate::theme::GUTTER_WIDTH + crate::theme::CODE_GUTTER_GAP);
+        assert_eq!(
+            rect.x0,
+            crate::theme::GUTTER_WIDTH + crate::theme::CODE_GUTTER_GAP
+        );
         let (pane_left, _) = pane_origin();
-        assert_eq!(rect.x1, 1400.0 - pane_left - crate::theme::CODE_GUTTER_GAP, "to the right edge, less the margin");
+        assert_eq!(
+            rect.x1,
+            1400.0 - pane_left - crate::theme::CODE_GUTTER_GAP,
+            "to the right edge, less the margin"
+        );
 
         // Collapsing it shrinks both sides by the difference.
         state.toggle_card(&card);
@@ -2490,7 +3148,9 @@ mod window {
         let (mut harness, state) = harness();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
-        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        let viewport = super::STACKED_VIEWPORT
+            .with(|v| v.get())
+            .expect("a stacked editor was built");
         let card = CardId::Thread("t1".into());
 
         // The thread arrives, and the document is built from the estimate
@@ -2504,7 +3164,10 @@ mod window {
         assert_eq!(before.len(), 120 + estimate);
         assert_eq!(before.card_span(&card), Some(9..9 + estimate));
         assert_eq!(before.row_of_display(9), Some(9 + estimate));
-        assert!(state.card_rows.get().is_empty(), "nothing has been laid out");
+        assert!(
+            state.card_rows.get().is_empty(),
+            "nothing has been laid out"
+        );
 
         // Laid out, the card says how tall it is, and the document has
         // the rows that takes: the lines above the card are where they
@@ -2513,19 +3176,43 @@ mod window {
         harness.rebuild();
         harness.paint();
         let rows = laid_out_rows(&harness, "t1");
-        assert!(rows > estimate, "the chrome is more than two rows: {rows} rows for {}px", card_rect(&harness, "t1").height());
+        assert!(
+            rows > estimate,
+            "the chrome is more than two rows: {rows} rows for {}px",
+            card_rect(&harness, "t1").height()
+        );
         let grew = rows - estimate;
         let after = live.doc.get();
-        assert_eq!(state.card_rows.get().get(&card), Some(&rows), "the layout's answer is kept");
+        assert_eq!(
+            state.card_rows.get().get(&card),
+            Some(&rows),
+            "the layout's answer is kept"
+        );
         assert_eq!(after.len(), 120 + rows);
         assert_eq!(after.card_span(&card), Some(9..9 + rows));
-        assert_eq!(after.rows[..9], before.rows[..9], "the lines above the card are where they were");
-        assert_eq!(after.row_of_display(9), Some(9 + estimate + grew), "the line under the card is {grew} rows further down");
+        assert_eq!(
+            after.rows[..9],
+            before.rows[..9],
+            "the lines above the card are where they were"
+        );
+        assert_eq!(
+            after.row_of_display(9),
+            Some(9 + estimate + grew),
+            "the line under the card is {grew} rows further down"
+        );
         assert_eq!(after.row_of_display(119), Some(119 + estimate + grew));
         assert_eq!(laid_out_text(&live), after.text);
-        assert_eq!(viewport.get().y0, 0.0, "the card is in view, so the view did not move");
+        assert_eq!(
+            viewport.get().y0,
+            0.0,
+            "the card is in view, so the view did not move"
+        );
         let rect = card_rect(&harness, "t1");
-        assert_eq!(rect.y0, 9.0 * line_height + crate::theme::CARD_INSET, "the card is where it was");
+        assert_eq!(
+            rect.y0,
+            9.0 * line_height + crate::theme::CARD_INSET,
+            "the card is where it was"
+        );
 
         // Every scroll lays the card out again at the same height, and
         // it says nothing new: the document is the one it was.
@@ -2534,7 +3221,10 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert_eq!(viewport.get().y0, 3.0 * line_height, "the editor scrolled");
-        assert!(Arc::ptr_eq(&live.doc.get(), &after), "the document was not built again");
+        assert!(
+            Arc::ptr_eq(&live.doc.get(), &after),
+            "the document was not built again"
+        );
         assert_eq!(state.card_rows.get().get(&card), Some(&rows));
     }
 
@@ -2544,7 +3234,9 @@ mod window {
         let (mut harness, state) = harness();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
-        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        let viewport = super::STACKED_VIEWPORT
+            .with(|v| v.get())
+            .expect("a stacked editor was built");
         let card = CardId::Thread("t1".into());
 
         // The question arrives and is laid out; then the editor is
@@ -2552,7 +3244,12 @@ mod window {
         state.set_comment_threads(Arc::new(vec![thread_with("t1", 5, 7, &["why?"])]));
         harness.rebuild();
         harness.paint();
-        let rows = live.doc.get().card_span(&card).expect("the card has rows").len();
+        let rows = live
+            .doc
+            .get()
+            .card_span(&card)
+            .expect("the card has rows")
+            .len();
         assert_eq!(rows, laid_out_rows(&harness, "t1"));
         let (left, top) = pane_origin();
         harness.scroll_down(left + 300.0, top + 300.0, 40.0 * line_height);
@@ -2560,30 +3257,53 @@ mod window {
         harness.paint();
         let before = viewport.get().y0;
         let first_row = (before / line_height).floor() as usize;
-        assert!(first_row > 9 + rows, "the editor did not scroll past the card: row {first_row} is first in view");
-        let first_line = live.doc.get().display_line(first_row).expect("a line is first in view");
+        assert!(
+            first_row > 9 + rows,
+            "the editor did not scroll past the card: row {first_row} is first in view"
+        );
+        let first_line = live
+            .doc
+            .get()
+            .display_line(first_row)
+            .expect("a line is first in view");
 
         // The answer lands: the card is built again for the thread's two
         // messages and is a line and a gap taller, which is more than a
         // row. The rows it gains are above the view, so the scroll moves
         // by them and the same line is first in view.
-        state.set_comment_threads(Arc::new(vec![thread_with("t1", 5, 7, &["why?", "because"])]));
+        state.set_comment_threads(Arc::new(vec![thread_with(
+            "t1",
+            5,
+            7,
+            &["why?", "because"],
+        )]));
         harness.rebuild();
         harness.paint();
         let grown = laid_out_rows(&harness, "t1");
-        assert!(grown > rows, "the answer did not grow the card: {rows} rows to {grown}");
+        assert!(
+            grown > rows,
+            "the answer did not grow the card: {rows} rows to {grown}"
+        );
         let grew = grown - rows;
         let doc = live.doc.get();
         assert_eq!(doc.card_span(&card), Some(9..9 + grown));
         assert_eq!(doc.len(), 120 + grown);
-        assert_eq!(viewport.get().y0, before + grew as f64 * line_height, "the scroll moved by the rows added above it");
-        assert_eq!(doc.display_line(first_row + grew), Some(first_line), "the same line is first in view");
+        assert_eq!(
+            viewport.get().y0,
+            before + grew as f64 * line_height,
+            "the scroll moved by the rows added above it"
+        );
+        assert_eq!(
+            doc.display_line(first_row + grew),
+            Some(first_line),
+            "the same line is first in view"
+        );
         assert_eq!(laid_out_text(&live), doc.text);
     }
 
     #[test]
     fn a_card_is_never_taller_than_the_cap_and_the_estimate_agrees_with_it_there() {
-        use crate::review::doc::{CARD_MAX_ROWS, CardId};
+        use crate::review::doc::{CardId, CARD_MAX_ROWS};
         let (mut harness, state) = harness();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
@@ -2592,19 +3312,31 @@ mod window {
         // A hundred-line answer is far more than forty rows of card, so
         // the estimate is the cap, and so is the card: its messages
         // scroll inside it, and its box stops where the rows do.
-        let answer = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let answer = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let thread = thread_with("t1", 5, 7, &["why?", &answer]);
-        assert_eq!(crate::review::doc::estimate_rows(&thread, false), CARD_MAX_ROWS);
+        assert_eq!(
+            crate::review::doc::estimate_rows(&thread, false),
+            CARD_MAX_ROWS
+        );
         state.set_comment_threads(Arc::new(vec![thread]));
         harness.rebuild();
         harness.paint();
         let rect = card_rect(&harness, "t1");
-        assert_eq!(rect.height(), CARD_MAX_ROWS as f64 * line_height - 2.0 * crate::theme::CARD_INSET);
+        assert_eq!(
+            rect.height(),
+            CARD_MAX_ROWS as f64 * line_height - 2.0 * crate::theme::CARD_INSET
+        );
         assert_eq!(laid_out_rows(&harness, "t1"), CARD_MAX_ROWS);
         let doc = live.doc.get();
         assert_eq!(doc.card_span(&card), Some(9..9 + CARD_MAX_ROWS));
         assert_eq!(doc.len(), 120 + CARD_MAX_ROWS);
-        assert!(!state.card_rows.get().contains_key(&card), "the estimate was right, so nothing was written");
+        assert!(
+            !state.card_rows.get().contains_key(&card),
+            "the estimate was right, so nothing was written"
+        );
         assert_eq!(laid_out_text(&live), doc.text);
     }
 
@@ -2626,12 +3358,24 @@ mod window {
         // Follow up: the composer's box takes the follow-up line's place
         // inside the card, which grows around it, and the document with
         // it. The box is never focused here; see `composer_autofocus`.
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
-        state.open_composer(Some("t1".into()), thread.anchor.clone(), String::new(), choice);
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        state.open_composer(
+            Some("t1".into()),
+            thread.anchor.clone(),
+            String::new(),
+            choice,
+        );
         harness.rebuild();
         harness.paint();
         let grown = laid_out_rows(&harness, "t1");
-        assert!(grown > rows, "the box is taller than the line it replaced: {rows} rows to {grown}");
+        assert!(
+            grown > rows,
+            "the box is taller than the line it replaced: {rows} rows to {grown}"
+        );
         let doc = live.doc.get();
         assert_eq!(doc.card_span(&card), Some(9..9 + grown));
         assert_eq!(doc.len(), len + (grown - rows));
@@ -2667,14 +3411,35 @@ mod window {
         // Following up puts one box inside the card in the code; the
         // column's card keeps its line. The box is never focused here;
         // see `composer_autofocus`.
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
-        state.open_composer(Some("t1".into()), thread.anchor.clone(), String::new(), choice);
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        state.open_composer(
+            Some("t1".into()),
+            thread.anchor.clone(),
+            String::new(),
+            choice,
+        );
         harness.rebuild();
         harness.paint();
-        assert_eq!(count(harness.root_id(), "composer-box"), 1, "one box, not one per face");
+        assert_eq!(
+            count(harness.root_id(), "composer-box"),
+            1,
+            "one box, not one per face"
+        );
         let card = find(harness.root_id(), "inline-card:t1").expect("the card is in the layer");
-        assert_eq!(count(card, "composer-box"), 1, "inside the card in the code");
-        assert_eq!(count(harness.root_id(), "Follow up…"), 1, "the column's card keeps its line");
+        assert_eq!(
+            count(card, "composer-box"),
+            1,
+            "inside the card in the code"
+        );
+        assert_eq!(
+            count(harness.root_id(), "Follow up…"),
+            1,
+            "the column's card keeps its line"
+        );
 
         // The column's line, clicked, points at the card rather than
         // opening a second box: the composer stays the one it was, so
@@ -2692,7 +3457,11 @@ mod window {
             Some(CardId::Thread("t1".into())),
             "click at ({x}, {y}) over {under:?} did not point at the card"
         );
-        assert_eq!(state.composer.get().map(|c| c.opening), Some(opening), "the composer was opened again");
+        assert_eq!(
+            state.composer.get().map(|c| c.opening),
+            Some(opening),
+            "the composer was opened again"
+        );
         assert_eq!(count(harness.root_id(), "composer-box"), 1);
 
         // With the thread's file closed there is no card in the code, so
@@ -2735,12 +3504,19 @@ mod window {
             side: perch_github::Side::Right,
             commit_sha: "h".into(),
         };
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
         state.open_composer(None, Some(anchor), "why?".into(), choice);
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
-        let rows = doc.card_span(&CardId::Composer).expect("the composer is a card").len();
+        let rows = doc
+            .card_span(&CardId::Composer)
+            .expect("the composer is a card")
+            .len();
         assert_eq!(doc.card_span(&CardId::Composer), Some(14..14 + rows));
         assert!(find(harness.root_id(), "inline-card:composer").is_some());
         assert_eq!(state.anchors_in("src/x.rs"), vec![(45, 45)]);
@@ -2753,12 +3529,23 @@ mod window {
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
-        assert_eq!(doc.run_of(5).map(|r| (r.first, r.last)), Some((5, 42)), "the run above, to the context before the line");
+        assert_eq!(
+            doc.run_of(5).map(|r| (r.first, r.last)),
+            Some((5, 42)),
+            "the run above, to the context before the line"
+        );
         assert_eq!(doc.row_of_display(46), Some(9));
         assert_eq!(doc.card_span(&CardId::Composer), Some(10..10 + rows));
-        assert_eq!(doc.run_of(10 + rows + 3).map(|r| (r.first, r.last)), Some((50, 58)), "the run below, from the context after it");
+        assert_eq!(
+            doc.run_of(10 + rows + 3).map(|r| (r.first, r.last)),
+            Some((50, 58)),
+            "the run below, from the context after it"
+        );
         assert_eq!(laid_out_text(&live), doc.text);
-        assert!(find(harness.root_id(), "inline-card:composer").is_some(), "the card is drawn");
+        assert!(
+            find(harness.root_id(), "inline-card:composer").is_some(),
+            "the card is drawn"
+        );
         assert!(state.composer_is_inline());
         assert_eq!(state.composer_draft.get(), "why?");
 
@@ -2777,7 +3564,12 @@ mod window {
 
     /// A review comment from GitHub on head line `line` of the open file,
     /// one-based, on the head side.
-    fn github_comment(id: u64, line: u64, reply_to: Option<u64>, body: &str) -> perch_github::ReviewComment {
+    fn github_comment(
+        id: u64,
+        line: u64,
+        reply_to: Option<u64>,
+        body: &str,
+    ) -> perch_github::ReviewComment {
         perch_github::ReviewComment {
             id,
             pull_request_review_id: None,
@@ -2796,7 +3588,9 @@ mod window {
     }
 
     /// A discussion holding the given review comments and nothing else.
-    fn discussion_of(review_comments: Vec<perch_github::ReviewComment>) -> perch_github::Discussion {
+    fn discussion_of(
+        review_comments: Vec<perch_github::ReviewComment>,
+    ) -> perch_github::Discussion {
         perch_github::Discussion {
             opened_at: None,
             body: String::new(),
@@ -2813,19 +3607,37 @@ mod window {
         let (mut harness, state) = harness();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
-        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        let viewport = super::STACKED_VIEWPORT
+            .with(|v| v.get())
+            .expect("a stacked editor was built");
         assert_eq!(live.doc.get().len(), 120);
 
         // A comment and a reply on head line 7, display line 8, arrive
         // with the discussion: the card goes under the line, before the
         // ghost of the rewritten line after it, as the reader's does.
-        let comments = vec![github_comment(100, 7, None, "nit: name this"), github_comment(101, 7, Some(100), "done")];
+        let comments = vec![
+            github_comment(100, 7, None, "nit: name this"),
+            github_comment(101, 7, Some(100), "done"),
+        ];
         let card = CardId::GitHub(100);
-        let thread = crate::review::model::github_threads_of(Some(&discussion_of(comments.clone())), "src/x.rs").remove(0);
+        let thread = crate::review::model::github_threads_of(
+            Some(&discussion_of(comments.clone())),
+            "src/x.rs",
+        )
+        .remove(0);
         let estimate = crate::review::doc::estimate_github_rows(&thread, false);
-        state.discussion.set(Some(Arc::new(discussion_of(comments))));
-        assert_eq!(live.doc.get().card_span(&card), Some(9..9 + estimate), "the estimate, until the card is laid out");
-        assert!(!state.is_collapsed(&card), "nothing says GitHub has it resolved, so it starts open");
+        state
+            .discussion
+            .set(Some(Arc::new(discussion_of(comments))));
+        assert_eq!(
+            live.doc.get().card_span(&card),
+            Some(9..9 + estimate),
+            "the estimate, until the card is laid out"
+        );
+        assert!(
+            !state.is_collapsed(&card),
+            "nothing says GitHub has it resolved, so it starts open"
+        );
         harness.rebuild();
         harness.paint();
         let rows = laid_out_rows(&harness, "github:100");
@@ -2833,20 +3645,36 @@ mod window {
         assert_eq!(doc.len(), 120 + rows);
         assert_eq!(doc.card_span(&card), Some(9..9 + rows));
         for row in 9..9 + rows {
-            assert_eq!(doc.rows[row], DocRow::Spacer { card: card.clone(), row: row - 9 });
+            assert_eq!(
+                doc.rows[row],
+                DocRow::Spacer {
+                    card: card.clone(),
+                    row: row - 9
+                }
+            );
         }
-        assert_eq!(doc.display_line(9 + rows), Some(9), "the code goes on under the card");
+        assert_eq!(
+            doc.display_line(9 + rows),
+            Some(9),
+            "the code goes on under the card"
+        );
         assert_eq!(laid_out_text(&live), doc.text);
         let rect = card_rect(&harness, "github:100");
         assert_eq!(rect.y0, 9.0 * line_height + crate::theme::CARD_INSET);
         assert_eq!(rect.x0, crate::theme::CODE_GUTTER_GAP);
         assert!(rect.height() > line_height);
-        assert!(!state.threads_open.get(), "GitHub's threads do not open the column");
+        assert!(
+            !state.threads_open.get(),
+            "GitHub's threads do not open the column"
+        );
 
         // The hollow marker on the comment's line focuses the card and
         // leaves the column shut.
         let (left, top) = pane_origin();
-        let (x, y) = (left + 3.0 + 8.0, top + 8.0 * line_height + line_height / 2.0);
+        let (x, y) = (
+            left + 3.0 + 8.0,
+            top + 8.0 * line_height + line_height / 2.0,
+        );
         harness.pointer_move(x, y);
         harness.rebuild();
         harness.paint();
@@ -2854,9 +3682,17 @@ mod window {
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.focus_card.get(), Some(card.clone()), "click at ({x}, {y}) over {under:?} did not focus the card");
+        assert_eq!(
+            state.focus_card.get(),
+            Some(card.clone()),
+            "click at ({x}, {y}) over {under:?} did not focus the card"
+        );
         assert!(!state.threads_open.get());
-        assert_eq!(viewport.get().y0, 0.0, "the card is in view, so nothing scrolled");
+        assert_eq!(
+            viewport.get().y0,
+            0.0,
+            "the card is in view, so nothing scrolled"
+        );
 
         // Collapsed, it is one row: the chevron, who commented, the first
         // line and how many replies follow.
@@ -2873,14 +3709,20 @@ mod window {
         state.toggle_card(&card);
         harness.rebuild();
         harness.paint();
-        assert_eq!(live.doc.get().len(), 120 + rows, "open again at the rows the layout gave it");
+        assert_eq!(
+            live.doc.get().len(),
+            120 + rows,
+            "open again at the rows the layout gave it"
+        );
 
         // A thread of the reader's own on the same line goes before it.
         state.set_comment_threads(Arc::new(vec![thread_with("t1", 5, 7, &["why?"])]));
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
-        let mine = doc.card_span(&CardId::Thread("t1".into())).expect("the reader's card has rows");
+        let mine = doc
+            .card_span(&CardId::Thread("t1".into()))
+            .expect("the reader's card has rows");
         assert_eq!(mine.start, 9);
         assert_eq!(doc.card_span(&card), Some(mine.end..mine.end + rows));
         assert_eq!(laid_out_text(&live), doc.text);
@@ -2897,17 +3739,22 @@ mod window {
     /// the name of the view in it, `Empty` when it holds nothing.
     fn column_slot(harness: &HeadlessHarness) -> String {
         let slot = find(harness.root_id(), "column-composer").expect("the column is open");
-        slot.children().first().map(|c| c.debug_name()).unwrap_or_default()
+        slot.children()
+            .first()
+            .map(|c| c.debug_name())
+            .unwrap_or_default()
     }
 
     #[test]
     fn the_composer_opened_on_lines_is_a_card_under_them_and_escape_takes_its_rows_away() {
-        use crate::review::doc::{CardId, COMPOSER_ROWS, DocRow};
+        use crate::review::doc::{CardId, DocRow, COMPOSER_ROWS};
         use floem::prelude::{Code, Key, NamedKey};
         let (mut harness, state) = harness();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
-        let cursor = super::STACKED_CURSOR.with(|c| c.get()).expect("a stacked editor was built");
+        let cursor = super::STACKED_CURSOR
+            .with(|c| c.get())
+            .expect("a stacked editor was built");
         let card = CardId::Composer;
 
         // The cursor placed as a click would place it: on head line 7,
@@ -2915,7 +3762,14 @@ mod window {
         let doc = live.doc.get();
         let row = doc.row_of_head(6).expect("head line 7 is shown");
         assert_eq!(row, 8);
-        cursor.update(|c| c.set_offset(doc.offset_of_row(row) + 2, CursorAffinity::Backward, false, false));
+        cursor.update(|c| {
+            c.set_offset(
+                doc.offset_of_row(row) + 2,
+                CursorAffinity::Backward,
+                false,
+                false,
+            )
+        });
         harness.rebuild();
         harness.paint();
         assert_eq!(state.selection.get(), Some((8, 8)));
@@ -2934,21 +3788,43 @@ mod window {
         // not opened for it.
         harness.dispatch_event(key_press(Code::KeyA, Key::Character("a".into())));
         let composer = state.composer.get().expect("`a` opened the composer");
-        assert_eq!(composer.anchor.as_ref().map(|a| (a.start_line, a.line)), Some((7, 7)));
+        assert_eq!(
+            composer.anchor.as_ref().map(|a| (a.start_line, a.line)),
+            Some((7, 7))
+        );
         assert!(state.composer_is_inline());
-        assert!(!state.threads_open.get(), "the column is not opened for a composer drawn in the code");
+        assert!(
+            !state.threads_open.get(),
+            "the column is not opened for a composer drawn in the code"
+        );
         harness.rebuild();
         harness.paint();
         let rows = laid_out_rows(&harness, "composer");
-        assert_eq!(rows, COMPOSER_ROWS, "an empty composer is laid out at its estimate, so nothing jumps");
-        assert!(state.card_rows.get().is_empty(), "the estimate was right, so nothing was written");
+        assert_eq!(
+            rows, COMPOSER_ROWS,
+            "an empty composer is laid out at its estimate, so nothing jumps"
+        );
+        assert!(
+            state.card_rows.get().is_empty(),
+            "the estimate was right, so nothing was written"
+        );
         let doc = live.doc.get();
         assert_eq!(doc.len(), 120 + rows);
         assert_eq!(doc.card_span(&card), Some(9..9 + rows));
         for row in 9..9 + rows {
-            assert_eq!(doc.rows[row], DocRow::Spacer { card: CardId::Composer, row: row - 9 });
+            assert_eq!(
+                doc.rows[row],
+                DocRow::Spacer {
+                    card: CardId::Composer,
+                    row: row - 9
+                }
+            );
         }
-        assert_eq!(doc.display_line(9 + rows), Some(9), "the code goes on under the card");
+        assert_eq!(
+            doc.display_line(9 + rows),
+            Some(9),
+            "the code goes on under the card"
+        );
         assert_eq!(laid_out_text(&live), doc.text);
         let rect = card_rect(&harness, "composer");
         assert_eq!(rect.y0, 9.0 * line_height + crate::theme::CARD_INSET);
@@ -2973,16 +3849,26 @@ mod window {
         harness.dispatch_event(key_press(Code::Escape, Key::Named(NamedKey::Escape)));
         harness.rebuild();
         harness.paint();
-        assert!(state.composer.get().is_none(), "escape did not close the empty composer");
+        assert!(
+            state.composer.get().is_none(),
+            "escape did not close the empty composer"
+        );
         let doc = live.doc.get();
         assert_eq!(doc.len(), 120);
         assert_eq!(doc.card_span(&card), None);
         assert_eq!(laid_out_text(&live), doc.text);
         assert!(find(harness.root_id(), "inline-card:").is_none());
-        assert!(!state.card_rows.get().contains_key(&card), "the next composer starts on the estimate");
+        assert!(
+            !state.card_rows.get().contains_key(&card),
+            "the next composer starts on the estimate"
+        );
 
         // A question about the worktree is the column's, as it was.
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
         state.open_composer(None, None, String::new(), choice);
         harness.rebuild();
         harness.paint();
@@ -2998,7 +3884,9 @@ mod window {
         let (mut harness, state) = harness();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
-        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor was built");
+        let viewport = super::STACKED_VIEWPORT
+            .with(|v| v.get())
+            .expect("a stacked editor was built");
         let anchor = perch_github::Anchor {
             path: "src/x.rs".into(),
             start_line: 5,
@@ -3006,21 +3894,35 @@ mod window {
             side: perch_github::Side::Right,
             commit_sha: "h".into(),
         };
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
         state.open_composer(None, Some(anchor), String::new(), choice);
         harness.rebuild();
         harness.paint();
         let rows = laid_out_rows(&harness, "composer");
-        assert_eq!(live.doc.get().card_span(&CardId::Composer), Some(9..9 + rows));
+        assert_eq!(
+            live.doc.get().card_span(&CardId::Composer),
+            Some(9..9 + rows)
+        );
 
         // Sent: the composer is gone from the code, and its rows are not.
         state.composer_sent();
         harness.rebuild();
         harness.paint();
         assert!(state.composer.get().is_none());
-        assert!(find(harness.root_id(), "inline-card:").is_none(), "the question went, and the box with it");
+        assert!(
+            find(harness.root_id(), "inline-card:").is_none(),
+            "the question went, and the box with it"
+        );
         let doc = live.doc.get();
-        assert_eq!(doc.card_span(&CardId::Composer), Some(9..9 + rows), "the rows stay under the lines");
+        assert_eq!(
+            doc.card_span(&CardId::Composer),
+            Some(9..9 + rows),
+            "the rows stay under the lines"
+        );
         assert_eq!(doc.len(), 120 + rows);
         assert_eq!(laid_out_text(&live), doc.text);
         assert_eq!(viewport.get().y0, 0.0);
@@ -3053,7 +3955,10 @@ mod window {
         assert_eq!(doc.card_span(&thread_card), Some(9..9 + laid));
         assert_eq!(doc.len(), 120 + laid);
         assert_eq!(laid_out_text(&live), doc.text);
-        assert_eq!(card_rect(&harness, "t1").y0, 9.0 * line_height + crate::theme::CARD_INSET);
+        assert_eq!(
+            card_rect(&harness, "t1").y0,
+            9.0 * line_height + crate::theme::CARD_INSET
+        );
         assert!(!state.card_rows.get().contains_key(&CardId::Composer));
     }
 }
