@@ -47,12 +47,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 Some(perch_github::ItemSubject::PullRequest(_)) => "Reading the pull request",
                 None => "Reading the branch",
             };
-            state.begin_item_review(review, message, &item.id);
-            if item.is_archived() {
-                backend.restore_item(&item.id);
+            let navigation_id = if item.is_archived() {
+                backend.restore_item(&item.id)
             } else {
-                backend.open_item(&item.id);
-            }
+                backend.open_item(&item.id)
+            };
+            state.begin_item_review(review, message, &item.id, navigation_id);
         }
     });
     let panel_backend = backend.clone();
@@ -196,281 +196,285 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     ));
     let root_id = root.view_id();
     root
-    // The keys the code editor would otherwise keep. The editor stops
-    // every key once it has focus, and these are pressed right after
-    // clicking in it, so they are caught on the way down to it rather
-    // than on the way back up. Target as well, for when nothing has focus
-    // and floem hands the key straight to whoever listens. Nothing here
-    // runs while a text box has the keyboard.
-    .on_event_with_config(
-        el::KeyDown,
-        floem::context::EventCallbackConfig {
-            phases: floem::context::Phases::CAPTURE_AND_TARGET,
-        },
-        move |cx, key: &KeyboardEvent| {
-            let key_backend = &capture_backend;
-            // Cmd-Shift-A is app-wide, including while the editor or a
-            // composer owns focus. Escape first backs out of details, then
-            // closes the inspector on the next press.
-            if key.code == Code::KeyA && key.modifiers == OS_MOD | Modifiers::SHIFT {
-                let opener = (!state.agents_open.get())
-                    .then(|| focused_descendant(cx, root_id))
-                    .flatten();
-                agents::toggle(state, key_backend, opener);
-                return EventPropagation::Stop;
-            }
-            if key.code == Code::Escape && key.modifiers.is_empty() && state.agents_open.get() {
-                if state.selected_agent_run.with(Option::is_some) {
-                    agents::back_to_list(state);
-                } else {
-                    agents::close(state, key_backend, true);
+        // The keys the code editor would otherwise keep. The editor stops
+        // every key once it has focus, and these are pressed right after
+        // clicking in it, so they are caught on the way down to it rather
+        // than on the way back up. Target as well, for when nothing has focus
+        // and floem hands the key straight to whoever listens. Nothing here
+        // runs while a text box has the keyboard.
+        .on_event_with_config(
+            el::KeyDown,
+            floem::context::EventCallbackConfig {
+                phases: floem::context::Phases::CAPTURE_AND_TARGET,
+            },
+            move |cx, key: &KeyboardEvent| {
+                let key_backend = &capture_backend;
+                // Cmd-Shift-A is app-wide, including while the editor or a
+                // composer owns focus. Escape first backs out of details, then
+                // closes the inspector on the next press.
+                if key.code == Code::KeyA && key.modifiers == OS_MOD | Modifiers::SHIFT {
+                    let opener = (!state.agents_open.get())
+                        .then(|| focused_descendant(cx, root_id))
+                        .flatten();
+                    agents::toggle(state, key_backend, opener);
+                    return EventPropagation::Stop;
                 }
-                return EventPropagation::Stop;
-            }
-            let typing = state.search_focused.get() || review.composer_focused.get();
-            if typing || !review.is_open() {
-                return EventPropagation::Continue;
-            }
-            // Cmd-Shift-1 and Cmd-Shift-2 are the item view's tabs. Here
-            // rather than with the other Cmd keys because they are pressed
-            // from the code as often as from anywhere.
-            if key.modifiers == OS_MOD | Modifiers::SHIFT {
-                match key.code {
-                    Code::Digit1 => {
-                        review.show_tab(crate::review::model::ItemTab::Conversation);
-                        return EventPropagation::Stop;
+                if key.code == Code::Escape && key.modifiers.is_empty() && state.agents_open.get() {
+                    if state.selected_agent_run.with(Option::is_some) {
+                        agents::back_to_list(state);
+                    } else {
+                        agents::close(state, key_backend, true);
                     }
-                    Code::Digit2 => {
-                        let has_files = review
-                            .item
-                            .with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
-                        if has_files {
-                            review.show_tab(crate::review::model::ItemTab::Files);
+                    return EventPropagation::Stop;
+                }
+                let typing = state.search_focused.get() || review.composer_focused.get();
+                if typing || !review.is_open() {
+                    return EventPropagation::Continue;
+                }
+                // Cmd-Shift-1 and Cmd-Shift-2 are the item view's tabs. Here
+                // rather than with the other Cmd keys because they are pressed
+                // from the code as often as from anywhere.
+                if key.modifiers == OS_MOD | Modifiers::SHIFT {
+                    match key.code {
+                        Code::Digit1 => {
+                            review.show_tab(crate::review::model::ItemTab::Conversation);
+                            return EventPropagation::Stop;
                         }
-                        return EventPropagation::Stop;
-                    }
-                    _ => {}
-                }
-            }
-            // Shift-F12 asks for references to the cursor's symbol.
-            if key.code == Code::F12 && key.modifiers == Modifiers::SHIFT {
-                crate::review::references::find_at_cursor(review, &references_backend);
-                return EventPropagation::Stop;
-            }
-            // Escape backs out of a thread's Delete first.
-            if key.code == Code::Escape
-                && key.modifiers.is_empty()
-                && review.confirm_thread.with(Option::is_some)
-            {
-                review.confirm_thread.set(None);
-                return EventPropagation::Stop;
-            }
-            // Escape closes the references panel when nothing else claims
-            // it: a composer, or something open under a sidebar row.
-            let claimed = review.composer.with(Option::is_some)
-                || state.renaming.with(Option::is_some)
-                || state.confirm_delete.with(Option::is_some);
-            if key.code == Code::Escape
-                && key.modifiers.is_empty()
-                && !claimed
-                && review.references.with(Option::is_some)
-            {
-                review.references.set(None);
-                return EventPropagation::Stop;
-            }
-
-            // `a` opens a composer for the selection, or for the worktree when
-            // no file is open. Caught on the way down for the same reason as
-            // Shift-F12: the code editor keeps every key once it has focus,
-            // and `a` is pressed right after selecting lines in it.
-            if key.modifiers.is_empty() {
-                match key.code {
-                    Code::KeyA => {
-                        // On Conversation the composer is laid in place at the
-                        // end of the column, about the item as a whole: `a`
-                        // opens it, or takes the keyboard back to it.
-                        if review.tab.get() == crate::review::model::ItemTab::Conversation {
-                            match review
-                                .composer_box
-                                .get()
-                                .filter(|_| review.composer.with(Option::is_some))
-                            {
-                                Some(id) => {
-                                    id.scroll_to(None);
-                                    id.request_focus();
-                                }
-                                None => review.open_composer(
-                                    None,
-                                    None,
-                                    String::new(),
-                                    crate::review::threads::defaults(state),
-                                ),
+                        Code::Digit2 => {
+                            let has_files = review
+                                .item
+                                .with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
+                            if has_files {
+                                review.show_tab(crate::review::model::ItemTab::Files);
                             }
                             return EventPropagation::Stop;
                         }
-                        let anchor = review.anchor_from_selection();
-                        review.open_composer(
-                            None,
-                            anchor,
-                            String::new(),
-                            crate::review::threads::defaults(state),
-                        );
-                        return EventPropagation::Stop;
+                        _ => {}
                     }
-                    // Close an empty composer. One with a question in it stays,
-                    // so an Escape meant for the selection cannot throw the
-                    // question away; the composer's own close button does that.
-                    Code::Escape
-                        if review.composer.with(Option::is_some)
-                            && review.composer_draft.with(|d| d.trim().is_empty()) =>
-                    {
-                        review.close_composer();
-                        return EventPropagation::Stop;
-                    }
-                    _ => {}
                 }
-            }
-
-            // `v` checks the open file as viewed, `]` and `[` go to the next
-            // and previous change, `}` and `{` open the next and previous
-            // unviewed file. Files only. The braces are shifted brackets:
-            // the physical codes with Shift alone, so Cmd-[ stays back.
-            if review.tab.get() == crate::review::model::ItemTab::Files {
-                let shifted = key.modifiers == Modifiers::SHIFT;
-                match key.code {
-                    Code::BracketRight | Code::BracketLeft if key.modifiers.is_empty() => {
-                        crate::review::tabs::jump_to_change(review, key.code == Code::BracketRight);
-                        return EventPropagation::Stop;
-                    }
-                    Code::KeyV if key.modifiers.is_empty() => {
-                        let item_id = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
-                        let file = review.active.get().and_then(|path| {
-                            review
-                                .changed_files
-                                .with(|f| f.iter().find(|f| f.path == path).cloned())
-                        });
-                        // A deletion has no content to have viewed.
-                        if let (Some(item_id), Some(file)) = (item_id, file) {
-                            if let Some(blob) = &file.head_blob {
-                                key_backend.set_viewed(
-                                    &item_id,
-                                    &file.path,
-                                    blob,
-                                    !review.is_viewed(&file),
-                                );
-                            }
-                        }
-                        return EventPropagation::Stop;
-                    }
-                    Code::BracketRight | Code::BracketLeft if shifted => {
-                        let active = review.active.get();
-                        let forward = key.code == Code::BracketRight;
-                        if let Some(path) = review.next_unviewed(active.as_deref(), forward) {
-                            // The same path a click in the rail takes.
-                            review
-                                .expanded
-                                .update(|expanded| crate::review::tree::reveal(expanded, &path));
-                            if review.open_tab(&path) {
-                                key_backend.open_file(&path);
-                            }
-                        }
-                        return EventPropagation::Stop;
-                    }
-                    _ => {}
-                }
-            }
-            EventPropagation::Continue
-        },
-    )
-    // Window-level shortcuts. Key events bubble from whatever has focus, so
-    // a handler on the root view catches them wherever the reader is.
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        // Escape puts away whatever the sidebar has open under a row.
-        if key.code == Code::Escape && key.modifiers.is_empty() {
-            let had =
-                state.renaming.with(Option::is_some) || state.confirm_delete.with(Option::is_some);
-            if had {
-                state.renaming.set(None);
-                state.confirm_delete.set(None);
-                return EventPropagation::Stop;
-            }
-        }
-
-        // `s` saves the sidebar row under the pointer, else the selected
-        // row.
-        if key.modifiers.is_empty()
-            && !state.search_focused.get()
-            && !review.composer_focused.get()
-            && key.code == Code::KeyS
-        {
-            let target = state
-                .hovered_item
-                .get()
-                .or_else(|| state.open_item.get())
-                .and_then(|id| state.item(&id));
-            if let Some(item) = target {
-                key_backend.mark_saved(&item.id, !item.saved);
-                return EventPropagation::Stop;
-            }
-        }
-
-        if !key.modifiers.contains(OS_MOD) {
-            return EventPropagation::Continue;
-        }
-        // Physical key codes, so the shortcuts hold on any keyboard layout.
-        match key.code {
-            // Close the open file, as in any editor.
-            Code::KeyW => {
-                if let Some(path) = review.active.get() {
-                    review.close_tab(&path);
+                // Shift-F12 asks for references to the cursor's symbol.
+                if key.code == Code::F12 && key.modifiers == Modifiers::SHIFT {
+                    crate::review::references::find_at_cursor(review, &references_backend);
                     return EventPropagation::Stop;
                 }
-                EventPropagation::Continue
-            }
-            // Show or hide the drawer, or with shift, the thread column.
-            Code::Backslash => {
-                if key.modifiers.contains(Modifiers::SHIFT) {
-                    if review.is_open() {
-                        review.threads_open.update(|open| *open = !*open);
-                    }
-                } else {
-                    state.sidebar_open.update(|open| *open = !*open);
-                }
-                EventPropagation::Stop
-            }
-            // Back to the sidebar.
-            Code::BracketLeft => {
-                if review.is_showing() {
-                    state.leave_review(review);
+                // Escape backs out of a thread's Delete first.
+                if key.code == Code::Escape
+                    && key.modifiers.is_empty()
+                    && review.confirm_thread.with(Option::is_some)
+                {
+                    review.confirm_thread.set(None);
                     return EventPropagation::Stop;
                 }
-                EventPropagation::Continue
-            }
-            // Cmd-1 is the sidebar's search. With the drawer shut it opens
-            // the drawer, and the box takes the keyboard once it is built.
-            Code::Digit1 => {
-                if state.sidebar_open.get() {
-                    if let Some(id) = state.search_box.get() {
-                        id.request_focus();
-                    }
-                } else {
-                    state.focus_search.set(true);
-                    state.sidebar_open.set(true);
+                // Escape closes the references panel when nothing else claims
+                // it: a composer, or something open under a sidebar row.
+                let claimed = review.composer.with(Option::is_some)
+                    || state.renaming.with(Option::is_some)
+                    || state.confirm_delete.with(Option::is_some);
+                if key.code == Code::Escape
+                    && key.modifiers.is_empty()
+                    && !claimed
+                    && review.references.with(Option::is_some)
+                {
+                    review.references.set(None);
+                    return EventPropagation::Stop;
                 }
-                EventPropagation::Stop
+
+                // `a` opens a composer for the selection, or for the worktree when
+                // no file is open. Caught on the way down for the same reason as
+                // Shift-F12: the code editor keeps every key once it has focus,
+                // and `a` is pressed right after selecting lines in it.
+                if key.modifiers.is_empty() {
+                    match key.code {
+                        Code::KeyA => {
+                            // On Conversation the composer is laid in place at the
+                            // end of the column, about the item as a whole: `a`
+                            // opens it, or takes the keyboard back to it.
+                            if review.tab.get() == crate::review::model::ItemTab::Conversation {
+                                match review
+                                    .composer_box
+                                    .get()
+                                    .filter(|_| review.composer.with(Option::is_some))
+                                {
+                                    Some(id) => {
+                                        id.scroll_to(None);
+                                        id.request_focus();
+                                    }
+                                    None => review.open_composer(
+                                        None,
+                                        None,
+                                        String::new(),
+                                        crate::review::threads::defaults(state),
+                                    ),
+                                }
+                                return EventPropagation::Stop;
+                            }
+                            let anchor = review.anchor_from_selection();
+                            review.open_composer(
+                                None,
+                                anchor,
+                                String::new(),
+                                crate::review::threads::defaults(state),
+                            );
+                            return EventPropagation::Stop;
+                        }
+                        // Close an empty composer. One with a question in it stays,
+                        // so an Escape meant for the selection cannot throw the
+                        // question away; the composer's own close button does that.
+                        Code::Escape
+                            if review.composer.with(Option::is_some)
+                                && review.composer_draft.with(|d| d.trim().is_empty()) =>
+                        {
+                            review.close_composer();
+                            return EventPropagation::Stop;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // `v` checks the open file as viewed, `]` and `[` go to the next
+                // and previous change, `}` and `{` open the next and previous
+                // unviewed file. Files only. The braces are shifted brackets:
+                // the physical codes with Shift alone, so Cmd-[ stays back.
+                if review.tab.get() == crate::review::model::ItemTab::Files {
+                    let shifted = key.modifiers == Modifiers::SHIFT;
+                    match key.code {
+                        Code::BracketRight | Code::BracketLeft if key.modifiers.is_empty() => {
+                            crate::review::tabs::jump_to_change(
+                                review,
+                                key.code == Code::BracketRight,
+                            );
+                            return EventPropagation::Stop;
+                        }
+                        Code::KeyV if key.modifiers.is_empty() => {
+                            let item_id = review.item.with(|i| i.as_ref().map(|i| i.id.clone()));
+                            let file = review.active.get().and_then(|path| {
+                                review
+                                    .changed_files
+                                    .with(|f| f.iter().find(|f| f.path == path).cloned())
+                            });
+                            // A deletion has no content to have viewed.
+                            if let (Some(item_id), Some(file)) = (item_id, file) {
+                                if let Some(blob) = &file.head_blob {
+                                    key_backend.set_viewed(
+                                        &item_id,
+                                        &file.path,
+                                        blob,
+                                        !review.is_viewed(&file),
+                                    );
+                                }
+                            }
+                            return EventPropagation::Stop;
+                        }
+                        Code::BracketRight | Code::BracketLeft if shifted => {
+                            let active = review.active.get();
+                            let forward = key.code == Code::BracketRight;
+                            if let Some(path) = review.next_unviewed(active.as_deref(), forward) {
+                                // The same path a click in the rail takes.
+                                review.expanded.update(|expanded| {
+                                    crate::review::tree::reveal(expanded, &path)
+                                });
+                                if review.open_tab(&path) {
+                                    key_backend.open_file(&path);
+                                }
+                            }
+                            return EventPropagation::Stop;
+                        }
+                        _ => {}
+                    }
+                }
+                EventPropagation::Continue
+            },
+        )
+        // Window-level shortcuts. Key events bubble from whatever has focus, so
+        // a handler on the root view catches them wherever the reader is.
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            // Escape puts away whatever the sidebar has open under a row.
+            if key.code == Code::Escape && key.modifiers.is_empty() {
+                let had = state.renaming.with(Option::is_some)
+                    || state.confirm_delete.with(Option::is_some);
+                if had {
+                    state.renaming.set(None);
+                    state.confirm_delete.set(None);
+                    return EventPropagation::Stop;
+                }
             }
-            _ => EventPropagation::Continue,
-        }
-    })
-    .style(|s| {
-        s.size_full()
-            .flex_col()
-            .position(floem::style::Position::Relative)
-            .font_family(theme::FONT_STACK.to_string())
-            .font_size(theme::TEXT_BODY)
-            .color(theme::FG)
-            .background(theme::CANVAS)
-    })
+
+            // `s` saves the sidebar row under the pointer, else the selected
+            // row.
+            if key.modifiers.is_empty()
+                && !state.search_focused.get()
+                && !review.composer_focused.get()
+                && key.code == Code::KeyS
+            {
+                let target = state
+                    .hovered_item
+                    .get()
+                    .or_else(|| state.open_item.get())
+                    .and_then(|id| state.item(&id));
+                if let Some(item) = target {
+                    key_backend.mark_saved(&item.id, !item.saved);
+                    return EventPropagation::Stop;
+                }
+            }
+
+            if !key.modifiers.contains(OS_MOD) {
+                return EventPropagation::Continue;
+            }
+            // Physical key codes, so the shortcuts hold on any keyboard layout.
+            match key.code {
+                // Close the open file, as in any editor.
+                Code::KeyW => {
+                    if let Some(path) = review.active.get() {
+                        review.close_tab(&path);
+                        return EventPropagation::Stop;
+                    }
+                    EventPropagation::Continue
+                }
+                // Show or hide the drawer, or with shift, the thread column.
+                Code::Backslash => {
+                    if key.modifiers.contains(Modifiers::SHIFT) {
+                        if review.is_open() {
+                            review.threads_open.update(|open| *open = !*open);
+                        }
+                    } else {
+                        state.sidebar_open.update(|open| *open = !*open);
+                    }
+                    EventPropagation::Stop
+                }
+                // Back to the sidebar.
+                Code::BracketLeft => {
+                    if review.is_showing() {
+                        let navigation_id = key_backend.close_review();
+                        state.begin_close(review, navigation_id);
+                        return EventPropagation::Stop;
+                    }
+                    EventPropagation::Continue
+                }
+                // Cmd-1 is the sidebar's search. With the drawer shut it opens
+                // the drawer, and the box takes the keyboard once it is built.
+                Code::Digit1 => {
+                    if state.sidebar_open.get() {
+                        if let Some(id) = state.search_box.get() {
+                            id.request_focus();
+                        }
+                    } else {
+                        state.focus_search.set(true);
+                        state.sidebar_open.set(true);
+                    }
+                    EventPropagation::Stop
+                }
+                _ => EventPropagation::Continue,
+            }
+        })
+        .style(|s| {
+            s.size_full()
+                .flex_col()
+                .position(floem::style::Position::Relative)
+                .font_family(theme::FONT_STACK.to_string())
+                .font_size(theme::TEXT_BODY)
+                .color(theme::FG)
+                .background(theme::CANVAS)
+        })
 }
 
 /// Floem exposes focus membership rather than its private current-focus slot.

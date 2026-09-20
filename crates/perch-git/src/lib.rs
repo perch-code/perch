@@ -7,19 +7,25 @@ pub mod cmd;
 pub mod diff;
 pub mod display;
 pub mod prepare;
+pub mod review_snapshot;
 pub mod scan;
 pub mod scope;
 pub mod store;
 pub mod tree;
 
-pub use diff::{
-    file_diff, ChangeStatus, ChangedFile, DeletedRun, FileDiff, Hunk, LineStatus,
-};
+pub use diff::{file_diff, ChangeStatus, ChangedFile, DeletedRun, FileDiff, Hunk, LineStatus};
 pub use display::{DisplayBuffer, Row};
 pub use prepare::{home_ref, Checkout, Cut, Preparer, Step};
+pub use review_snapshot::{
+    map_anchor_between, AnchorMapping, CaptureOutcome, DiffSide, MappedAnchor, MappingCandidate,
+    MappingConfidence, MappingDocument, MappingEvidence, MappingMethod, MappingSnapshot,
+    ResolvedReviewRange, ReviewSnapshot, ReviewSnapshotStore, SnapshotAnchor, SnapshotCapture,
+    SnapshotError, SnapshotFile, SnapshotManifest, UnmappedReason, BASE_TIP_REF, HEAD_REF,
+    MERGE_BASE_REF,
+};
 pub use scan::{
-    branch_churn, github_remote, head_commit_time, parse_remotes, parse_worktree_list,
-    remotes, repo_from_remote, scan_root, RootScan, WorktreeEntry,
+    branch_churn, github_remote, head_commit_time, parse_remotes, parse_worktree_list, remotes,
+    repo_from_remote, scan_root, RootScan, WorktreeEntry,
 };
 pub use scope::{alignment, changed_files, dirt, log, read_side, Commit, Dirt, Rev, Scope};
 pub use store::{RepoId, Store};

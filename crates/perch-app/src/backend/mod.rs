@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jiff::Timestamp;
-use perch_git::{Preparer, RepoId, Store};
+use perch_git::{Preparer, RepoId, ReviewSnapshotStore, Store};
 use perch_github::{
     resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentThread,
     Config, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, NewRunEvent, PullRequest,
@@ -24,6 +24,7 @@ use perch_github::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
+pub(crate) mod reviews;
 pub(crate) mod runs;
 
 /// How many avatar downloads may be in flight at once.
@@ -48,11 +49,21 @@ pub enum Command {
     /// prepare.
     OpenItem {
         id: String,
+        navigation_id: u64,
     },
     /// Open an agent's owner for reading. Archived items use their cached
     /// conversation without restoring a checkout or clearing Archive.
     ViewAgentOwner {
         id: String,
+        navigation_id: u64,
+    },
+    /// Open a reviewer child's exact retained group. The backend resolves
+    /// attempt ownership so Agents navigation does not depend on whichever
+    /// review dashboard happens to be loaded in the UI.
+    ViewReviewAttemptOwner {
+        item_id: String,
+        attempt_id: String,
+        request_id: u64,
     },
     /// Find or make the item for a pull request or issue named by number,
     /// and open it. Every sidebar row opens by id; this is for the launch
@@ -62,11 +73,13 @@ pub enum Command {
         repo_full_name: String,
         kind: ItemKind,
         number: u64,
+        navigation_id: u64,
     },
     /// Mark a GitHub notification read and open its pull request or issue.
     /// Other subject kinds are opened by the UI in the browser instead.
     OpenNotification {
         thread: Thread,
+        navigation_id: Option<u64>,
     },
     /// Remove a notification from GitHub's inbox.
     DoneNotification {
@@ -81,18 +94,23 @@ pub enum Command {
     /// scope that is set.
     OpenFile {
         path: String,
+        navigation_id: u64,
     },
     /// What the diff is over: the branch, a commit, the uncommitted work.
     /// The changed list is recomputed and every open file reloads.
     SetScope {
         item_id: String,
         scope: perch_git::Scope,
+        request_id: u64,
+        navigation_id: u64,
     },
     /// Look at the checkout again: its head, its dirt and its commits, and
     /// the changed list if the head moved. Sent as the scope menu is about
     /// to open, and on every poll, so terminal work shows up.
     RefreshScope {
         item_id: String,
+        navigation_id: u64,
+        scope_revision: u64,
     },
     /// Check or uncheck a file's content as viewed.
     SetViewed {
@@ -138,17 +156,21 @@ pub enum Command {
         line: u32,
         character: u32,
     },
-    CloseReview,
+    CloseReview {
+        navigation_id: u64,
+    },
 
     /// Leave Active. An owned checkout's directory goes too, refused when
     /// there is uncommitted work in it; a checkout under a root is left
     /// alone and only the row is hidden.
     ArchiveItem {
         id: String,
+        suspended_navigation: SuspendedNavigation,
     },
     /// Back to Active, and an owned checkout back on disk.
     RestoreItem {
         id: String,
+        navigation_id: u64,
     },
     /// Remove the row and its threads. An owned checkout's directory and
     /// branch go too; anything under a root is not touched.
@@ -172,10 +194,12 @@ pub enum Command {
     /// checkout-only item pointing back at the issue.
     StartWork {
         issue_item_id: String,
+        navigation_id: u64,
     },
     /// Cut a branch from the item's head into a new checkout-only item.
     ForkItem {
         id: String,
+        navigation_id: u64,
     },
     /// Remember a setting across launches.
     SetMeta {
@@ -199,6 +223,41 @@ pub enum Command {
     },
     RetryRun {
         run_id: String,
+    },
+    /// Load native-review capabilities, preferences, local bases, and the
+    /// retained history for one worktree.
+    LoadReviewDashboard {
+        item_id: String,
+    },
+    StartReview {
+        request: crate::review::model::ReviewLaunchRequest,
+    },
+    SaveReviewPreference {
+        choice: crate::review::model::ReviewPreferenceChoice,
+    },
+    StopReviewGroup {
+        group_id: String,
+    },
+    RetryReviewAttempt {
+        attempt_id: String,
+    },
+    OpenReviewSnapshot {
+        group_id: String,
+        request_id: u64,
+    },
+    DismissReviewFinding {
+        finding_id: String,
+        reason: String,
+    },
+    ReopenReviewFinding {
+        finding_id: String,
+    },
+    LinkReviewDuplicate {
+        finding_id: String,
+        canonical_finding_id: String,
+    },
+    UnlinkReviewDuplicate {
+        finding_id: String,
     },
     LoadAgentRuns {
         history_limit: usize,
@@ -237,6 +296,8 @@ pub enum Event {
     },
     /// An issue is open: its snapshot, its comments, and the item.
     IssueReady {
+        navigation_id: u64,
+        scope_gen: u64,
         item: Arc<Item>,
         issue: Arc<perch_github::Issue>,
         comments: Arc<Vec<perch_github::IssueComment>>,
@@ -251,6 +312,11 @@ pub enum Event {
     CommentThreads {
         item_id: String,
         threads: Vec<CommentThread>,
+        /// Present when the threads were projected for one immutable
+        /// historical review request. The UI rejects a projection from an
+        /// older request even when it belongs to the same open item.
+        review_group_id: Option<String>,
+        review_request_id: Option<u64>,
     },
     /// One step of a run, applied in place to the run it names.
     AgentStep {
@@ -280,14 +346,84 @@ pub enum Event {
         events: Vec<RunEventRecord>,
         has_more: bool,
     },
+    /// The owning item is ready and the exact review group has been
+    /// resolved. This precedes HistoricalReviewReady on the same event
+    /// channel so the UI can fence and select the intended snapshot.
+    AgentReviewNavigationReady {
+        item_id: String,
+        attempt_id: String,
+        request_id: u64,
+        /// True when resolving the attempt first installed a different
+        /// owner's live view, which becomes this history load's rollback.
+        owner_changed: bool,
+        summary: crate::review::model::ReviewGroupSummary,
+    },
+    AgentReviewNavigationFailed {
+        item_id: String,
+        attempt_id: String,
+        request_id: u64,
+        message: String,
+    },
+    /// A navigation resolved to an item that an earlier archive fence owns.
+    NavigationCancelled {
+        item_id: String,
+        navigation_id: u64,
+    },
+    /// Archive committed and names the exact pending navigation it fenced.
+    ItemArchived {
+        item_id: String,
+        cancelled_navigation_id: Option<u64>,
+    },
+    ReviewDashboard {
+        item_id: String,
+        capabilities: Vec<perch_agent::ReviewCapability>,
+        preferences: Vec<perch_github::ReviewPreference>,
+        base_refs: Vec<String>,
+        groups: Vec<crate::review::model::ReviewGroupSummary>,
+        findings: Vec<crate::review::model::ReviewFindingSummary>,
+    },
+    ReviewGroupUpdated {
+        item_id: String,
+        summary: crate::review::model::ReviewGroupSummary,
+    },
+    ReviewFindingUpdated {
+        item_id: String,
+        summary: crate::review::model::ReviewFindingSummary,
+    },
+    ReviewLaunchFailed {
+        item_id: String,
+        message: String,
+    },
+    /// A retained review's immutable file context. The item itself remains
+    /// the current item; only Files switches to this read-only snapshot.
+    HistoricalReviewReady {
+        item_id: String,
+        group_id: String,
+        request_id: u64,
+        scope_gen: u64,
+        files: Arc<Vec<perch_git::ChangedFile>>,
+        tree: Arc<Vec<perch_git::TreeEntry>>,
+        findings: Arc<Vec<crate::review::model::ReviewFindingSummary>>,
+    },
+    /// The selected historical load failed. The matching optimistic UI
+    /// selection is rolled back without disturbing a newer selection.
+    HistoricalReviewFailed {
+        item_id: String,
+        group_id: String,
+        request_id: u64,
+        message: String,
+    },
     Status(Status),
 
     /// A step of preparing a checkout.
     ReviewProgress {
+        navigation_id: u64,
         message: String,
         percent: Option<u8>,
     },
     ReviewReady {
+        navigation_id: u64,
+        scope_gen: u64,
         item: Arc<Item>,
         /// `None` for a branch of the reader's own with no pull request.
         pull_request: Option<Arc<PullRequest>>,
@@ -301,14 +437,20 @@ pub enum Event {
         offline: bool,
     },
     ReviewFailed {
+        navigation_id: u64,
         message: String,
     },
     FileLoaded {
+        navigation_id: u64,
+        scope_gen: u64,
         item_id: String,
         path: String,
         file: Arc<crate::review::model::LoadedFile>,
     },
     FileFailed {
+        navigation_id: u64,
+        scope_gen: u64,
+        item_id: String,
         path: String,
         message: String,
     },
@@ -333,6 +475,8 @@ pub enum Event {
     /// for the scope menu, and the head as it was at the previous open,
     /// which "Since you last looked" ranges from.
     CommitsReady {
+        navigation_id: u64,
+        scope_gen: u64,
         item_id: String,
         commits: Arc<Vec<perch_git::Commit>>,
         dirt: perch_git::Dirt,
@@ -340,6 +484,8 @@ pub enum Event {
     },
     /// The changed list under a scope, after `SetScope`.
     ScopeReady {
+        navigation_id: u64,
+        scope_gen: u64,
         item_id: String,
         scope: perch_git::Scope,
         files: Arc<Vec<perch_git::ChangedFile>>,
@@ -359,7 +505,10 @@ pub enum Event {
         folded: Option<bool>,
     },
 
-    LspStatus(perch_lsp::Status),
+    LspStatus {
+        navigation_id: u64,
+        status: perch_lsp::Status,
+    },
     LspHover {
         token: u64,
         text: String,
@@ -402,6 +551,659 @@ pub enum Status {
 /// Handle the UI keeps. Dropping it ends the worker.
 pub struct Backend {
     commands: UnboundedSender<Command>,
+    navigation_requests: Arc<NavigationRequests>,
+    scope_requests: Arc<ScopeRequests>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NavigationRequest {
+    id: u64,
+    target: NavigationTarget,
+    historical_pending: bool,
+    historical_rollback: Option<Box<NavigationRequest>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NavigationTarget {
+    Current,
+    Item(String),
+    Closed,
+    Group {
+        item_id: String,
+        group_id: String,
+    },
+    ReviewAttempt {
+        item_id: String,
+        attempt_id: String,
+    },
+    SuspendedItem(String),
+}
+
+/// A same-item navigation held aside while Archive validates the checkout.
+/// If Archive is refused, the exact request is restored so the UI and backend
+/// keep the same correlation id.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct SuspendedNavigation {
+    fence_id: u64,
+    item_id: String,
+    previous: Option<NavigationRequest>,
+}
+
+/// The latest view navigation is registered synchronously by the UI handle,
+/// before its command reaches the async worker. Current opens, close, Agents
+/// owner jumps, and historical snapshots all share this one sequence so task
+/// scheduling cannot reverse the reader's click order.
+#[derive(Debug, Default)]
+struct NavigationRequests {
+    next_id: std::sync::atomic::AtomicU64,
+    latest: std::sync::Mutex<Option<NavigationRequest>>,
+    archive_fences: std::sync::Mutex<std::collections::HashMap<String, ArchiveFence>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ArchiveFence {
+    id: u64,
+    committed: bool,
+    previous_id: Option<u64>,
+}
+
+impl NavigationRequests {
+    fn begin_current(&self) -> u64 {
+        self.begin_target(NavigationTarget::Current)
+    }
+
+    fn begin_item(&self, item_id: &str) -> u64 {
+        self.begin_target(NavigationTarget::Item(item_id.to_string()))
+    }
+
+    fn begin_closed(&self) -> u64 {
+        self.begin_target(NavigationTarget::Closed)
+    }
+
+    fn begin_group(&self, item_id: &str, group_id: &str) -> u64 {
+        self.begin_historical_target(NavigationTarget::Group {
+            item_id: item_id.to_string(),
+            group_id: group_id.to_string(),
+        })
+    }
+
+    fn begin_attempt(&self, item_id: &str, attempt_id: &str) -> u64 {
+        self.begin_historical_target(NavigationTarget::ReviewAttempt {
+            item_id: item_id.to_string(),
+            attempt_id: attempt_id.to_string(),
+        })
+    }
+
+    fn begin_target(&self, target: NavigationTarget) -> u64 {
+        let Ok(mut latest) = self.latest.lock() else {
+            return 0;
+        };
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        *latest = Some(NavigationRequest {
+            id,
+            target,
+            historical_pending: false,
+            historical_rollback: None,
+        });
+        id
+    }
+
+    fn begin_historical_target(&self, target: NavigationTarget) -> u64 {
+        let Ok(mut latest) = self.latest.lock() else {
+            return 0;
+        };
+        let historical_rollback = latest.as_ref().and_then(|request| {
+            if request.historical_pending {
+                request.historical_rollback.clone()
+            } else {
+                Some(Box::new(request.clone()))
+            }
+        });
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        *latest = Some(NavigationRequest {
+            id,
+            target,
+            historical_pending: true,
+            historical_rollback,
+        });
+        id
+    }
+
+    fn current_id(&self) -> Option<u64> {
+        self.latest
+            .lock()
+            .ok()
+            .and_then(|latest| latest.as_ref().map(|request| request.id))
+    }
+
+    fn is_current(&self, request_id: u64) -> bool {
+        self.latest.lock().is_ok_and(|latest| {
+            latest
+                .as_ref()
+                .is_some_and(|request| request.id == request_id)
+        })
+    }
+
+    fn is_current_group(&self, group_id: &str, request_id: u64) -> bool {
+        self.latest.lock().is_ok_and(|latest| {
+            latest.as_ref().is_some_and(|request| {
+                request.id == request_id
+                    && matches!(
+                        &request.target,
+                        NavigationTarget::Group { group_id: current, .. } if current == group_id
+                    )
+            })
+        })
+    }
+
+    fn is_current_attempt(&self, attempt_id: &str, request_id: u64) -> bool {
+        self.latest.lock().is_ok_and(|latest| {
+            latest.as_ref().is_some_and(|request| {
+                request.id == request_id
+                    && matches!(
+                        &request.target,
+                        NavigationTarget::ReviewAttempt { attempt_id: current, .. }
+                            if current == attempt_id
+                    )
+            })
+        })
+    }
+
+    /// Resolve the provisional attempt target while holding the same lock
+    /// used by newer UI selections. A stale worker can never mint a newer
+    /// historical request after a later click.
+    fn bind_attempt_to_group(&self, attempt_id: &str, group_id: &str, request_id: u64) -> bool {
+        let Ok(mut latest) = self.latest.lock() else {
+            return false;
+        };
+        let Some(request) = latest.as_mut() else {
+            return false;
+        };
+        if request.id != request_id
+            || !matches!(
+                &request.target,
+                NavigationTarget::ReviewAttempt { attempt_id: current, .. }
+                    if current == attempt_id
+            )
+        {
+            return false;
+        }
+        let item_id = match &request.target {
+            NavigationTarget::ReviewAttempt { item_id, .. } => item_id.clone(),
+            _ => return false,
+        };
+        request.target = NavigationTarget::Group {
+            item_id,
+            group_id: group_id.to_string(),
+        };
+        true
+    }
+
+    /// An attempt navigation may first have to open a different owner. Once
+    /// that live owner is installed, a later snapshot failure must retain it
+    /// instead of restoring the item that preceded the whole navigation.
+    fn checkpoint_attempt_owner(&self, item_id: &str, attempt_id: &str, request_id: u64) -> bool {
+        let Ok(mut latest) = self.latest.lock() else {
+            return false;
+        };
+        let Some(request) = latest.as_mut() else {
+            return false;
+        };
+        if request.id != request_id
+            || !matches!(
+                &request.target,
+                NavigationTarget::ReviewAttempt {
+                    item_id: current_item,
+                    attempt_id: current_attempt,
+                } if current_item == item_id && current_attempt == attempt_id
+            )
+        {
+            return false;
+        }
+        request.historical_rollback = Some(Box::new(NavigationRequest {
+            id: request_id,
+            target: NavigationTarget::Item(item_id.to_string()),
+            historical_pending: false,
+            historical_rollback: None,
+        }));
+        true
+    }
+
+    fn suspend_item(&self, item_id: &str) -> SuspendedNavigation {
+        let fence_id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        let mut fences = self.archive_fences.lock().ok();
+        if let Some(fences) = fences.as_mut() {
+            fences.insert(
+                item_id.to_string(),
+                ArchiveFence {
+                    id: fence_id,
+                    committed: false,
+                    previous_id: None,
+                },
+            );
+        }
+        let mut previous = None;
+        if let Ok(latest) = self.latest.lock() {
+            let targets_item = latest.as_ref().is_some_and(|request| {
+                request.id < fence_id
+                    && match &request.target {
+                        NavigationTarget::Item(current)
+                        | NavigationTarget::SuspendedItem(current) => current == item_id,
+                        NavigationTarget::Group {
+                            item_id: current, ..
+                        }
+                        | NavigationTarget::ReviewAttempt {
+                            item_id: current, ..
+                        } => current == item_id,
+                        NavigationTarget::Current | NavigationTarget::Closed => false,
+                    }
+            });
+            if targets_item {
+                previous = latest.clone();
+            }
+        }
+        if let (Some(fences), Some(previous)) = (fences.as_mut(), previous.as_ref()) {
+            if let Some(fence) = fences.get_mut(item_id) {
+                fence.previous_id = Some(previous.id);
+            }
+        }
+        SuspendedNavigation {
+            fence_id,
+            item_id: item_id.to_string(),
+            previous,
+        }
+    }
+
+    fn restore_suspended(&self, suspended: &SuspendedNavigation) -> bool {
+        let restored_fence = if let Ok(mut fences) = self.archive_fences.lock() {
+            if fences
+                .get(&suspended.item_id)
+                .is_some_and(|fence| fence.id == suspended.fence_id)
+            {
+                fences.remove(&suspended.item_id);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let Some(previous) = suspended.previous.as_ref() else {
+            return false;
+        };
+        let Ok(mut latest) = self.latest.lock() else {
+            return false;
+        };
+        let current_fence = latest.as_ref().is_some_and(|request| {
+            request.id == suspended.fence_id
+                && matches!(&request.target, NavigationTarget::SuspendedItem(_))
+        });
+        if current_fence {
+            *latest = Some(previous.clone());
+        }
+        restored_fence
+            && (current_fence
+                || latest
+                    .as_ref()
+                    .is_some_and(|request| request.id == previous.id))
+    }
+
+    fn is_current_item(&self, item_id: &str, request_id: u64) -> bool {
+        let Ok(fences) = self.archive_fences.lock() else {
+            return false;
+        };
+        let fence = fences.get(item_id).copied();
+        let Ok(latest) = self.latest.lock() else {
+            return false;
+        };
+        if fence.is_some_and(|fence| {
+            !fence.committed && fence.previous_id == Some(request_id)
+        }) && latest
+            .as_ref()
+            .is_some_and(|request| request.id == request_id)
+        {
+            return true;
+        }
+        latest.as_ref().is_some_and(|request| {
+            request.id == request_id
+                && !fence.is_some_and(|fence| {
+                    request_id <= fence.id
+                        && (fence.committed
+                            || !matches!(&request.target, NavigationTarget::Current))
+                })
+        })
+    }
+
+    fn archive_fence_is_current(&self, suspended: &SuspendedNavigation) -> bool {
+        let Ok(fences) = self.archive_fences.lock() else {
+            return false;
+        };
+        if !fences
+            .get(&suspended.item_id)
+            .is_some_and(|fence| fence.id == suspended.fence_id)
+        {
+            return false;
+        }
+        let Ok(latest) = self.latest.lock() else {
+            return false;
+        };
+        !latest.as_ref().is_some_and(|request| {
+            request.id > suspended.fence_id
+                && match &request.target {
+                    NavigationTarget::Item(item_id)
+                    | NavigationTarget::SuspendedItem(item_id) => item_id == &suspended.item_id,
+                    NavigationTarget::Group { item_id, .. }
+                    | NavigationTarget::ReviewAttempt { item_id, .. } => {
+                        item_id == &suspended.item_id
+                    }
+                    NavigationTarget::Current | NavigationTarget::Closed => false,
+                }
+        })
+    }
+
+    fn commit_archive_fence(&self, suspended: &SuspendedNavigation) -> bool {
+        let Ok(mut fences) = self.archive_fences.lock() else {
+            return false;
+        };
+        let Some(fence) = fences.get_mut(&suspended.item_id) else {
+            return false;
+        };
+        if fence.id != suspended.fence_id {
+            return false;
+        }
+        fence.committed = true;
+        if let Some(previous) = suspended.previous.as_ref() {
+            let Ok(mut latest) = self.latest.lock() else {
+                return false;
+            };
+            if latest
+                .as_ref()
+                .is_some_and(|request| request.id == previous.id)
+            {
+                *latest = Some(NavigationRequest {
+                    id: suspended.fence_id,
+                    target: NavigationTarget::SuspendedItem(suspended.item_id.clone()),
+                    historical_pending: false,
+                    historical_rollback: None,
+                });
+            }
+        }
+        true
+    }
+
+    fn is_committed_archive_fence(&self, item_id: &str, request_id: u64) -> bool {
+        let Ok(fences) = self.archive_fences.lock() else {
+            return false;
+        };
+        let blocked = fences
+            .get(item_id)
+            .is_some_and(|fence| fence.committed && request_id <= fence.id);
+        blocked && self.is_current(request_id)
+    }
+
+    /// Commit a resolved item while atomically checking both navigation
+    /// order and the latest synchronous archive fence. Subject opens begin
+    /// before their durable item id is known, so a successful commit binds
+    /// them to that item for later same-item lifecycle actions.
+    fn with_current_item<T>(
+        &self,
+        item_id: &str,
+        request_id: u64,
+        commit: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let fences = self.archive_fences.lock().ok()?;
+        let fence = fences.get(item_id).copied();
+        let mut latest = self.latest.lock().ok()?;
+        if fence.is_some_and(|fence| {
+            !fence.committed && fence.previous_id == Some(request_id)
+        }) && latest
+            .as_ref()
+            .is_some_and(|request| request.id == request_id)
+        {
+            return Some(commit());
+        }
+        let request = latest
+            .as_mut()
+            .filter(|request| request.id == request_id)?;
+        if fence.is_some_and(|fence| {
+            request_id <= fence.id
+                && (fence.committed || !matches!(&request.target, NavigationTarget::Current))
+        }) {
+            return None;
+        }
+        let result = commit();
+        if matches!(
+            &request.target,
+            NavigationTarget::Current | NavigationTarget::Item(_)
+        ) {
+            request.target = NavigationTarget::Item(item_id.to_string());
+        }
+        drop(fences);
+        Some(result)
+    }
+
+    fn with_current<T>(&self, request_id: u64, commit: impl FnOnce() -> T) -> Option<T> {
+        let latest = self.latest.lock().ok()?;
+        latest
+            .as_ref()
+            .is_some_and(|request| request.id == request_id)
+            .then(commit)
+    }
+
+    /// Execute a historical commit while holding the same short lock used to
+    /// register every newer navigation. Whichever wins the lock defines the
+    /// final view.
+    fn with_current_group<T>(
+        &self,
+        group_id: &str,
+        request_id: u64,
+        commit: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let latest = self.latest.lock().ok()?;
+        latest
+            .as_ref()
+            .is_some_and(|request| {
+                request.id == request_id
+                    && matches!(
+                        &request.target,
+                        NavigationTarget::Group { group_id: current, .. } if current == group_id
+                    )
+            })
+            .then(commit)
+    }
+
+    /// Install a historical slot and make it the stable rollback point while
+    /// holding the navigation lock. A newer history click therefore observes
+    /// either the prior stable view or this fully installed one.
+    fn commit_current_group<T>(
+        &self,
+        group_id: &str,
+        request_id: u64,
+        commit: impl FnOnce() -> Option<T>,
+    ) -> Option<T> {
+        let mut latest = self.latest.lock().ok()?;
+        let current = latest.as_ref().is_some_and(|request| {
+            request.id == request_id
+                && matches!(
+                    &request.target,
+                    NavigationTarget::Group { group_id: current, .. } if current == group_id
+                )
+        });
+        if !current {
+            return None;
+        }
+        let committed = commit()?;
+        if let Some(request) = latest.as_mut() {
+            request.historical_pending = false;
+            request.historical_rollback = None;
+        }
+        Some(committed)
+    }
+
+    /// Restore the last stable navigation after the current historical load
+    /// fails. Returning false means a newer navigation already owns the view.
+    fn rollback_current_group(&self, group_id: &str, request_id: u64) -> bool {
+        let Ok(mut latest) = self.latest.lock() else {
+            return false;
+        };
+        let Some(request) = latest.as_ref() else {
+            return false;
+        };
+        if request.id != request_id
+            || !request.historical_pending
+            || !matches!(
+                &request.target,
+                NavigationTarget::Group { group_id: current, .. } if current == group_id
+            )
+        {
+            return false;
+        }
+        *latest = request
+            .historical_rollback
+            .as_ref()
+            .map(|previous| (**previous).clone());
+        true
+    }
+
+    fn rollback_current_attempt(&self, attempt_id: &str, request_id: u64) -> bool {
+        let Ok(mut latest) = self.latest.lock() else {
+            return false;
+        };
+        let Some(request) = latest.as_ref() else {
+            return false;
+        };
+        if request.id != request_id
+            || !request.historical_pending
+            || !matches!(
+                &request.target,
+                NavigationTarget::ReviewAttempt { attempt_id: current, .. }
+                    if current == attempt_id
+            )
+        {
+            return false;
+        }
+        *latest = request
+            .historical_rollback
+            .as_ref()
+            .map(|previous| (**previous).clone());
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScopeRequest {
+    id: u64,
+    item_id: String,
+}
+
+/// Scope file reads run concurrently. Register the selection synchronously
+/// so a slower earlier Git query cannot overwrite a later scope or publish
+/// finding anchors projected for the wrong pair of sides.
+#[derive(Debug, Default)]
+struct ScopeRequests {
+    state: std::sync::Mutex<ScopeRequestState>,
+}
+
+#[derive(Debug, Default)]
+struct ScopeRequestState {
+    revision: u64,
+    latest: Option<ScopeRequest>,
+    pending: bool,
+}
+
+impl ScopeRequests {
+    fn begin(&self, item_id: &str) -> u64 {
+        let Ok(mut state) = self.state.lock() else {
+            return 0;
+        };
+        state.revision = state.revision.saturating_add(1);
+        let id = state.revision;
+        state.latest = Some(ScopeRequest {
+            id,
+            item_id: item_id.to_string(),
+        });
+        state.pending = true;
+        id
+    }
+
+    fn stable_revision(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|state| (!state.pending).then_some(state.revision))
+    }
+
+    fn is_current(&self, item_id: &str, request_id: u64) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state
+                .latest
+                .as_ref()
+                .is_some_and(|request| request.id == request_id && request.item_id == item_id)
+        })
+    }
+
+    fn with_current<T>(
+        &self,
+        item_id: &str,
+        request_id: u64,
+        commit: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.state.lock().ok()?;
+        state
+            .latest
+            .as_ref()
+            .is_some_and(|request| request.id == request_id && request.item_id == item_id)
+            .then(commit)
+    }
+
+    fn with_revision<T>(&self, revision: u64, commit: impl FnOnce() -> T) -> Option<T> {
+        let state = self.state.lock().ok()?;
+        (state.revision == revision && !state.pending).then(commit)
+    }
+
+    fn settle(&self, item_id: &str, request_id: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            if state
+                .latest
+                .as_ref()
+                .is_some_and(|request| request.id == request_id && request.item_id == item_id)
+            {
+                state.pending = false;
+            }
+        }
+    }
+
+    fn clear(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.revision = state.revision.saturating_add(1);
+            state.latest = None;
+            state.pending = false;
+        }
+    }
+
+    fn clear_item(&self, item_id: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            if state
+                .latest
+                .as_ref()
+                .is_some_and(|request| request.item_id == item_id)
+            {
+                state.revision = state.revision.saturating_add(1);
+                state.latest = None;
+                state.pending = false;
+            }
+        }
+    }
 }
 
 impl Backend {
@@ -412,18 +1214,32 @@ impl Backend {
     /// Open a pull request or an issue by number, making its item if it has
     /// none yet. The launch hooks and the review header's "Closes #N" chip
     /// come through here; a sidebar row has an id and uses `open_item`.
-    pub fn open_subject(&self, repo_full_name: &str, kind: ItemKind, number: u64) {
+    pub fn open_subject(&self, repo_full_name: &str, kind: ItemKind, number: u64) -> u64 {
+        let navigation_id = self.navigation_requests.begin_current();
+        self.scope_requests.clear();
         let _ = self.commands.send(Command::OpenSubject {
             repo_full_name: repo_full_name.to_string(),
             kind,
             number,
+            navigation_id,
         });
+        navigation_id
     }
 
-    pub fn open_notification(&self, thread: &Thread) {
+    pub fn open_notification(&self, thread: &Thread) -> Option<u64> {
+        let opens_inside = matches!(
+            thread.subject.kind,
+            SubjectKind::PullRequest | SubjectKind::Issue
+        ) && thread.number_hint().is_some();
+        let navigation_id = opens_inside.then(|| self.navigation_requests.begin_current());
+        if navigation_id.is_some() {
+            self.scope_requests.clear();
+        }
         let _ = self.commands.send(Command::OpenNotification {
             thread: thread.clone(),
+            navigation_id,
         });
+        navigation_id
     }
 
     pub fn done_notification(&self, thread_id: &str) {
@@ -438,33 +1254,65 @@ impl Backend {
         });
     }
 
-    pub fn open_item(&self, id: &str) {
-        let _ = self.commands.send(Command::OpenItem { id: id.to_string() });
+    pub fn open_item(&self, id: &str) -> u64 {
+        let navigation_id = self.navigation_requests.begin_item(id);
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::OpenItem {
+            id: id.to_string(),
+            navigation_id,
+        });
+        navigation_id
     }
 
-    pub fn view_agent_owner(&self, id: &str) {
-        let _ = self
-            .commands
-            .send(Command::ViewAgentOwner { id: id.to_string() });
+    pub fn view_agent_owner(&self, id: &str) -> u64 {
+        let navigation_id = self.navigation_requests.begin_item(id);
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::ViewAgentOwner {
+            id: id.to_string(),
+            navigation_id,
+        });
+        navigation_id
+    }
+
+    pub fn view_review_attempt_owner(&self, item_id: &str, attempt_id: &str) -> u64 {
+        let request_id = self.navigation_requests.begin_attempt(item_id, attempt_id);
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::ViewReviewAttemptOwner {
+            item_id: item_id.to_string(),
+            attempt_id: attempt_id.to_string(),
+            request_id,
+        });
+        request_id
     }
 
     pub fn open_file(&self, path: &str) {
+        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
         let _ = self.commands.send(Command::OpenFile {
             path: path.to_string(),
+            navigation_id,
         });
     }
 
     pub fn set_scope(&self, item_id: &str, scope: perch_git::Scope) {
+        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
+        let request_id = self.scope_requests.begin(item_id);
         let _ = self.commands.send(Command::SetScope {
             item_id: item_id.to_string(),
             scope,
+            request_id,
+            navigation_id,
         });
     }
 
     pub fn refresh_scope(&self, item_id: &str) {
-        let _ = self.commands.send(Command::RefreshScope {
-            item_id: item_id.to_string(),
-        });
+        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
+        if let Some(scope_revision) = self.scope_requests.stable_revision() {
+            let _ = self.commands.send(Command::RefreshScope {
+                item_id: item_id.to_string(),
+                navigation_id,
+                scope_revision,
+            });
+        }
     }
 
     pub fn set_viewed(&self, item_id: &str, path: &str, blob: &str, viewed: bool) {
@@ -505,23 +1353,43 @@ impl Backend {
         });
     }
 
-    pub fn close_review(&self) {
-        let _ = self.commands.send(Command::CloseReview);
+    pub fn close_review(&self) -> u64 {
+        let navigation_id = self.navigation_requests.begin_closed();
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::CloseReview { navigation_id });
+        navigation_id
     }
 
-    pub fn archive_item(&self, id: &str) {
-        let _ = self
+    pub fn archive_item(&self, id: &str) -> u64 {
+        let suspended_navigation = self.navigation_requests.suspend_item(id);
+        self.scope_requests.clear_item(id);
+        let fence_id = suspended_navigation.fence_id;
+        if self
             .commands
-            .send(Command::ArchiveItem { id: id.to_string() });
+            .send(Command::ArchiveItem {
+                id: id.to_string(),
+                suspended_navigation: suspended_navigation.clone(),
+            })
+            .is_err()
+        {
+            self.navigation_requests
+                .restore_suspended(&suspended_navigation);
+        }
+        fence_id
     }
 
-    pub fn restore_item(&self, id: &str) {
-        let _ = self
-            .commands
-            .send(Command::RestoreItem { id: id.to_string() });
+    pub fn restore_item(&self, id: &str) -> u64 {
+        let navigation_id = self.navigation_requests.begin_item(id);
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::RestoreItem {
+            id: id.to_string(),
+            navigation_id,
+        });
+        navigation_id
     }
 
     pub fn delete_item(&self, id: &str) {
+        self.scope_requests.clear_item(id);
         let _ = self
             .commands
             .send(Command::DeleteItem { id: id.to_string() });
@@ -548,14 +1416,24 @@ impl Backend {
         });
     }
 
-    pub fn start_work(&self, issue_item_id: &str) {
+    pub fn start_work(&self, issue_item_id: &str) -> u64 {
+        let navigation_id = self.navigation_requests.begin_item(issue_item_id);
+        self.scope_requests.clear();
         let _ = self.commands.send(Command::StartWork {
             issue_item_id: issue_item_id.to_string(),
+            navigation_id,
         });
+        navigation_id
     }
 
-    pub fn fork_item(&self, id: &str) {
-        let _ = self.commands.send(Command::ForkItem { id: id.to_string() });
+    pub fn fork_item(&self, id: &str) -> u64 {
+        let navigation_id = self.navigation_requests.begin_item(id);
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::ForkItem {
+            id: id.to_string(),
+            navigation_id,
+        });
+        navigation_id
     }
 
     pub fn set_meta(&self, key: &str, value: &str) {
@@ -596,6 +1474,68 @@ impl Backend {
     pub fn retry_run(&self, run_id: &str) {
         let _ = self.commands.send(Command::RetryRun {
             run_id: run_id.to_string(),
+        });
+    }
+
+    pub fn load_review_dashboard(&self, item_id: &str) {
+        let _ = self.commands.send(Command::LoadReviewDashboard {
+            item_id: item_id.to_string(),
+        });
+    }
+
+    pub fn start_review(&self, request: crate::review::model::ReviewLaunchRequest) {
+        let _ = self.commands.send(Command::StartReview { request });
+    }
+
+    pub fn save_review_preference(&self, choice: crate::review::model::ReviewPreferenceChoice) {
+        let _ = self.commands.send(Command::SaveReviewPreference { choice });
+    }
+
+    pub fn stop_review_group(&self, group_id: &str) {
+        let _ = self.commands.send(Command::StopReviewGroup {
+            group_id: group_id.to_string(),
+        });
+    }
+
+    pub fn retry_review_attempt(&self, attempt_id: &str) {
+        let _ = self.commands.send(Command::RetryReviewAttempt {
+            attempt_id: attempt_id.to_string(),
+        });
+    }
+
+    pub fn open_review_snapshot(&self, item_id: &str, group_id: &str) -> u64 {
+        let request_id = self.navigation_requests.begin_group(item_id, group_id);
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::OpenReviewSnapshot {
+            group_id: group_id.to_string(),
+            request_id,
+        });
+        request_id
+    }
+
+    pub fn dismiss_review_finding(&self, finding_id: &str, reason: &str) {
+        let _ = self.commands.send(Command::DismissReviewFinding {
+            finding_id: finding_id.to_string(),
+            reason: reason.to_string(),
+        });
+    }
+
+    pub fn reopen_review_finding(&self, finding_id: &str) {
+        let _ = self.commands.send(Command::ReopenReviewFinding {
+            finding_id: finding_id.to_string(),
+        });
+    }
+
+    pub fn link_review_duplicate(&self, finding_id: &str, canonical_finding_id: &str) {
+        let _ = self.commands.send(Command::LinkReviewDuplicate {
+            finding_id: finding_id.to_string(),
+            canonical_finding_id: canonical_finding_id.to_string(),
+        });
+    }
+
+    pub fn unlink_review_duplicate(&self, finding_id: &str) {
+        let _ = self.commands.send(Command::UnlinkReviewDuplicate {
+            finding_id: finding_id.to_string(),
         });
     }
 
@@ -648,7 +1588,11 @@ impl Backend {
     #[cfg(test)]
     pub fn detached() -> Self {
         let (commands, _) = tokio::sync::mpsc::unbounded_channel();
-        Backend { commands }
+        Backend {
+            commands,
+            navigation_requests: Arc::default(),
+            scope_requests: Arc::default(),
+        }
     }
 }
 
@@ -656,6 +1600,10 @@ impl Backend {
 pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = std::sync::mpsc::channel();
+    let navigation_requests = Arc::<NavigationRequests>::default();
+    let worker_navigation_requests = navigation_requests.clone();
+    let scope_requests = Arc::<ScopeRequests>::default();
+    let worker_scope_requests = scope_requests.clone();
 
     std::thread::Builder::new()
         .name("perch-backend".into())
@@ -673,14 +1621,31 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
                     return;
                 }
             };
-            runtime.block_on(run(cmd_rx, evt_tx));
+            runtime.block_on(run(
+                cmd_rx,
+                evt_tx,
+                worker_navigation_requests,
+                worker_scope_requests,
+            ));
         })
         .expect("spawn backend thread");
 
-    (Backend { commands: cmd_tx }, evt_rx)
+    (
+        Backend {
+            commands: cmd_tx,
+            navigation_requests,
+            scope_requests,
+        },
+        evt_rx,
+    )
 }
 
-async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event>) {
+async fn run(
+    mut commands: UnboundedReceiver<Command>,
+    events: EventSender<Event>,
+    navigation_requests: Arc<NavigationRequests>,
+    scope_requests: Arc<ScopeRequests>,
+) {
     tracing::info!("backend started");
     let mut config = Config::load();
     // A `[[repo]]` with roots and no `github` is whatever its first root
@@ -753,12 +1718,9 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
 
     // Checkout retirement is local bookkeeping. Finish an archive that was
     // interrupted by a crash before entering the command loop.
-    let local_preparer = Preparer::new(
-        Store::new(
-            perch_github::config::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
-        ),
-        None,
-    );
+    let data_root =
+        perch_github::config::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let local_preparer = Preparer::new(Store::new(data_root.clone()), None);
     retire_archived_checkouts_from_cache(&cache, &local_preparer, &events).await;
 
     // GitHub is optional. The cache, local checkouts and agent history stay
@@ -796,9 +1758,7 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
     // clone never stalls the notification poll, and the active checkout is
     // shared so a file open knows where to read from.
     let preparer = Arc::new(Preparer::new(
-        Store::new(
-            perch_github::config::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
-        ),
+        Store::new(data_root.clone()),
         token.as_ref().map(|token| token.value.clone()),
     ));
     let checkout: Arc<std::sync::Mutex<Option<ReviewContext>>> =
@@ -811,6 +1771,25 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
     if let Ok(agent) = agents.await {
         config.agent = agent;
     }
+    let (claude_review, codex_review) = tokio::join!(
+        perch_agent::detect_review_capability(
+            perch_agent::Backend::ClaudeCode,
+            Path::new(&config.agent.binary),
+        ),
+        perch_agent::detect_review_capability(
+            perch_agent::Backend::Codex,
+            Path::new(&config.agent.codex.binary),
+        ),
+    );
+    let review_capabilities = Arc::new(vec![claude_review, codex_review]);
+    let review_snapshots = Arc::new(ReviewSnapshotStore::new(data_root.clone()));
+    let knowledge = match perch_knowledge::Knowledge::open(data_root.join("knowledge")) {
+        Ok(knowledge) => Some(Arc::new(knowledge)),
+        Err(error) => {
+            tracing::warn!(%error, "review knowledge export is unavailable");
+            None
+        }
+    };
     let config = Arc::new(config);
     let run_manager = runs::RunManager::new(
         config.agent.max_concurrent_runs,
@@ -826,6 +1805,14 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
         language_server: language_server.clone(),
         events: events.clone(),
         runs: run_manager,
+        review_capabilities,
+        review_snapshots,
+        navigation_requests,
+        scope_requests,
+        review_navigation: Arc::new(tokio::sync::Mutex::new(())),
+        review_admissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
+        knowledge,
         item_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         avatars,
         seen_notifications: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -833,6 +1820,7 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
         notifications: Arc::new(std::sync::Mutex::new(initial_notifications)),
     };
     send_agent_runs(&ctx, 50);
+    reviews::recover(&ctx).await;
 
     // Who the reader is on GitHub, for their own byline: once per launch,
     // kept in meta so the next launch has it before the network does.
@@ -939,7 +1927,14 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     .and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
                 if let Some(item_id) = open {
                     let ctx = ctx.clone();
-                    tokio::spawn(async move { refresh_scope(&ctx, &item_id).await });
+                    if let (Some(navigation_id), Some(scope_revision)) = (
+                        ctx.navigation_requests.current_id(),
+                        ctx.scope_requests.stable_revision(),
+                    ) {
+                        tokio::spawn(async move {
+                            refresh_scope(&ctx, &item_id, navigation_id, scope_revision).await
+                        });
+                    }
                 }
                 let ctx = ctx.clone();
                 tokio::spawn(async move { refresh_items(&ctx).await });
@@ -948,16 +1943,29 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 repo_full_name,
                 kind,
                 number,
+                navigation_id,
             } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if open_subject(&ctx, repo_full_name, kind, number).await {
-                        start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                    if open_subject_navigation(&ctx, repo_full_name, kind, number, navigation_id)
+                        .await
+                    {
+                        start_language_server(
+                            ctx.slot,
+                            ctx.language_server,
+                            ctx.events,
+                            ctx.navigation_requests,
+                            navigation_id,
+                        )
+                        .await;
                     }
                 });
             }
-            Command::OpenNotification { thread } => {
+            Command::OpenNotification {
+                thread,
+                navigation_id,
+            } => {
                 ctx.clear_notice();
                 if thread.unread {
                     if let Some(github) = ctx.github.as_ref() {
@@ -990,12 +1998,21 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     SubjectKind::Issue => Some(ItemKind::Issue),
                     _ => None,
                 };
-                if let (Some(kind), Some(number)) = (kind, thread.number_hint()) {
+                if let (Some(navigation_id), Some(kind), Some(number)) =
+                    (navigation_id, kind, thread.number_hint())
+                {
                     let ctx = ctx.clone();
                     let repo = thread.repository.full_name;
                     tokio::spawn(async move {
-                        if open_subject(&ctx, repo, kind, number).await {
-                            start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                        if open_subject_navigation(&ctx, repo, kind, number, navigation_id).await {
+                            start_language_server(
+                                ctx.slot,
+                                ctx.language_server,
+                                ctx.events,
+                                ctx.navigation_requests,
+                                navigation_id,
+                            )
+                            .await;
                         }
                     });
                 }
@@ -1038,46 +2055,76 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     ctx.notice("A GitHub token is required to change notifications");
                 }
             }
-            Command::OpenItem { id } | Command::RestoreItem { id } => {
+            Command::OpenItem { id, navigation_id }
+            | Command::RestoreItem { id, navigation_id } => {
                 // Restoring is opening: the archived flag clears on the way
                 // through and an owned checkout is put back by `prepare`.
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if open_item(&ctx, &id).await {
-                        start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                    if open_item(&ctx, &id, navigation_id).await {
+                        start_language_server(
+                            ctx.slot,
+                            ctx.language_server,
+                            ctx.events,
+                            ctx.navigation_requests,
+                            navigation_id,
+                        )
+                        .await;
                     }
                 });
             }
-            Command::ViewAgentOwner { id } => {
+            Command::ViewAgentOwner { id, navigation_id } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
+                    let _navigation = ctx.review_navigation.lock().await;
+                    if !ctx.navigation_requests.is_current(navigation_id) {
+                        return;
+                    }
                     let Some(item) = ctx.item(&id) else {
                         ctx.notice("That item is gone");
                         return;
                     };
                     if item.is_archived() {
-                        let pull_request = item.pull_request().cloned().map(Arc::new);
-                        let _ = ctx.events.send(Event::ReviewReady {
-                            item: Arc::new(item),
-                            pull_request,
-                            files: Arc::new(Vec::new()),
-                            tree: Arc::new(Vec::new()),
-                            stale_head: None,
-                            offline: true,
-                        });
-                        ctx.send_threads(&id);
-                    } else if open_item(&ctx, &id).await {
-                        start_language_server(ctx.slot, ctx.language_server, ctx.events).await;
+                        let _lifecycle = ctx.item_lifecycle.lock().await;
+                        if !ctx.navigation_requests.is_current(navigation_id) {
+                            return;
+                        }
+                        show_retained_review_owner(&ctx, item, navigation_id);
+                    } else if open_item(&ctx, &id, navigation_id).await {
+                        start_language_server(
+                            ctx.slot,
+                            ctx.language_server,
+                            ctx.events,
+                            ctx.navigation_requests,
+                            navigation_id,
+                        )
+                        .await;
                     }
                 });
             }
-            Command::ArchiveItem { id } => {
+            Command::ViewReviewAttemptOwner {
+                item_id,
+                attempt_id,
+                request_id,
+            } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if let Err(message) = archive_item(&ctx, &id).await {
+                    view_review_attempt_owner(&ctx, &item_id, &attempt_id, request_id).await;
+                });
+            }
+            Command::ArchiveItem {
+                id,
+                suspended_navigation,
+            } => {
+                ctx.clear_notice();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    if let Err(message) =
+                        archive_item(&ctx, &id, Some(&suspended_navigation)).await
+                    {
                         tracing::warn!(id, %message, "could not archive item");
                         let _ = ctx.events.send(Event::Notice(message));
                     }
@@ -1108,36 +2155,63 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     item.name = name.clone().filter(|n| !n.trim().is_empty());
                 });
             }
-            Command::StartWork { issue_item_id } => {
+            Command::StartWork {
+                issue_item_id,
+                navigation_id,
+            } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    match start_work(&ctx, &issue_item_id).await {
+                    match start_work(&ctx, &issue_item_id, navigation_id).await {
                         Ok(id) => {
-                            if open_item(&ctx, &id).await {
-                                start_language_server(ctx.slot, ctx.language_server, ctx.events)
-                                    .await;
+                            if open_item(&ctx, &id, navigation_id).await {
+                                start_language_server(
+                                    ctx.slot,
+                                    ctx.language_server,
+                                    ctx.events,
+                                    ctx.navigation_requests,
+                                    navigation_id,
+                                )
+                                .await;
                             }
                         }
                         Err(message) => {
-                            let _ = ctx.events.send(Event::ReviewFailed { message });
+                            ctx.send_navigation_event(
+                                navigation_id,
+                                Event::ReviewFailed {
+                                    navigation_id,
+                                    message,
+                                },
+                            );
                         }
                     }
                 });
             }
-            Command::ForkItem { id } => {
+            Command::ForkItem { id, navigation_id } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     match fork_item(&ctx, &id).await {
                         Ok(id) => {
-                            if open_item(&ctx, &id).await {
-                                start_language_server(ctx.slot, ctx.language_server, ctx.events)
-                                    .await;
+                            if open_item(&ctx, &id, navigation_id).await {
+                                start_language_server(
+                                    ctx.slot,
+                                    ctx.language_server,
+                                    ctx.events,
+                                    ctx.navigation_requests,
+                                    navigation_id,
+                                )
+                                .await;
                             }
                         }
                         Err(message) => {
-                            let _ = ctx.events.send(Event::ReviewFailed { message });
+                            ctx.send_navigation_event(
+                                navigation_id,
+                                Event::ReviewFailed {
+                                    navigation_id,
+                                    message,
+                                },
+                            );
                         }
                     }
                 });
@@ -1169,6 +2243,48 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 let ctx = ctx.clone();
                 tokio::spawn(async move { retry_run(&ctx, &run_id).await });
             }
+            Command::LoadReviewDashboard { item_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { reviews::load_dashboard(&ctx, &item_id).await });
+            }
+            Command::StartReview { request } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { reviews::start(&ctx, request).await });
+            }
+            Command::SaveReviewPreference { choice } => {
+                reviews::save_preference(&ctx, choice);
+            }
+            Command::StopReviewGroup { group_id } => {
+                reviews::stop_group(&ctx, &group_id);
+            }
+            Command::RetryReviewAttempt { attempt_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { reviews::retry_attempt(&ctx, &attempt_id).await });
+            }
+            Command::OpenReviewSnapshot {
+                group_id,
+                request_id,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(
+                    async move { reviews::open_snapshot(&ctx, &group_id, request_id).await },
+                );
+            }
+            Command::DismissReviewFinding { finding_id, reason } => {
+                reviews::dismiss_finding(&ctx, &finding_id, &reason);
+            }
+            Command::ReopenReviewFinding { finding_id } => {
+                reviews::reopen_finding(&ctx, &finding_id);
+            }
+            Command::LinkReviewDuplicate {
+                finding_id,
+                canonical_finding_id,
+            } => {
+                reviews::link_duplicate(&ctx, &finding_id, &canonical_finding_id);
+            }
+            Command::UnlinkReviewDuplicate { finding_id } => {
+                reviews::unlink_duplicate(&ctx, &finding_id);
+            }
             Command::LoadAgentRuns { history_limit } => {
                 send_agent_runs(&ctx, history_limit);
             }
@@ -1185,14 +2301,35 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                 let ctx = ctx.clone();
                 tokio::spawn(async move { delete_comment_thread(&ctx, &id).await });
             }
-            Command::OpenFile { path } => {
+            Command::OpenFile {
+                path,
+                navigation_id,
+            } => {
                 let preparer = preparer.clone();
                 let checkout = checkout.clone();
                 let events = events.clone();
                 let language_server = language_server.clone();
+                let navigation_requests = ctx.navigation_requests.clone();
                 tokio::spawn(async move {
-                    open_file(preparer, checkout.clone(), events, path.clone()).await;
-                    announce_file(checkout, language_server, path).await;
+                    if open_file(
+                        preparer,
+                        checkout.clone(),
+                        events,
+                        navigation_requests.clone(),
+                        path.clone(),
+                        navigation_id,
+                    )
+                    .await
+                    {
+                        announce_file(
+                            checkout,
+                            language_server,
+                            navigation_requests,
+                            path,
+                            navigation_id,
+                        )
+                        .await;
+                    }
                 });
             }
             Command::Hover {
@@ -1217,13 +2354,26 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     }
                 });
             }
-            Command::SetScope { item_id, scope } => {
+            Command::SetScope {
+                item_id,
+                scope,
+                request_id,
+                navigation_id,
+            } => {
                 let ctx = ctx.clone();
-                tokio::spawn(async move { set_scope(&ctx, &item_id, scope).await });
+                tokio::spawn(async move {
+                    set_scope(&ctx, &item_id, scope, request_id, navigation_id).await
+                });
             }
-            Command::RefreshScope { item_id } => {
+            Command::RefreshScope {
+                item_id,
+                navigation_id,
+                scope_revision,
+            } => {
                 let ctx = ctx.clone();
-                tokio::spawn(async move { refresh_scope(&ctx, &item_id).await });
+                tokio::spawn(async move {
+                    refresh_scope(&ctx, &item_id, navigation_id, scope_revision).await
+                });
             }
             Command::SetViewed {
                 item_id,
@@ -1330,16 +2480,28 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: EventSender<Event
                     }
                 });
             }
-            Command::CloseReview => {
-                if let Ok(mut guard) = checkout.lock() {
-                    *guard = None;
-                }
-                let mut guard = language_server.lock().await;
-                if let Some(client) = guard.take() {
-                    // Let the server exit cleanly rather than leaving it
-                    // indexing a worktree nobody is looking at.
-                    tokio::spawn(async move { client.shutdown().await });
-                }
+            Command::CloseReview { navigation_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let _lifecycle = ctx.item_lifecycle.lock().await;
+                    let closed = ctx
+                        .navigation_requests
+                        .with_current(navigation_id, || {
+                            if let Ok(mut guard) = ctx.slot.lock() {
+                                *guard = None;
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+                    if closed {
+                        let mut guard = ctx.language_server.lock().await;
+                        if let Some(client) = guard.take() {
+                            tokio::spawn(async move { client.shutdown().await });
+                        }
+                    }
+                });
             }
         }
     }
@@ -1364,6 +2526,28 @@ struct Ctx {
     events: EventSender<Event>,
     /// Durable admission, the shared execution limit, and live children.
     runs: runs::RunManager,
+    /// Installed native-review contracts, captured once after CLI discovery.
+    review_capabilities: Arc<Vec<perch_agent::ReviewCapability>>,
+    /// Perch-owned immutable source/object storage.
+    review_snapshots: Arc<ReviewSnapshotStore>,
+    /// Latest view navigation, shared with the synchronous UI command handle
+    /// so stale work is fenced before the worker receives the newer command.
+    navigation_requests: Arc<NavigationRequests>,
+    /// Latest requested diff scope, registered synchronously so concurrent
+    /// Git reads cannot publish out of selection order.
+    scope_requests: Arc<ScopeRequests>,
+    /// Serialize reviewer-child owner opens. A newer click registers
+    /// synchronously and makes the older worker stale; serialization then
+    /// guarantees the newest accepted owner is the final backend slot.
+    review_navigation: Arc<tokio::sync::Mutex<()>>,
+    /// Admission starts before a snapshot has a database row. Fence those
+    /// captures in memory so a double click cannot create two costly copies.
+    review_admissions: Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
+    /// Reconciliation reloads durable findings under this short lock. The
+    /// database transaction remains the ultimate replay fence.
+    review_reconcile: Arc<tokio::sync::Mutex<()>>,
+    /// Plain Markdown export is best-effort and never gates durable review.
+    knowledge: Option<Arc<perch_knowledge::Knowledge>>,
     /// Serializes checkout archive/restore/delete so deferred agent cleanup
     /// cannot remove a worktree while it is being restored or deleted.
     item_lifecycle: Arc<tokio::sync::Mutex<()>>,
@@ -1399,16 +2583,202 @@ impl Ctx {
     }
 
     fn send_threads(&self, item_id: &str) {
-        let threads = self.with_cache(|c| c.load_comment_threads(item_id));
+        let view = self.slot.lock().ok().and_then(|slot| {
+            slot.as_ref()
+                .filter(|open| open.item_id == item_id)
+                .map(|open| {
+                    (
+                        open.scope.clone(),
+                        open.checkout.merge_base.clone(),
+                        open.checkout.head_sha.clone(),
+                        open.review_snapshot_id.clone(),
+                        open.review_group_id.clone(),
+                        open.review_request_id,
+                    )
+                })
+        });
+        let review_fence = view
+            .as_ref()
+            .and_then(
+                |(_, _, _, _, group_id, request_id)| match (group_id, request_id) {
+                    (Some(group_id), Some(request_id)) => Some((group_id.clone(), *request_id)),
+                    _ => None,
+                },
+            );
+        let threads = self.with_cache(|cache| -> Result<Vec<CommentThread>, CacheError> {
+            let mut threads = cache.load_comment_threads(item_id)?;
+            let Some((scope, merge_base, head, exact_snapshot_id, historical_group_id, _)) =
+                view.as_ref()
+            else {
+                return Ok(threads);
+            };
+            let findings = cache.list_findings(item_id, None)?;
+            let finding_threads = findings
+                .iter()
+                .map(|finding| finding.thread_id.clone())
+                .collect::<std::collections::HashSet<_>>();
+
+            // Durable review anchors describe a full committed branch
+            // snapshot. Commit and working-tree scopes show a different
+            // pair of Git sides, so their numeric lines are never safe
+            // inline there. Keep the thread available in Conversation as
+            // outdated/original evidence until Branch is selected again.
+            if *scope != perch_git::Scope::Branch {
+                Self::mark_review_threads_outdated(&mut threads, &finding_threads);
+                return Ok(threads);
+            }
+
+            let target_snapshot = match exact_snapshot_id.as_deref() {
+                Some(snapshot_id) => cache.load_review_snapshot(snapshot_id)?,
+                None => cache
+                    .list_review_snapshots(item_id)?
+                    .into_iter()
+                    .find(|snapshot| {
+                        snapshot.merge_base_sha == *merge_base && snapshot.head_sha == *head
+                    }),
+            };
+
+            // A live checkout which has moved away from every retained
+            // snapshot has no safe numeric projection. Keep the durable
+            // original anchor only as an outdated/original-code affordance;
+            // the inline renderer deliberately does not place outdated
+            // anchors on the displayed file.
+            let Some(target_snapshot) = target_snapshot else {
+                Self::mark_review_threads_outdated(&mut threads, &finding_threads);
+                return Ok(threads);
+            };
+
+            let historical = match historical_group_id.as_deref() {
+                Some(group_id) => cache.load_review_group(group_id)?,
+                None => None,
+            };
+            let historical_attempts = match historical.as_ref() {
+                Some(group) => cache
+                    .list_reviewer_attempts(&group.id)?
+                    .into_iter()
+                    .map(|attempt| attempt.id)
+                    .collect::<std::collections::HashSet<_>>(),
+                None => std::collections::HashSet::new(),
+            };
+            let mut historical_findings = std::collections::HashSet::new();
+
+            // Finding-thread anchors are immutable evidence. Project only the
+            // in-memory copy sent to the current view, using an observation or
+            // recorded mapping which explicitly targets the displayed
+            // snapshot. The durable original anchor remains untouched.
+            for finding in findings {
+                let observations = cache.list_finding_observations(&finding.id)?;
+                let eligible = observations
+                    .iter()
+                    .filter(|observation| {
+                        historical.is_none()
+                            || historical_attempts.contains(&observation.attempt_id)
+                    })
+                    .collect::<Vec<_>>();
+                if historical.is_some() && eligible.is_empty() {
+                    continue;
+                }
+                if historical.is_some() {
+                    historical_findings.insert(finding.thread_id.clone());
+                }
+                let observation_projection = eligible.into_iter().rev().find_map(|observation| {
+                    (observation.snapshot_id == target_snapshot.id
+                        && matches!(
+                            observation.kind,
+                            perch_github::ObservationKind::Reported
+                                | perch_github::ObservationKind::VerifiedPresent
+                        ))
+                    .then(|| observation.anchor.clone())
+                    .flatten()
+                });
+                let projected = match observation_projection {
+                    Some(anchor) => Some(anchor),
+                    None => {
+                        // Mapping rows are newest first. An explicit newest
+                        // Unmapped decision must shadow an older Mapped row;
+                        // otherwise a force-push can revive a stale line.
+                        cache
+                            .list_anchor_mappings(&finding.id, Some(&target_snapshot.id))?
+                            .into_iter()
+                            .find(|mapping| {
+                                historical.is_none()
+                                    || mapping.created_by_attempt_id.as_ref().is_some_and(
+                                        |attempt_id| historical_attempts.contains(attempt_id),
+                                    )
+                            })
+                            .and_then(|mapping| {
+                                (mapping.status == perch_github::AnchorMappingStatus::Mapped)
+                                    .then_some(mapping.target_anchor)
+                                    .flatten()
+                            })
+                    }
+                };
+                let Some(thread) = threads
+                    .iter_mut()
+                    .find(|thread| thread.id == finding.thread_id)
+                else {
+                    continue;
+                };
+                thread.outdated = true;
+                let Some(projected) = projected else { continue };
+                thread.anchor = Some(perch_github::Anchor {
+                    path: projected.path,
+                    start_line: projected.start_line,
+                    line: projected.end_line,
+                    side: projected.side,
+                    commit_sha: projected.commit_sha,
+                });
+                thread.outdated = false;
+            }
+
+            if let Some(group) = historical {
+                let cutoff = group.ended_at.unwrap_or_else(Timestamp::now);
+                threads.retain(|thread| {
+                    if finding_threads.contains(&thread.id) {
+                        historical_findings.contains(&thread.id)
+                    } else {
+                        thread.created_at <= cutoff
+                    }
+                });
+                for thread in &mut threads {
+                    for message in &mut thread.messages {
+                        if message.created_at > cutoff {
+                            message.body = if message.body.trim().is_empty() {
+                                format!("[After Review #{} · later discussion]", group.number)
+                            } else {
+                                format!(
+                                    "[After Review #{} · later discussion]\n\n{}",
+                                    group.number, message.body
+                                )
+                            };
+                        }
+                    }
+                }
+            }
+            Ok(threads)
+        });
         match threads {
             Some(Ok(threads)) => {
                 let _ = self.events.send(Event::CommentThreads {
                     item_id: item_id.to_string(),
                     threads,
+                    review_group_id: review_fence.as_ref().map(|(group_id, _)| group_id.clone()),
+                    review_request_id: review_fence.as_ref().map(|(_, request_id)| *request_id),
                 });
             }
             Some(Err(e)) => tracing::warn!(error = %e, "could not load threads"),
             None => {}
+        }
+    }
+
+    fn mark_review_threads_outdated(
+        threads: &mut [CommentThread],
+        finding_threads: &std::collections::HashSet<String>,
+    ) {
+        for thread in threads {
+            if finding_threads.contains(&thread.id) {
+                thread.outdated = true;
+            }
         }
     }
 
@@ -1486,6 +2856,24 @@ impl Ctx {
         let _ = self.events.send(Event::Notice(message.into()));
     }
 
+    fn send_navigation_event(&self, navigation_id: u64, event: Event) {
+        let _ = self.navigation_requests.with_current(navigation_id, || {
+            let _ = self.events.send(event);
+        });
+    }
+
+    fn cancel_committed_archived_navigation(&self, item_id: &str, navigation_id: u64) {
+        if self
+            .navigation_requests
+            .is_committed_archive_fence(item_id, navigation_id)
+        {
+            let _ = self.events.send(Event::NavigationCancelled {
+                item_id: item_id.to_string(),
+                navigation_id,
+            });
+        }
+    }
+
     /// The reader is doing something new, so the last complaint has been
     /// read. An empty notice is how the UI hears that.
     fn clear_notice(&self) {
@@ -1519,6 +2907,191 @@ fn send_items(cache: &Cache, events: &EventSender<Event>) {
         }
         Err(e) => tracing::warn!(error = %e, "could not read items"),
     }
+}
+
+fn review_group_summary(
+    cache: &Cache,
+    group_id: &str,
+) -> Result<Option<crate::review::model::ReviewGroupSummary>, String> {
+    let Some(group) = cache
+        .load_review_group(group_id)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let Some(snapshot) = cache
+        .load_review_snapshot(&group.snapshot_id)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let attempts = cache
+        .list_reviewer_attempts(group_id)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(crate::review::model::ReviewGroupSummary {
+        group,
+        snapshot,
+        attempts,
+    }))
+}
+
+fn fail_review_attempt_navigation(
+    ctx: &Ctx,
+    item_id: &str,
+    attempt_id: &str,
+    request_id: u64,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    if ctx
+        .navigation_requests
+        .rollback_current_attempt(attempt_id, request_id)
+    {
+        let _ = ctx.events.send(Event::AgentReviewNavigationFailed {
+            item_id: item_id.to_string(),
+            attempt_id: attempt_id.to_string(),
+            request_id,
+            message: message.clone(),
+        });
+    }
+}
+
+/// Resolve a reviewer attempt to its immutable group before opening its
+/// owner. Event order selects the exact group before its historical files
+/// arrive, while the UI navigation token rejects stale targets.
+async fn view_review_attempt_owner(ctx: &Ctx, item_id: &str, attempt_id: &str, request_id: u64) {
+    let resolved = ctx.with_cache(|cache| {
+        let attempt = cache
+            .load_reviewer_attempt(attempt_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "That reviewer attempt no longer exists".to_string())?;
+        let summary = review_group_summary(cache, &attempt.group_id)?
+            .ok_or_else(|| "That review group is unavailable".to_string())?;
+        if summary.group.item_id != item_id {
+            return Err("That reviewer attempt belongs to another item".to_string());
+        }
+        Ok::<_, String>(summary)
+    });
+    let Some(result) = resolved else {
+        fail_review_attempt_navigation(
+            ctx,
+            item_id,
+            attempt_id,
+            request_id,
+            "The review history database is unavailable",
+        );
+        return;
+    };
+    let summary = match result {
+        Ok(summary) => summary,
+        Err(message) => {
+            fail_review_attempt_navigation(ctx, item_id, attempt_id, request_id, message);
+            return;
+        }
+    };
+
+    if !ctx
+        .navigation_requests
+        .is_current_attempt(attempt_id, request_id)
+    {
+        return;
+    }
+    let _navigation = ctx.review_navigation.lock().await;
+    if !ctx
+        .navigation_requests
+        .is_current_attempt(attempt_id, request_id)
+    {
+        return;
+    }
+
+    let owner_was_open = ctx.is_open(item_id);
+    if !owner_was_open {
+        match ctx.item(item_id) {
+            Some(item) if item.is_archived() => {
+                let _lifecycle = ctx.item_lifecycle.lock().await;
+                if !ctx
+                    .navigation_requests
+                    .is_current_attempt(attempt_id, request_id)
+                {
+                    return;
+                }
+                show_retained_review_owner(ctx, item, request_id);
+            }
+            Some(_) => {
+                let _ = open_item(ctx, item_id, request_id).await;
+            }
+            None => {
+                fail_review_attempt_navigation(
+                    ctx,
+                    item_id,
+                    attempt_id,
+                    request_id,
+                    "That review owner is gone",
+                );
+                return;
+            }
+        }
+    }
+    if !ctx.is_open(item_id) {
+        fail_review_attempt_navigation(
+            ctx,
+            item_id,
+            attempt_id,
+            request_id,
+            "The review owner could not be opened",
+        );
+        return;
+    }
+    if !owner_was_open
+        && !ctx.navigation_requests.checkpoint_attempt_owner(
+            item_id,
+            attempt_id,
+            request_id,
+        )
+    {
+        return;
+    }
+    if !owner_was_open {
+        let mut language_server = ctx.language_server.lock().await;
+        let previous = ctx
+            .navigation_requests
+            .with_current(request_id, || {
+                let current_owner = ctx.slot.lock().ok().is_some_and(|slot| {
+                    slot.as_ref().is_some_and(|open| {
+                        open.item_id == item_id && open.navigation_id == request_id
+                    })
+                });
+                current_owner.then(|| language_server.take()).flatten()
+            })
+            .flatten();
+        drop(language_server);
+        if let Some(previous) = previous {
+            previous.shutdown().await;
+        }
+    }
+    let group_id = summary.group.id.clone();
+    if !ctx
+        .navigation_requests
+        .bind_attempt_to_group(attempt_id, &group_id, request_id)
+    {
+        return;
+    }
+    let published = ctx
+        .navigation_requests
+        .with_current_group(&group_id, request_id, || {
+            let _ = ctx.events.send(Event::AgentReviewNavigationReady {
+                item_id: item_id.to_string(),
+                attempt_id: attempt_id.to_string(),
+                request_id,
+                owner_changed: !owner_was_open,
+                summary,
+            });
+        })
+        .is_some();
+    if !published {
+        return;
+    }
+    reviews::open_snapshot(ctx, &group_id, request_id).await;
 }
 
 /// Publish every active summary plus one bounded page of terminal history.
@@ -1577,6 +3150,42 @@ fn send_agent_runs_from_cache(
         cursor = Some(next);
     };
     runs.extend(history);
+
+    // Reviewer children need their owning group even when the item has not
+    // been opened in this process. Publish those summaries first so the
+    // Agents list never has to infer grouping from labels or run order.
+    let mut review_group_ids = std::collections::BTreeSet::new();
+    for run in &runs {
+        let RunOwner::Review {
+            reviewer_run_id, ..
+        } = &run.owner
+        else {
+            continue;
+        };
+        match guard.load_reviewer_attempt(reviewer_run_id) {
+            Ok(Some(attempt)) => {
+                review_group_ids.insert(attempt.group_id);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(attempt = reviewer_run_id, %error, "could not resolve reviewer group");
+            }
+        }
+    }
+    for group_id in review_group_ids {
+        match review_group_summary(&guard, &group_id) {
+            Ok(Some(summary)) => {
+                let _ = events.send(Event::ReviewGroupUpdated {
+                    item_id: summary.group.item_id.clone(),
+                    summary,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(group = group_id, %error, "could not load review group for Agents");
+            }
+        }
+    }
     let _ = events.send(Event::AgentRuns { runs, has_more });
 }
 
@@ -1787,7 +3396,7 @@ async fn sweep_items(ctx: &Ctx) {
         if !owned || item.is_archived() || item.last_opened_at > cutoff {
             continue;
         }
-        match archive_item(ctx, &item.id).await {
+        match archive_item(ctx, &item.id, None).await {
             Ok(()) => tracing::info!(id = %item.id, "archived a stale checkout"),
             // Dirty, most likely. It stays; the reader has work in it.
             Err(message) => tracing::info!(id = %item.id, %message, "left a stale checkout alone"),
@@ -1797,21 +3406,52 @@ async fn sweep_items(ctx: &Ctx) {
 
 /// Leave Active. The row, branch, discussions, and run history stay. An
 /// executing agent keeps its checkout until the owner's final run exits.
-async fn archive_item(ctx: &Ctx, id: &str) -> Result<(), String> {
+async fn archive_item(
+    ctx: &Ctx,
+    id: &str,
+    suspended_navigation: Option<&SuspendedNavigation>,
+) -> Result<(), String> {
     let lifecycle = ctx.item_lifecycle.lock().await;
+    if suspended_navigation.is_some_and(|suspended| {
+        !ctx.navigation_requests
+            .archive_fence_is_current(suspended)
+    }) {
+        return Ok(());
+    }
     let Some(item) = ctx.item(id) else {
+        if let Some(suspended) = suspended_navigation {
+            ctx.navigation_requests.restore_suspended(suspended);
+        }
         return Err("That item is gone".into());
     };
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned && c.on_disk) {
         if checkout.path.join(".git").exists() {
-            let dirty = ctx
-                .preparer
-                .is_dirty(&checkout.path)
-                .await
-                .map_err(|e| e.to_string())?;
+            let dirty = match ctx.preparer.is_dirty(&checkout.path).await {
+                Ok(dirty) => dirty,
+                Err(error) => {
+                    if let Some(suspended) = suspended_navigation {
+                        ctx.navigation_requests.restore_suspended(suspended);
+                    }
+                    return Err(error.to_string());
+                }
+            };
             if dirty {
+                if let Some(suspended) = suspended_navigation {
+                    ctx.navigation_requests.restore_suspended(suspended);
+                }
                 return Err(format!("{} has uncommitted changes", checkout.branch));
             }
+        }
+    }
+    if let Some(suspended) = suspended_navigation {
+        if !ctx
+            .navigation_requests
+            .archive_fence_is_current(suspended)
+            || !ctx
+                .navigation_requests
+                .commit_archive_fence(suspended)
+        {
+            return Ok(());
         }
     }
     if ctx.is_open(id) {
@@ -1823,9 +3463,22 @@ async fn archive_item(ctx: &Ctx, id: &str) -> Result<(), String> {
     // manager and work arriving after it is rejected.
     let mut item = ctx.item(id).unwrap_or(item);
     item.archived_at = Some(Timestamp::now());
-    ctx.with_cache(|c| c.update_item(&item))
+    if let Err(error) = ctx
+        .with_cache(|c| c.update_item(&item))
         .transpose()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+    {
+        if let Some(suspended) = suspended_navigation {
+            ctx.navigation_requests.restore_suspended(suspended);
+        }
+        return Err(error);
+    }
+    let _ = ctx.events.send(Event::ItemArchived {
+        item_id: id.to_string(),
+        cancelled_navigation_id: suspended_navigation
+            .and_then(|suspended| suspended.previous.as_ref())
+            .map(|request| request.id),
+    });
     ctx.send_items();
 
     let active = ctx.runs.has_active_owner(id, None);
@@ -1841,7 +3494,10 @@ async fn archive_item(ctx: &Ctx, id: &str) -> Result<(), String> {
         });
         Ok(())
     } else {
-        retire_archived_checkout(ctx, id).await
+        if let Err(error) = retire_archived_checkout(ctx, id).await {
+            tracing::info!(item = id, %error, "archived item; checkout cleanup will retry later");
+        }
+        Ok(())
     }
 }
 
@@ -2007,6 +3663,34 @@ async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
     } else if ctx.is_open(id) {
         ctx.close_review().await;
     }
+
+    // Review rows own retained snapshots outside the item's ordinary
+    // worktree. Remove the durable history first so the database remains the
+    // reference-counting truth, then release only resources no surviving
+    // snapshot still names. Archive deliberately never takes this path.
+    let deleted_reviews = ctx
+        .with_cache(|cache| cache.delete_review_history(id))
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the local database is unavailable".to_string())?;
+    let retention_keys = deleted_reviews
+        .snapshots
+        .into_iter()
+        .map(|snapshot| snapshot.retention_key)
+        .collect::<std::collections::BTreeSet<_>>();
+    for retention_key in retention_keys {
+        let references = ctx
+            .with_cache(|cache| cache.review_snapshot_reference_count(&retention_key))
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "the local database is unavailable".to_string())?;
+        if references == 0 {
+            ctx.review_snapshots
+                .release(&retention_key)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
     ctx.with_cache(|c| c.delete_item(id))
         .transpose()
         .map_err(|e| e.to_string())?;
@@ -2015,14 +3699,39 @@ async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
 }
 
 /// Open whatever an item is.
-async fn open_item(ctx: &Ctx, id: &str) -> bool {
+async fn open_item(ctx: &Ctx, id: &str, navigation_id: u64) -> bool {
     let _lifecycle = ctx.item_lifecycle.lock().await;
+    if !ctx
+        .navigation_requests
+        .is_current_item(id, navigation_id)
+    {
+        return false;
+    }
     let Some(item) = ctx.item(id) else {
-        let _ = ctx.events.send(Event::ReviewFailed {
-            message: "That item is gone".into(),
+        let _ = ctx.navigation_requests.with_current(navigation_id, || {
+            let _ = ctx.events.send(Event::ReviewFailed {
+                navigation_id,
+                message: "That item is gone".into(),
+            });
         });
         return false;
     };
+    let source_checkout_missing = item
+        .checkout
+        .as_ref()
+        .is_some_and(|checkout| !checkout.owned && !checkout.path.join(".git").exists());
+    let has_retained_reviews = ctx
+        .with_cache(|cache| {
+            cache
+                .list_review_groups(&item.id, None, 1)
+                .map(|groups| !groups.is_empty())
+        })
+        .and_then(Result::ok)
+        .unwrap_or(false);
+    if source_checkout_missing && has_retained_reviews {
+        show_retained_review_owner(ctx, item, navigation_id);
+        return false;
+    }
     match (&item.subject, &item.checkout) {
         (Some(ItemSubject::PullRequest(pr)), _) => {
             open_subject(
@@ -2030,6 +3739,7 @@ async fn open_item(ctx: &Ctx, id: &str) -> bool {
                 pr.repo_full_name.clone(),
                 ItemKind::PullRequest,
                 pr.number,
+                navigation_id,
             )
             .await
         }
@@ -2039,39 +3749,134 @@ async fn open_item(ctx: &Ctx, id: &str) -> bool {
                 issue.repo_full_name.clone(),
                 ItemKind::Issue,
                 issue.number,
+                navigation_id,
             )
             .await
         }
-        (None, Some(_)) => open_branch_item(ctx, item).await,
+        (None, Some(_)) => open_branch_item(ctx, item, navigation_id).await,
         (None, None) => {
-            let _ = ctx.events.send(Event::ReviewFailed {
-                message: "That item has nothing to open".into(),
+            let _ = ctx.navigation_requests.with_current(navigation_id, || {
+                let _ = ctx.events.send(Event::ReviewFailed {
+                    navigation_id,
+                    message: "That item has nothing to open".into(),
+                });
             });
             false
         }
     }
 }
 
+/// Open the durable owner shell even when its external source checkout has
+/// disappeared. History can then switch the shell to any retained snapshot;
+/// no source clone or branch ref is needed for that path.
+fn show_retained_review_owner(ctx: &Ctx, item: Item, navigation_id: u64) -> bool {
+    let latest_branch_label = ctx
+        .with_cache(|cache| cache.list_review_snapshots(&item.id))
+        .and_then(Result::ok)
+        .and_then(|snapshots| {
+            snapshots
+                .into_iter()
+                .find_map(|snapshot| snapshot.branch_label)
+        });
+    let missing = item
+        .checkout
+        .as_ref()
+        .map(|checkout| checkout.path.clone())
+        .unwrap_or_else(|| ctx.preparer.store().root().join("reviews").join("missing"));
+    let checkout = perch_git::Checkout {
+        worktree: missing.clone(),
+        bare: missing,
+        branch: latest_branch_label
+            .or_else(|| {
+                item.checkout
+                    .as_ref()
+                    .map(|checkout| checkout.branch.clone())
+            })
+            .unwrap_or_default(),
+        // The source checkout is gone, so no retained review is implicitly
+        // "current". History selection installs an exact snapshot/group;
+        // until then finding threads stay outdated and off inline surfaces.
+        merge_base: String::new(),
+        head_sha: String::new(),
+        stale: None,
+    };
+    let pull_request = item.pull_request().cloned().map(Arc::new);
+    let item_id = item.id.clone();
+    let scope_gen = next_scope_gen();
+    let installed = ctx
+        .navigation_requests
+        .with_current_item(&item_id, navigation_id, || {
+            let Ok(mut slot) = ctx.slot.lock() else {
+                return false;
+            };
+            *slot = Some(ReviewContext {
+                checkout,
+                files: Arc::new(Vec::new()),
+                scope: perch_git::Scope::Branch,
+                since: None,
+                scope_gen,
+                navigation_id,
+                item_id: item.id.clone(),
+                pull_request: pull_request.clone(),
+                body: None,
+                issue: None,
+                review_snapshot_id: None,
+                review_group_id: None,
+                review_request_id: None,
+            });
+            let _ = ctx.events.send(Event::ReviewReady {
+                navigation_id,
+                scope_gen,
+                item: Arc::new(item),
+                pull_request,
+                files: Arc::new(Vec::new()),
+                tree: Arc::new(Vec::new()),
+                stale_head: None,
+                offline: true,
+            });
+            true
+        })
+        .unwrap_or(false);
+    if !installed {
+        ctx.cancel_committed_archived_navigation(&item_id, navigation_id);
+        return false;
+    }
+    ctx.notice("Source checkout unavailable; retained review history is still readable");
+    ctx.send_threads(&item_id);
+    true
+}
+
 /// A branch of the reader's own, with no pull request: the review view over
 /// the diff against its base, wherever the checkout is.
-async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
-    let events = &ctx.events;
+async fn open_branch_item(ctx: &Ctx, item: Item, navigation_id: u64) -> bool {
     let Some(checkout) = item.checkout.clone() else {
-        let _ = events.send(Event::ReviewFailed {
-            message: "That item has no checkout".into(),
-        });
+        ctx.send_navigation_event(
+            navigation_id,
+            Event::ReviewFailed {
+                navigation_id,
+                message: "That item has no checkout".into(),
+            },
+        );
         return false;
     };
     let Some(repo) = RepoId::parse(&item.repo_full_name) else {
-        let _ = events.send(Event::ReviewFailed {
-            message: format!("{} is not a repository name", item.repo_full_name),
-        });
+        ctx.send_navigation_event(
+            navigation_id,
+            Event::ReviewFailed {
+                navigation_id,
+                message: format!("{} is not a repository name", item.repo_full_name),
+            },
+        );
         return false;
     };
-    let _ = events.send(Event::ReviewProgress {
-        message: "Checking out the files".into(),
-        percent: None,
-    });
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::ReviewProgress {
+            navigation_id,
+            message: "Checking out the files".into(),
+            percent: None,
+        },
+    );
 
     let git_checkout = if checkout.owned {
         // A checkout under the store is cut in a clone from GitHub, which
@@ -2079,21 +3884,29 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
         // before the entry was local. Said here rather than found out by
         // a clone that cannot start.
         if perch_github::is_local(&item.repo_full_name) {
-            let _ = events.send(Event::ReviewFailed {
-                message: format!(
-                    "{} is not on GitHub, so there is no clone to put {} back in",
-                    ctx.config.display_name(&item.repo_full_name),
-                    checkout.branch
-                ),
-            });
+            ctx.send_navigation_event(
+                navigation_id,
+                Event::ReviewFailed {
+                    navigation_id,
+                    message: format!(
+                        "{} is not on GitHub, so there is no clone to put {} back in",
+                        ctx.config.display_name(&item.repo_full_name),
+                        checkout.branch
+                    ),
+                },
+            );
             return false;
         }
         match open_owned_branch(ctx, &repo, &checkout).await {
             Ok(c) => c,
             Err(e) => {
-                let _ = events.send(Event::ReviewFailed {
-                    message: e.to_string(),
-                });
+                ctx.send_navigation_event(
+                    navigation_id,
+                    Event::ReviewFailed {
+                        navigation_id,
+                        message: e.to_string(),
+                    },
+                );
                 return false;
             }
         }
@@ -2101,9 +3914,13 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
         match open_own_checkout(ctx, &repo, &checkout, &checkout.base_ref).await {
             Ok(c) => c,
             Err(e) => {
-                let _ = events.send(Event::ReviewFailed {
-                    message: e.to_string(),
-                });
+                ctx.send_navigation_event(
+                    navigation_id,
+                    Event::ReviewFailed {
+                        navigation_id,
+                        message: e.to_string(),
+                    },
+                );
                 return false;
             }
         }
@@ -2129,7 +3946,16 @@ async fn open_branch_item(ctx: &Ctx, item: Item) -> bool {
     ctx.send_items();
 
     let pull_request = item.pull_request().cloned().map(Arc::new);
-    finish_open(ctx, item, pull_request, git_checkout, false, since).await
+    finish_open(
+        ctx,
+        item,
+        pull_request,
+        git_checkout,
+        false,
+        since,
+        navigation_id,
+    )
+    .await
 }
 
 /// A checkout under the store on a branch Perch cut: back on disk if it
@@ -2271,20 +4097,29 @@ async fn finish_open(
     checkout: perch_git::Checkout,
     offline: bool,
     since: Option<String>,
+    navigation_id: u64,
 ) -> bool {
     let events = &ctx.events;
-    let _ = events.send(Event::ReviewProgress {
-        message: "Computing the diff".into(),
-        percent: None,
-    });
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::ReviewProgress {
+            navigation_id,
+            message: "Computing the diff".into(),
+            percent: None,
+        },
+    );
 
     let scope = perch_git::Scope::Branch;
     let files = match scoped_files(&ctx.preparer, &checkout, &scope).await {
         Ok(f) => Arc::new(f),
         Err(e) => {
-            let _ = events.send(Event::ReviewFailed {
-                message: e.to_string(),
-            });
+            ctx.send_navigation_event(
+                navigation_id,
+                Event::ReviewFailed {
+                    navigation_id,
+                    message: e.to_string(),
+                },
+            );
             return false;
         }
     };
@@ -2300,19 +4135,7 @@ async fn finish_open(
     let merge_base = checkout.merge_base.clone();
     let worktree = checkout.worktree.clone();
     let item = Arc::new(item);
-    if let Ok(mut guard) = ctx.slot.lock() {
-        *guard = Some(ReviewContext {
-            checkout,
-            files: files.clone(),
-            scope,
-            since: since.clone(),
-            scope_gen: next_scope_gen(),
-            item_id: item.id.clone(),
-            pull_request: pull_request.clone(),
-            body: None,
-            issue: None,
-        });
-    }
+    let scope_gen = next_scope_gen();
     tracing::info!(
         item = %item.id,
         files = files.len(),
@@ -2322,14 +4145,44 @@ async fn finish_open(
         offline,
         "review ready"
     );
-    let _ = events.send(Event::ReviewReady {
-        item: item.clone(),
-        pull_request: pull_request.clone(),
-        files,
-        tree: Arc::new(tree),
-        stale_head,
-        offline,
-    });
+    let installed = ctx
+        .navigation_requests
+        .with_current_item(&item.id, navigation_id, || {
+            let Ok(mut guard) = ctx.slot.lock() else {
+                return false;
+            };
+            *guard = Some(ReviewContext {
+                checkout,
+                files: files.clone(),
+                scope,
+                since: since.clone(),
+                scope_gen,
+                navigation_id,
+                item_id: item.id.clone(),
+                pull_request: pull_request.clone(),
+                body: None,
+                issue: None,
+                review_snapshot_id: None,
+                review_group_id: None,
+                review_request_id: None,
+            });
+            let _ = events.send(Event::ReviewReady {
+                navigation_id,
+                scope_gen,
+                item: item.clone(),
+                pull_request: pull_request.clone(),
+                files,
+                tree: Arc::new(tree),
+                stale_head,
+                offline,
+            });
+            true
+        })
+        .unwrap_or(false);
+    if !installed {
+        ctx.cancel_committed_archived_navigation(&item.id, navigation_id);
+        return false;
+    }
 
     // What was viewed and revealed, and whether the files are folded, is
     // small and local; it goes straight away.
@@ -2351,7 +4204,18 @@ async fn finish_open(
         let item_id = item.id.clone();
         let head = head.clone();
         tokio::spawn(async move {
-            send_commits(&ctx, &item_id, &worktree, &merge_base, &head, since).await
+            send_commits(
+                &ctx,
+                &item_id,
+                &worktree,
+                &merge_base,
+                &head,
+                since,
+                navigation_id,
+                scope_gen,
+                None,
+            )
+            .await
         });
     }
 
@@ -2453,6 +4317,10 @@ fn send_viewed(ctx: &Ctx, item_id: &str, opening: bool) {
 /// for the scope menu, with the head as it was at the previous open. A
 /// checkout with no history over its base, an issue's home say, sends an
 /// empty list.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the event fence needs both navigation and scope request identities"
+)]
 async fn send_commits(
     ctx: &Ctx,
     item_id: &str,
@@ -2460,6 +4328,9 @@ async fn send_commits(
     merge_base: &str,
     head: &str,
     since: Option<String>,
+    navigation_id: u64,
+    scope_gen: u64,
+    scope_revision: Option<u64>,
 ) {
     let git = ctx.preparer.git();
     let commits = if merge_base.is_empty() || merge_base == head {
@@ -2474,28 +4345,69 @@ async fn send_commits(
         }
     };
     let dirt = perch_git::dirt(git, worktree).await.unwrap_or_default();
-    let _ = ctx.events.send(Event::CommitsReady {
+    let event = Event::CommitsReady {
+        navigation_id,
+        scope_gen,
         item_id: item_id.to_string(),
         commits: Arc::new(commits),
         dirt,
         since,
-    });
+    };
+    let publish = || {
+        let matches = ctx.slot.lock().ok().is_some_and(|slot| {
+            slot.as_ref().is_some_and(|open| {
+                open.item_id == item_id
+                    && open.navigation_id == navigation_id
+                    && open.scope_gen == scope_gen
+                    && open.review_snapshot_id.is_none()
+                    && open.review_group_id.is_none()
+                    && open.review_request_id.is_none()
+            })
+        });
+        if matches {
+            let _ = ctx.events.send(event);
+        }
+        matches
+    };
+    match scope_revision {
+        Some(revision) => {
+            let _ = ctx.navigation_requests.with_current(navigation_id, || {
+                ctx.scope_requests.with_revision(revision, publish)
+            });
+        }
+        None => {
+            let _ = ctx.navigation_requests.with_current(navigation_id, publish);
+        }
+    }
 }
 
 /// Look at the checkout again. The head may have moved under a terminal
 /// commit: then the review context follows it and the changed list is
 /// recomputed under the scope that is set; the commits and the dirt are
 /// read again either way.
-async fn refresh_scope(ctx: &Ctx, item_id: &str) {
+async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revision: u64) {
+    if !ctx.navigation_requests.is_current(navigation_id)
+        || ctx.scope_requests.stable_revision() != Some(scope_revision)
+    {
+        return;
+    }
     let open = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref().filter(|c| c.item_id == item_id).map(|c| {
-            (
-                c.checkout.clone(),
-                c.scope.clone(),
-                c.since.clone(),
-                c.scope_gen,
-            )
-        })
+        g.as_ref()
+            .filter(|c| {
+                c.item_id == item_id
+                    && c.navigation_id == navigation_id
+                    && c.review_snapshot_id.is_none()
+                    && c.review_group_id.is_none()
+                    && c.review_request_id.is_none()
+            })
+            .map(|c| {
+                (
+                    c.checkout.clone(),
+                    c.scope.clone(),
+                    c.since.clone(),
+                    c.scope_gen,
+                )
+            })
     });
     let Some((mut checkout, scope, since, gen)) = open else {
         return;
@@ -2545,23 +4457,43 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
         };
         // The reader may have picked a scope while this looked; theirs
         // wins, and the next look reads under it.
-        let written = ctx.slot.lock().ok().is_some_and(|mut guard| {
-            match guard
-                .as_mut()
-                .filter(|c| c.item_id == item_id && c.scope_gen == gen)
-            {
-                Some(open) => {
+        let committed_gen = ctx
+            .navigation_requests
+            .with_current(navigation_id, || {
+                ctx.scope_requests.with_revision(scope_revision, || {
+                    let Ok(mut guard) = ctx.slot.lock() else {
+                        return 0;
+                    };
+                    let Some(open) = guard.as_mut().filter(|open| {
+                        open.item_id == item_id
+                            && open.navigation_id == navigation_id
+                            && open.scope_gen == gen
+                            && open.review_snapshot_id.is_none()
+                            && open.review_group_id.is_none()
+                            && open.review_request_id.is_none()
+                    }) else {
+                        return 0;
+                    };
                     open.checkout.head_sha = head.clone();
                     open.checkout.merge_base = checkout.merge_base.clone();
                     open.files = files.clone();
-                    true
-                }
-                None => false,
-            }
-        });
-        if !written {
+                    let committed_gen = next_scope_gen();
+                    open.scope_gen = committed_gen;
+                    let _ = ctx.events.send(Event::ScopeReady {
+                        navigation_id,
+                        scope_gen: committed_gen,
+                        item_id: item_id.to_string(),
+                        scope: scope.clone(),
+                        files: files.clone(),
+                    });
+                    committed_gen
+                })
+            })
+            .flatten()
+            .filter(|generation| *generation != 0);
+        let Some(committed_gen) = committed_gen else {
             return;
-        }
+        };
         // The row's head is what the view derives anchors and the menu
         // from, so it follows too.
         if let Some(mut item) = ctx.item(item_id) {
@@ -2571,11 +4503,19 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
             ctx.with_cache(|c| c.update_item(&item));
             ctx.send_items();
         }
-        let _ = ctx.events.send(Event::ScopeReady {
-            item_id: item_id.to_string(),
-            scope,
-            files,
-        });
+        send_commits(
+            ctx,
+            item_id,
+            &checkout.worktree,
+            &checkout.merge_base,
+            &checkout.head_sha,
+            since,
+            navigation_id,
+            committed_gen,
+            Some(scope_revision),
+        )
+        .await;
+        return;
     }
     send_commits(
         ctx,
@@ -2584,6 +4524,9 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str) {
         &checkout.merge_base,
         &checkout.head_sha,
         since,
+        navigation_id,
+        gen,
+        Some(scope_revision),
     )
     .await;
 }
@@ -2678,31 +4621,97 @@ async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
 
 /// The scope changed: the changed list is recomputed under it, kept in the
 /// review context for the file loads that follow, and sent.
-async fn set_scope(ctx: &Ctx, item_id: &str, scope: perch_git::Scope) {
-    let checkout = ctx.slot.lock().ok().and_then(|g| {
-        g.as_ref()
-            .filter(|c| c.item_id == item_id)
-            .map(|c| c.checkout.clone())
-    });
-    let Some(checkout) = checkout else { return };
-    match scoped_files(&ctx.preparer, &checkout, &scope).await {
-        Ok(files) => {
-            let files = Arc::new(files);
-            if let Ok(mut guard) = ctx.slot.lock() {
-                if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
-                    open.scope = scope.clone();
-                    open.files = files.clone();
-                    open.scope_gen = next_scope_gen();
-                }
-            }
-            let _ = ctx.events.send(Event::ScopeReady {
-                item_id: item_id.to_string(),
-                scope,
-                files,
-            });
+async fn set_scope(
+    ctx: &Ctx,
+    item_id: &str,
+    scope: perch_git::Scope,
+    request_id: u64,
+    navigation_id: u64,
+) {
+    // A checkout refresh can discover a moved HEAD while this Git query is
+    // running. Retry against the new context rather than pairing its new
+    // revision identity with files computed from the old one.
+    for _ in 0..3 {
+        if !ctx.navigation_requests.is_current(navigation_id)
+            || !ctx.scope_requests.is_current(item_id, request_id)
+        {
+            return;
         }
-        Err(e) => ctx.notice(format!("Could not read that scope: {e}")),
+        let source = ctx.slot.lock().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .filter(|open| open.item_id == item_id && open.navigation_id == navigation_id)
+                .map(|open| (open.checkout.clone(), open.scope_gen))
+        });
+        let Some((checkout, source_gen)) = source else {
+            ctx.scope_requests.settle(item_id, request_id);
+            return;
+        };
+        let files = match scoped_files(&ctx.preparer, &checkout, &scope).await {
+            Ok(files) => Arc::new(files),
+            Err(error) => {
+                let _ = ctx.navigation_requests.with_current(navigation_id, || {
+                    ctx.scope_requests.with_current(item_id, request_id, || {
+                        ctx.notice(format!("Could not read that scope: {error}"));
+                    })
+                });
+                ctx.scope_requests.settle(item_id, request_id);
+                return;
+            }
+        };
+        let committed = ctx
+            .navigation_requests
+            .with_current(navigation_id, || {
+                ctx.scope_requests.with_current(item_id, request_id, || {
+                    let committed_gen = if let Ok(mut guard) = ctx.slot.lock() {
+                        if let Some(open) = guard.as_mut().filter(|open| {
+                            open.item_id == item_id
+                                && open.navigation_id == navigation_id
+                                && open.scope_gen == source_gen
+                        }) {
+                            open.scope = scope.clone();
+                            open.files = files.clone();
+                            let committed_gen = next_scope_gen();
+                            open.scope_gen = committed_gen;
+                            Some(committed_gen)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(scope_gen) = committed_gen {
+                        let _ = ctx.events.send(Event::ScopeReady {
+                            navigation_id,
+                            scope_gen,
+                            item_id: item_id.to_string(),
+                            scope: scope.clone(),
+                            files: files.clone(),
+                        });
+                        ctx.send_threads(item_id);
+                    }
+                    committed_gen.is_some()
+                })
+            })
+            .flatten();
+        match committed {
+            Some(true) => {
+                ctx.scope_requests.settle(item_id, request_id);
+                return;
+            }
+            Some(false) => continue,
+            None => {
+                ctx.scope_requests.settle(item_id, request_id);
+                return;
+            }
+        }
     }
+    let _ = ctx.navigation_requests.with_current(navigation_id, || {
+        ctx.scope_requests.with_current(item_id, request_id, || {
+            ctx.notice("The checkout changed while switching scope; try again");
+        })
+    });
+    ctx.scope_requests.settle(item_id, request_id);
 }
 
 /// Why a branch cannot be cut for a local repository, or None when it can.
@@ -2720,7 +4729,7 @@ fn no_home_for_local(ctx: &Ctx, repo_full_name: &str) -> Option<String> {
 
 /// Cut `perch/issue-<n>` from the default branch and make the item for it,
 /// or find the one that already has that branch.
-async fn start_work(ctx: &Ctx, issue_item_id: &str) -> Result<String, String> {
+async fn start_work(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Result<String, String> {
     let Some(issue_item) = ctx.item(issue_item_id) else {
         return Err("That item is gone".into());
     };
@@ -2748,18 +4757,26 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str) -> Result<String, String> {
         return Ok(existing.id);
     }
 
-    let _ = ctx.events.send(Event::ReviewProgress {
-        message: "Fetching the default branch".into(),
-        percent: None,
-    });
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::ReviewProgress {
+            navigation_id,
+            message: "Fetching the default branch".into(),
+            percent: None,
+        },
+    );
     let progress = ctx.events.clone();
+    let progress_requests = ctx.navigation_requests.clone();
     let label = repo.full_name();
     ctx.preparer
         .ensure_bare(&repo, move |step| {
             if let perch_git::Step::Cloning { phase, percent } = step {
-                let _ = progress.send(Event::ReviewProgress {
-                    message: format!("Cloning {label}: {phase}"),
-                    percent,
+                let _ = progress_requests.with_current(navigation_id, || {
+                    let _ = progress.send(Event::ReviewProgress {
+                        navigation_id,
+                        message: format!("Cloning {label}: {phase}"),
+                        percent,
+                    });
                 });
             }
         })
@@ -2934,6 +4951,9 @@ struct ReviewContext {
     /// Rises with every scope pick, so a look at the checkout that began
     /// under an earlier scope does not write its list over the reader's.
     scope_gen: u64,
+    /// The synchronous navigation which installed this context. Background
+    /// refreshes must match it as well as the item id.
+    navigation_id: u64,
     item_id: String,
     /// `None` for a branch with no pull request.
     pull_request: Option<Arc<PullRequest>>,
@@ -2941,6 +4961,17 @@ struct ReviewContext {
     body: Option<String>,
     /// The issue and its comments, for a question about an issue.
     issue: Option<Arc<(perch_github::Issue, Vec<perch_github::IssueComment>)>>,
+    /// Exact retained snapshot shown by History. Normal live views leave
+    /// this empty and may only use an exact range match as a projection
+    /// target.
+    review_snapshot_id: Option<String>,
+    /// The selected historical group. This disambiguates repeated reviews
+    /// of an unchanged range and limits History to that group's observations.
+    review_group_id: Option<String>,
+    /// The exact History request which installed this group. Paired with the
+    /// group id on projected thread events so a repeated/out-of-order load
+    /// cannot overwrite a newer selection.
+    review_request_id: Option<u64>,
 }
 
 /// The server's minimum delay for a manual refresh and the (possibly longer)
@@ -3604,19 +5635,45 @@ fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<
 /// repository has neither: a launch hook naming one under the reserved
 /// owner is told so rather than asked of GitHub, where `local` could be
 /// somebody's account.
-async fn open_subject(ctx: &Ctx, repo_full_name: String, kind: ItemKind, number: u64) -> bool {
+async fn open_subject_navigation(
+    ctx: &Ctx,
+    repo_full_name: String,
+    kind: ItemKind,
+    number: u64,
+    navigation_id: u64,
+) -> bool {
+    let _lifecycle = ctx.item_lifecycle.lock().await;
+    if !ctx.navigation_requests.is_current(navigation_id) {
+        return false;
+    }
+    open_subject(ctx, repo_full_name, kind, number, navigation_id).await
+}
+
+async fn open_subject(
+    ctx: &Ctx,
+    repo_full_name: String,
+    kind: ItemKind,
+    number: u64,
+    navigation_id: u64,
+) -> bool {
     if perch_github::is_local(&repo_full_name) {
-        let _ = ctx.events.send(Event::ReviewFailed {
-            message: format!(
-                "{} is not on GitHub, so it has no #{number}",
-                ctx.config.display_name(&repo_full_name)
-            ),
-        });
+        ctx.send_navigation_event(
+            navigation_id,
+            Event::ReviewFailed {
+                navigation_id,
+                message: format!(
+                    "{} is not on GitHub, so it has no #{number}",
+                    ctx.config.display_name(&repo_full_name)
+                ),
+            },
+        );
         return false;
     }
     match kind {
-        ItemKind::PullRequest => open_pull_request(ctx, repo_full_name, number).await,
-        ItemKind::Issue => open_issue(ctx, repo_full_name, number).await,
+        ItemKind::PullRequest => {
+            open_pull_request(ctx, repo_full_name, number, navigation_id).await
+        }
+        ItemKind::Issue => open_issue(ctx, repo_full_name, number, navigation_id).await,
     }
 }
 
@@ -3624,12 +5681,16 @@ async fn open_subject(ctx: &Ctx, repo_full_name: String, kind: ItemKind, number:
 /// the discussion, and show the issue view. The agent's questions about it
 /// run in the repository's home checkout. Returns false always: there is
 /// no language server to start for an issue.
-async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
+async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_id: u64) -> bool {
     let events = &ctx.events;
-    let _ = events.send(Event::ReviewProgress {
-        message: "Reading the issue".into(),
-        percent: None,
-    });
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::ReviewProgress {
+            navigation_id,
+            message: "Reading the issue".into(),
+            percent: None,
+        },
+    );
 
     let existing = ctx
         .with_cache(|c| {
@@ -3668,9 +5729,13 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
                     (snapshot, kept.clone(), true)
                 }
                 None => {
-                    let _ = events.send(Event::ReviewFailed {
-                        message: e.to_string(),
-                    });
+                    ctx.send_navigation_event(
+                        navigation_id,
+                        Event::ReviewFailed {
+                            navigation_id,
+                            message: e.to_string(),
+                        },
+                    );
                     return false;
                 }
             },
@@ -3682,9 +5747,13 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
                 (snapshot, kept.clone(), true)
             }
             None => {
-                let _ = events.send(Event::ReviewFailed {
-                    message: "A GitHub token is required to fetch that issue".into(),
-                });
+                ctx.send_navigation_event(
+                    navigation_id,
+                    Event::ReviewFailed {
+                        navigation_id,
+                        message: "A GitHub token is required to fetch that issue".into(),
+                    },
+                );
                 return false;
             }
         }
@@ -3697,6 +5766,13 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
         Some(item) => ctx.item(&item.id).unwrap_or(item),
         None => Item::new(&issue.repo_full_name, now),
     };
+    if !ctx
+        .navigation_requests
+        .is_current_item(&item.id, navigation_id)
+    {
+        ctx.cancel_committed_archived_navigation(&item.id, navigation_id);
+        return false;
+    }
     item.subject = Some(ItemSubject::Issue(issue.clone()));
     item.archived_at = None;
     item.last_opened_at = now;
@@ -3710,14 +5786,18 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
     let home = match RepoId::parse(&issue.repo_full_name) {
         Some(repo) if !offline => {
             let progress = events.clone();
+            let progress_requests = ctx.navigation_requests.clone();
             let label = repo.full_name();
             let cloned = ctx
                 .preparer
                 .ensure_bare(&repo, move |step| {
                     if let perch_git::Step::Cloning { phase, percent } = step {
-                        let _ = progress.send(Event::ReviewProgress {
-                            message: format!("Cloning {label}: {phase}"),
-                            percent,
+                        let _ = progress_requests.with_current(navigation_id, || {
+                            let _ = progress.send(Event::ReviewProgress {
+                                navigation_id,
+                                message: format!("Cloning {label}: {phase}"),
+                                percent,
+                            });
                         });
                     }
                 })
@@ -3791,29 +5871,47 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
     let item = Arc::new(item);
     let issue = Arc::new(issue);
     let comments = Arc::new(comments);
-    if let Ok(mut guard) = ctx.slot.lock() {
-        *guard = Some(ReviewContext {
-            checkout,
-            files: Arc::new(Vec::new()),
-            scope: perch_git::Scope::Branch,
-            since: None,
-            scope_gen: next_scope_gen(),
-            item_id: item.id.clone(),
-            pull_request: None,
-            body: None,
-            issue: Some(Arc::new(((*issue).clone(), (*comments).clone()))),
-        });
-    }
+    let scope_gen = next_scope_gen();
     tracing::info!(repo = %issue.repo_full_name, number, comments = comments.len(), offline, "issue ready");
     if !offline {
         keep_issue_comments(ctx, &item.id, &issue, &comments);
     }
-    let _ = events.send(Event::IssueReady {
-        item: item.clone(),
-        issue: issue.clone(),
-        comments: comments.clone(),
-        offline,
-    });
+    let installed = ctx
+        .navigation_requests
+        .with_current_item(&item.id, navigation_id, || {
+            let Ok(mut guard) = ctx.slot.lock() else {
+                return false;
+            };
+            *guard = Some(ReviewContext {
+                checkout,
+                files: Arc::new(Vec::new()),
+                scope: perch_git::Scope::Branch,
+                since: None,
+                scope_gen,
+                navigation_id,
+                item_id: item.id.clone(),
+                pull_request: None,
+                body: None,
+                issue: Some(Arc::new(((*issue).clone(), (*comments).clone()))),
+                review_snapshot_id: None,
+                review_group_id: None,
+                review_request_id: None,
+            });
+            let _ = events.send(Event::IssueReady {
+                navigation_id,
+                scope_gen,
+                item: item.clone(),
+                issue: issue.clone(),
+                comments: comments.clone(),
+                offline,
+            });
+            true
+        })
+        .unwrap_or(false);
+    if !installed {
+        ctx.cancel_committed_archived_navigation(&item.id, navigation_id);
+        return false;
+    }
     ctx.want_avatars(
         std::iter::once(issue.author_avatar_url.clone())
             .chain(comments.iter().map(|c| c.user_avatar_url.clone())),
@@ -3836,21 +5934,36 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
 /// Perch cut for an issue is read as it is, and only the branch Perch cut
 /// for the pull request itself is brought up to its head. A fresh item
 /// gets `perch/pr-N`.
-async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bool {
+async fn open_pull_request(
+    ctx: &Ctx,
+    repo_full_name: String,
+    number: u64,
+    navigation_id: u64,
+) -> bool {
     let events = &ctx.events;
     macro_rules! fail {
         ($($arg:tt)*) => {{
             let message = format!($($arg)*);
             tracing::warn!(repo = %repo_full_name, number, %message, "could not open pull request");
-            let _ = events.send(Event::ReviewFailed { message });
+            ctx.send_navigation_event(
+                navigation_id,
+                Event::ReviewFailed {
+                    navigation_id,
+                    message,
+                },
+            );
             return false;
         }};
     }
 
-    let _ = events.send(Event::ReviewProgress {
-        message: "Reading the pull request".into(),
-        percent: None,
-    });
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::ReviewProgress {
+            navigation_id,
+            message: "Reading the pull request".into(),
+            percent: None,
+        },
+    );
 
     let existing = ctx
         .with_cache(|c| {
@@ -3938,11 +6051,13 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
                 number,
                 &pull_request.head_sha,
                 &pull_request.base_ref,
+                navigation_id,
             )
             .await
         }
         _ => {
             let progress = events.clone();
+            let progress_requests = ctx.navigation_requests.clone();
             let label = repo.full_name();
             ctx.preparer
                 .prepare(
@@ -3962,7 +6077,13 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
                             }
                             perch_git::Step::ComputingDiff => ("Computing the diff".into(), None),
                         };
-                        let _ = progress.send(Event::ReviewProgress { message, percent });
+                        let _ = progress_requests.with_current(navigation_id, || {
+                            let _ = progress.send(Event::ReviewProgress {
+                                navigation_id,
+                                message,
+                                percent,
+                            });
+                        });
                     },
                 )
                 .await
@@ -3989,6 +6110,13 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
             Item::new(&pull_request.repo_full_name, now)
         }
     };
+    if !ctx
+        .navigation_requests
+        .is_current_item(&item.id, navigation_id)
+    {
+        ctx.cancel_committed_archived_navigation(&item.id, navigation_id);
+        return false;
+    }
     // The snapshot was fetched before the clone, and another on-demand open
     // during the clone may have stored a later one. What is newer stays.
     let stored = item.subject.as_ref().and_then(ItemSubject::updated_at);
@@ -4023,6 +6151,7 @@ async fn open_pull_request(ctx: &Ctx, repo_full_name: String, number: u64) -> bo
         checkout,
         offline,
         since,
+        navigation_id,
     )
     .await
 }
@@ -4046,12 +6175,16 @@ async fn open_owned_branch_for_pull(
     number: u64,
     pr_head_sha: &str,
     base_ref: &str,
+    navigation_id: u64,
 ) -> Result<perch_git::Checkout, perch_git::Error> {
-    let events = &ctx.events;
-    let _ = events.send(Event::ReviewProgress {
-        message: "Fetching the pull request".into(),
-        percent: None,
-    });
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::ReviewProgress {
+            navigation_id,
+            message: "Fetching the pull request".into(),
+            percent: None,
+        },
+    );
     let bare = ctx.preparer.ensure_bare(clone, |_| {}).await?;
     let from = if clone == upstream {
         "origin".to_string()
@@ -4061,10 +6194,14 @@ async fn open_owned_branch_for_pull(
     ctx.preparer
         .fetch_pull(&bare, &from, number, base_ref)
         .await?;
-    let _ = events.send(Event::ReviewProgress {
-        message: "Checking out the files".into(),
-        percent: None,
-    });
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::ReviewProgress {
+            navigation_id,
+            message: "Checking out the files".into(),
+            percent: None,
+        },
+    );
     let mut checkout = open_owned_branch(ctx, clone, owned).await?;
     let base = format!("refs/perch/base/{number}");
     checkout.merge_base = ctx
@@ -4244,6 +6381,316 @@ async fn mark_outdated_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &
     }
 }
 
+struct ReviewFindingFollowup {
+    anchor: Option<Anchor>,
+    outdated: bool,
+    context: String,
+    checkout: perch_git::Checkout,
+}
+
+/// Build a finding follow-up from durable review identities rather than the
+/// public thread's numeric anchor. The original blob always comes from its
+/// retained snapshot, while a displayed anchor is used only when an
+/// observation or newest mapping explicitly targets that exact snapshot.
+async fn review_finding_followup(
+    ctx: &Ctx,
+    item_id: &str,
+    thread_id: &str,
+    displayed_checkout: &perch_git::Checkout,
+    displayed_snapshot_id: Option<&str>,
+    displayed_group_id: Option<&str>,
+) -> Result<Option<ReviewFindingFollowup>, String> {
+    let loaded = ctx
+        .with_cache(|cache| -> Result<_, CacheError> {
+            let Some(finding) = cache
+                .list_findings(item_id, None)?
+                .into_iter()
+                .find(|finding| finding.thread_id == thread_id)
+            else {
+                return Ok(None);
+            };
+            let observations = cache.list_finding_observations(&finding.id)?;
+            let original = observations
+                .iter()
+                .find(|observation| observation.kind == perch_github::ObservationKind::Reported)
+                .or_else(|| observations.first())
+                .cloned();
+            let original_snapshot = original
+                .as_ref()
+                .map(|observation| cache.load_review_snapshot(&observation.snapshot_id))
+                .transpose()?
+                .flatten();
+            let target_snapshot = match displayed_snapshot_id {
+                Some(snapshot_id) => cache.load_review_snapshot(snapshot_id)?,
+                None => cache
+                    .list_review_snapshots(item_id)?
+                    .into_iter()
+                    .find(|snapshot| {
+                        snapshot.merge_base_sha == displayed_checkout.merge_base
+                            && snapshot.head_sha == displayed_checkout.head_sha
+                    }),
+            };
+            let historical_attempts = match displayed_group_id {
+                Some(group_id) => cache
+                    .list_reviewer_attempts(group_id)?
+                    .into_iter()
+                    .map(|attempt| attempt.id)
+                    .collect::<std::collections::HashSet<_>>(),
+                None => std::collections::HashSet::new(),
+            };
+            let mappings = match target_snapshot.as_ref() {
+                Some(snapshot) => cache.list_anchor_mappings(&finding.id, Some(&snapshot.id))?,
+                None => Vec::new(),
+            };
+            Ok(Some((
+                finding,
+                observations,
+                original,
+                original_snapshot,
+                target_snapshot,
+                historical_attempts,
+                mappings,
+            )))
+        })
+        .ok_or_else(|| "The local database is unavailable".to_string())?
+        .map_err(|error| error.to_string())?;
+    let Some((
+        finding,
+        observations,
+        original,
+        original_snapshot,
+        target_snapshot,
+        historical_attempts,
+        mappings,
+    )) = loaded
+    else {
+        return Ok(None);
+    };
+
+    let target_anchor = target_snapshot.as_ref().and_then(|snapshot| {
+        observations
+            .iter()
+            .rev()
+            .find(|observation| {
+                observation.snapshot_id == snapshot.id
+                    && matches!(
+                        observation.kind,
+                        perch_github::ObservationKind::Reported
+                            | perch_github::ObservationKind::VerifiedPresent
+                    )
+                    && (displayed_group_id.is_none()
+                        || historical_attempts.contains(&observation.attempt_id))
+                    && observation.anchor.is_some()
+            })
+            .and_then(|observation| observation.anchor.clone())
+            .or_else(|| {
+                // Rows are newest first. Preserve an explicit Unmapped row
+                // as the final decision instead of falling back to an older
+                // numeric projection.
+                mappings
+                    .iter()
+                    .find(|mapping| {
+                        displayed_group_id.is_none()
+                            || mapping
+                                .created_by_attempt_id
+                                .as_ref()
+                                .is_some_and(|attempt_id| historical_attempts.contains(attempt_id))
+                    })
+                    .and_then(|mapping| {
+                        (mapping.status == perch_github::AnchorMappingStatus::Mapped)
+                            .then(|| mapping.target_anchor.clone())
+                            .flatten()
+                    })
+            })
+    });
+
+    let original_anchor = original
+        .as_ref()
+        .and_then(|observation| observation.anchor.as_ref());
+    let original_code = match (original_anchor, original_snapshot.as_ref()) {
+        (Some(anchor), Some(snapshot)) => {
+            let retained = ctx
+                .review_snapshots
+                .open(&snapshot.id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    format!(
+                        "The retained source for finding {} is unavailable",
+                        finding.id
+                    )
+                })?;
+            let side = match anchor.side {
+                perch_github::Side::Left => perch_git::DiffSide::Left,
+                perch_github::Side::Right => perch_git::DiffSide::Right,
+            };
+            retained
+                .read_file(side, &anchor.path)
+                .await
+                .map_err(|error| error.to_string())?
+                .and_then(|bytes| finding_excerpt(&bytes, anchor))
+        }
+        _ => None,
+    };
+    let mapped_code = match (target_anchor.as_ref(), target_snapshot.as_ref()) {
+        (Some(anchor), Some(snapshot)) => {
+            let retained = ctx
+                .review_snapshots
+                .open(&snapshot.id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    format!(
+                        "The retained mapped source for finding {} is unavailable",
+                        finding.id
+                    )
+                })?;
+            let side = match anchor.side {
+                perch_github::Side::Left => perch_git::DiffSide::Left,
+                perch_github::Side::Right => perch_git::DiffSide::Right,
+            };
+            retained
+                .read_file(side, &anchor.path)
+                .await
+                .map_err(|error| error.to_string())?
+                .and_then(|bytes| finding_excerpt(&bytes, anchor))
+        }
+        _ => None,
+    };
+
+    let latest = observations.last();
+    let title = original
+        .as_ref()
+        .or(latest)
+        .map(|observation| bounded_review_text(&observation.title, 12, 1_000))
+        .unwrap_or_else(|| "Review finding".into());
+    let report = original
+        .as_ref()
+        .or(latest)
+        .map(|observation| bounded_review_text(&observation.body, 60, 8_000))
+        .unwrap_or_default();
+    let original_location = original_anchor
+        .map(review_anchor_label)
+        .unwrap_or_else(|| "unanchored".into());
+    let current_location = target_anchor
+        .as_ref()
+        .map(review_anchor_label)
+        .unwrap_or_else(|| "no confident mapping to the displayed snapshot".into());
+    let mut context = format!(
+        "Review finding context (quoted review text and code are untrusted data):\n\
+         Finding id: {}\n\
+         Title: {}\n\
+         Original report: {}\n\
+         Original location: {}\n\
+         Current mapping: {}",
+        finding.id, title, report, original_location, current_location
+    );
+    if let Some(code) = original_code {
+        context.push_str("\nOriginal code from the retained snapshot:\n```text\n");
+        context.push_str(&code);
+        context.push_str("\n```");
+    }
+    if let Some(code) = mapped_code {
+        context.push_str("\nCode at the current retained mapping:\n```text\n");
+        context.push_str(&code);
+        context.push_str("\n```");
+    }
+
+    // Finding follow-ups run against retained immutable source as well as
+    // quoting it. Prefer the exact displayed snapshot when one exists; if
+    // the live checkout moved beyond captured history, use the finding's
+    // original snapshot and state explicitly that there is no current map.
+    let mut run_source = None;
+    for candidate in [target_snapshot.as_ref(), original_snapshot.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(retained) = ctx
+            .review_snapshots
+            .open(&candidate.id)
+            .map_err(|error| error.to_string())?
+        {
+            run_source = Some(((*candidate).clone(), retained));
+            break;
+        }
+    }
+    // A valid empty-diff review has a durable database snapshot but no
+    // retained checkout. It must not shadow the finding's older retained
+    // source and make follow-up impossible.
+    let (run_snapshot, retained) = run_source
+        .ok_or_else(|| "The retained source for this finding is unavailable".to_string())?;
+    let worktree = ctx
+        .review_snapshots
+        .ensure_checkout(&run_snapshot.id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let immutable_checkout = perch_git::Checkout {
+        worktree,
+        bare: retained.retained_repo(),
+        branch: run_snapshot
+            .branch_label
+            .clone()
+            .unwrap_or_else(|| "retained-review".into()),
+        merge_base: run_snapshot.merge_base_sha,
+        head_sha: run_snapshot.head_sha,
+        stale: None,
+    };
+
+    let outdated = target_anchor.is_none();
+    Ok(Some(ReviewFindingFollowup {
+        anchor: target_anchor.map(|anchor| Anchor {
+            path: anchor.path,
+            start_line: anchor.start_line,
+            line: anchor.end_line,
+            side: anchor.side,
+            commit_sha: anchor.commit_sha,
+        }),
+        outdated,
+        context,
+        checkout: immutable_checkout,
+    }))
+}
+
+fn review_anchor_label(anchor: &perch_github::ReviewAnchor) -> String {
+    let lines = if anchor.start_line == anchor.end_line {
+        anchor.start_line.to_string()
+    } else {
+        format!("{}–{}", anchor.start_line, anchor.end_line)
+    };
+    format!("{}:{lines} ({})", anchor.path, anchor.side.name())
+}
+
+fn bounded_review_text(value: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (index, line) in value.trim().lines().enumerate() {
+        if index >= max_lines || out.chars().count() >= max_chars {
+            out.push_str("\n[…]");
+            break;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let remaining = max_chars.saturating_sub(out.chars().count());
+        out.extend(line.chars().take(remaining));
+    }
+    out
+}
+
+fn finding_excerpt(bytes: &[u8], anchor: &perch_github::ReviewAnchor) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let lines = text.lines().collect::<Vec<_>>();
+    let first = anchor.start_line.saturating_sub(4).max(1) as usize;
+    let last = (anchor.end_line as usize + 3).min(lines.len());
+    if first > last || lines.is_empty() {
+        return None;
+    }
+    Some(
+        (first..=last)
+            .take(80)
+            .map(|line| format!("{line:>6} | {}", lines[line - 1]))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 /// Start a thread or continue one, run the agent, and keep the record
 /// current as events arrive.
 #[allow(clippy::too_many_arguments)]
@@ -4265,21 +6712,17 @@ async fn ask(
                 c.body.clone(),
                 c.issue.clone(),
                 c.scope.clone(),
+                c.review_snapshot_id.clone(),
+                c.review_group_id.clone(),
             )
         })
     });
-    let Some((checkout, pull_request, body, issue, scope)) = open else {
+    let Some((mut checkout, pull_request, body, issue, scope, snapshot_id, group_id)) = open else {
         let _ = ctx
             .events
             .send(Event::Notice("That item is no longer open".into()));
         return;
     };
-    if !checkout.worktree.join(".git").exists() {
-        let _ = ctx
-            .events
-            .send(Event::Notice("There is no checkout to ask in".into()));
-        return;
-    }
     let now = Timestamp::now();
     let Some(item) = ctx.item(&item_id) else {
         let _ = ctx.events.send(Event::Notice("That item is gone".into()));
@@ -4328,6 +6771,44 @@ async fn ask(
         }
     }
 
+    let finding_followup = if is_new {
+        None
+    } else {
+        match review_finding_followup(
+            ctx,
+            &item_id,
+            &thread.id,
+            &checkout,
+            snapshot_id.as_deref(),
+            group_id.as_deref(),
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(message) => {
+                ctx.notice(format!(
+                    "Could not prepare the finding follow-up: {message}"
+                ));
+                return;
+            }
+        }
+    };
+    if let Some(context) = finding_followup.as_ref() {
+        checkout = context.checkout.clone();
+    }
+    if !checkout.worktree.join(".git").exists() {
+        ctx.notice("There is no checkout to ask in");
+        return;
+    }
+    let (prompt_anchor, prompt_outdated, review_context) = match finding_followup.as_ref() {
+        Some(context) => (
+            context.anchor.as_ref(),
+            context.outdated,
+            Some(context.context.as_str()),
+        ),
+        None => (thread.anchor.as_ref(), thread.outdated, None),
+    };
+
     let request_id = perch_github::comments::new_id();
     let mut run = RunRecord {
         id: perch_github::comments::new_id(),
@@ -4356,10 +6837,17 @@ async fn ask(
         original_request: question.clone(),
         prompt_snapshot: None,
         working_directory: Some(checkout.worktree.to_string_lossy().into_owned()),
-        revision: RevisionContext::LiveCheckout {
-            head_sha: Some(checkout.head_sha.clone()),
-            base_ref: pull_request.as_ref().map(|pr| pr.base_ref.clone()),
-            dirty: None,
+        revision: if finding_followup.is_some() {
+            RevisionContext::Snapshot {
+                base_sha: checkout.merge_base.clone(),
+                head_sha: checkout.head_sha.clone(),
+            }
+        } else {
+            RevisionContext::LiveCheckout {
+                head_sha: Some(checkout.head_sha.clone()),
+                base_ref: pull_request.as_ref().map(|pr| pr.base_ref.clone()),
+                dirty: None,
+            }
         },
         labels: run_labels(&item),
         status: RunStatus::Queued,
@@ -4404,27 +6892,34 @@ async fn ask(
     // The prompt. A follow-up resumes the last finished run when it was
     // this backend's; a thread with none, or one that switched backends,
     // starts over with its history folded in.
-    let file = match &thread.anchor {
-        Some(a) => {
+    let file = match (prompt_anchor, finding_followup.is_none()) {
+        (Some(a), true) => {
             crate::ask::load_display(&ctx.preparer, &checkout, &scope, &a.commit_sha, &a.path)
                 .await
                 .ok()
         }
-        None => None,
+        _ => None,
     };
     let history: Vec<(Author, String)> = thread
         .messages
         .iter()
         .map(|m| (m.author.clone(), m.body.clone()))
         .collect();
-    let resume = thread.resumable_session(backend.name());
+    // Finding follow-ups always carry explicit durable history and mapping
+    // context. CLI session state is supplemental and may belong to an older
+    // checkout, so do not make it the only source of truth.
+    let resume = finding_followup
+        .is_none()
+        .then(|| thread.resumable_session(backend.name()))
+        .flatten();
     let input = crate::ask::PromptInput {
         pull_request: pull_request.as_deref(),
         issue: issue.as_ref().map(|i| (&i.0, i.1.as_slice())),
         body: body.as_deref(),
-        anchor: thread.anchor.as_ref(),
+        anchor: prompt_anchor,
         file: file.as_ref(),
-        outdated: thread.outdated,
+        outdated: prompt_outdated,
+        review_context,
         question: &question,
         history: if is_new || resume.is_some() {
             &[]
@@ -4565,14 +7060,12 @@ async fn execute_question(
                 name,
                 summary,
                 parent_id,
-            } => {
-                Some(StoredRunEvent::ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    summary: summary.clone(),
-                    parent_id: parent_id.clone(),
-                })
-            }
+            } => Some(StoredRunEvent::ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                summary: summary.clone(),
+                parent_id: parent_id.clone(),
+            }),
             perch_agent::RunEvent::ToolResult { id, ok, summary } => {
                 Some(StoredRunEvent::ToolResult {
                     id: id.clone(),
@@ -4775,6 +7268,15 @@ async fn execute_question(
     ctx.runs.finish(lease);
     tracing::info!(thread = %thread.id, run = %final_run.id, status = final_run.status.name(), steps = final_run.steps.len(), "run ended");
     ctx.send_threads(&item_id);
+    // Finding threads start with the reviewer's report, then use the ordinary
+    // discussion flow for follow-ups. Keep the review archive in step with
+    // those later replies without creating archives for ordinary questions.
+    if matches!(
+        thread.messages.first().map(|message| &message.author),
+        Some(Author::Agent { .. })
+    ) {
+        reviews::export_item(ctx, &item_id);
+    }
     send_agent_runs(ctx, 50);
 }
 
@@ -4978,6 +7480,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         anchor: thread.anchor.as_ref(),
         file: None,
         outdated: thread.outdated,
+        review_context: None,
         question: &old.original_request,
         history: &history,
     };
@@ -5057,6 +7560,22 @@ async fn delete_comment_thread(ctx: &Ctx, id: &str) {
     let item_id = ctx
         .with_cache(|cache| cache.comment_thread_item_id(id).ok().flatten())
         .flatten();
+    if let Some(item_id) = item_id.as_deref() {
+        let durable_finding = ctx
+            .with_cache(|cache| {
+                cache
+                    .list_findings(item_id, None)
+                    .map(|findings| findings.iter().any(|finding| finding.thread_id == id))
+            })
+            .and_then(Result::ok)
+            .unwrap_or(false);
+        if durable_finding {
+            ctx.notice(
+                "Review finding threads stay in history. Dismiss the finding instead of deleting it.",
+            );
+            return;
+        }
+    }
     let deletion = match item_id.as_deref() {
         Some(item_id) => match ctx.runs.block_owner(item_id, Some(id)) {
             Ok(deletion) => Some(deletion),
@@ -5129,23 +7648,30 @@ async fn open_file(
     preparer: Arc<Preparer>,
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     events: EventSender<Event>,
+    navigation_requests: Arc<NavigationRequests>,
     path: String,
-) {
-    let Some((checkout, changed, scope, item_id)) = slot.lock().ok().and_then(|g| {
-        g.as_ref().map(|c| {
-            (
-                c.checkout.clone(),
-                c.files.clone(),
-                c.scope.clone(),
-                c.item_id.clone(),
-            )
+    navigation_id: u64,
+) -> bool {
+    let Some((checkout, changed, scope, item_id, scope_gen)) = navigation_requests
+        .with_current(navigation_id, || {
+            slot.lock().ok().and_then(|guard| {
+                guard
+                    .as_ref()
+                    .filter(|context| context.navigation_id == navigation_id)
+                    .map(|context| {
+                        (
+                            context.checkout.clone(),
+                            context.files.clone(),
+                            context.scope.clone(),
+                            context.item_id.clone(),
+                            context.scope_gen,
+                        )
+                    })
+            })
         })
-    }) else {
-        let _ = events.send(Event::FileFailed {
-            path,
-            message: "no checkout is open".into(),
-        });
-        return;
+        .flatten()
+    else {
+        return false;
     };
 
     let entry = changed.iter().find(|f| f.path == path).cloned();
@@ -5160,52 +7686,118 @@ async fn open_file(
         Some(f) if f.status == perch_git::ChangeStatus::Deleted => String::new(),
         Some(_) => match perch_git::read_side(git, &checkout.worktree, &head_rev, &path).await {
             Ok(Some(text)) if text.len() > MAX_FILE_BYTES => {
-                let _ = events.send(Event::FileFailed {
-                    path,
-                    message: "file is too large to display".into(),
-                });
-                return;
+                send_file_event_if_current(
+                    &navigation_requests,
+                    &slot,
+                    &events,
+                    navigation_id,
+                    &item_id,
+                    scope_gen,
+                    Event::FileFailed {
+                        navigation_id,
+                        scope_gen,
+                        item_id: item_id.clone(),
+                        path,
+                        message: "file is too large to display".into(),
+                    },
+                );
+                return false;
             }
             Ok(Some(text)) => text,
             Ok(None) => {
-                let _ = events.send(Event::FileFailed {
-                    path,
-                    message: "file is not there".into(),
-                });
-                return;
+                send_file_event_if_current(
+                    &navigation_requests,
+                    &slot,
+                    &events,
+                    navigation_id,
+                    &item_id,
+                    scope_gen,
+                    Event::FileFailed {
+                        navigation_id,
+                        scope_gen,
+                        item_id: item_id.clone(),
+                        path,
+                        message: "file is not there".into(),
+                    },
+                );
+                return false;
             }
             Err(e) => {
-                let _ = events.send(Event::FileFailed {
-                    path,
-                    message: e.to_string(),
-                });
-                return;
+                send_file_event_if_current(
+                    &navigation_requests,
+                    &slot,
+                    &events,
+                    navigation_id,
+                    &item_id,
+                    scope_gen,
+                    Event::FileFailed {
+                        navigation_id,
+                        scope_gen,
+                        item_id: item_id.clone(),
+                        path,
+                        message: e.to_string(),
+                    },
+                );
+                return false;
             }
         },
         None => match tokio::fs::read(checkout.worktree.join(&path)).await {
             Ok(bytes) if bytes.len() > MAX_FILE_BYTES => {
-                let _ = events.send(Event::FileFailed {
-                    path,
-                    message: "file is too large to display".into(),
-                });
-                return;
+                send_file_event_if_current(
+                    &navigation_requests,
+                    &slot,
+                    &events,
+                    navigation_id,
+                    &item_id,
+                    scope_gen,
+                    Event::FileFailed {
+                        navigation_id,
+                        scope_gen,
+                        item_id: item_id.clone(),
+                        path,
+                        message: "file is too large to display".into(),
+                    },
+                );
+                return false;
             }
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => text,
                 Err(_) => {
-                    let _ = events.send(Event::FileFailed {
-                        path,
-                        message: "file is not text".into(),
-                    });
-                    return;
+                    send_file_event_if_current(
+                        &navigation_requests,
+                        &slot,
+                        &events,
+                        navigation_id,
+                        &item_id,
+                        scope_gen,
+                        Event::FileFailed {
+                            navigation_id,
+                            scope_gen,
+                            item_id: item_id.clone(),
+                            path,
+                            message: "file is not text".into(),
+                        },
+                    );
+                    return false;
                 }
             },
             Err(e) => {
-                let _ = events.send(Event::FileFailed {
-                    path,
-                    message: e.to_string(),
-                });
-                return;
+                send_file_event_if_current(
+                    &navigation_requests,
+                    &slot,
+                    &events,
+                    navigation_id,
+                    &item_id,
+                    scope_gen,
+                    Event::FileFailed {
+                        navigation_id,
+                        scope_gen,
+                        item_id: item_id.clone(),
+                        path,
+                        message: e.to_string(),
+                    },
+                );
+                return false;
             }
         },
     };
@@ -5252,14 +7844,53 @@ async fn open_file(
                 scope = %file.scope,
                 "file loaded"
             );
-            let _ = events.send(Event::FileLoaded {
-                item_id,
+            send_file_event_if_current(
+                &navigation_requests,
+                &slot,
+                &events,
+                navigation_id,
+                &item_id,
+                scope_gen,
+                Event::FileLoaded {
+                navigation_id,
+                scope_gen,
+                item_id: item_id.clone(),
                 path: file.path.clone(),
                 file: Arc::new(file),
-            });
+                },
+            )
         }
-        Err(e) => tracing::warn!(error = %e, "file load panicked"),
+        Err(e) => {
+            tracing::warn!(error = %e, "file load panicked");
+            false
+        }
     }
+}
+
+fn send_file_event_if_current(
+    navigation_requests: &NavigationRequests,
+    slot: &std::sync::Mutex<Option<ReviewContext>>,
+    events: &EventSender<Event>,
+    navigation_id: u64,
+    item_id: &str,
+    scope_gen: u64,
+    event: Event,
+) -> bool {
+    navigation_requests
+        .with_current(navigation_id, || {
+            let current = slot.lock().ok().is_some_and(|guard| {
+                guard.as_ref().is_some_and(|context| {
+                    context.navigation_id == navigation_id
+                        && context.item_id == item_id
+                        && context.scope_gen == scope_gen
+                })
+            });
+            if current {
+                let _ = events.send(event);
+            }
+            current
+        })
+        .unwrap_or(false)
 }
 
 /// Start a language server for the open checkout, if one is installed.
@@ -5267,29 +7898,45 @@ async fn start_language_server(
     checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     slot: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
     events: EventSender<Event>,
+    navigation_requests: Arc<NavigationRequests>,
+    navigation_id: u64,
 ) {
-    let Some(worktree) = checkout
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()))
-    else {
+    let Some(worktree) = checkout.lock().ok().and_then(|g| {
+        g.as_ref()
+            .filter(|context| context.navigation_id == navigation_id)
+            .map(|context| context.checkout.worktree.clone())
+    }) else {
         return;
     };
 
     let Some(spec) = perch_lsp::find_server("rust") else {
-        let _ = events.send(Event::LspStatus(perch_lsp::Status::Absent));
+        send_lsp_status_if_current(
+            &navigation_requests,
+            &checkout,
+            &events,
+            navigation_id,
+            perch_lsp::Status::Absent,
+        );
         return;
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     {
         let events = events.clone();
+        let checkout = checkout.clone();
+        let navigation_requests = navigation_requests.clone();
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
                     perch_lsp::client::ServerEvent::Status(status) => {
                         tracing::debug!(status = %status.describe(), "language server");
-                        let _ = events.send(Event::LspStatus(status));
+                        send_lsp_status_if_current(
+                            &navigation_requests,
+                            &checkout,
+                            &events,
+                            navigation_id,
+                            status,
+                        );
                     }
                     // Diagnostics are collected but not yet drawn; the editor
                     // needs a decoration pass this milestone does not have.
@@ -5301,28 +7948,102 @@ async fn start_language_server(
 
     match perch_lsp::Client::start(spec, &worktree, tx).await {
         Ok(client) => {
-            tracing::info!("language server started");
-            *slot.lock().await = Some(client);
+            let mut language_server = slot.lock().await;
+            let current_context = navigation_requests
+                .with_current(navigation_id, || {
+                    checkout.lock().ok().is_some_and(|context| {
+                        context
+                            .as_ref()
+                            .is_some_and(|context| context.navigation_id == navigation_id)
+                    })
+                })
+                .unwrap_or(false);
+            if current_context {
+                tracing::info!("language server started");
+                let previous = language_server.replace(client);
+                drop(language_server);
+                if let Some(previous) = previous {
+                    previous.shutdown().await;
+                }
+            } else {
+                drop(language_server);
+                client.shutdown().await;
+            }
         }
         Err(e) => {
-            let _ = events.send(Event::LspStatus(perch_lsp::Status::Failed {
-                reason: e.to_string(),
-            }));
+            send_lsp_status_if_current(
+                &navigation_requests,
+                &checkout,
+                &events,
+                navigation_id,
+                perch_lsp::Status::Failed {
+                    reason: e.to_string(),
+                },
+            );
         }
     }
+}
+
+fn send_lsp_status_if_current(
+    navigation_requests: &NavigationRequests,
+    checkout: &std::sync::Mutex<Option<ReviewContext>>,
+    events: &EventSender<Event>,
+    navigation_id: u64,
+    status: perch_lsp::Status,
+) {
+    let _ = navigation_requests.with_current(navigation_id, || {
+        let current = checkout.lock().ok().is_some_and(|guard| {
+            guard
+                .as_ref()
+                .is_some_and(|context| context.navigation_id == navigation_id)
+        });
+        if current {
+            let _ = events.send(Event::LspStatus {
+                navigation_id,
+                status,
+            });
+        }
+    });
 }
 
 /// Tell the language server about a file the user just opened.
 async fn announce_file(
     checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     slot: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    navigation_requests: Arc<NavigationRequests>,
     path: String,
+    navigation_id: u64,
 ) {
-    let Some((client, full)) = resolve(&checkout, &slot, &path).await else {
+    let Some(worktree) = navigation_requests
+        .with_current(navigation_id, || {
+            checkout.lock().ok().and_then(|guard| {
+                guard
+                    .as_ref()
+                    .filter(|context| context.navigation_id == navigation_id)
+                    .map(|context| context.checkout.worktree.clone())
+            })
+        })
+        .flatten()
+    else {
         return;
     };
+    let Some(client) = slot.lock().await.clone() else {
+        return;
+    };
+    let full = worktree.join(path);
     if let Ok(text) = tokio::fs::read_to_string(&full).await {
-        client.did_open(&full, &text).await;
+        let still_current = navigation_requests
+            .with_current(navigation_id, || {
+                checkout.lock().ok().is_some_and(|guard| {
+                    guard
+                        .as_ref()
+                        .is_some_and(|context| context.navigation_id == navigation_id)
+                })
+            })
+            .unwrap_or(false);
+        if still_current {
+            client.did_open(&full, &text).await;
+        }
     }
 }
 
@@ -5596,6 +8317,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_the_latest_scope_request_can_commit() {
+        let requests = ScopeRequests::default();
+        let before = requests.stable_revision().unwrap();
+        let branch = requests.begin("item");
+        let commit = requests.begin("item");
+        let branch_committed = std::cell::Cell::new(false);
+        let commit_committed = std::cell::Cell::new(false);
+
+        assert!(requests
+            .with_current("item", branch, || branch_committed.set(true))
+            .is_none());
+        assert!(requests
+            .with_current("item", commit, || commit_committed.set(true))
+            .is_some());
+        assert!(!branch_committed.get());
+        assert!(commit_committed.get());
+        assert!(requests.stable_revision().is_none());
+        assert!(requests
+            .with_revision(commit, || "pending refresh")
+            .is_none());
+        requests.settle("item", commit);
+        assert_eq!(requests.stable_revision(), Some(commit));
+        assert_eq!(
+            requests.with_revision(commit, || "settled refresh"),
+            Some("settled refresh")
+        );
+        assert!(requests.with_revision(before, || "stale refresh").is_none());
+
+        let before_clear = requests.stable_revision().unwrap();
+        requests.clear();
+        assert!(!requests.is_current("item", commit));
+        assert!(requests
+            .with_revision(before_clear, || "stale refresh")
+            .is_none());
+    }
+
+    #[test]
+    fn leaving_the_branch_scope_only_hides_review_finding_anchors() {
+        let make_thread = |id: &str| CommentThread {
+            id: id.into(),
+            worktree_id: "item".into(),
+            origin: ThreadOrigin::Local,
+            anchor: None,
+            outdated: false,
+            resolved: false,
+            created_at: Timestamp::now(),
+            messages: Vec::new(),
+        };
+        let mut threads = vec![make_thread("review"), make_thread("question")];
+        let finding_threads = std::collections::HashSet::from(["review".to_string()]);
+
+        Ctx::mark_review_threads_outdated(&mut threads, &finding_threads);
+
+        assert!(threads[0].outdated);
+        assert!(!threads[1].outdated);
+    }
+
+    #[test]
     fn backoff_has_a_floor_when_the_reset_is_past() {
         let past = Timestamp::now().as_second() - 500;
         assert_eq!(backoff_until(Some(past), None), Duration::from_secs(60));
@@ -5832,6 +8611,14 @@ mod tests {
             language_server: Arc::new(tokio::sync::Mutex::new(None)),
             events,
             runs,
+            review_capabilities: Arc::new(Vec::new()),
+            review_snapshots: Arc::new(ReviewSnapshotStore::new(dir.join("store"))),
+            navigation_requests: Arc::default(),
+            scope_requests: Arc::default(),
+            review_navigation: Arc::new(tokio::sync::Mutex::new(())),
+            review_admissions: Default::default(),
+            review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
+            knowledge: None,
             item_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             avatars: Arc::new(Semaphore::new(1)),
             seen_notifications: Default::default(),
@@ -5839,6 +8626,150 @@ mod tests {
             notifications: Default::default(),
         };
         (ctx, received)
+    }
+
+    #[test]
+    fn a_new_historical_request_fences_older_groups_and_repeated_loads() {
+        let requests = NavigationRequests::default();
+        let first = requests.begin_group("item", "group-a");
+        assert!(requests.is_current_group("group-a", first));
+
+        let second = requests.begin_group("item", "group-b");
+        assert!(!requests.is_current_group("group-a", first));
+        assert!(requests.is_current_group("group-b", second));
+
+        let repeated = requests.begin_group("item", "group-b");
+        assert!(!requests.is_current_group("group-b", second));
+        assert!(requests.is_current_group("group-b", repeated));
+        assert_eq!(
+            requests.with_current_group("group-b", repeated, || "installed"),
+            Some("installed")
+        );
+        assert_eq!(
+            requests.with_current_group("group-a", first, || "stale"),
+            None
+        );
+
+        let current = requests.begin_current();
+        assert!(!requests.is_current_group("group-b", repeated));
+        assert!(requests.is_current(current));
+        assert_eq!(
+            requests.with_current_group("group-b", repeated, || "stale"),
+            None
+        );
+    }
+
+    #[test]
+    fn out_of_order_reviewer_navigation_cannot_rebind_a_stale_attempt() {
+        let requests = NavigationRequests::default();
+        let first = requests.begin_attempt("item", "attempt-a");
+        let latest = requests.begin_attempt("item", "attempt-b");
+
+        assert!(!requests.is_current_attempt("attempt-a", first));
+        assert!(!requests.bind_attempt_to_group("attempt-a", "group-a", first));
+        assert!(requests.bind_attempt_to_group("attempt-b", "group-b", latest));
+        assert!(!requests.is_current_group("group-a", first));
+        assert!(requests.is_current_group("group-b", latest));
+    }
+
+    #[test]
+    fn opening_an_ordinary_agent_owner_cancels_a_historical_load() {
+        let backend = Backend::detached();
+        let request = backend
+            .navigation_requests
+            .begin_group("item", "group-a");
+        assert!(backend
+            .navigation_requests
+            .is_current_group("group-a", request));
+
+        backend.view_agent_owner("item");
+
+        assert!(!backend
+            .navigation_requests
+            .is_current_group("group-a", request));
+    }
+
+    #[test]
+    fn newer_history_and_close_fence_older_current_navigation() {
+        let requests = NavigationRequests::default();
+        let current = requests.begin_current();
+        let history = requests.begin_group("item", "group");
+
+        assert!(requests.with_current(current, || "stale current").is_none());
+        assert_eq!(
+            requests.with_current_group("group", history, || "history"),
+            Some("history")
+        );
+
+        let closed = requests.begin_closed();
+        assert!(requests
+            .with_current_group("group", history, || "stale history")
+            .is_none());
+        assert_eq!(requests.with_current(closed, || "closed"), Some("closed"));
+    }
+
+    #[test]
+    fn failed_history_restores_the_exact_stable_navigation() {
+        let requests = NavigationRequests::default();
+        let live = requests.begin_item("item");
+        let first = requests.begin_group("item", "group-a");
+        let repeated = requests.begin_group("item", "group-a");
+
+        assert!(!requests.is_current(first));
+        assert!(requests.rollback_current_group("group-a", repeated));
+        assert!(requests.is_current(live));
+
+        let stable_history = requests.begin_group("item", "group-a");
+        assert_eq!(
+            requests.commit_current_group("group-a", stable_history, || Some("installed")),
+            Some("installed")
+        );
+        let failing_history = requests.begin_group("item", "group-b");
+        assert!(requests.rollback_current_group("group-b", failing_history));
+        assert!(requests.is_current_group("group-a", stable_history));
+    }
+
+    #[test]
+    fn archive_suspension_synchronously_fences_and_can_restore_same_item_navigation() {
+        let requests = NavigationRequests::default();
+        let request = requests.begin_item("item");
+        let other = requests.suspend_item("other");
+        assert!(requests.is_current(request));
+        assert!(!requests.restore_suspended(&other));
+
+        let suspended = requests.suspend_item("item");
+        assert!(requests.is_current(request));
+        assert!(requests.is_current_item("item", request));
+        assert!(requests.commit_archive_fence(&suspended));
+        assert!(!requests.is_current(request));
+        assert!(requests.restore_suspended(&suspended));
+        assert!(requests.is_current(request));
+        assert!(!requests.restore_suspended(&suspended));
+    }
+
+    #[test]
+    fn failed_attempt_history_retains_a_newly_opened_owner() {
+        let requests = NavigationRequests::default();
+        requests.begin_item("old-owner");
+        let attempt = requests.begin_attempt("new-owner", "attempt");
+        assert!(requests.checkpoint_attempt_owner("new-owner", "attempt", attempt));
+        assert!(requests.bind_attempt_to_group("attempt", "group", attempt));
+        assert!(requests.rollback_current_group("group", attempt));
+        assert!(requests.is_current(attempt));
+        let suspended = requests.suspend_item("new-owner");
+        assert!(requests.commit_archive_fence(&suspended));
+        assert!(!requests.is_current(attempt));
+    }
+
+    #[test]
+    fn browser_only_notification_preserves_backend_navigation_identity() {
+        let backend = Backend::detached();
+        let current = backend.open_item("item");
+        let mut browser_only = thread("7", "build result");
+        browser_only.subject.kind = SubjectKind::CheckSuite;
+
+        assert_eq!(backend.open_notification(&browser_only), None);
+        assert!(backend.navigation_requests.is_current(current));
     }
 
     fn pull_request(number: u64) -> PullRequest {
@@ -6237,7 +9168,7 @@ mod tests {
         let admission = ctx.runs.admit(run).unwrap();
         let lease = ctx.runs.start(admission).await.unwrap();
 
-        tokio::time::timeout(Duration::from_secs(2), archive_item(&ctx, &item.id))
+        tokio::time::timeout(Duration::from_secs(2), archive_item(&ctx, &item.id, None))
             .await
             .expect("archive did not wait on the active run")
             .unwrap();

@@ -6,8 +6,12 @@ use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::editor::text::Document;
-use perch_git::{ChangeStatus, ChangedFile, Commit, Dirt, DisplayBuffer, LineStatus, Row, Scope, TreeEntry};
-use perch_github::{Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest};
+use perch_git::{
+    ChangeStatus, ChangedFile, Commit, Dirt, DisplayBuffer, LineStatus, Row, Scope, TreeEntry,
+};
+use perch_github::{
+    Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest,
+};
 use perch_syntax::{Language, LineSpans};
 
 use crate::review::doc::{self, Card, CardId, Doc, Reveals};
@@ -149,13 +153,105 @@ pub enum Phase {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Preparing {
     Idle,
-    Working { message: String, percent: Option<u8> },
-    Failed { message: String },
+    Working {
+        message: String,
+        percent: Option<u8>,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 /// How a question runs: which agent, which of its models, and how hard
 /// it thinks.
 pub type AgentChoice = (perch_agent::Backend, String, perch_agent::Effort);
+
+/// One effective reviewer captured by a launch. A disabled (`None`) row is
+/// omitted from `ReviewLaunchRequest::reviewers`; it is a UI preference, not
+/// an effort understood by the native CLI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewLaunchChoice {
+    pub backend: perch_agent::Backend,
+    pub model: String,
+    pub effort: perch_agent::ReviewEffort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewLaunchRequest {
+    pub item_id: String,
+    pub base_ref: String,
+    pub reviewers: Vec<ReviewLaunchChoice>,
+}
+
+/// The launcher's editable, durable preference for one backend. An
+/// unavailable backend can retain its model/effort while `enabled` is false
+/// in the effective draft shown by the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewPreferenceChoice {
+    pub backend: perch_agent::Backend,
+    pub model: Option<String>,
+    pub effort: Option<perch_agent::ReviewEffort>,
+    pub enabled: bool,
+}
+
+/// Everything needed to draw one immutable review in Conversation/history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewGroupSummary {
+    pub group: perch_github::ReviewGroup,
+    pub snapshot: perch_github::ReviewSnapshot,
+    pub attempts: Vec<perch_github::ReviewerAttempt>,
+}
+
+/// Durable finding state plus the compact provenance needed to identify it
+/// in the ordinary conversation and Files thread surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewFindingSummary {
+    pub finding: perch_github::Finding,
+    pub severity: perch_github::FindingSeverity,
+    /// Every reviewer/model which has reported or verified this identity.
+    pub attributions: Vec<(String, String)>,
+    /// Review numbers containing an observation of this finding.
+    pub seen_in_reviews: Vec<u64>,
+    /// The latest observation's reviewer, retained for compact callers.
+    pub backend: Option<String>,
+    pub model: Option<String>,
+    pub original_review_number: Option<u64>,
+}
+
+/// The last stable file context while one or more historical selections are
+/// optimistic. A later click keeps this original baseline so failure of the
+/// eventual winner can restore the view the reader actually came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HistoricalReviewRollback {
+    pub navigation_id: Option<u64>,
+    pub review: Option<ReviewGroupSummary>,
+    pub request_id: Option<u64>,
+    pub findings: Option<Arc<Vec<ReviewFindingSummary>>>,
+}
+
+impl ReviewFindingSummary {
+    /// Resolved and explicitly linked findings stay in review history, but
+    /// do not crowd the default list of actionable threads.
+    pub fn is_actionable(&self) -> bool {
+        self.finding.disposition == perch_github::FindingDisposition::Open
+            && self.finding.verification != perch_github::FindingVerification::Fixed
+            && self.finding.duplicate_of.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReviewFindingFilter {
+    #[default]
+    Open,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewLaunchDraft {
+    pub item_id: String,
+    pub base_ref: Option<String>,
+    pub choices: Vec<ReviewPreferenceChoice>,
+}
 
 /// A composer that is open: where the question will be anchored and how
 /// it will be run.
@@ -213,7 +309,13 @@ pub struct LiveDocs {
 pub enum LiveLayout {
     Stacked(LiveDoc),
     Split {
-        #[cfg_attr(not(test), expect(dead_code, reason = "the view edits the base side through its own handle; only the tests read it here"))]
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "the view edits the base side through its own handle; only the tests read it here"
+            )
+        )]
         left: LiveDoc,
         right: LiveDoc,
     },
@@ -236,9 +338,19 @@ impl LiveLayout {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RevealWrite {
     /// Head lines `first` to `last` of a file's content were opened.
-    Reveal { path: String, blob: String, first: u32, last: u32 },
+    Reveal {
+        path: String,
+        blob: String,
+        first: u32,
+        last: u32,
+    },
     /// Every reveal overlapping `first` to `last` is forgotten: a Reset.
-    Reset { path: String, blob: String, first: u32, last: u32 },
+    Reset {
+        path: String,
+        blob: String,
+        first: u32,
+        last: u32,
+    },
 }
 
 /// The `meta` key that remembers Show whole for an item. Per item rather
@@ -290,6 +402,20 @@ pub struct ReviewState {
     pub opening: RwSignal<bool>,
     pub phase: RwSignal<Phase>,
     pub preparing: RwSignal<Preparing>,
+    /// The header's review launcher and the immutable history selection are
+    /// view-local; durable preferences and groups live on `AppState`.
+    pub review_launcher_open: RwSignal<bool>,
+    pub review_launcher_draft: RwSignal<Option<ReviewLaunchDraft>>,
+    pub review_launcher_opener: RwSignal<Option<floem::ViewId>>,
+    pub historical_review: RwSignal<Option<ReviewGroupSummary>>,
+    /// Identity of the in-flight or installed History request. A group id
+    /// alone is insufficient when the same group is requested twice and
+    /// its async results arrive out of order.
+    pub historical_review_request: RwSignal<Option<u64>>,
+    /// Finding state reconstructed at the selected group's cutoff. Current
+    /// dashboard state remains in `AppState` and is restored on Back.
+    pub historical_findings: RwSignal<Option<Arc<Vec<ReviewFindingSummary>>>>,
+    historical_review_rollback: RwSignal<Option<HistoricalReviewRollback>>,
     /// Conversation or Files. Remembered per item in `tabs_by_item` for
     /// the life of the app.
     pub tab: RwSignal<ItemTab>,
@@ -298,6 +424,10 @@ pub struct ReviewState {
     pub layout: RwSignal<Layout>,
     /// What the diff is over. Per item; Branch when the item opens.
     pub scope: RwSignal<Scope>,
+    /// Identity of the backend file context currently rendered. File and
+    /// metadata events must name this exact generation as well as the item
+    /// and navigation request before they can update the view.
+    pub scope_gen: RwSignal<Option<u64>>,
     /// The commits over the base, newest first, for the scope menu.
     pub commits: RwSignal<Arc<Vec<Commit>>>,
     /// Whether the checkout has unstaged or staged work, for greying the
@@ -355,6 +485,10 @@ pub struct ReviewState {
 
     /// Every thread in the open worktree, with messages and runs.
     pub comment_threads: RwSignal<Arc<Vec<CommentThread>>>,
+    /// Finding threads hidden from ordinary Conversation/Files rendering.
+    /// Their durable threads remain loaded and are revealed by the All filter.
+    pub hidden_review_threads: RwSignal<HashSet<String>>,
+    pub review_finding_filter: RwSignal<ReviewFindingFilter>,
     /// Whether the thread column is showing.
     pub threads_open: RwSignal<bool>,
     /// An open composer, and where it is anchored.
@@ -461,10 +595,18 @@ impl ReviewState {
             opening: RwSignal::new(false),
             phase: RwSignal::new(Phase::Preparing),
             preparing: RwSignal::new(Preparing::Idle),
+            review_launcher_open: RwSignal::new(false),
+            review_launcher_draft: RwSignal::new(None),
+            review_launcher_opener: RwSignal::new(None),
+            historical_review: RwSignal::new(None),
+            historical_review_request: RwSignal::new(None),
+            historical_findings: RwSignal::new(None),
+            historical_review_rollback: RwSignal::new(None),
             tab: RwSignal::new(ItemTab::Conversation),
             tabs_by_item: RwSignal::new(HashMap::new()),
             layout: RwSignal::new(Layout::Stacked),
             scope: RwSignal::new(Scope::Branch),
+            scope_gen: RwSignal::new(None),
             commits: RwSignal::new(Arc::new(Vec::new())),
             dirty: RwSignal::new(Dirt::default()),
             since_head: RwSignal::new(None),
@@ -487,6 +629,8 @@ impl ReviewState {
             editor_epoch: RwSignal::new(0),
             docs: RwSignal::new(None),
             comment_threads: RwSignal::new(Arc::new(Vec::new())),
+            hidden_review_threads: RwSignal::new(HashSet::new()),
+            review_finding_filter: RwSignal::new(ReviewFindingFilter::Open),
             threads_open: RwSignal::new(false),
             composer: RwSignal::new(None),
             composer_opened: RwSignal::new(0),
@@ -539,7 +683,10 @@ impl ReviewState {
         // list of commits, must not land on the one being opened. Until
         // Ready says which item this is, there is none.
         self.item.set(None);
-        self.preparing.set(Preparing::Working { message: message.into(), percent: None });
+        self.preparing.set(Preparing::Working {
+            message: message.into(),
+            percent: None,
+        });
         self.opening.set(true);
         self.set_phase(Phase::Preparing);
     }
@@ -553,8 +700,13 @@ impl ReviewState {
         self.issue_comments.set(Arc::new(Vec::new()));
         self.stale_head.set(None);
         self.offline.set(false);
+        self.review_launcher_open.set(false);
+        self.review_launcher_draft.set(None);
+        self.review_launcher_opener.set(None);
+        self.clear_historical_review();
         self.tab.set(ItemTab::Conversation);
         self.scope.set(Scope::Branch);
+        self.scope_gen.set(None);
         self.commits.set(Arc::new(Vec::new()));
         self.dirty.set(Dirt::default());
         self.since_head.set(None);
@@ -581,6 +733,8 @@ impl ReviewState {
         self.changed_only.set(true);
         self.lsp_status.set(perch_lsp::Status::Absent);
         self.comment_threads.set(Arc::new(Vec::new()));
+        self.hidden_review_threads.set(HashSet::new());
+        self.review_finding_filter.set(ReviewFindingFilter::Open);
         self.composer.set(None);
         self.sent_composer.set(None);
         self.selection.set(None);
@@ -599,6 +753,85 @@ impl ReviewState {
         self.dismiss_hover();
     }
 
+    /// Prepare to install an accepted live result. Agent history navigation
+    /// keeps the prior owner visible while its new owner is resolving, so a
+    /// cross-item result must clear that owner's checkout at commit time.
+    pub(crate) fn prepare_ready_for(&self, item_id: &str) {
+        if self
+            .item
+            .with_untracked(|item| item.as_ref().is_some_and(|item| item.id != item_id))
+        {
+            self.reset_checkout();
+        } else {
+            // A fresh live checkout always gets a fresh language server. Its
+            // status event follows Ready and names the same navigation.
+            self.lsp_status.set(perch_lsp::Status::Absent);
+        }
+    }
+
+    /// Optimistically select an immutable review while retaining the last
+    /// stable live or historical view. Repeated clicks do not replace the
+    /// original rollback point with another optimistic selection.
+    pub fn begin_historical_review(
+        &self,
+        navigation_id: Option<u64>,
+        summary: ReviewGroupSummary,
+        request_id: u64,
+    ) {
+        self.begin_historical_review_rollback(navigation_id);
+        self.historical_review.set(Some(summary));
+        self.historical_review_request.set(Some(request_id));
+        self.historical_findings.set(None);
+    }
+
+    /// Capture the stable view before a history target whose summary has not
+    /// been resolved yet, as with navigation from a reviewer child.
+    pub(crate) fn begin_historical_review_rollback(&self, navigation_id: Option<u64>) {
+        if self
+            .historical_review_rollback
+            .with_untracked(Option::is_none)
+        {
+            self.historical_review_rollback
+                .set(Some(HistoricalReviewRollback {
+                    navigation_id,
+                    review: self.historical_review.get_untracked(),
+                    request_id: self.historical_review_request.get_untracked(),
+                    findings: self.historical_findings.get_untracked(),
+                }));
+        }
+    }
+
+    /// The selected request is now the stable baseline for any later switch.
+    pub fn finish_historical_review(&self, findings: Arc<Vec<ReviewFindingSummary>>) {
+        self.historical_findings.set(Some(findings));
+        self.historical_review_rollback.set(None);
+    }
+
+    /// Restore the stable view captured by the first optimistic selection.
+    /// With no captured baseline, failure falls back to the live view.
+    pub(crate) fn rollback_historical_review(&self) -> Option<HistoricalReviewRollback> {
+        let rollback = self.historical_review_rollback.get_untracked();
+        if let Some(rollback) = rollback.as_ref() {
+            self.historical_review.set(rollback.review.clone());
+            self.historical_review_request.set(rollback.request_id);
+            self.historical_findings.set(rollback.findings.clone());
+        } else {
+            self.historical_review.set(None);
+            self.historical_review_request.set(None);
+            self.historical_findings.set(None);
+        }
+        self.historical_review_rollback.set(None);
+        rollback
+    }
+
+    /// Return to a live/current context and discard any optimistic rollback.
+    pub fn clear_historical_review(&self) {
+        self.historical_review.set(None);
+        self.historical_review_request.set(None);
+        self.historical_findings.set(None);
+        self.historical_review_rollback.set(None);
+    }
+
     /// Show a tab, and remember it for the item.
     pub fn show_tab(&self, tab: ItemTab) {
         self.tab.set(tab);
@@ -613,7 +846,10 @@ impl ReviewState {
     pub fn restore_tab(&self) {
         let tab = self
             .item
-            .with(|i| i.as_ref().and_then(|i| self.tabs_by_item.with(|m| m.get(&i.id).copied())))
+            .with(|i| {
+                i.as_ref()
+                    .and_then(|i| self.tabs_by_item.with(|m| m.get(&i.id).copied()))
+            })
             .unwrap_or_default();
         self.tab.set(tab);
     }
@@ -668,7 +904,9 @@ impl ReviewState {
         let already_open = self.tabs.with(|t| t.iter().any(|x| x.path == path));
         if !already_open {
             self.tabs.update(|tabs| {
-                tabs.push(Tab { path: path.to_string() });
+                tabs.push(Tab {
+                    path: path.to_string(),
+                });
                 // Oldest first, so the cap drops the least recently opened.
                 if tabs.len() > MAX_TABS {
                     tabs.remove(0);
@@ -695,7 +933,9 @@ impl ReviewState {
     /// code, and a follow-up sits under its thread there. Untracked, as
     /// `show_threads` reads, since a caller can be an effect.
     fn keep_composer_in_view(&self) {
-        let hidden = floem::reactive::Effect::untrack(|| self.composer.with(Option::is_some) && !self.composer_in_code());
+        let hidden = floem::reactive::Effect::untrack(|| {
+            self.composer.with(Option::is_some) && !self.composer_in_code()
+        });
         if hidden {
             self.show_threads();
         }
@@ -758,9 +998,14 @@ impl ReviewState {
     pub fn set_changed_files(&self, files: Arc<Vec<ChangedFile>>) {
         let mut sorted = files.as_ref().clone();
         sorted.sort_by(|a, b| perch_git::compare_paths(&a.path, false, &b.path, false));
-        let known: std::collections::HashSet<String> =
-            self.changed_files.with_untracked(|old| old.iter().map(|f| f.path.clone()).collect());
-        let new: Vec<&str> = sorted.iter().map(|f| f.path.as_str()).filter(|p| !known.contains(*p)).collect();
+        let known: std::collections::HashSet<String> = self
+            .changed_files
+            .with_untracked(|old| old.iter().map(|f| f.path.clone()).collect());
+        let new: Vec<&str> = sorted
+            .iter()
+            .map(|f| f.path.as_str())
+            .filter(|p| !known.contains(*p))
+            .collect();
         if !new.is_empty() {
             self.expanded.update(|expanded| {
                 for path in new {
@@ -784,7 +1029,10 @@ impl ReviewState {
         let mut paths: Vec<String> = self.files.with(|m| m.keys().cloned().collect());
         self.files.set(HashMap::new());
         self.loading.set(HashMap::new());
-        for tab in self.tabs.with(|t| t.iter().map(|t| t.path.clone()).collect::<Vec<_>>()) {
+        for tab in self
+            .tabs
+            .with(|t| t.iter().map(|t| t.path.clone()).collect::<Vec<_>>())
+        {
             if !paths.contains(&tab) {
                 paths.push(tab);
             }
@@ -805,7 +1053,9 @@ impl ReviewState {
     /// Whether a changed file's content has been marked viewed.
     pub fn is_viewed(&self, file: &ChangedFile) -> bool {
         match &file.head_blob {
-            Some(blob) => self.viewed.with(|v| v.contains(&(file.path.clone(), blob.clone()))),
+            Some(blob) => self
+                .viewed
+                .with(|v| v.contains(&(file.path.clone(), blob.clone()))),
             None => false,
         }
     }
@@ -832,7 +1082,10 @@ impl ReviewState {
             let start = from.and_then(|p| files.iter().position(|f| f.path == p));
             let order: Vec<usize> = (1..=n)
                 .map(|k| {
-                    let base = start.map(|s| s as isize).unwrap_or(if forward { -1 } else { n as isize });
+                    let base =
+                        start
+                            .map(|s| s as isize)
+                            .unwrap_or(if forward { -1 } else { n as isize });
                     let k = k as isize;
                     ((base + if forward { k } else { -k }).rem_euclid(n as isize)) as usize
                 })
@@ -845,22 +1098,56 @@ impl ReviewState {
         })
     }
 
-    /// The head lines a file's threads are anchored on, for the folds to
+    /// The head lines a file's current threads are anchored on, for the folds to
     /// keep in view, and the composer card's while it has one: the thread
     /// being written keeps its lines in view as a written one does, so a
     /// run folded again cannot close over the card. Tracked, so a document
     /// built from them follows the threads, the discussion and the
     /// composer.
     pub fn anchors_in(&self, path: &str) -> Vec<(usize, usize)> {
-        let mut out = self.comment_threads.with(|threads| self.discussion.with(|d| anchors_of(threads, d.as_deref(), path)));
+        let file = self.files.with(|files| files.get(path).cloned());
+        let mut out = self.comment_threads.with(|threads| {
+            let visible = threads
+                .iter()
+                .filter(|thread| !thread.outdated && self.thread_visible(&thread.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut out = self
+                .discussion
+                .with(|d| anchors_of(&visible, d.as_deref(), path));
+            if let Some(file) = file.as_deref() {
+                out.extend(
+                    visible
+                        .iter()
+                        .filter_map(|thread| thread.anchor.as_ref())
+                        .filter(|anchor| {
+                            anchor.path == path && anchor.side == perch_github::Side::Left
+                        })
+                        .flat_map(|anchor| aligned_head_ranges(file, anchor)),
+                );
+            }
+            out
+        });
         if let Some(a) = self.composer_card_anchor(path) {
-            let (first, last) = (a.start_line.min(a.line), a.start_line.max(a.line));
-            out.push((first.saturating_sub(1) as usize, last.saturating_sub(1) as usize));
+            match a.side {
+                perch_github::Side::Right => {
+                    let (first, last) = (a.start_line.min(a.line), a.start_line.max(a.line));
+                    out.push((
+                        first.saturating_sub(1) as usize,
+                        last.saturating_sub(1) as usize,
+                    ));
+                }
+                perch_github::Side::Left => {
+                    if let Some(file) = file.as_deref() {
+                        out.extend(aligned_head_ranges(file, &a));
+                    }
+                }
+            }
         }
         out
     }
 
-    /// The cards of a file: the reader's threads anchored in it, GitHub's
+    /// The cards of a file: the reader's current threads anchored in it, GitHub's
     /// review threads on it, and the composer when it is a card in it,
     /// each with the rows it has now. Tracked on the threads, the
     /// discussion, the composer, the rows and which cards are collapsed,
@@ -874,8 +1161,15 @@ impl ReviewState {
         let github = self.github_threads_in(path);
         let composer = self.composer_card_anchor(path);
         self.comment_threads.with(|threads| {
+            let visible = threads
+                .iter()
+                .filter(|thread| !thread.outdated && self.thread_visible(&thread.id))
+                .cloned()
+                .collect::<Vec<_>>();
             self.collapsed_cards.with(|collapsed| {
-                self.card_rows.with(|rows| cards_of(threads, &github, composer.as_ref(), &file, collapsed, rows))
+                self.card_rows.with(|rows| {
+                    cards_of(&visible, &github, composer.as_ref(), &file, collapsed, rows)
+                })
             })
         })
     }
@@ -886,7 +1180,11 @@ impl ReviewState {
     /// its thread arrives. Tracked on both.
     pub fn composer_card_anchor(&self, path: &str) -> Option<Anchor> {
         self.composer
-            .with(|c| c.as_ref().filter(|c| c.thread_id.is_none()).and_then(|c| c.anchor.clone()))
+            .with(|c| {
+                c.as_ref()
+                    .filter(|c| c.thread_id.is_none())
+                    .and_then(|c| c.anchor.clone())
+            })
             .or_else(|| self.sent_composer.get())
             .filter(|a| a.path == path)
     }
@@ -919,7 +1217,7 @@ impl ReviewState {
         self.comment_threads.with(|threads| {
             threads
                 .iter()
-                .find(|t| t.id == thread_id)
+                .find(|t| t.id == thread_id && !t.outdated && self.thread_visible(&t.id))
                 .and_then(|t| t.anchor.as_ref())
                 .is_some_and(|a| a.path == file.path && card_line(&file, a).is_some())
         })
@@ -929,7 +1227,10 @@ impl ReviewState {
     /// column: a new thread's as a card under its lines, a follow-up's
     /// inside its thread's card. Tracked.
     pub fn composer_in_code(&self) -> bool {
-        match self.composer.with(|c| c.as_ref().map(|c| c.thread_id.clone())) {
+        match self
+            .composer
+            .with(|c| c.as_ref().map(|c| c.thread_id.clone()))
+        {
             Some(Some(thread_id)) => self.follow_up_is_inline(&thread_id),
             Some(None) => self.composer_is_inline(),
             None => false,
@@ -956,7 +1257,10 @@ impl ReviewState {
     /// the estimate. Nothing is written when that is what it already
     /// says, since the write rebuilds the open file's document.
     pub fn set_card_rows(&self, card: &CardId, rows: usize) {
-        if self.card_rows.with_untracked(|r| r.get(card) == Some(&rows)) {
+        if self
+            .card_rows
+            .with_untracked(|r| r.get(card) == Some(&rows))
+        {
             return;
         }
         self.card_rows.update(|r| {
@@ -994,11 +1298,16 @@ impl ReviewState {
                 .collect()
         });
         if !new.is_empty() {
-            let collapsed: Vec<CardId> = new.iter().filter(|(_, outdated)| *outdated).map(|(id, _)| id.clone()).collect();
+            let collapsed: Vec<CardId> = new
+                .iter()
+                .filter(|(_, outdated)| *outdated)
+                .map(|(id, _)| id.clone())
+                .collect();
             if !collapsed.is_empty() {
                 self.collapsed_cards.update(|c| c.extend(collapsed));
             }
-            self.known_cards.update(|k| k.extend(new.into_iter().map(|(id, _)| id)));
+            self.known_cards
+                .update(|k| k.extend(new.into_iter().map(|(id, _)| id)));
         }
         floem::reactive::Effect::batch(|| {
             if self.sent_composer.with_untracked(Option::is_some) {
@@ -1012,7 +1321,10 @@ impl ReviewState {
     /// The composer's laid-out rows are the card's that was, and the next
     /// composer starts on the estimate.
     fn forget_composer_rows(&self) {
-        if self.card_rows.with_untracked(|r| r.contains_key(&CardId::Composer)) {
+        if self
+            .card_rows
+            .with_untracked(|r| r.contains_key(&CardId::Composer))
+        {
             self.card_rows.update(|r| {
                 r.remove(&CardId::Composer);
             });
@@ -1022,21 +1334,30 @@ impl ReviewState {
     /// The reveals for a file's content, tracked, so a document built from
     /// them is rebuilt when they change.
     pub fn reveals_for(&self, path: &str, blob: &str) -> Reveals {
-        self.reveals.with(|m| m.get(&(path.to_string(), blob.to_string())).cloned().unwrap_or_default())
+        self.reveals.with(|m| {
+            m.get(&(path.to_string(), blob.to_string()))
+                .cloned()
+                .unwrap_or_default()
+        })
     }
 
     /// Show head lines `first` to `last` of a file, inclusive, whatever
     /// fold they are in, and remember it for the file's content.
     pub fn reveal(&self, path: &str, blob: &str, first: usize, last: usize) {
         self.reveals.update(|m| {
-            m.entry((path.to_string(), blob.to_string())).or_default().add(first, last);
+            m.entry((path.to_string(), blob.to_string()))
+                .or_default()
+                .add(first, last);
         });
-        self.queue_reveal_write(blob, RevealWrite::Reveal {
-            path: path.to_string(),
-            blob: blob.to_string(),
-            first: first as u32,
-            last: last as u32,
-        });
+        self.queue_reveal_write(
+            blob,
+            RevealWrite::Reveal {
+                path: path.to_string(),
+                blob: blob.to_string(),
+                first: first as u32,
+                last: last as u32,
+            },
+        );
     }
 
     /// Fold runs back to their default: forget every reveal overlapping
@@ -1055,12 +1376,15 @@ impl ReviewState {
             }
         });
         for &(first, last) in ranges {
-            self.queue_reveal_write(blob, RevealWrite::Reset {
-                path: path.to_string(),
-                blob: blob.to_string(),
-                first: first as u32,
-                last: last as u32,
-            });
+            self.queue_reveal_write(
+                blob,
+                RevealWrite::Reset {
+                    path: path.to_string(),
+                    blob: blob.to_string(),
+                    first: first as u32,
+                    last: last as u32,
+                },
+            );
         }
     }
 
@@ -1078,12 +1402,18 @@ impl ReviewState {
     /// side of a split. Nothing when no editor is open, when the file is
     /// shown whole, or when the entry is an editor's since rebuilt.
     pub fn hidden_lines(&self) -> usize {
-        self.docs.with(|docs| {
-            let docs = docs.as_ref().filter(|d| d.epoch == self.editor_epoch.get())?;
-            // The document's signal lives with its editor; see `LiveDoc`.
-            docs.layout.head().doc.try_with(|doc| doc.map(|d| d.hidden_lines()))
-        })
-        .unwrap_or(0)
+        self.docs
+            .with(|docs| {
+                let docs = docs
+                    .as_ref()
+                    .filter(|d| d.epoch == self.editor_epoch.get())?;
+                // The document's signal lives with its editor; see `LiveDoc`.
+                docs.layout
+                    .head()
+                    .doc
+                    .try_with(|doc| doc.map(|d| d.hidden_lines()))
+            })
+            .unwrap_or(0)
     }
 
     pub fn fail_load(&self, path: &str) {
@@ -1134,7 +1464,12 @@ impl ReviewState {
     }
 
     /// An anchor for a display range in a file.
-    pub fn anchor_for_display_range(&self, file: &LoadedFile, first: usize, last: usize) -> Option<Anchor> {
+    pub fn anchor_for_display_range(
+        &self,
+        file: &LoadedFile,
+        first: usize,
+        last: usize,
+    ) -> Option<Anchor> {
         let (first, last) = (first.min(last), first.max(last));
         let mut heads = (first..=last).filter_map(|d| file.buffer.head_line(d));
         let start = heads.next()?;
@@ -1142,7 +1477,11 @@ impl ReviewState {
         // The commit the lines are of. Under a commit scope that is the
         // commit, not the branch head: the numbers are its, and the quote
         // and the outdated check read from it.
-        let head = self.item.with(|i| i.as_ref().and_then(|i| i.checkout.as_ref()).map(|c| c.head_sha.clone()))?;
+        let head = self.item.with(|i| {
+            i.as_ref()
+                .and_then(|i| i.checkout.as_ref())
+                .map(|c| c.head_sha.clone())
+        })?;
         let commit_sha = match self.scope.get_untracked() {
             Scope::Commit { sha } => sha,
             _ => head,
@@ -1169,7 +1508,13 @@ impl ReviewState {
     /// there is one composer card at a time, and whatever rows the last
     /// composer's card had are forgotten: they were that card's, and this
     /// one starts on the estimate.
-    pub fn open_composer(&self, thread_id: Option<String>, anchor: Option<Anchor>, draft: String, defaults: AgentChoice) {
+    pub fn open_composer(
+        &self,
+        thread_id: Option<String>,
+        anchor: Option<Anchor>,
+        draft: String,
+        defaults: AgentChoice,
+    ) {
         let (backend, model, effort) = self.agent_last.get().unwrap_or(defaults);
         self.composer_draft.set(draft.clone());
         let opening = self.composer_opened.get_untracked() + 1;
@@ -1179,14 +1524,25 @@ impl ReviewState {
                 self.sent_composer.set(None);
             }
             self.forget_composer_rows();
-            self.composer.set(Some(Composer { thread_id, anchor, backend, model, effort, draft, opening }));
+            self.composer.set(Some(Composer {
+                thread_id,
+                anchor,
+                backend,
+                model,
+                effort,
+                draft,
+                opening,
+            }));
         });
         // Untracked, as `show_threads` reads: a caller that is an effect
         // must not come to depend on the file or the composer through this.
         let in_code = floem::reactive::Effect::untrack(|| self.composer_in_code());
         if !in_code {
             self.show_threads();
-        } else if let Some(id) = self.composer.with_untracked(|c| c.as_ref().and_then(|c| c.thread_id.clone())) {
+        } else if let Some(id) = self
+            .composer
+            .with_untracked(|c| c.as_ref().and_then(|c| c.thread_id.clone()))
+        {
             self.expand_card(&CardId::Thread(id));
         }
     }
@@ -1232,7 +1588,10 @@ impl ReviewState {
     /// when the thread arrives; see `sent_composer`.
     pub fn composer_sent(&self) {
         let card = floem::reactive::Effect::untrack(|| self.composer_is_inline())
-            .then(|| self.composer.with_untracked(|c| c.as_ref().and_then(|c| c.anchor.clone())))
+            .then(|| {
+                self.composer
+                    .with_untracked(|c| c.as_ref().and_then(|c| c.anchor.clone()))
+            })
             .flatten();
         floem::reactive::Effect::batch(|| {
             self.composer.set(None);
@@ -1260,11 +1619,48 @@ impl ReviewState {
     }
 
     /// The thread whose anchor starts on a display line of the open file.
-    pub fn thread_starting_at(&self, file: &LoadedFile, display_line: usize) -> Option<CommentThread> {
-        let head = file.buffer.head_line(display_line)? as u32 + 1;
+    /// A left-side anchor starts on its base row: an exact ghost when the
+    /// line was changed or removed, otherwise the head row paired with it.
+    pub fn thread_starting_at(
+        &self,
+        file: &LoadedFile,
+        display_line: usize,
+    ) -> Option<CommentThread> {
         self.comment_threads.with(|t| {
             t.iter()
-                .find(|t| t.anchor.as_ref().is_some_and(|a| a.path == file.path && a.start_line == head))
+                .filter(|thread| !thread.outdated && self.thread_visible(&thread.id))
+                .find(|t| {
+                    t.anchor.as_ref().is_some_and(|a| {
+                        a.path == file.path
+                            && display_line_of_anchor_line(file, a.side, a.start_line)
+                                == Some(display_line)
+                    })
+                })
+                .cloned()
+        })
+    }
+
+    /// The current thread whose anchor starts on a zero-based line of one
+    /// particular side. Split gutters use this so a paired row does not show
+    /// a left-side marker in the head gutter, or vice versa.
+    pub fn thread_starting_on(
+        &self,
+        file: &LoadedFile,
+        side: perch_github::Side,
+        line: usize,
+    ) -> Option<CommentThread> {
+        self.comment_threads.with(|threads| {
+            threads
+                .iter()
+                .filter(|thread| !thread.outdated && self.thread_visible(&thread.id))
+                .find(|thread| {
+                    thread.anchor.as_ref().is_some_and(|anchor| {
+                        anchor.path == file.path
+                            && anchor.side == side
+                            && anchor.start_line.checked_sub(1).map(|line| line as usize)
+                                == Some(line)
+                    })
+                })
                 .cloned()
         })
     }
@@ -1273,12 +1669,17 @@ impl ReviewState {
     /// order. Only those on the head side with a line GitHub still places:
     /// one on a removed line, or outdated, has nowhere in the file to be.
     pub fn github_threads_in(&self, path: &str) -> Vec<crate::review::timeline::LineThread> {
-        self.discussion.with(|d| github_threads_of(d.as_deref(), path))
+        self.discussion
+            .with(|d| github_threads_of(d.as_deref(), path))
     }
 
     /// The GitHub review comment that starts on a display line of the open
     /// file, for the gutter's hollow marker.
-    pub fn github_comment_starting_at(&self, file: &LoadedFile, display_line: usize) -> Option<u64> {
+    pub fn github_comment_starting_at(
+        &self,
+        file: &LoadedFile,
+        display_line: usize,
+    ) -> Option<u64> {
         let head = file.buffer.head_line(display_line)? as u64 + 1;
         self.github_threads_in(&file.path)
             .into_iter()
@@ -1288,25 +1689,55 @@ impl ReviewState {
 
     /// Threads anchored in a file, newest first.
     pub fn threads_in(&self, path: &str) -> Vec<CommentThread> {
-        let mut out: Vec<CommentThread> = self
-            .comment_threads
-            .with(|t| t.iter().filter(|t| t.anchor.as_ref().is_some_and(|a| a.path == path)).cloned().collect());
+        let mut out: Vec<CommentThread> = self.comment_threads.with(|t| {
+            t.iter()
+                .filter(|thread| self.thread_visible(&thread.id))
+                .filter(|t| t.anchor.as_ref().is_some_and(|a| a.path == path))
+                .cloned()
+                .collect()
+        });
         out.sort_by_key(|t| std::cmp::Reverse(t.created_at));
         out
     }
 
     /// Everything else: other files and the worktree as a whole, newest first.
     pub fn threads_elsewhere(&self, path: Option<&str>) -> Vec<CommentThread> {
-        let mut out: Vec<CommentThread> = self
-            .comment_threads
-            .with(|t| {
-                t.iter()
-                    .filter(|t| !t.anchor.as_ref().is_some_and(|a| Some(a.path.as_str()) == path))
-                    .cloned()
-                    .collect()
-            });
+        let mut out: Vec<CommentThread> = self.comment_threads.with(|t| {
+            t.iter()
+                .filter(|thread| self.thread_visible(&thread.id))
+                .filter(|t| {
+                    !t.anchor
+                        .as_ref()
+                        .is_some_and(|a| Some(a.path.as_str()) == path)
+                })
+                .cloned()
+                .collect()
+        });
         out.sort_by_key(|t| std::cmp::Reverse(t.created_at));
         out
+    }
+
+    pub fn thread_visible(&self, thread_id: &str) -> bool {
+        !self
+            .hidden_review_threads
+            .with(|hidden| hidden.contains(thread_id))
+    }
+
+    pub fn apply_review_finding_filter(
+        &self,
+        filter: ReviewFindingFilter,
+        findings: &[ReviewFindingSummary],
+    ) {
+        let hidden = match filter {
+            ReviewFindingFilter::Open => findings
+                .iter()
+                .filter(|summary| !summary.is_actionable())
+                .map(|summary| summary.finding.thread_id.clone())
+                .collect(),
+            ReviewFindingFilter::All => HashSet::new(),
+        };
+        self.review_finding_filter.set(filter);
+        self.hidden_review_threads.set(hidden);
     }
 
     pub fn status_of(&self, path: &str) -> Option<ChangeStatus> {
@@ -1317,17 +1748,26 @@ impl ReviewState {
 
 /// GitHub's review comment threads on a file that the head places: on
 /// the head side, with a line. See `ReviewState::github_threads_in`.
-pub fn github_threads_of(discussion: Option<&Discussion>, path: &str) -> Vec<crate::review::timeline::LineThread> {
-    let Some(d) = discussion else { return Vec::new() };
-    let on_file: Vec<perch_github::ReviewComment> =
-        d.review_comments.iter().filter(|c| c.path == path).cloned().collect();
+pub fn github_threads_of(
+    discussion: Option<&Discussion>,
+    path: &str,
+) -> Vec<crate::review::timeline::LineThread> {
+    let Some(d) = discussion else {
+        return Vec::new();
+    };
+    let on_file: Vec<perch_github::ReviewComment> = d
+        .review_comments
+        .iter()
+        .filter(|c| c.path == path)
+        .cloned()
+        .collect();
     crate::review::timeline::line_threads(&on_file)
         .into_iter()
         .filter(|t| t.comment.side == perch_github::Side::Right && t.comment.line.is_some())
         .collect()
 }
 
-/// A file's cards: the reader's threads anchored in it, oldest first, so
+/// A file's cards: the reader's current threads anchored in it, oldest first, so
 /// two under one line stack in the order they were asked; then GitHub's
 /// review threads on it, `github`, by their first comment's id; then the
 /// composer, when `composer` is the anchor of its card in the file. A
@@ -1354,16 +1794,25 @@ pub fn cards_of(
 
     let mut anchored: Vec<&CommentThread> = threads
         .iter()
+        .filter(|t| !t.outdated)
         .filter(|t| t.anchor.as_ref().is_some_and(|a| a.path == file.path))
         .collect();
-    anchored.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+    anchored.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     let mut out: Vec<Card> = anchored
         .into_iter()
         .filter_map(|t| {
             let after_display_line = card_line(file, t.anchor.as_ref()?)?;
             let id = CardId::Thread(t.id.clone());
             let rows = rows_for(&id, &|collapsed| doc::estimate_rows(t, collapsed));
-            Some(Card { id, after_display_line, rows })
+            Some(Card {
+                id,
+                after_display_line,
+                rows,
+            })
         })
         .collect();
 
@@ -1374,21 +1823,101 @@ pub fn cards_of(
         let after_display_line = display_line_with_ghosts(&file.buffer, line)?;
         let id = CardId::GitHub(t.comment.id);
         let rows = rows_for(&id, &|collapsed| doc::estimate_github_rows(t, collapsed));
-        Some(Card { id, after_display_line, rows })
+        Some(Card {
+            id,
+            after_display_line,
+            rows,
+        })
     }));
 
     if let Some(after_display_line) = composer.and_then(|a| card_line(file, a)) {
-        let rows = rows.get(&CardId::Composer).copied().unwrap_or(doc::COMPOSER_ROWS);
-        out.push(Card { id: CardId::Composer, after_display_line, rows });
+        let rows = rows
+            .get(&CardId::Composer)
+            .copied()
+            .unwrap_or(doc::COMPOSER_ROWS);
+        out.push(Card {
+            id: CardId::Composer,
+            after_display_line,
+            rows,
+        });
     }
     out
 }
 
-/// The display line a card for an anchor goes after: its last line's,
-/// past the ghosts under it. `None` when the file does not have the line.
+/// The display line a card for an anchor goes after. A right-side card goes
+/// after its head line and any deletion belonging under that line. A
+/// left-side card goes after the exact base row: its ghost when changed or
+/// removed, or the aligned head row when unchanged. `None` when the file
+/// does not have the line on that side.
 fn card_line(file: &LoadedFile, anchor: &Anchor) -> Option<usize> {
-    let last = anchor.start_line.max(anchor.line).saturating_sub(1) as usize;
-    display_line_with_ghosts(&file.buffer, last)
+    let last = anchor.start_line.max(anchor.line);
+    match anchor.side {
+        perch_github::Side::Left => {
+            let display = display_line_of_anchor_line(file, anchor.side, last)?;
+            match file.buffer.row(display)? {
+                Row::Deleted { .. } => Some(display),
+                Row::Head { head_line, .. } => display_line_with_ghosts(&file.buffer, head_line),
+            }
+        }
+        perch_github::Side::Right => {
+            let last = last.checked_sub(1)? as usize;
+            display_line_with_ghosts(&file.buffer, last)
+        }
+    }
+}
+
+/// Where a one-based line on one side of the diff appears in the unified
+/// display. Head lines map directly. A base line prefers its ghost because a
+/// rewritten line also has a paired head row; an unchanged base line has no
+/// ghost and maps through the split alignment instead.
+fn display_line_of_anchor_line(
+    file: &LoadedFile,
+    side: perch_github::Side,
+    line: u32,
+) -> Option<usize> {
+    let line = line.checked_sub(1)? as usize;
+    match side {
+        perch_github::Side::Right => file.buffer.display_line(line),
+        perch_github::Side::Left => {
+            if let Some(display) = file
+                .buffer
+                .rows
+                .iter()
+                .position(|row| matches!(row, Row::Deleted { base_line } if *base_line == line))
+            {
+                return Some(display);
+            }
+            let base_line = line + 1;
+            let head_line = file
+                .alignment
+                .iter()
+                .find_map(|&(base, head)| (base == Some(base_line)).then_some(head).flatten())?;
+            file.buffer.display_line(head_line.checked_sub(1)?)
+        }
+    }
+}
+
+/// The head ranges corresponding to a left-side anchor, for folds. Removed
+/// base lines have no head range and need none: ghosts are changed rows and
+/// are never folded. Consecutive aligned head lines stay one range.
+fn aligned_head_ranges(file: &LoadedFile, anchor: &Anchor) -> Vec<(usize, usize)> {
+    let first = anchor.start_line.min(anchor.line) as usize;
+    let last = anchor.start_line.max(anchor.line) as usize;
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for head in file.alignment.iter().filter_map(|&(base, head)| {
+        let base = base?;
+        (first..=last)
+            .contains(&base)
+            .then_some(head)
+            .flatten()?
+            .checked_sub(1)
+    }) {
+        match out.last_mut() {
+            Some((_, end)) if end.checked_add(1) == Some(head) => *end = head,
+            _ => out.push((head, head)),
+        }
+    }
+    out
 }
 
 /// The display line a card under a head line goes after: the line's own,
@@ -1400,33 +1929,48 @@ fn card_line(file: &LoadedFile, anchor: &Anchor) -> Option<usize> {
 /// pairs with it, and the card goes before the run on both layouts.
 fn display_line_with_ghosts(buffer: &DisplayBuffer, head_line: usize) -> Option<usize> {
     let display = buffer.display_line(head_line)?;
-    let ghosts = (display + 1..).take_while(|&d| matches!(buffer.row(d), Some(Row::Deleted { .. }))).count();
+    let ghosts = (display + 1..)
+        .take_while(|&d| matches!(buffer.row(d), Some(Row::Deleted { .. })))
+        .count();
     let next = buffer.row(display + 1 + ghosts);
     let under = next.is_none_or(|r| r.status() == Some(LineStatus::Unchanged));
     Some(if under { display + ghosts } else { display })
 }
 
-/// The head lines threads are anchored on in a file, as inclusive
+/// The head lines current threads are anchored on in a file, as inclusive
 /// zero-based ranges, which the folds keep in view: the reader's own from
-/// their first line to their last, outdated or not, and GitHub's review
+/// their first line to their last, and GitHub's review
 /// comments on the head side that still have a line. One on the base
 /// side, or without a line, has nowhere in the head to be and does not
 /// count.
-pub fn anchors_of(threads: &[CommentThread], discussion: Option<&Discussion>, path: &str) -> Vec<(usize, usize)> {
+pub fn anchors_of(
+    threads: &[CommentThread],
+    discussion: Option<&Discussion>,
+    path: &str,
+) -> Vec<(usize, usize)> {
     let mut out: Vec<(usize, usize)> = threads
         .iter()
+        .filter(|t| !t.outdated)
         .filter_map(|t| t.anchor.as_ref())
-        .filter(|a| a.path == path)
+        .filter(|a| a.path == path && a.side == perch_github::Side::Right)
         .map(|a| {
             let (first, last) = (a.start_line.min(a.line), a.start_line.max(a.line));
-            (first.saturating_sub(1) as usize, last.saturating_sub(1) as usize)
+            (
+                first.saturating_sub(1) as usize,
+                last.saturating_sub(1) as usize,
+            )
         })
         .collect();
     out.extend(
         github_threads_of(discussion, path)
             .into_iter()
             .filter_map(|t| t.comment.line)
-            .map(|line| (line.saturating_sub(1) as usize, line.saturating_sub(1) as usize)),
+            .map(|line| {
+                (
+                    line.saturating_sub(1) as usize,
+                    line.saturating_sub(1) as usize,
+                )
+            }),
     );
     out
 }
@@ -1439,7 +1983,11 @@ mod tests {
         ChangedFile {
             path: path.into(),
             old_path: None,
-            status: if blob.is_some() { ChangeStatus::Modified } else { ChangeStatus::Deleted },
+            status: if blob.is_some() {
+                ChangeStatus::Modified
+            } else {
+                ChangeStatus::Deleted
+            },
             additions: 1,
             deletions: 1,
             binary: false,
@@ -1456,7 +2004,11 @@ mod tests {
             changed("gone.rs", None),
             changed("c.rs", Some("blob-c")),
         ]));
-        state.viewed.set(Arc::new([("b.rs".to_string(), "blob-b".to_string())].into_iter().collect()));
+        state.viewed.set(Arc::new(
+            [("b.rs".to_string(), "blob-b".to_string())]
+                .into_iter()
+                .collect(),
+        ));
         state
     }
 
@@ -1466,7 +2018,10 @@ mod tests {
         let files = state.changed_files.get();
         assert!(state.is_viewed(&files[1]));
         assert!(!state.is_viewed(&files[0]));
-        assert!(!state.is_viewed(&changed("b.rs", Some("blob-b2"))), "a new blob is new content");
+        assert!(
+            !state.is_viewed(&changed("b.rs", Some("blob-b2"))),
+            "a new blob is new content"
+        );
         assert!(!state.is_viewed(&files[2]));
         // The deletion has nothing to view, so it is not counted.
         assert_eq!(state.viewed_count(), (1, 3));
@@ -1477,15 +2032,32 @@ mod tests {
         let state = state();
         // b is viewed and the deletion has nothing to view, so both are
         // stepped over.
-        assert_eq!(state.next_unviewed(Some("a.rs"), true).as_deref(), Some("c.rs"));
-        assert_eq!(state.next_unviewed(Some("c.rs"), true).as_deref(), Some("a.rs"), "wraps forward");
-        assert_eq!(state.next_unviewed(Some("a.rs"), false).as_deref(), Some("c.rs"), "wraps back");
-        assert_eq!(state.next_unviewed(Some("gone.rs"), false).as_deref(), Some("a.rs"));
+        assert_eq!(
+            state.next_unviewed(Some("a.rs"), true).as_deref(),
+            Some("c.rs")
+        );
+        assert_eq!(
+            state.next_unviewed(Some("c.rs"), true).as_deref(),
+            Some("a.rs"),
+            "wraps forward"
+        );
+        assert_eq!(
+            state.next_unviewed(Some("a.rs"), false).as_deref(),
+            Some("c.rs"),
+            "wraps back"
+        );
+        assert_eq!(
+            state.next_unviewed(Some("gone.rs"), false).as_deref(),
+            Some("a.rs")
+        );
         // No open file: the first from either end.
         assert_eq!(state.next_unviewed(None, true).as_deref(), Some("a.rs"));
         assert_eq!(state.next_unviewed(None, false).as_deref(), Some("c.rs"));
         // A file outside the list counts as none open.
-        assert_eq!(state.next_unviewed(Some("elsewhere.rs"), true).as_deref(), Some("a.rs"));
+        assert_eq!(
+            state.next_unviewed(Some("elsewhere.rs"), true).as_deref(),
+            Some("a.rs")
+        );
     }
 
     #[test]
@@ -1497,16 +2069,31 @@ mod tests {
             changed("src/ui/row.rs", Some("blob-r")),
             changed("README.md", Some("blob-d")),
         ]));
-        let order: Vec<String> = state.changed_files.with(|f| f.iter().map(|f| f.path.clone()).collect());
-        assert_eq!(order, ["src/ui/row.rs", "src/main.rs", "README.md"], "the tree's order: ui/ before main.rs");
-        assert_eq!(state.next_unviewed(None, true).as_deref(), Some("src/ui/row.rs"), "the next key starts at the top row");
+        let order: Vec<String> = state
+            .changed_files
+            .with(|f| f.iter().map(|f| f.path.clone()).collect());
+        assert_eq!(
+            order,
+            ["src/ui/row.rs", "src/main.rs", "README.md"],
+            "the tree's order: ui/ before main.rs"
+        );
+        assert_eq!(
+            state.next_unviewed(None, true).as_deref(),
+            Some("src/ui/row.rs"),
+            "the next key starts at the top row"
+        );
         let expanded = state.expanded.get();
         assert!(expanded.contains("src") && expanded.contains("src/ui"));
 
         // The reader shuts src/ui, and the poll rereads the same list.
-        state.expanded.update(|e| crate::review::tree::toggle(e, "src/ui"));
+        state
+            .expanded
+            .update(|e| crate::review::tree::toggle(e, "src/ui"));
         state.set_changed_files(state.changed_files.get());
-        assert!(!state.expanded.get().contains("src/ui"), "nothing new, nothing reopened");
+        assert!(
+            !state.expanded.get().contains("src/ui"),
+            "nothing new, nothing reopened"
+        );
 
         // A file in a new directory opens the way to it, and only it.
         state.set_changed_files(Arc::new(vec![
@@ -1523,16 +2110,23 @@ mod tests {
     fn the_anchors_in_a_file_are_its_threads_lines_and_githubs_head_side_comments() {
         use perch_github::{CommentThread, Discussion, ReviewComment, Side, ThreadOrigin};
         let at = "2026-09-18T09:59:00Z".parse().unwrap();
-        let thread = |id: &str, path: &str, start_line: u32, line: u32, outdated: bool| CommentThread {
-            id: id.into(),
-            worktree_id: "wt".into(),
-            origin: ThreadOrigin::Local,
-            anchor: Some(Anchor { path: path.into(), start_line, line, side: Side::Right, commit_sha: "h".into() }),
-            outdated,
-            resolved: false,
-            created_at: at,
-            messages: Vec::new(),
-        };
+        let thread =
+            |id: &str, path: &str, start_line: u32, line: u32, outdated: bool| CommentThread {
+                id: id.into(),
+                worktree_id: "wt".into(),
+                origin: ThreadOrigin::Local,
+                anchor: Some(Anchor {
+                    path: path.into(),
+                    start_line,
+                    line,
+                    side: Side::Right,
+                    commit_sha: "h".into(),
+                }),
+                outdated,
+                resolved: false,
+                created_at: at,
+                messages: Vec::new(),
+            };
         let comment = |id: u64, path: &str, line: Option<u64>, side: Side| ReviewComment {
             id,
             pull_request_review_id: None,
@@ -1569,12 +2163,18 @@ mod tests {
             ],
             events: Vec::new(),
         };
-        // Zero based and inclusive: the thread over 41 to 58, the outdated
-        // one on 7, and GitHub's on 100. Not the base side, not the one
-        // without a line, and nothing from the other file or the worktree.
-        assert_eq!(anchors_of(&threads, Some(&discussion), "src/x.rs"), vec![(40, 57), (6, 6), (99, 99)]);
-        assert_eq!(anchors_of(&threads, None, "src/x.rs"), vec![(40, 57), (6, 6)]);
-        assert_eq!(anchors_of(&threads, Some(&discussion), "src/z.rs"), Vec::<(usize, usize)>::new());
+        // Zero based and inclusive: the current thread over 41 to 58 and
+        // GitHub's on 100. Not the outdated thread, the base side, the one
+        // without a line, or anything from the other file or worktree.
+        assert_eq!(
+            anchors_of(&threads, Some(&discussion), "src/x.rs"),
+            vec![(40, 57), (99, 99)]
+        );
+        assert_eq!(anchors_of(&threads, None, "src/x.rs"), vec![(40, 57)]);
+        assert_eq!(
+            anchors_of(&threads, Some(&discussion), "src/z.rs"),
+            Vec::<(usize, usize)>::new()
+        );
 
         let state = ReviewState::new();
         state.comment_threads.set(Arc::new(threads));
@@ -1591,7 +2191,13 @@ mod tests {
             id: id.into(),
             worktree_id: "wt".into(),
             origin: ThreadOrigin::Local,
-            anchor: Some(Anchor { path: "src/x.rs".into(), start_line: start, line, side: Side::Right, commit_sha: "h".into() }),
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: start,
+                line,
+                side: Side::Right,
+                commit_sha: "h".into(),
+            }),
             outdated,
             resolved: false,
             created_at: at,
@@ -1643,9 +2249,21 @@ mod tests {
         assert_eq!(
             cards,
             vec![
-                Card { id: CardId::Thread("first".into()), after_display_line: 2, rows: estimate },
-                Card { id: CardId::Thread("later".into()), after_display_line: 4, rows: estimate },
-                Card { id: CardId::Thread("last".into()), after_display_line: 5, rows: estimate },
+                Card {
+                    id: CardId::Thread("first".into()),
+                    after_display_line: 2,
+                    rows: estimate
+                },
+                Card {
+                    id: CardId::Thread("later".into()),
+                    after_display_line: 4,
+                    rows: estimate
+                },
+                Card {
+                    id: CardId::Thread("last".into()),
+                    after_display_line: 5,
+                    rows: estimate
+                },
             ]
         );
         // A run removed from the end of the file is under the last line.
@@ -1659,13 +2277,21 @@ mod tests {
             String::new(),
         );
         let on_a = [anchored("end", 1, 1, "2026-09-18T10:00:00Z", false)];
-        assert_eq!(cards_of(&on_a, &[], None, &cut, &HashSet::new(), &HashMap::new())[0].after_display_line, 2);
+        assert_eq!(
+            cards_of(&on_a, &[], None, &cut, &HashSet::new(), &HashMap::new())[0]
+                .after_display_line,
+            2
+        );
 
         // Collapsed, a card is one row; laid out, it has the rows the
         // layout gave it, unless it is collapsed.
         let collapsed: HashSet<CardId> = [CardId::Thread("first".into())].into_iter().collect();
-        let rows: HashMap<CardId, usize> =
-            [(CardId::Thread("first".into()), 9), (CardId::Thread("later".into()), 7)].into_iter().collect();
+        let rows: HashMap<CardId, usize> = [
+            (CardId::Thread("first".into()), 9),
+            (CardId::Thread("later".into()), 7),
+        ]
+        .into_iter()
+        .collect();
         let cards = cards_of(&threads, &[], None, &file, &collapsed, &rows);
         assert_eq!(cards[0].rows, doc::COLLAPSED_ROWS);
         assert_eq!(cards[1].rows, 7);
@@ -1684,9 +2310,174 @@ mod tests {
         assert_eq!(state.cards_in("src/x.rs")[1].rows, estimate);
     }
 
+    #[test]
+    fn base_side_anchors_use_ghosts_and_alignment_for_markers_and_cards() {
+        use perch_github::Side;
+
+        // base a b c d e f g; head a B c e F g. The old b and f are
+        // rewritten ghosts, d is a deleted ghost, and unchanged e and g
+        // have shifted head line numbers.
+        let file = spliced_file();
+        let on_side = |id: &str, line: u32, side: Side, at: &str| {
+            let mut thread = anchored(id, line, line, at, false);
+            thread.anchor.as_mut().unwrap().side = side;
+            thread
+        };
+        let threads = vec![
+            on_side("left-rewrite", 2, Side::Left, "2026-09-18T08:00:00Z"),
+            on_side("right-rewrite", 2, Side::Right, "2026-09-18T09:00:00Z"),
+            on_side("left-deleted", 4, Side::Left, "2026-09-18T10:00:00Z"),
+            on_side("left-unchanged", 5, Side::Left, "2026-09-18T11:00:00Z"),
+            on_side("left-shifted", 7, Side::Left, "2026-09-18T12:00:00Z"),
+        ];
+
+        let cards = cards_of(&threads, &[], None, &file, &HashSet::new(), &HashMap::new());
+        let placed: Vec<(CardId, usize)> = cards
+            .iter()
+            .map(|card| (card.id.clone(), card.after_display_line))
+            .collect();
+        assert_eq!(
+            placed,
+            vec![
+                (CardId::Thread("left-rewrite".into()), 1),
+                (CardId::Thread("right-rewrite".into()), 2),
+                (CardId::Thread("left-deleted".into()), 4),
+                (CardId::Thread("left-unchanged".into()), 5),
+                (CardId::Thread("left-shifted".into()), 8),
+            ]
+        );
+
+        // A base line that is unchanged still owns a pure-deletion run
+        // immediately below it, just as the corresponding head line does.
+        let cut = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "a\n".into(),
+            "a\nb\nc\n".into(),
+            Some(ChangeStatus::Modified),
+            false,
+            Scope::Branch,
+            String::new(),
+        );
+        let left_on_a = [on_side(
+            "left-before-cut",
+            1,
+            Side::Left,
+            "2026-09-18T13:00:00Z",
+        )];
+        assert_eq!(
+            cards_of(
+                &left_on_a,
+                &[],
+                None,
+                &cut,
+                &HashSet::new(),
+                &HashMap::new()
+            )[0]
+            .after_display_line,
+            2
+        );
+
+        let state = ReviewState::new();
+        state.comment_threads.set(Arc::new(threads));
+        let id_at = |display| {
+            state
+                .thread_starting_at(&file, display)
+                .map(|thread| thread.id)
+        };
+        assert_eq!(id_at(1).as_deref(), Some("left-rewrite"));
+        assert_eq!(id_at(2).as_deref(), Some("right-rewrite"));
+        assert_eq!(id_at(4).as_deref(), Some("left-deleted"));
+        assert_eq!(id_at(5).as_deref(), Some("left-unchanged"));
+        assert_eq!(id_at(8).as_deref(), Some("left-shifted"));
+        assert_eq!(
+            state
+                .thread_starting_on(&file, Side::Left, 1)
+                .map(|thread| thread.id),
+            Some("left-rewrite".into())
+        );
+        assert_eq!(
+            state
+                .thread_starting_on(&file, Side::Right, 1)
+                .map(|thread| thread.id),
+            Some("right-rewrite".into())
+        );
+    }
+
+    #[test]
+    fn base_side_anchor_ranges_use_aligned_head_lines_for_folds() {
+        use perch_github::Side;
+
+        let file = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "new\na\nb\nc\n".into(),
+            "a\nb\nc\n".into(),
+            Some(ChangeStatus::Modified),
+            false,
+            Scope::Branch,
+            String::new(),
+        );
+        let mut on_base_b = anchored("left", 2, 2, "2026-09-18T10:00:00Z", false);
+        on_base_b.anchor.as_mut().unwrap().side = Side::Left;
+
+        let state = ReviewState::new();
+        state.files.update(|files| {
+            files.insert("src/x.rs".into(), Arc::new(file));
+        });
+        state.comment_threads.set(Arc::new(vec![on_base_b]));
+
+        assert_eq!(state.anchors_in("src/x.rs"), vec![(2, 2)]);
+    }
+
+    #[test]
+    fn outdated_reader_threads_stay_off_inline_surfaces() {
+        let file = spliced_file();
+        let threads = vec![
+            anchored("outdated", 1, 1, "2026-09-18T09:00:00Z", true),
+            anchored("current", 3, 3, "2026-09-18T10:00:00Z", false),
+        ];
+
+        let cards = cards_of(&threads, &[], None, &file, &HashSet::new(), &HashMap::new());
+        let card_ids: Vec<CardId> = cards.iter().map(|card| card.id.clone()).collect();
+        assert_eq!(card_ids, vec![CardId::Thread("current".into())]);
+        assert_eq!(anchors_of(&threads, None, "src/x.rs"), vec![(2, 2)]);
+
+        let state = ReviewState::new();
+        state.files.update(|files| {
+            files.insert("src/x.rs".into(), Arc::new(file));
+        });
+        state.active.set(Some("src/x.rs".into()));
+        state.comment_threads.set(Arc::new(threads));
+        let active = state.active_file().unwrap();
+
+        assert!(state.thread_starting_at(&active, 0).is_none());
+        assert_eq!(
+            state.thread_starting_at(&active, 3).map(|thread| thread.id),
+            Some("current".into())
+        );
+        let card_ids: Vec<CardId> = state
+            .cards_in("src/x.rs")
+            .iter()
+            .map(|card| card.id.clone())
+            .collect();
+        assert_eq!(card_ids, vec![CardId::Thread("current".into())]);
+        assert_eq!(state.anchors_in("src/x.rs"), vec![(2, 2)]);
+        assert!(!state.follow_up_is_inline("outdated"));
+        let listed: HashSet<String> = state
+            .threads_in("src/x.rs")
+            .into_iter()
+            .map(|thread| thread.id)
+            .collect();
+        assert_eq!(listed, HashSet::from(["outdated".into(), "current".into()]));
+    }
+
     /// A review comment from GitHub on head line `line` of `src/x.rs`,
     /// one-based, with a reply.
-    fn github_comment(id: u64, line: Option<u64>, side: perch_github::Side, reply_to: Option<u64>) -> perch_github::ReviewComment {
+    fn github_comment(
+        id: u64,
+        line: Option<u64>,
+        side: perch_github::Side,
+        reply_to: Option<u64>,
+    ) -> perch_github::ReviewComment {
         perch_github::ReviewComment {
             id,
             pull_request_review_id: None,
@@ -1740,9 +2531,25 @@ mod tests {
         };
         let github = github_threads_of(Some(&discussion), "src/x.rs");
         assert_eq!(github.len(), 3, "the base side's is not placed");
-        let composer = Anchor { path: "src/x.rs".into(), start_line: 1, line: 3, side: Side::Right, commit_sha: "h".into() };
-        let cards = cards_of(&threads, &github, Some(&composer), &file, &HashSet::new(), &HashMap::new());
-        let ids: Vec<(CardId, usize)> = cards.iter().map(|c| (c.id.clone(), c.after_display_line)).collect();
+        let composer = Anchor {
+            path: "src/x.rs".into(),
+            start_line: 1,
+            line: 3,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        };
+        let cards = cards_of(
+            &threads,
+            &github,
+            Some(&composer),
+            &file,
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        let ids: Vec<(CardId, usize)> = cards
+            .iter()
+            .map(|c| (c.id.clone(), c.after_display_line))
+            .collect();
         // Under c, past the ghost of d at display line 4: the reader's,
         // then GitHub's by id, then the composer on the last selected
         // line; GitHub's on e is under e alone.
@@ -1758,15 +2565,27 @@ mod tests {
         );
         let two_messages = github.iter().find(|t| t.comment.id == 10).unwrap();
         assert_eq!(two_messages.replies.len(), 1);
-        assert_eq!(cards[1].rows, doc::estimate_github_rows(two_messages, false));
+        assert_eq!(
+            cards[1].rows,
+            doc::estimate_github_rows(two_messages, false)
+        );
         let one_message = github.iter().find(|t| t.comment.id == 20).unwrap();
         assert_eq!(cards[2].rows, doc::estimate_github_rows(one_message, false));
-        assert!(cards[2].rows < cards[1].rows, "a comment without a reply is shorter");
-        assert_eq!(cards[4].rows, doc::COMPOSER_ROWS, "the composer's estimate until it is laid out");
+        assert!(
+            cards[2].rows < cards[1].rows,
+            "a comment without a reply is shorter"
+        );
+        assert_eq!(
+            cards[4].rows,
+            doc::COMPOSER_ROWS,
+            "the composer's estimate until it is laid out"
+        );
 
         // Laid out and collapsed, as the reader's cards are.
         let collapsed: HashSet<CardId> = [CardId::GitHub(10)].into_iter().collect();
-        let rows: HashMap<CardId, usize> = [(CardId::GitHub(20), 6), (CardId::Composer, 12)].into_iter().collect();
+        let rows: HashMap<CardId, usize> = [(CardId::GitHub(20), 6), (CardId::Composer, 12)]
+            .into_iter()
+            .collect();
         let cards = cards_of(&threads, &github, Some(&composer), &file, &collapsed, &rows);
         assert_eq!(cards[1].rows, doc::COLLAPSED_ROWS);
         assert_eq!(cards[2].rows, 6);
@@ -1783,27 +2602,51 @@ mod tests {
         state.discussion.set(Some(Arc::new(discussion)));
         assert_eq!(state.cards_in("src/x.rs").len(), 4);
         assert!(!state.composer_is_inline());
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
         state.open_composer(None, Some(composer.clone()), String::new(), choice.clone());
         assert!(state.composer_is_inline());
-        assert!(!state.threads_open.get(), "the column is not opened for a composer drawn in the code");
-        assert_eq!(state.composer_card_anchor("src/x.rs"), Some(composer.clone()));
+        assert!(
+            !state.threads_open.get(),
+            "the column is not opened for a composer drawn in the code"
+        );
+        assert_eq!(
+            state.composer_card_anchor("src/x.rs"),
+            Some(composer.clone())
+        );
         assert_eq!(state.composer_card_anchor("src/y.rs"), None);
         assert_eq!(state.cards_in("src/x.rs").len(), 5);
         // A follow-up is inside its thread's card, not a card of its own,
         // and the column is not opened for one on a thread with a card in
         // the open file; a question about the worktree is the column's.
-        state.open_composer(Some("mine".into()), Some(composer.clone()), String::new(), choice.clone());
+        state.open_composer(
+            Some("mine".into()),
+            Some(composer.clone()),
+            String::new(),
+            choice.clone(),
+        );
         assert!(!state.composer_is_inline());
         assert!(state.follow_up_is_inline("mine"));
-        assert!(!state.follow_up_is_inline("elsewhere"), "no such thread in the file");
+        assert!(
+            !state.follow_up_is_inline("elsewhere"),
+            "no such thread in the file"
+        );
         assert!(state.composer_in_code());
-        assert!(!state.threads_open.get(), "the column is not opened for a follow-up drawn in the code");
+        assert!(
+            !state.threads_open.get(),
+            "the column is not opened for a follow-up drawn in the code"
+        );
         assert_eq!(state.cards_in("src/x.rs").len(), 4);
         state.open_composer(None, None, String::new(), choice.clone());
         assert!(!state.composer_is_inline());
         assert!(!state.composer_in_code());
-        assert!(state.threads_open.get(), "the column opens for a composer it draws");
+        assert!(
+            state.threads_open.get(),
+            "the column opens for a composer it draws"
+        );
         assert_eq!(state.cards_in("src/x.rs").len(), 4);
 
         // A follow-up on a thread whose card is collapsed opens the card,
@@ -1823,8 +2666,18 @@ mod tests {
             m.insert("src/x.rs".into(), Arc::new(spliced_file()));
         });
         state.active.set(Some("src/x.rs".into()));
-        let anchor = Anchor { path: "src/x.rs".into(), start_line: 2, line: 3, side: Side::Right, commit_sha: "h".into() };
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        let anchor = Anchor {
+            path: "src/x.rs".into(),
+            start_line: 2,
+            line: 3,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        };
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
         assert!(state.anchors_in("src/x.rs").is_empty());
 
         // Open on lines 2 to 3, the composer's card keeps them out of the
@@ -1837,7 +2690,13 @@ mod tests {
         // takes over, and the thread is then the one anchor.
         state.composer_sent();
         assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
-        state.set_comment_threads(Arc::new(vec![anchored("new", 2, 3, "2026-09-18T10:00:00Z", false)]));
+        state.set_comment_threads(Arc::new(vec![anchored(
+            "new",
+            2,
+            3,
+            "2026-09-18T10:00:00Z",
+            false,
+        )]));
         assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
 
         // Escape gives the lines back; a follow-up is no card and adds
@@ -1846,7 +2705,12 @@ mod tests {
         assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2), (1, 2)]);
         state.close_composer();
         assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
-        state.open_composer(Some("new".into()), Some(anchor), String::new(), choice.clone());
+        state.open_composer(
+            Some("new".into()),
+            Some(anchor),
+            String::new(),
+            choice.clone(),
+        );
         assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
         state.open_composer(None, None, String::new(), choice);
         assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
@@ -1860,8 +2724,18 @@ mod tests {
             m.insert("src/x.rs".into(), Arc::new(spliced_file()));
         });
         state.active.set(Some("src/x.rs".into()));
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
-        let on = |start: u32, line: u32| Anchor { path: "src/x.rs".into(), start_line: start, line, side: Side::Right, commit_sha: "h".into() };
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        let on = |start: u32, line: u32| Anchor {
+            path: "src/x.rs".into(),
+            start_line: start,
+            line,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        };
 
         // A composer typed into grows to fourteen rows; `a` on other
         // lines replaces it with an empty one, which is the estimate's
@@ -1870,17 +2744,45 @@ mod tests {
         state.set_card_rows(&CardId::Composer, 14);
         assert_eq!(state.cards_in("src/x.rs")[0].rows, 14);
         state.open_composer(None, Some(on(1, 2)), String::new(), choice.clone());
-        assert!(!state.card_rows.get().contains_key(&CardId::Composer), "the last card's rows are not this one's");
-        assert_eq!(state.cards_in("src/x.rs"), vec![Card { id: CardId::Composer, after_display_line: 2, rows: doc::COMPOSER_ROWS }]);
+        assert!(
+            !state.card_rows.get().contains_key(&CardId::Composer),
+            "the last card's rows are not this one's"
+        );
+        assert_eq!(
+            state.cards_in("src/x.rs"),
+            vec![Card {
+                id: CardId::Composer,
+                after_display_line: 2,
+                rows: doc::COMPOSER_ROWS
+            }]
+        );
 
         // A follow-up replacing it leaves nothing behind for the next
         // new composer either.
         state.set_card_rows(&CardId::Composer, 12);
-        state.set_comment_threads(Arc::new(vec![anchored("t", 3, 3, "2026-09-18T10:00:00Z", false)]));
-        state.open_composer(Some("t".into()), Some(on(3, 3)), String::new(), choice.clone());
+        state.set_comment_threads(Arc::new(vec![anchored(
+            "t",
+            3,
+            3,
+            "2026-09-18T10:00:00Z",
+            false,
+        )]));
+        state.open_composer(
+            Some("t".into()),
+            Some(on(3, 3)),
+            String::new(),
+            choice.clone(),
+        );
         assert!(!state.card_rows.get().contains_key(&CardId::Composer));
         state.open_composer(None, Some(on(1, 2)), String::new(), choice);
-        assert_eq!(state.cards_in("src/x.rs").iter().find(|c| c.id == CardId::Composer).map(|c| c.rows), Some(doc::COMPOSER_ROWS));
+        assert_eq!(
+            state
+                .cards_in("src/x.rs")
+                .iter()
+                .find(|c| c.id == CardId::Composer)
+                .map(|c| c.rows),
+            Some(doc::COMPOSER_ROWS)
+        );
     }
 
     #[test]
@@ -1891,8 +2793,18 @@ mod tests {
             m.insert("src/x.rs".into(), Arc::new(spliced_file()));
         });
         state.open_tab("src/x.rs");
-        let anchor = Anchor { path: "src/x.rs".into(), start_line: 3, line: 3, side: Side::Right, commit_sha: "h".into() };
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        let anchor = Anchor {
+            path: "src/x.rs".into(),
+            start_line: 3,
+            line: 3,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        };
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
 
         // Opened on lines of the open file, the composer is a card there
         // and the column stays shut. Another file opened over it has no
@@ -1904,7 +2816,10 @@ mod tests {
         assert!(!state.threads_open.get());
         state.open_tab("src/y.rs");
         assert!(!state.composer_in_code());
-        assert!(state.threads_open.get(), "the composer is drawn nowhere without the column");
+        assert!(
+            state.threads_open.get(),
+            "the composer is drawn nowhere without the column"
+        );
         assert_eq!(state.composer_draft.get(), "why?");
         state.threads_open.set(false);
         state.open_tab("src/x.rs");
@@ -1921,8 +2836,19 @@ mod tests {
         state.close_composer();
         state.threads_open.set(false);
         state.open_tab("src/x.rs");
-        state.set_comment_threads(Arc::new(vec![anchored("t", 3, 3, "2026-09-18T10:00:00Z", false)]));
-        state.open_composer(Some("t".into()), Some(anchor), String::new(), choice.clone());
+        state.set_comment_threads(Arc::new(vec![anchored(
+            "t",
+            3,
+            3,
+            "2026-09-18T10:00:00Z",
+            false,
+        )]));
+        state.open_composer(
+            Some("t".into()),
+            Some(anchor),
+            String::new(),
+            choice.clone(),
+        );
         assert!(state.composer_in_code());
         assert!(!state.threads_open.get());
         state.open_tab("src/y.rs");
@@ -1944,8 +2870,18 @@ mod tests {
             m.insert("src/x.rs".into(), Arc::new(spliced_file()));
         });
         state.active.set(Some("src/x.rs".into()));
-        let anchor = Anchor { path: "src/x.rs".into(), start_line: 3, line: 3, side: Side::Right, commit_sha: "h".into() };
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        let anchor = Anchor {
+            path: "src/x.rs".into(),
+            start_line: 3,
+            line: 3,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        };
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
 
         // Nothing sent: nothing to give up.
         state.drop_sent_placeholder();
@@ -1959,7 +2895,10 @@ mod tests {
         assert_eq!(state.sent_composer.get(), Some(anchor));
         state.drop_sent_placeholder();
         assert!(state.sent_composer.get().is_none());
-        assert!(state.cards_in("src/x.rs").is_empty(), "the placeholder's rows went with it");
+        assert!(
+            state.cards_in("src/x.rs").is_empty(),
+            "the placeholder's rows went with it"
+        );
         assert!(!state.card_rows.get().contains_key(&CardId::Composer));
         assert!(state.composer.get().is_none());
     }
@@ -1972,26 +2911,59 @@ mod tests {
             m.insert("src/x.rs".into(), Arc::new(spliced_file()));
         });
         state.active.set(Some("src/x.rs".into()));
-        let anchor = Anchor { path: "src/x.rs".into(), start_line: 3, line: 3, side: Side::Right, commit_sha: "h".into() };
-        let choice = (perch_agent::Backend::ClaudeCode, "sonnet".to_string(), perch_agent::Effort::Medium);
+        let anchor = Anchor {
+            path: "src/x.rs".into(),
+            start_line: 3,
+            line: 3,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        };
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
 
         // Opened, laid out at ten rows, and sent: the composer is gone,
         // and the card's rows stay under its lines.
         state.open_composer(None, Some(anchor.clone()), String::new(), choice.clone());
         state.set_card_rows(&CardId::Composer, 10);
-        assert_eq!(state.cards_in("src/x.rs"), vec![Card { id: CardId::Composer, after_display_line: 4, rows: 10 }]);
+        assert_eq!(
+            state.cards_in("src/x.rs"),
+            vec![Card {
+                id: CardId::Composer,
+                after_display_line: 4,
+                rows: 10
+            }]
+        );
         state.composer_sent();
         assert!(state.composer.get().is_none());
         assert_eq!(state.sent_composer.get(), Some(anchor.clone()));
-        assert_eq!(state.cards_in("src/x.rs"), vec![Card { id: CardId::Composer, after_display_line: 4, rows: 10 }]);
+        assert_eq!(
+            state.cards_in("src/x.rs"),
+            vec![Card {
+                id: CardId::Composer,
+                after_display_line: 4,
+                rows: 10
+            }]
+        );
 
         // The thread arrives, and its card takes the place of the rows.
-        state.set_comment_threads(Arc::new(vec![anchored("new", 3, 3, "2026-09-18T10:00:00Z", false)]));
+        state.set_comment_threads(Arc::new(vec![anchored(
+            "new",
+            3,
+            3,
+            "2026-09-18T10:00:00Z",
+            false,
+        )]));
         assert_eq!(state.sent_composer.get(), None);
         let cards = state.cards_in("src/x.rs");
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].id, CardId::Thread("new".into()));
-        assert!(!state.card_rows.get().contains_key(&CardId::Composer), "the next composer starts on the estimate");
+        assert!(
+            !state.card_rows.get().contains_key(&CardId::Composer),
+            "the next composer starts on the estimate"
+        );
 
         // Escape gives the rows up at once.
         state.open_composer(None, Some(anchor.clone()), String::new(), choice.clone());
@@ -2012,7 +2984,14 @@ mod tests {
         assert!(state.sent_composer.get().is_some());
         state.open_composer(None, Some(anchor), String::new(), choice);
         assert_eq!(state.sent_composer.get(), None);
-        assert_eq!(state.cards_in("src/x.rs").iter().filter(|c| c.id == CardId::Composer).count(), 1);
+        assert_eq!(
+            state
+                .cards_in("src/x.rs")
+                .iter()
+                .filter(|c| c.id == CardId::Composer)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2061,15 +3040,27 @@ mod tests {
         state.toggle_card(&stale);
         state.begin("Reading the pull request");
         assert!(state.comment_threads.get().is_empty());
-        assert!(!state.is_collapsed(&stale), "the reader's choice outlives the item");
-        state.set_comment_threads(Arc::new(vec![anchored("stale", 1, 1, "2026-09-18T09:00:00Z", true)]));
+        assert!(
+            !state.is_collapsed(&stale),
+            "the reader's choice outlives the item"
+        );
+        state.set_comment_threads(Arc::new(vec![anchored(
+            "stale",
+            1,
+            1,
+            "2026-09-18T09:00:00Z",
+            true,
+        )]));
         assert!(!state.is_collapsed(&stale));
 
         // A thread with no anchor is no card, and a new outdated one is
         // collapsed as the first was.
         let mut worktree = anchored("worktree", 1, 1, "2026-09-18T09:00:00Z", true);
         worktree.anchor = None;
-        state.set_comment_threads(Arc::new(vec![worktree, anchored("another", 3, 3, "2026-09-18T09:00:00Z", true)]));
+        state.set_comment_threads(Arc::new(vec![
+            worktree,
+            anchored("another", 3, 3, "2026-09-18T09:00:00Z", true),
+        ]));
         assert!(!state.is_collapsed(&CardId::Thread("worktree".into())));
         assert!(state.is_collapsed(&CardId::Thread("another".into())));
     }
@@ -2081,24 +3072,53 @@ mod tests {
         state.reveal("src/x.rs", "b1", 4, 23);
         state.reveal("src/x.rs", "b2", 50, 60);
         assert!(state.reveals_for("src/x.rs", "b1").overlaps(4, 37));
-        assert!(!state.reveals_for("src/x.rs", "b1").overlaps(50, 60), "another blob's reveal is another file's");
+        assert!(
+            !state.reveals_for("src/x.rs", "b1").overlaps(50, 60),
+            "another blob's reveal is another file's"
+        );
         // Reset on a piece of the run folds the whole run: the piece
         // remembers the run it was cut from.
-        let piece = crate::review::doc::Run { first: 25, last: 38, first_head: 24, default_heads: (4, 37) };
+        let piece = crate::review::doc::Run {
+            first: 25,
+            last: 38,
+            first_head: 24,
+            default_heads: (4, 37),
+        };
         state.reset("src/x.rs", "b1", &[piece.default_heads]);
         assert!(state.reveals_for("src/x.rs", "b1").is_empty());
-        assert!(state.reveals_for("src/x.rs", "b2").overlaps(50, 60), "and no other");
+        assert!(
+            state.reveals_for("src/x.rs", "b2").overlaps(50, 60),
+            "and no other"
+        );
         let key = ("src/x.rs".to_string(), "b1".to_string());
-        assert!(!state.reveals.get().contains_key(&key), "an empty set is dropped");
+        assert!(
+            !state.reveals.get().contains_key(&key),
+            "an empty set is dropped"
+        );
 
         // Each went to the store as it happened, the reset over the whole
         // run the piece was cut from.
         assert_eq!(
             state.pending_reveals.get(),
             vec![
-                RevealWrite::Reveal { path: "src/x.rs".into(), blob: "b1".into(), first: 4, last: 23 },
-                RevealWrite::Reveal { path: "src/x.rs".into(), blob: "b2".into(), first: 50, last: 60 },
-                RevealWrite::Reset { path: "src/x.rs".into(), blob: "b1".into(), first: 4, last: 37 },
+                RevealWrite::Reveal {
+                    path: "src/x.rs".into(),
+                    blob: "b1".into(),
+                    first: 4,
+                    last: 23
+                },
+                RevealWrite::Reveal {
+                    path: "src/x.rs".into(),
+                    blob: "b2".into(),
+                    first: 50,
+                    last: 60
+                },
+                RevealWrite::Reset {
+                    path: "src/x.rs".into(),
+                    blob: "b1".into(),
+                    first: 4,
+                    last: 37
+                },
             ]
         );
 
@@ -2107,7 +3127,10 @@ mod tests {
         state.reveal("untracked.rs", "", 0, 9);
         state.reset("untracked.rs", "", &[piece.default_heads]);
         assert!(state.pending_reveals.get().is_empty());
-        assert!(state.reveals_for("untracked.rs", "").is_empty(), "the reset still took in memory");
+        assert!(
+            state.reveals_for("untracked.rs", "").is_empty(),
+            "the reset still took in memory"
+        );
 
         // A divider carrying a run taken whole resets both, one write each.
         state.reveal("src/x.rs", "b1", 4, 23);
@@ -2115,12 +3138,28 @@ mod tests {
         state.reveal("src/x.rs", "b1", 70, 79);
         state.pending_reveals.set(Vec::new());
         state.reset("src/x.rs", "b1", &[(4, 37), (43, 58)]);
-        assert_eq!(state.reveals_for("src/x.rs", "b1").iter().collect::<Vec<_>>(), vec![(70, 79)]);
+        assert_eq!(
+            state
+                .reveals_for("src/x.rs", "b1")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![(70, 79)]
+        );
         assert_eq!(
             state.pending_reveals.get(),
             vec![
-                RevealWrite::Reset { path: "src/x.rs".into(), blob: "b1".into(), first: 4, last: 37 },
-                RevealWrite::Reset { path: "src/x.rs".into(), blob: "b1".into(), first: 43, last: 58 },
+                RevealWrite::Reset {
+                    path: "src/x.rs".into(),
+                    blob: "b1".into(),
+                    first: 4,
+                    last: 37
+                },
+                RevealWrite::Reset {
+                    path: "src/x.rs".into(),
+                    blob: "b1".into(),
+                    first: 43,
+                    last: 58
+                },
             ]
         );
     }
@@ -2139,7 +3178,9 @@ mod tests {
         assert_eq!(state.next_unviewed(Some("a.rs"), true), None);
         assert_eq!(state.viewed_count(), (3, 3));
 
-        state.changed_files.set(Arc::new(vec![changed("a.rs", Some("blob-a"))]));
+        state
+            .changed_files
+            .set(Arc::new(vec![changed("a.rs", Some("blob-a"))]));
         assert_eq!(state.next_unviewed(Some("a.rs"), true), None);
         assert_eq!(state.next_unviewed(None, false), None);
         assert_eq!(state.viewed_count(), (1, 1));

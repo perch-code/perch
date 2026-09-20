@@ -50,7 +50,7 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
                     thread.updated_at.to_string(),
                 )
             },
-            move |thread| notification_row(backend.clone(), thread),
+            move |thread| notification_row(state, backend.clone(), thread),
         )
         .style(|s| s.flex_col().width_full().gap(1.0)),
     ))
@@ -67,12 +67,14 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
 /// The rows visible under the shared sidebar controls. Item-only settings
 /// such as status, saved, and sort deliberately have no effect here.
 pub fn visible_notifications(state: AppState) -> Vec<Thread> {
-    let repository = state.item_filters.with(|filters| filters.repository.clone());
+    let repository = state
+        .item_filters
+        .with(|filters| filters.repository.clone());
     let reason = state.notification_reason.get();
     let query = state.item_query.get();
-    state
-        .notifications
-        .with(|threads| filter_notifications(threads, repository.as_deref(), reason.as_deref(), &query))
+    state.notifications.with(|threads| {
+        filter_notifications(threads, repository.as_deref(), reason.as_deref(), &query)
+    })
 }
 
 pub(crate) fn filter_notifications(
@@ -120,14 +122,19 @@ pub fn repository_options(threads: &[Thread]) -> Vec<String> {
 pub fn reason_options(threads: &[Thread]) -> Vec<(String, String)> {
     let mut reasons: Vec<(String, String)> = threads
         .iter()
-        .map(|thread| (thread.reason.wire().to_string(), thread.reason.label().to_string()))
+        .map(|thread| {
+            (
+                thread.reason.wire().to_string(),
+                thread.reason.label().to_string(),
+            )
+        })
         .collect();
     reasons.sort_by_key(|(wire, label)| (label.to_lowercase(), wire.clone()));
     reasons.dedup_by(|a, b| a.0 == b.0);
     reasons
 }
 
-fn notification_row(backend: Rc<Backend>, thread: Thread) -> impl IntoView {
+fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let unread = thread.unread;
     let title = thread.subject.title.clone();
@@ -185,8 +192,12 @@ fn notification_row(backend: Rc<Backend>, thread: Thread) -> impl IntoView {
 
     Container::new(content)
         .on_event_stop(el::Click, move |_, _| {
-            open_backend.open_notification(&open_thread);
-            if !opens_inside {
+            let navigation_id = open_backend.open_notification(&open_thread);
+            if opens_inside {
+                if let Some(navigation_id) = navigation_id {
+                    state.begin_open("Reading the notification", navigation_id);
+                }
+            } else {
                 if let Some(url) = &url {
                     open_in_browser(url);
                 }
@@ -471,7 +482,10 @@ mod tests {
         assert_eq!(repository_options(&threads), ["org/one", "org/two"]);
         assert_eq!(
             reason_options(&threads),
-            [("mention".into(), "mention".into()), ("review_requested".into(), "review requested".into())]
+            [
+                ("mention".into(), "mention".into()),
+                ("review_requested".into(), "review requested".into())
+            ]
         );
     }
 

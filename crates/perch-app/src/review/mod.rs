@@ -13,6 +13,7 @@ pub mod markdown;
 pub mod model;
 pub mod rail;
 pub mod references;
+pub mod review_launch;
 pub mod scope;
 pub mod strip;
 pub mod styling;
@@ -25,7 +26,7 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
-use floem::views::{Decorators, Stack, dyn_container};
+use floem::views::{dyn_container, Decorators, Stack};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -52,7 +53,9 @@ pub fn review_view(
         move |path: &str| {
             // Open the path to it in the tree, so a file reached from the
             // changed list or from a definition can be found there too.
-            state.expanded.update(|expanded| tree::reveal(expanded, path));
+            state
+                .expanded
+                .update(|expanded| tree::reveal(expanded, path));
             if state.open_tab(path) {
                 backend.open_file(path);
             }
@@ -64,8 +67,8 @@ pub fn review_view(
     let on_back: Rc<dyn Fn()> = Rc::new({
         let backend = backend.clone();
         move || {
-            app.leave_review(state);
-            backend.close_review();
+            let navigation_id = backend.close_review();
+            app.begin_close(state, navigation_id);
         }
     });
 
@@ -74,7 +77,9 @@ pub fn review_view(
     // everything as it was, with the reason in the status line.
     let on_archive: Rc<dyn Fn(String)> = Rc::new({
         let backend = backend.clone();
-        move |id: String| backend.archive_item(&id)
+        move |id: String| {
+            backend.archive_item(&id);
+        }
     });
 
     let header_backend = backend.clone();
@@ -86,7 +91,13 @@ pub fn review_view(
             move || is_issue.get(),
             move |is_issue| {
                 if is_issue {
-                    header::issue_header(app, state, header_backend.clone(), header_open_item.clone()).into_any()
+                    header::issue_header(
+                        app,
+                        state,
+                        header_backend.clone(),
+                        header_open_item.clone(),
+                    )
+                    .into_any()
                 } else {
                     let (back, archive) = (on_back.clone(), on_archive.clone());
                     header::header(
@@ -132,17 +143,29 @@ pub fn review_view(
         )
         .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
     ))
-    .style(|s| s.size_full().flex_col().min_height(0.0).background(theme::CANVAS))
+    .style(|s| {
+        s.size_full()
+            .flex_col()
+            .min_height(0.0)
+            .background(theme::CANVAS)
+    })
 }
 
 /// The tab strip, then the tab: Conversation for every item, Files for one
 /// with a checkout. The strip is drawn for an issue too, with one tab, so
 /// the view keeps its shape when Start work adds a checkout.
-fn item_view(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Backend>) -> impl IntoView {
+fn item_view(
+    app: AppState,
+    state: ReviewState,
+    open_file: OpenFile,
+    backend: Rc<Backend>,
+) -> impl IntoView {
     // An item without a checkout has no Files to show, whatever the tab
     // remembered for it says.
     let tab = floem::reactive::Memo::new(move |_| {
-        let has_files = state.item.with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
+        let has_files = state
+            .item
+            .with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
         match state.tab.get() {
             ItemTab::Files if has_files => ItemTab::Files,
             _ => ItemTab::Conversation,
@@ -168,7 +191,12 @@ fn item_view(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc
 /// reader put it: a file's threads are drawn in the code as cards, so
 /// nothing opens the column for them, and `open_composer` opens it only
 /// for a composer it draws.
-fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Backend>) -> impl IntoView {
+fn body(
+    app: AppState,
+    state: ReviewState,
+    open_file: OpenFile,
+    backend: Rc<Backend>,
+) -> impl IntoView {
     let column_backend = backend.clone();
     let column_open = open_file.clone();
     Stack::horizontal((
@@ -177,14 +205,19 @@ fn body(app: AppState, state: ReviewState, open_file: OpenFile, backend: Rc<Back
             tabs::tab_bar(app, state),
             editor::editor_pane(app, state, backend, open_file),
         ))
-            .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().flex_col()),
+        .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().flex_col()),
         dyn_container(
             move || state.threads_open.get(),
             move |open| {
                 if open {
                     floem::views::Container::new(Stack::horizontal((
                         threads::resize_handle(state),
-                        threads::thread_column(app, state, column_backend.clone(), column_open.clone()),
+                        threads::thread_column(
+                            app,
+                            state,
+                            column_backend.clone(),
+                            column_open.clone(),
+                        ),
                     )))
                     .style(|s| {
                         s.height_full()
@@ -223,7 +256,11 @@ fn status_line(state: ReviewState, hidden: usize) -> StatusLine {
     } else {
         format!("{STATUS_SEPARATOR}{}", server.describe())
     };
-    let whole = |before: String| StatusLine { before: format!("{before}{server}"), hidden: None, after: String::new() };
+    let whole = |before: String| StatusLine {
+        before: format!("{before}{server}"),
+        hidden: None,
+        after: String::new(),
+    };
 
     if let Some(issue) = state.issue.get() {
         return whole(issue::describe(&issue));
@@ -240,7 +277,10 @@ fn status_line(state: ReviewState, hidden: usize) -> StatusLine {
     let changes = counted(file.change_count(), "change");
     let line = state.cursor_line.get() + 1;
     StatusLine {
-        before: format!("{}{STATUS_SEPARATOR}{language}{STATUS_SEPARATOR}{lines}{STATUS_SEPARATOR}{changes}", file.path),
+        before: format!(
+            "{}{STATUS_SEPARATOR}{language}{STATUS_SEPARATOR}{lines}{STATUS_SEPARATOR}{changes}",
+            file.path
+        ),
         hidden: (hidden > 0).then(|| hidden_lines_label(hidden)),
         after: format!("{STATUS_SEPARATOR}ln {line}{server}"),
     }
@@ -275,7 +315,8 @@ pub fn review_status(app: AppState, state: ReviewState) -> impl IntoView {
     let muted = |s: floem::style::Style| s.font_size(theme::TEXT_META).color(theme::FG_MUTED);
     let line = move || status_line(state, state.hidden_lines());
     Stack::horizontal((
-        Label::derived(move || line().before).style(move |s| muted(s).text_ellipsis().min_width(0.0)),
+        Label::derived(move || line().before)
+            .style(move |s| muted(s).text_ellipsis().min_width(0.0)),
         dyn_container(
             move || line().hidden,
             move |hidden| match hidden {
@@ -286,7 +327,8 @@ pub fn review_status(app: AppState, state: ReviewState) -> impl IntoView {
                         Label::derived(move || text.clone())
                             .on_event_stop(el::Click, move |_, _| tabs::toggle_folded(app, state))
                             .style(move |s| {
-                                crate::ui::widgets::clickable(muted(s)).hover(|s| s.color(theme::ACCENT))
+                                crate::ui::widgets::clickable(muted(s))
+                                    .hover(|s| s.color(theme::ACCENT))
                             }),
                         "Show this worktree's files whole".to_string(),
                     ),
@@ -319,19 +361,45 @@ mod tests {
         state.open_tab("src/x.rs");
         state.finish_load("src/x.rs", std::sync::Arc::new(file));
 
-        let before = format!("src/x.rs{STATUS_SEPARATOR}Rust{STATUS_SEPARATOR}2 lines{STATUS_SEPARATOR}1 change");
+        let before = format!(
+            "src/x.rs{STATUS_SEPARATOR}Rust{STATUS_SEPARATOR}2 lines{STATUS_SEPARATOR}1 change"
+        );
         let after = format!("{STATUS_SEPARATOR}ln 1");
-        assert_eq!(status_line(state, 0), StatusLine { before: before.clone(), hidden: None, after: after.clone() });
+        assert_eq!(
+            status_line(state, 0),
+            StatusLine {
+                before: before.clone(),
+                hidden: None,
+                after: after.clone()
+            }
+        );
         assert_eq!(
             status_line(state, 312),
-            StatusLine { before, hidden: Some("312 lines hidden".into()), after }
+            StatusLine {
+                before,
+                hidden: Some("312 lines hidden".into()),
+                after
+            }
         );
-        assert_eq!(status_line(state, 12_000).hidden.as_deref(), Some("12,000 lines hidden"));
-        assert_eq!(status_line(state, 1).hidden.as_deref(), Some("1 line hidden"));
+        assert_eq!(
+            status_line(state, 12_000).hidden.as_deref(),
+            Some("12,000 lines hidden")
+        );
+        assert_eq!(
+            status_line(state, 1).hidden.as_deref(),
+            Some("1 line hidden")
+        );
 
         // A line that is not about a file has no count, whatever it is
         // given: there is no document to have folds.
         state.close_tab("src/x.rs");
-        assert_eq!(status_line(state, 312), StatusLine { before: "0 changed files".into(), hidden: None, after: String::new() });
+        assert_eq!(
+            status_line(state, 312),
+            StatusLine {
+                before: "0 changed files".into(),
+                hidden: None,
+                after: String::new()
+            }
+        );
     }
 }

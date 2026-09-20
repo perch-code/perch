@@ -435,12 +435,12 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         menu = menu.item(label, move |m| {
             let (b, i) = (b.clone(), i.clone());
             m.enabled(can).accelerator(key(KeyCode::KeyF)).action(move || {
-                state.begin_open("Cutting a branch");
-                if is_issue {
+                let navigation_id = if is_issue {
                     b.start_work(&i)
                 } else {
                     b.fork_item(&i)
-                }
+                };
+                state.begin_open("Cutting a branch", navigation_id);
             })
         });
     }
@@ -455,9 +455,19 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
             let (b, i) = (b.clone(), i.clone());
             m.enabled(restorable).accelerator(key(KeyCode::KeyA)).action(move || {
                 if archived {
-                    b.restore_item(&i)
+                    let navigation_id = b.restore_item(&i);
+                    if let Some(review) = state.review.get_untracked() {
+                        state.begin_item_review(
+                            review,
+                            "Checking out the files",
+                            &i,
+                            navigation_id,
+                        );
+                    } else {
+                        state.expect_item_navigation(&i, navigation_id);
+                    }
                 } else {
-                    b.archive_item(&i)
+                    b.archive_item(&i);
                 }
             })
         });

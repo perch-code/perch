@@ -101,6 +101,7 @@ fn main() {
                 app_icon::install();
                 let state = AppState::new();
                 let review = review::model::ReviewState::new();
+                state.review.set(Some(review));
 
                 // Backend events arrive on a std channel. floem drains it on
                 // the UI thread and writes each one into this signal; the
@@ -137,8 +138,13 @@ fn main() {
                             });
                             match found {
                                 Some(id) => {
-                                    state.begin_item_review(review, "Reading the branch", &id);
-                                    backend.open_item(&id);
+                                    let navigation_id = backend.open_item(&id);
+                                    state.begin_item_review(
+                                        review,
+                                        "Reading the branch",
+                                        &id,
+                                        navigation_id,
+                                    );
                                     true
                                 }
                                 None => false,
@@ -154,8 +160,9 @@ fn main() {
                         Some((repo.to_string(), number.parse::<u64>().ok()?))
                     })
                 {
-                    review.opening.set(true);
-                    backend.open_subject(&repo, perch_github::ItemKind::Issue, number);
+                    let navigation_id =
+                        backend.open_subject(&repo, perch_github::ItemKind::Issue, number);
+                    state.begin_open("Reading the issue", navigation_id);
                 }
 
                 // PERCH_START_WORK=1 presses Start work once the issue is up.
@@ -172,8 +179,8 @@ fn main() {
                             .flatten();
                         match issue_item {
                             Some(id) => {
-                                state.begin_open("Cutting a branch");
-                                backend.start_work(&id);
+                                let navigation_id = backend.start_work(&id);
+                                state.begin_open("Cutting a branch", navigation_id);
                                 true
                             }
                             None => false,
@@ -182,8 +189,9 @@ fn main() {
                 }
 
                 if let Some((repo, number)) = open_at_launch.clone() {
-                    review.opening.set(true);
-                    backend.open_subject(&repo, perch_github::ItemKind::PullRequest, number);
+                    let navigation_id =
+                        backend.open_subject(&repo, perch_github::ItemKind::PullRequest, number);
+                    state.begin_open("Reading the pull request", navigation_id);
 
                     // Optionally open a file once the checkout lands, so the
                     // whole path can be exercised without a pointer.

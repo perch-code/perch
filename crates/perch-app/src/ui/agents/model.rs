@@ -5,6 +5,7 @@
 //! item's whole discussion.  Keeping the projection here also keeps Floem out
 //! of the run manager and the database.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use jiff::Timestamp;
@@ -187,6 +188,12 @@ pub enum AgentRunPurpose {
     Review,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRetryTarget {
+    Run(String),
+    ReviewAttempt(String),
+}
+
 impl AgentRunPurpose {
     pub fn label(self) -> &'static str {
         match self {
@@ -209,6 +216,10 @@ pub struct AgentRunSummary {
     pub id: String,
     pub item_id: Option<String>,
     pub thread_id: Option<String>,
+    /// Stable reviewer-attempt identity for native review children. The
+    /// ordinary run id is deliberately different: retry and navigation must
+    /// act on the review attempt/group, not replay the generic run request.
+    pub review_attempt_id: Option<String>,
     pub repository: String,
     pub worktree: String,
     pub purpose: AgentRunPurpose,
@@ -255,6 +266,13 @@ impl AgentRunSummary {
         } else {
             &self.backend
         }
+    }
+
+    pub fn retry_target(&self) -> AgentRetryTarget {
+        self.review_attempt_id
+            .clone()
+            .map(AgentRetryTarget::ReviewAttempt)
+            .unwrap_or_else(|| AgentRetryTarget::Run(self.id.clone()))
     }
 
     pub fn subject(&self) -> String {
@@ -318,10 +336,17 @@ impl AgentRunSummary {
         use perch_github::comments::RunPurpose;
 
         let usage = run.usage.as_ref();
+        let review_attempt_id = match &run.owner {
+            perch_github::RunOwner::Review {
+                reviewer_run_id, ..
+            } => Some(reviewer_run_id.clone()),
+            _ => None,
+        };
         Self {
             id: run.id.clone(),
             item_id: run.owner.item_id().map(str::to_string),
             thread_id: run.thread_id().map(str::to_string),
+            review_attempt_id,
             repository: run.labels.repository.clone(),
             worktree: run
                 .labels
@@ -378,10 +403,17 @@ impl AgentRunSummary {
         use perch_github::comments::RunPurpose;
 
         let usage = run.usage.as_ref();
+        let review_attempt_id = match &run.owner {
+            perch_github::RunOwner::Review {
+                reviewer_run_id, ..
+            } => Some(reviewer_run_id.clone()),
+            _ => None,
+        };
         Self {
             id: run.id.clone(),
             item_id: run.owner.item_id().map(str::to_string),
             thread_id: run.thread_id().map(str::to_string),
+            review_attempt_id,
             repository: run.labels.repository.clone(),
             worktree: run
                 .labels
@@ -427,17 +459,126 @@ pub struct AgentRunGroup {
     pub runs: Vec<AgentRunSummary>,
 }
 
+/// One row in a worktree/history run list. Native reviewer children stay
+/// beneath their durable review group; ordinary question and follow-up rows
+/// retain their existing flat presentation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentRunEntry {
+    Run(AgentRunSummary),
+    ReviewGroup(AgentReviewRunGroup),
+}
+
+impl AgentRunEntry {
+    pub fn key(&self) -> String {
+        match self {
+            Self::Run(run) => format!("run:{}", run.id),
+            Self::ReviewGroup(group) => format!("review:{}", group.key),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentReviewRunGroup {
+    /// The durable group id when its metadata has arrived. A just-admitted
+    /// attempt may briefly use its attempt id as a stable placeholder key.
+    pub key: String,
+    pub summary: Option<crate::review::model::ReviewGroupSummary>,
+    pub runs: Vec<AgentRunSummary>,
+}
+
+/// Find the durable group which owns one reviewer attempt.
+pub fn review_group_for_attempt<'a>(
+    groups: &'a [crate::review::model::ReviewGroupSummary],
+    attempt_id: &str,
+) -> Option<&'a crate::review::model::ReviewGroupSummary> {
+    groups.iter().find(|summary| {
+        summary
+            .attempts
+            .iter()
+            .any(|attempt| attempt.id == attempt_id)
+    })
+}
+
+/// Preserve the caller's established ordering while replacing reviewer rows
+/// with one expandable group entry at the position of its first child.
+pub fn group_review_runs(
+    runs: &[AgentRunSummary],
+    groups: &[crate::review::model::ReviewGroupSummary],
+) -> Vec<AgentRunEntry> {
+    let mut entries = Vec::new();
+    let mut emitted = HashSet::new();
+    for run in runs {
+        let Some(attempt_id) = run.review_attempt_id.as_deref() else {
+            entries.push(AgentRunEntry::Run(run.clone()));
+            continue;
+        };
+        let summary = review_group_for_attempt(groups, attempt_id).cloned();
+        let key = summary
+            .as_ref()
+            .map(|summary| summary.group.id.clone())
+            .unwrap_or_else(|| format!("attempt:{attempt_id}"));
+        if !emitted.insert(key.clone()) {
+            continue;
+        }
+        let children = match summary.as_ref() {
+            Some(summary) => {
+                let attempts = summary
+                    .attempts
+                    .iter()
+                    .map(|attempt| attempt.id.as_str())
+                    .collect::<HashSet<_>>();
+                runs.iter()
+                    .filter(|candidate| {
+                        candidate
+                            .review_attempt_id
+                            .as_deref()
+                            .is_some_and(|attempt| attempts.contains(attempt))
+                    })
+                    .cloned()
+                    .collect()
+            }
+            None => vec![run.clone()],
+        };
+        entries.push(AgentRunEntry::ReviewGroup(AgentReviewRunGroup {
+            key,
+            summary,
+            runs: children,
+        }));
+    }
+    entries
+}
+
 /// Filter and group active rows. Groups keep the order in which their first
 /// run was admitted, except that the open worktree is lifted to the front.
+#[cfg(test)]
 pub fn active_groups(
     runs: &[AgentRunSummary],
     current_item: Option<&str>,
     worktrees: WorktreeFilter,
     backends: BackendFilter,
 ) -> Vec<AgentRunGroup> {
+    active_groups_with_reviews(runs, current_item, worktrees, backends, &[])
+}
+
+pub fn active_groups_with_reviews(
+    runs: &[AgentRunSummary],
+    current_item: Option<&str>,
+    worktrees: WorktreeFilter,
+    backends: BackendFilter,
+    review_groups: &[crate::review::model::ReviewGroupSummary],
+) -> Vec<AgentRunGroup> {
+    let active_review_attempts = review_groups
+        .iter()
+        .filter(|summary| summary.group.status.is_active())
+        .flat_map(|summary| summary.attempts.iter().map(|attempt| attempt.id.as_str()))
+        .collect::<HashSet<_>>();
     let mut groups: Vec<AgentRunGroup> = Vec::new();
     for run in runs.iter().filter(|run| {
-        run.status.is_active()
+        (run.status.is_active()
+            || run
+                .review_attempt_id
+                .as_deref()
+                .is_some_and(|attempt| active_review_attempts.contains(attempt)))
             && backends.includes(&run.backend)
             && (worktrees == WorktreeFilter::All || run.item_id.as_deref() == current_item)
     }) {
@@ -474,6 +615,7 @@ pub fn active_groups(
     groups
 }
 
+#[cfg(test)]
 pub fn history_runs(
     runs: &[AgentRunSummary],
     current_item: Option<&str>,
@@ -481,10 +623,30 @@ pub fn history_runs(
     backends: BackendFilter,
     outcomes: OutcomeFilter,
 ) -> Vec<AgentRunSummary> {
+    history_runs_with_reviews(runs, current_item, worktrees, backends, outcomes, &[])
+}
+
+pub fn history_runs_with_reviews(
+    runs: &[AgentRunSummary],
+    current_item: Option<&str>,
+    worktrees: WorktreeFilter,
+    backends: BackendFilter,
+    outcomes: OutcomeFilter,
+    review_groups: &[crate::review::model::ReviewGroupSummary],
+) -> Vec<AgentRunSummary> {
+    let active_review_attempts = review_groups
+        .iter()
+        .filter(|summary| summary.group.status.is_active())
+        .flat_map(|summary| summary.attempts.iter().map(|attempt| attempt.id.as_str()))
+        .collect::<HashSet<_>>();
     let mut rows: Vec<_> = runs
         .iter()
         .filter(|run| {
             !run.status.is_active()
+                && !run
+                    .review_attempt_id
+                    .as_deref()
+                    .is_some_and(|attempt| active_review_attempts.contains(attempt))
                 && backends.includes(&run.backend)
                 && outcomes.includes(run.status)
                 && (worktrees == WorktreeFilter::All || run.item_id.as_deref() == current_item)
@@ -548,6 +710,7 @@ mod tests {
             id: id.into(),
             item_id: Some(item.into()),
             thread_id: Some(format!("t-{id}")),
+            review_attempt_id: None,
             repository: "perch".into(),
             worktree: item.into(),
             purpose: AgentRunPurpose::Question,
@@ -726,5 +889,169 @@ mod tests {
         let mut richer = finished.clone();
         richer.response = "durable result".into();
         assert!(finished.can_replace_with(&richer));
+    }
+
+    #[test]
+    fn native_review_owner_retains_the_attempt_identity() {
+        let record = perch_github::RunRecord {
+            id: "process-run".into(),
+            owner: perch_github::RunOwner::Review {
+                item_id: "item".into(),
+                reviewer_run_id: "attempt-7".into(),
+            },
+            ..perch_github::RunRecord::default()
+        };
+
+        let projected = AgentRunSummary::from_record(&record);
+        assert_eq!(projected.review_attempt_id.as_deref(), Some("attempt-7"));
+        assert!(projected.thread_id.is_none());
+        assert_eq!(
+            projected.retry_target(),
+            AgentRetryTarget::ReviewAttempt("attempt-7".into())
+        );
+
+        let ordinary = run(
+            "ordinary-run",
+            "item",
+            AgentRunStatus::Failed,
+            "2026-09-19T10:00:00Z",
+        );
+        assert_eq!(
+            ordinary.retry_target(),
+            AgentRetryTarget::Run("ordinary-run".into())
+        );
+    }
+
+    #[test]
+    fn reviewer_children_collapse_under_their_durable_group() {
+        let created_at = at("2026-09-19T10:00:00Z");
+        let mut claude = run(
+            "claude-run",
+            "item",
+            AgentRunStatus::Failed,
+            "2026-09-19T10:00:00Z",
+        );
+        claude.purpose = AgentRunPurpose::Review;
+        claude.review_attempt_id = Some("attempt-claude".into());
+        let mut codex = run(
+            "codex-run",
+            "item",
+            AgentRunStatus::Completed,
+            "2026-09-19T10:01:00Z",
+        );
+        codex.purpose = AgentRunPurpose::Review;
+        codex.review_attempt_id = Some("attempt-codex".into());
+        let ordinary = run(
+            "question",
+            "item",
+            AgentRunStatus::Completed,
+            "2026-09-19T10:02:00Z",
+        );
+        let attempt = |id: &str, backend: &str| perch_github::ReviewerAttempt {
+            id: id.into(),
+            group_id: "group-3".into(),
+            run_id: None,
+            backend: backend.into(),
+            executable: None,
+            executable_version: None,
+            model: "model".into(),
+            effort: "high".into(),
+            adapter_version: "1".into(),
+            output_format_version: "1".into(),
+            attempt_number: 1,
+            retry_of: None,
+            phase: perch_github::ReviewerPhase::Completed,
+            ingestion_state: perch_github::ReviewIngestionState::Complete,
+            result_kind: Some(perch_github::ReviewResultKind::Clean),
+            output_id: None,
+            raw_result: None,
+            diagnostics: None,
+            verification_input: perch_github::ReviewVerificationInput::default(),
+            output_saved_at: Some(created_at),
+            created_at,
+            started_at: Some(created_at),
+            ended_at: Some(created_at),
+        };
+        let summary = crate::review::model::ReviewGroupSummary {
+            group: perch_github::ReviewGroup {
+                id: "group-3".into(),
+                item_id: "item".into(),
+                snapshot_id: "snapshot-3".into(),
+                number: 3,
+                status: perch_github::ReviewGroupStatus::Completed,
+                new_findings: 0,
+                still_present: 0,
+                verified_fixed: 0,
+                not_verified: 0,
+                created_at,
+                started_at: Some(created_at),
+                ended_at: Some(created_at),
+            },
+            snapshot: perch_github::ReviewSnapshot {
+                id: "snapshot-3".into(),
+                item_id: "item".into(),
+                repository: "local/perch".into(),
+                branch_label: Some("feature".into()),
+                requested_base_ref: "main".into(),
+                base_tip_sha: "base".into(),
+                merge_base_sha: "merge".into(),
+                head_sha: "head".into(),
+                dirty_edits_excluded: false,
+                retention_key: "retained".into(),
+                retained_ref: None,
+                manifest_path: Some("manifest".into()),
+                diff_path: Some("diff".into()),
+                created_at,
+            },
+            attempts: vec![
+                attempt("attempt-claude", "claude-code"),
+                attempt("attempt-codex", "codex"),
+            ],
+        };
+
+        let mut active_summary = summary.clone();
+        active_summary.group.status = perch_github::ReviewGroupStatus::Reconciling;
+        let active = active_groups_with_reviews(
+            &[claude.clone(), codex.clone(), ordinary.clone()],
+            None,
+            WorktreeFilter::All,
+            BackendFilter::All,
+            &[active_summary.clone()],
+        );
+        assert_eq!(
+            active.iter().map(|group| group.runs.len()).sum::<usize>(),
+            2
+        );
+        let history = history_runs_with_reviews(
+            &[claude.clone(), codex.clone(), ordinary.clone()],
+            None,
+            WorktreeFilter::All,
+            BackendFilter::All,
+            OutcomeFilter::All,
+            &[active_summary],
+        );
+        assert_eq!(
+            history
+                .iter()
+                .map(|run| run.id.as_str())
+                .collect::<Vec<_>>(),
+            ["question"]
+        );
+
+        let entries = group_review_runs(&[claude, codex, ordinary], &[summary]);
+        assert_eq!(entries.len(), 2);
+        let AgentRunEntry::ReviewGroup(group) = &entries[0] else {
+            panic!("review children were not grouped");
+        };
+        assert_eq!(group.key, "group-3");
+        assert_eq!(
+            group
+                .runs
+                .iter()
+                .map(|run| run.id.as_str())
+                .collect::<Vec<_>>(),
+            ["claude-run", "codex-run"]
+        );
+        assert!(matches!(entries[1], AgentRunEntry::Run(_)));
     }
 }

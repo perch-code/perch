@@ -808,7 +808,7 @@ fn card_layer(
                 .filter_map(|id| match &id {
                     CardId::Thread(thread_id) => threads
                         .iter()
-                        .find(|t| t.id == *thread_id)
+                        .find(|t| t.id == *thread_id && state.thread_visible(&t.id))
                         .cloned()
                         .map(CardItem::Thread),
                     CardId::GitHub(comment_id) => github

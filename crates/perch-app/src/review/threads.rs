@@ -234,7 +234,11 @@ fn body(
         dyn_container(
             move || {
                 let github = state.active.with(|p| p.as_deref().map(|p| !state.github_threads_in(p).is_empty()).unwrap_or(false));
-                state.comment_threads.with(|t| t.is_empty()) && state.composer.with(Option::is_none) && !github
+                state
+                    .comment_threads
+                    .with(|threads| threads.iter().all(|thread| !state.thread_visible(&thread.id)))
+                    && state.composer.with(Option::is_none)
+                    && !github
             },
             |empty| {
                 if empty {
@@ -905,6 +909,8 @@ fn open_card(
     };
     Stack::vertical((
         first_row.style(|s| s.flex_shrink(0.0_f32)),
+        crate::review::cards::finding_controls(app, state, backend.clone(), thread.id.clone())
+            .style(|s| s.flex_shrink(0.0_f32)),
         delete_confirmation(state, backend.clone(), thread.id.clone())
             .style(|s| s.flex_shrink(0.0_f32)),
         messages,

@@ -10,18 +10,18 @@ use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::text::FontWeight;
-use floem::views::{Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack};
+use floem::views::{dyn_container, dyn_stack, Decorators, Empty, Label, ScrollExt, Stack};
 use perch_git::{ChangeStatus, ChangedFile, TreeEntry};
 
 use crate::backend::Backend;
+use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::review::tree::{self, Row};
-use crate::review::{cards, scope};
 use crate::review::OpenFile;
-use crate::icons::SidebarIcon;
+use crate::review::{cards, scope};
 use crate::state::Checked;
-use crate::ui::widgets::{checkbox, icon_button, sidebar_glyph};
 use crate::theme;
+use crate::ui::widgets::{checkbox, icon_button, sidebar_glyph};
 
 /// The changed files by path, for the tree, which lists every file and
 /// knows the changed ones only by path.
@@ -34,9 +34,38 @@ pub fn rail(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl
             .with(|files| Arc::new(files.iter().map(|f| (f.path.clone(), f.clone())).collect()))
     });
 
+    let controls_backend = backend.clone();
     Stack::vertical((
-        scope::button(state, backend.clone()),
-        viewed_row(state, backend.clone()),
+        dyn_container(
+            move || state.historical_review.get(),
+            move |historical| match historical {
+                Some(review) => Label::derived(move || {
+                    format!(
+                        "Review #{} retained snapshot · read-only",
+                        review.group.number
+                    )
+                })
+                .style(|s| {
+                    s.height(theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT)
+                        .width_full()
+                        .padding_horiz(10.0)
+                        .items_center()
+                        .font_size(theme::TEXT_BADGE)
+                        .color(theme::FG_MUTED)
+                        .background(theme::CANVAS_SUBTLE)
+                        .border_bottom(1.0)
+                        .border_color(theme::BORDER)
+                        .text_wrap()
+                })
+                .into_any(),
+                None => Stack::vertical((
+                    scope::button(state, controls_backend.clone()),
+                    viewed_row(state, controls_backend.clone()),
+                ))
+                .style(|s| s.flex_col().width_full())
+                .into_any(),
+            },
+        ),
         tree_list(state, changed, on_open, backend),
     ))
     .style(|s| {
@@ -69,10 +98,11 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
         move || empty.get(),
         move |empty| {
             if empty {
-                return Container::new(
-                    Label::derived(move || "No changes")
-                        .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).selectable(false)),
-                )
+                return Container::new(Label::derived(move || "No changes").style(|s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .color(theme::FG_MUTED)
+                        .selectable(false)
+                }))
                 .style(|s| {
                     s.height(theme::VIEWED_ROW_HEIGHT)
                         .width_full()
@@ -96,18 +126,26 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                         .flex_grow(1.0_f32)
                         .selectable(false)
                 }),
-                Label::derived(move || if all_viewed() { "Clear all" } else { "Mark all" })
-                    .on_event_stop(el::Click, move |_, _| set_all_viewed(state, &backend, !all_viewed()))
-                    .style(|s| {
-                        s.font_size(theme::TEXT_BADGE)
-                            .color(theme::ACCENT)
-                            .selectable(false)
-                            .padding_horiz(6.0)
-                            .padding_vert(2.0)
-                            .margin_right(2.0)
-                            .border_radius(4.0)
-                            .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
-                    }),
+                Label::derived(move || {
+                    if all_viewed() {
+                        "Clear all"
+                    } else {
+                        "Mark all"
+                    }
+                })
+                .on_event_stop(el::Click, move |_, _| {
+                    set_all_viewed(state, &backend, !all_viewed())
+                })
+                .style(|s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .color(theme::ACCENT)
+                        .selectable(false)
+                        .padding_horiz(6.0)
+                        .padding_vert(2.0)
+                        .margin_right(2.0)
+                        .border_radius(4.0)
+                        .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
+                }),
                 filter_button(state),
             ))
             .style(|s| {
@@ -167,7 +205,12 @@ fn set_all_viewed(state: ReviewState, backend: &Backend, viewed: bool) {
 /// The tree. Three steps, each remembered so a click on a chevron redoes
 /// only the last: the worktree with the deleted files put back, the rows
 /// for it whole or cut down to the changes, then the rows that are open.
-fn tree_list(state: ReviewState, changed: ChangedByPath, on_open: OpenFile, backend: Rc<Backend>) -> impl IntoView {
+fn tree_list(
+    state: ReviewState,
+    changed: ChangedByPath,
+    on_open: OpenFile,
+    backend: Rc<Backend>,
+) -> impl IntoView {
     // A deleted file is gone from the worktree but is in the changed list,
     // and needs a row to be opened and marked from.
     let full: Memo<Arc<Vec<TreeEntry>>> = Memo::new(move |_| {
@@ -194,7 +237,11 @@ fn tree_list(state: ReviewState, changed: ChangedByPath, on_open: OpenFile, back
     // and a row kept by its path would show the old label at the old
     // depth.
     dyn_stack(
-        move || state.expanded.with(|expanded| tree::visible(rows.get().as_ref(), expanded)),
+        move || {
+            state
+                .expanded
+                .with(|expanded| tree::visible(rows.get().as_ref(), expanded))
+        },
         |row| row.clone(),
         move |row| tree_row(state, row, changed, on_open.clone(), backend.clone()),
     )
@@ -218,11 +265,23 @@ fn tree_row(
     let chevron_click_row = row.clone();
     let is_expanded = move || state.expanded.with(|e| tree::is_expanded(&chevron_row, e));
     // One closure per use: each captures a String, so none of them is Copy.
-    let (name_path, row_path, file_path, viewed_path) =
-        (row.path.clone(), row.path.clone(), row.path.clone(), row.path);
+    let (name_path, row_path, file_path, viewed_path) = (
+        row.path.clone(),
+        row.path.clone(),
+        row.path.clone(),
+        row.path,
+    );
 
-    let active_name = move || state.active.with(|a| a.as_deref() == Some(name_path.as_str()));
-    let active_row = move || state.active.with(|a| a.as_deref() == Some(row_path.as_str()));
+    let active_name = move || {
+        state
+            .active
+            .with(|a| a.as_deref() == Some(name_path.as_str()))
+    };
+    let active_row = move || {
+        state
+            .active
+            .with(|a| a.as_deref() == Some(row_path.as_str()))
+    };
     // A file the pull request touched carries its status, churn and Viewed
     // check, so the changes are marked while browsing the whole tree.
     let file = move || changed.with(|c| c.get(&file_path).cloned());
@@ -240,13 +299,17 @@ fn tree_row(
             move || is_dir.then(&is_expanded),
             move |open| match open {
                 Some(true) => sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE).into_any(),
-                Some(false) => sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE).into_any(),
+                Some(false) => {
+                    sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE).into_any()
+                }
                 None => Empty::new().into_any(),
             },
         ))
         .on_event(el::Click, move |_, _| {
             if is_dir {
-                state.expanded.update(|expanded| tree::toggle_row(expanded, &chevron_click_row));
+                state
+                    .expanded
+                    .update(|expanded| tree::toggle_row(expanded, &chevron_click_row));
                 EventPropagation::Stop
             } else {
                 EventPropagation::Continue
@@ -268,7 +331,11 @@ fn tree_row(
                 } else {
                     theme::FG
                 })
-                .font_weight(if active_name() { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
+                .font_weight(if active_name() {
+                    FontWeight::SEMI_BOLD
+                } else {
+                    FontWeight::NORMAL
+                })
                 .flex_grow(1.0_f32)
                 .min_width(0.0)
                 .text_ellipsis()
@@ -283,7 +350,9 @@ fn tree_row(
         // A directory that is itself a change, a submodule, opens like a
         // file: the diff is what the reader came for. The chevron shuts it.
         if is_dir && !changed.with(|c| c.contains_key(&click_row.path)) {
-            state.expanded.update(|expanded| tree::toggle_row(expanded, &click_row));
+            state
+                .expanded
+                .update(|expanded| tree::toggle_row(expanded, &click_row));
         } else {
             on_open(&click_row.path);
         }
@@ -309,10 +378,22 @@ fn tree_row(
 fn change_marks(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> impl IntoView {
     let counts_file = file.clone();
     let viewed_counts = move || state.is_viewed(&counts_file);
+    let viewed_file = file.clone();
     Stack::horizontal((
         status_letter(file.status),
         counts(file.additions, file.deletions, file.binary, viewed_counts),
-        viewed_box(state, file, backend),
+        dyn_container(
+            move || state.historical_review.with(Option::is_some),
+            move |read_only| {
+                if read_only {
+                    Empty::new()
+                        .style(|s| s.size(26.0, 26.0).flex_shrink(0.0_f32))
+                        .into_any()
+                } else {
+                    viewed_box(state, viewed_file.clone(), backend.clone()).into_any()
+                }
+            },
+        ),
     ))
     .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(8.0))
 }
@@ -322,12 +403,20 @@ fn change_marks(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> 
 /// counts stay in their column.
 fn viewed_box(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> impl IntoView {
     let Some(blob) = file.head_blob.clone() else {
-        return Empty::new().style(|s| s.size(26.0, 26.0).flex_shrink(0.0_f32)).into_any();
+        return Empty::new()
+            .style(|s| s.size(26.0, 26.0).flex_shrink(0.0_f32))
+            .into_any();
     };
     let path = file.path.clone();
     let toggle_file = file.clone();
     checkbox(
-        move || if state.is_viewed(&file) { Checked::Full } else { Checked::Empty },
+        move || {
+            if state.is_viewed(&file) {
+                Checked::Full
+            } else {
+                Checked::Empty
+            }
+        },
         move || {
             let Some(item_id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
                 return;
@@ -356,23 +445,46 @@ fn status_letter(status: ChangeStatus) -> impl IntoView {
     })
 }
 
-fn counts(additions: u32, deletions: u32, binary: bool, muted: impl Fn() -> bool + 'static) -> impl IntoView {
+fn counts(
+    additions: u32,
+    deletions: u32,
+    binary: bool,
+    muted: impl Fn() -> bool + 'static,
+) -> impl IntoView {
     // Two readers of one closure that captures the file, so it is not Copy.
     let muted = Rc::new(muted);
     let muted_deletions = muted.clone();
     Stack::horizontal((
-        Label::derived(move || if binary { "bin".to_string() } else { format!("+{additions}") })
-            .style(move |s| {
-                s.font_size(theme::TEXT_BADGE)
-                    .color(if binary || muted() { theme::FG_SUBTLE } else { theme::STATUS_ADDED })
-            }),
-        Label::derived(move || if binary { String::new() } else { format!("-{deletions}") }).style(
-            move |s| {
-                s.font_size(theme::TEXT_BADGE)
-                    .color(if muted_deletions() { theme::FG_SUBTLE } else { theme::STATUS_DELETED })
-                    .margin_left(5.0)
-            },
-        ),
+        Label::derived(move || {
+            if binary {
+                "bin".to_string()
+            } else {
+                format!("+{additions}")
+            }
+        })
+        .style(move |s| {
+            s.font_size(theme::TEXT_BADGE).color(if binary || muted() {
+                theme::FG_SUBTLE
+            } else {
+                theme::STATUS_ADDED
+            })
+        }),
+        Label::derived(move || {
+            if binary {
+                String::new()
+            } else {
+                format!("-{deletions}")
+            }
+        })
+        .style(move |s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(if muted_deletions() {
+                    theme::FG_SUBTLE
+                } else {
+                    theme::STATUS_DELETED
+                })
+                .margin_left(5.0)
+        }),
     ))
     .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(6.0))
 }
@@ -396,7 +508,11 @@ mod tests {
         ChangedFile {
             path: path.into(),
             old_path: None,
-            status: if blob.is_some() { ChangeStatus::Modified } else { ChangeStatus::Deleted },
+            status: if blob.is_some() {
+                ChangeStatus::Modified
+            } else {
+                ChangeStatus::Deleted
+            },
             additions: 3,
             deletions: 1,
             binary: false,
@@ -431,17 +547,28 @@ mod tests {
         state.set_phase(Phase::Ready);
         state.tab.set(ItemTab::Files);
         state.tree.set(Arc::new(
-            ["src", "src/a.rs", "src/b.rs", "src/c.rs", "src/untouched.rs", "README.md"]
-                .into_iter()
-                .map(|path| TreeEntry::new(path, path == "src"))
-                .collect(),
+            [
+                "src",
+                "src/a.rs",
+                "src/b.rs",
+                "src/c.rs",
+                "src/untouched.rs",
+                "README.md",
+            ]
+            .into_iter()
+            .map(|path| TreeEntry::new(path, path == "src"))
+            .collect(),
         ));
         state.set_changed_files(Arc::new(vec![
             changed("src/a.rs", Some("blob-a")),
             changed("src/b.rs", Some("blob-b")),
             changed("src/c.rs", Some("blob-c")),
         ]));
-        state.viewed.set(Arc::new([("src/b.rs".to_string(), "blob-b".to_string())].into_iter().collect()));
+        state.viewed.set(Arc::new(
+            [("src/b.rs".to_string(), "blob-b".to_string())]
+                .into_iter()
+                .collect(),
+        ));
         state.composer_autofocus.set(false);
         app.sidebar_open.set(false);
         let backend = crate::backend::Backend::detached();
@@ -455,7 +582,11 @@ mod tests {
     /// The top of the tree: header, tab strip, scope button, viewed row,
     /// then the list's 4px of padding.
     fn list_top() -> f64 {
-        theme::REVIEW_HEADER_HEIGHT + theme::TAB_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT + 4.0
+        theme::REVIEW_HEADER_HEIGHT
+            + theme::TAB_HEIGHT
+            + theme::SCOPE_BUTTON_HEIGHT
+            + theme::VIEWED_ROW_HEIGHT
+            + 4.0
     }
 
     /// The centre of a row's name, `row` rows down the tree.
@@ -476,7 +607,10 @@ mod tests {
     /// row, the same 26 square against the same 4px.
     fn filter_center() -> (f64, f64) {
         let x = theme::ACTIVITY_RAIL_WIDTH + theme::RAIL_WIDTH - 4.0 - 13.0;
-        let y = theme::REVIEW_HEADER_HEIGHT + theme::TAB_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT / 2.0;
+        let y = theme::REVIEW_HEADER_HEIGHT
+            + theme::TAB_HEIGHT
+            + theme::SCOPE_BUTTON_HEIGHT
+            + theme::VIEWED_ROW_HEIGHT / 2.0;
         (x, y)
     }
 
@@ -497,7 +631,11 @@ mod tests {
         let (x, y) = checkbox_center(1);
         let under = harness.element_id_at(x, y);
         click(&mut harness, (x, y));
-        assert_eq!(state.active.get(), None, "click at ({x}, {y}) over {under:?} opened the file");
+        assert_eq!(
+            state.active.get(),
+            None,
+            "click at ({x}, {y}) over {under:?} opened the file"
+        );
 
         // The same row, on its name, does open it.
         click(&mut harness, name_center(1));
@@ -511,7 +649,10 @@ mod tests {
     #[test]
     fn a_deletion_has_no_check() {
         let (mut harness, state) = app_harness();
-        state.set_changed_files(Arc::new(vec![changed("src/gone.rs", None), changed("src/a.rs", Some("blob-a"))]));
+        state.set_changed_files(Arc::new(vec![
+            changed("src/gone.rs", None),
+            changed("src/a.rs", Some("blob-a")),
+        ]));
         harness.rebuild();
         harness.paint();
         // src, a.rs, gone.rs: the tree's order, not the list's.
@@ -536,14 +677,22 @@ mod tests {
         assert_eq!(state.active.get().as_deref(), Some("src/untouched.rs"));
         // The changed files keep their check in the whole tree.
         click(&mut harness, checkbox_center(3));
-        assert_eq!(state.active.get().as_deref(), Some("src/untouched.rs"), "the check did not open c.rs");
+        assert_eq!(
+            state.active.get().as_deref(),
+            Some("src/untouched.rs"),
+            "the check did not open c.rs"
+        );
 
         click(&mut harness, filter_center());
         assert!(state.changed_only.get());
         click(&mut harness, name_center(1));
         assert_eq!(state.active.get().as_deref(), Some("src/a.rs"));
         click(&mut harness, name_center(4));
-        assert_eq!(state.active.get().as_deref(), Some("src/a.rs"), "row 4 is gone again");
+        assert_eq!(
+            state.active.get().as_deref(),
+            Some("src/a.rs"),
+            "row 4 is gone again"
+        );
     }
 
     /// A run of lone directories is one row, and that row opens and
@@ -553,12 +702,22 @@ mod tests {
     fn a_folded_run_is_one_row_that_toggles() {
         let (mut harness, state) = app_harness();
         state.tree.set(Arc::new(
-            ["lib", "lib/inner", "lib/inner/deep", "lib/inner/deep/x.rs", "lib/inner/other.rs", "README.md"]
-                .into_iter()
-                .map(|path| TreeEntry::new(path, !path.ends_with(".rs") && !path.ends_with(".md")))
-                .collect(),
+            [
+                "lib",
+                "lib/inner",
+                "lib/inner/deep",
+                "lib/inner/deep/x.rs",
+                "lib/inner/other.rs",
+                "README.md",
+            ]
+            .into_iter()
+            .map(|path| TreeEntry::new(path, !path.ends_with(".rs") && !path.ends_with(".md")))
+            .collect(),
         ));
-        state.set_changed_files(Arc::new(vec![changed("lib/inner/deep/x.rs", Some("blob-x"))]));
+        state.set_changed_files(Arc::new(vec![changed(
+            "lib/inner/deep/x.rs",
+            Some("blob-x"),
+        )]));
         harness.rebuild();
         harness.paint();
         // Row 0 is the run, row 1 the file.
@@ -567,13 +726,20 @@ mod tests {
 
         state.active.set(None);
         click(&mut harness, name_center(0));
-        assert!(!state.expanded.get().contains("lib/inner/deep"), "the run shut at its innermost");
+        assert!(
+            !state.expanded.get().contains("lib/inner/deep"),
+            "the run shut at its innermost"
+        );
         click(&mut harness, name_center(1));
         assert_eq!(state.active.get(), None, "the file is hidden");
 
         click(&mut harness, name_center(0));
         let expanded = state.expanded.get();
-        assert!(expanded.contains("lib") && expanded.contains("lib/inner") && expanded.contains("lib/inner/deep"));
+        assert!(
+            expanded.contains("lib")
+                && expanded.contains("lib/inner")
+                && expanded.contains("lib/inner/deep")
+        );
         click(&mut harness, name_center(1));
         assert_eq!(state.active.get().as_deref(), Some("lib/inner/deep/x.rs"));
 
@@ -618,7 +784,10 @@ mod tests {
         assert_eq!(state.active.get(), None, "the chevron did not open it");
         assert!(state.expanded.get().contains("vendor/lib"));
         click(&mut harness, (x, y));
-        assert!(!state.expanded.get().contains("vendor/lib"), "and shuts it again");
+        assert!(
+            !state.expanded.get().contains("vendor/lib"),
+            "and shuts it again"
+        );
         assert_eq!(state.active.get(), None);
     }
 
@@ -626,7 +795,10 @@ mod tests {
     #[test]
     fn a_directory_row_toggles() {
         let (mut harness, state) = app_harness();
-        assert!(state.expanded.get().contains("src"), "the changed files' directory starts open");
+        assert!(
+            state.expanded.get().contains("src"),
+            "the changed files' directory starts open"
+        );
         click(&mut harness, name_center(0));
         assert!(!state.expanded.get().contains("src"));
         // Shut, its files are gone: row 1 is empty rail.
@@ -659,7 +831,11 @@ mod tests {
         harness.paint();
         state.active.set(None);
         click(&mut harness, name_center(4));
-        assert_eq!(state.active.get(), None, "filtered again: src and a.rs only");
+        assert_eq!(
+            state.active.get(),
+            None,
+            "filtered again: src and a.rs only"
+        );
         click(&mut harness, filter_center());
         assert!(!state.changed_only.get());
     }

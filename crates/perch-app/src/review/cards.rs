@@ -17,9 +17,13 @@ use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::text::FontWeight;
-use floem::views::{Container, Decorators, Empty, Label, ScrollExt, Stack, TooltipExt, dyn_container, dyn_stack};
+use floem::views::{
+    dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack, TooltipExt,
+};
 use perch_git::{LineStatus, Row};
-use perch_github::{Anchor, CommentThread, IssueComment, PullEvent, PullEventKind, Review, ReviewComment};
+use perch_github::{
+    Anchor, CommentThread, IssueComment, PullEvent, PullEventKind, Review, ReviewComment,
+};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -27,7 +31,7 @@ use crate::review::doc::CardId;
 use crate::review::markdown;
 use crate::review::model::{ItemTab, LoadedFile, ReviewState};
 use crate::review::threads::{self, ThreadFace};
-use crate::review::timeline::{Card, LineThread, event_name, verdict};
+use crate::review::timeline::{event_name, verdict, Card, LineThread};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
@@ -49,7 +53,11 @@ pub fn key(card: &Card) -> String {
         }
         Card::Comment(c) => format!("comment:{}:{:?}", c.id, c.updated_at),
         Card::Review { review, comments } => {
-            let id = review.as_ref().map(|r| r.id).or_else(|| comments.first().map(|t| t.comment.id)).unwrap_or(0);
+            let id = review
+                .as_ref()
+                .map(|r| r.id)
+                .or_else(|| comments.first().map(|t| t.comment.id))
+                .unwrap_or(0);
             let edited = comments
                 .iter()
                 .flat_map(|t| std::iter::once(&t.comment).chain(t.replies.iter()))
@@ -111,23 +119,41 @@ struct Byline {
 /// Avatar, login, what they did and when, and whatever the caller puts at
 /// the right: the permalink and Ask about this.
 fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> impl IntoView {
-    let Byline { login, avatar_url, avatar_size, glyph, verb, when } = who;
+    let Byline {
+        login,
+        avatar_url,
+        avatar_size,
+        glyph,
+        verb,
+        when,
+    } = who;
     let seed = login.clone();
     Stack::horizontal((
-        avatar(app, move || avatar_url.clone(), avatar_size, seed).style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
+        avatar(app, move || avatar_url.clone(), avatar_size, seed)
+            .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
         match glyph {
-            Some((icon, color)) => sidebar_glyph(icon, color).style(|s| s.size(14.0, 14.0).margin_right(5.0)).into_any(),
+            Some((icon, color)) => sidebar_glyph(icon, color)
+                .style(|s| s.size(14.0, 14.0).margin_right(5.0))
+                .into_any(),
             None => Empty::new().into_any(),
         },
         Label::derived(move || login.clone()).style(|s| {
-            s.font_size(theme::TEXT_META).font_weight(FontWeight::SEMI_BOLD).color(theme::FG)
+            s.font_size(theme::TEXT_META)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .color(theme::FG)
         }),
         Label::derived(move || match when {
             Some(at) if verb.is_empty() => timefmt::relative(at, app.now.get()),
             Some(at) => format!("{verb} {}", timefmt::relative(at, app.now.get())),
             None => verb.clone(),
         })
-        .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_MUTED).margin_left(6.0).text_ellipsis().min_width(0.0)),
+        .style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::FG_MUTED)
+                .margin_left(6.0)
+                .text_ellipsis()
+                .min_width(0.0)
+        }),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         trailing,
     ))
@@ -145,9 +171,13 @@ fn actions(hovered: RwSignal<bool>, ask: Option<Rc<dyn Fn()>>, url: String) -> f
         if url.is_empty() {
             Empty::new().into_any()
         } else {
-            icon_button(|| SidebarIcon::Link, || theme::FG_SUBTLE, move || open_in_browser(&url))
-                .style(|s| s.size(24.0, 24.0).margin_right(-4.0))
-                .into_any()
+            icon_button(
+                || SidebarIcon::Link,
+                || theme::FG_SUBTLE,
+                move || open_in_browser(&url),
+            )
+            .style(|s| s.size(24.0, 24.0).margin_right(-4.0))
+            .into_any()
         },
     ))
     .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
@@ -158,9 +188,12 @@ fn actions(hovered: RwSignal<bool>, ask: Option<Rc<dyn Fn()>>, url: String) -> f
 /// Hidden rather than absent, so the byline keeps its shape.
 fn ask_button(hovered: RwSignal<bool>, ask: Rc<dyn Fn()>) -> impl IntoView {
     Stack::horizontal((
-        sidebar_glyph(SidebarIcon::Thread, theme::FG_MUTED).style(|s| s.size(12.0, 12.0).margin_right(5.0)),
+        sidebar_glyph(SidebarIcon::Thread, theme::FG_MUTED)
+            .style(|s| s.size(12.0, 12.0).margin_right(5.0)),
         Label::derived(|| "Ask about this".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).margin_bottom(theme::OPTICAL_TEXT_LIFT)
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::FG_MUTED)
+                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
     ))
     .on_event_stop(el::Click, move |_, _| ask())
@@ -190,7 +223,10 @@ pub fn tip<V: IntoView + 'static>(view: V, text: String) -> impl IntoView {
 
 /// The same, with an explanation that follows what it explains: read
 /// each time the tip is shown.
-pub fn tip_with<V: IntoView + 'static>(view: V, text: impl Fn() -> String + Clone + 'static) -> impl IntoView {
+pub fn tip_with<V: IntoView + 'static>(
+    view: V,
+    text: impl Fn() -> String + Clone + 'static,
+) -> impl IntoView {
     view.tooltip(move || {
         let text = text.clone();
         Label::derived(text).style(|s| {
@@ -223,15 +259,35 @@ pub fn avatar_url_for(state: ReviewState, login: &str) -> String {
             if p.author_login == login {
                 return Some(p.author_avatar_url.clone());
             }
-            p.requested_reviewers.iter().find(|r| r.login == login).map(|r| r.avatar_url.clone())
+            p.requested_reviewers
+                .iter()
+                .find(|r| r.login == login)
+                .map(|r| r.avatar_url.clone())
         })
-        .or_else(|| state.issue.with_untracked(|i| i.as_ref().filter(|i| i.author_login == login).map(|i| i.author_avatar_url.clone())))
         .or_else(|| {
-            state.discussion.with_untracked(|d| {
-                d.as_ref().and_then(|d| d.comments.iter().find(|c| c.user == login).map(|c| c.user_avatar_url.clone()))
+            state.issue.with_untracked(|i| {
+                i.as_ref()
+                    .filter(|i| i.author_login == login)
+                    .map(|i| i.author_avatar_url.clone())
             })
         })
-        .or_else(|| state.issue_comments.with_untracked(|c| c.iter().find(|c| c.user == login).map(|c| c.user_avatar_url.clone())))
+        .or_else(|| {
+            state.discussion.with_untracked(|d| {
+                d.as_ref().and_then(|d| {
+                    d.comments
+                        .iter()
+                        .find(|c| c.user == login)
+                        .map(|c| c.user_avatar_url.clone())
+                })
+            })
+        })
+        .or_else(|| {
+            state.issue_comments.with_untracked(|c| {
+                c.iter()
+                    .find(|c| c.user == login)
+                    .map(|c| c.user_avatar_url.clone())
+            })
+        })
         .filter(|u| !u.is_empty())
         .unwrap_or_default()
 }
@@ -239,7 +295,14 @@ pub fn avatar_url_for(state: ReviewState, login: &str) -> String {
 /// The composer, with a comment quoted above the draft and, for a line
 /// comment, anchored to its line. On Conversation the composer is laid in
 /// place and scrolls to itself.
-fn ask_about(app: AppState, state: ReviewState, anchor: Option<Anchor>, author: &str, url: &str, body: &str) {
+fn ask_about(
+    app: AppState,
+    state: ReviewState,
+    anchor: Option<Anchor>,
+    author: &str,
+    url: &str,
+    body: &str,
+) {
     let quote = crate::ask::quote_for(author, url, body);
     state.open_composer(None, anchor, quote, threads::defaults(app));
 }
@@ -249,8 +312,21 @@ fn ask_about(app: AppState, state: ReviewState, anchor: Option<Anchor>, author: 
 // ---------------------------------------------------------------------
 
 /// The pull request's or issue's own text, led by who opened it.
-pub fn description_card(app: AppState, author: String, avatar_url: String, at: Option<jiff::Timestamp>, body: String) -> impl IntoView {
-    let who = Byline { login: author, avatar_url, avatar_size: theme::CARD_AVATAR, glyph: None, verb: "opened".into(), when: at };
+pub fn description_card(
+    app: AppState,
+    author: String,
+    avatar_url: String,
+    at: Option<jiff::Timestamp>,
+    body: String,
+) -> impl IntoView {
+    let who = Byline {
+        login: author,
+        avatar_url,
+        avatar_size: theme::CARD_AVATAR,
+        glyph: None,
+        verb: "opened".into(),
+        when: at,
+    };
     let description = if body.trim().is_empty() {
         Label::derived(|| "No description.".to_string())
             .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG_SUBTLE))
@@ -285,11 +361,19 @@ pub fn comment_card(app: AppState, state: ReviewState, comment: IssueComment) ->
         verb: "commented".into(),
         when: Some(comment.created_at),
     };
-    let (author, url, body) = (comment.user.clone(), comment.html_url.clone(), comment.body.clone());
+    let (author, url, body) = (
+        comment.user.clone(),
+        comment.html_url.clone(),
+        comment.body.clone(),
+    );
     let ask: Rc<dyn Fn()> = Rc::new(move || ask_about(app, state, None, &author, &url, &body));
     track_hover(
         card(
-            byline_strip(byline(app, who, actions(hovered, Some(ask), comment.html_url.clone()))),
+            byline_strip(byline(
+                app,
+                who,
+                actions(hovered, Some(ask), comment.html_url.clone()),
+            )),
             markdown::render(&comment.body).into_any(),
         ),
         hovered,
@@ -324,15 +408,24 @@ pub fn review_card(
         .map(|r| r.user.clone())
         .or_else(|| comments.first().map(|t| t.comment.user.clone()))
         .unwrap_or_default();
-    let summary = review.as_ref().map(|r| r.body.clone()).filter(|b| !b.trim().is_empty());
-    let url = review.as_ref().map(|r| r.html_url.clone()).unwrap_or_default();
+    let summary = review
+        .as_ref()
+        .map(|r| r.body.clone())
+        .filter(|b| !b.trim().is_empty());
+    let url = review
+        .as_ref()
+        .map(|r| r.html_url.clone())
+        .unwrap_or_default();
     let who = Byline {
         login: login.clone(),
         avatar_url: avatar_url_for(state, &login),
         avatar_size: theme::CARD_AVATAR,
         glyph: Some(verdict_glyph(review.as_ref())),
         verb: verdict(review.as_ref()).to_string(),
-        when: review.as_ref().and_then(|r| r.submitted_at).or_else(|| comments.first().map(|t| t.comment.created_at)),
+        when: review
+            .as_ref()
+            .and_then(|r| r.submitted_at)
+            .or_else(|| comments.first().map(|t| t.comment.created_at)),
     };
     let ask = summary.clone().map(|body| {
         let (author, url) = (login.clone(), url.clone());
@@ -347,13 +440,28 @@ pub fn review_card(
         dyn_stack(
             move || comments.clone(),
             |t| t.comment.id,
-            move |t| line_thread_block(app, state, backend.clone(), open_file.clone(), t, ThreadFace::Card),
+            move |t| {
+                line_thread_block(
+                    app,
+                    state,
+                    backend.clone(),
+                    open_file.clone(),
+                    t,
+                    ThreadFace::Card,
+                )
+            },
         )
         .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP)),
     ))
     .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP));
 
-    track_hover(card(byline_strip(byline(app, who, actions(hovered, ask, url))), body.into_any()), hovered)
+    track_hover(
+        card(
+            byline_strip(byline(app, who, actions(hovered, ask, url))),
+            body.into_any(),
+        ),
+        hovered,
+    )
 }
 
 /// A review comment and its replies as one block, each with Ask about
@@ -371,7 +479,9 @@ pub fn line_thread_block(
     face: ThreadFace,
 ) -> floem::AnyView {
     match face {
-        ThreadFace::Column | ThreadFace::Card => located_block(app, state, backend, open_file, thread).into_any(),
+        ThreadFace::Column | ThreadFace::Card => {
+            located_block(app, state, backend, open_file, thread).into_any()
+        }
         ThreadFace::Inline => github_card(app, state, thread).into_any(),
     }
 }
@@ -398,14 +508,21 @@ fn located_block(
     // hunk's: the commented line and the few above it.
     let hunk = hunk_tail(&first.diff_hunk, theme::HUNK_LINES);
     let at_head = state.item.with_untracked(|i| {
-        let checkout = i.as_ref().and_then(|i| i.checkout.as_ref()).map(|c| c.head_sha.clone());
-        let pr = state.pull_request.with_untracked(|p| p.as_ref().map(|p| p.head_sha.clone()));
+        let checkout = i
+            .as_ref()
+            .and_then(|i| i.checkout.as_ref())
+            .map(|c| c.head_sha.clone());
+        let pr = state
+            .pull_request
+            .with_untracked(|p| p.as_ref().map(|p| p.head_sha.clone()));
         checkout.is_some() && checkout == pr
     }) && state.stale_head.with_untracked(Option::is_none);
-    let anchor = anchor_for(state, &first).filter(|_| at_head).map(|a| Anchor {
-        start_line: a.line.saturating_sub(theme::HUNK_LINES as u32 - 1).max(1),
-        ..a
-    });
+    let anchor = anchor_for(state, &first)
+        .filter(|_| at_head)
+        .map(|a| Anchor {
+            start_line: a.line.saturating_sub(theme::HUNK_LINES as u32 - 1).max(1),
+            ..a
+        });
     let lines_path = first.path.clone();
     let loaded = Memo::new(move |_| state.files.with(|m| m.contains_key(&lines_path)));
     if anchor.is_some() && !loaded.get_untracked() && !state.is_loading(&first.path) {
@@ -499,7 +616,9 @@ fn github_card(app: AppState, state: ReviewState, thread: LineThread) -> impl In
             .background(theme::CANVAS)
             .border(1.0)
             .border_radius(theme::RADIUS)
-            .apply_if(collapsed.get(), |s| s.height(theme::CODE_LINE_HEIGHT as f64));
+            .apply_if(collapsed.get(), |s| {
+                s.height(theme::CODE_LINE_HEIGHT as f64)
+            });
         if flashing.get() {
             base.border_color(theme::ACCENT)
         } else {
@@ -515,8 +634,11 @@ fn github_card(app: AppState, state: ReviewState, thread: LineThread) -> impl In
 fn open_github_card(app: AppState, state: ReviewState, thread: LineThread) -> impl IntoView {
     let card_id = CardId::GitHub(thread.comment.id);
     Stack::vertical((
-        threads::chevron_row(state, card_id, false, Empty::new().into_any()).style(|s| s.flex_shrink(0.0_f32)),
-        comments_view(app, state, &thread).scroll().style(threads::card_scroll),
+        threads::chevron_row(state, card_id, false, Empty::new().into_any())
+            .style(|s| s.flex_shrink(0.0_f32)),
+        comments_view(app, state, &thread)
+            .scroll()
+            .style(threads::card_scroll),
     ))
     .style(|s| {
         s.flex_col()
@@ -554,10 +676,24 @@ fn anchor_for(state: ReviewState, comment: &ReviewComment) -> Option<Anchor> {
     let line = comment.line? as u32;
     let commit_sha = state
         .item
-        .with(|i| i.as_ref().and_then(|i| i.checkout.as_ref()).map(|c| c.head_sha.clone()))
-        .or_else(|| state.pull_request.with(|p| p.as_ref().map(|p| p.head_sha.clone())))
+        .with(|i| {
+            i.as_ref()
+                .and_then(|i| i.checkout.as_ref())
+                .map(|c| c.head_sha.clone())
+        })
+        .or_else(|| {
+            state
+                .pull_request
+                .with(|p| p.as_ref().map(|p| p.head_sha.clone()))
+        })
         .unwrap_or_default();
-    Some(Anchor { path: comment.path.clone(), start_line: line, line, side: comment.side, commit_sha })
+    Some(Anchor {
+        path: comment.path.clone(),
+        start_line: line,
+        line,
+        side: comment.side,
+        commit_sha,
+    })
 }
 
 /// `path:line` across the top of a nested block. Click it and Files opens
@@ -576,7 +712,9 @@ fn location_row(
                 state.show_tab(ItemTab::Files);
                 open_file(&path);
                 if let Some(line) = line {
-                    state.jump_to_line.set(Some(line.saturating_sub(1) as usize));
+                    state
+                        .jump_to_line
+                        .set(Some(line.saturating_sub(1) as usize));
                 }
             })
             .style(|s| {
@@ -604,7 +742,13 @@ fn location_row(
 /// One comment inside a review's block: a small byline, then the body. A
 /// reply sits flush under the comment it answers, with a rule down its
 /// left.
-fn nested_comment(app: AppState, state: ReviewState, comment: ReviewComment, anchor: Option<Anchor>, reply: bool) -> impl IntoView {
+fn nested_comment(
+    app: AppState,
+    state: ReviewState,
+    comment: ReviewComment,
+    anchor: Option<Anchor>,
+    reply: bool,
+) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let who = Byline {
         login: comment.user.clone(),
@@ -614,17 +758,28 @@ fn nested_comment(app: AppState, state: ReviewState, comment: ReviewComment, anc
         verb: String::new(),
         when: Some(comment.created_at),
     };
-    let (author, url, body) = (comment.user.clone(), comment.html_url.clone(), comment.body.clone());
-    let ask: Rc<dyn Fn()> = Rc::new(move || ask_about(app, state, anchor.clone(), &author, &url, &body));
+    let (author, url, body) = (
+        comment.user.clone(),
+        comment.html_url.clone(),
+        comment.body.clone(),
+    );
+    let ask: Rc<dyn Fn()> =
+        Rc::new(move || ask_about(app, state, anchor.clone(), &author, &url, &body));
     track_hover(
         Stack::vertical((
-            byline(app, who, actions(hovered, Some(ask), comment.html_url.clone())),
+            byline(
+                app,
+                who,
+                actions(hovered, Some(ask), comment.html_url.clone()),
+            ),
             markdown::render(&comment.body),
         ))
         .style(move |s| {
             let base = s.flex_col().width_full().gap(6.0);
             if reply {
-                base.padding_left(12.0).border_left(theme::REPLY_RULE).border_color(theme::BORDER_MUTED)
+                base.padding_left(12.0)
+                    .border_left(theme::REPLY_RULE)
+                    .border_color(theme::BORDER_MUTED)
             } else {
                 base
             }
@@ -706,23 +861,34 @@ pub fn hunk_tail(hunk: &str, count: usize) -> Vec<CodeLine> {
         if tint != Tint::Removed {
             new = new.map(|n| n + 1);
         }
-        lines.push(CodeLine { number, tint, text: text.to_string() });
+        lines.push(CodeLine {
+            number,
+            tint,
+            text: text.to_string(),
+        });
     }
     let skip = lines.len().saturating_sub(count);
     lines.drain(..skip);
     lines
 }
 
-/// The lines under an anchor, from the file as the editor shows it: the
-/// head lines from `start_line` to `line`, with any removed lines that sit
-/// between them, tinted as the editor tints them. At most `max` of them,
-/// and how many more there were.
+/// The lines under an anchor, from the side it names. A head anchor includes
+/// removed lines spliced between its range, as the editor shows them. A base
+/// anchor reads the retained base text and tints changed/removed lines as
+/// removed. At most `max` lines are returned, plus how many more there were.
 pub fn anchored_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<CodeLine>, usize) {
+    if anchor.side == perch_github::Side::Left {
+        return anchored_base_lines(file, anchor, max);
+    }
     let first = anchor.start_line.saturating_sub(1) as usize;
     let last = anchor.line.saturating_sub(1) as usize;
     let rows = &file.buffer.rows;
-    let from = rows.iter().position(|r| r.head_line().is_some_and(|h| h >= first));
-    let to = rows.iter().rposition(|r| r.head_line().is_some_and(|h| h <= last));
+    let from = rows
+        .iter()
+        .position(|r| r.head_line().is_some_and(|h| h >= first));
+    let to = rows
+        .iter()
+        .rposition(|r| r.head_line().is_some_and(|h| h <= last));
     let (Some(from), Some(to)) = (from, to) else {
         return (Vec::new(), 0);
     };
@@ -743,7 +909,47 @@ pub fn anchored_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<Co
                 ),
                 Row::Deleted { base_line } => (Some(base_line + 1), Tint::Removed),
             };
-            CodeLine { number, tint, text: text.get(d).copied().unwrap_or_default().to_string() }
+            CodeLine {
+                number,
+                tint,
+                text: text.get(d).copied().unwrap_or_default().to_string(),
+            }
+        })
+        .collect();
+    let more = lines.len().saturating_sub(max);
+    lines.truncate(max);
+    (lines, more)
+}
+
+fn anchored_base_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<CodeLine>, usize) {
+    let Some(base) = file.base_buffer.as_ref() else {
+        return (Vec::new(), 0);
+    };
+    let text: Vec<&str> = base.text.lines().collect();
+    let first = anchor.start_line.min(anchor.line).saturating_sub(1) as usize;
+    let last = anchor.start_line.max(anchor.line).saturating_sub(1) as usize;
+    if first >= text.len() {
+        return (Vec::new(), 0);
+    }
+    let last = last.min(text.len() - 1);
+    let removed: std::collections::HashSet<usize> = file
+        .buffer
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Deleted { base_line } => Some(*base_line),
+            Row::Head { .. } => None,
+        })
+        .collect();
+    let mut lines: Vec<CodeLine> = (first..=last)
+        .map(|base_line| CodeLine {
+            number: Some(base_line + 1),
+            tint: if removed.contains(&base_line) {
+                Tint::Removed
+            } else {
+                Tint::Plain
+            },
+            text: text[base_line].to_string(),
         })
         .collect();
     let more = lines.len().saturating_sub(max);
@@ -761,7 +967,12 @@ fn code_lines(lines: Vec<CodeLine>) -> impl IntoView {
         |(i, _)| *i,
         |(_, line)| code_row(line),
     )
-    .style(|s| s.flex_col().width_full().border_bottom(1.0).border_color(theme::BORDER_MUTED))
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .border_bottom(1.0)
+            .border_color(theme::BORDER_MUTED)
+    })
     .into_any()
 }
 
@@ -790,7 +1001,11 @@ fn code_row(line: CodeLine) -> impl IntoView {
         }),
     ))
     .style(move |s| {
-        let base = s.items_center().width_full().height(theme::CODE_ROW_HEIGHT).padding_right(12.0);
+        let base = s
+            .items_center()
+            .width_full()
+            .height(theme::CODE_ROW_HEIGHT)
+            .padding_right(12.0);
         match bg {
             Some(bg) => base.background(bg),
             None => base,
@@ -827,7 +1042,10 @@ fn more_row(more: usize) -> impl IntoView {
 /// `author` is who opened the pull request, for the Opened line.
 pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> impl IntoView {
     let (actor, name) = match &event.kind {
-        PullEventKind::Merged { by: Some(by) } => (Some(by.clone()), event_name(&PullEventKind::Merged { by: None })),
+        PullEventKind::Merged { by: Some(by) } => (
+            Some(by.clone()),
+            event_name(&PullEventKind::Merged { by: None }),
+        ),
         PullEventKind::Opened => (author, event_name(&event.kind)),
         kind => (None, event_name(kind)),
     };
@@ -853,13 +1071,22 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
         match actor {
             Some(actor) => Label::derived(move || actor.clone())
                 .style(|s| {
-                    s.font_size(theme::TEXT_META).font_weight(FontWeight::SEMI_BOLD).color(theme::FG).margin_right(4.0)
+                    s.font_size(theme::TEXT_META)
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .color(theme::FG)
+                        .margin_right(4.0)
                 })
                 .into_any(),
             None => Empty::new().into_any(),
         },
-        Label::derived(move || format!("{name} {}", timefmt::relative(at, app.now.get())))
-            .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_MUTED).text_ellipsis().min_width(0.0)),
+        Label::derived(move || format!("{name} {}", timefmt::relative(at, app.now.get()))).style(
+            |s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG_MUTED)
+                    .text_ellipsis()
+                    .min_width(0.0)
+            },
+        ),
     ))
     .style(move |s| {
         s.items_center()
@@ -887,9 +1114,12 @@ pub fn thread_card(
     let id = thread.id.clone();
     Stack::vertical((
         thread_byline(app, state, &thread),
+        finding_controls(app, state, backend.clone(), thread.id.clone()),
         threads::delete_confirmation(state, backend.clone(), id.clone()),
         match thread.anchor.clone() {
-            Some(anchor) => anchor_block(state, backend.clone(), open_file, anchor, thread.outdated).into_any(),
+            Some(anchor) => {
+                anchor_block(state, backend.clone(), open_file, anchor, thread.outdated).into_any()
+            }
             None => Empty::new().into_any(),
         },
         threads::messages_view(app, state, backend.clone(), id.clone(), ThreadFace::Card),
@@ -908,6 +1138,249 @@ pub fn thread_card(
     })
 }
 
+/// Provenance and explicit lifecycle controls for a durable review finding.
+/// Ordinary user-created threads have no finding record and render no row.
+pub(crate) fn finding_controls(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread_id: String,
+) -> impl IntoView {
+    dyn_container(
+        move || {
+            let item_id = state
+                .item
+                .with(|item| item.as_ref().map(|item| item.id.clone()))?;
+            let summary = match state.historical_findings.get() {
+                Some(findings) => findings
+                    .iter()
+                    .find(|summary| summary.finding.thread_id == thread_id)
+                    .cloned(),
+                None => app.review_finding_for_thread(&item_id, &thread_id),
+            }?;
+            let original_group = summary
+                .finding
+                .created_group_id
+                .as_deref()
+                .and_then(|group_id| {
+                    app.review_groups_for(&item_id)
+                        .iter()
+                        .find(|group| group.group.id == group_id)
+                        .cloned()
+                });
+            Some((
+                summary,
+                state.historical_review.with(Option::is_some),
+                original_group,
+            ))
+        },
+        move |summary| match summary {
+            Some((summary, historical, original_group)) => {
+                let finding = &summary.finding;
+                let reviewer = if summary.attributions.is_empty() {
+                    match (&summary.backend, &summary.model) {
+                        (Some(backend), Some(model)) => format!("{backend} / {model}"),
+                        (Some(backend), None) => backend.clone(),
+                        _ => "reviewer unavailable".to_string(),
+                    }
+                } else {
+                    summary
+                        .attributions
+                        .iter()
+                        .map(|(backend, model)| format!("{backend} / {model}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let seen = if summary.seen_in_reviews.is_empty() {
+                    summary
+                        .original_review_number
+                        .map(|number| format!("review #{number}"))
+                        .unwrap_or_else(|| "original review unavailable".into())
+                } else {
+                    format!(
+                        "seen in {}",
+                        summary
+                            .seen_in_reviews
+                            .iter()
+                            .map(|number| format!("#{number}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let verified = finding
+                    .last_verified_head_sha
+                    .as_deref()
+                    .map(|sha| format!("verified at {}", short_revision(sha)))
+                    .unwrap_or_else(|| "not yet verified".into());
+                let metadata = format!(
+                    "{} · {reviewer} · {seen} · {verified}",
+                    finding_severity_label(summary.severity)
+                );
+                let status = if let Some(canonical) = finding.duplicate_of.as_deref() {
+                    format!("Linked duplicate of {}", short_finding(canonical))
+                } else if let Some(candidate) = finding.possible_duplicate_of.as_deref() {
+                    format!("Possible duplicate of {}", short_finding(candidate))
+                } else if finding.disposition == perch_github::FindingDisposition::Dismissed {
+                    format!(
+                        "Dismissed · {}",
+                        finding
+                            .dismissal_reason
+                            .as_deref()
+                            .unwrap_or("No reason recorded")
+                    )
+                } else if finding.verification == perch_github::FindingVerification::Fixed {
+                    "Verified fixed".to_string()
+                } else {
+                    format!(
+                        "{} · {}",
+                        finding.disposition.name(),
+                        finding.verification.name()
+                    )
+                };
+
+                let finding_id = finding.id.clone();
+                let dismiss_backend = backend.clone();
+                let dismiss = if finding.disposition == perch_github::FindingDisposition::Open
+                    && finding.verification != perch_github::FindingVerification::Fixed
+                    && finding.duplicate_of.is_none()
+                    && !historical
+                {
+                    finding_action("Dismiss", move || {
+                        dismiss_backend
+                            .dismiss_review_finding(&finding_id, "Dismissed by the user in Perch");
+                    })
+                    .into_any()
+                } else {
+                    Empty::new().into_any()
+                };
+
+                let finding_id = finding.id.clone();
+                let reopen_backend = backend.clone();
+                let reopen = if finding.disposition == perch_github::FindingDisposition::Dismissed
+                    && !historical
+                {
+                    finding_action("Reopen", move || {
+                        reopen_backend.reopen_review_finding(&finding_id);
+                    })
+                    .into_any()
+                } else {
+                    Empty::new().into_any()
+                };
+
+                let finding_id = finding.id.clone();
+                let duplicate_backend = backend.clone();
+                let link = match (
+                    finding.duplicate_of.as_ref(),
+                    finding.possible_duplicate_of.as_ref(),
+                ) {
+                    (None, Some(candidate)) if !historical => {
+                        let candidate = candidate.clone();
+                        finding_action("Link duplicate", move || {
+                            duplicate_backend.link_review_duplicate(&finding_id, &candidate);
+                        })
+                        .into_any()
+                    }
+                    _ => Empty::new().into_any(),
+                };
+
+                let finding_id = finding.id.clone();
+                let unlink_backend = backend.clone();
+                let unlink = if finding.duplicate_of.is_some() && !historical {
+                    finding_action("Unlink", move || {
+                        unlink_backend.unlink_review_duplicate(&finding_id);
+                    })
+                    .into_any()
+                } else {
+                    Empty::new().into_any()
+                };
+
+                let original_backend = backend.clone();
+                let view_original = match original_group {
+                    Some(group) if !historical => {
+                        let group_id = group.group.id.clone();
+                        let item_id = group.group.item_id.clone();
+                        finding_action("View original", move || {
+                            let request_id =
+                                original_backend.open_review_snapshot(&item_id, &group_id);
+                            app.begin_historical_review(state, group.clone(), request_id);
+                        })
+                        .into_any()
+                    }
+                    _ => Empty::new().into_any(),
+                };
+
+                Stack::vertical((
+                    Label::derived(move || metadata.clone()).style(|s| {
+                        s.font_size(theme::TEXT_BADGE)
+                            .font_weight(FontWeight::MEDIUM)
+                            .color(theme::FG_MUTED)
+                            .text_wrap()
+                    }),
+                    Stack::horizontal((
+                        Label::derived(move || status.clone())
+                            .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_SUBTLE)),
+                        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+                        dismiss,
+                        reopen,
+                        link,
+                        unlink,
+                        view_original,
+                    ))
+                    .style(|s| s.items_center().gap(6.0).width_full()),
+                ))
+                .style(|s| {
+                    s.flex_col()
+                        .width_full()
+                        .gap(5.0)
+                        .padding(8.0)
+                        .background(theme::CANVAS_SUBTLE)
+                        .border_radius(theme::RADIUS)
+                })
+                .into_any()
+            }
+            None => Empty::new().into_any(),
+        },
+    )
+}
+
+fn finding_action(label: &'static str, action: impl Fn() + 'static) -> impl IntoView {
+    Label::derived(move || label.to_string())
+        .on_event_stop(el::Click, move |_, _| action())
+        .style(|s| {
+            clickable(s)
+                .height(24.0)
+                .padding_horiz(8.0)
+                .items_center()
+                .font_size(theme::TEXT_BADGE)
+                .font_weight(FontWeight::MEDIUM)
+                .color(theme::FG_MUTED)
+                .background(theme::CANVAS)
+                .border(1.0)
+                .border_color(theme::BORDER)
+                .border_radius(theme::RADIUS)
+                .selectable(false)
+        })
+}
+
+fn finding_severity_label(severity: perch_github::FindingSeverity) -> &'static str {
+    match severity {
+        perch_github::FindingSeverity::Unknown => "Finding",
+        perch_github::FindingSeverity::Note => "Note",
+        perch_github::FindingSeverity::Low => "Low",
+        perch_github::FindingSeverity::Medium => "Medium",
+        perch_github::FindingSeverity::High => "High",
+        perch_github::FindingSeverity::Critical => "Critical",
+    }
+}
+
+fn short_revision(value: &str) -> &str {
+    &value[..value.len().min(8)]
+}
+
+fn short_finding(value: &str) -> String {
+    format!("finding {}", &value[..value.len().min(8)])
+}
+
 /// "You asked Sonnet · High", the time, Local, and the thread's menu.
 fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> impl IntoView {
     let question = thread.messages.first();
@@ -919,7 +1392,10 @@ fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> i
             let effort = perch_agent::Effort::parse(&run.effort)
                 .map(|e| e.label().to_string())
                 .unwrap_or_else(|| run.effort.clone());
-            format!("asked {} \u{00b7} {effort}", threads::model_label(&run.model))
+            format!(
+                "asked {} \u{00b7} {effort}",
+                threads::model_label(&run.model)
+            )
         }
         None => "asked".to_string(),
     };
@@ -930,13 +1406,30 @@ fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> i
     let viewer = move || app.viewer.get().filter(|(l, _)| !l.is_empty());
     let seed = viewer().map(|(l, _)| l).unwrap_or_else(|| "you".into());
     Stack::horizontal((
-        avatar(app, move || viewer().map(|(_, a)| a).unwrap_or_default(), theme::CARD_AVATAR, seed)
-            .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
-        Label::derived(move || viewer().map(|(l, _)| l).unwrap_or_else(|| "You".into())).style(|s| {
-            s.font_size(theme::TEXT_META).font_weight(FontWeight::SEMI_BOLD).color(theme::FG)
+        avatar(
+            app,
+            move || viewer().map(|(_, a)| a).unwrap_or_default(),
+            theme::CARD_AVATAR,
+            seed,
+        )
+        .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
+        Label::derived(move || viewer().map(|(l, _)| l).unwrap_or_else(|| "You".into())).style(
+            |s| {
+                s.font_size(theme::TEXT_META)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .color(theme::FG)
+            },
+        ),
+        Label::derived(move || {
+            format!("{asked} \u{00b7} {}", timefmt::relative(at, app.now.get()))
+        })
+        .style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::FG_MUTED)
+                .margin_left(6.0)
+                .text_ellipsis()
+                .min_width(0.0)
         }),
-        Label::derived(move || format!("{asked} \u{00b7} {}", timefmt::relative(at, app.now.get())))
-            .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_MUTED).margin_left(6.0).text_ellipsis().min_width(0.0)),
         local_chip(),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         threads::thread_menu(state, thread.id.clone(), theme::THREAD_MENU),
@@ -989,7 +1482,14 @@ fn anchor_block(
     }
     let lines_anchor = anchor.clone();
     Stack::vertical((
-        location_row(state, open_file, anchor.path.clone(), Some(anchor.start_line as u64), anchor.label(), outdated),
+        location_row(
+            state,
+            open_file,
+            anchor.path.clone(),
+            Some(anchor.start_line as u64),
+            anchor.label(),
+            outdated,
+        ),
         dyn_container(
             move || loaded.get(),
             move |loaded| {
@@ -1000,7 +1500,9 @@ fn anchor_block(
                     return Empty::new().into_any();
                 };
                 let (lines, more) = anchored_lines(&file, &lines_anchor, theme::ANCHOR_LINES);
-                Stack::vertical((code_lines(lines), more_row(more))).style(|s| s.flex_col().width_full()).into_any()
+                Stack::vertical((code_lines(lines), more_row(more)))
+                    .style(|s| s.flex_col().width_full())
+                    .into_any()
             },
         )
         .style(|s| s.width_full()),
@@ -1024,10 +1526,15 @@ fn anchor_block(
 /// question will go in, with its placeholder, before it is a box.
 pub fn ask_box(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
-        sidebar_glyph(SidebarIcon::Thread, theme::FG_SUBTLE).style(|s| s.size(13.0, 13.0).margin_right(8.0)),
-        Label::derived(move || format!("Ask about this {}…", threads::subject_word(state))).style(|s| {
-            s.font_size(theme::TEXT_BODY).color(theme::FG_SUBTLE).selectable(false)
-        }),
+        sidebar_glyph(SidebarIcon::Thread, theme::FG_SUBTLE)
+            .style(|s| s.size(13.0, 13.0).margin_right(8.0)),
+        Label::derived(move || format!("Ask about this {}…", threads::subject_word(state))).style(
+            |s| {
+                s.font_size(theme::TEXT_BODY)
+                    .color(theme::FG_SUBTLE)
+                    .selectable(false)
+            },
+        ),
     ))
     .on_event_stop(el::Click, move |_, _| {
         state.open_composer(None, None, String::new(), threads::defaults(app));
@@ -1060,15 +1567,35 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                CodeLine { number: Some(41), tint: Tint::Removed, text: "let b = 2;".into() },
-                CodeLine { number: Some(41), tint: Tint::Added, text: "let b = 3;".into() },
-                CodeLine { number: Some(42), tint: Tint::Added, text: "let c = 4;".into() },
-                CodeLine { number: Some(43), tint: Tint::Plain, text: "let d = 5;".into() },
+                CodeLine {
+                    number: Some(41),
+                    tint: Tint::Removed,
+                    text: "let b = 2;".into()
+                },
+                CodeLine {
+                    number: Some(41),
+                    tint: Tint::Added,
+                    text: "let b = 3;".into()
+                },
+                CodeLine {
+                    number: Some(42),
+                    tint: Tint::Added,
+                    text: "let c = 4;".into()
+                },
+                CodeLine {
+                    number: Some(43),
+                    tint: Tint::Plain,
+                    text: "let d = 5;".into()
+                },
             ]
         );
         // The whole hunk when it is short, and nothing from nothing.
         assert_eq!(hunk_tail(hunk, 10).len(), 5);
-        assert_eq!(hunk_tail(hunk, 10)[0].number, Some(40), "a context line counts on the head side");
+        assert_eq!(
+            hunk_tail(hunk, 10)[0].number,
+            Some(40),
+            "a context line counts on the head side"
+        );
         assert!(hunk_tail("", 4).is_empty());
         assert!(hunk_tail("@@ -1 +1 @@", 4).is_empty());
     }
@@ -1076,7 +1603,10 @@ mod tests {
     #[test]
     fn a_hunk_without_a_header_has_lines_but_no_numbers() {
         let lines = hunk_tail(" a\n+b", 4);
-        assert_eq!(lines.iter().map(|l| l.number).collect::<Vec<_>>(), [None, None]);
+        assert_eq!(
+            lines.iter().map(|l| l.number).collect::<Vec<_>>(),
+            [None, None]
+        );
         assert_eq!(lines[1].tint, Tint::Added);
     }
 
@@ -1091,16 +1621,51 @@ mod tests {
             perch_git::Scope::Branch,
             String::new(),
         );
-        let anchor = |start, line| Anchor { path: "src/x.rs".into(), start_line: start, line, side: perch_github::Side::Right, commit_sha: "h".into() };
+        let anchor = |start, line| Anchor {
+            path: "src/x.rs".into(),
+            start_line: start,
+            line,
+            side: perch_github::Side::Right,
+            commit_sha: "h".into(),
+        };
         let (lines, more) = anchored_lines(&file, &anchor(1, 3), 8);
         assert_eq!(more, 0);
         assert_eq!(
-            lines.iter().map(|l| (l.number, l.tint, l.text.as_str())).collect::<Vec<_>>(),
-            [(Some(1), Tint::Plain, "a"), (Some(2), Tint::Removed, "b"), (Some(2), Tint::Modified, "b2"), (Some(3), Tint::Plain, "c")]
+            lines
+                .iter()
+                .map(|l| (l.number, l.tint, l.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Some(1), Tint::Plain, "a"),
+                (Some(2), Tint::Removed, "b"),
+                (Some(2), Tint::Modified, "b2"),
+                (Some(3), Tint::Plain, "c")
+            ]
         );
         let (lines, more) = anchored_lines(&file, &anchor(1, 4), 2);
-        assert_eq!((lines.len(), more), (2, 3), "cut to the cap, and the rest counted");
-        assert!(anchored_lines(&file, &anchor(40, 50), 8).0.is_empty(), "past the end is nothing");
+        assert_eq!(
+            (lines.len(), more),
+            (2, 3),
+            "cut to the cap, and the rest counted"
+        );
+        assert!(
+            anchored_lines(&file, &anchor(40, 50), 8).0.is_empty(),
+            "past the end is nothing"
+        );
+
+        // The same numeric line on the base side is the old b alone, not
+        // the old/new pair that occupies head line 2 in the unified view.
+        let mut base_anchor = anchor(2, 2);
+        base_anchor.side = perch_github::Side::Left;
+        let (lines, more) = anchored_lines(&file, &base_anchor, 8);
+        assert_eq!(more, 0);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| (line.number, line.tint, line.text.as_str()))
+                .collect::<Vec<_>>(),
+            [(Some(2), Tint::Removed, "b")]
+        );
     }
 
     #[test]
@@ -1117,8 +1682,19 @@ mod tests {
                 html_url: String::new(),
             })
         };
-        assert_ne!(key(&comment(None)), key(&comment(Some("2026-09-16T09:14:00Z"))));
-        let event = |kind| Card::Event(PullEvent { kind, at: at("2026-09-15T09:14:00Z") });
-        assert_ne!(key(&event(PullEventKind::Opened)), key(&event(PullEventKind::Closed)));
+        assert_ne!(
+            key(&comment(None)),
+            key(&comment(Some("2026-09-16T09:14:00Z")))
+        );
+        let event = |kind| {
+            Card::Event(PullEvent {
+                kind,
+                at: at("2026-09-15T09:14:00Z"),
+            })
+        };
+        assert_ne!(
+            key(&event(PullEventKind::Opened)),
+            key(&event(PullEventKind::Closed))
+        );
     }
 }

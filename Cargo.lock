@@ -3679,10 +3679,12 @@ dependencies = [
  "perch-agent",
  "perch-git",
  "perch-github",
+ "perch-knowledge",
  "perch-lsp",
  "perch-syntax",
  "pulldown-cmark",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
@@ -3699,6 +3701,7 @@ dependencies = [
  "jiff",
  "perch-github",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3728,6 +3731,15 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+]
+
+[[package]]
+name = "perch-knowledge"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

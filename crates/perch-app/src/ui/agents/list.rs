@@ -19,8 +19,9 @@ use crate::theme;
 use crate::ui::widgets::{clickable, sidebar_glyph};
 
 use super::model::{
-    active_groups, elapsed_label, history_runs, AgentRunGroup, AgentRunStatus, AgentRunSummary,
-    AgentsTab, BackendFilter, OutcomeFilter, WorktreeFilter,
+    active_groups_with_reviews, elapsed_label, group_review_runs, history_runs_with_reviews,
+    AgentRetryTarget, AgentReviewRunGroup, AgentRunEntry, AgentRunGroup, AgentRunStatus,
+    AgentRunSummary, AgentsTab, BackendFilter, OutcomeFilter, WorktreeFilter,
 };
 use super::{metadata, navigate_to_source, request_agent_runs, status_color, text_action};
 
@@ -75,9 +76,24 @@ fn tabs(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                     AgentsTab::Active => state
                         .agent_runs
                         .with(|runs| runs.iter().filter(|run| run.status.is_active()).count()),
-                    AgentsTab::History => state
-                        .agent_runs
-                        .with(|runs| runs.iter().filter(|run| !run.status.is_active()).count()),
+                    AgentsTab::History => {
+                        let groups = state.review_groups.with(|all| {
+                            all.values()
+                                .flat_map(|groups| groups.iter().cloned())
+                                .collect::<Vec<_>>()
+                        });
+                        state.agent_runs.with(|runs| {
+                            history_runs_with_reviews(
+                                runs,
+                                None,
+                                WorktreeFilter::All,
+                                BackendFilter::All,
+                                OutcomeFilter::All,
+                                &groups,
+                            )
+                            .len()
+                        })
+                    }
                 },
                 move |count| {
                     if count == 0 {
@@ -270,10 +286,21 @@ fn active(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl In
                 state.agents_backend_filter.get(),
                 state.agent_history_loading.get(),
                 state.agent_history_load_failed.get(),
+                state.review_groups.get(),
             )
         },
-        move |(runs, current, worktrees, backends, loading, failed)| {
-            let groups = active_groups(&runs, current.as_deref(), worktrees, backends);
+        move |(runs, current, worktrees, backends, loading, failed, review_groups)| {
+            let summaries = review_groups
+                .values()
+                .flat_map(|groups| groups.iter().cloned())
+                .collect::<Vec<_>>();
+            let groups = active_groups_with_reviews(
+                &runs,
+                current.as_deref(),
+                worktrees,
+                backends,
+                &summaries,
+            );
             if groups.is_empty() {
                 if loading {
                     return empty_state("Loading agents…", "Reading active and queued work.")
@@ -301,7 +328,15 @@ fn active(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl In
                             .collect::<Vec<_>>(),
                     )
                 },
-                move |group| group_view(state, review, group_backend.clone(), group),
+                move |group| {
+                    let summaries = group
+                        .item_id
+                        .as_deref()
+                        .and_then(|item_id| review_groups.get(item_id))
+                        .map(|summaries| summaries.as_ref().clone())
+                        .unwrap_or_default();
+                    group_view(state, review, group_backend.clone(), group, summaries)
+                },
             )
             .style(|s| s.flex_col().width_full().padding_bottom(12.0))
             .scroll()
@@ -317,11 +352,12 @@ fn group_view(
     review: ReviewState,
     backend: Rc<Backend>,
     group: AgentRunGroup,
+    review_groups: Vec<crate::review::model::ReviewGroupSummary>,
 ) -> impl IntoView {
     let count = group.runs.len();
     let label = group.label.clone();
     let current = group.current;
-    let runs = group.runs;
+    let entries = group_review_runs(&group.runs, &review_groups);
     Stack::vertical((
         Stack::horizontal((
             dyn_container(
@@ -366,9 +402,9 @@ fn group_view(
                 .padding_bottom(5.0)
         }),
         dyn_stack(
-            move || runs.clone(),
-            |run| (run.id.clone(), run.status, run.latest_activity.clone()),
-            move |run| run_row(state, review, backend.clone(), run),
+            move || entries.clone(),
+            |entry| entry.key(),
+            move |entry| run_entry(state, review, backend.clone(), entry),
         )
         .style(|s| s.flex_col().width_full()),
     ))
@@ -387,12 +423,35 @@ fn history(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl I
                 state.agent_history_loading.get(),
                 state.agent_history_has_more.get(),
                 state.agent_history_load_failed.get(),
+                state.review_groups.get(),
             )
         },
-        move |(runs, current, worktrees, backends, outcomes, loading, has_more, failed)| {
-            let rows = history_runs(&runs, current.as_deref(), worktrees, backends, outcomes);
+        move |(
+            runs,
+            current,
+            worktrees,
+            backends,
+            outcomes,
+            loading,
+            has_more,
+            failed,
+            review_groups,
+        )| {
+            let summaries = review_groups
+                .values()
+                .flat_map(|groups| groups.iter().cloned())
+                .collect::<Vec<_>>();
+            let rows = history_runs_with_reviews(
+                &runs,
+                current.as_deref(),
+                worktrees,
+                backends,
+                outcomes,
+                &summaries,
+            );
             let has_rows = !rows.is_empty();
             let loaded = runs.iter().filter(|run| !run.status.is_active()).count();
+            let entries = group_review_runs(&rows, &summaries);
             let more_backend = backend.clone();
             let row_backend = backend.clone();
             let body = if rows.is_empty() {
@@ -416,9 +475,9 @@ fn history(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl I
                 }
             } else {
                 dyn_stack(
-                    move || rows.clone(),
-                    |run| (run.id.clone(), run.status, run.ended_at),
-                    move |run| run_row(state, review, row_backend.clone(), run),
+                    move || entries.clone(),
+                    |entry| entry.key(),
+                    move |entry| run_entry(state, review, row_backend.clone(), entry),
                 )
                 .style(|s| s.flex_col().width_full())
                 .into_any()
@@ -461,6 +520,198 @@ fn history(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl I
         },
     )
     .style(|s| s.size_full().min_height(0.0))
+}
+
+fn run_entry(
+    state: AppState,
+    review: ReviewState,
+    backend: Rc<Backend>,
+    entry: AgentRunEntry,
+) -> floem::AnyView {
+    match entry {
+        AgentRunEntry::Run(run) => run_row(state, review, backend, run).into_any(),
+        AgentRunEntry::ReviewGroup(group) => {
+            review_group_row(state, review, backend, group).into_any()
+        }
+    }
+}
+
+fn review_group_row(
+    state: AppState,
+    review: ReviewState,
+    backend: Rc<Backend>,
+    group: AgentReviewRunGroup,
+) -> impl IntoView {
+    let group_key = group.key.clone();
+    let icon_key = group_key.clone();
+    let toggle_key = group_key.clone();
+    let keyboard_key = group_key.clone();
+    let debug_key = group_key.clone();
+    let child_runs = group.runs.clone();
+    let child_backend = backend.clone();
+    let count = child_runs.len();
+    let (title, status) = match group.summary.as_ref() {
+        Some(summary) => {
+            let title = format!(
+                "Review #{} · {} · against {}",
+                summary.group.number,
+                short_sha(&summary.snapshot.head_sha),
+                summary.snapshot.requested_base_ref
+            );
+            let status = if summary.group.status.is_active() {
+                let complete = summary
+                    .attempts
+                    .iter()
+                    .filter(|attempt| attempt.phase.is_terminal())
+                    .count();
+                format!("{complete} of {} complete", summary.attempts.len())
+            } else {
+                title_case_status(summary.group.status.name())
+            };
+            (title, status)
+        }
+        None => (
+            "Worktree review".to_string(),
+            format!("{count} reviewer{}", if count == 1 { "" } else { "s" }),
+        ),
+    };
+    let representative = child_runs.first().cloned();
+    let view = match representative {
+        Some(run)
+            if run.source_available
+                && run
+                    .item_id
+                    .as_deref()
+                    .is_some_and(|item_id| state.item(item_id).is_some()) =>
+        {
+            let view_backend = backend.clone();
+            text_action(
+                || "View".to_string(),
+                true,
+                move || navigate_to_source(state, review, &view_backend, &run),
+            )
+            .into_any()
+        }
+        _ => Empty::new().into_any(),
+    };
+    let toggle = move |key: &str| {
+        state.collapsed_agent_review_groups.update(|collapsed| {
+            if !collapsed.insert(key.to_string()) {
+                collapsed.remove(key);
+            }
+        });
+    };
+
+    let header = Stack::horizontal((
+        dyn_container(
+            move || {
+                state
+                    .collapsed_agent_review_groups
+                    .with(|collapsed| collapsed.contains(&icon_key))
+            },
+            move |collapsed| {
+                sidebar_glyph(
+                    if collapsed {
+                        SidebarIcon::ChevronRight
+                    } else {
+                        SidebarIcon::ChevronDown
+                    },
+                    theme::FG_SUBTLE,
+                )
+                .style(|s| s.size(10.0, 10.0).pointer_events_none())
+            },
+        ),
+        Stack::vertical((
+            Label::derived(move || title.clone()).style(|s| {
+                s.font_size(theme::TEXT_BODY)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .color(theme::FG)
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .width_full()
+                    .selectable(false)
+                    .pointer_events_none()
+            }),
+            Label::derived(move || status.clone()).style(|s| {
+                s.font_size(theme::TEXT_SECTION)
+                    .font_weight(FontWeight::MEDIUM)
+                    .color(theme::FG_MUTED)
+                    .selectable(false)
+                    .pointer_events_none()
+            }),
+        ))
+        .style(|s| s.flex_col().gap(2.0).min_width(0.0).flex_grow(1.0_f32)),
+        view,
+    ))
+    .on_event_stop(el::Click, move |_, _| toggle(&toggle_key))
+    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+        if matches!(key.code, Code::Enter | Code::Space) {
+            toggle(&keyboard_key);
+            EventPropagation::Stop
+        } else {
+            EventPropagation::Continue
+        }
+    })
+    .style(|s| {
+        clickable(s)
+            .width_full()
+            .min_height(48.0)
+            .items_center()
+            .gap(9.0)
+            .padding_left(14.0)
+            .padding_right(10.0)
+            .padding_vert(8.0)
+            .background(theme::CANVAS_SUBTLE)
+            .border_bottom(1.0)
+            .border_color(theme::BORDER_MUTED)
+            .keyboard_navigable()
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .hover(|s| s.background(theme::CANVAS_HOVER))
+    })
+    .debug_name(format!("agent-review-group:{debug_key}"));
+
+    let children = dyn_container(
+        move || {
+            state
+                .collapsed_agent_review_groups
+                .with(|collapsed| collapsed.contains(&group_key))
+        },
+        move |collapsed| {
+            if collapsed {
+                Empty::new().into_any()
+            } else {
+                let child_backend = child_backend.clone();
+                let visible_runs = child_runs.clone();
+                dyn_stack(
+                    move || visible_runs.clone(),
+                    |run| (run.id.clone(), run.status, run.latest_activity.clone()),
+                    move |run| run_row(state, review, child_backend.clone(), run),
+                )
+                .style(|s| {
+                    s.flex_col()
+                        .width_full()
+                        .margin_left(12.0)
+                        .border_left(1.0)
+                        .border_color(theme::BORDER)
+                })
+                .into_any()
+            }
+        },
+    );
+
+    Stack::vertical((header, children)).style(|s| s.flex_col().width_full())
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+fn title_case_status(status: &str) -> String {
+    let mut chars = status.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
 }
 
 fn run_row(
@@ -693,15 +944,20 @@ fn row_actions(
             )
             .into_any()
         }
-        status if status.may_retry() => {
-            let id = run.id.clone();
-            text_action(
+        status if status.may_retry() => match run.retry_target() {
+            AgentRetryTarget::ReviewAttempt(attempt_id) => text_action(
+                || "Retry".to_string(),
+                false,
+                move || backend.retry_review_attempt(&attempt_id),
+            )
+            .into_any(),
+            AgentRetryTarget::Run(id) => text_action(
                 || "Retry".to_string(),
                 false,
                 move || backend.retry_run(&id),
             )
-            .into_any()
-        }
+            .into_any(),
+        },
         AgentRunStatus::Stopping => Label::derived(|| "Stopping…".to_string())
             .style(|s| {
                 s.font_size(theme::TEXT_BADGE)

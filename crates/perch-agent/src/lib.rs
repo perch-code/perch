@@ -9,6 +9,7 @@
 mod codex;
 mod discover;
 mod parse;
+mod review;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +31,12 @@ pub use discover::{
     codex_catalog, codex_default_model, find_binary, parse_codex_catalog, CodexModel,
 };
 pub use parse::{parse_line, summarize_tool_call};
+pub use review::{
+    assess_review_capability, detect_review_capability, extract_review, review_output_schema,
+    CliVersion, EvidenceSpan, ReviewCapability, ReviewEffort, ReviewExtraction, ReviewFinding,
+    ReviewLocation, ReviewManifest, ReviewManifestEntry, ReviewSeverity, ReviewSide, ReviewSpec,
+    ReviewVerificationSpec, REVIEW_ADAPTER_VERSION, REVIEW_OUTPUT_FORMAT_VERSION,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -393,6 +400,8 @@ pub enum RunEvent {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("invalid review invocation: {0}")]
+    InvalidReview(String),
     #[error("could not start {binary}: {source}")]
     Spawn {
         binary: PathBuf,
@@ -688,11 +697,42 @@ impl Run {
     /// Must be called on a tokio runtime. Exactly one of `Finished`,
     /// `Failed`, and `Stopped` is the last event sent.
     pub fn spawn(spec: RunSpec, events: UnboundedSender<RunEvent>) -> Result<Run, Error> {
+        let args = spec.args();
+        Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, events)
+    }
+
+    /// Start an installed CLI's native local code-review operation using
+    /// the same process-tree lifetime, cancellation, event parsing, and
+    /// watchdog guarantees as an ordinary question.
+    pub fn spawn_review(spec: ReviewSpec, events: UnboundedSender<RunEvent>) -> Result<Run, Error> {
+        spec.validate().map_err(Error::InvalidReview)?;
+        let args = spec.args();
+        Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, events)
+    }
+
+    /// Start a structured prior-finding verification pass without inheriting
+    /// repository instructions, hooks, plugins, MCP servers, or approvals.
+    pub fn spawn_review_verification(
+        spec: ReviewVerificationSpec,
+        events: UnboundedSender<RunEvent>,
+    ) -> Result<Run, Error> {
+        spec.validate().map_err(Error::InvalidReview)?;
+        let args = spec.args();
+        Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, events)
+    }
+
+    fn spawn_process(
+        backend: Backend,
+        binary: PathBuf,
+        cwd: PathBuf,
+        args: Vec<String>,
+        events: UnboundedSender<RunEvent>,
+    ) -> Result<Run, Error> {
         let started_at = Instant::now();
-        let mut command = Command::new(&spec.binary);
+        let mut command = Command::new(&binary);
         command
-            .args(spec.args())
-            .current_dir(&spec.cwd)
+            .args(args)
+            .current_dir(&cwd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -703,7 +743,7 @@ impl Run {
         #[cfg(unix)]
         command.process_group(0);
         let mut child = command.spawn().map_err(|source| Error::Spawn {
-            binary: spec.binary.clone(),
+            binary: binary.clone(),
             source,
         })?;
 
@@ -718,10 +758,7 @@ impl Run {
                 tokio::spawn(async move {
                     let _ = child.wait().await;
                 });
-                return Err(Error::Watchdog {
-                    binary: spec.binary.clone(),
-                    source,
-                });
+                return Err(Error::Watchdog { binary, source });
             }
         };
         let cancel = Arc::new(Cancellation {
@@ -740,7 +777,7 @@ impl Run {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             let mut stderr_task = tokio::spawn(read_stderr_tail(stderr));
-            let mut parser = Parser::for_backend(spec.backend);
+            let mut parser = Parser::for_backend(backend);
             let exit = drive_until_exit(
                 &mut child,
                 process_group,

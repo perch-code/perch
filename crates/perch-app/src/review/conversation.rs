@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
+use floem::style::CursorStyle;
 use floem::text::FontWeight;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
@@ -17,12 +18,13 @@ use floem::views::{
 
 use crate::backend::Backend;
 use crate::review::cards;
-use crate::review::model::ReviewState;
+use crate::review::model::{ReviewFindingFilter, ReviewState};
 use crate::review::threads::{self, ThreadFace};
 use crate::review::timeline::{timeline, Card};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::widgets::clickable;
 
 /// One scrolling column, centred, on the page grey.
 pub fn view(
@@ -42,7 +44,13 @@ pub fn view(
         let discussion = state.discussion.get();
         let issue = state.issue.get();
         let comments = state.issue_comments.get();
-        let threads = state.comment_threads.get();
+        let threads = state.comment_threads.with(|threads| {
+            threads
+                .iter()
+                .filter(|thread| state.thread_visible(&thread.id))
+                .cloned()
+                .collect::<Vec<_>>()
+        });
         let cards = timeline(
             pull.as_deref(),
             discussion.as_deref(),
@@ -70,11 +78,16 @@ pub fn view(
         state.comment_threads.with(|t| t.is_empty())
             && state.pull_request.with(Option::is_none)
             && state.issue.with(Option::is_none)
+            && state
+                .item
+                .with(|item| item.as_ref().map(|item| item.id.clone()))
+                .is_none_or(|item_id| app.review_groups_for(&item_id).is_empty())
     };
 
     Container::new(
         Stack::vertical((
             conversation_title(state),
+            finding_filters(app, state),
             dyn_stack(
                 cards,
                 |(card, gap)| format!("{}:{gap}", cards::key(card)),
@@ -90,6 +103,7 @@ pub fn view(
                 },
             )
             .style(|s| s.flex_col().width_full()),
+            crate::review::review_launch::history(app, state, backend.clone()),
             Label::derived(|| "Nothing here yet. Ask about the branch below.".to_string()).style(
                 move |s| {
                     // Hidden rather than absent, so it takes no share of the
@@ -130,6 +144,86 @@ pub fn view(
             .background(theme::CANVAS)
             .focusable()
     })
+}
+
+fn finding_filters(app: AppState, state: ReviewState) -> impl IntoView {
+    dyn_container(
+        move || {
+            let item_id = state
+                .item
+                .with(|item| item.as_ref().map(|item| item.id.clone()))?;
+            let findings = state
+                .historical_findings
+                .get()
+                .unwrap_or_else(|| app.review_findings_for(&item_id));
+            (!findings.is_empty()).then_some((item_id, findings))
+        },
+        move |value| match value {
+            Some((item_id, findings)) => {
+                let open = findings
+                    .iter()
+                    .filter(|finding| finding.is_actionable())
+                    .count();
+                let total = findings.len();
+                let open_findings = findings.clone();
+                let all_findings = findings;
+                Stack::horizontal((
+                    Label::derived(move || format!("Review findings · {open} open")).style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .font_weight(FontWeight::MEDIUM)
+                            .color(theme::FG_MUTED)
+                            .margin_right(4.0)
+                    }),
+                    finding_filter_button("Open", ReviewFindingFilter::Open, state, open_findings),
+                    finding_filter_button("All", ReviewFindingFilter::All, state, all_findings),
+                    Label::derived(move || format!("{total} total"))
+                        .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_SUBTLE)),
+                ))
+                .debug_name(format!("review-finding-filters:{item_id}"))
+                .style(|s| {
+                    s.items_center()
+                        .gap(6.0)
+                        .padding_bottom(theme::CONVERSATION_ENTRY_PADDING)
+                        .border_bottom(1.0)
+                        .border_color(theme::BORDER_MUTED)
+                })
+                .into_any()
+            }
+            None => Empty::new().into_any(),
+        },
+    )
+}
+
+fn finding_filter_button(
+    label: &'static str,
+    filter: ReviewFindingFilter,
+    state: ReviewState,
+    findings: std::sync::Arc<Vec<crate::review::model::ReviewFindingSummary>>,
+) -> impl IntoView {
+    Label::derived(move || label.to_string())
+        .on_event_stop(el::Click, move |_, _| {
+            state.apply_review_finding_filter(filter, &findings);
+        })
+        .style(move |s| {
+            clickable(s)
+                .height(24.0)
+                .padding_horiz(8.0)
+                .items_center()
+                .font_size(theme::TEXT_BADGE)
+                .color(if state.review_finding_filter.get() == filter {
+                    theme::FG
+                } else {
+                    theme::FG_MUTED
+                })
+                .background(if state.review_finding_filter.get() == filter {
+                    theme::BADGE_BG
+                } else {
+                    theme::CANVAS
+                })
+                .border_radius(theme::RADIUS)
+                .cursor(CursorStyle::Pointer)
+                .selectable(false)
+        })
 }
 
 /// The full item title belongs in the reading surface as well as the compact

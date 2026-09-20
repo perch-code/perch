@@ -8,7 +8,7 @@ use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalWith};
 use floem::style::CursorStyle;
 use floem::text::FontWeight;
-use floem::views::{Container, Decorators, Empty, Label, Stack, dyn_container, dyn_stack};
+use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
 use perch_github::{CheckState, Item, ItemKind, SubjectState};
 
 use crate::backend::Backend;
@@ -37,6 +37,8 @@ pub fn header(
         icon_and_title(app, state),
         Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
         notice(state),
+        historical_review(app, state, backend.clone()),
+        crate::review::review_launch::control(app, state, backend.clone()),
         branches(state),
         checks_pill(state),
         directory(state, on_archive),
@@ -44,16 +46,82 @@ pub fn header(
         item_marks(state, backend.clone()),
     )))
     .style(bar_style);
-    Stack::vertical((bar, metadata_strip(app, state, backend, open_item))).style(|s| s.flex_col().width_full())
+    Stack::vertical((bar, metadata_strip(app, state, backend, open_item)))
+        .style(|s| s.flex_col().width_full())
+}
+
+fn historical_review(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    dyn_container(
+        move || state.historical_review.get(),
+        move |review| match review {
+            Some(review) => {
+                let current_backend = backend.clone();
+                Stack::horizontal((
+                    Label::derived(move || {
+                        format!("Review #{} snapshot · read-only", review.group.number)
+                    })
+                    .style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .font_weight(FontWeight::MEDIUM)
+                            .color(theme::FG_MUTED)
+                            .selectable(false)
+                    }),
+                    Label::derived(|| "Back to current".to_string())
+                        .on_event_stop(el::Click, move |_, _| {
+                            if let Some(item_id) = state
+                                .item
+                                .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
+                            {
+                                let navigation_id = current_backend.open_item(&item_id);
+                                app.begin_item_review(
+                                    state,
+                                    "Reading the current files",
+                                    &item_id,
+                                    navigation_id,
+                                );
+                            }
+                        })
+                        .style(|s| {
+                            clickable(s)
+                                .height(20.0)
+                                .items_center()
+                                .padding_horiz(6.0)
+                                .font_size(theme::TEXT_BADGE)
+                                .font_weight(FontWeight::MEDIUM)
+                                .color(theme::FG)
+                                .background(theme::CANVAS)
+                                .border_radius(theme::RADIUS)
+                                .selectable(false)
+                        }),
+                ))
+                .style(|s| {
+                    s.height(28.0)
+                        .items_center()
+                        .gap(7.0)
+                        .padding_horiz(8.0)
+                        .background(theme::BADGE_BG)
+                        .border_radius(theme::RADIUS)
+                })
+                .into_any()
+            }
+            None => Empty::new().into_any(),
+        },
+    )
+    .style(|s| s.flex_shrink(0.0_f32))
 }
 
 /// The bar above an issue: back, the issue, and Save. The same bar
 /// as a review's, so the window drags from it the same way.
-pub fn issue_header(app: AppState, state: ReviewState, backend: Rc<Backend>, open_item: OpenItem) -> impl IntoView {
+pub fn issue_header(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_item: OpenItem,
+) -> impl IntoView {
     let back_backend = backend.clone();
     let on_back = move || {
-        app.leave_review(state);
-        back_backend.close_review();
+        let navigation_id = back_backend.close_review();
+        app.begin_close(state, navigation_id);
     };
     let mark_backend = backend.clone();
     let bar = title_bar(Stack::horizontal((
@@ -62,7 +130,8 @@ pub fn issue_header(app: AppState, state: ReviewState, backend: Rc<Backend>, ope
         item_marks(state, mark_backend),
     )))
     .style(bar_style);
-    Stack::vertical((bar, metadata_strip(app, state, backend, open_item))).style(|s| s.flex_col().width_full())
+    Stack::vertical((bar, metadata_strip(app, state, backend, open_item)))
+        .style(|s| s.flex_col().width_full())
 }
 
 fn bar_style(s: floem::style::Style) -> floem::style::Style {
@@ -77,19 +146,34 @@ fn bar_style(s: floem::style::Style) -> floem::style::Style {
         .border_color(theme::BORDER_MUTED)
 }
 
-
 /// Save for the open item, as the sidebar rows have.
 fn item_marks(state: ReviewState, backend: std::rc::Rc<crate::backend::Backend>) -> impl IntoView {
     dyn_container(
-        move || state.item.with(|i| i.as_ref().map(|i| (i.id.clone(), i.saved))),
+        move || {
+            state
+                .item
+                .with(|i| i.as_ref().map(|i| (i.id.clone(), i.saved)))
+        },
         move |item| {
             let Some((id, saved)) = item else {
                 return Empty::new().into_any();
             };
             let backend = backend.clone();
             crate::ui::widgets::icon_button(
-                move || if saved { SidebarIcon::BookmarkFilled } else { SidebarIcon::Bookmark },
-                move || if saved { theme::ACCENT } else { theme::FG_MUTED },
+                move || {
+                    if saved {
+                        SidebarIcon::BookmarkFilled
+                    } else {
+                        SidebarIcon::Bookmark
+                    }
+                },
+                move || {
+                    if saved {
+                        theme::ACCENT
+                    } else {
+                        theme::FG_MUTED
+                    }
+                },
                 move || backend.mark_saved(&id, !saved),
             )
             .into_any()
@@ -102,8 +186,7 @@ fn back_button(on_back: impl Fn() + 'static) -> impl IntoView {
     // A drawn chevron rather than a typed one: a glyph is centred by its
     // line box, not by its own shape, so it never sits square in a button.
     Container::new(
-        sidebar_glyph(SidebarIcon::ChevronLeft, theme::FG_MUTED)
-            .style(|s| s.size(14.0, 14.0)),
+        sidebar_glyph(SidebarIcon::ChevronLeft, theme::FG_MUTED).style(|s| s.size(14.0, 14.0)),
     )
     .on_event_stop(el::Click, move |_, _| on_back())
     .style(|s| {
@@ -115,7 +198,10 @@ fn back_button(on_back: impl Fn() + 'static) -> impl IntoView {
             .border(1.0)
             .border_color(theme::BORDER)
             .background(theme::CANVAS)
-            .hover(|s| s.background(theme::CANVAS_SUBTLE).cursor(CursorStyle::Pointer))
+            .hover(|s| {
+                s.background(theme::CANVAS_SUBTLE)
+                    .cursor(CursorStyle::Pointer)
+            })
     })
 }
 
@@ -126,7 +212,11 @@ fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
         state
             .pull_request
             .with(|p| p.as_ref().map(|p| p.title.clone()))
-            .or_else(|| state.item.with(|i| i.as_ref().map(|i| i.title().to_string())))
+            .or_else(|| {
+                state
+                    .item
+                    .with(|i| i.as_ref().map(|i| i.title().to_string()))
+            })
             .unwrap_or_default()
     };
     let subtitle = move || {
@@ -169,7 +259,12 @@ fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
                     .max_width_full()
             }),
         ))
-        .style(|s| s.flex_col().min_width(0.0).justify_center().margin_right(10.0)),
+        .style(|s| {
+            s.flex_col()
+                .min_width(0.0)
+                .justify_center()
+                .margin_right(10.0)
+        }),
         dyn_container(author, move |login| {
             if login.is_empty() {
                 Empty::new().into_any()
@@ -193,7 +288,10 @@ fn icon_and_title(app: AppState, state: ReviewState) -> impl IntoView {
 /// a line, so its subtitle is the base alone; the sidebar's heading
 /// already says which repository it is.
 fn branch_subtitle(item: &Item) -> String {
-    let base = item.checkout.as_ref().map(|c| format!("against {}", short_ref(&c.base_ref)));
+    let base = item
+        .checkout
+        .as_ref()
+        .map(|c| format!("against {}", short_ref(&c.base_ref)));
     if perch_github::is_local(&item.repo_full_name) {
         return base.unwrap_or_default();
     }
@@ -229,7 +327,11 @@ fn subject_state(state: ReviewState) -> Option<SubjectState> {
                 }
             })
         })
-        .or_else(|| state.issue.with(|i| i.as_ref().map(|i| crate::review::issue::state_of(i))))
+        .or_else(|| {
+            state
+                .issue
+                .with(|i| i.as_ref().map(|i| crate::review::issue::state_of(i)))
+        })
 }
 
 /// The word in the state pill.
@@ -293,20 +395,29 @@ fn checks_pill(state: ReviewState) -> impl IntoView {
             let Some(checks) = checks else {
                 return Empty::new().into_any();
             };
-            let (glyph, text, failing): (floem::AnyView, &str, Option<String>) = match &checks.state {
+            let (glyph, text, failing): (floem::AnyView, &str, Option<String>) = match &checks.state
+            {
                 CheckState::Passing => (
-                    sidebar_glyph(SidebarIcon::Check, theme::OPEN).style(|s| s.size(13.0, 13.0)).into_any(),
+                    sidebar_glyph(SidebarIcon::Check, theme::OPEN)
+                        .style(|s| s.size(13.0, 13.0))
+                        .into_any(),
                     "Checks passed",
                     None,
                 ),
                 CheckState::Failing { workflow } => (
-                    sidebar_glyph(SidebarIcon::Close, theme::CLOSED).style(|s| s.size(13.0, 13.0)).into_any(),
+                    sidebar_glyph(SidebarIcon::Close, theme::CLOSED)
+                        .style(|s| s.size(13.0, 13.0))
+                        .into_any(),
                     "Checks failed",
                     Some(workflow.clone()),
                 ),
                 CheckState::Running => (
                     Empty::new()
-                        .style(|s| s.size(theme::EVENT_DOT, theme::EVENT_DOT).border_radius(theme::EVENT_DOT / 2.0).background(theme::FG_MUTED))
+                        .style(|s| {
+                            s.size(theme::EVENT_DOT, theme::EVENT_DOT)
+                                .border_radius(theme::EVENT_DOT / 2.0)
+                                .background(theme::FG_MUTED)
+                        })
                         .into_any(),
                     "Checks running",
                     None,
@@ -315,9 +426,16 @@ fn checks_pill(state: ReviewState) -> impl IntoView {
             };
             let url = checks.url.clone();
             let pill = Stack::horizontal((
-                Container::new(glyph).style(|s| s.size(13.0, 13.0).items_center().justify_center().margin_right(6.0)),
+                Container::new(glyph).style(|s| {
+                    s.size(13.0, 13.0)
+                        .items_center()
+                        .justify_center()
+                        .margin_right(6.0)
+                }),
                 Label::derived(move || text.to_string()).style(|s| {
-                    s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).margin_bottom(theme::OPTICAL_TEXT_LIFT)
+                    s.font_size(theme::TEXT_BADGE)
+                        .color(theme::FG_MUTED)
+                        .margin_bottom(theme::OPTICAL_TEXT_LIFT)
                 }),
             ))
             .on_event_stop(el::Click, move |_, _| {
@@ -390,7 +508,11 @@ fn directory(state: ReviewState, on_archive: impl Fn(String) + 'static) -> impl 
     dyn_container(
         move || state.item.get(),
         move |item| {
-            let Some(checkout) = item.as_ref().and_then(|i| i.checkout.clone()).filter(|c| c.on_disk) else {
+            let Some(checkout) = item
+                .as_ref()
+                .and_then(|i| i.checkout.clone())
+                .filter(|c| c.on_disk)
+            else {
                 return Empty::new().into_any();
             };
             let name = checkout
@@ -435,7 +557,10 @@ fn directory(state: ReviewState, on_archive: impl Fn(String) + 'static) -> impl 
                     .border_radius(theme::RADIUS)
                     .flex_shrink(0.0_f32)
                     .selectable(false)
-                    .hover(|s| s.background(theme::CANVAS_HOVER).cursor(CursorStyle::Pointer))
+                    .hover(|s| {
+                        s.background(theme::CANVAS_HOVER)
+                            .cursor(CursorStyle::Pointer)
+                    })
             })
             .into_any()
         },
@@ -452,7 +577,9 @@ fn notice(state: ReviewState) -> impl IntoView {
     let text = move || {
         if let Some(head) = state.stale_head.get() {
             let short: String = head.chars().take(7).collect();
-            return Some(format!("Pull request moved to {short}; showing the worktree as it is"));
+            return Some(format!(
+                "Pull request moved to {short}; showing the worktree as it is"
+            ));
         }
         if state.offline.get() {
             return Some("Offline; showing the checkout as it was last left".to_string());
@@ -464,10 +591,14 @@ fn notice(state: ReviewState) -> impl IntoView {
             match state.scope.get() {
                 perch_git::Scope::Commit { sha } => {
                     let short: String = sha.chars().take(7).collect();
-                    return Some(format!("Showing {short}; rust-analyzer sees the working tree"));
+                    return Some(format!(
+                        "Showing {short}; rust-analyzer sees the working tree"
+                    ));
                 }
                 perch_git::Scope::Staged => {
-                    return Some("Showing the index; rust-analyzer sees the working tree".to_string());
+                    return Some(
+                        "Showing the index; rust-analyzer sees the working tree".to_string(),
+                    );
                 }
                 _ => {}
             }
@@ -514,12 +645,20 @@ fn churn(state: ReviewState) -> impl IntoView {
     let churn = move || -> Option<(u32, u32)> {
         match state.tab.get() {
             ItemTab::Files => Some(state.changed_files.with(|files| {
-                files.iter().fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions))
+                files
+                    .iter()
+                    .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions))
             })),
             ItemTab::Conversation => state
                 .pull_request
                 .with(|p| p.as_ref().map(|p| (p.additions, p.deletions)))
-                .or_else(|| state.item.with(|i| i.as_ref().and_then(|i| i.checkout.as_ref()).and_then(|c| c.churn))),
+                .or_else(|| {
+                    state.item.with(|i| {
+                        i.as_ref()
+                            .and_then(|i| i.checkout.as_ref())
+                            .and_then(|c| c.churn)
+                    })
+                }),
         }
     };
     let has_churn = Memo::new(move |_| churn().is_some());
@@ -528,7 +667,11 @@ fn churn(state: ReviewState) -> impl IntoView {
         move || has_churn.get(),
         move |has| {
             if has {
-                churn_labels(move || churn().map(|c| c.0).unwrap_or(0), move || churn().map(|c| c.1).unwrap_or(0)).into_any()
+                churn_labels(
+                    move || churn().map(|c| c.0).unwrap_or(0),
+                    move || churn().map(|c| c.1).unwrap_or(0),
+                )
+                .into_any()
             } else {
                 Empty::new().into_any()
             }
@@ -536,7 +679,10 @@ fn churn(state: ReviewState) -> impl IntoView {
     )
 }
 
-fn churn_labels(additions: impl Fn() -> u32 + 'static, deletions: impl Fn() -> u32 + 'static) -> impl IntoView {
+fn churn_labels(
+    additions: impl Fn() -> u32 + 'static,
+    deletions: impl Fn() -> u32 + 'static,
+) -> impl IntoView {
     Stack::horizontal((
         Label::derived(move || format!("+{}", additions())).style(|s| {
             s.font_size(theme::TEXT_META)
@@ -588,19 +734,33 @@ fn strip_data(app: AppState, state: ReviewState) -> Strip {
     let mut strip = Strip::default();
     if let Some(pr) = state.pull_request.get() {
         for r in &pr.requested_reviewers {
-            strip.reviewers.push((r.login.clone(), r.avatar_url.clone(), None));
+            strip
+                .reviewers
+                .push((r.login.clone(), r.avatar_url.clone(), None));
         }
         state.discussion.with(|d| {
             let Some(d) = d else { return };
             // The last verdict each reviewer gave. The author's own
             // comments are not reviews of it, and a pending review is
             // not given yet.
-            let mut reviews: Vec<_> = d.reviews.iter().filter(|r| r.state != "PENDING" && r.user != pr.author_login).collect();
+            let mut reviews: Vec<_> = d
+                .reviews
+                .iter()
+                .filter(|r| r.state != "PENDING" && r.user != pr.author_login)
+                .collect();
             reviews.sort_by_key(|r| r.submitted_at);
             for r in reviews {
-                match strip.reviewers.iter_mut().find(|(login, ..)| *login == r.user) {
+                match strip
+                    .reviewers
+                    .iter_mut()
+                    .find(|(login, ..)| *login == r.user)
+                {
                     Some(mark) => mark.2 = Some(r.state.clone()),
-                    None => strip.reviewers.push((r.user.clone(), avatar_url_for(state, &r.user), Some(r.state.clone()))),
+                    None => strip.reviewers.push((
+                        r.user.clone(),
+                        avatar_url_for(state, &r.user),
+                        Some(r.state.clone()),
+                    )),
                 }
             }
             strip.closes = closes(&d.body);
@@ -615,7 +775,10 @@ fn strip_data(app: AppState, state: ReviewState) -> Strip {
     }
     let id = state.item.with(|i| i.as_ref().map(|i| i.id.clone()));
     strip.in_perch = app.items.with(|all| {
-        all.iter().filter(|i| i.from_item_id.is_some() && i.from_item_id == id).cloned().collect()
+        all.iter()
+            .filter(|i| i.from_item_id.is_some() && i.from_item_id == id)
+            .cloned()
+            .collect()
     });
     strip
 }
@@ -624,7 +787,9 @@ fn strip_data(app: AppState, state: ReviewState) -> Strip {
 /// #3`, `resolved #7`, in any case, anywhere in the text. Only this
 /// repository's; `owner/repo#N` names another and is left alone.
 pub fn closes(body: &str) -> Vec<u64> {
-    const WORDS: [&str; 9] = ["close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved"];
+    const WORDS: [&str; 9] = [
+        "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+    ];
     let mut out = Vec::new();
     let mut words = body.split_whitespace().peekable();
     while let Some(word) = words.next() {
@@ -633,7 +798,9 @@ pub fn closes(body: &str) -> Vec<u64> {
             continue;
         }
         let Some(next) = words.peek() else { break };
-        let Some(number) = next.strip_prefix('#') else { continue };
+        let Some(number) = next.strip_prefix('#') else {
+            continue;
+        };
         let digits: String = number.chars().take_while(char::is_ascii_digit).collect();
         if let Ok(n) = digits.parse::<u64>() {
             if !out.contains(&n) {
@@ -648,7 +815,12 @@ pub fn closes(body: &str) -> Vec<u64> {
 /// Reviewers with their verdicts, labels, assignees, the milestone, the
 /// issues closed, and what Perch started from here. Each part is absent
 /// when empty, and the strip with them.
-fn metadata_strip(app: AppState, state: ReviewState, backend: Rc<Backend>, open_item: OpenItem) -> impl IntoView {
+fn metadata_strip(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_item: OpenItem,
+) -> impl IntoView {
     let data = Memo::new(move |_| strip_data(app, state));
     dyn_container(
         move || data.get(),
@@ -656,13 +828,32 @@ fn metadata_strip(app: AppState, state: ReviewState, backend: Rc<Backend>, open_
             if strip.is_empty() {
                 return Empty::new().into_any();
             }
-            let repo = state.item.with(|i| i.as_ref().map(|i| i.repo_full_name.clone())).unwrap_or_default();
+            let repo = state
+                .item
+                .with(|i| i.as_ref().map(|i| i.repo_full_name.clone()))
+                .unwrap_or_default();
             let (backend, open_item) = (backend.clone(), open_item.clone());
             Stack::horizontal((
-                part("Reviewers", !strip.reviewers.is_empty(), reviewers(app, strip.reviewers)),
-                part("", !strip.labels.is_empty(), chips(strip.labels, |l| label_chip(l.name, l.color))),
-                part("Assignees", !strip.assignees.is_empty(), assignees(app, strip.assignees)),
-                part("Milestone", strip.milestone.is_some(), milestone(strip.milestone.unwrap_or_default())),
+                part(
+                    "Reviewers",
+                    !strip.reviewers.is_empty(),
+                    reviewers(app, strip.reviewers),
+                ),
+                part(
+                    "",
+                    !strip.labels.is_empty(),
+                    chips(strip.labels, |l| label_chip(l.name, l.color)),
+                ),
+                part(
+                    "Assignees",
+                    !strip.assignees.is_empty(),
+                    assignees(app, strip.assignees),
+                ),
+                part(
+                    "Milestone",
+                    strip.milestone.is_some(),
+                    milestone(strip.milestone.unwrap_or_default()),
+                ),
                 part(
                     "Closes",
                     !strip.closes.is_empty(),
@@ -671,10 +862,16 @@ fn metadata_strip(app: AppState, state: ReviewState, backend: Rc<Backend>, open_
                         let open = move || {
                             // By number rather than by row: the issue may
                             // have no item yet, and the backend makes one.
-                            app.begin_open("Reading the issue");
-                            backend.open_subject(&repo, ItemKind::Issue, n);
+                            let navigation_id =
+                                backend.open_subject(&repo, ItemKind::Issue, n);
+                            app.begin_open("Reading the issue", navigation_id);
                         };
-                        chip(format!("#{n}"), theme::BADGE_BG, theme::FG_MUTED, Some(Rc::new(open)))
+                        chip(
+                            format!("#{n}"),
+                            theme::BADGE_BG,
+                            theme::FG_MUTED,
+                            Some(Rc::new(open)),
+                        )
                     }),
                 ),
                 part(
@@ -684,7 +881,12 @@ fn metadata_strip(app: AppState, state: ReviewState, backend: Rc<Backend>, open_
                         let open = open_item.clone();
                         let target = item.clone();
                         let name = item.title().to_string();
-                        chip(name, theme::BADGE_BG, theme::FG_MUTED, Some(Rc::new(move || open(&target))))
+                        chip(
+                            name,
+                            theme::BADGE_BG,
+                            theme::FG_MUTED,
+                            Some(Rc::new(move || open(&target))),
+                        )
                     }),
                 ),
             ))
@@ -718,7 +920,12 @@ fn part(name: &'static str, present: bool, items: impl IntoView + 'static) -> im
             Empty::new().into_any()
         } else {
             Label::derived(move || name.to_string())
-                .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_SUBTLE).margin_right(8.0).selectable(false))
+                .style(|s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .color(theme::FG_SUBTLE)
+                        .margin_right(8.0)
+                        .selectable(false)
+                })
                 .into_any()
         },
         items,
@@ -735,8 +942,10 @@ fn reviewers(app: AppState, reviewers: Vec<(String, String, Option<String>)>) ->
         move |(login, url, verdict)| {
             let seed = login.clone();
             Stack::horizontal((
-                avatar(app, move || url.clone(), theme::METADATA_AVATAR, seed).style(|s| s.margin_right(5.0)),
-                Label::derived(move || login.clone()).style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED)),
+                avatar(app, move || url.clone(), theme::METADATA_AVATAR, seed)
+                    .style(|s| s.margin_right(5.0)),
+                Label::derived(move || login.clone())
+                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED)),
                 match verdict {
                     Some(state) => {
                         let review = perch_github::Review {
@@ -748,7 +957,9 @@ fn reviewers(app: AppState, reviewers: Vec<(String, String, Option<String>)>) ->
                             html_url: String::new(),
                         };
                         let (icon, color) = verdict_glyph(Some(&review));
-                        sidebar_glyph(icon, color).style(|s| s.size(12.0, 12.0).margin_left(4.0)).into_any()
+                        sidebar_glyph(icon, color)
+                            .style(|s| s.size(12.0, 12.0).margin_left(4.0))
+                            .into_any()
                     }
                     None => Empty::new().into_any(),
                 },
@@ -766,8 +977,10 @@ fn assignees(app: AppState, logins: Vec<String>) -> impl IntoView {
         move |login| {
             let seed = login.clone();
             Stack::horizontal((
-                avatar(app, String::new, theme::METADATA_AVATAR, seed).style(|s| s.margin_right(5.0)),
-                Label::derived(move || login.clone()).style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED)),
+                avatar(app, String::new, theme::METADATA_AVATAR, seed)
+                    .style(|s| s.margin_right(5.0)),
+                Label::derived(move || login.clone())
+                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED)),
             ))
             .style(|s| s.items_center())
         },
@@ -777,8 +990,14 @@ fn assignees(app: AppState, logins: Vec<String>) -> impl IntoView {
 
 fn milestone(name: String) -> impl IntoView {
     Stack::horizontal((
-        sidebar_glyph(SidebarIcon::Milestone, theme::FG_SUBTLE).style(|s| s.size(12.0, 12.0).margin_right(5.0)),
-        Label::derived(move || name.clone()).style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).text_ellipsis().max_width(240.0)),
+        sidebar_glyph(SidebarIcon::Milestone, theme::FG_SUBTLE)
+            .style(|s| s.size(12.0, 12.0).margin_right(5.0)),
+        Label::derived(move || name.clone()).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::FG_MUTED)
+                .text_ellipsis()
+                .max_width(240.0)
+        }),
     ))
     .style(|s| s.items_center())
 }
@@ -792,7 +1011,12 @@ fn chips<T: Clone + std::hash::Hash + Eq + 'static, V: IntoView + 'static>(
 }
 
 /// A small pill, clickable when it leads somewhere.
-fn chip(text: String, tint: floem::peniko::Color, ink: floem::peniko::Color, on_click: Option<Rc<dyn Fn()>>) -> impl IntoView {
+fn chip(
+    text: String,
+    tint: floem::peniko::Color,
+    ink: floem::peniko::Color,
+    on_click: Option<Rc<dyn Fn()>>,
+) -> impl IntoView {
     let clicks = on_click.is_some();
     Container::new(Label::derived(move || text.clone()).style(move |s| {
         s.font_size(theme::TEXT_SECTION)
@@ -848,7 +1072,10 @@ fn label_colors(hex: &str) -> (floem::peniko::Color, floem::peniko::Color) {
 }
 
 /// Shown while a checkout is being prepared.
-pub fn preparing_card(message: impl Fn() -> String + 'static, percent: impl Fn() -> Option<u8> + 'static) -> impl IntoView {
+pub fn preparing_card(
+    message: impl Fn() -> String + 'static,
+    percent: impl Fn() -> Option<u8> + 'static,
+) -> impl IntoView {
     Container::new(
         Stack::vertical((
             Container::new(sidebar_glyph(SidebarIcon::Refresh, theme::ACCENT)).style(|s| {
@@ -866,7 +1093,9 @@ pub fn preparing_card(message: impl Fn() -> String + 'static, percent: impl Fn()
                     .margin_bottom(6.0)
             }),
             Label::derived(message).style(|s| {
-                s.font_size(theme::TEXT_BODY).color(theme::FG_MUTED).margin_bottom(14.0)
+                s.font_size(theme::TEXT_BODY)
+                    .color(theme::FG_MUTED)
+                    .margin_bottom(14.0)
             }),
             progress_bar(percent),
         ))
@@ -914,11 +1143,24 @@ mod tests {
 
     #[test]
     fn a_branch_subtitle_names_the_slug_unless_the_repository_is_local() {
-        assert_eq!(branch_subtitle(&branch_item("slatedb/slatedb", "main")), "slatedb/slatedb  \u{00b7}  against main");
-        assert_eq!(branch_subtitle(&branch_item("local/notes", "main")), "against main");
-        assert_eq!(branch_subtitle(&branch_item("Local/notes", "main")), "against main", "the owner in any case");
+        assert_eq!(
+            branch_subtitle(&branch_item("slatedb/slatedb", "main")),
+            "slatedb/slatedb  \u{00b7}  against main"
+        );
+        assert_eq!(
+            branch_subtitle(&branch_item("local/notes", "main")),
+            "against main"
+        );
+        assert_eq!(
+            branch_subtitle(&branch_item("Local/notes", "main")),
+            "against main",
+            "the owner in any case"
+        );
         let sha = "0123456789abcdef0123456789abcdef01234567";
-        assert_eq!(branch_subtitle(&branch_item("local/notes", sha)), "against 0123456");
+        assert_eq!(
+            branch_subtitle(&branch_item("local/notes", sha)),
+            "against 0123456"
+        );
     }
 
     #[test]
@@ -926,7 +1168,11 @@ mod tests {
         let body = "Closes #12 and fixes #3.\n\nResolved #12 again; see #99 and other/repo#7. fix #x fixed #";
         assert_eq!(closes(body), [12, 3]);
         assert_eq!(closes("nothing here"), Vec::<u64>::new());
-        assert_eq!(closes("close\n#5"), [5], "a line break between the word and the number is fine");
+        assert_eq!(
+            closes("close\n#5"),
+            [5],
+            "a line break between the word and the number is fine"
+        );
     }
 
     #[test]

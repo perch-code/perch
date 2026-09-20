@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::Error;
@@ -36,6 +36,7 @@ fn credential_args() -> [String; 4] {
     ]
 }
 
+#[derive(Debug, Clone)]
 pub struct Git {
     token: Option<String>,
 }
@@ -46,7 +47,12 @@ impl Git {
     }
 
     /// Run git and return stdout, failing on a non-zero exit.
-    pub async fn run<I, S>(&self, cwd: Option<&Path>, args: I, timeout: Duration) -> Result<String, Error>
+    pub async fn run<I, S>(
+        &self,
+        cwd: Option<&Path>,
+        args: I,
+        timeout: Duration,
+    ) -> Result<String, Error>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -68,6 +74,93 @@ impl Git {
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Run git and preserve stdout byte-for-byte. Review snapshot diffs and
+    /// blobs may be binary and must not pass through lossy UTF-8 conversion.
+    pub async fn run_bytes<I, S>(
+        &self,
+        cwd: Option<&Path>,
+        args: I,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = self.command(cwd);
+        command.args(args);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let output = tokio::time::timeout(timeout, command.output())
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|e| Error::Spawn(e.to_string()))?;
+        if !output.status.success() {
+            return Err(Error::Git {
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        Ok(output.stdout)
+    }
+
+    /// Run git with a bounded stdin payload. This is used by `pack-objects`
+    /// so an exact set of already-resolved commits can be retained without
+    /// creating or moving any ref in the reader's repository.
+    pub async fn run_with_input<I, S>(
+        &self,
+        cwd: Option<&Path>,
+        args: I,
+        input: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = self.command(cwd);
+        command.args(args);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|e| Error::Spawn(e.to_string()))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Spawn("git stdin was not piped".into()))?;
+        let input = input.to_vec();
+
+        let output = tokio::time::timeout(timeout, async move {
+            stdin
+                .write_all(&input)
+                .await
+                .map_err(|e| Error::Spawn(e.to_string()))?;
+            stdin
+                .shutdown()
+                .await
+                .map_err(|e| Error::Spawn(e.to_string()))?;
+            // `pack-objects --revs` does not start producing output until it
+            // observes EOF. Keep no live ChildStdin handle while awaiting the
+            // child: on macOS, `shutdown` alone does not reliably deliver
+            // that EOF before the handle is dropped.
+            drop(stdin);
+            child
+                .wait_with_output()
+                .await
+                .map_err(|e| Error::Spawn(e.to_string()))
+        })
+        .await
+        .map_err(|_| Error::Timeout)??;
+
+        if !output.status.success() {
+            return Err(Error::Git {
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        Ok(output.stdout)
     }
 
     /// Run git, forwarding `--progress` output as it arrives.
@@ -118,7 +211,10 @@ impl Git {
 
         let result = tokio::time::timeout(timeout, async {
             let tail = pump.await;
-            let status = child.wait().await.map_err(|e| Error::Spawn(e.to_string()))?;
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| Error::Spawn(e.to_string()))?;
             Ok::<_, Error>((status, tail))
         })
         .await;
@@ -169,7 +265,12 @@ fn parse_progress(line: &str) -> Progress {
     // "Receiving objects:  42% (123/456), 1.2 MiB | 3.4 MiB/s"
     let (phase, rest) = match line.split_once(':') {
         Some((p, r)) => (p.trim().to_string(), r),
-        None => return Progress { phase: line.to_string(), percent: None },
+        None => {
+            return Progress {
+                phase: line.to_string(),
+                percent: None,
+            }
+        }
     };
 
     let percent = rest

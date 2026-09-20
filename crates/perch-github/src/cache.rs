@@ -21,11 +21,14 @@ use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
 use crate::model::Thread;
 use crate::workflow_runs::Checks;
 
-/// The shape of the tables. Version 17 adds the captured execution prompt
-/// and an explicit truncation bit for the bounded result projection. Versions
-/// 13 through 16 migrate in place so local conversations and review history
-/// are never discarded.
-pub const SCHEMA_VERSION: u32 = 17;
+mod review_store;
+
+/// The shape of the tables. Version 18 adds durable worktree-review history
+/// and repeat-review reconciliation records on top of the run schema. Version
+/// 19 persists the exact finding cohort used by verifier attempts.
+/// Versions 13 through 17 migrate in place so local conversations and agent
+/// history are never discarded.
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// Metadata key holding the validator for the cached notifications inbox.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -61,6 +64,10 @@ pub enum CacheError {
     InvalidRunTransition { from: RunStatus, to: RunStatus },
     #[error("run {0} is already terminal")]
     TerminalRun(String),
+    #[error("review conflict: {0}")]
+    ReviewConflict(String),
+    #[error("invalid review transition: {0}")]
+    InvalidReviewTransition(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -261,6 +268,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(BASE_SCHEMA)?;
         tx.execute_batch(RUN_SCHEMA)?;
+        tx.execute_batch(review_store::REVIEW_SCHEMA)?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -308,6 +316,8 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             14 => tx.execute_batch(NOTIFICATION_SCHEMA)?,
             15 => migrate_15_to_16(&tx)?,
             16 => migrate_16_to_17(&tx)?,
+            17 => review_store::migrate_17_to_18(&tx)?,
+            18 => review_store::migrate_18_to_19(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -2314,6 +2324,16 @@ impl Cache {
 
     pub fn delete_comment_thread(&self, id: &str) -> Result<(), CacheError> {
         let tx = self.conn.unchecked_transaction()?;
+        let finding_thread: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM review_findings WHERE thread_id=?1)",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if finding_thread {
+            return Err(CacheError::ReviewConflict(format!(
+                "comment thread {id} belongs to a review finding"
+            )));
+        }
         tx.execute(
             "DELETE FROM comment_messages WHERE thread_id = ?1",
             params![id],
@@ -2480,6 +2500,7 @@ impl Cache {
     /// pointer.
     pub fn delete_item(&self, id: &str) -> Result<(), CacheError> {
         let tx = self.conn.unchecked_transaction()?;
+        review_store::delete_review_history_on(&tx, id)?;
         tx.execute(
             "DELETE FROM comment_messages WHERE thread_id IN (SELECT id FROM comment_threads WHERE worktree_id = ?1)",
             params![id],
@@ -2888,6 +2909,29 @@ mod tests {
 
     fn stamp(s: &str) -> Timestamp {
         s.parse().unwrap()
+    }
+
+    /// Tests which start from today's schema and then label the database as
+    /// an older run-schema version must also remove schema 18's review
+    /// objects. Otherwise the 17 -> 18 migration correctly tries to create
+    /// tables which the synthetic fixture accidentally left behind.
+    fn remove_review_schema(cache: &Cache) {
+        cache
+            .conn
+            .execute_batch(
+                "DROP TABLE finding_audit_entries;
+                 DROP TABLE review_anchor_mappings;
+                 DROP TABLE review_observations;
+                 DROP TABLE review_findings;
+                 DROP TABLE reviewer_attempts;
+                 DROP TABLE review_groups;
+                 DROP TABLE review_preferences;
+                 DROP INDEX comment_threads_anchor_snapshot;
+                 ALTER TABLE comment_threads DROP COLUMN anchor_snapshot_id;
+                 ALTER TABLE comment_threads DROP COLUMN anchor_blob_sha;
+                 DROP TABLE review_snapshots;",
+            )
+            .unwrap();
     }
 
     fn notification_thread(id: &str, updated_at: &str) -> Thread {
@@ -4201,6 +4245,7 @@ mod tests {
             let cache = Cache::open(&path, None).unwrap();
             cache.insert_item(&item).unwrap();
             cache.insert_comment_thread(&thread).unwrap();
+            remove_review_schema(&cache);
             cache.conn.execute("DROP TABLE threads", []).unwrap();
             cache.set_meta("schema_version", "14").unwrap();
         }
@@ -4271,6 +4316,7 @@ mod tests {
             record.steps.clear();
             record.prompt_snapshot = None;
             cache.insert_run(&record).unwrap();
+            remove_review_schema(&cache);
             cache
                 .conn
                 .execute_batch(

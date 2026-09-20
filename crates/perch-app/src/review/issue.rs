@@ -8,7 +8,7 @@ use std::rc::Rc;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
 use floem::text::FontWeight;
-use floem::views::{Decorators, Empty, Label, Stack, dyn_container};
+use floem::views::{dyn_container, Decorators, Empty, Label, Stack};
 use perch_github::Issue;
 
 use crate::backend::Backend;
@@ -60,10 +60,19 @@ pub fn issue_header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> 
                 ))
                 .style(|s| s.items_center().min_width(0.0)),
                 Label::derived(move || opened.clone()).style(|s| {
-                    s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE).margin_top(2.0).text_ellipsis().min_width(0.0)
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::FG_SUBTLE)
+                        .margin_top(2.0)
+                        .text_ellipsis()
+                        .min_width(0.0)
                 }),
             ))
-            .style(|s| s.flex_col().min_width(0.0).flex_grow(1.0_f32).margin_left(10.0)),
+            .style(|s| {
+                s.flex_col()
+                    .min_width(0.0)
+                    .flex_grow(1.0_f32)
+                    .margin_left(10.0)
+            }),
             start_work_button(app, state, backend),
         ))
         .style(|s| s.items_center().width_full().min_width(0.0))
@@ -93,10 +102,14 @@ fn start_work_button(app: AppState, state: ReviewState, backend: Rc<Backend>) ->
                 return Empty::new().into_any();
             };
             let backend = backend.clone();
-            text_button(|| "Start work".to_string(), SidebarIcon::Branch, move || {
-                app.begin_open("Cutting a branch");
-                backend.start_work(&id)
-            })
+            text_button(
+                || "Start work".to_string(),
+                SidebarIcon::Branch,
+                move || {
+                    let navigation_id = backend.start_work(&id);
+                    app.begin_open("Cutting a branch", navigation_id);
+                },
+            )
             .into_any()
         },
     )
@@ -105,5 +118,8 @@ fn start_work_button(app: AppState, state: ReviewState, backend: Rc<Backend>) ->
 
 /// So the status line can name the issue.
 pub fn describe(issue: &Issue) -> String {
-    format!("{}#{}  \u{00b7}  {} comments", issue.repo_full_name, issue.number, issue.comments)
+    format!(
+        "{}#{}  \u{00b7}  {} comments",
+        issue.repo_full_name, issue.number, issue.comments
+    )
 }

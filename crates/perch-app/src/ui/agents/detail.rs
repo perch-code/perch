@@ -19,7 +19,7 @@ use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 
-use super::model::{elapsed_label, AgentRunStatus, AgentRunSummary};
+use super::model::{elapsed_label, AgentRetryTarget, AgentRunStatus, AgentRunSummary};
 use super::{metadata, navigate_to_source, status_color, text_action};
 
 pub fn view(
@@ -198,15 +198,20 @@ fn summary_bar(
             )
             .into_any()
         }
-        status if status.may_retry() => {
-            let id = run.id.clone();
-            text_action(
+        status if status.may_retry() => match run.retry_target() {
+            AgentRetryTarget::ReviewAttempt(attempt_id) => text_action(
+                || "Retry".to_string(),
+                false,
+                move || backend.retry_review_attempt(&attempt_id),
+            )
+            .into_any(),
+            AgentRetryTarget::Run(id) => text_action(
                 || "Retry".to_string(),
                 false,
                 move || backend.retry_run(&id),
             )
-            .into_any()
-        }
+            .into_any(),
+        },
         AgentRunStatus::Stopping => Label::derived(|| "Stopping…".to_string())
             .style(|s| {
                 s.font_size(theme::TEXT_BADGE)

@@ -452,9 +452,23 @@ pub(super) fn navigate_to_source(
         .open_item
         .with_untracked(|open| open.as_deref() == Some(item_id.as_str()))
         && review.is_showing();
+    let same_live_item = can_focus_loaded_discussion(
+        same_item,
+        review.historical_review.with_untracked(Option::is_some),
+    );
     close(app, backend, false);
+    if let Some(attempt_id) = run.review_attempt_id.clone() {
+        let navigation_id = backend.view_review_attempt_owner(&item_id, &attempt_id);
+        app.begin_agent_review_navigation(
+            review,
+            item_id.clone(),
+            attempt_id.clone(),
+            navigation_id,
+        );
+        return;
+    }
     review.show_tab(ItemTab::Conversation);
-    if same_item {
+    if same_live_item {
         if let Some(thread_id) = &run.thread_id {
             review
                 .focus_card
@@ -462,9 +476,13 @@ pub(super) fn navigate_to_source(
         }
         return;
     }
-    app.begin_agent_navigation(item_id.clone(), run.thread_id.clone());
+    let navigation_id = backend.view_agent_owner(&item_id);
+    app.begin_agent_navigation(item_id.clone(), run.thread_id.clone(), navigation_id);
     app.begin_review(review, "Reading the discussion");
-    backend.view_agent_owner(&item_id);
+}
+
+fn can_focus_loaded_discussion(same_item: bool, historical_review: bool) -> bool {
+    same_item && !historical_review
 }
 
 fn arm_clock(state: AppState) {
@@ -818,5 +836,11 @@ mod tests {
         app.merge_agent_runs([perch_github::RunSummary::from(&running_record())], false);
         harness.rebuild();
         assert!(app.agents_clock_armed.get());
+    }
+
+    #[test]
+    fn ordinary_view_reloads_a_same_item_historical_snapshot() {
+        assert!(can_focus_loaded_discussion(true, false));
+        assert!(!can_focus_loaded_discussion(true, true));
     }
 }

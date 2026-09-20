@@ -12,6 +12,7 @@ pub mod discussion;
 pub mod items;
 pub mod model;
 pub mod pulls;
+pub mod reviews;
 pub mod workflow_runs;
 
 pub use auth::{resolve_token, Token, TokenSource};
@@ -35,4 +36,14 @@ pub use items::{
 };
 pub use model::{Reason, Repository, Subject, SubjectKind, SubjectState, Thread};
 pub use pulls::{CheckStatus, PullRequest, ReviewDecision, Reviewer};
+pub use reviews::{
+    AnchorMapping, AnchorMappingMethod, AnchorMappingStatus, DeletedReviewHistory, Finding,
+    FindingAuditAction, FindingAuditEntry, FindingDisposition, FindingSeverity, FindingTarget,
+    FindingVerification, NewFinding, NewObservation, NewReviewerAttempt, Observation,
+    ObservationKind, ReconciledObservation, ReviewAdmission, ReviewAnchor, ReviewEvidence,
+    ReviewEvidenceSpan, ReviewGroup, ReviewGroupStatus, ReviewIngestion, ReviewIngestionResult,
+    ReviewIngestionState, ReviewPreference, ReviewResultKind, ReviewSnapshot, ReviewThreadMessage,
+    ReviewVerificationInput, ReviewerAttempt, ReviewerOutputSave, ReviewerPhase,
+    StoredReviewerOutput, MAX_REVIEW_VERIFICATION_FINDINGS,
+};
 pub use workflow_runs::{worst, CheckState, Checks, WorkflowRunPayload, WorkflowRunQuery};

@@ -1,0 +1,13 @@
+{
+  "findings": [
+    {
+      "title": "[P1] Preserve the cancellation fence",
+      "body": "The new path can publish completion before its descendant process is reaped.",
+      "confidence_score": 0.96,
+      "code_location": {
+        "absolute_file_path": "/private/perch-review/src/lib.rs",
+        "line_range": { "start": 7, "end": 9 }
+      }
+    }
+  ]
+}

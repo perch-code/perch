@@ -109,8 +109,44 @@ launching an agent. `perch --ask owner/repo#N path:start-end "question"`
 runs the same question flow from a terminal; omit the path to ask about the
 whole item.
 
-Older `~/.perch/knowledge` directories are no longer read. They can be
-removed manually after any files worth keeping have been copied elsewhere.
+## Worktree reviews
+
+**Review** runs Claude Code and/or Codex's native review workflow against the
+full committed branch diff from the selected base's merge base to `HEAD`. It
+works for Perch-managed and registered external worktrees, with or without a
+pull request. A dirty worktree is reviewable, but staged and unstaged edits are
+not part of the snapshot; Perch labels this `Committed changes only; local
+edits are excluded`. Staged-only, individual-commit, and incremental-only
+review scopes are not supported. If the committed diff is empty, Perch records
+that result without launching an agent.
+
+Every review uses a clean, read-only, immutable snapshot in Perch-owned
+storage. Perch retains its exact diff, manifest, commits, and anchored blobs so
+history remains readable after the branch moves or an external checkout is
+deleted. Opening a historical review never changes the current worktree.
+
+Perch currently supports Codex CLI 0.155.1 or newer through `codex exec review`
+and Claude Code 2.1.223 or newer through `/code-review`, when the installed CLI
+advertises the required local, noninteractive options. Missing, older, or
+incompatible CLIs are shown as unavailable with a reason; Perch does not fall
+back to a generic review prompt. Review mode excludes Claude's hosted `ultra`
+mode and never enables fix, comment, or permission-bypass options.
+
+Findings are durable local discussions, separate from the attempts that found
+them. Repeat reviews preserve every group, attempt, observation, failure, and
+valid zero-finding result while reconciling the same problem back to its
+existing thread. **Retry** creates another attempt with the original snapshot
+and settings. **Review latest** creates a new group and immutable snapshot from
+the branch's current committed state.
+
+Review results and follow-ups stay local to Perch. Reviews do not post,
+resolve, or comment on GitHub, modify code, run automatically after a push, or
+use a hosted review service. Perch also exports each item's review history as
+deterministic Markdown at
+`$PERCH_HOME/knowledge/reviews/<owner>/<repo>/<item-id>.md` (under
+`~/.perch` when `PERCH_HOME` is unset). Re-exporting replaces that stable
+document rather than duplicating unchanged entries; unrelated legacy files in
+the knowledge directory are not imported.
 
 ## Development
 

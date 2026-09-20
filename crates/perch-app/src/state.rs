@@ -30,8 +30,10 @@ pub enum Checked {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAgentNavigation {
     pub token: u64,
+    pub navigation_id: u64,
     pub item_id: String,
     pub thread_id: Option<String>,
+    pub review_attempt_id: Option<String>,
 }
 
 /// Which asynchronous item open is still allowed to replace the workspace.
@@ -122,8 +124,12 @@ pub struct AppState {
     /// Returning from detail rebuilds the list, so the run id—not the old
     /// row's transient ViewId—is the durable focus target.
     pub pending_agent_row_focus: RwSignal<Option<String>>,
+    /// Review group rows are expanded by default; this records the explicit
+    /// collapses so newly admitted reviewer children are immediately visible.
+    pub collapsed_agent_review_groups: RwSignal<HashSet<String>>,
     pub pending_agent_navigation: RwSignal<Option<PendingAgentNavigation>>,
     pub agent_navigation_token: RwSignal<u64>,
+    expected_navigation_id: RwSignal<Option<u64>>,
     open_expectation: RwSignal<OpenExpectation>,
     /// An archived discussion opened from run history is a read-only view.
     /// Keep it open across the normal Items refresh without restoring its
@@ -133,6 +139,19 @@ pub struct AppState {
     /// not erase one another before the reader can see them.
     pub agent_completion_notices: RwSignal<VecDeque<AgentCompletionNotice>>,
     pub agent_completion_token: RwSignal<u64>,
+
+    /// Review capability/preferences are global; bases, groups, and launch
+    /// errors are keyed by their stable item id so opening another item never
+    /// lets a late dashboard response replace the visible one.
+    pub review_capabilities: RwSignal<Arc<Vec<perch_agent::ReviewCapability>>>,
+    pub review_preferences: RwSignal<Arc<Vec<perch_github::ReviewPreference>>>,
+    pub review_base_refs: RwSignal<HashMap<String, Arc<Vec<String>>>>,
+    pub review_groups:
+        RwSignal<HashMap<String, Arc<Vec<crate::review::model::ReviewGroupSummary>>>>,
+    pub review_findings:
+        RwSignal<HashMap<String, Arc<Vec<crate::review::model::ReviewFindingSummary>>>>,
+    pub review_launch_errors: RwSignal<HashMap<String, String>>,
+    pub review_dashboard_loading: RwSignal<HashSet<String>>,
 
     /// The item the pointer is over, so a row can show its buttons and a
     /// bare keystroke knows what it means.
@@ -212,12 +231,21 @@ impl AppState {
             agent_history_load_failed: RwSignal::new(false),
             agent_history_load_token: RwSignal::new(0),
             pending_agent_row_focus: RwSignal::new(None),
+            collapsed_agent_review_groups: RwSignal::new(HashSet::new()),
             pending_agent_navigation: RwSignal::new(None),
             agent_navigation_token: RwSignal::new(0),
+            expected_navigation_id: RwSignal::new(None),
             open_expectation: RwSignal::new(OpenExpectation::Any),
             agent_archived_owner: RwSignal::new(None),
             agent_completion_notices: RwSignal::new(VecDeque::new()),
             agent_completion_token: RwSignal::new(0),
+            review_capabilities: RwSignal::new(Arc::new(Vec::new())),
+            review_preferences: RwSignal::new(Arc::new(Vec::new())),
+            review_base_refs: RwSignal::new(HashMap::new()),
+            review_groups: RwSignal::new(HashMap::new()),
+            review_findings: RwSignal::new(HashMap::new()),
+            review_launch_errors: RwSignal::new(HashMap::new()),
+            review_dashboard_loading: RwSignal::new(HashSet::new()),
             agent: RwSignal::new(AgentConfig::default()),
             hovered_item: RwSignal::new(None),
             item_filters: RwSignal::new(crate::items::ItemFilters::default()),
@@ -267,6 +295,123 @@ impl AppState {
         self.agent_history_has_more.set(has_more);
         self.agent_history_loading.set(false);
         self.agent_history_load_failed.set(false);
+    }
+
+    pub fn begin_review_dashboard_load(&self, item_id: &str) {
+        self.review_dashboard_loading
+            .update(|loading| _ = loading.insert(item_id.to_string()));
+        self.review_launch_errors
+            .update(|errors| _ = errors.remove(item_id));
+    }
+
+    pub fn set_review_dashboard(
+        &self,
+        item_id: String,
+        capabilities: Vec<perch_agent::ReviewCapability>,
+        preferences: Vec<perch_github::ReviewPreference>,
+        base_refs: Vec<String>,
+        mut groups: Vec<crate::review::model::ReviewGroupSummary>,
+        findings: Vec<crate::review::model::ReviewFindingSummary>,
+    ) {
+        groups.sort_by_key(|summary| std::cmp::Reverse(summary.group.number));
+        self.review_capabilities.set(Arc::new(capabilities));
+        self.review_preferences.set(Arc::new(preferences));
+        self.review_base_refs
+            .update(|all| _ = all.insert(item_id.clone(), Arc::new(base_refs)));
+        self.review_groups
+            .update(|all| _ = all.insert(item_id.clone(), Arc::new(groups)));
+        self.review_findings
+            .update(|all| _ = all.insert(item_id.clone(), Arc::new(findings)));
+        self.review_dashboard_loading
+            .update(|loading| _ = loading.remove(&item_id));
+        self.review_launch_errors
+            .update(|errors| _ = errors.remove(&item_id));
+    }
+
+    pub fn update_review_group(
+        &self,
+        item_id: String,
+        summary: crate::review::model::ReviewGroupSummary,
+    ) {
+        self.review_groups.update(|all| {
+            let mut groups = all
+                .get(&item_id)
+                .map(|groups| groups.as_ref().clone())
+                .unwrap_or_default();
+            match groups
+                .iter()
+                .position(|existing| existing.group.id == summary.group.id)
+            {
+                Some(index) => groups[index] = summary,
+                None => groups.push(summary),
+            }
+            groups.sort_by_key(|summary| std::cmp::Reverse(summary.group.number));
+            all.insert(item_id, Arc::new(groups));
+        });
+    }
+
+    pub fn fail_review_launch(&self, item_id: String, message: String) {
+        self.review_dashboard_loading
+            .update(|loading| _ = loading.remove(&item_id));
+        self.review_launch_errors
+            .update(|errors| _ = errors.insert(item_id, message));
+    }
+
+    pub fn review_groups_for(
+        &self,
+        item_id: &str,
+    ) -> Arc<Vec<crate::review::model::ReviewGroupSummary>> {
+        self.review_groups
+            .with(|all| all.get(item_id).cloned())
+            .unwrap_or_else(|| Arc::new(Vec::new()))
+    }
+
+    pub fn review_findings_for(
+        &self,
+        item_id: &str,
+    ) -> Arc<Vec<crate::review::model::ReviewFindingSummary>> {
+        self.review_findings
+            .with(|all| all.get(item_id).cloned())
+            .unwrap_or_else(|| Arc::new(Vec::new()))
+    }
+
+    pub fn review_finding_for_thread(
+        &self,
+        item_id: &str,
+        thread_id: &str,
+    ) -> Option<crate::review::model::ReviewFindingSummary> {
+        self.review_findings_for(item_id)
+            .iter()
+            .find(|summary| summary.finding.thread_id == thread_id)
+            .cloned()
+    }
+
+    pub fn update_review_finding(
+        &self,
+        item_id: String,
+        summary: crate::review::model::ReviewFindingSummary,
+    ) {
+        self.review_findings.update(|all| {
+            let mut findings = all
+                .get(&item_id)
+                .map(|findings| findings.as_ref().clone())
+                .unwrap_or_default();
+            match findings
+                .iter()
+                .position(|existing| existing.finding.id == summary.finding.id)
+            {
+                Some(index) => findings[index] = summary,
+                None => findings.push(summary),
+            }
+            findings.sort_by_key(|summary| std::cmp::Reverse(summary.finding.updated_at));
+            all.insert(item_id, Arc::new(findings));
+        });
+    }
+
+    pub fn review_base_refs_for(&self, item_id: &str) -> Arc<Vec<String>> {
+        self.review_base_refs
+            .with(|all| all.get(item_id).cloned())
+            .unwrap_or_else(|| Arc::new(Vec::new()))
     }
 
     /// Start a bounded Agents-page request. The token fences an older timeout
@@ -586,9 +731,36 @@ impl AppState {
         })
     }
 
-    pub fn begin_agent_navigation(&self, item_id: String, thread_id: Option<String>) -> u64 {
+    pub fn begin_agent_navigation(
+        &self,
+        item_id: String,
+        thread_id: Option<String>,
+        navigation_id: u64,
+    ) -> u64 {
+        self.begin_agent_navigation_to(item_id, thread_id, None, navigation_id)
+    }
+
+    pub fn begin_agent_review_navigation(
+        &self,
+        review: crate::review::model::ReviewState,
+        item_id: String,
+        review_attempt_id: String,
+        navigation_id: u64,
+    ) -> u64 {
+        review.begin_historical_review_rollback(self.expected_navigation_id.get_untracked());
+        self.begin_agent_navigation_to(item_id, None, Some(review_attempt_id), navigation_id)
+    }
+
+    fn begin_agent_navigation_to(
+        &self,
+        item_id: String,
+        thread_id: Option<String>,
+        review_attempt_id: Option<String>,
+        navigation_id: u64,
+    ) -> u64 {
         let token = self.agent_navigation_token.get_untracked().wrapping_add(1);
         self.agent_navigation_token.set(token);
+        self.expected_navigation_id.set(Some(navigation_id));
         self.open_expectation
             .set(OpenExpectation::Item(item_id.clone()));
         self.open_item.set(Some(item_id.clone()));
@@ -600,19 +772,27 @@ impl AppState {
         self.pending_agent_navigation
             .set(Some(PendingAgentNavigation {
                 token,
+                navigation_id,
                 item_id,
                 thread_id,
+                review_attempt_id,
             }));
         token
     }
 
-    fn accepts_open_item(&self, item_id: &str) -> bool {
-        self.open_expectation
-            .with_untracked(|expected| match expected {
-                OpenExpectation::Any => true,
-                OpenExpectation::Item(expected) => expected == item_id,
-                OpenExpectation::Closed => false,
-            })
+    fn accepts_navigation(&self, navigation_id: u64) -> bool {
+        self.expected_navigation_id.get_untracked() == Some(navigation_id)
+    }
+
+    fn accepts_open_item(&self, navigation_id: u64, item_id: &str) -> bool {
+        self.accepts_navigation(navigation_id)
+            && self
+                .open_expectation
+                .with_untracked(|expected| match expected {
+                    OpenExpectation::Any => true,
+                    OpenExpectation::Item(expected) => expected == item_id,
+                    OpenExpectation::Closed => false,
+                })
     }
 
     /// Fold one backend event into the sidebar or the review view.
@@ -620,7 +800,14 @@ impl AppState {
         use crate::review::model::{ItemTab, Phase, Preparing};
 
         match event {
-            Event::ReviewProgress { message, percent } => {
+            Event::ReviewProgress {
+                navigation_id,
+                message,
+                percent,
+            } => {
+                if !self.accepts_navigation(navigation_id) {
+                    return;
+                }
                 review
                     .preparing
                     .set(Preparing::Working { message, percent });
@@ -628,6 +815,8 @@ impl AppState {
             }
             // The phase goes last, after every field the view will read.
             Event::ReviewReady {
+                navigation_id,
+                scope_gen,
                 item,
                 pull_request,
                 files,
@@ -635,13 +824,18 @@ impl AppState {
                 stale_head,
                 offline,
             } => {
-                if !self.accepts_open_item(&item.id) {
+                if !self.accepts_open_item(navigation_id, &item.id) {
                     tracing::debug!(item = %item.id, "ignored a stale item-open result");
                     return;
                 }
+                review.prepare_ready_for(&item.id);
                 self.open_expectation
                     .set(OpenExpectation::Item(item.id.clone()));
                 review.preparing.set(Preparing::Idle);
+                review.scope_gen.set(Some(scope_gen));
+                // A normal item open restores the live checkout after a
+                // retained review snapshot was being inspected.
+                review.clear_historical_review();
                 review.set_changed_files(files);
                 review.tree.set(tree);
                 self.open_item.set(Some(item.id.clone()));
@@ -659,21 +853,26 @@ impl AppState {
                 review.set_phase(Phase::Ready);
             }
             Event::IssueReady {
+                navigation_id,
+                scope_gen,
                 item,
                 issue,
                 comments,
                 offline,
             } => {
-                if !self.accepts_open_item(&item.id) {
+                if !self.accepts_open_item(navigation_id, &item.id) {
                     tracing::debug!(item = %item.id, "ignored a stale issue-open result");
                     return;
                 }
+                review.prepare_ready_for(&item.id);
                 self.open_expectation
                     .set(OpenExpectation::Item(item.id.clone()));
                 review.preparing.set(Preparing::Idle);
+                review.scope_gen.set(Some(scope_gen));
                 review.changed_files.set(Arc::new(Vec::new()));
                 review.tree.set(Arc::new(Vec::new()));
                 self.open_item.set(Some(item.id.clone()));
+                review.clear_historical_review();
                 review.item.set(Some(item));
                 review.pull_request.set(None);
                 review.stale_head.set(None);
@@ -685,7 +884,42 @@ impl AppState {
                 review.ready.set(true);
                 review.set_phase(Phase::Issue);
             }
-            Event::CommentThreads { item_id, threads } => {
+            Event::CommentThreads {
+                item_id,
+                threads,
+                review_group_id,
+                review_request_id,
+            } => {
+                let expected_historical = review.historical_review.with(|selected| {
+                    selected.as_ref().and_then(|summary| {
+                        review
+                            .historical_review_request
+                            .get_untracked()
+                            .map(|request_id| (summary.group.id.clone(), request_id))
+                    })
+                });
+                let matching_view = match (
+                    expected_historical.as_ref(),
+                    review_group_id.as_ref(),
+                    review_request_id,
+                ) {
+                    (None, None, None) => true,
+                    (
+                        Some((expected_group, expected_request)),
+                        Some(group_id),
+                        Some(request_id),
+                    ) => expected_group == group_id && *expected_request == request_id,
+                    _ => false,
+                };
+                if !matching_view {
+                    tracing::debug!(
+                        item = %item_id,
+                        group = ?review_group_id,
+                        request = ?review_request_id,
+                        "ignored comment threads for a stale review view"
+                    );
+                    return;
+                }
                 let retained_threads: HashSet<_> =
                     threads.iter().map(|thread| thread.id.as_str()).collect();
                 self.retain_agent_runs(|run| {
@@ -700,7 +934,10 @@ impl AppState {
                     review.set_comment_threads(Arc::new(threads));
                     if let Some(pending) = self.pending_agent_navigation.get().filter(|pending| {
                         pending.token == self.agent_navigation_token.get_untracked()
+                            && self.expected_navigation_id.get_untracked()
+                                == Some(pending.navigation_id)
                             && pending.item_id == item_id
+                            && pending.review_attempt_id.is_none()
                     }) {
                         review.show_tab(ItemTab::Conversation);
                         if let Some(thread_id) = pending.thread_id {
@@ -733,6 +970,209 @@ impl AppState {
                 events,
                 has_more,
             } => self.merge_agent_run_events(&run_id, events, has_more),
+            Event::AgentReviewNavigationReady {
+                item_id,
+                attempt_id,
+                request_id,
+                owner_changed,
+                summary,
+            } => {
+                self.update_review_group(item_id.clone(), summary.clone());
+                let selected = self.pending_agent_navigation.get().is_some_and(|pending| {
+                    pending.token == self.agent_navigation_token.get_untracked()
+                        && pending.navigation_id == request_id
+                        && self.accepts_navigation(request_id)
+                        && pending.item_id == item_id
+                        && pending.review_attempt_id.as_deref() == Some(attempt_id.as_str())
+                });
+                let newest_request = review
+                    .historical_review_request
+                    .get_untracked()
+                    .is_none_or(|current| request_id >= current);
+                if selected && newest_request && review.is_item(&item_id) {
+                    if owner_changed {
+                        // ReviewReady installed this owner's live context.
+                        // It, not the item visible before Agents navigation,
+                        // is the stable view retained when the snapshot fails.
+                        review.clear_historical_review();
+                    }
+                    review.begin_historical_review(
+                        owner_changed.then_some(request_id),
+                        summary,
+                        request_id,
+                    );
+                    self.pending_agent_navigation.set(None);
+                }
+            }
+            Event::AgentReviewNavigationFailed {
+                item_id,
+                attempt_id,
+                request_id,
+                message,
+            } => {
+                let selected = self.pending_agent_navigation.get().is_some_and(|pending| {
+                    pending.token == self.agent_navigation_token.get_untracked()
+                        && pending.navigation_id == request_id
+                        && pending.item_id == item_id
+                        && pending.review_attempt_id.as_deref() == Some(attempt_id.as_str())
+                        && self.accepts_navigation(request_id)
+                });
+                if selected {
+                    if let Some(rollback) = review.rollback_historical_review() {
+                        if let Some(navigation_id) = rollback.navigation_id {
+                            self.expected_navigation_id.set(Some(navigation_id));
+                        }
+                    }
+                    if let Some(owner) = review
+                        .item
+                        .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
+                    {
+                        self.open_expectation
+                            .set(OpenExpectation::Item(owner.clone()));
+                        self.open_item.set(Some(owner));
+                    }
+                    self.pending_agent_navigation.set(None);
+                    review.preparing.set(Preparing::Idle);
+                    if review.issue.with_untracked(Option::is_some) {
+                        review.set_phase(Phase::Issue);
+                    } else if review.ready.get_untracked() {
+                        review.set_phase(Phase::Ready);
+                    }
+                    self.notice.set(Some(message));
+                }
+            }
+            Event::NavigationCancelled {
+                item_id,
+                navigation_id,
+            } => {
+                if self.accepts_open_item(navigation_id, &item_id) {
+                    self.leave_review(review);
+                }
+            }
+            Event::ItemArchived {
+                item_id,
+                cancelled_navigation_id,
+            } => {
+                let matches_item = review.is_item(&item_id)
+                    || self
+                        .open_item
+                        .with_untracked(|open| open.as_deref() == Some(item_id.as_str()))
+                    || self
+                        .open_expectation
+                        .with_untracked(|expected| matches!(expected, OpenExpectation::Any));
+                if matches_item
+                    && cancelled_navigation_id
+                        .is_some_and(|navigation_id| self.accepts_navigation(navigation_id))
+                {
+                    self.leave_review(review);
+                }
+            }
+            Event::ReviewDashboard {
+                item_id,
+                capabilities,
+                preferences,
+                base_refs,
+                groups,
+                findings,
+            } => {
+                self.set_review_dashboard(
+                    item_id.clone(),
+                    capabilities,
+                    preferences,
+                    base_refs,
+                    groups,
+                    findings.clone(),
+                );
+                if review.is_item(&item_id) {
+                    review.apply_review_finding_filter(
+                        review.review_finding_filter.get_untracked(),
+                        &findings,
+                    );
+                }
+            }
+            Event::ReviewGroupUpdated { item_id, summary } => {
+                self.update_review_group(item_id, summary)
+            }
+            Event::ReviewFindingUpdated { item_id, summary } => {
+                self.update_review_finding(item_id.clone(), summary);
+                if review.is_item(&item_id) {
+                    let findings = self.review_findings_for(&item_id);
+                    review.apply_review_finding_filter(
+                        review.review_finding_filter.get_untracked(),
+                        &findings,
+                    );
+                }
+            }
+            Event::ReviewLaunchFailed { item_id, message } => {
+                self.fail_review_launch(item_id, message)
+            }
+            Event::HistoricalReviewReady {
+                item_id,
+                group_id,
+                request_id,
+                scope_gen,
+                files,
+                tree,
+                findings,
+            } => {
+                let selected = review.historical_review.with(|selected| {
+                    selected
+                        .as_ref()
+                        .is_some_and(|summary| summary.group.id == group_id)
+                        && review.historical_review_request.get_untracked() == Some(request_id)
+                        && self.accepts_navigation(request_id)
+                });
+                if review.is_item(&item_id) && selected {
+                    review.scope_gen.set(Some(scope_gen));
+                    review.lsp_status.set(perch_lsp::Status::Absent);
+                    // Historical membership is fixed by the selected
+                    // group's observations, not by each finding's current
+                    // disposition. Do not let today's Open filter hide a
+                    // finding that was present in this review.
+                    review.hidden_review_threads.set(HashSet::new());
+                    review.finish_historical_review(findings);
+                    // The backend has already switched its file context to
+                    // this retained snapshot. Forget current-snapshot file
+                    // buffers and let the normal reload queue ask for the
+                    // historical versions of any open tabs.
+                    for path in review.change_scope(perch_git::Scope::Branch, files) {
+                        self.reload.update(|reload| reload.push(path));
+                    }
+                    review.tree.set(tree);
+                    review.show_tab(ItemTab::Files);
+                }
+            }
+            Event::HistoricalReviewFailed {
+                item_id,
+                group_id,
+                request_id,
+                message,
+            } => {
+                let selected = review.historical_review.with(|selected| {
+                    selected.as_ref().is_some_and(|summary| {
+                        summary.group.id == group_id
+                            && (item_id.is_empty() || summary.group.item_id == item_id)
+                            && review.historical_review_request.get_untracked() == Some(request_id)
+                            && self.accepts_navigation(request_id)
+                    })
+                });
+                if selected {
+                    if let Some(rollback) = review.rollback_historical_review() {
+                        if let Some(navigation_id) = rollback.navigation_id {
+                            self.expected_navigation_id.set(Some(navigation_id));
+                            let item_id = rollback
+                                .review
+                                .as_ref()
+                                .map(|summary| summary.group.item_id.clone())
+                                .or_else(|| (!item_id.is_empty()).then(|| item_id.clone()));
+                            if let Some(item_id) = item_id {
+                                self.open_expectation.set(OpenExpectation::Item(item_id));
+                            }
+                        }
+                    }
+                    self.notice.set(Some(message));
+                }
+            }
             Event::Items(items) => {
                 let retained_items: HashSet<_> =
                     items.iter().map(|item| item.id.as_str()).collect();
@@ -774,11 +1214,24 @@ impl AppState {
                 }
                 self.apply(Event::Items(items));
             }
-            Event::ReviewFailed { message } => {
+            Event::ReviewFailed {
+                navigation_id,
+                message,
+            } => {
+                if !self.accepts_navigation(navigation_id) {
+                    return;
+                }
                 review.preparing.set(Preparing::Failed { message });
                 review.set_phase(Phase::Failed);
             }
-            Event::LspStatus(status) => review.lsp_status.set(status),
+            Event::LspStatus {
+                navigation_id,
+                status,
+            } => {
+                if self.accepts_navigation(navigation_id) {
+                    review.lsp_status.set(status);
+                }
+            }
             Event::LspHover { token, text } => {
                 // Drop an answer the pointer has already moved past.
                 if review.request_token.get() == token {
@@ -795,11 +1248,16 @@ impl AppState {
             // A load for the last item, still on its way when the next one
             // opened, is nobody's now.
             Event::FileLoaded {
+                navigation_id,
+                scope_gen,
                 item_id,
                 path,
                 file,
             } => {
-                if review.is_item(&item_id) {
+                if self.accepts_navigation(navigation_id)
+                    && review.is_item(&item_id)
+                    && review.scope_gen.get_untracked() == Some(scope_gen)
+                {
                     review.finish_load(&path, file);
                 }
             }
@@ -808,9 +1266,20 @@ impl AppState {
                     review.issue_comments.set(comments);
                 }
             }
-            Event::FileFailed { path, message } => {
-                tracing::warn!(path, message, "could not open file");
-                review.fail_load(&path);
+            Event::FileFailed {
+                navigation_id,
+                scope_gen,
+                item_id,
+                path,
+                message,
+            } => {
+                if self.accepts_navigation(navigation_id)
+                    && review.is_item(&item_id)
+                    && review.scope_gen.get_untracked() == Some(scope_gen)
+                {
+                    tracing::warn!(path, message, "could not open file");
+                    review.fail_load(&path);
+                }
             }
             // A complaint may be about the send a sent question's card is
             // waiting on, whose thread is then not coming; the card's
@@ -836,23 +1305,31 @@ impl AppState {
                 }
             }
             Event::CommitsReady {
+                navigation_id,
+                scope_gen,
                 item_id,
                 commits,
                 dirt,
                 since,
             } => {
-                if review.is_item(&item_id) {
+                if self.accepts_navigation(navigation_id)
+                    && review.is_item(&item_id)
+                    && review.scope_gen.get_untracked() == Some(scope_gen)
+                {
                     review.commits.set(commits);
                     review.dirty.set(dirt);
                     review.since_head.set(since);
                 }
             }
             Event::ScopeReady {
+                navigation_id,
+                scope_gen,
                 item_id,
                 scope,
                 files,
             } => {
-                if review.is_item(&item_id) {
+                if self.accepts_navigation(navigation_id) && review.is_item(&item_id) {
+                    review.scope_gen.set(Some(scope_gen));
                     for path in review.change_scope(scope, files) {
                         self.reload.update(|r| r.push(path));
                     }
@@ -984,13 +1461,23 @@ impl AppState {
             | Event::AgentRunUpdated { .. }
             | Event::AgentRunDetail { .. }
             | Event::AgentRunEvents { .. }
+            | Event::AgentReviewNavigationReady { .. }
+            | Event::AgentReviewNavigationFailed { .. }
+            | Event::NavigationCancelled { .. }
+            | Event::ItemArchived { .. }
+            | Event::ReviewDashboard { .. }
+            | Event::ReviewGroupUpdated { .. }
+            | Event::ReviewFindingUpdated { .. }
+            | Event::ReviewLaunchFailed { .. }
+            | Event::HistoricalReviewReady { .. }
+            | Event::HistoricalReviewFailed { .. }
             | Event::IssueReady { .. } => {}
             Event::ReviewProgress { .. }
             | Event::ReviewReady { .. }
             | Event::ReviewFailed { .. }
             | Event::FileLoaded { .. }
             | Event::FileFailed { .. }
-            | Event::LspStatus(_)
+            | Event::LspStatus { .. }
             | Event::LspHover { .. }
             | Event::LspDefinition { .. }
             | Event::DiscussionReady { .. }
@@ -1026,7 +1513,9 @@ impl AppState {
         review: crate::review::model::ReviewState,
         message: &str,
         item_id: &str,
+        navigation_id: u64,
     ) {
+        self.expected_navigation_id.set(Some(navigation_id));
         self.open_expectation
             .set(OpenExpectation::Item(item_id.to_string()));
         self.open_item.set(Some(item_id.to_string()));
@@ -1035,15 +1524,45 @@ impl AppState {
 
     /// The progress card, over the open review or the empty main area, for
     /// an act that ends in another item being opened: Start work, Fork.
-    pub fn begin_open(&self, message: &str) {
-        let Some(review) = self.review.get_untracked() else {
-            return;
-        };
+    pub fn begin_open(&self, message: &str, navigation_id: u64) {
+        self.expected_navigation_id.set(Some(navigation_id));
         self.pending_agent_navigation.set(None);
         self.agent_archived_owner.set(None);
         self.open_expectation.set(OpenExpectation::Any);
         self.open_item.set(None);
-        review.begin(message);
+        if let Some(review) = self.review.get_untracked() {
+            review.begin(message);
+        }
+    }
+
+    /// Register a known item without changing its visible loading state.
+    pub fn expect_item_navigation(&self, item_id: &str, navigation_id: u64) {
+        self.expected_navigation_id.set(Some(navigation_id));
+        self.open_expectation
+            .set(OpenExpectation::Item(item_id.to_string()));
+    }
+
+    /// Select a retained review after the backend has synchronously assigned
+    /// its request identity.
+    pub fn begin_historical_review(
+        &self,
+        review: crate::review::model::ReviewState,
+        summary: crate::review::model::ReviewGroupSummary,
+        navigation_id: u64,
+    ) {
+        let item_id = summary.group.item_id.clone();
+        review.begin_historical_review(
+            self.expected_navigation_id.get_untracked(),
+            summary,
+            navigation_id,
+        );
+        self.expect_item_navigation(&item_id, navigation_id);
+    }
+
+    /// A user-initiated close has its own backend navigation identity.
+    pub fn begin_close(&self, review: crate::review::model::ReviewState, navigation_id: u64) {
+        self.expected_navigation_id.set(Some(navigation_id));
+        self.leave_review(review);
     }
 
     /// Leave the review view. The sidebar is the only place to land.
@@ -1134,16 +1653,59 @@ mod tests {
         }
     }
 
-    fn review_ready(item_id: &str) -> Event {
+    fn review_ready(item_id: &str, navigation_id: u64) -> Event {
+        review_ready_at_scope(item_id, navigation_id, navigation_id)
+    }
+
+    fn review_ready_at_scope(item_id: &str, navigation_id: u64, scope_gen: u64) -> Event {
         let mut item = Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
         item.id = item_id.into();
         Event::ReviewReady {
+            navigation_id,
+            scope_gen,
             item: Arc::new(item),
             pull_request: None,
             files: Arc::new(Vec::new()),
             tree: Arc::new(Vec::new()),
             stale_head: None,
             offline: true,
+        }
+    }
+
+    fn historical_summary(group_id: &str) -> crate::review::model::ReviewGroupSummary {
+        let created_at = "2026-09-19T12:00:00Z".parse().unwrap();
+        crate::review::model::ReviewGroupSummary {
+            group: perch_github::ReviewGroup {
+                id: group_id.into(),
+                item_id: "wt".into(),
+                snapshot_id: "snapshot".into(),
+                number: 2,
+                status: perch_github::ReviewGroupStatus::Completed,
+                new_findings: 0,
+                still_present: 0,
+                verified_fixed: 0,
+                not_verified: 0,
+                created_at,
+                started_at: Some(created_at),
+                ended_at: Some(created_at),
+            },
+            snapshot: perch_github::ReviewSnapshot {
+                id: "snapshot".into(),
+                item_id: "wt".into(),
+                repository: "slatedb/slatedb".into(),
+                branch_label: Some("feature".into()),
+                requested_base_ref: "main".into(),
+                base_tip_sha: "base".into(),
+                merge_base_sha: "merge-base".into(),
+                head_sha: "head".into(),
+                dirty_edits_excluded: false,
+                retention_key: "snapshot".into(),
+                retained_ref: None,
+                manifest_path: None,
+                diff_path: None,
+                created_at,
+            },
+            attempts: Vec::new(),
         }
     }
 
@@ -1171,20 +1733,22 @@ mod tests {
         let app = AppState::new();
         let review = ReviewState::new();
 
-        let first = app.begin_agent_navigation("older".into(), Some("thread-old".into()));
-        let latest = app.begin_agent_navigation("latest".into(), Some("thread-new".into()));
+        let first = app.begin_agent_navigation("older".into(), Some("thread-old".into()), 11);
+        let latest = app.begin_agent_navigation("latest".into(), Some("thread-new".into()), 12);
         assert!(latest > first);
         app.begin_review(review, "Reading the discussion");
 
-        app.apply_with_review(review_ready("older"), review);
+        app.apply_with_review(review_ready("older", 11), review);
         assert_eq!(app.open_item.get().as_deref(), Some("latest"));
         assert!(!review.is_item("older"));
 
-        app.apply_with_review(review_ready("latest"), review);
+        app.apply_with_review(review_ready("latest", 12), review);
         app.apply_with_review(
             Event::CommentThreads {
                 item_id: "latest".into(),
                 threads: Vec::new(),
+                review_group_id: None,
+                review_request_id: None,
             },
             review,
         );
@@ -1196,11 +1760,510 @@ mod tests {
 
         // The first load can still finish after the latest one. It remains
         // inert, and closing the workspace also fences delayed Ready events.
-        app.apply_with_review(review_ready("older"), review);
+        app.apply_with_review(review_ready("older", 11), review);
         assert!(review.is_item("latest"));
         app.leave_review(review);
-        app.apply_with_review(review_ready("latest"), review);
+        app.apply_with_review(review_ready("latest", 12), review);
         assert!(!review.is_showing());
+    }
+
+    #[test]
+    fn a_queued_same_item_event_requires_the_exact_backend_navigation_id() {
+        let app = AppState::new();
+        let review = ReviewState::new();
+
+        app.begin_item_review(review, "First open", "same", 31);
+        app.begin_item_review(review, "Second open", "same", 32);
+
+        app.apply_with_review(review_ready("same", 31), review);
+        app.apply_with_review(
+            Event::ReviewFailed {
+                navigation_id: 31,
+                message: "stale failure".into(),
+            },
+            review,
+        );
+        assert!(!review.ready.get());
+        assert_eq!(review.phase.get(), crate::review::model::Phase::Preparing);
+
+        app.apply_with_review(review_ready("same", 32), review);
+        assert!(review.ready.get());
+        assert!(review.is_item("same"));
+    }
+
+    #[test]
+    fn an_accepted_cross_item_ready_clears_the_retained_checkout() {
+        let app = AppState::new();
+        let review = review_of("old");
+        review.tabs.set(vec![crate::review::model::Tab {
+            path: "src/old.rs".into(),
+        }]);
+        review
+            .loading
+            .update(|loading| _ = loading.insert("src/old.rs".into(), ()));
+        review.lsp_status.set(perch_lsp::Status::Ready);
+        app.expect_item_navigation("new", 41);
+
+        app.apply_with_review(review_ready("new", 41), review);
+
+        assert!(review.is_item("new"));
+        assert!(review.tabs.with(Vec::is_empty));
+        assert!(review.loading.with(HashMap::is_empty));
+        assert_eq!(review.lsp_status.get(), perch_lsp::Status::Absent);
+    }
+
+    #[test]
+    fn an_accepted_same_item_ready_fences_the_old_lsp_status() {
+        let app = AppState::new();
+        let review = review_of("same");
+        review.lsp_status.set(perch_lsp::Status::Ready);
+        app.expect_item_navigation("same", 42);
+
+        app.apply_with_review(review_ready("same", 42), review);
+
+        assert_eq!(review.lsp_status.get(), perch_lsp::Status::Absent);
+    }
+
+    #[test]
+    fn file_results_require_the_current_scope_generation() {
+        let app = AppState::new();
+        let review = ReviewState::new();
+
+        app.begin_item_review(review, "Open", "same", 61);
+        app.apply_with_review(review_ready_at_scope("same", 61, 610), review);
+        review.loading.update(|loading| {
+            loading.insert("src/loaded.rs".into(), ());
+            loading.insert("src/failed.rs".into(), ());
+        });
+        let file = Arc::new(crate::backend::build_loaded_file(
+            "src/loaded.rs".into(),
+            "new\n".into(),
+            "old\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        ));
+
+        app.apply_with_review(
+            Event::FileLoaded {
+                navigation_id: 61,
+                scope_gen: 609,
+                item_id: "same".into(),
+                path: "src/loaded.rs".into(),
+                file: file.clone(),
+            },
+            review,
+        );
+        app.apply_with_review(
+            Event::FileFailed {
+                navigation_id: 61,
+                scope_gen: 609,
+                item_id: "same".into(),
+                path: "src/failed.rs".into(),
+                message: "stale".into(),
+            },
+            review,
+        );
+        assert!(!review.files.with(|files| files.contains_key("src/loaded.rs")));
+        assert!(review
+            .loading
+            .with(|loading| loading.contains_key("src/loaded.rs")));
+        assert!(review
+            .loading
+            .with(|loading| loading.contains_key("src/failed.rs")));
+
+        app.apply_with_review(
+            Event::FileLoaded {
+                navigation_id: 61,
+                scope_gen: 610,
+                item_id: "same".into(),
+                path: "src/loaded.rs".into(),
+                file,
+            },
+            review,
+        );
+        app.apply_with_review(
+            Event::FileFailed {
+                navigation_id: 61,
+                scope_gen: 610,
+                item_id: "same".into(),
+                path: "src/failed.rs".into(),
+                message: "current".into(),
+            },
+            review,
+        );
+        assert!(review.files.with(|files| files.contains_key("src/loaded.rs")));
+        assert!(!review
+            .loading
+            .with(|loading| loading.contains_key("src/loaded.rs")));
+        assert!(!review
+            .loading
+            .with(|loading| loading.contains_key("src/failed.rs")));
+    }
+
+    #[test]
+    fn scope_and_commit_results_require_the_current_navigation_and_generation() {
+        let app = AppState::new();
+        let review = ReviewState::new();
+
+        app.begin_item_review(review, "Open", "same", 71);
+        app.apply_with_review(review_ready_at_scope("same", 71, 710), review);
+        let changed = Arc::new(vec![perch_git::ChangedFile {
+            path: "src/current.rs".into(),
+            old_path: None,
+            status: perch_git::ChangeStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            head_blob: Some("current".into()),
+        }]);
+
+        app.apply_with_review(
+            Event::ScopeReady {
+                navigation_id: 70,
+                scope_gen: 711,
+                item_id: "same".into(),
+                scope: perch_git::Scope::Branch,
+                files: changed.clone(),
+            },
+            review,
+        );
+        assert_eq!(review.scope_gen.get(), Some(710));
+        assert!(review.changed_files.get().is_empty());
+
+        app.apply_with_review(
+            Event::ScopeReady {
+                navigation_id: 71,
+                scope_gen: 712,
+                item_id: "same".into(),
+                scope: perch_git::Scope::Branch,
+                files: changed,
+            },
+            review,
+        );
+        assert_eq!(review.scope_gen.get(), Some(712));
+        assert_eq!(review.changed_files.get()[0].path, "src/current.rs");
+
+        app.apply_with_review(
+            Event::CommitsReady {
+                navigation_id: 71,
+                scope_gen: 710,
+                item_id: "same".into(),
+                commits: Arc::new(Vec::new()),
+                dirt: perch_git::Dirt::default(),
+                since: Some("stale-generation".into()),
+            },
+            review,
+        );
+        app.apply_with_review(
+            Event::CommitsReady {
+                navigation_id: 70,
+                scope_gen: 712,
+                item_id: "same".into(),
+                commits: Arc::new(Vec::new()),
+                dirt: perch_git::Dirt::default(),
+                since: Some("stale-navigation".into()),
+            },
+            review,
+        );
+        assert!(review.since_head.with(Option::is_none));
+
+        app.apply_with_review(
+            Event::CommitsReady {
+                navigation_id: 71,
+                scope_gen: 712,
+                item_id: "same".into(),
+                commits: Arc::new(Vec::new()),
+                dirt: perch_git::Dirt::default(),
+                since: Some("current".into()),
+            },
+            review,
+        );
+        assert_eq!(review.since_head.get().as_deref(), Some("current"));
+    }
+
+    #[test]
+    fn review_navigation_selects_only_the_latest_attempts_exact_group() {
+        let app = AppState::new();
+        let review = review_of("wt");
+
+        let first = app.begin_agent_review_navigation(
+            review,
+            "wt".into(),
+            "attempt-old".into(),
+            41,
+        );
+        let latest = app.begin_agent_review_navigation(
+            review,
+            "wt".into(),
+            "attempt-new".into(),
+            42,
+        );
+        assert!(latest > first);
+
+        app.apply_with_review(
+            Event::AgentReviewNavigationReady {
+                item_id: "wt".into(),
+                attempt_id: "attempt-old".into(),
+                request_id: 41,
+                owner_changed: false,
+                summary: historical_summary("group-old"),
+            },
+            review,
+        );
+        assert!(review.historical_review.with(Option::is_none));
+
+        app.apply_with_review(
+            Event::AgentReviewNavigationReady {
+                item_id: "wt".into(),
+                attempt_id: "attempt-new".into(),
+                request_id: 42,
+                owner_changed: false,
+                summary: historical_summary("group-new"),
+            },
+            review,
+        );
+        assert_eq!(
+            review
+                .historical_review
+                .with(|selected| selected.as_ref().map(|summary| summary.group.id.clone())),
+            Some("group-new".to_string())
+        );
+        assert_eq!(review.historical_review_request.get(), Some(42));
+        assert!(app.pending_agent_navigation.with(Option::is_none));
+    }
+
+    #[test]
+    fn cross_item_attempt_failure_retains_the_new_live_owner() {
+        let app = AppState::new();
+        let review = review_of("old-owner");
+        app.expect_item_navigation("old-owner", 50);
+        app.begin_agent_review_navigation(review, "wt".into(), "attempt".into(), 51);
+
+        app.apply_with_review(review_ready("wt", 51), review);
+        app.apply_with_review(
+            Event::AgentReviewNavigationReady {
+                item_id: "wt".into(),
+                attempt_id: "attempt".into(),
+                request_id: 51,
+                owner_changed: true,
+                summary: historical_summary("group"),
+            },
+            review,
+        );
+        app.apply_with_review(
+            Event::HistoricalReviewFailed {
+                item_id: "wt".into(),
+                group_id: "group".into(),
+                request_id: 51,
+                message: "missing snapshot".into(),
+            },
+            review,
+        );
+
+        assert!(review.is_item("wt"));
+        assert!(review.historical_review.with(Option::is_none));
+        assert!(app.accepts_navigation(51));
+        assert!(!app.accepts_navigation(50));
+    }
+
+    #[test]
+    fn only_the_selected_historical_snapshot_can_replace_the_open_diff() {
+        let app = AppState::new();
+        let review = review_of("wt");
+        review
+            .historical_review
+            .set(Some(historical_summary("selected")));
+        review.historical_review_request.set(Some(7));
+        app.expect_item_navigation("wt", 7);
+        review
+            .changed_files
+            .set(Arc::new(vec![perch_git::ChangedFile {
+                path: "src/current.rs".into(),
+                old_path: None,
+                status: perch_git::ChangeStatus::Modified,
+                additions: 1,
+                deletions: 0,
+                binary: false,
+                head_blob: Some("current".into()),
+            }]));
+
+        let event = |item_id: &str, group_id: &str, request_id: u64, path: &str| {
+            Event::HistoricalReviewReady {
+                item_id: item_id.into(),
+                group_id: group_id.into(),
+                request_id,
+                scope_gen: request_id,
+                files: Arc::new(vec![perch_git::ChangedFile {
+                    path: path.into(),
+                    old_path: None,
+                    status: perch_git::ChangeStatus::Added,
+                    additions: 2,
+                    deletions: 0,
+                    binary: false,
+                    head_blob: Some("historical".into()),
+                }]),
+                tree: Arc::new(vec![perch_git::TreeEntry::new(path, false)]),
+                findings: Arc::new(Vec::new()),
+            }
+        };
+
+        app.apply_with_review(event("wt", "stale", 7, "src/stale.rs"), review);
+        app.apply_with_review(event("wt", "selected", 6, "src/repeated.rs"), review);
+        app.apply_with_review(event("other", "selected", 7, "src/other.rs"), review);
+        assert_eq!(review.changed_files.get()[0].path, "src/current.rs");
+
+        app.apply_with_review(event("wt", "selected", 7, "src/historical.rs"), review);
+        assert_eq!(review.scope_gen.get(), Some(7));
+        assert_eq!(review.changed_files.get()[0].path, "src/historical.rs");
+        assert_eq!(review.tree.get()[0].path, "src/historical.rs");
+        assert_eq!(review.tab.get(), crate::review::model::ItemTab::Files);
+        assert!(review.historical_findings.with(Option::is_some));
+        assert_eq!(
+            review
+                .historical_review
+                .get()
+                .as_ref()
+                .map(|summary| summary.group.id.as_str()),
+            Some("selected")
+        );
+    }
+
+    #[test]
+    fn a_failed_historical_load_rolls_back_only_its_optimistic_selection() {
+        let app = AppState::new();
+        let review = review_of("wt");
+        review
+            .historical_review
+            .set(Some(historical_summary("stable")));
+        review.historical_review_request.set(Some(7));
+        review.historical_findings.set(Some(Arc::new(Vec::new())));
+        app.expect_item_navigation("wt", 7);
+
+        app.begin_historical_review(review, historical_summary("selected"), 8);
+        app.begin_historical_review(review, historical_summary("latest"), 9);
+
+        app.apply_with_review(
+            Event::HistoricalReviewFailed {
+                item_id: "wt".into(),
+                group_id: "selected".into(),
+                request_id: 8,
+                message: "stale failed".into(),
+            },
+            review,
+        );
+        assert_eq!(
+            review
+                .historical_review
+                .get()
+                .as_ref()
+                .map(|summary| summary.group.id.as_str()),
+            Some("latest")
+        );
+
+        app.apply_with_review(
+            Event::HistoricalReviewFailed {
+                item_id: "wt".into(),
+                group_id: "latest".into(),
+                request_id: 9,
+                message: "retained source missing".into(),
+            },
+            review,
+        );
+        assert_eq!(
+            review
+                .historical_review
+                .get()
+                .as_ref()
+                .map(|summary| summary.group.id.as_str()),
+            Some("stable")
+        );
+        assert_eq!(review.historical_review_request.get(), Some(7));
+        assert!(review.historical_findings.with(Option::is_some));
+        assert_eq!(app.expected_navigation_id.get(), Some(7));
+        assert_eq!(app.notice.get().as_deref(), Some("retained source missing"));
+    }
+
+    #[test]
+    fn an_older_historical_load_cannot_replace_threads_or_files_before_the_latest_fails() {
+        let app = AppState::new();
+        let review = review_of("wt");
+        review
+            .historical_review
+            .set(Some(historical_summary("group-b")));
+        review.historical_review_request.set(Some(22));
+        app.expect_item_navigation("wt", 22);
+        review
+            .changed_files
+            .set(Arc::new(vec![perch_git::ChangedFile {
+                path: "src/current.rs".into(),
+                old_path: None,
+                status: perch_git::ChangeStatus::Modified,
+                additions: 1,
+                deletions: 0,
+                binary: false,
+                head_blob: Some("current".into()),
+            }]));
+        review.set_comment_threads(Arc::new(vec![perch_github::CommentThread {
+            id: "current-thread".into(),
+            worktree_id: "wt".into(),
+            origin: perch_github::ThreadOrigin::Local,
+            anchor: None,
+            outdated: false,
+            resolved: false,
+            created_at: "2026-09-19T12:00:00Z".parse().unwrap(),
+            messages: Vec::new(),
+        }]));
+
+        // Request A finishes after B is selected. Both its projected threads
+        // and its file payload carry A's request identity and remain inert.
+        app.apply_with_review(
+            Event::CommentThreads {
+                item_id: "wt".into(),
+                threads: Vec::new(),
+                review_group_id: Some("group-a".into()),
+                review_request_id: Some(21),
+            },
+            review,
+        );
+        app.apply_with_review(
+            Event::HistoricalReviewReady {
+                item_id: "wt".into(),
+                group_id: "group-a".into(),
+                request_id: 21,
+                scope_gen: 21,
+                files: Arc::new(vec![perch_git::ChangedFile {
+                    path: "src/group-a.rs".into(),
+                    old_path: None,
+                    status: perch_git::ChangeStatus::Added,
+                    additions: 2,
+                    deletions: 0,
+                    binary: false,
+                    head_blob: Some("a".into()),
+                }]),
+                tree: Arc::new(vec![perch_git::TreeEntry::new("src/group-a.rs", false)]),
+                findings: Arc::new(Vec::new()),
+            },
+            review,
+        );
+        assert_eq!(review.comment_threads.get()[0].id, "current-thread");
+        assert_eq!(review.changed_files.get()[0].path, "src/current.rs");
+
+        app.apply_with_review(
+            Event::HistoricalReviewFailed {
+                item_id: "wt".into(),
+                group_id: "group-b".into(),
+                request_id: 22,
+                message: "group B failed".into(),
+            },
+            review,
+        );
+        assert!(review.historical_review.with(Option::is_none));
+        assert!(review.historical_review_request.with(Option::is_none));
+        assert_eq!(review.comment_threads.get()[0].id, "current-thread");
+        assert_eq!(review.changed_files.get()[0].path, "src/current.rs");
+        assert_eq!(app.notice.get().as_deref(), Some("group B failed"));
     }
 
     #[test]
