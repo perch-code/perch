@@ -16,6 +16,28 @@ use serde::{Deserialize, Serialize};
 use crate::comments::Side;
 use crate::pulls::UserRef;
 
+/// The verdict attached to a submitted pull-request review.
+///
+/// These names serialize exactly as GitHub's REST endpoint expects. Leaving
+/// the event out would create a pending review, which Perch does not expose:
+/// its review composer always submits one of these three final decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PullReviewEvent {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl PullReviewEvent {
+    /// A summary is optional only for an approval. GitHub rejects empty
+    /// comment and change-request reviews with a 422, so catch those before
+    /// spending a request or triggering abuse-rate-limit accounting.
+    pub fn requires_body(self) -> bool {
+        matches!(self, Self::Comment | Self::RequestChanges)
+    }
+}
+
 /// Everything said on one pull request, as GitHub lists it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Discussion {

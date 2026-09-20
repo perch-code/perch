@@ -172,6 +172,7 @@ pub fn open_launcher(
     else {
         return;
     };
+    crate::review::submit_review::close(state, false);
     state.review_launcher_opener.set(opener);
     state
         .review_launcher_draft
@@ -181,7 +182,7 @@ pub fn open_launcher(
     backend.load_review_dashboard(&item_id);
 }
 
-fn close_launcher(state: ReviewState, restore_focus: bool) {
+pub(crate) fn close_launcher(state: ReviewState, restore_focus: bool) {
     state.review_launcher_open.set(false);
     if restore_focus {
         let opener = state.review_launcher_opener.get_untracked();

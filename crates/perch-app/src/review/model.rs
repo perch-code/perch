@@ -11,7 +11,7 @@ use perch_git::{
 };
 use perch_github::{
     Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest,
-    PullRequestOverview,
+    PullRequestOverview, PullReviewEvent, Review,
 };
 use perch_syntax::{Language, LineSpans};
 
@@ -408,6 +408,22 @@ pub struct ReviewState {
     pub review_launcher_open: RwSignal<bool>,
     pub review_launcher_draft: RwSignal<Option<ReviewLaunchDraft>>,
     pub review_launcher_opener: RwSignal<Option<floem::ViewId>>,
+    /// GitHub's review submission surface is separate from the native agent
+    /// review launcher above. Its draft stays with the open pull request so a
+    /// cancelled or failed submission can be resumed without retyping it.
+    pub submit_review_open: RwSignal<bool>,
+    pub submit_review_draft: RwSignal<String>,
+    pub submit_review_event: RwSignal<PullReviewEvent>,
+    pub submit_review_opener: RwSignal<Option<floem::ViewId>>,
+    pub submit_review_focused: RwSignal<bool>,
+    pub submit_review_autofocus: RwSignal<bool>,
+    /// The backend-assigned attempt currently in flight, if any.
+    pub submit_review_pending: RwSignal<Option<u64>>,
+    pub submit_review_error: RwSignal<Option<String>>,
+    /// Reviews accepted by GitHub in this session. They are merged into
+    /// later discussion snapshots so an older in-flight GET cannot briefly
+    /// erase a review that the POST already confirmed.
+    pub submitted_reviews: RwSignal<Arc<Vec<Review>>>,
     pub historical_review: RwSignal<Option<ReviewGroupSummary>>,
     /// Identity of the in-flight or installed History request. A group id
     /// alone is insufficient when the same group is requested twice and
@@ -610,6 +626,15 @@ impl ReviewState {
             review_launcher_open: RwSignal::new(false),
             review_launcher_draft: RwSignal::new(None),
             review_launcher_opener: RwSignal::new(None),
+            submit_review_open: RwSignal::new(false),
+            submit_review_draft: RwSignal::new(String::new()),
+            submit_review_event: RwSignal::new(PullReviewEvent::Comment),
+            submit_review_opener: RwSignal::new(None),
+            submit_review_focused: RwSignal::new(false),
+            submit_review_autofocus: RwSignal::new(true),
+            submit_review_pending: RwSignal::new(None),
+            submit_review_error: RwSignal::new(None),
+            submitted_reviews: RwSignal::new(Arc::new(Vec::new())),
             historical_review: RwSignal::new(None),
             historical_review_request: RwSignal::new(None),
             historical_findings: RwSignal::new(None),
@@ -720,6 +745,14 @@ impl ReviewState {
         self.review_launcher_open.set(false);
         self.review_launcher_draft.set(None);
         self.review_launcher_opener.set(None);
+        self.submit_review_open.set(false);
+        self.submit_review_draft.set(String::new());
+        self.submit_review_event.set(PullReviewEvent::Comment);
+        self.submit_review_opener.set(None);
+        self.submit_review_focused.set(false);
+        self.submit_review_pending.set(None);
+        self.submit_review_error.set(None);
+        self.submitted_reviews.set(Arc::new(Vec::new()));
         self.clear_historical_review();
         self.tab.set(ItemTab::Conversation);
         self.scope.set(Scope::Branch);
@@ -881,6 +914,95 @@ impl ReviewState {
     /// Whether the open item is this one.
     pub fn is_item(&self, id: &str) -> bool {
         self.item.with(|i| i.as_ref().is_some_and(|i| i.id == id))
+    }
+
+    /// Record the backend attempt that owns the review submission UI. An
+    /// older result can still enter the timeline, but must not settle this
+    /// surface once a newer attempt owns it.
+    pub fn begin_submit_review(&self, attempt_id: u64) {
+        self.submit_review_pending.set(Some(attempt_id));
+        self.submit_review_error.set(None);
+    }
+
+    /// Install a review GitHub accepted before the follow-up discussion GET
+    /// completes. Keeping it in `submitted_reviews` also protects the UI from
+    /// an older discussion request that was already in flight.
+    pub fn finish_submit_review(&self, attempt_id: u64, review: Review) -> bool {
+        let pending = self.submit_review_pending.get_untracked();
+        let owns_surface = pending == Some(attempt_id);
+        // `None` means the item was left and reopened while the backend kept
+        // this attempt alive. A different id means a newer submission now
+        // owns the surface. In both cases the durable review still belongs in
+        // the timeline, without disturbing that fresh draft or attempt.
+        if owns_surface {
+            self.submit_review_pending.set(None);
+            self.submit_review_error.set(None);
+            self.submit_review_open.set(false);
+            self.submit_review_draft.set(String::new());
+            self.submit_review_event.set(PullReviewEvent::Comment);
+            self.submit_review_focused.set(false);
+        }
+
+        self.submitted_reviews.update(|reviews| {
+            let reviews = Arc::make_mut(reviews);
+            match reviews.iter_mut().find(|known| known.id == review.id) {
+                Some(known) => *known = review.clone(),
+                None => reviews.push(review.clone()),
+            }
+        });
+        self.discussion.update(|discussion| {
+            let Some(current) = discussion.as_ref() else {
+                return;
+            };
+            let mut current = (**current).clone();
+            match current.reviews.iter_mut().find(|known| known.id == review.id) {
+                Some(known) => *known = review.clone(),
+                None => current.reviews.push(review.clone()),
+            }
+            *discussion = Some(Arc::new(current));
+        });
+
+        if owns_surface {
+            if let Some(opener) = self.submit_review_opener.get_untracked() {
+                opener.request_focus();
+            }
+            self.submit_review_opener.set(None);
+        }
+        true
+    }
+
+    pub fn fail_submit_review(&self, attempt_id: u64, message: String) -> bool {
+        if self
+            .submit_review_pending
+            .get_untracked()
+            .is_some_and(|current| current != attempt_id)
+        {
+            return false;
+        }
+        self.submit_review_pending.set(None);
+        self.submit_review_error.set(Some(message));
+        true
+    }
+
+    /// Merge locally confirmed reviews into a fetched discussion only when
+    /// that snapshot does not contain their id. A newer server-side state
+    /// (for example a dismissed review) wins when it is present.
+    pub fn with_submitted_reviews(&self, discussion: Arc<Discussion>) -> Arc<Discussion> {
+        let submitted = self.submitted_reviews.get_untracked();
+        if submitted.is_empty()
+            || submitted
+                .iter()
+                .all(|review| discussion.reviews.iter().any(|known| known.id == review.id))
+        {
+            return discussion;
+        }
+        let mut merged = (*discussion).clone();
+        for review in submitted.iter() {
+            if !merged.reviews.iter().any(|known| known.id == review.id) {
+                merged.reviews.push(review.clone());
+            }
+        }
+        Arc::new(merged)
     }
 
     /// Whether the review view should be on screen at all.

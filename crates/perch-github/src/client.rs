@@ -16,8 +16,8 @@ use jiff::Timestamp;
 use octocrab::Octocrab;
 
 use crate::discussion::{
-    Discussion, IssueComment, IssueCommentPayload, PullSummary, Review, ReviewComment,
-    ReviewCommentPayload, ReviewPayload,
+    Discussion, IssueComment, IssueCommentPayload, PullReviewEvent, PullSummary, Review,
+    ReviewComment, ReviewCommentPayload, ReviewPayload,
 };
 use crate::items::{Issue, IssuePayload};
 use crate::model::Thread;
@@ -391,6 +391,55 @@ impl GitHub {
             .map_err(map_octocrab_error)?;
         let body = self.finish_response(response, &[StatusCode::OK]).await?;
         serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))
+    }
+
+    /// Submit a final review of exactly the pull-request head the reader saw.
+    ///
+    /// GitHub accepts reviews of an older commit, so `commit_id` is carried
+    /// explicitly rather than allowing the endpoint to default to whatever
+    /// head is newest when the request arrives. The app performs its own
+    /// fresh-head check immediately before calling this method; the explicit
+    /// commit remains the final race-safe identity recorded by GitHub.
+    pub async fn submit_pull_request_review(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        commit_id: &str,
+        body: &str,
+        event: PullReviewEvent,
+    ) -> Result<Review, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        if commit_id.is_empty() || commit_id.trim() != commit_id {
+            return Err(Error::Decode(
+                "pull request review commit SHA is empty or invalid".into(),
+            ));
+        }
+        if event.requires_body() && body.trim().is_empty() {
+            return Err(Error::Decode(format!(
+                "a {event:?} pull request review requires a body"
+            )));
+        }
+
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            commit_id: &'a str,
+            body: &'a str,
+            event: PullReviewEvent,
+        }
+
+        let path = format!("/repos/{owner}/{name}/pulls/{number}/reviews");
+        let request = Request { commit_id, body, event };
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._post(&path, Some(&request))
+            .await
+            .map_err(map_octocrab_error)?;
+        let body = self.finish_response(response, &[StatusCode::OK]).await?;
+        let review: ReviewPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(Review::from(review))
     }
 
     /// The workflow runs for one commit, newest first. What the checks

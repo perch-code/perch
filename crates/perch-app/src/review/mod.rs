@@ -18,6 +18,7 @@ pub mod review_launch;
 pub mod scope;
 pub mod strip;
 pub mod styling;
+pub mod submit_review;
 pub mod tabs;
 pub mod threads;
 pub mod timeline;

@@ -57,7 +57,8 @@ Using `gh auth login` is the simplest setup for the desktop app because a GUI
 launch does not normally inherit shell environment variables. The credential
 must be allowed to read and update notifications and to read the repositories
 you open. Merging a pull request also requires `Contents: write` permission on
-its repository.
+its repository. Commenting on, approving, or requesting changes on a pull
+request requires `Pull requests: write` permission.
 
 ## Configuration
 

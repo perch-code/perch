@@ -17,10 +17,10 @@ use perch_git::{Preparer, RepoId, ReviewSnapshotStore, Store};
 use perch_github::{
     resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentThread,
     Config, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, MergeMethod, MergeState,
-    MergeableState, NewRunEvent, PullRequest, PullRequestOverview, RepositoryPermission,
-    RevisionContext, RunEvent as StoredRunEvent, RunEventRecord, RunHistoryFilter, RunLabels,
-    RunOwner, RunPurpose, RunRecord, RunStatus, RunSummary, SubjectKind, TerminalReason, Thread,
-    ThreadOrigin,
+    MergeableState, NewRunEvent, PullRequest, PullRequestOverview, PullReviewEvent,
+    RepositoryPermission, Review, RevisionContext, RunEvent as StoredRunEvent, RunEventRecord,
+    RunHistoryFilter, RunLabels, RunOwner, RunPurpose, RunRecord, RunStatus, RunSummary,
+    SubjectKind, TerminalReason, Thread, ThreadOrigin,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
@@ -111,6 +111,16 @@ pub enum Command {
         expected_head_sha: String,
         method: MergeMethod,
         bypass_requirements: bool,
+    },
+    /// Submit a final review of the exact pull request head the reader saw.
+    SubmitPullRequestReview {
+        attempt_id: u64,
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        expected_head_sha: String,
+        body: String,
+        event: PullReviewEvent,
     },
     /// Read, diff, and highlight one file of the open checkout, over the
     /// scope that is set.
@@ -545,6 +555,29 @@ pub enum Event {
         attempt_id: u64,
         message: String,
     },
+    PullRequestReviewStarted {
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        expected_head_sha: String,
+        attempt_id: u64,
+    },
+    PullRequestReviewSubmitted {
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        expected_head_sha: String,
+        attempt_id: u64,
+        review: Arc<Review>,
+    },
+    PullRequestReviewFailed {
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        expected_head_sha: String,
+        attempt_id: u64,
+        message: String,
+    },
     /// The commits over the base and whether the checkout has work in it,
     /// for the scope menu, and the head as it was at the previous open,
     /// which "Since you last looked" ranges from.
@@ -628,6 +661,7 @@ pub struct Backend {
     navigation_requests: Arc<NavigationRequests>,
     scope_requests: Arc<ScopeRequests>,
     merge_attempts: Arc<MergeAttempts>,
+    pull_request_review_attempts: Arc<PullRequestReviewAttempts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1311,6 +1345,74 @@ impl PullRequestStatusRequests {
     }
 }
 
+/// Monotonic generations for full pull-request discussion reads. A review
+/// submission invalidates any fetch that began before the mutation, so an
+/// older response cannot erase the newly returned review from the cache or
+/// the open conversation.
+#[derive(Debug, Default)]
+struct DiscussionRequests {
+    latest: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl DiscussionRequests {
+    fn begin(&self, item_id: &str) -> u64 {
+        let Ok(mut latest) = self.latest.lock() else {
+            return 0;
+        };
+        let generation = latest
+            .get(item_id)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(1);
+        latest.insert(item_id.to_string(), generation);
+        generation
+    }
+
+    fn is_current(&self, item_id: &str, generation: u64) -> bool {
+        self.latest
+            .lock()
+            .ok()
+            .and_then(|latest| latest.get(item_id).copied())
+            == Some(generation)
+    }
+
+    /// Commit a fetched discussion while holding the same lock used to
+    /// register a newer read or mutation fence. A submission therefore sees
+    /// either the cache before this whole commit or the cache after it, never
+    /// a successful generation check followed by a late stale write.
+    fn with_current<T>(
+        &self,
+        item_id: &str,
+        generation: u64,
+        commit: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let latest = self.latest.lock().ok()?;
+        if latest.get(item_id).copied() != Some(generation) {
+            return None;
+        }
+        let result = commit();
+        drop(latest);
+        Some(result)
+    }
+
+    /// Advance an item's generation and perform the mutation's cache commit
+    /// under that same lock. This serializes it with `with_current`: an older
+    /// GET must finish its cache write before this closure, or be rejected
+    /// without writing after it.
+    fn fence_with<T>(&self, item_id: &str, commit: impl FnOnce() -> T) -> Option<T> {
+        let mut latest = self.latest.lock().ok()?;
+        let generation = latest
+            .get(item_id)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(1);
+        latest.insert(item_id.to_string(), generation);
+        let result = commit();
+        drop(latest);
+        Some(result)
+    }
+}
+
 /// Merge attempts are registered synchronously by the UI handle. Keeping the
 /// in-flight item here both assigns an ordering identity and suppresses a
 /// second REST mutation while the first is unresolved.
@@ -1321,6 +1423,38 @@ struct MergeAttempts {
 }
 
 impl MergeAttempts {
+    fn begin(&self, item_id: &str) -> Option<u64> {
+        let mut in_flight = self.in_flight.lock().ok()?;
+        if in_flight.contains_key(item_id) {
+            return None;
+        }
+        let attempt_id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        in_flight.insert(item_id.to_string(), attempt_id);
+        Some(attempt_id)
+    }
+
+    fn finish(&self, item_id: &str, attempt_id: u64) {
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            if in_flight.get(item_id).copied() == Some(attempt_id) {
+                in_flight.remove(item_id);
+            }
+        }
+    }
+}
+
+/// Review submissions are remote mutations, so a double click must not make
+/// two reviews. The attempt identity also lets the UI ignore a late result
+/// after a newer checkout or submission has taken its place.
+#[derive(Debug, Default)]
+struct PullRequestReviewAttempts {
+    next_id: std::sync::atomic::AtomicU64,
+    in_flight: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl PullRequestReviewAttempts {
     fn begin(&self, item_id: &str) -> Option<u64> {
         let mut in_flight = self.in_flight.lock().ok()?;
         if in_flight.contains_key(item_id) {
@@ -1421,6 +1555,34 @@ impl Backend {
         }).is_err() {
             self.merge_attempts.finish(item_id, attempt_id);
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_pull_request_review(
+        &self,
+        item_id: &str,
+        repo_full_name: &str,
+        number: u64,
+        expected_head_sha: &str,
+        body: &str,
+        event: PullReviewEvent,
+    ) -> Option<u64> {
+        let Some(attempt_id) = self.pull_request_review_attempts.begin(item_id) else {
+            return None;
+        };
+        if self.commands.send(Command::SubmitPullRequestReview {
+            attempt_id,
+            item_id: item_id.to_string(),
+            repo_full_name: repo_full_name.to_string(),
+            number,
+            expected_head_sha: expected_head_sha.to_string(),
+            body: body.to_string(),
+            event,
+        }).is_err() {
+            self.pull_request_review_attempts.finish(item_id, attempt_id);
+            return None;
+        }
+        Some(attempt_id)
     }
 
     pub fn open_item(&self, id: &str) -> u64 {
@@ -1762,6 +1924,7 @@ impl Backend {
             navigation_requests: Arc::default(),
             scope_requests: Arc::default(),
             merge_attempts: Arc::default(),
+            pull_request_review_attempts: Arc::default(),
         }
     }
 }
@@ -1776,6 +1939,8 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
     let worker_scope_requests = scope_requests.clone();
     let merge_attempts = Arc::<MergeAttempts>::default();
     let worker_merge_attempts = merge_attempts.clone();
+    let pull_request_review_attempts = Arc::<PullRequestReviewAttempts>::default();
+    let worker_pull_request_review_attempts = pull_request_review_attempts.clone();
 
     std::thread::Builder::new()
         .name("perch-backend".into())
@@ -1799,6 +1964,7 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
                 worker_navigation_requests,
                 worker_scope_requests,
                 worker_merge_attempts,
+                worker_pull_request_review_attempts,
             ));
         })
         .expect("spawn backend thread");
@@ -1809,6 +1975,7 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
             navigation_requests,
             scope_requests,
             merge_attempts,
+            pull_request_review_attempts,
         },
         evt_rx,
     )
@@ -1820,6 +1987,7 @@ async fn run(
     navigation_requests: Arc<NavigationRequests>,
     scope_requests: Arc<ScopeRequests>,
     merge_attempts: Arc<MergeAttempts>,
+    pull_request_review_attempts: Arc<PullRequestReviewAttempts>,
 ) {
     tracing::info!("backend started");
     let mut config = Config::load();
@@ -1985,7 +2153,9 @@ async fn run(
         navigation_requests,
         scope_requests,
         status_requests: Arc::default(),
+        discussion_requests: Arc::default(),
         merge_attempts,
+        pull_request_review_attempts,
         review_navigation: Arc::new(tokio::sync::Mutex::new(())),
         review_admissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
@@ -2284,6 +2454,46 @@ async fn run(
                     )
                     .await;
                     ctx.merge_attempts.finish(&item_id, attempt_id);
+                });
+            }
+            Command::SubmitPullRequestReview {
+                attempt_id,
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                body,
+                event,
+            } => {
+                ctx.clear_notice();
+                let _ = ctx.events.send(Event::PullRequestReviewStarted {
+                    item_id: item_id.clone(),
+                    repo_full_name: repo_full_name.clone(),
+                    number,
+                    expected_head_sha: expected_head_sha.clone(),
+                    attempt_id,
+                });
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let submitted = submit_open_pull_request_review(
+                        &ctx,
+                        attempt_id,
+                        &item_id,
+                        &repo_full_name,
+                        number,
+                        &expected_head_sha,
+                        &body,
+                        event,
+                    )
+                    .await;
+                    settle_pull_request_review_attempt(
+                        &ctx.pull_request_review_attempts,
+                        &item_id,
+                        attempt_id,
+                        submitted,
+                        refresh_open_item_inner(&ctx, &item_id),
+                    )
+                    .await;
                 });
             }
             Command::OpenItem { id, navigation_id }
@@ -2769,8 +2979,13 @@ struct Ctx {
     scope_requests: Arc<ScopeRequests>,
     /// Latest live checks/mergeability read for each item.
     status_requests: Arc<PullRequestStatusRequests>,
+    /// Latest full discussion read for each item. Review mutations invalidate
+    /// older reads before publishing their returned review.
+    discussion_requests: Arc<DiscussionRequests>,
     /// Monotonic merge identities and the one in-flight mutation per item.
     merge_attempts: Arc<MergeAttempts>,
+    /// Monotonic review identities and one in-flight submission per item.
+    pull_request_review_attempts: Arc<PullRequestReviewAttempts>,
     /// Serialize reviewer-child owner opens. A newer click registers
     /// synchronously and makes the older worker stale; serialization then
     /// guarantees the newest accepted owner is the final backend slot.
@@ -4586,7 +4801,10 @@ async fn finish_open(
         }
         if !offline {
             let (ctx2, item_id2, pr2) = (ctx.clone(), item.id.clone(), pr.clone());
-            tokio::spawn(async move { fetch_discussion(&ctx2, &item_id2, &pr2).await });
+            let discussion_generation = ctx2.discussion_requests.begin(&item_id2);
+            tokio::spawn(async move {
+                fetch_discussion(&ctx2, &item_id2, &pr2, discussion_generation).await
+            });
             let (ctx2, item_id2) = (ctx.clone(), item.id.clone());
             let status_generation = begin_pull_request_status(&ctx2, &item_id2, &pr);
             tokio::spawn(async move {
@@ -5192,7 +5410,275 @@ async fn merge_open_pull_request(
         method.as_str()
     ));
     if let Some((_, pull_request)) = installed {
-        fetch_discussion(ctx, item_id, &pull_request).await;
+        let discussion_generation = ctx.discussion_requests.begin(item_id);
+        fetch_discussion(ctx, item_id, &pull_request, discussion_generation).await;
+    }
+}
+
+/// Submit a final review only for the live checkout and exact pull-request
+/// head shown when the reader confirmed it. GitHub records `commit_id` on the
+/// review but does not offer an atomic compare-and-submit operation, so a
+/// fresh REST read narrows the race and the explicit commit identity makes
+/// any later head movement honest rather than approving unseen changes.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the remote mutation carries every item and revision fence explicitly"
+)]
+async fn submit_open_pull_request_review(
+    ctx: &Ctx,
+    attempt_id: u64,
+    item_id: &str,
+    repo_full_name: &str,
+    number: u64,
+    expected_head_sha: &str,
+    body: &str,
+    event: PullReviewEvent,
+) -> bool {
+    let open = ctx.slot.lock().ok().and_then(|slot| {
+        slot.as_ref()
+            .filter(|open| open.item_id == item_id)
+            .and_then(|open| {
+                open.pull_request.clone().map(|pull_request| {
+                    (
+                        pull_request,
+                        open.checkout.head_sha.clone(),
+                        open.review_snapshot_id.is_some()
+                            || open.review_group_id.is_some()
+                            || open.review_request_id.is_some(),
+                    )
+                })
+            })
+    });
+    let Some((pull_request, checkout_head_sha, historical)) = open else {
+        send_pull_request_review_failure(
+            ctx,
+            attempt_id,
+            item_id,
+            repo_full_name,
+            number,
+            expected_head_sha,
+            "That pull request is no longer open in Perch",
+        );
+        return false;
+    };
+    if pull_request.repo_full_name != repo_full_name || pull_request.number != number {
+        send_pull_request_review_failure(
+            ctx,
+            attempt_id,
+            item_id,
+            repo_full_name,
+            number,
+            expected_head_sha,
+            "The open pull request changed; review it again before submitting",
+        );
+        return false;
+    }
+    let Some(github) = ctx.github.as_ref() else {
+        send_pull_request_review_failure(
+            ctx,
+            attempt_id,
+            item_id,
+            repo_full_name,
+            number,
+            expected_head_sha,
+            "GitHub is unavailable while Perch is offline",
+        );
+        return false;
+    };
+
+    let fresh = match github.fetch_pull_request(repo_full_name, number).await {
+        Ok(pull_request) => pull_request,
+        Err(error) => {
+            send_pull_request_review_failure(
+                ctx,
+                attempt_id,
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                format!("Could not refresh the pull request before submitting: {error}"),
+            );
+            return false;
+        }
+    };
+    if let Err(message) = validate_pull_request_review_attempt(
+        &pull_request,
+        &checkout_head_sha,
+        historical,
+        &fresh,
+        expected_head_sha,
+        body,
+        event,
+    ) {
+        send_pull_request_review_failure(
+            ctx,
+            attempt_id,
+            item_id,
+            repo_full_name,
+            number,
+            expected_head_sha,
+            message,
+        );
+        return false;
+    }
+
+    let review = match github
+        .submit_pull_request_review(
+            repo_full_name,
+            number,
+            expected_head_sha,
+            body,
+            event,
+        )
+        .await
+    {
+        Ok(review) => review,
+        Err(error) => {
+            send_pull_request_review_failure(
+                ctx,
+                attempt_id,
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                format!("GitHub could not submit this review: {error}"),
+            );
+            return false;
+        }
+    };
+
+    // Fence any discussion read that began before the mutation, then retain
+    // GitHub's successful response before doing best-effort refreshes. A
+    // transient follow-up failure must not turn a submitted review into a
+    // failed one or let an older response erase it from the cache.
+    let _ = ctx.discussion_requests.fence_with(item_id, || {
+        upsert_cached_review(ctx, item_id, repo_full_name, number, &review)
+    });
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::PullRequestReviewSubmitted {
+            item_id: item_id.to_string(),
+            repo_full_name: repo_full_name.to_string(),
+            number,
+            expected_head_sha: expected_head_sha.to_string(),
+            attempt_id,
+            review: Arc::new(review),
+        });
+    }
+    ctx.notice("Review submitted");
+    true
+}
+
+/// Release the mutation gate before waiting on the best-effort refresh. The
+/// review is already durable on GitHub and installed in the cache/UI when
+/// this runs, so a slow follow-up read must not silently reject a new review.
+async fn settle_pull_request_review_attempt(
+    attempts: &PullRequestReviewAttempts,
+    item_id: &str,
+    attempt_id: u64,
+    submitted: bool,
+    refresh: impl std::future::Future<Output = ()>,
+) {
+    attempts.finish(item_id, attempt_id);
+    if submitted {
+        refresh.await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_pull_request_review_attempt(
+    pull_request: &PullRequest,
+    checkout_head_sha: &str,
+    historical: bool,
+    fresh: &PullRequest,
+    expected_head_sha: &str,
+    body: &str,
+    event: PullReviewEvent,
+) -> Result<(), String> {
+    if historical {
+        return Err("Return to the current review before submitting".into());
+    }
+    if pull_request.merged || !pull_request.is_open() || fresh.merged || !fresh.is_open() {
+        return Err("This pull request is no longer open".into());
+    }
+    if pull_request.repo_full_name != fresh.repo_full_name
+        || pull_request.number != fresh.number
+        || pull_request.head_sha != expected_head_sha
+        || fresh.head_sha != expected_head_sha
+        || checkout_head_sha != expected_head_sha
+    {
+        return Err(
+            "The pull request moved; refresh and review the new head before submitting".into(),
+        );
+    }
+    if event.requires_body() && body.trim().is_empty() {
+        return Err("Comment and request-changes reviews need a summary".into());
+    }
+    Ok(())
+}
+
+/// Add or replace the review returned by GitHub in the durable conversation.
+/// No row is manufactured when discussion has never loaded: the Submitted
+/// event still updates the live UI, and the follow-up fetch will create the
+/// complete row without briefly caching an otherwise empty conversation.
+fn upsert_cached_review(
+    ctx: &Ctx,
+    item_id: &str,
+    repo_full_name: &str,
+    number: u64,
+    review: &Review,
+) {
+    let still_owns_subject = ctx.item(item_id).is_some_and(|item| {
+        item.pull_request().is_some_and(|pull_request| {
+            pull_request.repo_full_name == repo_full_name && pull_request.number == number
+        })
+    });
+    if !still_owns_subject {
+        return;
+    }
+    let cached = ctx
+        .with_cache(|cache| cache.load_discussion(item_id))
+        .and_then(Result::ok)
+        .flatten();
+    let Some((_, mut discussion)) = cached else {
+        return;
+    };
+    match discussion
+        .reviews
+        .iter_mut()
+        .find(|existing| existing.id == review.id)
+    {
+        Some(existing) => *existing = review.clone(),
+        None => discussion.reviews.push(review.clone()),
+    }
+    discussion
+        .reviews
+        .sort_by_key(|review| (review.submitted_at, review.id));
+    if let Some(Err(error)) = ctx.with_cache(|cache| cache.store_discussion(item_id, &discussion)) {
+        tracing::warn!(item = item_id, %error, "could not cache the submitted review");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_pull_request_review_failure(
+    ctx: &Ctx,
+    attempt_id: u64,
+    item_id: &str,
+    repo_full_name: &str,
+    number: u64,
+    expected_head_sha: &str,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    tracing::info!(item = item_id, %message, "pull request review submission stopped");
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::PullRequestReviewFailed {
+            item_id: item_id.to_string(),
+            repo_full_name: repo_full_name.to_string(),
+            number,
+            expected_head_sha: expected_head_sha.to_string(),
+            attempt_id,
+            message,
+        });
     }
 }
 
@@ -5923,8 +6409,9 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
             return;
         }
         let status_generation = begin_pull_request_status(ctx, item_id, &pr);
+        let discussion_generation = ctx.discussion_requests.begin(item_id);
         tokio::join!(
-            fetch_discussion(ctx, item_id, &pr),
+            fetch_discussion(ctx, item_id, &pr, discussion_generation),
             fetch_checks(ctx, item_id, &pr, status_generation),
         );
     } else if let Some(issue) = issue {
@@ -7060,7 +7547,12 @@ async fn open_own_checkout(
 
 /// Fetch what was said on a pull request and cache it for the reader.
 /// A fetch error is a line in the status bar, not a failed review.
-async fn fetch_discussion(ctx: &Ctx, item_id: &str, pr: &perch_github::PullRequest) {
+async fn fetch_discussion(
+    ctx: &Ctx,
+    item_id: &str,
+    pr: &perch_github::PullRequest,
+    discussion_generation: u64,
+) {
     let Some(github) = ctx.github.as_ref() else {
         return;
     };
@@ -7068,16 +7560,30 @@ async fn fetch_discussion(ctx: &Ctx, item_id: &str, pr: &perch_github::PullReque
         Ok(d) => d,
         Err(e) => {
             tracing::warn!(repo = %pr.repo_full_name, number = pr.number, error = %e, "could not fetch the discussion");
-            let _ = ctx.events.send(Event::Notice(format!(
-                "Could not fetch the discussion: {e}"
-            )));
+            if ctx.discussion_requests.is_current(item_id, discussion_generation) {
+                let _ = ctx.events.send(Event::Notice(format!(
+                    "Could not fetch the discussion: {e}"
+                )));
+            }
             return;
         }
     };
 
-    // Kept whole, so the next open paints it before the network answers,
-    // and shown now if the item is still the one open.
-    ctx.with_cache(|c| c.store_discussion(item_id, &discussion));
+    let committed = ctx
+        .discussion_requests
+        .with_current(item_id, discussion_generation, || {
+            // Kept whole, so the next open paints it before the network
+            // answers. The generation check and this cache write share one
+            // lock with review-submission fences.
+            ctx.with_cache(|c| c.store_discussion(item_id, &discussion))
+        });
+    if committed.is_none() {
+        return;
+    }
+
+    // Shown now if the item is still the one open. The state layer also
+    // retains an accepted review if navigation changes after the cache
+    // commit but before this event is handled.
     if let Ok(mut guard) = ctx.slot.lock() {
         if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
             open.body = Some(discussion.body.clone());
@@ -9380,7 +9886,9 @@ mod tests {
             navigation_requests: Arc::default(),
             scope_requests: Arc::default(),
             status_requests: Arc::default(),
+            discussion_requests: Arc::default(),
             merge_attempts: Arc::default(),
+            pull_request_review_attempts: Arc::default(),
             review_navigation: Arc::new(tokio::sync::Mutex::new(())),
             review_admissions: Default::default(),
             review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
@@ -9857,12 +10365,225 @@ mod tests {
         assert!(second > first);
     }
 
+    #[test]
+    fn review_attempts_suppress_duplicates_and_only_matching_finishes() {
+        let attempts = PullRequestReviewAttempts::default();
+
+        let first = attempts.begin("item").expect("first attempt starts");
+        assert_eq!(attempts.begin("item"), None);
+
+        attempts.finish("item", first.saturating_add(1));
+        assert_eq!(attempts.begin("item"), None, "a stale finish is ignored");
+
+        attempts.finish("item", first);
+        let second = attempts.begin("item").expect("matching finish releases item");
+        assert!(second > first);
+    }
+
+    #[test]
+    fn discussion_generations_reject_reads_started_before_a_mutation() {
+        let requests = DiscussionRequests::default();
+        let before = requests.begin("item");
+        let mutation_fence = requests.begin("item");
+
+        assert!(!requests.is_current("item", before));
+        assert!(requests.is_current("item", mutation_fence));
+        assert!(!requests.is_current("other", mutation_fence));
+    }
+
+    #[test]
+    fn a_discussion_cache_commit_cannot_cross_a_submission_fence() {
+        let requests = Arc::new(DiscussionRequests::default());
+        let cached = Arc::new(Mutex::new("initial"));
+        let generation = requests.begin("item");
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+
+        let reader = {
+            let requests = requests.clone();
+            let cached = cached.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            std::thread::spawn(move || {
+                assert!(requests
+                    .with_current("item", generation, || {
+                        entered.wait();
+                        release.wait();
+                        *cached.lock().unwrap() = "stale GET";
+                    })
+                    .is_some());
+            })
+        };
+
+        entered.wait();
+        assert!(
+            requests.latest.try_lock().is_err(),
+            "the generation check stays locked through the cache commit"
+        );
+        let submitter = {
+            let requests = requests.clone();
+            let cached = cached.clone();
+            std::thread::spawn(move || {
+                assert!(requests
+                    .fence_with("item", || {
+                        assert!(
+                            requests.latest.try_lock().is_err(),
+                            "the submission fence stays locked through its cache upsert"
+                        );
+                        let mut cached = cached.lock().unwrap();
+                        assert_eq!(*cached, "stale GET");
+                        *cached = "submitted review";
+                    })
+                    .is_some());
+            })
+        };
+
+        release.wait();
+        reader.join().unwrap();
+        submitter.join().unwrap();
+        assert_eq!(*cached.lock().unwrap(), "submitted review");
+        assert!(!requests.is_current("item", generation));
+    }
+
+    #[tokio::test]
+    async fn a_successful_review_releases_its_gate_before_refresh_is_polled() {
+        let attempts = PullRequestReviewAttempts::default();
+        let first = attempts.begin("item").unwrap();
+        let next = std::cell::Cell::new(None);
+
+        settle_pull_request_review_attempt(&attempts, "item", first, true, async {
+            next.set(attempts.begin("item"));
+        })
+        .await;
+
+        let second = next
+            .get()
+            .expect("the refresh observes an already released mutation gate");
+        assert!(second > first);
+        attempts.finish("item", second);
+    }
+
+    #[test]
+    fn review_submission_requires_the_live_open_head_and_required_body() {
+        let pull = pull_request(7);
+        assert_eq!(
+            validate_pull_request_review_attempt(
+                &pull,
+                "h7",
+                false,
+                &pull,
+                "h7",
+                "",
+                PullReviewEvent::Approve,
+            ),
+            Ok(())
+        );
+
+        let mut draft = pull.clone();
+        draft.draft = true;
+        assert_eq!(
+            validate_pull_request_review_attempt(
+                &draft,
+                "h7",
+                false,
+                &draft,
+                "h7",
+                "Looks good",
+                PullReviewEvent::Approve,
+            ),
+            Ok(()),
+            "draft pull requests may still be reviewed"
+        );
+
+        assert!(validate_pull_request_review_attempt(
+            &pull,
+            "h7",
+            true,
+            &pull,
+            "h7",
+            "Looks good",
+            PullReviewEvent::Approve,
+        )
+        .unwrap_err()
+        .contains("current review"));
+
+        let mut moved = pull.clone();
+        moved.head_sha = "new-head".into();
+        assert!(validate_pull_request_review_attempt(
+            &pull,
+            "h7",
+            false,
+            &moved,
+            "h7",
+            "Looks good",
+            PullReviewEvent::Approve,
+        )
+        .unwrap_err()
+        .contains("moved"));
+
+        assert!(validate_pull_request_review_attempt(
+            &pull,
+            "h7",
+            false,
+            &pull,
+            "h7",
+            " \n ",
+            PullReviewEvent::RequestChanges,
+        )
+        .unwrap_err()
+        .contains("summary"));
+
+        let mut closed = pull.clone();
+        closed.state = "closed".into();
+        assert!(validate_pull_request_review_attempt(
+            &pull,
+            "h7",
+            false,
+            &closed,
+            "h7",
+            "A comment",
+            PullReviewEvent::Comment,
+        )
+        .unwrap_err()
+        .contains("no longer open"));
+    }
+
     /// A durable row for `a/b#<number>`, as an on-demand open makes it.
     fn store_pull(ctx: &Ctx, number: u64) -> Item {
         let mut item = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
         item.subject = Some(ItemSubject::PullRequest(pull_request(number)));
         ctx.with_cache(|c| c.insert_item(&item)).unwrap().unwrap();
         item
+    }
+
+    #[tokio::test]
+    async fn a_submitted_review_is_upserted_into_the_cached_discussion() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        ctx.with_cache(|cache| {
+            cache.store_discussion(&item.id, &perch_github::Discussion::default())
+        })
+        .unwrap()
+        .unwrap();
+        let mut review = Review {
+            id: 9,
+            user: "reviewer".into(),
+            body: "first".into(),
+            state: "COMMENTED".into(),
+            submitted_at: Some("2026-09-20T18:00:00Z".parse().unwrap()),
+            html_url: String::new(),
+        };
+
+        upsert_cached_review(&ctx, &item.id, "a/b", 7, &review);
+        review.body = "replacement".into();
+        review.state = "APPROVED".into();
+        upsert_cached_review(&ctx, &item.id, "a/b", 7, &review);
+
+        let discussion = ctx
+            .with_cache(|cache| cache.load_discussion(&item.id).unwrap().unwrap().1)
+            .unwrap();
+        assert_eq!(discussion.reviews, vec![review]);
     }
 
     fn with_reason(mut t: Thread, reason: Reason) -> Thread {

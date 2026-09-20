@@ -44,6 +44,7 @@ pub fn header(
         directory(state, on_archive),
         churn(state),
         item_marks(state, backend.clone()),
+        crate::review::submit_review::control(state, backend.clone()),
     )))
     // Floem bounds z-index to sibling stacking contexts. The review launcher
     // lives inside this bar, so the bar itself must sit above the metadata

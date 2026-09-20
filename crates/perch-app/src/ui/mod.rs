@@ -227,7 +227,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                     return EventPropagation::Stop;
                 }
-                let typing = state.search_focused.get() || review.composer_focused.get();
+                let typing = state.search_focused.get()
+                    || review.composer_focused.get()
+                    || review.submit_review_open.get();
                 if typing || !review.is_open() {
                     return EventPropagation::Continue;
                 }
@@ -404,6 +406,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             if key.modifiers.is_empty()
                 && !state.search_focused.get()
                 && !review.composer_focused.get()
+                && !review.submit_review_open.get()
                 && key.code == Code::KeyS
             {
                 let target = state

@@ -1298,7 +1298,9 @@ impl AppState {
                 discussion,
             } => {
                 if review.is_item(&item_id) {
-                    review.discussion.set(Some(discussion));
+                    review
+                        .discussion
+                        .set(Some(review.with_submitted_reviews(discussion)));
                 }
             }
             Event::ChecksReady {
@@ -1483,6 +1485,91 @@ impl AppState {
                     if current_subject_is_open {
                         review.merge_error.set(Some(message));
                     }
+                }
+            }
+            Event::PullRequestReviewStarted {
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                attempt_id,
+            } => {
+                let is_current_subject = review.pull_request.with(|pull| {
+                    pull.as_ref().is_some_and(|pull| {
+                        pull.repo_full_name == repo_full_name
+                            && pull.number == number
+                            && pull.head_sha == expected_head_sha
+                    })
+                });
+                // The UI registers the attempt synchronously before the
+                // backend can acknowledge it. A Started event is therefore
+                // only an acknowledgement: after navigation has reset the
+                // UI, a delayed event must not claim a newly opened draft.
+                let is_current_attempt =
+                    review.submit_review_pending.get_untracked() == Some(attempt_id);
+                if review.is_item(&item_id) && is_current_subject && is_current_attempt {
+                    review.begin_submit_review(attempt_id);
+                }
+            }
+            Event::PullRequestReviewSubmitted {
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                attempt_id,
+                review: submitted,
+            } => {
+                // The review is already durable on GitHub. Accept it for the
+                // same pull request even if a follow-up refresh has meanwhile
+                // observed a newer head; the review itself remains part of
+                // that pull request's timeline and names its exact commit.
+                let (is_current_subject, is_current_head) = review.pull_request.with(|pull| {
+                    pull.as_ref()
+                        .map(|pull| {
+                            (
+                                pull.repo_full_name == repo_full_name && pull.number == number,
+                                pull.head_sha == expected_head_sha,
+                            )
+                        })
+                        .unwrap_or_default()
+                });
+                if review.is_item(&item_id) && is_current_subject {
+                    if !is_current_head {
+                        tracing::info!(
+                            item = %item_id,
+                            reviewed_head = %expected_head_sha,
+                            "installed a submitted review after the pull request head moved"
+                        );
+                    }
+                    review.finish_submit_review(attempt_id, (*submitted).clone());
+                }
+            }
+            Event::PullRequestReviewFailed {
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                attempt_id,
+                message,
+            } => {
+                let (is_current_subject, is_current_head) = review.pull_request.with(|pull| {
+                    pull.as_ref()
+                        .map(|pull| {
+                            (
+                                pull.repo_full_name == repo_full_name && pull.number == number,
+                                pull.head_sha == expected_head_sha,
+                            )
+                        })
+                        .unwrap_or_default()
+                });
+                if review.is_item(&item_id) && is_current_subject {
+                    let message = if is_current_head {
+                        message
+                    } else {
+                        "The pull request moved; refresh and review the new head before submitting"
+                            .into()
+                    };
+                    review.fail_submit_review(attempt_id, message);
                 }
             }
             Event::CommitsReady {
@@ -1670,6 +1757,9 @@ impl AppState {
             | Event::PullRequestUpdated { .. }
             | Event::PullRequestMergeStarted { .. }
             | Event::PullRequestMergeFailed { .. }
+            | Event::PullRequestReviewStarted { .. }
+            | Event::PullRequestReviewSubmitted { .. }
+            | Event::PullRequestReviewFailed { .. }
             | Event::CommitsReady { .. }
             | Event::ScopeReady { .. }
             | Event::ViewedReady { .. }
@@ -1795,7 +1885,8 @@ mod tests {
     use crate::review::model::ReviewState;
     use perch_github::{
         CheckState, Checks, MergeMethods, MergeState, MergeableState, PullRequest,
-        PullRequestOverview, Reason, Repository, RepositoryPermission, Subject, SubjectKind,
+        PullRequestOverview, PullReviewEvent, Reason, Repository, RepositoryPermission, Review,
+        Subject, SubjectKind,
     };
 
     /// A review with an item open, by id.
@@ -2520,6 +2611,202 @@ mod tests {
         assert!(!review.merge_pending.get());
         assert_eq!(review.merge_attempt_id.get(), Some(11));
         assert!(review.merge_error.with(Option::is_none));
+    }
+
+    #[test]
+    fn only_the_current_review_attempt_settles_and_survives_stale_discussion_reads() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        review.ready.set(true);
+        review.submit_review_open.set(true);
+        review
+            .submit_review_draft
+            .set("The summary I wrote".into());
+        review
+            .submit_review_event
+            .set(PullReviewEvent::RequestChanges);
+        review
+            .discussion
+            .set(Some(Arc::new(perch_github::Discussion::default())));
+        // Submission registration is synchronous in the UI; Started only
+        // acknowledges the attempt already owning this surface.
+        review.begin_submit_review(10);
+
+        app.apply_with_review(
+            Event::PullRequestReviewStarted {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 10,
+            },
+            review,
+        );
+        assert_eq!(review.submit_review_pending.get(), Some(10));
+
+        let accepted = Review {
+            id: 99,
+            user: "reviewer".into(),
+            body: "Please cover the failure path".into(),
+            state: "CHANGES_REQUESTED".into(),
+            submitted_at: Some("2026-09-20T18:00:00Z".parse().unwrap()),
+            html_url: "https://github.com/slatedb/slatedb/pull/7#pullrequestreview-99".into(),
+        };
+        app.apply_with_review(
+            Event::PullRequestReviewSubmitted {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 9,
+                review: Arc::new(accepted.clone()),
+            },
+            review,
+        );
+        assert_eq!(review.submit_review_pending.get(), Some(10));
+        assert!(review.submit_review_open.get());
+        assert_eq!(
+            review.discussion.get().unwrap().reviews,
+            vec![accepted.clone()],
+            "an accepted older review enters the timeline without settling the newer attempt"
+        );
+
+        app.apply_with_review(
+            Event::PullRequestReviewSubmitted {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 10,
+                review: Arc::new(accepted.clone()),
+            },
+            review,
+        );
+        assert!(review.submit_review_pending.with(Option::is_none));
+        assert!(!review.submit_review_open.get());
+        assert!(review.submit_review_draft.get().is_empty());
+        assert_eq!(
+            review.submit_review_event.get(),
+            PullReviewEvent::Comment
+        );
+
+        // A GET that began before the POST must not temporarily erase the
+        // review GitHub already accepted.
+        app.apply_with_review(
+            Event::DiscussionReady {
+                item_id: "wt".into(),
+                discussion: Arc::new(perch_github::Discussion::default()),
+            },
+            review,
+        );
+        let discussion = review.discussion.get().unwrap();
+        assert_eq!(discussion.reviews, vec![accepted]);
+    }
+
+    #[test]
+    fn review_submission_failure_keeps_the_draft_and_selected_outcome() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        review.submit_review_open.set(true);
+        review.submit_review_draft.set("Needs a test".into());
+        review
+            .submit_review_event
+            .set(PullReviewEvent::RequestChanges);
+        review.begin_submit_review(4);
+
+        app.apply_with_review(
+            Event::PullRequestReviewFailed {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 4,
+                message: "GitHub refused the review".into(),
+            },
+            review,
+        );
+
+        assert!(review.submit_review_pending.with(Option::is_none));
+        assert!(review.submit_review_open.get());
+        assert_eq!(review.submit_review_draft.get(), "Needs a test");
+        assert_eq!(
+            review.submit_review_event.get(),
+            PullReviewEvent::RequestChanges
+        );
+        assert_eq!(
+            review.submit_review_error.get().as_deref(),
+            Some("GitHub refused the review")
+        );
+    }
+
+    #[test]
+    fn returning_to_an_item_accepts_its_inflight_review_without_dropping_a_new_draft() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        review.ready.set(true);
+        review.submit_review_open.set(true);
+        review.submit_review_draft.set("Original submission".into());
+        review.begin_submit_review(12);
+
+        // Leave after sending, then reopen the same pull request while the
+        // backend still owns the item-scoped mutation.
+        let item = review.item.get_untracked();
+        let pull_request = review.pull_request.get_untracked();
+        review.begin("Reopening pull request");
+        review.item.set(item);
+        review.pull_request.set(pull_request);
+        review.ready.set(true);
+        review.submit_review_open.set(true);
+        review.submit_review_draft.set("A second thought".into());
+        review
+            .discussion
+            .set(Some(Arc::new(perch_github::Discussion::default())));
+
+        // The delayed acknowledgement belongs to the surface that navigation
+        // reset. It must not claim the new draft.
+        app.apply_with_review(
+            Event::PullRequestReviewStarted {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 12,
+            },
+            review,
+        );
+        assert!(review.submit_review_pending.with(Option::is_none));
+        assert!(review.submit_review_open.get());
+        assert_eq!(review.submit_review_draft.get(), "A second thought");
+
+        // The durable result is still relevant to this pull request and
+        // enters its timeline without settling the new surface.
+        app.apply_with_review(
+            Event::PullRequestReviewSubmitted {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 12,
+                review: Arc::new(Review {
+                    id: 101,
+                    user: "reviewer".into(),
+                    body: "Approved before navigation".into(),
+                    state: "APPROVED".into(),
+                    submitted_at: Some("2026-09-20T18:05:00Z".parse().unwrap()),
+                    html_url:
+                        "https://github.com/slatedb/slatedb/pull/7#pullrequestreview-101".into(),
+                }),
+            },
+            review,
+        );
+
+        assert!(review.submit_review_open.get());
+        assert_eq!(review.submit_review_draft.get(), "A second thought");
+        assert_eq!(
+            review.discussion.get().unwrap().reviews[0].id,
+            101,
+            "the successful original attempt still enters the timeline"
+        );
     }
 
     #[test]
