@@ -191,21 +191,26 @@ pub(super) fn request_agent_runs(state: AppState, backend: &Backend, history_lim
 fn surface(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let header_backend = backend.clone();
     let body_backend = backend.clone();
-    Container::new(Stack::horizontal((
-        resize_handle(state, backend.clone()),
-        Stack::vertical((
-            panel_header(state, header_backend),
-            dyn_container(
-                move || state.selected_agent_run.get(),
-                move |selected| match selected.and_then(|id| state.agent_run(&id)) {
-                    Some(run) => detail::view(state, review, body_backend.clone(), run).into_any(),
-                    None => list::view(state, review, body_backend.clone()).into_any(),
-                },
-            )
-            .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
+    Container::new(
+        Stack::horizontal((
+            resize_handle(state, backend.clone()),
+            Stack::vertical((
+                panel_header(state, header_backend),
+                dyn_container(
+                    move || state.selected_agent_run.get(),
+                    move |selected| match selected.and_then(|id| state.agent_run(&id)) {
+                        Some(run) => {
+                            detail::view(state, review, body_backend.clone(), run).into_any()
+                        }
+                        None => list::view(state, review, body_backend.clone()).into_any(),
+                    },
+                )
+                .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
+            ))
+            .style(|s| s.size_full().flex_col().min_width(0.0)),
         ))
-        .style(|s| s.size_full().flex_col().min_width(0.0)),
-    )))
+        .style(|s| s.size_full()),
+    )
     .style(move |s| {
         s.width(state.agents_width.get())
             .max_width_full()
@@ -836,6 +841,32 @@ mod tests {
         app.merge_agent_runs([perch_github::RunSummary::from(&running_record())], false);
         harness.rebuild();
         assert!(app.agents_clock_armed.get());
+    }
+
+    #[test]
+    fn panel_contents_fill_the_allocated_width() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.agents_open.set(true);
+        app.agents_tab.set(model::AgentsTab::History);
+        let backend = Rc::new(Backend::detached());
+        let view = crate::ui::app_view(app, review, backend);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1200.0, 760.0);
+        harness.rebuild();
+        harness.paint();
+
+        let panel = named(harness.root_id(), "agents-panel")
+            .expect("the open panel exists")
+            .get_visual_rect_no_clip();
+        let list = named(harness.root_id(), "agents-list")
+            .expect("the history list exists")
+            .get_visual_rect_no_clip();
+        assert_eq!(panel.width(), theme::AGENTS_WIDTH);
+        assert!(
+            (panel.x1 - list.x1).abs() < 0.01,
+            "the panel content must reach the panel's right edge: panel={panel:?}, list={list:?}"
+        );
     }
 
     #[test]
