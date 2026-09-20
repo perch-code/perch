@@ -190,18 +190,14 @@ fn item_view(
     .style(|s| s.size_full().flex_col().min_height(0.0))
 }
 
-/// The rail, the code and the thread column. The column stays where the
-/// reader put it: a file's threads are drawn in the code as cards, so
-/// nothing opens the column for them, and `open_composer` opens it only
-/// for a composer it draws.
+/// The file rail and the code. Threads anchored in the open file are drawn
+/// inline; the complete item conversation lives on the Conversation tab.
 fn body(
     app: AppState,
     state: ReviewState,
     open_file: OpenFile,
     backend: Rc<Backend>,
 ) -> impl IntoView {
-    let column_backend = backend.clone();
-    let column_open = open_file.clone();
     Stack::horizontal((
         rail::rail(state, open_file.clone(), backend.clone()),
         Stack::vertical((
@@ -209,30 +205,6 @@ fn body(
             editor::editor_pane(app, state, backend, open_file),
         ))
         .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().flex_col()),
-        dyn_container(
-            move || state.threads_open.get(),
-            move |open| {
-                if open {
-                    floem::views::Container::new(Stack::horizontal((
-                        threads::resize_handle(state),
-                        threads::thread_column(
-                            app,
-                            state,
-                            column_backend.clone(),
-                            column_open.clone(),
-                        ),
-                    )))
-                    .style(|s| {
-                        s.height_full()
-                            .flex_shrink(0.0_f32)
-                            .position(floem::style::Position::Relative)
-                    })
-                    .into_any()
-                } else {
-                    floem::views::Empty::new().into_any()
-                }
-            },
-        ),
     ))
     .style(|s| s.size_full().min_height(0.0))
 }

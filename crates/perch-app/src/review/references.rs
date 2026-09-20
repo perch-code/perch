@@ -691,8 +691,7 @@ mod window {
     const WIDTH: f64 = 1400.0;
     const HEIGHT: f64 = 900.0;
 
-    /// The whole window on Files, with one file open and loaded, and the
-    /// thread column closed so the editor has the width.
+    /// The whole window on Files, with one file open and loaded.
     fn app_harness() -> (HeadlessHarness, ReviewState) {
         let root = TestRoot::new();
         let app = AppState::new();

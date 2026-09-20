@@ -4,7 +4,7 @@
 //!
 //! The order is `review::timeline`'s; this module only draws it. The cards
 //! are in `review::cards`, and a thread's card shares its views with the
-//! thread column on Files.
+//! inline card on Files.
 
 use std::rc::Rc;
 
@@ -606,6 +606,71 @@ mod tests {
         assert!(!shown(&harness, "Nothing here yet"));
     }
 
+    /// Conversation is the home for local threads that have no inline card:
+    /// item-level threads, stale anchors, and anchors in another file.
+    #[test]
+    fn local_threads_without_an_inline_home_still_draw_on_conversation() {
+        let (mut harness, _, state) = app_harness();
+        let local_thread =
+            |id: &str, body: &str, path: Option<&str>, outdated: bool| -> CommentThread {
+                let mut thread = thread();
+                thread.id = id.into();
+                thread.anchor = match path {
+                    Some(path) => {
+                        let mut anchor = thread.anchor.take().unwrap();
+                        anchor.path = path.into();
+                        Some(anchor)
+                    }
+                    None => None,
+                };
+                thread.outdated = outdated;
+                for (index, message) in thread.messages.iter_mut().enumerate() {
+                    message.id = format!("{id}-m{index}");
+                    message.thread_id = id.into();
+                    message.run = None;
+                }
+                thread.messages[0].body = body.into();
+                thread
+            };
+        state.comment_threads.set(Arc::new(vec![
+            local_thread("item-level", "question about the whole item", None, false),
+            local_thread(
+                "outdated",
+                "question about stale lines",
+                Some("src/manifest.rs"),
+                true,
+            ),
+            local_thread(
+                "other-file",
+                "question in another file",
+                Some("src/elsewhere.rs"),
+                false,
+            ),
+        ]));
+        harness.rebuild();
+        harness.paint();
+
+        assert_eq!(
+            cards_in_order(&harness)
+                .iter()
+                .filter(|card| card.as_str() == "card:thread")
+                .count(),
+            3
+        );
+        let mut all = Vec::new();
+        names(harness.root_id(), &mut all);
+        let text = all.join("\n");
+        for expected in [
+            "question about the whole item",
+            "question about stale lines",
+            "question in another file",
+            "Outdated",
+            "src/elsewhere.rs:41",
+        ] {
+            assert!(text.contains(expected), "no {expected:?} on Conversation");
+        }
+    }
+
     #[test]
     fn a_bare_branch_says_so_above_the_composer() {
         let (mut harness, _, state) = app_harness();
@@ -666,9 +731,9 @@ mod tests {
         );
     }
 
-    /// The thread views build for both faces, from the same thread.
+    /// The thread views build for Conversation and inline, from the same thread.
     #[test]
-    fn a_thread_draws_with_either_face() {
+    fn a_thread_draws_with_both_faces() {
         use floem::views::Stack;
         let root = TestRoot::new();
         let app = AppState::new();
@@ -682,13 +747,6 @@ mod tests {
                 state,
                 backend.clone(),
                 "t1".into(),
-                ThreadFace::Column,
-            ),
-            crate::review::threads::messages_view(
-                app,
-                state,
-                backend.clone(),
-                "t1".into(),
                 ThreadFace::Card,
             ),
             crate::review::threads::messages_view(
@@ -697,13 +755,6 @@ mod tests {
                 backend.clone(),
                 "t1".into(),
                 ThreadFace::Inline,
-            ),
-            crate::review::threads::follow_up(
-                app,
-                state,
-                backend.clone(),
-                "t1".into(),
-                ThreadFace::Column,
             ),
             crate::review::threads::follow_up(
                 app,
@@ -726,14 +777,7 @@ mod tests {
                 open_file.clone(),
                 thread(),
             ),
-            crate::review::threads::thread_card(
-                app,
-                state,
-                backend,
-                open_file,
-                thread(),
-                ThreadFace::Inline,
-            ),
+            crate::review::threads::thread_card(app, state, backend, thread()),
         ));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 1600.0);
         harness.rebuild();
@@ -743,10 +787,10 @@ mod tests {
         let text = all.join("\n");
         assert_eq!(
             text.matches("Read 1 file, ran 1 command").count(),
-            10,
+            8,
             "each face folds the run's steps to one line"
         );
-        assert_eq!(text.matches("Follow up…").count(), 5);
+        assert_eq!(text.matches("Follow up…").count(), 4);
         // The inline card has no anchor label: it is under its lines.
         assert_eq!(
             text.matches("src/manifest.rs:41").count(),

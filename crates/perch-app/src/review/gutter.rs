@@ -575,7 +575,7 @@ fn anchor_slot(
             // A review comment from GitHub on this line, hollow where a
             // thread of the reader's own is solid. Click scrolls the
             // editor to its card and flashes it, as it does for the
-            // reader's own; the column is not opened for it.
+            // reader's own.
             (None, Some(id), _) => Container::new(
                 sidebar_glyph(SidebarIcon::ThreadHollow, theme::FG_MUTED)
                     .style(|s| s.size(12.0, 12.0)),
@@ -590,9 +590,7 @@ fn anchor_slot(
                     .justify_center()
             })
             .into_any(),
-            // Click scrolls the editor to the thread's card and flashes
-            // it, and the column's card for it flashes too if the column
-            // is open; it is not opened for this.
+            // Click scrolls the editor to the thread's card and flashes it.
             (Some((id, outdated)), _, _) => Container::new(
                 sidebar_glyph(
                     SidebarIcon::Thread,

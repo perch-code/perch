@@ -35,7 +35,7 @@ pub const REVEAL_ALL_AT: usize = 40;
 
 /// The most rows a card takes. A thread longer than that scrolls inside
 /// its card, so a long conversation cannot push the code off the screen;
-/// the column is there for reading one at length.
+/// Conversation is there for reading one at length.
 pub const CARD_MAX_ROWS: usize = 40;
 
 /// A collapsed card is one row: the first author, the first line, and how
@@ -59,8 +59,8 @@ const ESTIMATE_COLUMNS: usize = 80;
 const ROWS_PER_MESSAGE: usize = 2;
 
 /// The rows a card takes besides its messages: the first row, with the
-/// chevron and the menu where the anchor's label is in the column, and
-/// the follow-up line.
+/// chevron and the menu where Conversation has the anchor label, and the
+/// follow-up line.
 const CARD_CHROME_ROWS: usize = 2;
 
 /// How a line is painted.

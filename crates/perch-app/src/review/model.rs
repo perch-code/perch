@@ -507,8 +507,6 @@ pub struct ReviewState {
     /// Their durable threads remain loaded and are revealed by the All filter.
     pub hidden_review_threads: RwSignal<HashSet<String>>,
     pub review_finding_filter: RwSignal<ReviewFindingFilter>,
-    /// Whether the thread column is showing.
-    pub threads_open: RwSignal<bool>,
     /// An open composer, and where it is anchored.
     pub composer: RwSignal<Option<Composer>>,
     /// How many composers have been opened, for `Composer::opening`.
@@ -521,17 +519,13 @@ pub struct ReviewState {
     pub sent_composer: RwSignal<Option<Anchor>>,
     /// The editor's selection as display lines, first and last inclusive.
     pub selection: RwSignal<Option<(usize, usize)>>,
-    /// A gutter marker was clicked: the card to scroll the editor to and
-    /// flash, and the column's card for the same thread flashes too. Left
-    /// as it was set rather than taken by whichever card sees it first,
-    /// since more than one does; a write always runs the effects that
-    /// read it, so a second click on the same marker is a second flash,
-    /// and a card built after the click ignores what it finds here.
+    /// A gutter marker was clicked: the inline card to scroll to and flash.
+    /// Left as it was set rather than taken so a second click on the same
+    /// marker is still a second flash, while a card built after the click
+    /// ignores what it finds here.
     pub focus_card: RwSignal<Option<CardId>>,
     /// A thread whose Delete is waiting for a yes, under its byline.
     pub confirm_thread: RwSignal<Option<String>>,
-    /// How wide the thread column is. Dragged.
-    pub threads_width: RwSignal<f64>,
     /// Runs whose step list the reader opened.
     pub expanded_runs: RwSignal<std::collections::HashSet<String>>,
     /// The rows each card has now: the estimate until the card has been
@@ -656,14 +650,12 @@ impl ReviewState {
             comment_threads: RwSignal::new(Arc::new(Vec::new())),
             hidden_review_threads: RwSignal::new(HashSet::new()),
             review_finding_filter: RwSignal::new(ReviewFindingFilter::Open),
-            threads_open: RwSignal::new(false),
             composer: RwSignal::new(None),
             composer_opened: RwSignal::new(0),
             sent_composer: RwSignal::new(None),
             selection: RwSignal::new(None),
             focus_card: RwSignal::new(None),
             confirm_thread: RwSignal::new(None),
-            threads_width: RwSignal::new(crate::theme::THREADS_WIDTH),
             expanded_runs: RwSignal::new(std::collections::HashSet::new()),
             card_rows: RwSignal::new(HashMap::new()),
             collapsed_cards: RwSignal::new(HashSet::new()),
@@ -959,17 +951,15 @@ impl ReviewState {
         needs_load
     }
 
-    /// The open file changed under an open composer. One drawn in the
-    /// code of the file that was open is drawn nowhere now, so the column
-    /// is shown for it: its slot takes a composer that is not in the
-    /// code, and a follow-up sits under its thread there. Untracked, as
-    /// `show_threads` reads, since a caller can be an effect.
+    /// The open file changed under an open composer. One drawn in the code
+    /// of the file that was open would now be hidden, so show Conversation,
+    /// where new questions and follow-ups always have a home.
     fn keep_composer_in_view(&self) {
         let hidden = floem::reactive::Effect::untrack(|| {
             self.composer.with(Option::is_some) && !self.composer_in_code()
         });
-        if hidden {
-            self.show_threads();
+        if hidden && self.tab.get_untracked() != ItemTab::Conversation {
+            self.show_tab(ItemTab::Conversation);
         }
     }
 
@@ -1221,10 +1211,9 @@ impl ReviewState {
             .filter(|a| a.path == path)
     }
 
-    /// Whether the open composer is drawn as a card in the code: it
-    /// starts a thread on lines of the active file, which is loaded and
-    /// has the lines. The column's slot is empty then, so the composer is
-    /// in one place. Tracked.
+    /// Whether the open composer is drawn as a card in the code: it starts
+    /// a thread on lines of the active file, which is loaded and has the
+    /// lines. Tracked.
     pub fn composer_is_inline(&self) -> bool {
         let Some(file) = self.active_file() else {
             return false;
@@ -1239,9 +1228,7 @@ impl ReviewState {
 
     /// Whether a follow-up on a thread is drawn inside the thread's card
     /// in the code: the thread has a card in the active file, which is
-    /// loaded and has its lines. The column's card shows its plain
-    /// follow-up line then, so the follow-up's box is in one place.
-    /// Tracked.
+    /// loaded and has its lines. Tracked.
     pub fn follow_up_is_inline(&self, thread_id: &str) -> bool {
         let Some(file) = self.active_file() else {
             return false;
@@ -1255,9 +1242,8 @@ impl ReviewState {
         })
     }
 
-    /// Whether the open composer is drawn in the code rather than the
-    /// column: a new thread's as a card under its lines, a follow-up's
-    /// inside its thread's card. Tracked.
+    /// Whether the open composer is drawn in the code: a new thread's as a
+    /// card under its lines, a follow-up's inside its thread's card. Tracked.
     pub fn composer_in_code(&self) -> bool {
         match self
             .composer
@@ -1527,19 +1513,18 @@ impl ReviewState {
         })
     }
 
-    /// Open a composer, for a new thread on `anchor` or the worktree, or
-    /// a follow-up in `thread_id`.
+    /// Open a composer, for a new thread on `anchor` or the item as a whole,
+    /// or a follow-up in `thread_id`.
     ///
-    /// The column opens for it, unless it is drawn in the code: a
-    /// composer on lines of the open file is a card under them, and a
-    /// follow-up on a thread with a card in the open file sits inside
-    /// that card; the column's slot and line for either are empty, so
-    /// opening the column would only narrow the code. A card the
-    /// follow-up sits inside is opened if it was collapsed, so the box is
-    /// seen. A sent question's card gives way to the new composer, since
-    /// there is one composer card at a time, and whatever rows the last
-    /// composer's card had are forgotten: they were that card's, and this
-    /// one starts on the estimate.
+    /// A composer on lines of the open file is a card under them, and a
+    /// follow-up on a thread with a card in the open file sits inside that
+    /// card. Anything that cannot be drawn inline moves to Conversation,
+    /// where every item-level thread is available. A card the follow-up
+    /// sits inside is opened if it was collapsed, so the box is seen. A
+    /// sent question's card gives way to the new composer, since there is
+    /// one composer card at a time, and whatever rows the last composer's
+    /// card had are forgotten: they were that card's, and this one starts
+    /// on the estimate.
     pub fn open_composer(
         &self,
         thread_id: Option<String>,
@@ -1566,38 +1551,16 @@ impl ReviewState {
                 opening,
             }));
         });
-        // Untracked, as `show_threads` reads: a caller that is an effect
-        // must not come to depend on the file or the composer through this.
+        // A caller can be an effect; do not make it depend on the file or
+        // composer merely because placement was checked here.
         let in_code = floem::reactive::Effect::untrack(|| self.composer_in_code());
-        if !in_code {
-            self.show_threads();
+        if !in_code && self.tab.get_untracked() != ItemTab::Conversation {
+            self.show_tab(ItemTab::Conversation);
         } else if let Some(id) = self
             .composer
             .with_untracked(|c| c.as_ref().and_then(|c| c.thread_id.clone()))
         {
             self.expand_card(&CardId::Thread(id));
-        }
-    }
-
-    /// Open the thread column, if it is not open already.
-    ///
-    /// Only writes when the value changes. A signal write notifies whether
-    /// or not the value changed, and the column is a `dyn_container` on
-    /// this signal, so a redundant write rebuilds the whole column: every
-    /// card, and any composer that was just put in it. Rebuilding is not
-    /// only wasteful, it crashes: the first composer's editor registers a
-    /// layout listener through a deferred message, and by the time that
-    /// message runs the editor has been torn down with the old column.
-    /// floem then registers the dead view anyway, and the next box tree
-    /// commit asks it for a window origin it no longer has.
-    ///
-    /// The read is untracked. A caller can be an effect, and a tracked
-    /// read would subscribe it to the very signal the close button
-    /// writes: closing the column would re-run the effect that opened it,
-    /// and the column would come straight back.
-    pub fn show_threads(&self) {
-        if !self.threads_open.get_untracked() {
-            self.threads_open.set(true);
         }
     }
 
@@ -1717,36 +1680,6 @@ impl ReviewState {
             .into_iter()
             .find(|t| t.comment.line == Some(head))
             .map(|t| t.comment.id)
-    }
-
-    /// Threads anchored in a file, newest first.
-    pub fn threads_in(&self, path: &str) -> Vec<CommentThread> {
-        let mut out: Vec<CommentThread> = self.comment_threads.with(|t| {
-            t.iter()
-                .filter(|thread| self.thread_visible(&thread.id))
-                .filter(|t| t.anchor.as_ref().is_some_and(|a| a.path == path))
-                .cloned()
-                .collect()
-        });
-        out.sort_by_key(|t| std::cmp::Reverse(t.created_at));
-        out
-    }
-
-    /// Everything else: other files and the worktree as a whole, newest first.
-    pub fn threads_elsewhere(&self, path: Option<&str>) -> Vec<CommentThread> {
-        let mut out: Vec<CommentThread> = self.comment_threads.with(|t| {
-            t.iter()
-                .filter(|thread| self.thread_visible(&thread.id))
-                .filter(|t| {
-                    !t.anchor
-                        .as_ref()
-                        .is_some_and(|a| Some(a.path.as_str()) == path)
-                })
-                .cloned()
-                .collect()
-        });
-        out.sort_by_key(|t| std::cmp::Reverse(t.created_at));
-        out
     }
 
     pub fn thread_visible(&self, thread_id: &str) -> bool {
@@ -2494,12 +2427,27 @@ mod tests {
         assert_eq!(card_ids, vec![CardId::Thread("current".into())]);
         assert_eq!(state.anchors_in("src/x.rs"), vec![(2, 2)]);
         assert!(!state.follow_up_is_inline("outdated"));
-        let listed: HashSet<String> = state
-            .threads_in("src/x.rs")
-            .into_iter()
-            .map(|thread| thread.id)
-            .collect();
-        assert_eq!(listed, HashSet::from(["outdated".into(), "current".into()]));
+
+        // A reply to an outdated thread has no inline card, so it moves to
+        // Conversation without losing what was typed.
+        state.show_tab(ItemTab::Files);
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        let outdated_anchor = state
+            .comment_threads
+            .with(|threads| threads[0].anchor.clone());
+        state.open_composer(
+            Some("outdated".into()),
+            outdated_anchor,
+            "reply".into(),
+            choice,
+        );
+        assert!(!state.composer_in_code());
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
+        assert_eq!(state.composer_draft.get(), "reply");
     }
 
     /// A review comment from GitHub on head line `line` of `src/x.rs`,
@@ -2639,12 +2587,10 @@ mod tests {
             "sonnet".to_string(),
             perch_agent::Effort::Medium,
         );
+        state.show_tab(ItemTab::Files);
         state.open_composer(None, Some(composer.clone()), String::new(), choice.clone());
         assert!(state.composer_is_inline());
-        assert!(
-            !state.threads_open.get(),
-            "the column is not opened for a composer drawn in the code"
-        );
+        assert_eq!(state.tab.get(), ItemTab::Files);
         assert_eq!(
             state.composer_card_anchor("src/x.rs"),
             Some(composer.clone())
@@ -2652,8 +2598,8 @@ mod tests {
         assert_eq!(state.composer_card_anchor("src/y.rs"), None);
         assert_eq!(state.cards_in("src/x.rs").len(), 5);
         // A follow-up is inside its thread's card, not a card of its own,
-        // and the column is not opened for one on a thread with a card in
-        // the open file; a question about the worktree is the column's.
+        // and stays on Files when that card is in the open file. A question
+        // about the item as a whole moves to Conversation.
         state.open_composer(
             Some("mine".into()),
             Some(composer.clone()),
@@ -2667,27 +2613,22 @@ mod tests {
             "no such thread in the file"
         );
         assert!(state.composer_in_code());
-        assert!(
-            !state.threads_open.get(),
-            "the column is not opened for a follow-up drawn in the code"
-        );
+        assert_eq!(state.tab.get(), ItemTab::Files);
         assert_eq!(state.cards_in("src/x.rs").len(), 4);
-        state.open_composer(None, None, String::new(), choice.clone());
+        state.open_composer(None, None, "whole item".into(), choice.clone());
         assert!(!state.composer_is_inline());
         assert!(!state.composer_in_code());
-        assert!(
-            state.threads_open.get(),
-            "the column opens for a composer it draws"
-        );
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
+        assert_eq!(state.composer_draft.get(), "whole item");
         assert_eq!(state.cards_in("src/x.rs").len(), 4);
 
         // A follow-up on a thread whose card is collapsed opens the card,
         // so the box it sits inside is seen.
-        state.threads_open.set(false);
+        state.show_tab(ItemTab::Files);
         state.toggle_card(&CardId::Thread("mine".into()));
         state.open_composer(Some("mine".into()), Some(composer), String::new(), choice);
         assert!(!state.is_collapsed(&CardId::Thread("mine".into())));
-        assert!(!state.threads_open.get());
+        assert_eq!(state.tab.get(), ItemTab::Files);
     }
 
     #[test]
@@ -2732,7 +2673,7 @@ mod tests {
         assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
 
         // Escape gives the lines back; a follow-up is no card and adds
-        // none; a composer in the column adds none.
+        // none; a composer in Conversation adds none.
         state.open_composer(None, Some(anchor.clone()), String::new(), choice.clone());
         assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2), (1, 2)]);
         state.close_composer();
@@ -2818,7 +2759,7 @@ mod tests {
     }
 
     #[test]
-    fn a_composer_drawn_in_the_code_is_shown_in_the_column_when_the_open_file_changes_under_it() {
+    fn a_composer_moves_to_conversation_when_the_open_file_changes_under_it() {
         use perch_github::Side;
         let state = ReviewState::new();
         state.files.update(|m| {
@@ -2839,35 +2780,31 @@ mod tests {
         );
 
         // Opened on lines of the open file, the composer is a card there
-        // and the column stays shut. Another file opened over it has no
-        // card for it, so the column opens with it in its slot; back on
-        // its own file it is the card again, and the column is left as
-        // it is.
+        // and Files stays visible. Another file opened over it has no card
+        // for it, so Conversation takes over without losing the draft.
+        state.show_tab(ItemTab::Files);
         state.open_composer(None, Some(anchor.clone()), "why?".into(), choice.clone());
         assert!(state.composer_in_code());
-        assert!(!state.threads_open.get());
+        assert_eq!(state.tab.get(), ItemTab::Files);
         state.open_tab("src/y.rs");
         assert!(!state.composer_in_code());
-        assert!(
-            state.threads_open.get(),
-            "the composer is drawn nowhere without the column"
-        );
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
         assert_eq!(state.composer_draft.get(), "why?");
-        state.threads_open.set(false);
         state.open_tab("src/x.rs");
         assert!(state.composer_in_code());
-        assert!(!state.threads_open.get());
+        state.show_tab(ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Files);
 
         // Closing the composer's file for its neighbour does the same.
-        state.threads_open.set(false);
         state.close_tab("src/x.rs");
         assert_eq!(state.active.get().as_deref(), Some("src/y.rs"));
-        assert!(state.threads_open.get());
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
+        assert_eq!(state.composer_draft.get(), "why?");
 
         // A follow-up inside a card of the open file likewise.
         state.close_composer();
-        state.threads_open.set(false);
         state.open_tab("src/x.rs");
+        state.show_tab(ItemTab::Files);
         state.set_comment_threads(Arc::new(vec![anchored(
             "t",
             3,
@@ -2882,16 +2819,16 @@ mod tests {
             choice.clone(),
         );
         assert!(state.composer_in_code());
-        assert!(!state.threads_open.get());
+        assert_eq!(state.tab.get(), ItemTab::Files);
         state.open_tab("src/y.rs");
-        assert!(state.threads_open.get());
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
 
-        // No composer, no column.
+        // Without a composer, changing files leaves Files selected.
         state.close_composer();
-        state.threads_open.set(false);
         state.open_tab("src/x.rs");
+        state.show_tab(ItemTab::Files);
         state.open_tab("src/y.rs");
-        assert!(!state.threads_open.get());
+        assert_eq!(state.tab.get(), ItemTab::Files);
     }
 
     #[test]
@@ -3004,7 +2941,7 @@ mod tests {
         assert_eq!(state.cards_in("src/x.rs").len(), 1);
         assert!(!state.card_rows.get().contains_key(&CardId::Composer));
 
-        // A question sent from the column keeps no rows: it was no card.
+        // A question sent from Conversation keeps no rows: it was no card.
         state.open_composer(None, None, String::new(), choice.clone());
         state.composer_sent();
         assert_eq!(state.sent_composer.get(), None);

@@ -843,8 +843,8 @@ fn card_layer(
         .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none())
 }
 
-/// One card in the layer, over its rows: the column's card for a thread
-/// of the reader's own in its inline face, the block for one of GitHub's
+/// One card in the layer, over its rows: a thread of the reader's own in
+/// its inline face, the block for one of GitHub's
 /// without its heading and lines, or the composer, set into its first
 /// spacer row a little way in, so its border never touches a tinted
 /// line, from the first code column to the right edge less the same
@@ -900,10 +900,7 @@ fn inline_card(
     });
 
     let view = match item {
-        CardItem::Thread(thread) => {
-            threads::thread_card(app, state, backend, open_file, thread, ThreadFace::Inline)
-                .into_any()
-        }
+        CardItem::Thread(thread) => threads::thread_card(app, state, backend, thread).into_any(),
         CardItem::GitHub(thread) => {
             cards::line_thread_block(app, state, backend, open_file, thread, ThreadFace::Inline)
         }
@@ -3013,7 +3010,7 @@ mod window {
     }
 
     #[test]
-    fn a_marker_click_focuses_the_card_and_scrolls_it_into_view_without_opening_the_column() {
+    fn a_marker_click_focuses_the_card_and_scrolls_it_into_view() {
         use crate::review::doc::CardId;
         let (mut harness, state) = harness();
         let live = stacked(state);
@@ -3023,13 +3020,6 @@ mod window {
         harness.rebuild();
         harness.paint();
         let card = CardId::Thread("t1".into());
-        // The thread is drawn in the code, so the column is not opened
-        // for it, and it stays shut through the click.
-        assert!(
-            !state.threads_open.get(),
-            "the column opened itself for a thread drawn in the code"
-        );
-
         // The marker sits in the gutter's slot on the anchor's first line,
         // head line 5, display line 6, on row 6 of a document with nothing
         // folded above it.
@@ -3053,7 +3043,6 @@ mod window {
             Some(card.clone()),
             "click at ({x}, {y}) over {under:?} did not focus the card"
         );
-        assert!(!state.threads_open.get(), "the column is not opened for it");
         assert_eq!(
             viewport.get().y0,
             0.0,
@@ -3089,9 +3078,6 @@ mod window {
         state.layout.set(Layout::Split);
         harness.rebuild();
         harness.paint();
-        // The column is not opened for the thread, so the pane is the
-        // rest of the window.
-        assert!(!state.threads_open.get());
         let (left, right) = sides(state);
         let card = CardId::Thread("t1".into());
         // The card over the outer stack corrects both sides' rows.
@@ -3396,22 +3382,18 @@ mod window {
     }
 
     #[test]
-    fn a_follow_up_composer_is_drawn_in_the_cards_card_alone_and_the_columns_line_points_at_it() {
-        use crate::review::doc::CardId;
+    fn a_follow_up_composer_is_drawn_inline_then_falls_back_to_conversation() {
         let (mut harness, state) = harness();
         let thread = thread_with("t1", 5, 7, &["why?", "because"]);
         state.set_comment_threads(Arc::new(vec![thread.clone()]));
-        state.threads_open.set(true);
         harness.rebuild();
         harness.paint();
-        // The thread is drawn twice, as the card in the code and the
-        // column's card, each with its follow-up line and no box.
+        // The thread is drawn in the code, with its follow-up line and no box.
         assert_eq!(count(harness.root_id(), "composer-box"), 0);
-        assert_eq!(count(harness.root_id(), "Follow up…"), 2);
+        assert_eq!(count(harness.root_id(), "Follow up…"), 1);
 
-        // Following up puts one box inside the card in the code; the
-        // column's card keeps its line. The box is never focused here;
-        // see `composer_autofocus`.
+        // Following up puts one box inside the card in the code. The box is
+        // never focused here; see `composer_autofocus`.
         let choice = (
             perch_agent::Backend::ClaudeCode,
             "sonnet".to_string(),
@@ -3436,41 +3418,17 @@ mod window {
             1,
             "inside the card in the code"
         );
-        assert_eq!(
-            count(harness.root_id(), "Follow up…"),
-            1,
-            "the column's card keeps its line"
-        );
+        assert_eq!(count(harness.root_id(), "Follow up…"), 0);
+        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert!(state.composer_in_code());
 
-        // The column's line, clicked, points at the card rather than
-        // opening a second box: the composer stays the one it was, so
-        // what is typed in it stays too.
-        let opening = state.composer.get().expect("the follow-up is open").opening;
-        let line = find(harness.root_id(), "Follow up…").expect("the column's line");
-        let rect = line.get_visual_rect();
-        let (x, y) = (rect.center().x, rect.center().y);
-        let under = harness.element_id_at(x, y);
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(
-            state.focus_card.get(),
-            Some(CardId::Thread("t1".into())),
-            "click at ({x}, {y}) over {under:?} did not point at the card"
-        );
-        assert_eq!(
-            state.composer.get().map(|c| c.opening),
-            Some(opening),
-            "the composer was opened again"
-        );
-        assert_eq!(count(harness.root_id(), "composer-box"), 1);
-
-        // With the thread's file closed there is no card in the code, so
-        // the column's card takes the box.
+        // With the thread's file closed there is no inline card for the box,
+        // so the open composer moves to the thread on Conversation.
         state.close_tab("src/x.rs");
         harness.rebuild();
         harness.paint();
-        assert!(state.threads_open.get());
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
+        assert!(!state.composer_in_code());
         assert!(find(harness.root_id(), "inline-card:").is_none());
         assert_eq!(count(harness.root_id(), "composer-box"), 1);
         assert_eq!(count(harness.root_id(), "Follow up…"), 0);
@@ -3664,13 +3622,8 @@ mod window {
         assert_eq!(rect.y0, 9.0 * line_height + crate::theme::CARD_INSET);
         assert_eq!(rect.x0, crate::theme::CODE_GUTTER_GAP);
         assert!(rect.height() > line_height);
-        assert!(
-            !state.threads_open.get(),
-            "GitHub's threads do not open the column"
-        );
 
-        // The hollow marker on the comment's line focuses the card and
-        // leaves the column shut.
+        // The hollow marker on the comment's line focuses the card.
         let (left, top) = pane_origin();
         let (x, y) = (
             left + 3.0 + 8.0,
@@ -3688,7 +3641,6 @@ mod window {
             Some(card.clone()),
             "click at ({x}, {y}) over {under:?} did not focus the card"
         );
-        assert!(!state.threads_open.get());
         assert_eq!(
             viewport.get().y0,
             0.0,
@@ -3736,16 +3688,6 @@ mod window {
         assert!(find(harness.root_id(), "inline-card:github").is_none());
     }
 
-    /// The column's slot for a new thread's composer: what it holds, by
-    /// the name of the view in it, `Empty` when it holds nothing.
-    fn column_slot(harness: &HeadlessHarness) -> String {
-        let slot = find(harness.root_id(), "column-composer").expect("the column is open");
-        slot.children()
-            .first()
-            .map(|c| c.debug_name())
-            .unwrap_or_default()
-    }
-
     #[test]
     fn the_composer_opened_on_lines_is_a_card_under_them_and_escape_takes_its_rows_away() {
         use crate::review::doc::{CardId, DocRow, COMPOSER_ROWS};
@@ -3784,9 +3726,8 @@ mod window {
         harness.rebuild();
         harness.paint();
 
-        // `a` opens the composer on the line. It is a card under the
-        // line, at its estimate until it is laid out, and the column is
-        // not opened for it.
+        // `a` opens the composer on the line. It is a card under the line,
+        // at its estimate until it is laid out, and Files stays visible.
         harness.dispatch_event(key_press(Code::KeyA, Key::Character("a".into())));
         let composer = state.composer.get().expect("`a` opened the composer");
         assert_eq!(
@@ -3794,10 +3735,7 @@ mod window {
             Some((7, 7))
         );
         assert!(state.composer_is_inline());
-        assert!(
-            !state.threads_open.get(),
-            "the column is not opened for a composer drawn in the code"
-        );
+        assert_eq!(state.tab.get(), ItemTab::Files);
         harness.rebuild();
         harness.paint();
         let rows = laid_out_rows(&harness, "composer");
@@ -3837,14 +3775,6 @@ mod window {
             "to the right edge, less the margin"
         );
 
-        // Opened, the column's slot for the composer is empty: the
-        // composer is in the code and nowhere else.
-        state.threads_open.set(true);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(column_slot(&harness), "Empty");
-        assert!(find(harness.root_id(), "inline-card:composer").is_some());
-
         // Escape, with nothing typed, puts the composer away, and the
         // rows go with it.
         harness.dispatch_event(key_press(Code::Escape, Key::Named(NamedKey::Escape)));
@@ -3864,7 +3794,8 @@ mod window {
             "the next composer starts on the estimate"
         );
 
-        // A question about the worktree is the column's, as it was.
+        // A question about the item has no inline anchor, so it opens on
+        // Conversation instead.
         let choice = (
             perch_agent::Backend::ClaudeCode,
             "sonnet".to_string(),
@@ -3874,8 +3805,8 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert!(!state.composer_is_inline());
-        assert_ne!(column_slot(&harness), "Empty");
-        assert_eq!(live.doc.get().len(), 120);
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
+        assert_eq!(count(harness.root_id(), "composer-box"), 1);
         assert!(find(harness.root_id(), "inline-card:").is_none());
     }
 

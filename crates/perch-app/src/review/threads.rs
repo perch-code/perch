@@ -1,18 +1,14 @@
-//! The thread column: questions anchored to lines, and the agent's answers.
+//! Thread views: questions anchored to lines, and the agent's answers.
 //!
 //! A thread is a comment thread, not a chat: short questions, short
-//! answers, tied to lines. The column lists the open file's threads first,
-//! then the worktree's others under a divider. A composer sits at the top
-//! for a new thread, unless the thread is on lines of the open file, when
-//! the composer is a card in the code under them instead; a follow-up's
-//! composer sits under its thread, in the code when the thread is drawn
-//! there and in the column otherwise.
+//! answers, tied to lines. Anchored threads are cards in the code, and the
+//! complete item history is on Conversation. A composer sits in the code
+//! under selected lines or on Conversation for an item-level question; a
+//! follow-up's composer sits under its thread.
 //!
-//! The same thread is also a card on Conversation, and a card in the code
-//! under the lines it is about. The message, the run's steps and footer,
-//! the follow-up line and the composer are one set of views here, taking
-//! a [`ThreadFace`] for the sizes that differ, so the places cannot drift
-//! apart.
+//! The message, the run's steps and footer, the follow-up line and the
+//! composer are one set of views here, taking a [`ThreadFace`] for the
+//! sizes that differ, so Conversation and inline cards cannot drift apart.
 
 use std::rc::Rc;
 
@@ -29,65 +25,9 @@ use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, Composer, ReviewState};
-use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{clickable, icon_button, sidebar_glyph, text_button};
-
-pub fn thread_column(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    open_file: OpenFile,
-) -> impl IntoView {
-    Stack::vertical((header(app, state), body(app, state, backend, open_file))).style(move |s| {
-        s.width(state.threads_width.get())
-            .height_full()
-            .flex_shrink(0.0_f32)
-            .flex_col()
-            .background(theme::CANVAS_SIDEBAR)
-            .border_left(1.0)
-            .border_color(theme::BORDER)
-    })
-}
-
-fn header(app: AppState, state: ReviewState) -> impl IntoView {
-    Stack::horizontal((
-        Label::derived(|| "Threads".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .color(theme::FG)
-                .selectable(false)
-                .flex_grow(1.0_f32)
-        }),
-        // A question about the pull request as a whole.
-        icon_button(
-            || SidebarIcon::Plus,
-            || theme::FG_MUTED,
-            move || {
-                state.open_composer(None, None, String::new(), defaults(app));
-            },
-        ),
-        icon_button(
-            || SidebarIcon::Close,
-            || theme::FG_MUTED,
-            move || {
-                state.threads_open.set(false);
-            },
-        ),
-    ))
-    .style(|s| {
-        s.height(theme::TAB_HEIGHT)
-            .width_full()
-            .flex_shrink(0.0_f32)
-            .items_center()
-            .padding_left(14.0)
-            .padding_right(8.0)
-            .gap(2.0)
-            .border_bottom(1.0)
-            .border_color(theme::BORDER)
-    })
-}
 
 /// A model alias as the screen shows it: "Sonnet" for `sonnet`. A full id
 /// such as `claude-sonnet-5` is shown as typed.
@@ -135,13 +75,11 @@ fn default_choice(agent: &perch_github::AgentConfig) -> AgentChoice {
     )
 }
 
-/// Where a thread is drawn: in the column beside the editor, as a card on
-/// Conversation, or inline in the code under the lines it is about. The
-/// views are the same; the face picks the room they take and the surface
-/// they sit on.
+/// Where a thread is drawn: as a card on Conversation, or inline in the
+/// code under the lines it is about. The views are the same; the face picks
+/// the room they take and the surface they sit on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadFace {
-    Column,
     Card,
     Inline,
 }
@@ -150,130 +88,10 @@ impl ThreadFace {
     /// Room between a thread's messages.
     fn message_gap(self) -> f64 {
         match self {
-            ThreadFace::Column | ThreadFace::Inline => theme::THREAD_GAP,
+            ThreadFace::Inline => theme::THREAD_GAP,
             ThreadFace::Card => 20.0,
         }
     }
-}
-
-fn body(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    open_file: OpenFile,
-) -> impl IntoView {
-    let composer_backend = backend.clone();
-    let here_backend = backend.clone();
-    let here_open = open_file.clone();
-
-    // A composer for a new thread sits at the top, unless it is drawn in
-    // the code as a card under its lines: then this slot is empty, so the
-    // composer is in one place. A follow-up's sits under its thread
-    // instead. Keyed on what the composer is about and which opening it
-    // is, not on the composer itself: picking a model writes the
-    // composer, and a rebuild on that would throw the typed question
-    // away.
-    let slot = Memo::new(move |_| {
-        state.composer.with(|c| {
-            c.as_ref()
-                .filter(|c| c.thread_id.is_none() && !state.composer_is_inline())
-                .map(|c| (c.anchor.clone(), c.opening))
-        })
-    });
-    Stack::vertical((
-        dyn_container(
-            move || slot.get(),
-            move |slot| match slot.and_then(|_| state.composer.get_untracked()) {
-                Some(c) => composer_view(app, state, composer_backend.clone(), c, ThreadFace::Column).into_any(),
-                None => Empty::new().into_any(),
-            },
-        )
-        .debug_name("column-composer")
-        .style(|s| s.width_full()),
-        dyn_stack(
-            move || {
-                let path = state.active.get();
-                let here = path.as_deref().map(|p| state.threads_in(p)).unwrap_or_default();
-                let github = path.as_deref().map(|p| state.github_threads_in(p)).unwrap_or_default();
-                let elsewhere = state.threads_elsewhere(path.as_deref());
-                let mut rows: Vec<Row> = here.into_iter().map(Row::Thread).collect();
-                if !github.is_empty() {
-                    rows.push(Row::GitHubDivider);
-                    rows.extend(github.into_iter().map(Row::GitHub));
-                }
-                if !elsewhere.is_empty() {
-                    rows.push(Row::Divider);
-                    rows.extend(elsewhere.into_iter().map(Row::Thread));
-                }
-                rows
-            },
-            |row| match row {
-                Row::Thread(t) => t.id.clone(),
-                Row::Divider => "divider".to_string(),
-                Row::GitHubDivider => "github".to_string(),
-                Row::GitHub(t) => format!("github:{}:{}", t.comment.id, t.replies.len()),
-            },
-            move |row| match row {
-                Row::Thread(t) => {
-                    thread_card(app, state, here_backend.clone(), here_open.clone(), t, ThreadFace::Column).into_any()
-                }
-                Row::Divider => group_heading("Elsewhere in this worktree").into_any(),
-                Row::GitHubDivider => group_heading("On GitHub").into_any(),
-                Row::GitHub(t) => crate::review::cards::line_thread_block(
-                    app,
-                    state,
-                    here_backend.clone(),
-                    here_open.clone(),
-                    t,
-                    ThreadFace::Column,
-                )
-                .into_any(),
-            },
-        )
-        .style(|s| s.flex_col().width_full().gap(10.0).padding(12.0)),
-        dyn_container(
-            move || {
-                let github = state.active.with(|p| p.as_deref().map(|p| !state.github_threads_in(p).is_empty()).unwrap_or(false));
-                state
-                    .comment_threads
-                    .with(|threads| threads.iter().all(|thread| !state.thread_visible(&thread.id)))
-                    && state.composer.with(Option::is_none)
-                    && !github
-            },
-            |empty| {
-                if empty {
-                    Label::derived(|| {
-                        "Select lines and press a to ask about them, or + to ask about the pull request."
-                            .to_string()
-                    })
-                    .style(|s| {
-                        s.font_size(theme::TEXT_META)
-                            .color(theme::FG_SUBTLE)
-                            .padding(20.0)
-                            .width_full()
-                            .text_wrap()
-                    })
-                    .into_any()
-                } else {
-                    Empty::new().into_any()
-                }
-            },
-        ),
-    ))
-    .style(|s| s.flex_col().width_full())
-    .scroll()
-    .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
-}
-
-#[derive(Clone)]
-enum Row {
-    Thread(CommentThread),
-    Divider,
-    /// The heading over GitHub's review comments on the open file, which
-    /// are not threads of the reader's own and are drawn as the nested
-    /// blocks Conversation shows.
-    GitHubDivider,
-    GitHub(crate::review::timeline::LineThread),
 }
 
 // ---------------------------------------------------------------------
@@ -437,7 +255,7 @@ pub fn composer_view(
                 .border_radius(10.0);
             match face {
                 ThreadFace::Card => base.border(0.0),
-                ThreadFace::Column | ThreadFace::Inline => base
+                ThreadFace::Inline => base
                     .border(1.0)
                     .border_color(theme::BORDER)
                     .focus(|s| s.border_color(theme::ACCENT)),
@@ -453,8 +271,8 @@ pub fn composer_view(
     // the view is in the box tree, where it is invisible and dropped.
     //
     // A composer laid in place on Conversation also leaves its box where
-    // `a` can find it, and scrolls the column to itself: it sits at the end
-    // of the column, or under a thread, and may have opened off screen.
+    // `a` can find it and scrolls the page to itself: it sits at the end of
+    // the conversation, or under a thread, and may have opened off screen.
     let inner = editor.editor().editor_view_id;
     let asked = std::rc::Rc::new(std::cell::Cell::new(false));
     let registered = std::rc::Rc::new(std::cell::Cell::new(None));
@@ -525,12 +343,6 @@ pub fn composer_view(
     .style(move |s| {
         let base = s.flex_col().padding(12.0).border(1.0).border_radius(14.0);
         match face {
-            ThreadFace::Column => base
-                .width_full()
-                .margin(theme::THREAD_PADDING)
-                .margin_bottom(0.0)
-                .background(theme::CANVAS)
-                .border_color(theme::BORDER),
             ThreadFace::Card => base
                 .width_full()
                 .background(theme::CANVAS_SUBTLE)
@@ -765,29 +577,23 @@ pub fn outdated_pill(outdated: bool) -> impl IntoView {
 // Threads
 // ---------------------------------------------------------------------
 
-/// A thread of the reader's own: in the column, a white card led by its
-/// anchor's label; inline in the code, Conversation's dashed chrome at
-/// the column's density, led by a chevron that collapses it to one row,
-/// with no label, since it is under the lines the label would name. Both
-/// hold the messages, the run under an agent's answer with its steps on
-/// one line, and the follow-up line. A gutter marker click on the thread
-/// flashes the border of either.
+/// A thread of the reader's own inline in the code: dashed chrome led by a
+/// chevron that collapses it to one row, with no anchor label since it is
+/// already under those lines. It holds the messages, the run under an
+/// agent's answer with its steps on one line, and the follow-up line. A
+/// gutter marker click flashes its border.
 pub fn thread_card(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
-    open_file: OpenFile,
     thread: CommentThread,
-    face: ThreadFace,
 ) -> impl IntoView {
     let card_id = CardId::Thread(thread.id.clone());
     let flashing = RwSignal::new(false);
 
-    // Only a card in the code collapses; the column lists every thread
-    // whole, as it did.
     let collapsed = {
         let card_id = card_id.clone();
-        Memo::new(move |_| face == ThreadFace::Inline && state.is_collapsed(&card_id))
+        Memo::new(move |_| state.is_collapsed(&card_id))
     };
     let open_thread = thread.clone();
     let open_backend = backend.clone();
@@ -797,41 +603,22 @@ pub fn thread_card(
             if collapsed {
                 collapsed_row(app, state, open_thread.clone()).into_any()
             } else {
-                open_card(
-                    app,
-                    state,
-                    open_backend.clone(),
-                    open_file.clone(),
-                    open_thread.clone(),
-                    face,
-                )
-                .into_any()
+                open_inline_card(app, state, open_backend.clone(), open_thread.clone()).into_any()
             }
         },
     )
     .style(move |s| {
-        let base = match face {
-            // A card in the code is the page grey inside a dashed border,
-            // as it is on Conversation, so it cannot be taken for a line
-            // of GitHub's; collapsed, it is its one row exactly. Its
-            // width is the layer's to set, from the edges it is placed
-            // against, so it takes none here.
-            ThreadFace::Inline => s
-                .background(theme::CANVAS_SUBTLE)
-                .border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
-                .border_radius(theme::RADIUS_LG)
-                .apply_if(collapsed.get(), |s| {
-                    s.height(theme::CODE_LINE_HEIGHT as f64)
-                }),
-            ThreadFace::Column | ThreadFace::Card => s
-                .width_full()
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_radius(theme::RADIUS_LG)
-                .box_shadow_blur(4.0)
-                .box_shadow_v_offset(1.0)
-                .box_shadow_color(theme::SHADOW),
-        };
+        // Page grey inside a dashed border, as on Conversation, so it
+        // cannot be taken for a line of GitHub's. Collapsed, it is its one
+        // row exactly. The layer sets its width from the edges it is placed
+        // against.
+        let base = s
+            .background(theme::CANVAS_SUBTLE)
+            .border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
+            .border_radius(theme::RADIUS_LG)
+            .apply_if(collapsed.get(), |s| {
+                s.height(theme::CODE_LINE_HEIGHT as f64)
+            });
         if flashing.get() {
             base.border_color(theme::ACCENT)
         } else {
@@ -839,31 +626,19 @@ pub fn thread_card(
         }
     });
 
-    // In the column the marker's click scrolls to the card as well; the
-    // editor is scrolled to the card in the code by the layer that
-    // places it.
-    let scroll_to = (face == ThreadFace::Column).then(|| card.view_id());
-    wire_flash(state, card_id, flashing, scroll_to);
+    // The editor layer scrolls to inline cards before asking them to flash.
+    wire_flash(state, card_id, flashing);
     card
 }
 
 /// A gutter marker was clicked on the card's thread: `flashing` goes on
-/// for the flash's length, and `scroll_to` is scrolled to first when
-/// there is one. The first run only subscribes: a card built after a
-/// click must not take the click for its own.
-pub(crate) fn wire_flash(
-    state: ReviewState,
-    card_id: CardId,
-    flashing: RwSignal<bool>,
-    scroll_to: Option<floem::ViewId>,
-) {
+/// for the flash's length. The first run only subscribes: a card built
+/// after a click must not take the click for its own.
+pub(crate) fn wire_flash(state: ReviewState, card_id: CardId, flashing: RwSignal<bool>) {
     Effect::new(move |first: Option<()>| {
         let focused = state.focus_card.with(|f| f.as_ref() == Some(&card_id));
         if first.is_none() || !focused {
             return;
-        }
-        if let Some(view_id) = scroll_to {
-            view_id.scroll_to(None);
         }
         flashing.set(true);
         floem::action::exec_after(
@@ -879,34 +654,28 @@ pub(crate) fn wire_flash(
 /// is asked for, the messages and the follow-up. In the code the messages
 /// scroll inside the card once it is as tall as a card may be, so a long
 /// thread cannot push the code off the screen.
-fn open_card(
+fn open_inline_card(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
-    open_file: OpenFile,
     thread: CommentThread,
-    face: ThreadFace,
 ) -> impl IntoView {
-    let first_row = match face {
-        ThreadFace::Inline => {
-            let menu = thread_menu(state, thread.id.clone(), theme::THREAD_MENU).into_any();
-            chevron_row(
-                state,
-                CardId::Thread(thread.id.clone()),
-                thread.outdated,
-                menu,
-            )
-            .into_any()
-        }
-        ThreadFace::Column | ThreadFace::Card => {
-            anchor_line(state, open_file, thread.clone()).into_any()
-        }
-    };
-    let messages = messages_view(app, state, backend.clone(), thread.id.clone(), face);
-    let messages = match face {
-        ThreadFace::Inline => messages.scroll().style(card_scroll).into_any(),
-        ThreadFace::Column | ThreadFace::Card => messages.into_any(),
-    };
+    let menu = thread_menu(state, thread.id.clone(), theme::THREAD_MENU).into_any();
+    let first_row = chevron_row(
+        state,
+        CardId::Thread(thread.id.clone()),
+        thread.outdated,
+        menu,
+    );
+    let messages = messages_view(
+        app,
+        state,
+        backend.clone(),
+        thread.id.clone(),
+        ThreadFace::Inline,
+    )
+    .scroll()
+    .style(card_scroll);
     Stack::vertical((
         first_row.style(|s| s.flex_shrink(0.0_f32)),
         crate::review::cards::finding_controls(app, state, backend.clone(), thread.id.clone())
@@ -914,18 +683,15 @@ fn open_card(
         delete_confirmation(state, backend.clone(), thread.id.clone())
             .style(|s| s.flex_shrink(0.0_f32)),
         messages,
-        follow_up(app, state, backend, thread.id.clone(), face).style(|s| s.flex_shrink(0.0_f32)),
+        follow_up(app, state, backend, thread.id.clone(), ThreadFace::Inline)
+            .style(|s| s.flex_shrink(0.0_f32)),
     ))
-    .style(move |s| {
-        let base = s
-            .flex_col()
+    .style(|s| {
+        s.flex_col()
             .width_full()
             .padding(theme::THREAD_PADDING)
-            .gap(theme::THREAD_GAP);
-        match face {
-            ThreadFace::Inline => base.max_height(inline_card_max_height()),
-            ThreadFace::Column | ThreadFace::Card => base,
-        }
+            .gap(theme::THREAD_GAP)
+            .max_height(inline_card_max_height())
     })
 }
 
@@ -951,8 +717,8 @@ pub(crate) fn card_scroll(s: floem::style::Style) -> floem::style::Style {
         .margin_right(-theme::CARD_SCROLLBAR)
 }
 
-/// The first row of a card in the code, where the column's card has its
-/// anchor's label: the chevron that collapses it, Outdated, and at the
+/// The first row of a card in the code, where its Conversation card has an
+/// anchor label: the chevron that collapses it, Outdated, and at the
 /// end whatever the card puts there, the `...` menu on a thread of the
 /// reader's own. The row is as tall as that menu whether or not it holds
 /// one, so the chevron sits at one height on every card.
@@ -1121,76 +887,8 @@ fn chevron(state: ReviewState, card_id: CardId, open: bool) -> impl IntoView {
     })
 }
 
-/// `src/x.rs:41–58`, clickable, with Outdated and the `...` menu.
-fn anchor_line(state: ReviewState, open_file: OpenFile, thread: CommentThread) -> impl IntoView {
-    let label = thread
-        .anchor
-        .as_ref()
-        .map(|a| a.label())
-        .unwrap_or_else(|| "Worktree".to_string());
-    let anchor = thread.anchor.clone();
-    let delete_id = thread.id.clone();
-    let has_anchor = anchor.is_some();
-
-    Stack::horizontal((
-        sidebar_glyph(
-            if has_anchor {
-                SidebarIcon::Thread
-            } else {
-                SidebarIcon::Branch
-            },
-            if thread.outdated {
-                theme::FG_SUBTLE
-            } else {
-                theme::ACCENT
-            },
-        )
-        .style(|s| s.size(13.0, 13.0).margin_right(6.0).flex_shrink(0.0_f32)),
-        Label::derived(move || label.clone())
-            .on_event_stop(el::Click, move |_, _| {
-                if let Some(a) = &anchor {
-                    open_file(&a.path);
-                    state
-                        .jump_to_line
-                        .set(Some(a.start_line.saturating_sub(1) as usize));
-                }
-            })
-            .style(move |s| {
-                let base = s
-                    .font_size(theme::TEXT_BADGE)
-                    .font_family(theme::CODE_FONT_STACK.to_string())
-                    .color(theme::FG_MUTED)
-                    .text_ellipsis()
-                    .min_width(0.0)
-                    .selectable(false);
-                if has_anchor {
-                    base.hover(|s| s.color(theme::ACCENT).cursor(CursorStyle::Pointer))
-                } else {
-                    base
-                }
-            }),
-        outdated_pill(thread.outdated),
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        thread_menu(state, delete_id, theme::THREAD_MENU),
-    ))
-    .style(|s| s.items_center().width_full())
-}
-
-/// A small heading over a group of the column's rows.
-fn group_heading(text: &'static str) -> impl IntoView {
-    Label::derived(move || text.to_string()).style(|s| {
-        s.font_size(theme::TEXT_SECTION)
-            .font_weight(FontWeight::SEMI_BOLD)
-            .color(theme::FG_SUBTLE)
-            .padding_horiz(14.0)
-            .padding_top(14.0)
-            .padding_bottom(4.0)
-            .selectable(false)
-    })
-}
-
 /// "Delete this thread?" with Delete and Cancel, under the thread that
-/// asked, on a card or in the column alike. Nothing else deletes.
+/// asked, on its card. Nothing else deletes.
 pub fn delete_confirmation(
     state: ReviewState,
     backend: Rc<Backend>,
@@ -1339,11 +1037,9 @@ pub fn messages_view(
 /// The follow-up composer under a thread when one is open for it, else the
 /// line that opens one.
 ///
-/// The composer is drawn in one place. A thread with a card in the open
-/// file takes it inside that card, and the column's card for the thread
-/// keeps its line, whose click points the reader at the card; a thread
-/// without one takes it in the column. Conversation's card is the only
-/// place the thread is drawn there, and always takes it.
+/// The composer is drawn in one place on the visible surface. A thread with
+/// a card in the open file takes it inside that card; Conversation's card
+/// always takes it when Conversation is visible.
 pub fn follow_up(
     app: AppState,
     state: ReviewState,
@@ -1372,7 +1068,6 @@ pub fn follow_up(
             });
             let drawn_here = match face {
                 ThreadFace::Inline => state.follow_up_is_inline(&composer_thread),
-                ThreadFace::Column => !state.follow_up_is_inline(&composer_thread),
                 ThreadFace::Card => true,
             };
             (composer.filter(|_| drawn_here), running.get())
@@ -1420,7 +1115,7 @@ pub fn message_view(
         .is_some_and(|r| r.status == RunStatus::Completed);
     let message = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
-            run_surface(steps_view(state, run.clone()), face),
+            run_surface(steps_view(state, run.clone())),
             crate::review::markdown::render(&body),
             run_footer(app, state, backend, thread, message.body.clone(), run, face),
         ))
@@ -1483,19 +1178,17 @@ pub fn run_block(
             run_footer(app, state, backend, thread, question, run, face),
         ))
         .style(|s| s.flex_col().width_full().gap(6.0)),
-        face,
     )
 }
 
 /// The box a run's lines sit in. Tool activity is an inset neutral surface,
 /// separate from the prose without becoming a second heavy card.
-fn run_surface(inner: impl IntoView + 'static, face: ThreadFace) -> impl IntoView {
-    Container::new(inner).style(move |s| {
-        let base = s.width_full().padding(10.0).border_radius(12.0);
-        match face {
-            ThreadFace::Column => base.background(theme::CANVAS_SUBTLE),
-            ThreadFace::Card | ThreadFace::Inline => base.background(theme::CANVAS_SUBTLE),
-        }
+fn run_surface(inner: impl IntoView + 'static) -> impl IntoView {
+    Container::new(inner).style(|s| {
+        s.width_full()
+            .padding(10.0)
+            .border_radius(12.0)
+            .background(theme::CANVAS_SUBTLE)
     })
 }
 
@@ -1537,10 +1230,9 @@ fn run_footer(
                 .map(|e| e.label().to_string())
                 .unwrap_or_else(|| run.effort.clone());
             // A Conversation card's byline already names the model and the
-            // effort; the column's card and the one in the code have no
-            // byline, so the footer says.
+            // effort; the card in the code has no byline, so its footer says.
             match face {
-                ThreadFace::Column | ThreadFace::Inline => {
+                ThreadFace::Inline => {
                     format!(
                         "{} \u{00b7} {effort} \u{00b7} {secs:.0}s{cost}",
                         model_label(&run.model)
@@ -1703,10 +1395,7 @@ pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
     text
 }
 
-/// The one-line invitation at the bottom of a thread. In the column, for a
-/// thread whose follow-up is drawn inside its card in the code, the click
-/// points the reader at that card rather than opening a second box: the
-/// card is opened if collapsed, scrolled to and flashed.
+/// The one-line invitation at the bottom of a thread.
 pub fn reply_line(
     app: AppState,
     state: ReviewState,
@@ -1733,11 +1422,6 @@ pub fn reply_line(
                     defaults(app),
                 );
             }
-            if face == ThreadFace::Column && Effect::untrack(|| state.follow_up_is_inline(&id)) {
-                let card = CardId::Thread(id.clone());
-                state.expand_card(&card);
-                state.focus_card.set(Some(card));
-            }
         })
         .style(move |s| {
             let base = clickable(s)
@@ -1747,11 +1431,10 @@ pub fn reply_line(
                 .padding_vert(4.0)
                 .hover(|s| s.color(theme::ACCENT));
             // On a Conversation card the line stands where the composer's
-            // box will be, and takes the box's shape. In the code it is
-            // the column's bare line, which is one row of the code, the
-            // row the card's estimate gives it.
+            // box will be, and takes the box's shape. In the code it is a
+            // bare line, one row of the card's estimate.
             match face {
-                ThreadFace::Column | ThreadFace::Inline => base,
+                ThreadFace::Inline => base,
                 ThreadFace::Card => base
                     .padding_horiz(12.0)
                     .height(theme::ASK_BOX_HEIGHT - 12.0)
@@ -1764,53 +1447,6 @@ pub fn reply_line(
             }
         })
         .into_any()
-}
-
-/// The strip along the column's left edge that drags it wider.
-pub fn resize_handle(state: ReviewState) -> impl IntoView {
-    use floem::event::DragConfig;
-    use floem::style::Position;
-
-    let grab = RwSignal::new(0.0_f64);
-
-    Empty::new()
-        .on_event_stop(el::PointerDown, move |cx, e: &PointerButtonEvent| {
-            grab.set(state.threads_width.get());
-            if let Some(pointer) = e.pointer.pointer_id {
-                if pointer.is_primary_pointer() {
-                    cx.request_pointer_capture(pointer);
-                }
-            }
-        })
-        .on_event_stop(el::GainedPointerCapture, |cx, token| {
-            cx.start_drag(
-                *token,
-                DragConfig {
-                    threshold: 1.0,
-                    animation_duration: std::time::Duration::ZERO,
-                    easing: std::rc::Rc::new(floem::easing::Linear),
-                    custom_data: None,
-                    track_targets: false,
-                },
-                false,
-            );
-        })
-        .on_event_stop(el::DragMove, move |_, e: &floem::event::DragMoveEvent| {
-            // The column's left edge moves with the pointer, so its width
-            // is what it was at the grab plus how far left the pointer went.
-            let dx = e.start_state.logical_point().x - e.current_state.logical_point().x;
-            let width = (grab.get() + dx).clamp(theme::THREADS_MIN_WIDTH, theme::THREADS_MAX_WIDTH);
-            state.threads_width.set(width);
-        })
-        .style(|s| {
-            s.position(Position::Absolute)
-                .inset_top(0.0)
-                .inset_bottom(0.0)
-                .inset_left(-3.0)
-                .width(7.0)
-                .z_index(10)
-                .hover(|s| s.cursor(CursorStyle::ColResize))
-        })
 }
 
 #[cfg(test)]
@@ -1963,397 +1599,5 @@ mod tests {
             vec![(Backend::ClaudeCode, "shared".to_string())],
             "config decides, not the section"
         );
-    }
-}
-
-/// The column in a headless window, driven by clicks.
-#[cfg(test)]
-mod column {
-    use std::rc::Rc;
-    use std::sync::Arc;
-
-    use floem::headless::{HeadlessHarness, TestRoot};
-    use floem::prelude::{Code, KeyboardEvent, Modifiers};
-    use floem::reactive::{SignalGet, SignalUpdate};
-    use perch_github::{
-        Anchor, Author, CommentMessage, CommentThread, Item, ItemCheckout, ItemSubject,
-        PullRequest, RunRecord, RunStatus, RunStep, Side, ThreadOrigin,
-    };
-
-    use crate::review::model::ReviewState;
-    use crate::state::AppState;
-
-    fn run(status: RunStatus) -> RunRecord {
-        RunRecord {
-            id: "r1".into(),
-            owner: perch_github::RunOwner::Discussion {
-                item_id: "wt".into(),
-                thread_id: "t1".into(),
-                request_id: "q1".into(),
-            },
-            backend: "claude-code".into(),
-            model: "sonnet".into(),
-            effort: "medium".into(),
-            session_id: Some("sess".into()),
-            status,
-            cost_usd: Some(0.03),
-            duration_ms: Some(14_000),
-            steps: vec![
-                RunStep {
-                    summary: "Read src/x.rs".into(),
-                    ok: true,
-                },
-                RunStep {
-                    summary: "Asked to edit src/x.rs".into(),
-                    ok: false,
-                },
-            ],
-            error: None,
-            started_at: Some("2026-09-18T10:00:00Z".parse().unwrap()),
-            ended_at: Some("2026-09-18T10:00:14Z".parse().unwrap()),
-            ..RunRecord::default()
-        }
-    }
-
-    /// A question and its answer, both finished.
-    fn thread() -> CommentThread {
-        let created_at = "2026-09-18T09:59:00Z".parse().unwrap();
-        let message = |id: &str, author: Author, body: &str| CommentMessage {
-            id: id.into(),
-            thread_id: "t1".into(),
-            origin: ThreadOrigin::Local,
-            author,
-            body: body.into(),
-            created_at,
-            run: Some(run(RunStatus::Completed)),
-        };
-        CommentThread {
-            id: "t1".into(),
-            worktree_id: "wt".into(),
-            origin: ThreadOrigin::Local,
-            anchor: Some(Anchor {
-                path: "src/x.rs".into(),
-                start_line: 41,
-                line: 58,
-                side: Side::Right,
-                commit_sha: "abc".into(),
-            }),
-            outdated: false,
-            resolved: false,
-            created_at,
-            messages: vec![
-                message("m1", Author::User, "why?"),
-                message(
-                    "m2",
-                    Author::Agent {
-                        backend: "claude-code".into(),
-                        model: "sonnet".into(),
-                    },
-                    "because\n\n```rust\nfn x() {}\n```\n\n- one\n- two",
-                ),
-            ],
-        }
-    }
-
-    /// The whole window with a pull request open and the column showing
-    /// one thread. The whole window rather than the column alone, because
-    /// the column sits in a `dyn_container` of its own, and what that
-    /// container does on a signal write is part of what is being tested.
-    fn app_harness() -> (HeadlessHarness, ReviewState) {
-        let root = TestRoot::new();
-        let app = AppState::new();
-        let state = ReviewState::new();
-        let pr = PullRequest {
-            number: 812,
-            html_url: "https://github.com/slatedb/slatedb/pull/812".into(),
-            title: "Fence the manifest".into(),
-            author_login: "rohan".into(),
-            author_avatar_url: String::new(),
-            head_sha: "h".into(),
-            head_ref: "f".into(),
-            base_sha: "b".into(),
-            base_ref: "main".into(),
-            draft: false,
-            merged: false,
-            state: "open".into(),
-            additions: 0,
-            deletions: 0,
-            changed_files: 0,
-            repo_full_name: "slatedb/slatedb".into(),
-            head_repo_full_name: None,
-            updated_at: None,
-            review_requested: false,
-            checks: None,
-            review_decision: None,
-            merged_at: None,
-            merged_by: None,
-            closed_at: None,
-            requested_reviewers: vec![],
-            milestone: None,
-            labels: vec![],
-            assignees: vec![],
-        };
-        let now = "2026-09-18T09:59:00Z".parse().unwrap();
-        let mut item = Item::new("slatedb/slatedb", now);
-        item.id = "wt".into();
-        item.subject = Some(ItemSubject::PullRequest(pr.clone()));
-        item.checkout = Some(ItemCheckout {
-            branch: "perch/pr-812".into(),
-            base_ref: "main".into(),
-            head_sha: "h".into(),
-            path: std::path::PathBuf::from("/tmp/wt"),
-            owned: true,
-            on_disk: true,
-            churn: None,
-            last_seen_head: None,
-        });
-        state.item.set(Some(Arc::new(item)));
-        state.ready.set(true);
-        state.set_phase(crate::review::model::Phase::Ready);
-        // These tests drive the thread column beside the editor, on Files.
-        state.tab.set(crate::review::model::ItemTab::Files);
-        state.pull_request.set(Some(Arc::new(pr)));
-        state.comment_threads.set(Arc::new(vec![thread()]));
-        state.threads_open.set(true);
-        // See the field: a focused editor cannot be driven headlessly.
-        state.composer_autofocus.set(false);
-        let backend = crate::backend::Backend::detached();
-        let view = crate::ui::app_view(app, state, Rc::new(backend));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
-        harness.rebuild();
-        harness.paint();
-        (harness, state)
-    }
-
-    /// Where the header's close button sits: the last child of a header
-    /// that is `TAB_HEIGHT` tall, `padding_right` 8, button 26 square, in
-    /// a column `THREADS_WIDTH` wide against the window's right edge under
-    /// the review header and the item view's tab strip.
-    fn close_button_center() -> (f64, f64) {
-        let x = 1400.0 - 8.0 - 13.0;
-        let y = crate::theme::REVIEW_HEADER_HEIGHT
-            + crate::theme::TAB_HEIGHT
-            + crate::theme::TAB_HEIGHT / 2.0;
-        (x, y)
-    }
-
-    #[test]
-    fn the_close_button_hides_the_column() {
-        let (mut harness, state) = app_harness();
-        assert!(state.threads_open.get());
-        let (x, y) = close_button_center();
-        let under = harness.element_id_at(x, y);
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
-        assert!(
-            !state.threads_open.get(),
-            "click at ({x}, {y}) over {under:?} did not close the column"
-        );
-    }
-
-    #[test]
-    fn the_close_button_hides_the_column_with_a_composer_open() {
-        let (mut harness, state) = app_harness();
-        // The state in the report: an unanchored composer, its box focused.
-        state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(
-            None,
-            None,
-            String::new(),
-            (
-                perch_agent::Backend::ClaudeCode,
-                "sonnet".into(),
-                perch_agent::Effort::Medium,
-            ),
-        );
-        harness.rebuild();
-        harness.paint();
-        assert!(state.composer.get().is_some());
-        let (x, y) = close_button_center();
-        let under = harness.element_id_at(x, y);
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
-        assert!(
-            !state.threads_open.get(),
-            "click at ({x}, {y}) over {under:?} did not close the column"
-        );
-    }
-
-    #[test]
-    fn the_close_button_works_at_retina_scale_after_a_hover() {
-        let (mut harness, state) = app_harness();
-        harness.set_scale(2.0);
-        harness.rebuild();
-        harness.paint();
-        let (x, y) = close_button_center();
-        harness.pointer_move(x, y);
-        harness.rebuild();
-        harness.paint();
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
-        assert!(!state.threads_open.get(), "did not close at 2x");
-    }
-
-    #[test]
-    fn the_close_button_hides_the_column_when_the_open_file_has_threads() {
-        let (mut harness, state) = app_harness();
-        // The thread is anchored in src/x.rs; make that the open file, so
-        // the thread is drawn in the code as well as in the column.
-        let file = Arc::new(crate::backend::build_loaded_file(
-            "src/x.rs".into(),
-            "fn a() {}\n".repeat(80),
-            String::new(),
-            None,
-            false,
-            perch_git::Scope::Branch,
-            String::new(),
-        ));
-        // One rebuild per write, as the window gets: the tab opens on a
-        // click and the file lands from the backend a frame later.
-        state.open_tab("src/x.rs");
-        harness.rebuild();
-        harness.paint();
-        state.finish_load("src/x.rs", file);
-        harness.rebuild();
-        harness.paint();
-        assert!(state.threads_open.get());
-        let (x, y) = close_button_center();
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
-        assert!(!state.threads_open.get(), "the column reopened itself");
-    }
-
-    fn escape() -> floem::event::Event {
-        floem::event::Event::Key(KeyboardEvent {
-            state: floem::prelude::KeyState::Down,
-            key: floem::prelude::Key::Named(floem::prelude::NamedKey::Escape),
-            code: Code::Escape,
-            location: Default::default(),
-            modifiers: Modifiers::empty(),
-            repeat: false,
-            is_composing: false,
-        })
-    }
-
-    /// With the box unfocused, as it is here, Escape reaches the root
-    /// handler. Focused, the composer's own capture-phase listener does the
-    /// same thing before the editor can swallow the key; that path needs a
-    /// real window.
-    #[test]
-    fn escape_in_an_empty_box_closes_the_composer() {
-        let (mut harness, state) = app_harness();
-        state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(
-            None,
-            None,
-            String::new(),
-            (
-                perch_agent::Backend::ClaudeCode,
-                "sonnet".into(),
-                perch_agent::Effort::Medium,
-            ),
-        );
-        harness.rebuild();
-        harness.paint();
-        harness.dispatch_event(escape());
-        harness.rebuild();
-        harness.paint();
-        assert!(
-            state.composer.get().is_none(),
-            "escape did not close the empty composer"
-        );
-        assert!(state.threads_open.get(), "the column stays");
-    }
-
-    #[test]
-    fn escape_keeps_a_composer_with_a_question_in_it() {
-        let (mut harness, state) = app_harness();
-        state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(
-            None,
-            None,
-            "why is this here?".into(),
-            (
-                perch_agent::Backend::ClaudeCode,
-                "sonnet".into(),
-                perch_agent::Effort::Medium,
-            ),
-        );
-        harness.rebuild();
-        harness.paint();
-        harness.dispatch_event(escape());
-        harness.rebuild();
-        harness.paint();
-        assert!(
-            state.composer.get().is_some(),
-            "escape threw the question away"
-        );
-    }
-
-    #[test]
-    fn the_composers_close_button_dismisses_it() {
-        let (mut harness, state) = app_harness();
-        state.comment_threads.set(Arc::new(vec![]));
-        state.open_composer(
-            None,
-            None,
-            "half a thought".into(),
-            (
-                perch_agent::Backend::ClaudeCode,
-                "sonnet".into(),
-                perch_agent::Effort::Medium,
-            ),
-        );
-        harness.rebuild();
-        harness.paint();
-        // The anchor row is the card's first row; its close button is the
-        // last thing on it. Card: 12 margin + 12 padding from the column's
-        // right edge; button 22 wide, at the padding's edge.
-        let x = 1400.0 - 12.0 - 12.0 - 11.0;
-        let y = crate::theme::REVIEW_HEADER_HEIGHT
-            + 2.0 * crate::theme::TAB_HEIGHT
-            + 12.0
-            + 12.0
-            + 11.0;
-        let under = harness.element_id_at(x, y);
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
-        assert!(
-            state.composer.get().is_none(),
-            "click at ({x}, {y}) over {under:?} did not close the composer"
-        );
-        assert!(state.composer_draft.get().is_empty());
-    }
-
-    /// Opening a composer used to write `threads_open` whether or not the
-    /// column was already open. The write rebuilt the column, and the
-    /// composer's editor, torn down with the old column before its
-    /// deferred listener registration ran, was left registered as a dead
-    /// view. The next box tree commit then panicked inside floem asking it
-    /// for a window origin. The follow-up line is found by clicking up the
-    /// column from the bottom, so the test is not tied to the layout.
-    #[test]
-    fn a_follow_up_opens_without_rebuilding_the_column() {
-        let (mut harness, state) = app_harness();
-        let x = 1400.0 - crate::theme::THREADS_WIDTH + 40.0;
-        let mut y = 860.0;
-        while y > 0.0 && state.composer.get().is_none() {
-            harness.click(x, y);
-            harness.rebuild();
-            harness.paint();
-            y -= 6.0;
-        }
-        assert!(
-            state.composer.get().and_then(|c| c.thread_id).is_some(),
-            "never hit the follow-up line"
-        );
-        harness.pointer_move(x, y + 40.0);
-        harness.rebuild();
-        harness.paint();
     }
 }

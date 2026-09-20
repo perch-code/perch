@@ -430,16 +430,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                     EventPropagation::Continue
                 }
-                // Show or hide the drawer, or with shift, the thread column.
+                // Show or hide the sidebar drawer.
                 Code::Backslash => {
-                    if key.modifiers.contains(Modifiers::SHIFT) {
-                        if review.is_open() {
-                            review.threads_open.update(|open| *open = !*open);
-                        }
-                    } else {
+                    if !key.modifiers.contains(Modifiers::SHIFT) {
                         state.sidebar_open.update(|open| *open = !*open);
+                        EventPropagation::Stop
+                    } else {
+                        EventPropagation::Continue
                     }
-                    EventPropagation::Stop
                 }
                 // Back to the sidebar.
                 Code::BracketLeft => {

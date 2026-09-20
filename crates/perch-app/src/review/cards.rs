@@ -465,11 +465,11 @@ pub fn review_card(
 }
 
 /// A review comment and its replies as one block, each with Ask about
-/// this. On Conversation inside a review card, and in the thread column
-/// under On GitHub, the comments come under `path:line` and the lines the
-/// comment was left on; in the code, as a card under those lines, they
-/// come under the chevron that collapses the card to one row, and
-/// neither the heading nor the lines, since the card is under them.
+/// this. On Conversation inside a review card, the comments come under
+/// `path:line` and the lines the comment was left on; in the code, as a
+/// card under those lines, they come under the chevron that collapses the
+/// card to one row, and neither the heading nor the lines, since the card
+/// is under them.
 pub fn line_thread_block(
     app: AppState,
     state: ReviewState,
@@ -479,9 +479,7 @@ pub fn line_thread_block(
     face: ThreadFace,
 ) -> floem::AnyView {
     match face {
-        ThreadFace::Column | ThreadFace::Card => {
-            located_block(app, state, backend, open_file, thread).into_any()
-        }
+        ThreadFace::Card => located_block(app, state, backend, open_file, thread).into_any(),
         ThreadFace::Inline => github_card(app, state, thread).into_any(),
     }
 }
@@ -625,7 +623,7 @@ fn github_card(app: AppState, state: ReviewState, thread: LineThread) -> impl In
             base.border_color(theme::BORDER_MUTED)
         }
     });
-    threads::wire_flash(state, card_id, flashing, None);
+    threads::wire_flash(state, card_id, flashing);
     card
 }
 
