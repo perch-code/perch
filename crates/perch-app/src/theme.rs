@@ -10,9 +10,20 @@ use floem::peniko::Color;
 pub const CANVAS: Color = Color::from_rgb8(0xff, 0xff, 0xff);
 pub const CANVAS_SUBTLE: Color = Color::from_rgb8(0xf7, 0xf7, 0xf5);
 pub const CANVAS_SIDEBAR: Color = Color::from_rgb8(0xf8, 0xf8, 0xf6);
-/// The activity rail sits a shade deeper than the panel beside it.
-pub const CANVAS_RAIL: Color = Color::from_rgb8(0xf2, 0xf2, 0xef);
 pub const CANVAS_HOVER: Color = Color::from_rgb8(0xee, 0xee, 0xeb);
+
+/// The left navigation uses Codex's quieter, neutral surface treatment.
+/// These stay separate from the shared app palette so the dock can keep its
+/// precise contrast and interaction states.
+pub const NAV_CANVAS: Color = Color::from_rgb8(0xff, 0xff, 0xff);
+pub const NAV_CONTROL_BORDER: Color = Color::from_rgb8(0xe5, 0xe4, 0xe5);
+pub const NAV_DIVIDER: Color = Color::from_rgb8(0xed, 0xed, 0xed);
+pub const NAV_HOVER: Color = Color::from_rgb8(0xf8, 0xf8, 0xf8);
+pub const NAV_SELECTED: Color = Color::from_rgb8(0xf4, 0xf4, 0xf4);
+pub const NAV_SELECTED_PRESSED: Color = Color::from_rgb8(0xee, 0xee, 0xee);
+pub const NAV_FG: Color = Color::from_rgb8(0x19, 0x1a, 0x1c);
+pub const NAV_MUTED: Color = Color::from_rgb8(0x88, 0x88, 0x8a);
+pub const NAV_SUBTLE: Color = Color::from_rgb8(0xa3, 0xa3, 0xa5);
 
 /// Lines.
 pub const BORDER: Color = Color::from_rgb8(0xdd, 0xdd, 0xd9);
@@ -76,9 +87,9 @@ pub const TEXT_SECTION: f32 = 11.0;
 pub const OPTICAL_TEXT_LIFT: f64 = 1.0;
 
 /// Layout constants.
-/// The navigation panel beside the activity rail.
-pub const SIDEBAR_WIDTH: f64 = 320.0;
-pub const SIDEBAR_MIN_WIDTH: f64 = 260.0;
+/// The navigation panel, matching the roomy Codex dock at its default size.
+pub const SIDEBAR_WIDTH: f64 = 442.0;
+pub const SIDEBAR_MIN_WIDTH: f64 = 320.0;
 pub const SIDEBAR_MAX_WIDTH: f64 = 520.0;
 /// The always-present rail of destination icons.
 ///
@@ -86,15 +97,17 @@ pub const SIDEBAR_MAX_WIDTH: f64 = 520.0;
 /// top of it, and they need the room.
 pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
 /// An item row in the sidebar: two lines of text and the glyph beside them.
-pub const ROW_HEIGHT: f64 = 58.0;
+pub const ROW_HEIGHT: f64 = 68.0;
 pub const STATUS_HEIGHT: f64 = 34.0;
 /// Room above the rail's first entry, where the traffic lights sit.
 ///
-/// The lights end at y=23; this leaves a little air below them without
-/// the entry drifting down the rail.
-pub const TITLEBAR_HEIGHT: f64 = 36.0;
+/// The lights and the scope controls share this strip.
+pub const TITLEBAR_HEIGHT: f64 = 56.0;
 pub const RADIUS: f64 = 6.0;
 pub const RADIUS_LG: f64 = 10.0;
+pub const NAV_ROW_RADIUS: f64 = 14.0;
+pub const NAV_CONTROL_HEIGHT: f64 = 36.0;
+pub const NAV_CONTROL_RADIUS: f64 = NAV_CONTROL_HEIGHT / 2.0;
 /// The references panel under the editor, and how far it can be dragged.
 pub const REFERENCES_HEIGHT: f64 = 220.0;
 pub const REFERENCES_MIN_HEIGHT: f64 = 100.0;

@@ -89,6 +89,7 @@ pub fn item_row(
     let under_backend = backend.clone();
     let row_item = item.clone();
     let title_item = item.clone();
+    let row_debug_name = format!("item row:{}", item.id);
 
     // The click and the context menu are on the row, and both land on the
     // deepest view under the pointer, so everything drawn in the row lets
@@ -111,9 +112,9 @@ pub fn item_row(
                         let title = title_item.title().to_string();
                         Label::derived(move || title.clone())
                             .style(move |s| {
-                                s.font_size(theme::TEXT_BODY)
+                                s.font_size(theme::TEXT_TITLE)
                                     .font_weight(if attention { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
-                                    .color(if archived { theme::FG_SUBTLE } else { theme::FG })
+                                    .color(if archived { theme::NAV_SUBTLE } else { theme::NAV_FG })
                                     .text_ellipsis()
                                     .max_width_full()
                             })
@@ -124,12 +125,12 @@ pub fn item_row(
             .style(|s| s.width_full().min_width(0.0)),
             Stack::horizontal((
                 Label::derived(move || reference_text.clone()).style(|s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_SUBTLE)
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::NAV_MUTED)
                         .text_ellipsis()
                         .min_width(0.0)
                         .flex_shrink(1.0_f32)
-                        .margin_top(1.0)
+                        .margin_top(3.0)
                 }),
                 chips(state, &item),
             ))
@@ -142,6 +143,7 @@ pub fn item_row(
     .style(|s| s.items_center().width_full().min_width(0.0).pointer_events_none());
 
     let row = Container::new(content)
+        .debug_name(row_debug_name)
         .on_event_stop(el::Click, move |_, _| on_open(&open_target))
         .on_event_cont(el::PointerEnter, move |_, _| state.hovered_item.set(Some(hover_id.clone())))
         .on_event_cont(el::PointerLeave, move |_, _| {
@@ -158,15 +160,16 @@ pub fn item_row(
                 .height(theme::ROW_HEIGHT)
                 .items_center()
                 .padding_left(12.0)
-                .padding_right(8.0)
-                .margin_horiz(10.0)
-                .border_radius(12.0);
+                .padding_right(13.0)
+                .border_radius(theme::NAV_ROW_RADIUS);
             if selected() {
-                base.background(theme::ACCENT_SUBTLE)
+                base.background(theme::NAV_SELECTED)
+                    .hover(|s| s.background(theme::NAV_SELECTED_PRESSED))
             } else {
-                base.hover(|s| s.background(theme::CANVAS_HOVER))
+                base.hover(|s| s.background(theme::NAV_HOVER))
             }
         });
+    let row = Container::new(row).style(|s| s.width_full().padding_horiz(24.0));
 
     // What opens under the row: a Delete confirmation.
     let under_item = item.clone();
@@ -197,13 +200,19 @@ fn glyph(item: &Item) -> impl IntoView {
         Some(state) => floem::views::svg(move || icons::state_icon(state))
             .style(move |s| {
                 s.size(16.0, 16.0)
-                    .color(if muted { theme::FG_SUBTLE } else { icons::state_color(state) })
+                    .color(if muted { theme::NAV_SUBTLE } else { icons::state_color(state) })
             })
             .into_any(),
-        None => sidebar_glyph(SidebarIcon::Branch, if muted { theme::FG_SUBTLE } else { theme::FG_MUTED })
+        None => sidebar_glyph(SidebarIcon::Branch, if muted { theme::NAV_SUBTLE } else { theme::NAV_MUTED })
             .into_any(),
     })
-    .style(|s| s.size(16.0, 16.0).margin_right(10.0).flex_shrink(0.0_f32))
+    .style(|s| {
+        s.size(20.0, 20.0)
+            .items_center()
+            .justify_center()
+            .margin_right(10.0)
+            .flex_shrink(0.0_f32)
+    })
 }
 
 /// The CI chip and the review chip after a pull request's reference, from

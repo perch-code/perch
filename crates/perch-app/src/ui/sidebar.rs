@@ -34,9 +34,9 @@ pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl
             .height_full()
             .flex_shrink(0.0_f32)
             .flex_col()
-            .background(theme::CANVAS_SIDEBAR)
+            .background(theme::NAV_CANVAS)
             .border_right(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::NAV_DIVIDER)
     })
 }
 
@@ -53,18 +53,25 @@ pub fn collapsed_sidebar(state: AppState) -> impl IntoView {
             .flex_col()
             .flex_shrink(0.0_f32)
             .items_center()
-            .background(theme::CANVAS_RAIL)
+            .background(theme::NAV_CANVAS)
             .border_right(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::NAV_DIVIDER)
     })
 }
 
-/// The strip the traffic lights sit over, with the drawer's toggle at its
-/// right edge.
+/// The strip the traffic lights sit over, followed by the drawer control and
+/// the three scopes.
 fn lights_strip(state: AppState) -> impl IntoView {
     title_bar(
-        Stack::horizontal((Empty::new().style(|s| s.flex_grow(1.0_f32)), toggle_button(state)))
-            .style(|s| s.items_center().width_full().padding_right(8.0)),
+        Stack::horizontal((
+            // The native traffic lights occupy this first lane. Codex puts
+            // the drawer control immediately after them, then the scopes.
+            Empty::new().style(|s| s.width(theme::ACTIVITY_RAIL_WIDTH).pointer_events_none()),
+            toggle_button(state),
+            scope_tabs(state).style(|s| s.margin_left(8.0)),
+            Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
+        ))
+        .style(|s| s.items_center().width_full().padding_right(12.0)),
     )
     .style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().flex_shrink(0.0_f32).items_center())
 }
@@ -75,7 +82,7 @@ fn toggle_button(state: AppState) -> impl IntoView {
     Container::new(dyn_container(open, |open| {
         sidebar_glyph(
             if open { SidebarIcon::ChevronLeft } else { SidebarIcon::ChevronRight },
-            theme::FG_MUTED,
+            theme::NAV_MUTED,
         )
         .style(|s| s.size(14.0, 14.0))
         .into_any()
@@ -86,8 +93,8 @@ fn toggle_button(state: AppState) -> impl IntoView {
             .size(26.0, 26.0)
             .items_center()
             .justify_center()
-            .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .border_radius(8.0)
+            .hover(|s| s.background(theme::NAV_HOVER))
     })
 }
 
@@ -96,7 +103,7 @@ fn toggle_button(state: AppState) -> impl IntoView {
 // ---------------------------------------------------------------------
 
 fn items_nav(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
-    Stack::vertical((scope_tabs(state), search_row(state), item_list(state, backend, on_open)))
+    Stack::vertical((search_row(state), item_list(state, backend, on_open)))
         .style(|s| s.size_full().flex_col())
 }
 
@@ -113,27 +120,24 @@ fn scope_tabs(state: AppState) -> impl IntoView {
                 .style(move |s| {
                     let selected = state.item_filters.with(|f| f.scope == scope);
                     crate::ui::widgets::clickable(s)
-                        .height(30.0)
-                        .padding_horiz(10.0)
+                        .height(31.0)
+                        .padding_horiz(9.0)
                         .padding_vert(0.0)
                         .border(0.0)
-                        .border_radius(9.0)
+                        .border_radius(10.0)
                         .font_size(theme::TEXT_META)
-                        .color(if selected { theme::FG } else { theme::FG_MUTED })
-                        .background(if selected { theme::BADGE_BG } else { theme::CANVAS_SIDEBAR })
+                        .color(if selected { theme::NAV_FG } else { theme::NAV_MUTED })
+                        .background(if selected { theme::NAV_SELECTED } else { theme::NAV_CANVAS })
                         .flex_shrink(0.0_f32)
-                        .hover(|s| s.background(theme::CANVAS_HOVER))
-                        .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT))
+                        .hover(|s| s.background(theme::NAV_HOVER))
+                        .focus_visible(|s| s.outline(2.0).outline_color(theme::NAV_CONTROL_BORDER))
                 })
         },
     )
     .style(|s| {
-        s.width_full()
-            .flex_row()
+        s.flex_row()
             .items_center()
             .gap(2.0)
-            .padding_horiz(14.0)
-            .padding_bottom(2.0)
             .flex_shrink(0.0_f32)
     })
 }
@@ -149,22 +153,23 @@ fn search_row(state: AppState) -> impl IntoView {
 
     let input = TextInput::new(state.item_query)
         .placeholder("Search")
+        .debug_name("sidebar search")
         .on_event_cont(el::FocusGained, move |_, _| state.search_focused.set(true))
         .on_event_cont(el::FocusLost, move |_, _| state.search_focused.set(false))
         .style(|s| {
             s.width_full()
                 .min_width(0.0)
-                .height(34.0)
+                .height(theme::NAV_CONTROL_HEIGHT)
                 .font_size(theme::TEXT_META)
                 // The glyph takes the left padding, and the text starts at
-                // x=42 with the row titles: the row's 10, the border, and 31.
-                .padding_left(31.0)
-                .padding_right(6.0)
-                .background(theme::CANVAS)
+                // the same optical inset as the item titles below it.
+                .padding_left(34.0)
+                .padding_right(10.0)
+                .background(theme::NAV_CANVAS)
                 .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(17.0)
-                .focus(|s| s.border_color(theme::ACCENT))
+                .border_color(theme::NAV_CONTROL_BORDER)
+                .border_radius(theme::NAV_CONTROL_RADIUS)
+                .focus(|s| s.border_color(theme::NAV_MUTED))
         });
     let id = input.view_id();
     state.search_box.set(Some(id));
@@ -178,14 +183,14 @@ fn search_row(state: AppState) -> impl IntoView {
     });
     // The glyph is laid over the box rather than beside the text, the way
     // the filter button's is, and lets the pointer through: a click on it
-    // is a click in the box. Six in from the box's edge puts it at x=16.
-    let glyph = sidebar_glyph(SidebarIcon::Search, theme::FG_SUBTLE)
-        .style(|s| s.size(14.0, 14.0).position(Position::Absolute).inset_left(8.0).pointer_events_none());
+    // is a click in the box.
+    let glyph = sidebar_glyph(SidebarIcon::Search, theme::NAV_SUBTLE)
+        .style(|s| s.size(15.0, 15.0).position(Position::Absolute).inset_left(10.0).pointer_events_none());
     let search_box =
         Stack::horizontal((input, glyph)).style(|s| s.items_center().flex_grow(1.0_f32).min_width(0.0));
 
     Stack::horizontal((search_box, filter_button(state)))
-        .style(|s| s.items_center().width_full().gap(8.0).padding_horiz(14.0).padding_top(8.0))
+        .style(|s| s.items_center().width_full().gap(8.0).padding_horiz(24.0).padding_top(16.0))
 }
 
 /// The filter menu, in the shape of a settings menu: one row per setting,
@@ -210,27 +215,23 @@ fn filter_button(state: AppState) -> impl IntoView {
     // both let the click through.
     Container::new(
         dyn_container(narrowed, |on| {
-            sidebar_glyph(SidebarIcon::Filter, if on { theme::ACCENT } else { theme::FG_MUTED })
+            sidebar_glyph(SidebarIcon::Filter, if on { theme::ACCENT } else { theme::NAV_MUTED })
                 .style(|s| s.size(14.0, 14.0).pointer_events_none())
                 .into_any()
         })
         .style(|s| s.pointer_events_none()),
     )
     .popout_menu(move || filter_menu(state))
+    .debug_name("sidebar filter")
     .style(move |s| {
-        // When narrowed the border takes the ring as well as the glyph the
-        // accent, so the button reads as set the way a focused search box
-        // reads as active.
-        let border = if narrowed() { theme::ACCENT_RING } else { theme::BORDER };
         crate::ui::widgets::clickable(s)
-            .size(34.0, 34.0)
+            .size(32.0, 32.0)
             .items_center()
             .justify_center()
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(border)
-            .border_radius(17.0)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .background(if narrowed() { theme::NAV_SELECTED_PRESSED } else { theme::NAV_SELECTED })
+            .border(0.0)
+            .border_radius(16.0)
+            .hover(|s| s.background(theme::NAV_SELECTED_PRESSED))
     })
 }
 
@@ -382,7 +383,7 @@ fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl I
             |empty| {
                 if empty {
                     Label::new("No matching items")
-                        .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE).padding(16.0))
+                        .style(|s| s.font_size(theme::TEXT_META).color(theme::NAV_SUBTLE).padding(24.0))
                         .into_any()
                 } else {
                     Empty::new().into_any()
@@ -396,7 +397,7 @@ fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl I
         )
         .style(|s| s.flex_col().width_full().gap(1.0)),
     ))
-    .style(|s| s.flex_col().width_full().padding_top(10.0).padding_bottom(12.0))
+    .style(|s| s.flex_col().width_full().padding_top(18.0).padding_bottom(16.0))
     .scroll()
     .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
 }
@@ -581,6 +582,43 @@ mod tests {
         click_scope(&mut harness, ItemScope::All);
         assert!(find(harness.root_id(), "Issue mine").is_some());
         assert!(find(harness.root_id(), "Issue notification").is_some());
+    }
+
+    #[test]
+    fn codex_dock_geometry_holds_at_the_minimum_width() {
+        let (mut harness, _) = harness();
+
+        let all = find(harness.root_id(), "scope:All").unwrap().get_visual_rect_no_clip();
+        assert_eq!(all.height(), 31.0);
+        assert!(
+            all.y0 >= 0.0 && all.y1 <= theme::TITLEBAR_HEIGHT,
+            "scope leaves title strip: {all:?}"
+        );
+
+        let search = find(harness.root_id(), "sidebar search")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert_eq!(search.height(), theme::NAV_CONTROL_HEIGHT);
+        assert_eq!(search.x0, 24.0);
+
+        let filter = find(harness.root_id(), "sidebar filter")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert_eq!((filter.width(), filter.height()), (32.0, 32.0));
+        assert!(filter.x1 <= theme::SIDEBAR_MIN_WIDTH - 24.0);
+
+        let row = find(harness.root_id(), "item row:mine")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert_eq!(row.height(), theme::ROW_HEIGHT);
+        assert!(
+            row.x0 >= 24.0 && row.x1 <= theme::SIDEBAR_MIN_WIDTH - 24.0,
+            "row leaves gutter: {row:?}"
+        );
+
+        // A real paint exercises the rounded backgrounds and SVG glyphs in
+        // addition to the style and layout passes above.
+        harness.paint();
     }
 
     #[test]
