@@ -15,20 +15,18 @@ pub enum ItemStatus {
     #[default]
     Active,
     Closed,
-    Done,
     Archived,
     All,
 }
 
 impl ItemStatus {
-    pub const ALL: [ItemStatus; 5] =
-        [ItemStatus::Active, ItemStatus::Closed, ItemStatus::Done, ItemStatus::Archived, ItemStatus::All];
+    pub const ALL: [ItemStatus; 4] =
+        [ItemStatus::Active, ItemStatus::Closed, ItemStatus::Archived, ItemStatus::All];
 
     pub fn label(self) -> &'static str {
         match self {
             ItemStatus::Active => "Active",
             ItemStatus::Closed => "Closed",
-            ItemStatus::Done => "Done",
             ItemStatus::Archived => "Archived",
             ItemStatus::All => "All",
         }
@@ -42,14 +40,10 @@ impl ItemStatus {
         matches!(self, ItemStatus::Archived | ItemStatus::All)
     }
 
-    /// Closed and Done do not overlap. `Item::is_closed` counts a done item
-    /// as closed, which is right for Active, so Closed subtracts Done here
-    /// rather than the item changing what closed means.
     fn accepts(self, item: &Item) -> bool {
         match self {
             ItemStatus::Active => item.is_active(),
-            ItemStatus::Closed => item.is_closed() && !item.is_done() && !item.is_archived(),
-            ItemStatus::Done => item.is_done() && !item.is_archived(),
+            ItemStatus::Closed => item.is_closed() && !item.is_archived(),
             ItemStatus::Archived => item.is_archived(),
             ItemStatus::All => true,
         }
@@ -59,7 +53,6 @@ impl ItemStatus {
         match self {
             ItemStatus::Active => "active",
             ItemStatus::Closed => "closed",
-            ItemStatus::Done => "done",
             ItemStatus::Archived => "archived",
             ItemStatus::All => "all",
         }
@@ -178,7 +171,9 @@ impl ItemScope {
     fn accepts(self, item: &Item, viewer: Option<&str>) -> bool {
         match self {
             ItemScope::All => true,
-            ItemScope::Notifications => item.needs_attention(),
+            // Notifications are GitHub Thread rows, rendered separately
+            // from the durable Items this module filters.
+            ItemScope::Notifications => false,
             ItemScope::Authored => viewer.filter(|login| !login.is_empty()).is_some_and(|viewer| {
                 let author = match &item.subject {
                     Some(ItemSubject::PullRequest(pr)) => &pr.author_login,
@@ -256,104 +251,6 @@ impl std::fmt::Display for ItemSort {
     }
 }
 
-/// Why an item was given attention: the strings `attention_reason` holds,
-/// as the Reason submenu offers them. A `team_mention` is a mention; a
-/// string not here matches only Any and is shown by `attention_label`'s
-/// fallback rather than lost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttentionReason {
-    ReviewRequested,
-    Mention,
-    Assign,
-    Comment,
-    CiFailed,
-    Manual,
-    /// The reader opened the pull request or issue. The poll writes it and
-    /// it makes attention, so a reader can narrow to their own.
-    Author,
-    /// Something happened on a thread the reader watches: a push, a
-    /// review, a comment by somebody else. Most of an inbox.
-    Subscribed,
-    /// Merged, closed, or reopened.
-    StateChange,
-}
-
-impl AttentionReason {
-    pub const ALL: [AttentionReason; 9] = [
-        AttentionReason::ReviewRequested,
-        AttentionReason::Mention,
-        AttentionReason::Assign,
-        AttentionReason::Comment,
-        AttentionReason::CiFailed,
-        AttentionReason::Manual,
-        AttentionReason::Author,
-        AttentionReason::Subscribed,
-        AttentionReason::StateChange,
-    ];
-
-    /// The reason in words, as `perch --items` prints it beside a row
-    /// that needs attention.
-    pub fn label(self) -> &'static str {
-        match self {
-            AttentionReason::ReviewRequested => "review requested",
-            AttentionReason::Mention => "mentioned",
-            AttentionReason::Assign => "assigned",
-            AttentionReason::Comment => "commented",
-            AttentionReason::CiFailed => "CI failed",
-            AttentionReason::Manual => "manual",
-            AttentionReason::Author => "authored",
-            AttentionReason::Subscribed => "subscribed",
-            AttentionReason::StateChange => "state changed",
-        }
-    }
-
-    /// The menu's wording, sentence case, since a menu item is a title and
-    /// a row's suffix is not.
-    pub fn title(self) -> &'static str {
-        match self {
-            AttentionReason::ReviewRequested => "Review requested",
-            AttentionReason::Mention => "Mentioned",
-            AttentionReason::Assign => "Assigned",
-            AttentionReason::Comment => "Commented",
-            AttentionReason::CiFailed => "CI failed",
-            AttentionReason::Manual => "Manual",
-            AttentionReason::Author => "Authored",
-            AttentionReason::Subscribed => "Subscribed",
-            AttentionReason::StateChange => "State changed",
-        }
-    }
-
-    /// The wire string the poll stores, which is also the persisted form.
-    fn key(self) -> &'static str {
-        match self {
-            AttentionReason::ReviewRequested => "review_requested",
-            AttentionReason::Mention => "mention",
-            AttentionReason::Assign => "assign",
-            AttentionReason::Comment => "comment",
-            AttentionReason::CiFailed => "ci_failed",
-            AttentionReason::Manual => "manual",
-            AttentionReason::Author => "author",
-            AttentionReason::Subscribed => "subscribed",
-            AttentionReason::StateChange => "state_change",
-        }
-    }
-
-    /// The reason a stored string names, or `None` for one the menu does
-    /// not offer.
-    pub fn from_str(s: &str) -> Option<Self> {
-        if s == "team_mention" {
-            return Some(AttentionReason::Mention);
-        }
-        Self::ALL.into_iter().find(|v| v.key() == s)
-    }
-}
-
-impl std::fmt::Display for AttentionReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
 /// Which end of the sort the rows start from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
@@ -402,8 +299,6 @@ pub struct ItemFilters {
     pub show_pr_status: bool,
     /// Only saved items, whatever the status.
     pub saved_only: bool,
-    /// Only items whose latest reason is this one; `None` is Any.
-    pub reason: Option<AttentionReason>,
     pub direction: Direction,
     pub query: String,
 }
@@ -418,7 +313,6 @@ impl Default for ItemFilters {
             sort: ItemSort::LastActivity,
             show_pr_status: true,
             saved_only: false,
-            reason: None,
             direction: Direction::Newest,
             query: String::new(),
         }
@@ -431,7 +325,7 @@ impl ItemFilters {
     /// so local names can contain delimiters, percent signs, or spaces.
     pub fn to_meta(&self) -> String {
         format!(
-            "status={};kinds={};scope={};repository={};sort={};show_pr_status={};saved={};reason={};direction={}",
+            "status={};kinds={};scope={};repository={};sort={};show_pr_status={};saved={};direction={}",
             self.status.key(),
             self.kinds.key(),
             self.scope.key(),
@@ -439,18 +333,14 @@ impl ItemFilters {
             self.sort.key(),
             u8::from(self.show_pr_status),
             u8::from(self.saved_only),
-            self.reason.map_or("any", AttentionReason::key),
             self.direction.key(),
         )
     }
 
     /// Missing keys keep their defaults. Legacy grouping settings are
-    /// validated and ignored; Needs attention migrates to Notifications
-    /// unless an explicit scope is present, regardless of key order.
+    /// validated and ignored.
     pub fn parse(s: &str) -> Result<Self, String> {
         let mut out = Self::default();
-        let mut explicit_scope = false;
-        let mut legacy_attention = false;
         for pair in s.split(';').map(str::trim).filter(|p| !p.is_empty()) {
             let (key, value) =
                 pair.split_once('=').ok_or_else(|| format!("expected key=value, got {pair:?}"))?;
@@ -459,10 +349,7 @@ impl ItemFilters {
             match key {
                 "status" => out.status = ItemStatus::from_key(value).ok_or_else(bad)?,
                 "kinds" => out.kinds = ItemKinds::from_key(value).ok_or_else(bad)?,
-                "scope" => {
-                    out.scope = ItemScope::from_key(value).ok_or_else(bad)?;
-                    explicit_scope = true;
-                }
+                "scope" => out.scope = ItemScope::from_key(value).ok_or_else(bad)?,
                 "repository" => {
                     out.repository =
                         if value.is_empty() { None } else { Some(decode_meta_value(value).ok_or_else(bad)?) };
@@ -475,16 +362,10 @@ impl ItemFilters {
                 "sort" => out.sort = ItemSort::from_key(value).ok_or_else(bad)?,
                 "show_pr_status" => out.show_pr_status = parse_flag(value).ok_or_else(bad)?,
                 "saved" => out.saved_only = parse_flag(value).ok_or_else(bad)?,
-                "attention" => legacy_attention = parse_flag(value).ok_or_else(bad)?,
-                "reason" if value == "any" => out.reason = None,
-                "reason" => out.reason = Some(AttentionReason::from_str(value).ok_or_else(bad)?),
                 "direction" => out.direction = Direction::from_key(value).ok_or_else(bad)?,
                 "query" => out.query = value.to_string(),
                 _ => return Err(format!("unknown key {key:?}")),
             }
-        }
-        if legacy_attention && !explicit_scope {
-            out.scope = ItemScope::Notifications;
         }
         Ok(out)
     }
@@ -510,8 +391,8 @@ impl ItemFilters {
         .any(|hay| !hay.is_empty() && hay.to_lowercase().contains(&needle))
     }
 
-    /// Scope, repository, saved state, and latest reason narrow pinned
-    /// and unpinned items alike. The reason remains meaningful after Done.
+    /// Scope, repository, and saved state narrow pinned and unpinned items
+    /// alike.
     fn narrows_to(&self, item: &Item, viewer: Option<&str>) -> bool {
         self.scope.accepts(item, viewer)
             && self
@@ -519,9 +400,6 @@ impl ItemFilters {
                 .as_ref()
                 .is_none_or(|repo| repo.to_lowercase() == item.repo_full_name.to_lowercase())
             && (!self.saved_only || item.saved)
-            && self.reason.is_none_or(|wanted| {
-                item.attention_reason.as_deref().and_then(AttentionReason::from_str) == Some(wanted)
-            })
     }
 }
 
@@ -633,17 +511,6 @@ pub fn full_reference(item: &Item) -> String {
     }
 }
 
-/// The reason in words, from the string the attention was set with, as
-/// `perch --items` prints it beside a row that needs attention. A reason
-/// the menu does not know is still shown, with its underscores as spaces,
-/// rather than dropped from the row.
-pub fn attention_label(reason: &str) -> String {
-    match AttentionReason::from_str(reason) {
-        Some(known) => known.label().into(),
-        None => reason.replace('_', " "),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,23 +601,19 @@ mod tests {
             .collect()
     }
 
-    /// Three declared repositories. criccomini/perch has a pull request
-    /// with attention, a done pull request, a merged one, an issue, an
-    /// archived branch, and a plain branch. slatedb/slatedb has one open
-    /// pull request. x/empty has nothing.
+    /// Three declared repositories. criccomini/perch has an open pull
+    /// request, a closed pull request, a merged one, an issue, an archived
+    /// branch, and a plain branch. slatedb/slatedb has one open pull request.
+    /// x/empty has nothing.
     fn fixture() -> (Vec<DeclaredRepo>, Vec<Item>) {
         let declared = declared(&["criccomini/perch", "slatedb/slatedb", "x/empty"]);
 
         let mut wanted = item("pr-wanted", "criccomini/perch", "2026-09-10T10:00:00Z");
         wanted.subject = Some(pr(57, "Fence the manifest", "fence", "open", "2026-09-17T10:00:00Z"));
         wanted.checkout = Some(checkout("fence"));
-        wanted.attention_at = Some(at("2026-09-18T09:00:00Z"));
-        wanted.attention_reason = Some("review_requested".into());
 
-        let mut done = item("pr-done", "criccomini/perch", "2026-09-11T10:00:00Z");
-        done.subject = Some(pr(58, "Tracing spans", "spans", "open", "2026-09-16T10:00:00Z"));
-        done.attention_at = Some(at("2026-09-16T10:00:00Z"));
-        done.done_at = Some(at("2026-09-16T10:00:00Z"));
+        let mut closed = item("pr-closed", "criccomini/perch", "2026-09-11T10:00:00Z");
+        closed.subject = Some(pr(58, "Tracing spans", "spans", "closed", "2026-09-16T10:00:00Z"));
 
         let mut merged = item("pr-merged", "criccomini/perch", "2026-09-01T10:00:00Z");
         merged.subject = Some(pr(50, "Old thing", "old", "merged", "2026-09-02T10:00:00Z"));
@@ -772,7 +635,7 @@ mod tests {
             p.repo_full_name = "slatedb/slatedb".into();
         }
 
-        (declared, vec![wanted, done, merged, bug, archived, branch, other])
+        (declared, vec![wanted, closed, merged, bug, archived, branch, other])
     }
 
     fn ids(items: &[Item]) -> Vec<&str> {
@@ -793,30 +656,12 @@ mod tests {
     }
 
     #[test]
-    fn status_filters_exclude_done_closed_and_archived_from_active() {
+    fn status_filters_separate_closed_and_archived_from_active() {
         let (_, items) = fixture();
         let under = |status| visible_items(&items, &ItemFilters { status, ..Default::default() }, None);
-        assert_eq!(ids(&under(ItemStatus::Closed)), ["pr-merged"]);
-        assert_eq!(ids(&under(ItemStatus::Done)), ["pr-done"]);
+        assert_eq!(ids(&under(ItemStatus::Closed)), ["pr-closed", "pr-merged"]);
         assert_eq!(ids(&under(ItemStatus::Archived)), ["branch-archived"]);
         assert_eq!(under(ItemStatus::All).len(), items.len());
-    }
-
-    #[test]
-    fn done_and_closed_do_not_overlap_even_after_merge() {
-        let (_, mut items) = fixture();
-        if let Some(ItemSubject::PullRequest(pr)) = &mut items[1].subject {
-            pr.state = "closed".into();
-            pr.merged = true;
-        }
-        let mut archived_done = items[1].clone();
-        archived_done.id = "pr-done-archived".into();
-        archived_done.archived_at = Some(at("2026-09-17T10:00:00Z"));
-        items.push(archived_done);
-        let under = |status| visible_items(&items, &ItemFilters { status, ..Default::default() }, None);
-        assert_eq!(ids(&under(ItemStatus::Done)), ["pr-done"]);
-        assert_eq!(ids(&under(ItemStatus::Closed)), ["pr-merged"]);
-        assert_eq!(ids(&under(ItemStatus::Archived)), ["pr-done-archived", "branch-archived"]);
     }
 
     #[test]
@@ -862,32 +707,23 @@ mod tests {
     }
 
     #[test]
-    fn notifications_follow_attention_and_done_including_pinned_items() {
+    fn notification_scope_contributes_no_durable_items() {
         let (_, mut items) = fixture();
-        items[6].attention_at = Some(at("2026-09-17T12:00:00Z"));
-        items[6].attention_reason = Some("comment".into());
         items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
         let filters = ItemFilters { scope: ItemScope::Notifications, ..Default::default() };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["pr-wanted", "slatedb-pr"]);
-        items[0].done_at = items[0].attention_at;
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["slatedb-pr"]);
-        items[0].attention_at = Some(at("2026-09-19T10:00:00Z"));
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["pr-wanted", "slatedb-pr"]);
+        assert!(visible_items(&items, &filters, None).is_empty());
     }
 
     #[test]
-    fn authored_uses_pr_and_issue_authors_independently_of_latest_attention_reason() {
+    fn authored_uses_pr_and_issue_authors() {
         let (_, mut items) = fixture();
         if let Some(ItemSubject::Issue(issue)) = &mut items[3].subject {
             issue.author_login = "A".into();
         }
-        // An authored notification is not proof of authorship, and a local
-        // branch owned by the reader has no subject author to match.
+        // A local branch owned by the reader has no subject author to match.
         if let Some(ItemSubject::PullRequest(pr)) = &mut items[6].subject {
             pr.author_login = "someone-else".into();
         }
-        items[6].attention_reason = Some("author".into());
-        items[5].attention_reason = Some("author".into());
         items[6].pinned_at = Some(at("2026-09-18T10:00:00Z"));
         let filters = ItemFilters { scope: ItemScope::Authored, ..Default::default() };
         assert_eq!(ids(&visible_items(&items, &filters, Some("a"))), ["pr-wanted", "issue"]);
@@ -906,13 +742,13 @@ mod tests {
             kinds: ItemKinds { pull_requests: false, issues: true, branches: false },
             ..Default::default()
         };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["branch", "pr-done", "issue"]);
+        assert_eq!(ids(&visible_items(&items, &filters, None)), ["branch", "pr-closed", "issue"]);
         let filters = ItemFilters { status: ItemStatus::Archived, ..filters };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["branch-archived", "branch", "pr-done"]);
+        assert_eq!(ids(&visible_items(&items, &filters, None)), ["branch-archived", "branch", "pr-closed"]);
     }
 
     #[test]
-    fn pins_respect_repository_saved_reason_and_search_filters() {
+    fn pins_respect_repository_saved_and_search_filters() {
         let (_, mut items) = fixture();
         for i in [0, 3, 5, 6] {
             items[i].pinned_at = Some(at("2026-09-18T10:00:00Z"));
@@ -923,8 +759,6 @@ mod tests {
         assert_eq!(ids(&visible_items(&items, &filters, None)), ["slatedb-pr"]);
         let filters = ItemFilters { saved_only: true, ..Default::default() };
         assert_eq!(ids(&visible_items(&items, &filters, None)), ["pr-wanted", "slatedb-pr"]);
-        let filters = ItemFilters { reason: Some(AttentionReason::ReviewRequested), ..Default::default() };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["pr-wanted"]);
         let filters = ItemFilters { query: "checkpoint".into(), ..Default::default() };
         assert_eq!(ids(&visible_items(&items, &filters, None)), ["slatedb-pr"]);
     }
@@ -980,26 +814,6 @@ mod tests {
     }
 
     #[test]
-    fn latest_reason_matches_even_when_done_and_team_mention_is_a_mention() {
-        let (_, mut items) = fixture();
-        items[3].attention_reason = Some("team_mention".into());
-        items[1].attention_reason = Some("review_requested".into());
-        items[6].attention_reason = Some("security_alert".into());
-        let filters = ItemFilters { reason: Some(AttentionReason::Mention), ..Default::default() };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["issue"]);
-        let filters = ItemFilters {
-            reason: Some(AttentionReason::ReviewRequested),
-            status: ItemStatus::Done,
-            ..Default::default()
-        };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["pr-done"]);
-        for reason in AttentionReason::ALL {
-            let filters = ItemFilters { reason: Some(reason), status: ItemStatus::All, ..Default::default() };
-            assert!(!ids(&visible_items(&items, &filters, None)).contains(&"slatedb-pr"));
-        }
-    }
-
-    #[test]
     fn filters_round_trip_with_all_preferences_and_safe_repository_encoding() {
         let filters = ItemFilters {
             status: ItemStatus::Closed,
@@ -1009,7 +823,6 @@ mod tests {
             sort: ItemSort::LastOpened,
             show_pr_status: false,
             saved_only: true,
-            reason: Some(AttentionReason::Mention),
             direction: Direction::Oldest,
             query: String::new(),
         };
@@ -1029,37 +842,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_grouping_and_attention_preferences_migrate_without_losing_other_filters() {
-        let old = "status=done;kinds=pr;group=owner;sort=created;show_empty=1;show_pr_status=0;saved=1;attention=1;reason=mention;direction=oldest";
+    fn legacy_grouping_preferences_are_ignored_without_losing_other_filters() {
+        let old = "status=closed;kinds=pr;group=owner;sort=created;show_empty=1;show_pr_status=0;saved=1;direction=oldest";
         let filters = ItemFilters::parse(old).unwrap();
-        assert_eq!(filters.status, ItemStatus::Done);
+        assert_eq!(filters.status, ItemStatus::Closed);
         assert_eq!(filters.kinds, ItemKinds { pull_requests: true, issues: false, branches: false });
-        assert_eq!(filters.scope, ItemScope::Notifications);
+        assert_eq!(filters.scope, ItemScope::All);
         assert_eq!(filters.repository, None);
         assert_eq!(filters.sort, ItemSort::Created);
         assert!(!filters.show_pr_status);
         assert!(filters.saved_only);
-        assert_eq!(filters.reason, Some(AttentionReason::Mention));
         assert_eq!(filters.direction, Direction::Oldest);
         for group in ["repo", "owner", "date"] {
             assert_eq!(
-                ItemFilters::parse(&format!("group={group};show_empty=0;attention=0")).unwrap(),
+                ItemFilters::parse(&format!("group={group};show_empty=0")).unwrap(),
                 ItemFilters::default()
             );
-        }
-        assert_eq!(ItemFilters::parse("attention=on").unwrap().scope, ItemScope::Notifications);
-    }
-
-    #[test]
-    fn explicit_scope_overrides_legacy_attention_regardless_of_key_order() {
-        for value in ["scope=all;attention=1", "attention=1;scope=all"] {
-            assert_eq!(ItemFilters::parse(value).unwrap().scope, ItemScope::All);
-        }
-        for value in ["scope=authored;attention=1", "attention=1;scope=authored"] {
-            assert_eq!(ItemFilters::parse(value).unwrap().scope, ItemScope::Authored);
-        }
-        for value in ["scope=notifications;attention=0", "attention=0;scope=notifications"] {
-            assert_eq!(ItemFilters::parse(value).unwrap().scope, ItemScope::Notifications);
         }
     }
 
@@ -1072,7 +870,6 @@ mod tests {
             ItemFilters::parse("kinds=").unwrap().kinds,
             ItemKinds { pull_requests: false, issues: false, branches: false }
         );
-        assert_eq!(ItemFilters::parse("reason=team_mention").unwrap().reason, Some(AttentionReason::Mention));
     }
 
     #[test]
@@ -1111,11 +908,6 @@ mod tests {
             assert_eq!(ItemSort::from_key(value.key()), Some(value));
             assert_eq!(value.to_string(), value.label());
         }
-        for value in AttentionReason::ALL {
-            assert_eq!(AttentionReason::from_str(value.key()), Some(value));
-            assert_eq!(value.to_string(), value.label());
-            assert_eq!(value.title().to_lowercase(), value.label().to_lowercase());
-        }
         for value in Direction::ALL {
             assert_eq!(Direction::from_key(value.key()), Some(value));
             assert_eq!(value.to_string(), value.label());
@@ -1123,11 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn attention_labels_and_row_kinds_remain_readable() {
-        assert_eq!(attention_label("review_requested"), "review requested");
-        assert_eq!(attention_label("team_mention"), "mentioned");
-        assert_eq!(attention_label("ci_failed"), "CI failed");
-        assert_eq!(attention_label("security_alert"), "security alert");
+    fn row_kinds_remain_readable() {
         let (_, items) = fixture();
         assert_eq!(RowKind::of(&items[0]), RowKind::PullRequest);
         assert_eq!(RowKind::of(&items[3]), RowKind::Issue);

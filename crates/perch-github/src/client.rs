@@ -1,18 +1,17 @@
-//! GitHub REST client: the notifications poll and the repository lists.
+//! GitHub REST client: the notifications inbox and targeted item lookups.
 //!
 //! Uses octocrab's raw `_get_with_headers` rather than its typed builders,
-//! because the rules need response headers: `X-Poll-Interval` sets the
-//! floor on how often the notifications may be asked for again, `ETag`
-//! drives the lists' conditional requests, `Link` says how long a
-//! repository's closed history is, and the rate limit headers are kept as
-//! the allowance the backfill paces itself by.
+//! because polling needs `X-Poll-Interval` and `Last-Modified`, targeted
+//! branch lookup uses `ETag`, and rate-limit headers classify failures.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{HeaderMap, HeaderValue, ETAG, IF_NONE_MATCH, LINK};
+use http::header::{
+    HeaderMap, HeaderName, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED,
+};
 use http::StatusCode;
 use http_body_util::BodyExt;
 use jiff::Timestamp;
@@ -31,21 +30,23 @@ use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunsPayload};
 const PER_PAGE: usize = 50;
 /// Fallback when the server sends no `X-Poll-Interval`.
 const DEFAULT_POLL_SECS: u64 = 60;
-/// Page size for every other list. GitHub allows a hundred there.
+/// GitHub's dated REST contract. Pinning this keeps a future default change
+/// from silently changing response shapes underneath the client.
+const API_VERSION: &str = "2022-11-28";
+/// Page size for discussion timelines. GitHub allows a hundred there.
 const LIST_PER_PAGE: usize = 100;
-/// Hard cap on pages for those lists. A hundred pages of a hundred is more
-/// discussion than any pull request has, and more open pull requests than
-/// any repository keeps.
+/// Hard cap on pages for discussion lists.
 const LIST_MAX_PAGES: usize = 100;
-/// What an allowance cell holds before any response has been seen.
-const UNSEEN: i64 = -1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("GitHub rejected the token")]
     Unauthorized,
     #[error("rate limited")]
-    RateLimited { reset_epoch: Option<i64> },
+    RateLimited {
+        reset_epoch: Option<i64>,
+        retry_after_secs: Option<u64>,
+    },
     #[error("GitHub returned {status}: {body}")]
     Status { status: u16, body: String },
     #[error("network error: {0}")]
@@ -63,70 +64,43 @@ pub enum PullLookup {
     Answer { pull: Option<Box<PullRequest>>, etag: Option<String> },
 }
 
-/// What listing a repository's open pull requests or issues gave back.
+/// Outcome of a notifications poll.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Listed<T> {
-    /// A 304 on the first page: nothing opened, closed, or moved since the
-    /// tag was taken, so the rows made from the last answer still stand.
-    Unchanged,
-    /// The whole list, and the tag to ask with next time: the first
-    /// page's when the list fit on one page, because only the first page
-    /// is asked conditionally and its tag vouches for that page alone;
-    /// `None` when the list ran on, so the next ask is unconditional.
-    Changed { etag: Option<String>, items: Vec<T> },
-}
-
-/// One page of a repository's closed history, read a page at a time so the
-/// backfill can stop and resume by page number.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Page<T> {
-    pub items: Vec<T>,
-    /// The page the `Link` header names as `rel="last"`. Absent on the last
-    /// page itself, and when the whole list fits in one.
-    pub last_page: Option<u32>,
-    /// The newest `updated_at` among everything the page listed, the pull
-    /// requests an issues page carried and dropped included. The list is
-    /// oldest updated first, so this is where the page was consumed to,
-    /// and where a later `since` must start from, whether or not the last
-    /// entry survived into `items`.
-    pub newest: Option<Timestamp>,
-}
-
-/// The rate limit as the last response reported it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Allowance {
-    /// Requests left in the current window.
-    pub remaining: i64,
-    /// When the window resets, in seconds since the Unix epoch.
-    pub reset_epoch: i64,
-}
-
-/// Outcome of a notifications poll: the first page, and how long the
-/// server asks for before the next.
-#[derive(Debug)]
 pub struct ListResult {
+    /// The complete inbox when `unchanged` is false. Empty when the
+    /// conditional probe returned 304 and the cached inbox still stands.
     pub threads: Vec<Thread>,
+    pub unchanged: bool,
+    /// The validator to use for the next poll.
+    pub last_modified: Option<String>,
     pub poll_interval: Duration,
 }
 
-/// One response with its headers read before the body was consumed, which
-/// is the order the allowance and the conditional headers need.
+/// One raw `/notifications` page response, before its body is decoded.
+struct NotificationPage {
+    status: StatusCode,
+    last_modified: Option<String>,
+    poll_interval: Duration,
+    body: String,
+}
+
+/// One response with its headers read before the body is consumed.
 struct Fetched {
     status: StatusCode,
     headers: HeaderMap,
     body: String,
 }
 
-/// The client. A clone shares the allowance cells, so every copy reports
-/// what the last response on any of them said.
 #[derive(Clone)]
 pub struct GitHub {
     octo: Octocrab,
     http: reqwest::Client,
-    /// `x-ratelimit-remaining` from the last response, or `UNSEEN`.
-    remaining: Arc<AtomicI64>,
-    /// `x-ratelimit-reset` from the last response, or `UNSEEN`.
-    reset: Arc<AtomicI64>,
+    /// Serializes API requests across clones so a response that closes the
+    /// rate-limit window gates the next request before it is sent.
+    api_request_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Shared by every clone so one rate-limit response gates all later API
+    /// calls, including item fetches spawned outside the poll loop.
+    rate_limit_until: Arc<AtomicI64>,
 }
 
 impl GitHub {
@@ -141,7 +115,12 @@ impl GitHub {
     }
 
     fn build(token: &str, base_uri: Option<&str>) -> Result<Self, Error> {
-        let mut builder = Octocrab::builder().personal_token(token.to_string());
+        let mut builder = Octocrab::builder()
+            .personal_token(token.to_string())
+            .add_header(
+                HeaderName::from_static("x-github-api-version"),
+                API_VERSION.to_string(),
+            );
         if let Some(base) = base_uri {
             builder = builder
                 .base_uri(base)
@@ -160,53 +139,149 @@ impl GitHub {
         Ok(Self {
             octo,
             http,
-            remaining: Arc::new(AtomicI64::new(UNSEEN)),
-            reset: Arc::new(AtomicI64::new(UNSEEN)),
+            api_request_lock: Arc::new(tokio::sync::Mutex::new(())),
+            rate_limit_until: Arc::new(AtomicI64::new(0)),
         })
     }
 
-    /// The rate limit as the last response reported it, on this client or
-    /// any clone of it, and `None` until one has.
-    pub fn allowance(&self) -> Option<Allowance> {
-        let remaining = self.remaining.load(Ordering::Relaxed);
-        let reset_epoch = self.reset.load(Ordering::Relaxed);
-        if remaining < 0 || reset_epoch < 0 {
-            return None;
-        }
-        Some(Allowance { remaining, reset_epoch })
-    }
-
-    /// Keep what a response said about the rate limit. Each header updates
-    /// its own cell, so with requests in flight together the pair can come
-    /// from two responses; the backfill reads it as a floor, and either
-    /// response's numbers serve that.
-    fn note_allowance(&self, headers: &HeaderMap) {
-        let (remaining, reset) = rate_headers(headers);
-        if let Some(remaining) = remaining {
-            self.remaining.store(remaining, Ordering::Relaxed);
-        }
-        if let Some(reset) = reset {
-            self.reset.store(reset, Ordering::Relaxed);
-        }
-    }
-
-    /// The first page of notifications, read and unread alike: the web UI's
-    /// Unread tab is a filter over one list, not a separate query.
+    /// Fetch the complete inbox unconditionally.
     ///
-    /// One request, unconditional. What comes back is acted on and dropped,
-    /// so there is nothing to compare against last time, and a partial
-    /// answer to `If-Modified-Since` would only be a way of missing some.
-    /// Fifty is GitHub's cap here, and more than one poll's worth of news.
+    /// This wrapper is useful for callers without a cached validator. Polling
+    /// callers should use [`Self::list_threads_since`].
     pub async fn list_threads(&self) -> Result<ListResult, Error> {
-        let uri = format!("/notifications?all=true&participating=false&per_page={PER_PAGE}");
-        let fetched = self.get(&uri, None).await?;
+        self.list_threads_since(None).await
+    }
+
+    /// Fetch the authenticated user's GitHub notifications inbox.
+    ///
+    /// Read and unread threads are both requested because github.com's Inbox
+    /// is one list with an Unread filter. `last_modified` is used only for a
+    /// conditional request. A 304 keeps the cached inbox; a 200 is the new
+    /// complete first page and is followed by any remaining pages.
+    pub async fn list_threads_since(
+        &self,
+        last_modified: Option<&str>,
+    ) -> Result<ListResult, Error> {
+        let mut first_page = None;
+        if let Some(last_modified) = last_modified {
+            let probe = self.fetch_notification_page(1, Some(last_modified)).await?;
+            if probe.status == StatusCode::NOT_MODIFIED {
+                return Ok(ListResult {
+                    threads: Vec::new(),
+                    unchanged: true,
+                    last_modified: probe
+                        .last_modified
+                        .or_else(|| Some(last_modified.to_string())),
+                    poll_interval: probe.poll_interval,
+                });
+            }
+            first_page = Some(probe);
+        }
+
+        let mut threads = Vec::new();
+        let mut page = 1usize;
+        let mut response_last_modified = None;
+        let mut poll_interval = Duration::from_secs(DEFAULT_POLL_SECS);
+
+        loop {
+            let response = match first_page.take() {
+                Some(response) if page == 1 => response,
+                _ => self.fetch_notification_page(page, None).await?,
+            };
+            if page == 1 {
+                response_last_modified = response.last_modified.clone();
+                poll_interval = response.poll_interval;
+            } else {
+                poll_interval = poll_interval.max(response.poll_interval);
+            }
+
+            let page_threads: Vec<Thread> = serde_json::from_str(&response.body)
+                .map_err(|e| Error::Decode(e.to_string()))?;
+            let is_last_page = page_threads.len() < PER_PAGE;
+            threads.extend(page_threads);
+            if is_last_page {
+                break;
+            }
+            page = page
+                .checked_add(1)
+                .ok_or_else(|| Error::Decode("notification page number overflowed".into()))?;
+        }
+
+        Ok(ListResult {
+            threads,
+            unchanged: false,
+            last_modified: response_last_modified,
+            poll_interval,
+        })
+    }
+
+    /// Mark one notification read, the same operation as opening it in
+    /// github.com's notifications inbox.
+    pub async fn mark_thread_read(&self, thread_id: &str) -> Result<(), Error> {
+        let path = notification_thread_path(thread_id, "")?;
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._patch(&path, None::<&()>)
+            .await
+            .map_err(map_octocrab_error)?;
+        self.finish_mutation(response, &[StatusCode::RESET_CONTENT, StatusCode::NOT_MODIFIED])
+            .await
+    }
+
+    /// Remove one notification from github.com's inbox as Done.
+    pub async fn mark_thread_done(&self, thread_id: &str) -> Result<(), Error> {
+        let path = notification_thread_path(thread_id, "")?;
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._delete(&path, None::<&()>)
+            .await
+            .map_err(map_octocrab_error)?;
+        self.finish_mutation(response, &[StatusCode::NO_CONTENT]).await
+    }
+
+    /// Ignore future activity on a notification thread, including when the
+    /// user watches its repository.
+    pub async fn ignore_thread(&self, thread_id: &str) -> Result<(), Error> {
+        let path = notification_thread_path(thread_id, "/subscription")?;
+        let body = serde_json::json!({ "ignored": true });
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._put(&path, Some(&body))
+            .await
+            .map_err(map_octocrab_error)?;
+        self.finish_mutation(response, &[StatusCode::OK, StatusCode::NOT_MODIFIED])
+            .await
+    }
+
+    /// One page of `/notifications`, including the headers that pace and
+    /// validate polling.
+    async fn fetch_notification_page(
+        &self,
+        page: usize,
+        last_modified: Option<&str>,
+    ) -> Result<NotificationPage, Error> {
+        let uri = format!(
+            "/notifications?all=true&participating=false&per_page={PER_PAGE}&page={page}"
+        );
+        let fetched = self.get(&uri, modified_since(last_modified)).await?;
+        let last_modified = header_str(&fetched.headers, LAST_MODIFIED.as_str());
         let poll_interval = header_str(&fetched.headers, "x-poll-interval")
             .and_then(|v| v.parse::<u64>().ok())
-            .map(|s| Duration::from_secs(s.max(1)))
+            .map(|seconds| Duration::from_secs(seconds.max(1)))
             .unwrap_or_else(|| Duration::from_secs(DEFAULT_POLL_SECS));
-        let threads: Vec<Thread> =
-            serde_json::from_str(&fetched.body).map_err(|e| Error::Decode(e.to_string()))?;
-        Ok(ListResult { threads, poll_interval })
+
+        Ok(NotificationPage {
+            status: fetched.status,
+            last_modified,
+            poll_interval,
+            body: fetched.body,
+        })
     }
 
     /// Fetch a pull request by number.
@@ -224,99 +299,6 @@ impl GitHub {
             serde_json::from_str(&fetched.body).map_err(|e| Error::Decode(e.to_string()))?;
 
         Ok(payload.into_pull_request(repo_full_name))
-    }
-
-    /// Every open pull request in a repository, or `Unchanged` when the tag
-    /// from last time still holds. What the list pass makes its rows from.
-    pub async fn list_open_pulls(
-        &self,
-        repo_full_name: &str,
-        etag: Option<&str>,
-    ) -> Result<Listed<PullRequest>, Error> {
-        let path = format!("/repos/{repo_full_name}/pulls?state=open");
-        Ok(match self.list_open::<PullPayload>(&path, etag).await? {
-            Listed::Unchanged => Listed::Unchanged,
-            Listed::Changed { etag, items } => Listed::Changed {
-                etag,
-                items: items
-                    .into_iter()
-                    .map(|p| p.into_pull_request(repo_full_name))
-                    .collect(),
-            },
-        })
-    }
-
-    /// Every open issue in a repository, the same way. The issues endpoint
-    /// lists pull requests too, and those are dropped here rather than
-    /// refused as `fetch_issue` does: a list is not a claim about one
-    /// number.
-    pub async fn list_open_issues(
-        &self,
-        repo_full_name: &str,
-        etag: Option<&str>,
-    ) -> Result<Listed<Issue>, Error> {
-        let path = format!("/repos/{repo_full_name}/issues?state=open");
-        Ok(match self.list_open::<IssuePayload>(&path, etag).await? {
-            Listed::Unchanged => Listed::Unchanged,
-            Listed::Changed { etag, items } => Listed::Changed {
-                etag,
-                items: issues_only(items, repo_full_name),
-            },
-        })
-    }
-
-    /// One page of a repository's closed pull requests, oldest updated
-    /// first, so an interrupted backfill leaves a contiguous prefix behind.
-    pub async fn list_closed_pulls(
-        &self,
-        repo_full_name: &str,
-        page: u32,
-    ) -> Result<Page<PullRequest>, Error> {
-        let path = format!(
-            "/repos/{repo_full_name}/pulls?state=closed&sort=updated&direction=asc\
-             &per_page={LIST_PER_PAGE}&page={page}"
-        );
-        let fetched = self.get(&path, None).await?;
-        let payloads: Vec<PullPayload> =
-            serde_json::from_str(&fetched.body).map_err(|e| Error::Decode(e.to_string()))?;
-        Ok(Page {
-            newest: payloads.iter().filter_map(|p| p.updated_at).max(),
-            items: payloads
-                .into_iter()
-                .map(|p| p.into_pull_request(repo_full_name))
-                .collect(),
-            last_page: last_page_of(&fetched.headers),
-        })
-    }
-
-    /// One page of a repository's closed issues, the same way, and from
-    /// `since` once the backfill has been to the end: the issues endpoint
-    /// takes one where the pull requests endpoint does not. Pull requests
-    /// are dropped as `list_open_issues` drops them.
-    pub async fn list_closed_issues(
-        &self,
-        repo_full_name: &str,
-        page: u32,
-        since: Option<Timestamp>,
-    ) -> Result<Page<Issue>, Error> {
-        let mut path = format!(
-            "/repos/{repo_full_name}/issues?state=closed&sort=updated&direction=asc\
-             &per_page={LIST_PER_PAGE}&page={page}"
-        );
-        if let Some(since) = since {
-            path.push_str(&format!("&since={since}"));
-        }
-        let fetched = self.get(&path, None).await?;
-        let payloads: Vec<IssuePayload> =
-            serde_json::from_str(&fetched.body).map_err(|e| Error::Decode(e.to_string()))?;
-        Ok(Page {
-            // Before the pull requests are dropped: they count toward the
-            // page and toward `since`, so a cursor that stopped short of
-            // them would list them again on every catch-up.
-            newest: payloads.iter().map(|p| p.updated_at).max(),
-            items: issues_only(payloads, repo_full_name),
-            last_page: last_page_of(&fetched.headers),
-        })
     }
 
     /// The workflow runs for one commit, newest first. What the checks
@@ -435,50 +417,6 @@ impl GitHub {
         Ok(PullLookup::Answer { pull, etag: new_etag })
     }
 
-    /// Every page of a list whose first page is asked conditionally.
-    ///
-    /// Only the first page carries `If-None-Match`: a tag belongs to one
-    /// response, and a later page has a tag of its own that nobody stored.
-    /// The first page's tag is what comes back when the list fit on it,
-    /// since a tag vouches for one page's body and nothing beyond: a list
-    /// that ran to a second page hands back no tag, so the next pass asks
-    /// unconditionally and sees a closure on the later pages that would
-    /// have left the first page's body, and its tag, exactly as they were.
-    /// Paging is `list_all`'s: stop at the first short page, cap at a
-    /// hundred. The short-page test is on what the server sent, before
-    /// the caller drops anything from it.
-    async fn list_open<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        etag: Option<&str>,
-    ) -> Result<Listed<T>, Error> {
-        let mut all = Vec::new();
-        let mut first_etag = None;
-        let mut pages = 0;
-        for page in 1..=LIST_MAX_PAGES {
-            let headers = if page == 1 { conditional(etag) } else { None };
-            let fetched = self
-                .get(&format!("{path}&per_page={LIST_PER_PAGE}&page={page}"), headers)
-                .await?;
-            if page == 1 {
-                if fetched.status == StatusCode::NOT_MODIFIED {
-                    return Ok(Listed::Unchanged);
-                }
-                first_etag = header_str(&fetched.headers, ETAG.as_str());
-            }
-            pages = page;
-            let items: Vec<T> = serde_json::from_str(&fetched.body)
-                .map_err(|e| Error::Decode(e.to_string()))?;
-            let short = items.len() < LIST_PER_PAGE;
-            all.extend(items);
-            if short {
-                break;
-            }
-        }
-        let etag = if pages == 1 { first_etag } else { None };
-        Ok(Listed::Changed { etag, items: all })
-    }
-
     /// Every page of a list endpoint, concatenated.
     ///
     /// Stops at the first short page rather than following `Link` headers,
@@ -511,10 +449,10 @@ impl GitHub {
     ///
     /// A 2xx comes back with its body; a 304 comes back with an empty one,
     /// for the callers that asked conditionally; anything else is an error.
-    /// The allowance is noted from the headers first, whatever the status,
-    /// because GitHub sends the rate limit headers on a 304 and on a
-    /// refusal the same as on an answer.
+    /// Rate-limit response headers are still used to classify an error.
     async fn get(&self, path: &str, headers: Option<HeaderMap>) -> Result<Fetched, Error> {
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
         let response = self
             .octo
             ._get_with_headers(path, headers)
@@ -523,7 +461,8 @@ impl GitHub {
 
         let status = response.status();
         let headers = response.headers().clone();
-        self.note_allowance(&headers);
+        let (remaining, reset, retry_after) = rate_headers(&headers);
+        self.remember_rate_headers(remaining, reset, retry_after);
 
         if status == StatusCode::NOT_MODIFIED {
             return Ok(Fetched { status, headers, body: String::new() });
@@ -531,10 +470,73 @@ impl GitHub {
 
         let body = body_text(response).await;
         if !status.is_success() {
-            let (remaining, reset) = rate_headers(&headers);
-            return Err(classify(status, remaining, reset, body));
+            let error = classify(status, remaining, reset, retry_after, body);
+            self.remember_rate_limit(&error);
+            return Err(error);
         }
         Ok(Fetched { status, headers, body })
+    }
+
+    /// Classify a mutation response with the same error behavior as GETs.
+    /// Some notification endpoints use 304 as a
+    /// successful idempotent result, so accepted statuses are explicit.
+    async fn finish_mutation<B>(
+        &self,
+        response: http::Response<B>,
+        accepted: &[StatusCode],
+    ) -> Result<(), Error>
+    where
+        B: http_body::Body<Data = Bytes>,
+    {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let (remaining, reset, retry_after) = rate_headers(&headers);
+        self.remember_rate_headers(remaining, reset, retry_after);
+        let body = body_text(response).await;
+
+        if accepted.contains(&status) {
+            return Ok(());
+        }
+        let error = classify(status, remaining, reset, retry_after, body);
+        self.remember_rate_limit(&error);
+        Err(error)
+    }
+
+    fn check_rate_limit(&self) -> Result<(), Error> {
+        let until = self.rate_limit_until.load(Ordering::SeqCst);
+        if until > Timestamp::now().as_second() {
+            return Err(Error::RateLimited {
+                reset_epoch: Some(until),
+                retry_after_secs: None,
+            });
+        }
+        Ok(())
+    }
+
+    fn remember_rate_headers(
+        &self,
+        remaining: Option<i64>,
+        reset_epoch: Option<i64>,
+        retry_after_secs: Option<u64>,
+    ) {
+        if remaining == Some(0) || retry_after_secs.is_some() {
+            self.remember_rate_limit(&Error::RateLimited {
+                reset_epoch,
+                retry_after_secs,
+            });
+        }
+    }
+
+    fn remember_rate_limit(&self, error: &Error) {
+        let Error::RateLimited {
+            reset_epoch,
+            retry_after_secs,
+        } = error
+        else {
+            return;
+        };
+        let until = rate_limit_deadline(*reset_epoch, *retry_after_secs);
+        self.rate_limit_until.fetch_max(until, Ordering::SeqCst);
     }
 
     /// Download an avatar at display size. Returns raw encoded bytes.
@@ -571,14 +573,22 @@ fn conditional(etag: Option<&str>) -> Option<HeaderMap> {
     Some(headers)
 }
 
-/// The issues among what the issues endpoint listed, since it lists pull
-/// requests too.
-fn issues_only(payloads: Vec<IssuePayload>, repo_full_name: &str) -> Vec<Issue> {
-    payloads
-        .into_iter()
-        .filter(|p| !p.is_pull_request())
-        .map(|p| p.into_issue(repo_full_name))
-        .collect()
+/// The conditional header for a notifications probe.
+fn modified_since(last_modified: Option<&str>) -> Option<HeaderMap> {
+    let value = last_modified.and_then(|value| HeaderValue::from_str(value).ok())?;
+    let mut headers = HeaderMap::new();
+    headers.insert(IF_MODIFIED_SINCE, value);
+    Some(headers)
+}
+
+/// Build a notification endpoint from the numeric ID GitHub supplied.
+fn notification_thread_path(thread_id: &str, suffix: &str) -> Result<String, Error> {
+    if thread_id.is_empty() || !thread_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::Decode(format!(
+            "notification thread id is not numeric: {thread_id}"
+        )));
+    }
+    Ok(format!("/notifications/threads/{thread_id}{suffix}"))
 }
 
 /// GitHub serves avatars at whatever size `s` asks for. Asking for 64 keeps a
@@ -595,42 +605,23 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
     headers.get(name)?.to_str().ok().map(str::to_string)
 }
 
-/// The rate limit headers as a pair: requests remaining, and the reset
-/// epoch. Either is `None` when absent or unreadable.
-fn rate_headers(headers: &HeaderMap) -> (Option<i64>, Option<i64>) {
+/// Requests remaining, the primary-window reset epoch, and a secondary-limit
+/// delay. Any value is `None` when its header is absent or unreadable.
+fn rate_headers(headers: &HeaderMap) -> (Option<i64>, Option<i64>, Option<u64>) {
     let remaining =
         header_str(headers, "x-ratelimit-remaining").and_then(|v| v.parse::<i64>().ok());
     let reset = header_str(headers, "x-ratelimit-reset").and_then(|v| v.parse::<i64>().ok());
-    (remaining, reset)
+    let retry_after = header_str(headers, "retry-after").and_then(|v| v.parse::<u64>().ok());
+    (remaining, reset, retry_after)
 }
 
-/// The last page a response's `Link` header names, if it names one.
-fn last_page_of(headers: &HeaderMap) -> Option<u32> {
-    last_page_from_link(&header_str(headers, LINK.as_str())?)
-}
-
-/// The page number of the `rel="last"` entry of a `Link` header.
-///
-/// GitHub writes `<url>; rel="next", <url>; rel="last"` and leaves `last`
-/// out on the last page, so `None` is the answer there and for a list that
-/// fits in one page. The number is the URL's own `page` parameter rather
-/// than a count of entries, because `per_page` carries a number too.
-fn last_page_from_link(link: &str) -> Option<u32> {
-    link.split(',').find_map(|entry| {
-        let (url, params) = entry.split_once(';')?;
-        if !params.split(';').any(|p| p.trim() == r#"rel="last""#) {
-            return None;
-        }
-        let url = url.trim().strip_prefix('<')?.strip_suffix('>')?;
-        let (_, query) = url.split_once('?')?;
-        query.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            if key != "page" {
-                return None;
-            }
-            value.parse().ok()
-        })
-    })
+fn rate_limit_deadline(reset_epoch: Option<i64>, retry_after_secs: Option<u64>) -> i64 {
+    let now = Timestamp::now().as_second();
+    if let Some(seconds) = retry_after_secs {
+        let seconds = i64::try_from(seconds.max(1)).unwrap_or(i64::MAX);
+        return now.saturating_add(seconds);
+    }
+    reset_epoch.filter(|reset| *reset > now).unwrap_or_else(|| now.saturating_add(60))
 }
 
 async fn body_text(response: http::Response<impl http_body::Body<Data = Bytes>>) -> String {
@@ -644,6 +635,7 @@ fn classify(
     status: StatusCode,
     rate_remaining: Option<i64>,
     rate_reset: Option<i64>,
+    retry_after_secs: Option<u64>,
     body: String,
 ) -> Error {
     if status == StatusCode::UNAUTHORIZED {
@@ -653,7 +645,10 @@ fn classify(
     // and says so only in the body, so the body is read for it too.
     let exhausted = rate_remaining == Some(0) || body.to_ascii_lowercase().contains("rate limit");
     if (status == StatusCode::FORBIDDEN && exhausted) || status == StatusCode::TOO_MANY_REQUESTS {
-        return Error::RateLimited { reset_epoch: rate_reset };
+        return Error::RateLimited {
+            reset_epoch: rate_reset,
+            retry_after_secs,
+        };
     }
     Error::Status {
         status: status.as_u16(),
@@ -683,16 +678,16 @@ mod tests {
     #[test]
     fn unauthorized_is_distinct_from_rate_limiting() {
         assert!(matches!(
-            classify(StatusCode::UNAUTHORIZED, None, None, String::new()),
+            classify(StatusCode::UNAUTHORIZED, None, None, None, String::new()),
             Error::Unauthorized
         ));
         assert!(matches!(
-            classify(StatusCode::FORBIDDEN, Some(0), Some(123), String::new()),
-            Error::RateLimited { reset_epoch: Some(123) }
+            classify(StatusCode::FORBIDDEN, Some(0), Some(123), None, String::new()),
+            Error::RateLimited { reset_epoch: Some(123), retry_after_secs: None }
         ));
         // A 403 that is not a rate limit stays a plain status error.
         assert!(matches!(
-            classify(StatusCode::FORBIDDEN, Some(42), None, "no".into()),
+            classify(StatusCode::FORBIDDEN, Some(42), None, None, "no".into()),
             Error::Status { status: 403, .. }
         ));
     }
@@ -701,49 +696,30 @@ mod tests {
     fn a_403_that_names_the_rate_limit_is_rate_limited_whatever_remains() {
         let body = r#"{"message":"You have exceeded a secondary rate limit."}"#.to_string();
         assert!(matches!(
-            classify(StatusCode::FORBIDDEN, Some(42), Some(9), body),
-            Error::RateLimited { reset_epoch: Some(9) }
+            classify(StatusCode::FORBIDDEN, Some(42), Some(9), Some(120), body),
+            Error::RateLimited {
+                reset_epoch: Some(9),
+                retry_after_secs: Some(120)
+            }
         ));
     }
 
-    #[test]
-    fn the_last_page_comes_from_the_link_header_and_only_from_rel_last() {
-        let link = r#"<https://api.github.com/repositories/1/pulls?state=closed&per_page=100&page=2>; rel="next", <https://api.github.com/repositories/1/pulls?state=closed&per_page=100&page=34>; rel="last""#;
-        assert_eq!(last_page_from_link(link), Some(34));
-
-        // The last page names its neighbours and not itself.
-        let tail = r#"<https://api.github.com/repositories/1/pulls?state=closed&per_page=100&page=33>; rel="prev", <https://api.github.com/repositories/1/pulls?state=closed&per_page=100&page=1>; rel="first""#;
-        assert_eq!(last_page_from_link(tail), None);
-        assert_eq!(last_page_from_link(""), None);
-    }
-
-    // Building an Octocrab wants a runtime, hence the tokio test for a
-    // check that never touches the network.
     #[tokio::test]
-    async fn the_allowance_is_the_last_pair_seen_and_a_clone_shares_it() {
+    async fn retry_after_sets_a_fail_fast_shared_gate_and_wins_over_reset() {
         let gh = GitHub::new("token").unwrap();
-        assert_eq!(gh.allowance(), None, "nothing has been seen yet");
-
-        let mut headers = HeaderMap::new();
-        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
-        headers.insert("x-ratelimit-reset", HeaderValue::from_static("1790000000"));
-        gh.note_allowance(&headers);
-        assert_eq!(
-            gh.allowance(),
-            Some(Allowance { remaining: 4999, reset_epoch: 1790000000 })
-        );
-
-        let twin = gh.clone();
-        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4998"));
-        twin.note_allowance(&headers);
-        assert_eq!(
-            gh.allowance().map(|a| a.remaining),
-            Some(4998),
-            "a clone writes the same cells"
-        );
-
-        // A response without the headers leaves the last pair standing.
-        gh.note_allowance(&HeaderMap::new());
-        assert_eq!(gh.allowance().map(|a| a.remaining), Some(4998));
+        let before = Timestamp::now().as_second();
+        gh.remember_rate_limit(&Error::RateLimited {
+            reset_epoch: Some(before + 60),
+            retry_after_secs: Some(3_600),
+        });
+        assert!(gh.rate_limit_until.load(Ordering::SeqCst) >= before + 3_600);
+        assert!(matches!(
+            gh.check_rate_limit(),
+            Err(Error::RateLimited {
+                reset_epoch: Some(reset),
+                retry_after_secs: None
+            }) if reset >= before + 3_600
+        ));
     }
+
 }

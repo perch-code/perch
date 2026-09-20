@@ -1,5 +1,8 @@
 # Perch: Milestone 9, The repository is the unit
 
+> Historical specification. The repository-history crawl and knowledge
+> archive described here have been removed; see [README.md](README.md).
+
 ## Goal
 
 Make the repository the unit of everything: what is declared, what is

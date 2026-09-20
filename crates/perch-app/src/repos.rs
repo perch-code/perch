@@ -148,8 +148,8 @@ mod tests {
         // `git init -b develop` with a remote added and never fetched: no
         // remote HEAD, no `base` in config, and neither main nor master.
         // The scan will say so every time it runs; the identity is the
-        // remote's regardless, so the rows and the knowledge do not move
-        // when `base` is added.
+        // remote's regardless, so its rows do not move when `base` is
+        // added.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("widgets");
         std::fs::create_dir_all(&repo).unwrap();

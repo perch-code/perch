@@ -1,5 +1,8 @@
 # Perch: Milestone 5, Knowledge
 
+> Historical specification for a removed feature. Perch no longer builds or
+> maintains a knowledge archive; see [README.md](README.md).
+
 ## Goal
 
 Give the coding agents on this machine the discussion behind the code.

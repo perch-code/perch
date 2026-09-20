@@ -14,7 +14,7 @@ use floem::views::{
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::items::{AttentionReason, Direction, ItemScope, ItemSort, ItemStatus};
+use crate::items::{Direction, ItemScope, ItemSort, ItemStatus};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::{item_row, OpenItem};
@@ -196,17 +196,19 @@ fn search_row(state: AppState) -> impl IntoView {
 /// The filter menu, in the shape of a settings menu: one row per setting,
 /// each a submenu with its options checked.
 fn filter_button(state: AppState) -> impl IntoView {
-    // Anything the list is narrowed by lights the button. Any reason and
-    // the newest-first direction are the defaults and do not.
+    // Anything the current list is narrowed by lights the button. Item-only
+    // filters do not make the notification button appear active.
     let narrowed = move || {
         state.item_filters.with(|f| {
+            if f.scope == ItemScope::Notifications {
+                return f.repository.is_some() || state.notification_reason.with(Option::is_some);
+            }
             let d = crate::items::ItemFilters::default();
             f.status != d.status
                 || f.kinds != d.kinds
                 || f.repository.is_some()
                 || f.sort != d.sort
                 || f.saved_only
-                || f.reason.is_some()
                 || f.direction != d.direction
         })
     };
@@ -221,7 +223,13 @@ fn filter_button(state: AppState) -> impl IntoView {
         })
         .style(|s| s.pointer_events_none()),
     )
-    .popout_menu(move || filter_menu(state))
+    .popout_menu(move || {
+        if state.item_filters.with(|f| f.scope == ItemScope::Notifications) {
+            notification_filter_menu(state)
+        } else {
+            item_filter_menu(state)
+        }
+    })
     .debug_name("sidebar filter")
     .style(move |s| {
         crate::ui::widgets::clickable(s)
@@ -235,7 +243,7 @@ fn filter_button(state: AppState) -> impl IntoView {
     })
 }
 
-fn filter_menu(state: AppState) -> Menu {
+fn item_filter_menu(state: AppState) -> Menu {
     let f = state.item_filters.get_untracked();
     // One writer, so every change lands in the meta table the same way.
     let set = Rc::new(move |edit: Box<dyn Fn(&mut crate::items::ItemFilters)>| {
@@ -322,21 +330,6 @@ fn filter_menu(state: AppState) -> Menu {
             m.checked(f.saved_only).action(move || set(Box::new(|f| f.saved_only = !f.saved_only)))
         });
     }
-    menu = menu.submenu("Reason", {
-        let set = set.clone();
-        let current = f.reason;
-        move |mut sub| {
-            // Any first, as the one that is not a reason.
-            for reason in std::iter::once(None).chain(AttentionReason::ALL.into_iter().map(Some)) {
-                let set = set.clone();
-                sub = sub.item(reason.map_or("Any", AttentionReason::title), move |m| {
-                    let set = set.clone();
-                    m.checked(reason == current).action(move || set(Box::new(move |f| f.reason = reason)))
-                });
-            }
-            sub
-        }
-    });
     menu = menu.separator();
     menu = menu.submenu("Sort By", {
         let set = set.clone();
@@ -374,9 +367,92 @@ fn filter_menu(state: AppState) -> Menu {
     menu
 }
 
-/// One scrolling list. Pinning changes order and the row's pin indicator,
-/// without adding a separate heading or hiding the repository identity.
+/// Notifications share repository and reason with local items. The rest of
+/// the item menu describes local state and ordering, so it stays out of this
+/// scope.
+fn notification_filter_menu(state: AppState) -> Menu {
+    let f = state.item_filters.get_untracked();
+    let set = Rc::new(move |edit: Box<dyn Fn(&mut crate::items::ItemFilters)>| {
+        set_filters(state, |f| edit(f));
+    });
+
+    let current_repo = f.repository.clone();
+    let mut repositories =
+        state.notifications.with(|threads| crate::ui::notifications::repository_options(threads));
+    if let Some(selected) = current_repo.as_ref() {
+        if !repositories.iter().any(|repo| repo.eq_ignore_ascii_case(selected)) {
+            repositories.push(selected.clone());
+            repositories.sort_by_key(|repo| repo.to_lowercase());
+        }
+    }
+
+    let mut menu = Menu::new().submenu("Repository", {
+        let set = set.clone();
+        move |mut sub| {
+            let all = set.clone();
+            let all_selected = current_repo.is_none();
+            sub = sub.item("All repositories", move |item| {
+                item.checked(all_selected).action(move || all(Box::new(|f| f.repository = None)))
+            });
+            for repo in &repositories {
+                let set = set.clone();
+                let repo = repo.clone();
+                let selected = current_repo.as_ref().is_some_and(|current| current.eq_ignore_ascii_case(&repo));
+                sub = sub.item(repo.clone(), move |item| {
+                    item.checked(selected).action(move || {
+                        let repo = repo.clone();
+                        set(Box::new(move |f| f.repository = Some(repo.clone())))
+                    })
+                });
+            }
+            sub
+        }
+    });
+
+    let current_reason = state.notification_reason.get_untracked();
+    let mut reasons = state.notifications.with(|threads| crate::ui::notifications::reason_options(threads));
+    if let Some(selected) = current_reason.as_ref() {
+        if !reasons.iter().any(|(wire, _)| wire == selected) {
+            reasons.push((selected.clone(), selected.clone()));
+            reasons.sort_by_key(|(wire, label)| (label.to_lowercase(), wire.clone()));
+        }
+    }
+    menu = menu.submenu("Reason", {
+        move |mut sub| {
+            let all_selected = current_reason.is_none();
+            sub = sub.item("Any", move |item| {
+                item.checked(all_selected).action(move || state.notification_reason.set(None))
+            });
+            for (wire, label) in &reasons {
+                let wire = wire.clone();
+                let selected = current_reason.as_deref() == Some(wire.as_str());
+                sub = sub.item(label.clone(), move |item| {
+                    let wire = wire.clone();
+                    item.checked(selected).action(move || state.notification_reason.set(Some(wire.clone())))
+                });
+            }
+            sub
+        }
+    });
+    menu
+}
+
+/// Notifications are GitHub's ordered thread list. The other scopes are
+/// views over Perch's local items.
 fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
+    dyn_container(
+        move || state.item_filters.with(|filters| filters.scope),
+        move |scope| match scope {
+            ItemScope::Notifications => crate::ui::notifications::notification_list(state, backend.clone()).into_any(),
+            ItemScope::All | ItemScope::Authored => local_item_list(state, backend.clone(), on_open.clone()).into_any(),
+        },
+    )
+    .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
+}
+
+/// One scrolling local-item list. Pinning changes order and the row's pin
+/// indicator without adding a separate heading.
+fn local_item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
     Stack::vertical((
         dyn_container(
             move || state.visible_items().is_empty(),
@@ -488,9 +564,9 @@ pub fn resize_cursor_sheet(state: AppState) -> impl IntoView {
 mod tests {
     use super::*;
     use floem::headless::{HeadlessHarness, TestRoot};
-    use perch_github::{Issue, ItemSubject};
+    use perch_github::{Issue, ItemSubject, Reason, Repository, Subject, SubjectKind, Thread};
 
-    fn issue(id: &str, repo: &str, author: &str, attention: bool) -> Item {
+    fn issue(id: &str, repo: &str, author: &str) -> Item {
         let now = "2026-09-19T12:00:00Z".parse().unwrap();
         let mut item = Item::new(repo, now);
         item.id = id.into();
@@ -509,11 +585,24 @@ mod tests {
             created_at: Some(now),
             updated_at: now,
         }));
-        if attention {
-            item.attention_at = Some(now);
-            item.attention_reason = Some("mention".into());
-        }
         item
+    }
+
+    fn notification(id: &str, repo: &str, title: &str, kind: SubjectKind, unread: bool) -> Thread {
+        Thread {
+            id: id.into(),
+            unread,
+            reason: Reason::Mention,
+            updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
+            last_read_at: (!unread).then(|| "2026-09-19T11:00:00Z".parse().unwrap()),
+            subject: Subject {
+                title: title.into(),
+                kind,
+                url: Some(format!("https://api.github.com/repos/{repo}/issues/{id}")),
+                latest_comment_url: None,
+            },
+            repository: Repository { full_name: repo.into(), owner_avatar_url: String::new() },
+        }
     }
 
     fn harness() -> (HeadlessHarness, AppState) {
@@ -522,9 +611,14 @@ mod tests {
         state.sidebar_width.set(theme::SIDEBAR_MIN_WIDTH);
         state.viewer.set(Some(("me".into(), String::new())));
         state.items.set(vec![
-            issue("mine", "org/one", "me", false),
-            issue("notification", "org/one", "someone", true),
-            issue("elsewhere", "org/two", "me", true),
+            issue("mine", "org/one", "me"),
+            issue("notification", "org/one", "someone"),
+            issue("elsewhere", "org/two", "me"),
+        ]);
+        state.notifications.set(vec![
+            notification("12", "org/one", "Read discussion", SubjectKind::Discussion, false),
+            notification("11", "org/one", "Unread pull request", SubjectKind::PullRequest, true),
+            notification("10", "org/two", "Other repository", SubjectKind::Issue, true),
         ]);
         state.item_filters.update(|f| f.repository = Some("org/one".into()));
         let view = sidebar(state, Rc::new(Backend::detached()), Rc::new(|_| {}));
@@ -566,7 +660,10 @@ mod tests {
         click_scope(&mut harness, ItemScope::Notifications);
         assert_eq!(state.item_filters.get().scope, ItemScope::Notifications);
         assert!(find(harness.root_id(), "Issue mine").is_none());
-        assert!(find(harness.root_id(), "Issue notification").is_some());
+        assert!(find(harness.root_id(), "Issue notification").is_none());
+        assert!(find(harness.root_id(), "Read discussion").is_some(), "read and unsupported subjects stay listed");
+        assert!(find(harness.root_id(), "Unread pull request").is_some());
+        assert!(find(harness.root_id(), "Other repository").is_none());
         let (key, value) = state.pending_meta.get().unwrap();
         assert_eq!(key, "item_filters");
         let restored = crate::items::ItemFilters::parse(&value).unwrap();
@@ -578,6 +675,7 @@ mod tests {
         assert!(find(harness.root_id(), "Issue mine").is_some());
         assert!(find(harness.root_id(), "Issue notification").is_none());
         assert!(find(harness.root_id(), "Issue elsewhere").is_none());
+        assert!(find(harness.root_id(), "Read discussion").is_none());
 
         click_scope(&mut harness, ItemScope::All);
         assert!(find(harness.root_id(), "Issue mine").is_some());

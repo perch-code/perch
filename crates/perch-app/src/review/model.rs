@@ -353,9 +353,6 @@ pub struct ReviewState {
     /// it, rather than the editor being rebuilt.
     pub docs: RwSignal<Option<LiveDocs>>,
 
-    /// How many discussion records the archive took in, once it has.
-    pub archived: RwSignal<Option<usize>>,
-
     /// Every thread in the open worktree, with messages and runs.
     pub comment_threads: RwSignal<Arc<Vec<CommentThread>>>,
     /// Whether the thread column is showing.
@@ -489,7 +486,6 @@ impl ReviewState {
             cursor_line: RwSignal::new(0),
             editor_epoch: RwSignal::new(0),
             docs: RwSignal::new(None),
-            archived: RwSignal::new(None),
             comment_threads: RwSignal::new(Arc::new(Vec::new())),
             threads_open: RwSignal::new(false),
             composer: RwSignal::new(None),
@@ -584,7 +580,6 @@ impl ReviewState {
         self.loading.set(HashMap::new());
         self.changed_only.set(true);
         self.lsp_status.set(perch_lsp::Status::Absent);
-        self.archived.set(None);
         self.comment_threads.set(Arc::new(Vec::new()));
         self.composer.set(None);
         self.sent_composer.set(None);

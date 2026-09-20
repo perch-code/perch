@@ -250,11 +250,6 @@ pub struct Item {
     pub name: Option<String>,
     pub saved: bool,
     pub pinned_at: Option<Timestamp>,
-    /// `attention_at` at the moment Done was pressed.
-    pub done_at: Option<Timestamp>,
-    pub attention_at: Option<Timestamp>,
-    /// Why: `review_requested`, `mention`, `comment`, `manual`, `ci_failed`.
-    pub attention_reason: Option<String>,
     pub archived_at: Option<Timestamp>,
     pub created_at: Timestamp,
     pub last_opened_at: Timestamp,
@@ -272,9 +267,6 @@ impl Item {
             name: None,
             saved: false,
             pinned_at: None,
-            done_at: None,
-            attention_at: None,
-            attention_reason: None,
             archived_at: None,
             created_at: now,
             last_opened_at: now,
@@ -319,19 +311,6 @@ impl Item {
         self.checkout.as_ref().map(|c| c.branch.as_str())
     }
 
-    /// Attention newer than the last Done.
-    pub fn needs_attention(&self) -> bool {
-        match (self.attention_at, self.done_at) {
-            (Some(at), Some(done)) => at > done,
-            (Some(_), None) => true,
-            (None, _) => false,
-        }
-    }
-
-    pub fn is_done(&self) -> bool {
-        !self.needs_attention() && self.done_at.is_some()
-    }
-
     pub fn is_archived(&self) -> bool {
         self.archived_at.is_some()
     }
@@ -340,24 +319,21 @@ impl Item {
         self.pinned_at.is_some()
     }
 
-    /// The subject is closed or merged, or the item is Done.
+    /// The subject is closed or merged.
     pub fn is_closed(&self) -> bool {
-        if self.is_done() {
-            return true;
-        }
         self.subject.as_ref().is_some_and(|s| !s.is_open())
     }
 
-    /// Not archived, not Done, and the subject open or absent.
+    /// Not archived, and the subject open or absent.
     pub fn is_active(&self) -> bool {
         !self.is_archived() && !self.is_closed()
     }
 
-    /// The later of attention and the subject's own activity. For a
-    /// checkout-only item, when it was made or last opened.
+    /// The subject's own activity. For a checkout-only item, when it was
+    /// made.
     pub fn last_activity(&self) -> Timestamp {
         let subject = self.subject.as_ref().and_then(Subject::updated_at);
-        [self.attention_at, subject, Some(self.created_at)]
+        [subject, Some(self.created_at)]
             .into_iter()
             .flatten()
             .max()
@@ -381,20 +357,6 @@ mod tests {
 
     fn item() -> Item {
         Item::new("criccomini/perch", at("2026-09-18T10:00:00Z"))
-    }
-
-    #[test]
-    fn attention_past_done_needs_looking_at() {
-        let mut i = item();
-        assert!(!i.needs_attention());
-        i.attention_at = Some(at("2026-09-18T11:00:00Z"));
-        assert!(i.needs_attention());
-        i.done_at = Some(at("2026-09-18T11:00:00Z"));
-        assert!(!i.needs_attention());
-        assert!(i.is_done());
-        i.attention_at = Some(at("2026-09-18T12:00:00Z"));
-        assert!(i.needs_attention(), "newer attention reopens");
-        assert!(!i.is_done());
     }
 
     #[test]
@@ -435,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_means_the_subject_closed_or_done() {
+    fn closed_means_the_subject_is_closed() {
         let mut i = item();
         i.subject = Some(Subject::Issue(Issue {
             number: 1,
@@ -457,9 +419,6 @@ mod tests {
         let mut j = item();
         j.checkout = Some(Checkout { branch: "b".into(), base_ref: "main".into(), head_sha: "h".into(), path: "/x".into(), owned: false, on_disk: true, churn: None, last_seen_head: None });
         assert!(j.is_active());
-        j.attention_at = Some(at("2026-09-18T11:00:00Z"));
-        j.done_at = Some(at("2026-09-18T11:00:00Z"));
-        assert!(j.is_closed(), "done is closed");
         j.archived_at = Some(at("2026-09-18T12:00:00Z"));
         assert!(j.is_archived());
         assert!(!j.is_active());

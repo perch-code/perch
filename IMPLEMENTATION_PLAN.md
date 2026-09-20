@@ -1,5 +1,8 @@
 # Perch: Implementation Plan, Milestone 1
 
+> Historical milestone specification. It is not the current product
+> architecture; see [README.md](README.md) for current behavior.
+
 ## Goal
 
 A native macOS desktop app, written entirely in Rust, that shows the user's

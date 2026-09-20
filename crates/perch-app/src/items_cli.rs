@@ -1,10 +1,10 @@
-//! `perch --items ["status=done;reason=mention;direction=oldest;query=fence"]`
+//! `perch --items ["status=closed;direction=oldest;query=fence"]`
 //!
 //! Prints the sidebar's flat list from the cache the app uses, with pinned
 //! items first. The keys are the filter menu's, in `ItemFilters::to_meta`'s
 //! form: `scope` (`all`, `notifications` or `authored`), `repository`,
-//! `status`, `kinds`, `sort`, `show_pr_status`, `saved`, `reason` and
-//! `direction`, plus `query` for the search box. It is how
+//! `status`, `kinds`, `sort`, `show_pr_status`, `saved` and `direction`,
+//! plus `query` for the search box. It is how
 //! `items::visible_items` is checked against real data without a window.
 
 use perch_github::{Cache, CheckStatus, Item, ItemSubject};
@@ -20,8 +20,7 @@ pub fn run(args: &[String]) {
                 eprintln!("bad filters: {e}");
                 eprintln!(
                     "keys: scope (all, notifications, authored), repository, \
-                     status (active, closed, done, archived, all), kinds, sort, show_pr_status, saved, \
-                     reason (any, review_requested, mention, assign, comment, ci_failed, manual, author), \
+                     status (active, closed, archived, all), kinds, sort, show_pr_status, saved, \
                      direction (newest, oldest), query"
                 );
                 std::process::exit(2);
@@ -95,18 +94,6 @@ fn row(out: &mut String, item: &Item, reference: &str, filters: &ItemFilters) {
     if item.is_archived() {
         line.push_str("  archived");
     }
-    if item.needs_attention() {
-        let reason = item
-            .attention_reason
-            .as_deref()
-            .map(items::attention_label)
-            .unwrap_or_default();
-        line.push_str("  *");
-        if !reason.is_empty() {
-            line.push(' ');
-            line.push_str(&reason);
-        }
-    }
     line.push('\n');
     out.push_str(&line);
 }
@@ -144,7 +131,7 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// A pull request that wants a review and a pinned branch.
+    /// An open pull request and a pinned branch.
     fn fixture() -> Vec<Item> {
         let mut wanted = Item::new("criccomini/perch", at("2026-09-10T10:00:00Z"));
         wanted.id = "a".into();
@@ -177,9 +164,6 @@ mod tests {
             labels: vec![],
             assignees: vec![],
         }));
-        wanted.attention_at = Some(at("2026-09-18T09:00:00Z"));
-        wanted.attention_reason = Some("review_requested".into());
-
         let mut branch = Item::new("criccomini/perch", at("2026-09-14T10:00:00Z"));
         branch.id = "b".into();
         branch.checkout = Some(ItemCheckout {
@@ -209,7 +193,7 @@ mod tests {
         let got = text(&ItemFilters::default());
         let want = [
             "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned",
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested  * review requested",
+            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested",
             "",
         ]
         .join("\n");
@@ -226,7 +210,7 @@ mod tests {
         let got = text(&f);
         assert_eq!(
             got,
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]  * review requested\n"
+            "  P  Fence the manifest  [criccomini/perch #57 · fence]\n"
         );
     }
 
@@ -236,16 +220,6 @@ mod tests {
         assert_eq!(got, text(&ItemFilters::default()));
         let got = text(&ItemFilters::parse("repository=slatedb/slatedb").unwrap());
         assert_eq!(got, "");
-    }
-
-    #[test]
-    fn a_pinned_row_that_needs_attention_says_both() {
-        let mut items = fixture();
-        items[0].pinned_at = Some(at("2026-09-18T10:00:00Z"));
-        let visible = items::visible_items(&items, &ItemFilters::default(), Some("a"));
-        let mut out = String::new();
-        render(&mut out, &visible, &ItemFilters::default());
-        assert!(out.contains("  pinned  * review requested\n"), "{out}");
     }
 
     #[test]
@@ -263,27 +237,10 @@ mod tests {
 
     #[test]
     fn the_new_keys_narrow_the_printed_list_the_way_the_window_does() {
-        // The wanted pull request is a review request and the pinned branch
-        // has no reason at all; a mention filter leaves nothing anywhere.
-        let got = text(&ItemFilters::parse("reason=mention").unwrap());
+        // Notification threads are rendered by their own view; durable
+        // items contribute no rows to this scope.
+        let got = text(&ItemFilters::parse("scope=notifications;direction=oldest").unwrap());
         assert_eq!(got, "");
-
-        // Notifications cuts the pinned branch, which needs no attention.
-        let got = text(
-            &ItemFilters::parse("scope=notifications;reason=review_requested;direction=oldest")
-                .unwrap(),
-        );
-        assert_eq!(
-            got,
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested  * review requested\n"
-        );
-        assert_eq!(
-            got,
-            text(
-                &ItemFilters::parse("attention=1;reason=review_requested;direction=oldest")
-                    .unwrap()
-            )
-        );
 
         // Nothing is saved.
         let got = text(&ItemFilters::parse("saved=1").unwrap());
@@ -295,7 +252,7 @@ mod tests {
         let filters = ItemFilters::parse("scope=authored").unwrap();
         assert_eq!(
             text(&filters),
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested  * review requested\n"
+            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested\n"
         );
 
         let visible = items::visible_items(&fixture(), &filters, None);

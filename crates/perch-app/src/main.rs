@@ -7,7 +7,6 @@ mod backend;
 mod icons;
 mod items;
 mod items_cli;
-mod knowledge;
 mod repos;
 mod review;
 mod state;
@@ -25,11 +24,9 @@ use floem::Application;
 
 use crate::state::AppState;
 
-mod backfill_cli;
 mod dump;
 mod scan_cli;
 mod scope_cli;
-mod sync_cli;
 mod timeline_cli;
 
 fn main() {
@@ -69,19 +66,6 @@ fn main() {
         timeline_cli::run(&args[2..]);
         return;
     }
-    // One list pass over a repository, against the real cache, and what
-    // it added, updated or closed.
-    if args.get(1).map(String::as_str) == Some("--sync") {
-        sync_cli::run(&args[2..]);
-        return;
-    }
-    // One round of the backfill over a repository, in the foreground,
-    // and each discussion it archived.
-    if args.get(1).map(String::as_str) == Some("--backfill") {
-        backfill_cli::run(&args[2..]);
-        return;
-    }
-
     tracing_subscriber::fmt()
         // stderr, so logs are not held in a block-buffered stdout when the
         // app is launched with its output redirected to a file.

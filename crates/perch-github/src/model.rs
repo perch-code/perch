@@ -88,15 +88,6 @@ impl Reason {
         }
     }
 
-    /// Whether a notification with this reason gives its item attention.
-    /// Every reason github.com's inbox lists does, so the sidebar under
-    /// Needs attention and the inbox on the web agree row for row; the
-    /// Reason filter is where a reader who finds subscribed activity
-    /// noisy leaves it out. The one exception goes through the checks
-    /// instead, and is attention only when they come back red.
-    pub fn makes_attention(&self) -> bool {
-        !matches!(self, Reason::CiActivity)
-    }
 }
 
 impl Serialize for Reason {
@@ -303,25 +294,6 @@ mod tests {
     fn unknown_subject_kind_falls_back_to_other() {
         let k: SubjectKind = serde_json::from_str(r#""Sponsorship""#).unwrap();
         assert_eq!(k, SubjectKind::Other("Sponsorship".into()));
-    }
-
-    #[test]
-    fn every_reason_the_inbox_lists_is_attention_but_ci_which_the_checks_decide() {
-        for reason in [
-            Reason::ReviewRequested,
-            Reason::Mention,
-            Reason::TeamMention,
-            Reason::Assign,
-            Reason::Comment,
-            Reason::Author,
-            Reason::Subscribed,
-            Reason::StateChange,
-            Reason::Manual,
-            Reason::Other("brand_new_reason".into()),
-        ] {
-            assert!(reason.makes_attention(), "{}", reason.wire());
-        }
-        assert!(!Reason::CiActivity.makes_attention());
     }
 
     #[test]

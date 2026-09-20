@@ -15,15 +15,15 @@ pub mod pulls;
 pub mod workflow_runs;
 
 pub use auth::{resolve_token, Token, TokenSource};
-pub use cache::{Cache, CacheError, StoredReveals};
+pub use cache::{Cache, CacheError, StoredReveals, NOTIFICATIONS_LAST_MODIFIED_KEY};
 pub use comments::{
     Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStatus, RunStep, Side,
     ThreadOrigin,
 };
-pub use client::{Allowance, Error, GitHub, ListResult, Listed, Page, PullLookup};
+pub use client::{Error, GitHub, ListResult, PullLookup};
 pub use config::{
-    is_local, AgentConfig, CodexConfig, Config, DeclaredRepo, KnowledgeConfig, RepoConfig, CLAUDE_CODE,
-    CODEX, LOCAL_OWNER,
+    is_local, AgentConfig, CodexConfig, Config, DeclaredRepo, RepoConfig, CLAUDE_CODE, CODEX,
+    LOCAL_OWNER,
 };
 pub use discussion::{Discussion, IssueComment, PullEvent, PullEventKind, Review, ReviewComment};
 pub use items::{Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind};

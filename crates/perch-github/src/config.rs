@@ -14,15 +14,12 @@ pub struct Config {
     #[serde(default = "default_poll_secs")]
     pub poll_interval_secs: u64,
     #[serde(default)]
-    pub knowledge: KnowledgeConfig,
-    #[serde(default)]
     pub agent: AgentConfig,
     /// A GitHub Enterprise host whose remotes count as GitHub, beside
     /// github.com.
     #[serde(default)]
     pub github_host: Option<String>,
-    /// `[[repo]]` entries: the repositories Perch lists, syncs, and files
-    /// knowledge under.
+    /// `[[repo]]` entries: the repositories Perch knows about.
     #[serde(default)]
     pub repo: Vec<RepoConfig>,
     /// The old `[[project]]` key. Read only so `load` can refuse the file
@@ -154,22 +151,6 @@ impl AgentConfig {
     }
 }
 
-/// Where archived discussion goes.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct KnowledgeConfig {
-    /// Defaults to `knowledge/` under the Perch home. A leading `~` is the
-    /// home directory.
-    #[serde(default)]
-    pub root: Option<String>,
-    /// Write the two `SKILL.md` files. On unless turned off.
-    #[serde(default = "default_true")]
-    pub skills: bool,
-    /// The older home of `[[project]]`. Read only so `load` can refuse the
-    /// file by name, as with `Config::project`.
-    #[serde(default)]
-    project: Vec<toml::Value>,
-}
-
 /// The owner reserved for repositories with no GitHub remote. Their
 /// identity is `local/<name>`, so it splits on one slash and files under
 /// two directories like any other; `parse` refuses it in `github`, so a
@@ -177,7 +158,7 @@ pub struct KnowledgeConfig {
 pub const LOCAL_OWNER: &str = "local";
 
 /// Whether an identity is `local/<name>`: a repository with no GitHub
-/// remote, which no GitHub pass should ask about. The owner is compared
+/// remote, which no GitHub subject lookup should ask about. The owner is compared
 /// without regard to case, as identities are everywhere else.
 pub fn is_local(identity: &str) -> bool {
     match identity.split_once('/') {
@@ -279,18 +260,6 @@ pub struct DeclaredRepo {
     pub name: String,
 }
 
-fn default_true() -> bool {
-    true
-}
-
-// By hand rather than derived: an absent `[knowledge]` table must mean the
-// same as an empty one, skills on.
-impl Default for KnowledgeConfig {
-    fn default() -> Self {
-        Self { root: None, skills: true, project: Vec::new() }
-    }
-}
-
 impl Config {
     /// The hosts whose remotes name a GitHub repository: github.com, and
     /// the enterprise host when the file names one.
@@ -304,8 +273,7 @@ impl Config {
 
     /// Whether an identity is one of the `[[repo]]` entries, `owner/repo`
     /// or `local/<name>`. Declaring one is what makes the sidebar a section
-    /// for it, and for a GitHub one starts the list pass and the backfill;
-    /// an item in a repository nobody declared is still an item.
+    /// for it. An item in a repository nobody declared is still an item.
     pub fn is_declared(&self, identity: &str) -> bool {
         self.entry(identity).is_some()
     }
@@ -316,9 +284,8 @@ impl Config {
         self.entry(identity).map(RepoConfig::root_paths).unwrap_or_default()
     }
 
-    /// The identities in config order, which is the order the sidebar and
-    /// the list pass take them in. A roots-only entry is left out until
-    /// `resolve` has given it one.
+    /// The identities in config order, which is the order the sidebar uses.
+    /// A roots-only entry is left out until `resolve` has given it one.
     pub fn declared(&self) -> Vec<String> {
         self.repo.iter().filter_map(|r| r.identity().map(str::to_string)).collect()
     }
@@ -377,18 +344,6 @@ fn is_full_name(name: &str) -> bool {
     }
 }
 
-impl KnowledgeConfig {
-    /// The knowledge root, `~` expanded: `knowledge/` under the Perch home
-    /// unless the file says otherwise.
-    pub fn root_path(&self) -> PathBuf {
-        match &self.root {
-            Some(root) => expand_home(root),
-            None => perch_home().join("knowledge"),
-        }
-    }
-
-}
-
 pub fn home_dir() -> PathBuf {
     directories::BaseDirs::new()
         .map(|b| b.home_dir().to_path_buf())
@@ -426,37 +381,31 @@ impl Config {
     }
 
     /// The file's text as a config. A file that still declares its
-    /// repositories under `[[project]]` or `[[knowledge.project]]` is not
-    /// loaded at all: the fallback comes back with one warning naming the
-    /// new key. Taking everything but that table would look like a config
-    /// with no repositories, which is harder to notice than one with none
-    /// of the reader's settings and a line saying why.
+    /// repositories under `[[project]]` is not loaded at all: the fallback
+    /// comes back with one warning naming the new key. Taking everything but
+    /// that table would look like a config with no repositories, which is
+    /// harder to notice than one with none of the reader's settings and a
+    /// line saying why.
     fn parse(text: &str) -> Result<Self, toml::de::Error> {
         let mut c = toml::from_str::<Config>(text)?;
-        let old_key = if !c.project.is_empty() {
-            Some("[[project]]")
-        } else if !c.knowledge.project.is_empty() {
-            Some("[[knowledge.project]]")
-        } else {
-            None
-        };
-        if let Some(key) = old_key {
+        if !c.project.is_empty() {
             let mut refused = Self::fallback();
-            refused.warnings.push(format!(
-                "config.toml: {key} is no longer read; declare each repository as [[repo]] with github = \"owner/repo\". The file was not loaded."
-            ));
+            refused.warnings.push(
+                "config.toml: [[project]] is no longer read; declare each repository as [[repo]] with github = \"owner/repo\". The file was not loaded."
+                    .to_string(),
+            );
             return Ok(refused);
         }
         c.keep_well_formed_repos();
         Ok(c)
     }
 
-    /// Drop a `[[repo]]` that could not be listed or scanned, with a
+    /// Drop a `[[repo]]` that could not be identified or scanned, with a
     /// warning naming it, and let the rest of the file load. A `github`
     /// that is not `owner/repo` would not split the way everything
     /// downstream splits an identity; the owner `local` is kept for
     /// repositories with no GitHub remote; an entry with neither `github`
-    /// nor roots has nothing to list and nothing to scan; and two entries
+    /// nor roots has nothing to identify and nothing to scan; and two entries
     /// with the same `github`, or two the sidebar would call the same
     /// thing, are one repository or an ambiguity, so the later one goes.
     ///
@@ -491,7 +440,7 @@ impl Config {
             }
             if r.github.is_none() && r.roots.is_empty() {
                 self.warnings.push(format!(
-                    "config.toml: {} has neither github nor roots, so there is nothing to list and nothing to scan; the entry was skipped",
+                    "config.toml: {} has neither github nor roots, so there is nothing to identify or scan; the entry was skipped",
                     r.label()
                 ));
                 continue;
@@ -524,7 +473,6 @@ impl Config {
         Config {
             token: None,
             poll_interval_secs: default_poll_secs(),
-            knowledge: KnowledgeConfig::default(),
             agent: AgentConfig::default(),
             github_host: None,
             repo: Vec::new(),
@@ -538,7 +486,7 @@ impl Config {
 ///
 /// One directory, so it can be named in a sentence, backed up, or deleted
 /// as a whole. Under it: `config.toml`, `perch.db`, `avatars/`, `repos/`,
-/// `worktrees/`, `homes/`, and `knowledge/`.
+/// `worktrees/`, and `homes/`.
 pub fn perch_home() -> PathBuf {
     match std::env::var_os("PERCH_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => expand_home(&dir.to_string_lossy()),
@@ -577,7 +525,6 @@ mod tests {
         std::env::set_var("PERCH_HOME", "/tmp/perch-test-home");
         assert_eq!(perch_home(), PathBuf::from("/tmp/perch-test-home"));
         assert_eq!(config_path(), Some(PathBuf::from("/tmp/perch-test-home/config.toml")));
-        assert_eq!(KnowledgeConfig::default().root_path(), PathBuf::from("/tmp/perch-test-home/knowledge"));
         std::env::set_var("PERCH_HOME", "~/elsewhere");
         assert_eq!(perch_home(), home_dir().join("elsewhere"));
         std::env::remove_var("PERCH_HOME");
@@ -588,9 +535,7 @@ mod tests {
     fn an_old_config_still_parses() {
         let c: Config = toml::from_str("poll_interval_secs = 30").unwrap();
         assert_eq!(c.poll_interval_secs, 30);
-        assert!(c.knowledge.skills);
         assert!(c.repo.is_empty());
-        assert!(c.knowledge.root_path().ends_with("knowledge"));
     }
 
     #[test]
@@ -660,10 +605,6 @@ mod tests {
     fn a_declared_repository_is_known_by_its_identity_whatever_the_case() {
         let c = Config::parse(
             r#"
-            [knowledge]
-            root = "~/elsewhere"
-            skills = false
-
             [[repo]]
             github = "slatedb/slatedb"
 
@@ -679,8 +620,6 @@ mod tests {
         assert!(!c.is_declared("slatedb"), "the whole owner/repo, not a part of it");
         assert!(!c.is_declared("criccomini/perch"));
         assert!(c.repo.iter().all(RepoConfig::is_resolved), "github is the identity, nothing to wait for");
-        assert!(!c.knowledge.skills);
-        assert_eq!(c.knowledge.root_path(), home_dir().join("elsewhere"));
     }
 
     #[test]
@@ -887,15 +826,6 @@ mod tests {
         assert!(c.warnings[0].contains("github = \"owner/repo\""), "and the key inside it: {}", c.warnings[0]);
         assert!(c.repo.is_empty());
         assert_eq!(c.poll_interval_secs, 60, "nothing else in the file was taken either");
-    }
-
-    #[test]
-    fn the_old_knowledge_project_key_refuses_the_file_too() {
-        let c = Config::parse("[[knowledge.project]]\nname = \"x\"\nrepos = [\"a/b\"]").unwrap();
-        assert_eq!(c.warnings.len(), 1);
-        assert!(c.warnings[0].starts_with("config.toml: [[knowledge.project]] is no longer read"), "{}", c.warnings[0]);
-        assert!(c.warnings[0].contains("[[repo]]"));
-        assert!(c.repo.is_empty());
     }
 
     #[test]

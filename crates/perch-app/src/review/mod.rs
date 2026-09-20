@@ -207,8 +207,8 @@ const STATUS_SEPARATOR: &str = "  \u{00b7}  ";
 /// The status line's text in three parts, so that the hidden count can be
 /// a view of its own: up to the change count; how many lines the open
 /// file's folds hide, when they hide any; and the cursor's line, then the
-/// language server's state and what the archive took in. A line that is
-/// not about a file is all `before`.
+/// language server's state. A line that is not about a file is all
+/// `before`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StatusLine {
     before: String,
@@ -223,13 +223,6 @@ fn status_line(state: ReviewState, hidden: usize) -> StatusLine {
     } else {
         format!("{STATUS_SEPARATOR}{}", server.describe())
     };
-    let archived = match state.archived.get() {
-        Some(0) => format!("{STATUS_SEPARATOR}discussion up to date"),
-        Some(1) => format!("{STATUS_SEPARATOR}1 message archived"),
-        Some(n) => format!("{STATUS_SEPARATOR}{n} messages archived"),
-        None => String::new(),
-    };
-    let server = format!("{server}{archived}");
     let whole = |before: String| StatusLine { before: format!("{before}{server}"), hidden: None, after: String::new() };
 
     if let Some(issue) = state.issue.get() {
@@ -263,8 +256,7 @@ fn counted(n: usize, noun: &str) -> String {
     }
 }
 
-/// `312 lines hidden`, with the thousands separated as the backfill's
-/// count is.
+/// `312 lines hidden`, with thousands separated.
 fn hidden_lines_label(hidden: usize) -> String {
     if hidden == 1 {
         "1 line hidden".to_string()

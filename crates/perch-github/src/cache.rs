@@ -14,12 +14,16 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::comments::{self, Anchor, Author, CommentMessage, CommentThread, RunRecord, RunStep};
 use crate::discussion::Discussion;
 use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
+use crate::model::Thread;
 use crate::workflow_runs::Checks;
 
-/// The shape of the tables. A database with an older number, or none, is
-/// deleted and recreated: there is no migration, and nothing before the
-/// number was written has shipped to anyone.
-pub const SCHEMA_VERSION: u32 = 13;
+/// The shape of the tables. Schemas 13 and 14 migrate in place because they
+/// contain local items and conversations that must survive notification
+/// cache changes. Unknown schemas are recreated.
+pub const SCHEMA_VERSION: u32 = 15;
+
+/// Metadata key holding the validator for the cached notifications inbox.
+pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
 
 /// An item's reveals as the store holds them: the head line ranges the
 /// reader opened out of a fold, inclusive, by `(path, blob)`.
@@ -48,31 +52,34 @@ impl Cache {
         Ok(cache)
     }
 
-    /// Open, resetting a database whose schema is older than this build's.
-    /// Returns whether it was reset, for the status line.
+    /// Open, migrating the two preceding schemas in place and resetting an
+    /// unknown schema. Returns whether it was reset, for the status line.
     pub fn open_checked(db_path: &Path, avatar_dir: Option<PathBuf>) -> Result<(Self, bool), CacheError> {
-        let reset = db_path.exists() && !Self::is_current(db_path);
+        let version = db_path.exists().then(|| Self::schema_version(db_path)).flatten();
+        let migratable = matches!(version, Some(13 | 14));
+        let reset = db_path.exists() && version != Some(SCHEMA_VERSION) && !migratable;
         if reset {
-            tracing::info!(path = %db_path.display(), "schema is old; recreating the database");
+            tracing::info!(path = %db_path.display(), ?version, "schema is unknown; recreating the database");
             for suffix in ["", "-wal", "-shm"] {
                 let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
             }
+        } else if migratable {
+            tracing::info!(path = %db_path.display(), ?version, to = SCHEMA_VERSION, "migrating database in place");
         }
         let conn = Connection::open(db_path)?;
         let cache = Self::from_conn(conn, avatar_dir)?;
         Ok((cache, reset))
     }
 
-    /// Whether a database on disk carries this build's schema version.
-    fn is_current(db_path: &Path) -> bool {
+    fn schema_version(db_path: &Path) -> Option<u32> {
         let Ok(conn) = Connection::open(db_path) else {
-            return false;
+            return None;
         };
         let version: Option<String> = conn
             .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
             .optional()
             .unwrap_or(None);
-        version.and_then(|v| v.parse::<u32>().ok()) == Some(SCHEMA_VERSION)
+        version.and_then(|v| v.parse::<u32>().ok())
     }
 
     /// In-memory cache, used by tests.
@@ -88,6 +95,12 @@ impl Cache {
             CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS threads (
+                position    INTEGER NOT NULL UNIQUE,
+                id          TEXT PRIMARY KEY,
+                updated_at  TEXT NOT NULL,
+                json        TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS items (
                 id               TEXT PRIMARY KEY,
@@ -106,9 +119,6 @@ impl Cache {
                 name             TEXT,
                 saved            INTEGER NOT NULL DEFAULT 0,
                 pinned_at        TEXT,
-                done_at          TEXT,
-                attention_at     TEXT,
-                attention_reason TEXT,
                 archived_at      TEXT,
                 created_at       TEXT NOT NULL,
                 last_opened_at   TEXT NOT NULL,
@@ -200,6 +210,62 @@ impl Cache {
             params![SCHEMA_VERSION.to_string()],
         )?;
         Ok(Self { conn, avatar_dir })
+    }
+
+    // -----------------------------------------------------------------
+    // GitHub notifications inbox
+    // -----------------------------------------------------------------
+
+    /// Atomically replace the cached inbox and its polling validator.
+    ///
+    /// The API result is a snapshot, so rows missing from `threads` must be
+    /// removed rather than accumulated. Keeping the validator in the same
+    /// transaction prevents a crash from pairing an older list with a newer
+    /// `Last-Modified` value (or the reverse).
+    pub fn store_threads(&self, threads: &[Thread], last_modified: Option<&str>) -> Result<(), CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM threads", [])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO threads (position, id, updated_at, json)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (position, thread) in threads.iter().enumerate() {
+                stmt.execute(params![
+                    position as i64,
+                    thread.id,
+                    thread.updated_at.to_string(),
+                    serde_json::to_string(thread)?
+                ])?;
+            }
+        }
+
+        if let Some(last_modified) = last_modified {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                params![NOTIFICATIONS_LAST_MODIFIED_KEY, last_modified],
+            )?;
+        } else {
+            tx.execute("DELETE FROM meta WHERE key = ?1", params![NOTIFICATIONS_LAST_MODIFIED_KEY])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Load the cached inbox in the same most-recent-first order GitHub sent.
+    pub fn load_threads(&self) -> Result<Vec<Thread>, CacheError> {
+        let mut stmt = self.conn.prepare("SELECT json FROM threads ORDER BY position")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut threads = Vec::new();
+        for row in rows {
+            threads.push(serde_json::from_str(&row?)?);
+        }
+        Ok(threads)
+    }
+
+    /// The validator paired atomically with [`Self::load_threads`].
+    pub fn notifications_last_modified(&self) -> Result<Option<String>, CacheError> {
+        self.meta(NOTIFICATIONS_LAST_MODIFIED_KEY)
     }
 
     // -----------------------------------------------------------------
@@ -482,101 +548,6 @@ impl Cache {
     // Items
     // -----------------------------------------------------------------
 
-    /// Every repository with an item in it, archived ones included: one
-    /// entry per repository whatever the case its items spell it in, in the
-    /// spelling of the oldest item, ordered by name without regard to case.
-    /// With the declared list this is what the sidebar sections over.
-    pub fn repos(&self) -> Result<Vec<String>, CacheError> {
-        let mut stmt = self.conn.prepare("SELECT repo_full_name FROM items ORDER BY created_at, rowid")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for row in rows {
-            let name = row?;
-            if seen.insert(name.to_lowercase()) {
-                out.push(name);
-            }
-        }
-        out.sort_by_cached_key(|n| n.to_lowercase());
-        Ok(out)
-    }
-
-    /// The kind, number, and item id of every item whose subject is open
-    /// in a repository, by number. The list pass compares this with what
-    /// GitHub lists as open to learn what closed. The repository is the
-    /// subject's, as `find_item_by_subject` takes it, so a branch on a fork
-    /// counts for the upstream its pull request is in. Openness is read
-    /// from the parsed subject rather than asked of the JSON, so the rule
-    /// stays `Subject::is_open`'s.
-    pub fn open_subjects_in(&self, repo_full_name: &str) -> Result<Vec<(SubjectKind, u64, String)>, CacheError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, subject_json FROM items
-             WHERE subject_repo = ?1 COLLATE NOCASE AND subject_kind IS NOT NULL
-             ORDER BY subject_number",
-        )?;
-        let rows = stmt.query_map(params![repo_full_name], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, json) = row?;
-            let Some(subject) = json.and_then(|j| serde_json::from_str::<Subject>(&j).ok()) else {
-                tracing::warn!(id, "skipping an item with an unreadable subject");
-                continue;
-            };
-            if subject.is_open() {
-                out.push((subject.kind(), subject.number(), id));
-            }
-        }
-        Ok(out)
-    }
-
-    /// The items whose kept discussion is missing, or was fetched before the
-    /// subject's own last activity, newest subject first, so the backfill
-    /// archives what is moving before what is not. A pull request whose
-    /// `updated_at` is unknown is stale only when there is no row: with
-    /// nothing to compare against, no fetch could ever be the last one.
-    /// The comparison is made on parsed timestamps: `fetched_at` carries
-    /// fractions of a second and GitHub's times do not, and as strings the
-    /// two misorder within a second.
-    pub fn discussion_stale(&self) -> Result<Vec<String>, CacheError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT i.id, i.subject_json, d.fetched_at FROM items i
-             LEFT JOIN discussions d ON d.item_id = i.id
-             WHERE i.subject_kind IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-            ))
-        })?;
-        let mut stale: Vec<(Option<Timestamp>, String)> = Vec::new();
-        for row in rows {
-            let (id, json, fetched_at) = row?;
-            let Some(subject) = json.and_then(|j| serde_json::from_str::<Subject>(&j).ok()) else {
-                continue;
-            };
-            let updated_at = subject.updated_at();
-            // An unreadable `fetched_at` is treated as no row: refetching is
-            // the only way to get one that reads.
-            let fetched_at = fetched_at.and_then(|f| f.parse::<Timestamp>().ok());
-            let is_stale = match (fetched_at, updated_at) {
-                (None, _) => true,
-                (Some(fetched), Some(updated)) => fetched < updated,
-                (Some(_), None) => false,
-            };
-            if is_stale {
-                stale.push((updated_at, id));
-            }
-        }
-        // Newest first, an unknown time last, and by id between equals so
-        // the order is the same on every call.
-        stale.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        Ok(stale.into_iter().map(|(_, id)| id).collect())
-    }
-
     pub fn load_items(&self) -> Result<Vec<Item>, CacheError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS} FROM items ORDER BY created_at"
@@ -644,9 +615,9 @@ impl Cache {
             "INSERT INTO items
              (id, repo_full_name, subject_kind, subject_number, subject_json,
               branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name,
-              saved, pinned_at, done_at, attention_at, attention_reason, archived_at,
-              created_at, last_opened_at, additions, deletions, subject_repo, last_seen_head)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+              saved, pinned_at, archived_at, created_at, last_opened_at, additions, deletions,
+              subject_repo, last_seen_head)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 item.id, item.repo_full_name,
                 c.subject_kind, c.subject_number, c.subject_json,
@@ -654,9 +625,6 @@ impl Cache {
                 item.from_item_id, item.name,
                 item.saved as i64,
                 item.pinned_at.map(|t| t.to_string()),
-                item.done_at.map(|t| t.to_string()),
-                item.attention_at.map(|t| t.to_string()),
-                item.attention_reason,
                 item.archived_at.map(|t| t.to_string()),
                 item.created_at.to_string(),
                 item.last_opened_at.to_string(),
@@ -680,9 +648,8 @@ impl Cache {
                 repo_full_name = ?2, subject_kind = ?3, subject_number = ?4,
                 subject_json = ?5, branch = ?6, base_ref = ?7, head_sha = ?8, checkout_path = ?9,
                 owned = ?10, on_disk = ?11, from_item_id = ?12, name = ?13, saved = ?14,
-                pinned_at = ?15, done_at = ?16, attention_at = ?17, attention_reason = ?18,
-                archived_at = ?19, last_opened_at = ?20, additions = ?21, deletions = ?22,
-                subject_repo = ?23, last_seen_head = ?24
+                pinned_at = ?15, archived_at = ?16, last_opened_at = ?17,
+                additions = ?18, deletions = ?19, subject_repo = ?20, last_seen_head = ?21
              WHERE id = ?1",
             params![
                 item.id, item.repo_full_name,
@@ -691,9 +658,6 @@ impl Cache {
                 item.from_item_id, item.name,
                 item.saved as i64,
                 item.pinned_at.map(|t| t.to_string()),
-                item.done_at.map(|t| t.to_string()),
-                item.attention_at.map(|t| t.to_string()),
-                item.attention_reason,
                 item.archived_at.map(|t| t.to_string()),
                 item.last_opened_at.to_string(),
                 c.additions,
@@ -860,25 +824,6 @@ impl Cache {
         Ok(out)
     }
 
-    /// Set attention, only ever forward: an older notification arriving
-    /// late cannot rewind it, and cannot change the reason either.
-    pub fn touch_attention(&self, id: &str, at: Timestamp, reason: &str) -> Result<bool, CacheError> {
-        let current: Option<String> = self
-            .conn
-            .query_row("SELECT attention_at FROM items WHERE id = ?1", params![id], |r| r.get(0))
-            .optional()?
-            .flatten();
-        let current = current.and_then(|c| c.parse::<Timestamp>().ok());
-        if current.is_some_and(|c| c >= at) {
-            return Ok(false);
-        }
-        self.conn.execute(
-            "UPDATE items SET attention_at = ?2, attention_reason = ?3 WHERE id = ?1",
-            params![id, at.to_string(), reason],
-        )?;
-        Ok(true)
-    }
-
     pub fn set_meta(&self, key: &str, value: &str) -> Result<(), CacheError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -894,13 +839,6 @@ impl Cache {
                 r.get(0)
             })
             .optional()?)
-    }
-
-    /// Forget a key. Absent reads the same as never set, which is what a
-    /// list pass wants when an endpoint stops sending an ETag.
-    pub fn delete_meta(&self, key: &str) -> Result<(), CacheError> {
-        self.conn.execute("DELETE FROM meta WHERE key = ?1", params![key])?;
-        Ok(())
     }
 
     pub fn avatar_path(&self, url: &str) -> Option<PathBuf> {
@@ -931,8 +869,7 @@ fn hash(s: &str) -> String {
 
 const ITEM_COLUMNS: &str = "id, repo_full_name, subject_kind, subject_number, subject_json,
     branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name, saved,
-    pinned_at, done_at, attention_at, attention_reason, archived_at, created_at, last_opened_at,
-    additions, deletions, last_seen_head";
+    pinned_at, archived_at, created_at, last_opened_at, additions, deletions, last_seen_head";
 
 /// An item's optional parts as columns.
 struct ItemColumns {
@@ -993,14 +930,14 @@ fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         path: PathBuf::from(r.get::<_, Option<String>>(8).ok().flatten().unwrap_or_default()),
         owned: r.get::<_, i64>(9).unwrap_or(1) != 0,
         on_disk: r.get::<_, i64>(10).unwrap_or(1) != 0,
-        churn: match (r.get::<_, Option<i64>>(21).ok().flatten(), r.get::<_, Option<i64>>(22).ok().flatten()) {
+        churn: match (r.get::<_, Option<i64>>(18).ok().flatten(), r.get::<_, Option<i64>>(19).ok().flatten()) {
             (Some(a), Some(d)) => Some((a as u32, d as u32)),
             _ => None,
         },
-        last_seen_head: r.get::<_, Option<String>>(23).ok().flatten(),
+        last_seen_head: r.get::<_, Option<String>>(20).ok().flatten(),
     });
-    let created: String = r.get(19)?;
-    let opened: String = r.get(20)?;
+    let created: String = r.get(16)?;
+    let opened: String = r.get(17)?;
     Ok(Item {
         id: r.get(0)?,
         repo_full_name: r.get(1)?,
@@ -1010,10 +947,7 @@ fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         name: r.get(12)?,
         saved: r.get::<_, i64>(13)? != 0,
         pinned_at: stamp(r.get(14)?),
-        done_at: stamp(r.get(15)?),
-        attention_at: stamp(r.get(16)?),
-        attention_reason: r.get(17)?,
-        archived_at: stamp(r.get(18)?),
+        archived_at: stamp(r.get(15)?),
         created_at: created.parse().unwrap_or(Timestamp::UNIX_EPOCH),
         last_opened_at: opened.parse().unwrap_or(Timestamp::UNIX_EPOCH),
     })
@@ -1024,6 +958,7 @@ mod tests {
     use super::*;
     use crate::comments::{RunStatus, Side, ThreadOrigin};
     use crate::items::{Subject as ItemSubject, SubjectKind as ItemKind};
+    use crate::model::{Reason, Repository, Subject as NotificationSubject, SubjectKind as NotificationSubjectKind};
     use crate::pulls::PullRequest;
 
     fn pull_request(number: u64) -> PullRequest {
@@ -1060,6 +995,26 @@ mod tests {
 
     fn stamp(s: &str) -> Timestamp {
         s.parse().unwrap()
+    }
+
+    fn notification_thread(id: &str, updated_at: &str) -> Thread {
+        Thread {
+            id: id.into(),
+            unread: true,
+            reason: Reason::Subscribed,
+            updated_at: stamp(updated_at),
+            last_read_at: None,
+            subject: NotificationSubject {
+                title: format!("thread {id}"),
+                kind: NotificationSubjectKind::PullRequest,
+                url: Some(format!("https://api.github.com/repos/acme/widgets/pulls/{id}")),
+                latest_comment_url: None,
+            },
+            repository: Repository {
+                full_name: "acme/widgets".into(),
+                owner_avatar_url: "https://avatars/1".into(),
+            },
+        }
     }
 
     fn run(id: &str, thread: &str, status: RunStatus) -> RunRecord {
@@ -1228,27 +1183,6 @@ mod tests {
         i
     }
 
-    fn issue_item(number: u64, state: &str, updated: &str) -> Item {
-        let mut i = Item::new("acme/widgets", stamp_of("2026-09-18T10:00:00Z"));
-        i.id = format!("item-issue-{number}");
-        i.subject = Some(ItemSubject::Issue(crate::items::Issue {
-            number,
-            title: "t".into(),
-            body: String::new(),
-            state: state.into(),
-            state_reason: None,
-            author_login: String::new(),
-            author_avatar_url: String::new(),
-            labels: vec![],
-            assignees: vec![],
-            comments: 0,
-            created_at: None,
-            updated_at: stamp_of(updated),
-            repo_full_name: "acme/widgets".into(),
-        }));
-        i
-    }
-
     fn stamp_of(s: &str) -> Timestamp {
         s.parse().unwrap()
     }
@@ -1283,7 +1217,8 @@ mod tests {
             .conn
             .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'threads'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(old, 0, "the old table is gone");
+        assert_eq!(old, 1, "the notification cache table is recreated");
+        assert!(c.load_threads().unwrap().is_empty(), "the old row is gone");
     }
 
     #[test]
@@ -1307,6 +1242,30 @@ mod tests {
     }
 
     #[test]
+    fn notification_schema_migration_preserves_items_and_conversations() {
+        for version in [13_u32, 14] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("perch.db");
+            let item = pr_item(u64::from(version));
+            let thread = comment_thread(&format!("t{version}"), &item.id);
+            {
+                let c = Cache::open(&path, None).unwrap();
+                c.insert_item(&item).unwrap();
+                c.insert_comment_thread(&thread).unwrap();
+                c.conn.execute("DROP TABLE threads", []).unwrap();
+                c.set_meta("schema_version", &version.to_string()).unwrap();
+            }
+
+            let (c, reset) = Cache::open_checked(&path, None).unwrap();
+            assert!(!reset, "schema {version} migrates without deleting local state");
+            assert_eq!(c.meta("schema_version").unwrap().as_deref(), Some("15"));
+            assert_eq!(c.load_item(&item.id).unwrap(), Some(item));
+            assert_eq!(c.load_comment_threads(&thread.worktree_id).unwrap(), vec![thread]);
+            assert!(c.load_threads().unwrap().is_empty(), "the new notification table exists");
+        }
+    }
+
+    #[test]
     fn the_schema_has_no_project_table_and_indexes_items_by_repository() {
         let c = Cache::open_in_memory().unwrap();
         let count = |sql: &str| -> i64 { c.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
@@ -1314,29 +1273,6 @@ mod tests {
         assert_eq!(count("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'items_project'"), 0);
         assert_eq!(count("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'items_repo'"), 1);
         assert_eq!(count("SELECT count(*) FROM pragma_table_info('items') WHERE name = 'project_id'"), 0);
-    }
-
-    #[test]
-    fn repos_lists_each_repository_with_an_item_once_in_name_order() {
-        let c = Cache::open_in_memory().unwrap();
-        assert!(c.repos().unwrap().is_empty());
-        c.insert_item(&pr_item(7)).unwrap();
-        let mut fork = branch_item("feature");
-        fork.repo_full_name = "Zed/widgets".into();
-        c.insert_item(&fork).unwrap();
-        let mut archived = branch_item("old");
-        archived.repo_full_name = "beta/things".into();
-        archived.archived_at = Some(stamp_of("2026-09-19T00:00:00Z"));
-        c.insert_item(&archived).unwrap();
-        let mut spelled = branch_item("other");
-        spelled.repo_full_name = "ACME/Widgets".into();
-        spelled.created_at = stamp_of("2026-09-18T11:00:00Z");
-        c.insert_item(&spelled).unwrap();
-        assert_eq!(
-            c.repos().unwrap(),
-            vec!["acme/widgets", "beta/things", "Zed/widgets"],
-            "one entry per repository in its oldest item's spelling, archived included, ordered without regard to case"
-        );
     }
 
     #[test]
@@ -1356,8 +1292,6 @@ mod tests {
         i.name = Some("the fence".into());
         i.saved = true;
         i.pinned_at = Some(stamp_of("2026-09-18T11:00:00Z"));
-        i.attention_at = Some(stamp_of("2026-09-18T12:00:00Z"));
-        i.attention_reason = Some("review_requested".into());
         c.insert_item(&i).unwrap();
         assert_eq!(c.load_items().unwrap(), vec![i.clone()]);
         assert_eq!(c.load_item(&i.id).unwrap(), Some(i.clone()));
@@ -1413,36 +1347,18 @@ mod tests {
     }
 
     #[test]
-    fn touch_attention_only_moves_forward() {
-        let c = Cache::open_in_memory().unwrap();
-        c.insert_item(&pr_item(7)).unwrap();
-        let id = pr_item(7).id;
-        assert!(c.touch_attention(&id, stamp_of("2026-09-18T12:00:00Z"), "mention").unwrap());
-        assert!(!c.touch_attention(&id, stamp_of("2026-09-18T11:00:00Z"), "comment").unwrap(), "older is ignored");
-        assert!(!c.touch_attention(&id, stamp_of("2026-09-18T12:00:00Z"), "comment").unwrap(), "equal is ignored");
-        let i = c.load_item(&id).unwrap().unwrap();
-        assert_eq!(i.attention_at, Some(stamp_of("2026-09-18T12:00:00Z")));
-        assert_eq!(i.attention_reason.as_deref(), Some("mention"));
-        assert!(c.touch_attention(&id, stamp_of("2026-09-18T13:00:00Z"), "comment").unwrap());
-        assert_eq!(c.load_item(&id).unwrap().unwrap().attention_reason.as_deref(), Some("comment"));
-    }
-
-    #[test]
-    fn marks_and_deletion() {
+    fn saved_and_deletion() {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         let mut cut = branch_item("perch/pr-7-2");
         cut.from_item_id = Some(pr_item(7).id);
         c.insert_item(&cut).unwrap();
-        // Saved and Done are columns of the row, written the way every
-        // other edit is.
+        // Saved is a column of the row, written the way every other edit is.
         let mut marked = pr_item(7);
         marked.saved = true;
-        marked.done_at = Some(stamp_of("2026-09-18T12:00:00Z"));
         c.update_item(&marked).unwrap();
         let i = c.load_item(&pr_item(7).id).unwrap().unwrap();
         assert!(i.saved);
-        assert_eq!(i.done_at, Some(stamp_of("2026-09-18T12:00:00Z")));
 
         c.delete_item(&pr_item(7).id).unwrap();
         assert!(c.load_item(&pr_item(7).id).unwrap().is_none());
@@ -1647,84 +1563,6 @@ mod tests {
     }
 
     #[test]
-    fn open_subjects_in_a_repository_are_what_the_list_pass_compares_against() {
-        let c = Cache::open_in_memory().unwrap();
-        c.insert_item(&pr_item(7)).unwrap();
-        let mut merged = pr_item(8);
-        if let Some(ItemSubject::PullRequest(pr)) = merged.subject.as_mut() {
-            pr.state = "closed".into();
-            pr.merged = true;
-        }
-        c.insert_item(&merged).unwrap();
-        c.insert_item(&issue_item(42, "open", "2026-09-18T10:00:00Z")).unwrap();
-        c.insert_item(&issue_item(43, "closed", "2026-09-18T10:00:00Z")).unwrap();
-        c.insert_item(&branch_item("feature")).unwrap();
-        // A branch on a fork with an open pull request upstream counts for
-        // the upstream, where the list pass will look for it.
-        let mut fork = branch_item("fork-branch");
-        fork.repo_full_name = "chris/widgets".into();
-        fork.subject = Some(ItemSubject::PullRequest(pull_request(9)));
-        c.insert_item(&fork).unwrap();
-
-        assert_eq!(
-            c.open_subjects_in("ACME/widgets").unwrap(),
-            vec![
-                (ItemKind::PullRequest, 7, "item-pr-7".to_string()),
-                (ItemKind::PullRequest, 9, "item-fork-branch".to_string()),
-                (ItemKind::Issue, 42, "item-issue-42".to_string()),
-            ]
-        );
-        assert!(c.open_subjects_in("chris/widgets").unwrap().is_empty(), "the subject's repository, not the checkout's");
-        assert!(c.open_subjects_in("nobody/here").unwrap().is_empty());
-    }
-
-    #[test]
-    fn discussion_stale_lists_missing_and_outdated_rows_newest_subject_first() {
-        let c = Cache::open_in_memory().unwrap();
-        let fetched_at = |id: &str, at: &str| {
-            c.conn
-                .execute("UPDATE discussions SET fetched_at = ?2 WHERE item_id = ?1", params![id, at])
-                .unwrap();
-        };
-        // No row at all.
-        c.insert_item(&issue_item(1, "open", "2026-09-18T09:00:00Z")).unwrap();
-        // A row older than the subject.
-        c.insert_item(&issue_item(2, "open", "2026-09-18T11:00:00Z")).unwrap();
-        c.store_discussion("item-issue-2", &discussion()).unwrap();
-        fetched_at("item-issue-2", "2026-09-18T10:00:00Z");
-        // A row from the same second as the subject, a fraction later: as
-        // strings the fraction would sort it before, but it is current.
-        c.insert_item(&issue_item(3, "open", "2026-09-18T10:00:00Z")).unwrap();
-        c.store_discussion("item-issue-3", &discussion()).unwrap();
-        fetched_at("item-issue-3", "2026-09-18T10:00:00.250Z");
-        // A pull request whose updated_at is unknown: stale without a row,
-        // never with one.
-        c.insert_item(&pr_item(7)).unwrap();
-        c.insert_item(&pr_item(8)).unwrap();
-        c.store_discussion("item-pr-8", &discussion()).unwrap();
-        fetched_at("item-pr-8", "2000-01-01T00:00:00Z");
-        // A checkout with no subject has no discussion to be stale.
-        c.insert_item(&branch_item("feature")).unwrap();
-
-        assert_eq!(c.discussion_stale().unwrap(), vec!["item-issue-2", "item-issue-1", "item-pr-7"]);
-
-        // Storing the discussion again makes the row current.
-        c.store_discussion("item-issue-2", &discussion()).unwrap();
-        fetched_at("item-issue-2", "2026-09-18T11:00:00Z");
-        assert_eq!(c.discussion_stale().unwrap(), vec!["item-issue-1", "item-pr-7"]);
-    }
-
-    #[test]
-    fn deleting_a_meta_key_makes_it_absent_and_is_fine_when_it_already_is() {
-        let c = Cache::open_in_memory().unwrap();
-        c.set_meta("etag:pulls:acme/widgets", "\"abc\"").unwrap();
-        c.delete_meta("etag:pulls:acme/widgets").unwrap();
-        assert_eq!(c.meta("etag:pulls:acme/widgets").unwrap(), None);
-        c.delete_meta("etag:pulls:acme/widgets").unwrap();
-        assert!(c.meta("schema_version").unwrap().is_some(), "other keys stay");
-    }
-
-    #[test]
     fn meta_round_trips() {
         let c = Cache::open_in_memory().unwrap();
         assert_eq!(c.meta("last_modified").unwrap(), None);
@@ -1732,6 +1570,68 @@ mod tests {
         assert_eq!(
             c.meta("last_modified").unwrap().as_deref(),
             Some("Wed, 17 Sep 2026 18:00:00 GMT")
+        );
+    }
+
+    #[test]
+    fn notification_snapshot_and_validator_round_trip_in_api_order() {
+        let c = Cache::open_in_memory().unwrap();
+        let threads = vec![
+            notification_thread("20", "2026-09-19T12:00:00Z"),
+            notification_thread("10", "2026-09-18T12:00:00Z"),
+        ];
+
+        c.store_threads(&threads, Some("Sat, 19 Sep 2026 12:00:00 GMT"))
+            .unwrap();
+
+        assert_eq!(c.load_threads().unwrap(), threads);
+        assert_eq!(
+            c.notifications_last_modified().unwrap().as_deref(),
+            Some("Sat, 19 Sep 2026 12:00:00 GMT")
+        );
+    }
+
+    #[test]
+    fn notification_snapshot_replaces_rows_and_can_clear_its_validator() {
+        let c = Cache::open_in_memory().unwrap();
+        c.store_threads(
+            &[
+                notification_thread("1", "2026-09-17T18:00:00Z"),
+                notification_thread("2", "2026-09-17T17:00:00Z"),
+            ],
+            Some("Thu, 17 Sep 2026 18:00:00 GMT"),
+        )
+        .unwrap();
+
+        let replacement = notification_thread("3", "2026-09-19T09:00:00Z");
+        c.store_threads(std::slice::from_ref(&replacement), None).unwrap();
+
+        assert_eq!(c.load_threads().unwrap(), vec![replacement]);
+        assert_eq!(c.notifications_last_modified().unwrap(), None);
+    }
+
+    #[test]
+    fn failed_notification_replacement_rolls_back_rows_and_validator_together() {
+        let c = Cache::open_in_memory().unwrap();
+        let original = notification_thread("1", "2026-09-17T18:00:00Z");
+        c.store_threads(
+            std::slice::from_ref(&original),
+            Some("Thu, 17 Sep 2026 18:00:00 GMT"),
+        )
+        .unwrap();
+
+        let duplicate = notification_thread("2", "2026-09-19T09:00:00Z");
+        assert!(c
+            .store_threads(
+                &[duplicate.clone(), duplicate],
+                Some("Sat, 19 Sep 2026 09:00:00 GMT"),
+            )
+            .is_err());
+
+        assert_eq!(c.load_threads().unwrap(), vec![original]);
+        assert_eq!(
+            c.notifications_last_modified().unwrap().as_deref(),
+            Some("Thu, 17 Sep 2026 18:00:00 GMT")
         );
     }
 

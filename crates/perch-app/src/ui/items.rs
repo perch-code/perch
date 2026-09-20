@@ -17,7 +17,7 @@ use floem::menu::Menu;
 use floem::muda::accelerator::{Accelerator, Code as KeyCode};
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::{CursorStyle, Style};
+use floem::style::CursorStyle;
 use floem::text::FontWeight;
 use floem::views::{Container, Decorators, Empty, Label, Stack, TextInput, dyn_container};
 use perch_github::{CheckStatus, Item, ItemSubject, SubjectState};
@@ -74,7 +74,6 @@ pub fn item_row(
         move || state.open_item.with(|o| o.as_deref() == Some(id.as_str()))
     };
     let archived = item.is_archived();
-    let attention = item.needs_attention();
     let mut reference_text = full_reference(&item);
     // A branch of the reader's own says how far it has gone from its base.
     if item.subject.is_none() {
@@ -113,7 +112,6 @@ pub fn item_row(
                         Label::derived(move || title.clone())
                             .style(move |s| {
                                 s.font_size(theme::TEXT_TITLE)
-                                    .font_weight(if attention { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
                                     .color(if archived { theme::NAV_SUBTLE } else { theme::NAV_FG })
                                     .text_ellipsis()
                                     .max_width_full()
@@ -138,7 +136,7 @@ pub fn item_row(
         ))
         .style(|s| s.flex_col().flex_grow(1.0_f32).min_width(0.0).justify_center()),
         row_actions(state, actions_backend, row_item).style(|s| s.pointer_events_auto()),
-        trailing(attention, item.is_pinned()),
+        trailing(item.is_pinned()),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0).pointer_events_none());
 
@@ -276,35 +274,21 @@ fn chips(state: AppState, item: &Item) -> impl IntoView {
     )
 }
 
-/// The right edge shows the pin and the attention dot independently.
-fn trailing(attention: bool, pinned: bool) -> impl IntoView {
-    let slot = |s: Style| s.width(14.0).items_center().justify_center().flex_shrink(0.0_f32);
-    Stack::horizontal((
-        if pinned {
-            Container::new(sidebar_glyph(SidebarIcon::Pin, theme::FG_SUBTLE).style(|s| s.size(11.0, 11.0)))
-                .style(slot)
-                .into_any()
-        } else {
-            Empty::new().into_any()
-        },
-        Container::new(if attention {
-            Empty::new()
-                .style(|s| s.size(7.0, 7.0).border_radius(4.0).background(theme::ACCENT))
-                .into_any()
-        } else {
-            Empty::new().into_any()
-        })
-        .style(slot),
-    ))
-    .style(|s| s.items_center().flex_shrink(0.0_f32))
+/// The right edge shows whether the item is pinned.
+fn trailing(pinned: bool) -> impl IntoView {
+    Container::new(if pinned {
+        sidebar_glyph(SidebarIcon::Pin, theme::FG_SUBTLE).style(|s| s.size(11.0, 11.0)).into_any()
+    } else {
+        Empty::new().into_any()
+    })
+    .style(|s| s.width(14.0).items_center().justify_center().flex_shrink(0.0_f32))
 }
 
-/// Save, Done and the menu, on hover.
+/// Save and the menu, on hover.
 fn row_actions(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoView {
     let id = item.id.clone();
     let hovering = move || state.hovered_item.with(|h| h.as_deref() == Some(id.as_str()));
     let saved = item.saved;
-    let done = item.is_done();
 
     dyn_container(
         move || (hovering(), saved),
@@ -314,27 +298,16 @@ fn row_actions(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoVi
             }
             let save_id = item.id.clone();
             let save_backend = backend.clone();
-            let done_id = item.id.clone();
-            let done_backend = backend.clone();
             let menu_item = item.clone();
             let menu_backend = backend.clone();
             Stack::horizontal((
                 icon_button(
                     move || if saved { SidebarIcon::BookmarkFilled } else { SidebarIcon::Bookmark },
                     move || if saved { theme::ACCENT } else { theme::FG_SUBTLE },
-                    move || save_backend.mark_item(&save_id, Some(!saved), None),
+                    move || save_backend.mark_saved(&save_id, !saved),
                 ),
                 if hovered {
-                    Stack::horizontal((
-                        icon_button(
-                            move || if done { SidebarIcon::Undo } else { SidebarIcon::Check },
-                            || theme::FG_SUBTLE,
-                            move || done_backend.mark_item(&done_id, None, Some(!done)),
-                        ),
-                        more_button(move || item_menu(state, menu_backend.clone(), menu_item.clone())),
-                    ))
-                    .style(|s| s.items_center())
-                    .into_any()
+                    more_button(move || item_menu(state, menu_backend.clone(), menu_item.clone())).into_any()
                 } else {
                     Empty::new().into_any()
                 },
@@ -440,13 +413,6 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         menu = menu.item(if pinned { "Unpin" } else { "Pin" }, move |m| {
             let (b, i) = (b.clone(), i.clone());
             m.accelerator(key(KeyCode::KeyP)).action(move || b.pin_item(&i, !pinned))
-        });
-    }
-    {
-        let (b, i) = (backend.clone(), id.clone());
-        menu = menu.item("Mark Unread", move |m| {
-            let (b, i) = (b.clone(), i.clone());
-            m.accelerator(key(KeyCode::KeyU)).action(move || b.mark_unread(&i))
         });
     }
     {

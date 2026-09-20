@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use jiff::Timestamp;
-use perch_github::{AgentConfig, DeclaredRepo, Item};
+use perch_github::{AgentConfig, DeclaredRepo, Item, Thread};
 
 use crate::backend::{Event, Status};
 
@@ -18,16 +18,6 @@ use crate::backend::{Event, Status};
 pub enum Checked {
     Empty,
     Full,
-}
-
-/// The backfill's progress, as `Event::Backfill` reports it: `done`
-/// discussions of about `total` for `repo`, which is the repository's
-/// display name, since the status bar is the only reader.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Archiving {
-    pub repo: String,
-    pub done: usize,
-    pub total: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -39,6 +29,12 @@ pub struct AppState {
     pub repos: RwSignal<Vec<DeclaredRepo>>,
     /// Every item, active and archived.
     pub items: RwSignal<Vec<Item>>,
+    /// GitHub's notification inbox, in the order GitHub returned it.
+    /// Read threads stay here until GitHub removes them from the inbox.
+    pub notifications: RwSignal<Vec<Thread>>,
+    /// GitHub's wire name for the notification reason currently shown.
+    /// Separate from local item filters because notifications are not items.
+    pub notification_reason: RwSignal<Option<String>>,
     /// The item whose row is selected in the sidebar: the open one.
     pub open_item: RwSignal<Option<String>>,
     /// The agent section of config.toml: binary, defaults, and the models
@@ -47,10 +43,6 @@ pub struct AppState {
     /// Something a worktree action could not do, for the status line.
     /// Cleared by the next act the reader takes.
     pub notice: RwSignal<Option<String>>,
-    /// Where the backfill is, for the status bar: the repository being
-    /// archived and how far along it is. `None` once every repository
-    /// is caught up.
-    pub archiving: RwSignal<Option<Archiving>>,
     /// The review view's state, once the window has made it, so a menu
     /// that ends in something being opened can put the progress card up.
     pub review: RwSignal<Option<crate::review::model::ReviewState>>,
@@ -113,9 +105,10 @@ impl AppState {
             avatars: RwSignal::new(HashMap::new()),
             repos: RwSignal::new(Vec::new()),
             items: RwSignal::new(Vec::new()),
+            notifications: RwSignal::new(Vec::new()),
+            notification_reason: RwSignal::new(None),
             open_item: RwSignal::new(None),
             notice: RwSignal::new(None),
-            archiving: RwSignal::new(None),
             review: RwSignal::new(None),
             viewer: RwSignal::new(None),
             reload: RwSignal::new(Vec::new()),
@@ -190,17 +183,6 @@ impl AppState {
             Event::AgentStep { run_id, thread_id, event } => {
                 tracing::debug!(run_id, thread_id, ?event, "run event");
                 review.apply_run_event(&run_id, &event);
-            }
-            Event::Archived { repo_full_name, number, added, .. } => {
-                // Only for the review that is still open; a slow archive of
-                // a pull request since left has nothing to say.
-                let same = review.pull_request.with(|p| {
-                    p.as_ref()
-                        .is_some_and(|p| p.repo_full_name == repo_full_name && p.number == number)
-                });
-                if same {
-                    review.archived.set(Some(added));
-                }
             }
             Event::Items(items) => {
                 // The open review can be archived from the sidebar, or by
@@ -356,6 +338,7 @@ impl AppState {
                 });
             }
             Event::Items(items) => self.items.set(items),
+            Event::Notifications(notifications) => self.notifications.set(notifications),
             Event::Repos(repos) => self.repos.set(repos),
             Event::Meta { key, value } => match key.as_str() {
                 "item_filters" => match crate::items::ItemFilters::parse(&value) {
@@ -384,16 +367,8 @@ impl AppState {
             // An empty notice is the backend saying the last one has been
             // read: the reader has moved on to something else.
             Event::Notice(message) => self.notice.set(Some(message).filter(|m| !m.is_empty())),
-            // A total of zero is the backfill saying it is caught up. The
-            // backend names the repository by its identity; the bar shows
-            // what the sidebar calls it.
-            Event::Backfill { repo, done, total } => {
-                let repo = self.display_name(&repo);
-                self.archiving.set((total > 0).then_some(Archiving { repo, done, total }))
-            }
             Event::AgentConfig(agent) => self.agent.set(agent),
-            Event::Archived { .. }
-            | Event::CommentThreads { .. }
+            Event::CommentThreads { .. }
             | Event::AgentStep { .. }
             | Event::IssueReady { .. } => {}
             Event::ReviewProgress { .. }
@@ -446,18 +421,6 @@ impl AppState {
         self.items.with(|all| all.iter().find(|i| i.id == id).cloned())
     }
 
-    /// What the sidebar calls an identity: its declared name, or the
-    /// identity itself when nothing declares it.
-    pub fn display_name(&self, identity: &str) -> String {
-        self.repos.with(|repos| {
-            repos
-                .iter()
-                .find(|r| r.identity.eq_ignore_ascii_case(identity))
-                .map(|r| r.name.clone())
-                .unwrap_or_else(|| identity.to_string())
-        })
-    }
-
     /// The flat sidebar under the current scope, filters and search.
     pub fn visible_items(&self) -> Vec<Item> {
         let mut filters = self.item_filters.get();
@@ -481,6 +444,7 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::review::model::ReviewState;
+    use perch_github::{Reason, Repository, Subject, SubjectKind};
 
     /// A review with an item open, by id.
     fn review_of(id: &str) -> ReviewState {
@@ -505,6 +469,36 @@ mod tests {
             })),
             folded: Some(folded),
         }
+    }
+
+    fn notification(id: &str, unread: bool) -> Thread {
+        Thread {
+            id: id.into(),
+            unread,
+            reason: Reason::Mention,
+            updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
+            last_read_at: (!unread).then(|| "2026-09-19T11:00:00Z".parse().unwrap()),
+            subject: Subject {
+                title: format!("Notification {id}"),
+                kind: SubjectKind::Issue,
+                url: Some(format!("https://api.github.com/repos/org/repo/issues/{id}")),
+                latest_comment_url: None,
+            },
+            repository: Repository {
+                full_name: "org/repo".into(),
+                owner_avatar_url: String::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_notifications_event_replaces_the_inbox_in_github_order_and_keeps_read_threads() {
+        let app = AppState::new();
+        app.apply(Event::Notifications(vec![notification("2", false), notification("1", true)]));
+        let notifications = app.notifications.get();
+        assert_eq!(notifications.iter().map(|thread| thread.id.as_str()).collect::<Vec<_>>(), ["2", "1"]);
+        assert!(!notifications[0].unread);
+        assert!(notifications[1].unread);
     }
 
     #[test]
@@ -557,28 +551,6 @@ mod tests {
         assert!(review.viewed.get().contains(&("src/x.rs".into(), "b1".into())));
         assert_eq!(review.reveals_for("src/x.rs", "b1").iter().collect::<Vec<_>>(), vec![(4, 23)]);
         assert!(!review.folded.get(), "Show whole is not undone by a write that came before it");
-    }
-
-    #[test]
-    fn the_backfill_line_names_the_repository_as_the_sidebar_does() {
-        let app = AppState::new();
-        app.apply(Event::Repos(vec![
-            DeclaredRepo { identity: "slatedb/slatedb".into(), name: "slatedb".into() },
-            DeclaredRepo { identity: "local/notes".into(), name: "notes".into() },
-        ]));
-
-        // The backend says which repository by identity, in whatever case
-        // GitHub answered under; the bar shows the declared name.
-        app.apply(Event::Backfill { repo: "SlateDB/SlateDB".into(), done: 312, total: 2140 });
-        assert_eq!(app.archiving.get(), Some(Archiving { repo: "slatedb".into(), done: 312, total: 2140 }));
-
-        // A repository nobody declared is named as it came.
-        app.apply(Event::Backfill { repo: "x/stray".into(), done: 1, total: 2 });
-        assert_eq!(app.archiving.get().map(|a| a.repo), Some("x/stray".to_string()));
-
-        // Caught up: the line comes down.
-        app.apply(Event::Backfill { repo: String::new(), done: 0, total: 0 });
-        assert_eq!(app.archiving.get(), None);
     }
 
     #[test]

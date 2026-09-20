@@ -47,7 +47,7 @@ pub fn header(
     Stack::vertical((bar, metadata_strip(app, state, backend, open_item))).style(|s| s.flex_col().width_full())
 }
 
-/// The bar above an issue: back, the issue, Save and Done. The same bar
+/// The bar above an issue: back, the issue, and Save. The same bar
 /// as a review's, so the window drags from it the same way.
 pub fn issue_header(app: AppState, state: ReviewState, backend: Rc<Backend>, open_item: OpenItem) -> impl IntoView {
     let back_backend = backend.clone();
@@ -78,31 +78,20 @@ fn bar_style(s: floem::style::Style) -> floem::style::Style {
 }
 
 
-/// Save and Done for the open item, as the sidebar rows have. Every
-/// item's bar ends in them, so a pull request read to the end is marked
-/// where the reader is looking.
+/// Save for the open item, as the sidebar rows have.
 fn item_marks(state: ReviewState, backend: std::rc::Rc<crate::backend::Backend>) -> impl IntoView {
     dyn_container(
-        move || state.item.with(|i| i.as_ref().map(|i| (i.id.clone(), i.saved, i.is_done()))),
+        move || state.item.with(|i| i.as_ref().map(|i| (i.id.clone(), i.saved))),
         move |item| {
-            let Some((id, saved, done)) = item else {
+            let Some((id, saved)) = item else {
                 return Empty::new().into_any();
             };
-            let (save_id, done_id) = (id.clone(), id);
-            let (b1, b2) = (backend.clone(), backend.clone());
-            Stack::horizontal((
-                crate::ui::widgets::icon_button(
-                    move || if saved { SidebarIcon::BookmarkFilled } else { SidebarIcon::Bookmark },
-                    move || if saved { theme::ACCENT } else { theme::FG_MUTED },
-                    move || b1.mark_item(&save_id, Some(!saved), None),
-                ),
-                crate::ui::widgets::icon_button(
-                    move || if done { SidebarIcon::Undo } else { SidebarIcon::Check },
-                    || theme::FG_MUTED,
-                    move || b2.mark_item(&done_id, None, Some(!done)),
-                ),
-            ))
-            .style(|s| s.items_center().gap(2.0))
+            let backend = backend.clone();
+            crate::ui::widgets::icon_button(
+                move || if saved { SidebarIcon::BookmarkFilled } else { SidebarIcon::Bookmark },
+                move || if saved { theme::ACCENT } else { theme::FG_MUTED },
+                move || backend.mark_saved(&id, !saved),
+            )
             .into_any()
         },
     )

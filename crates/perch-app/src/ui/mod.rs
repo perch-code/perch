@@ -5,6 +5,7 @@ pub mod status;
 pub mod titlebar;
 pub mod widgets;
 pub mod items;
+pub mod notifications;
 
 use std::rc::Rc;
 
@@ -320,12 +321,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
         }
 
-        // `e` and `s` on the sidebar row under the pointer, else on the
-        // selected row.
+        // `s` saves the sidebar row under the pointer, else the selected
+        // row.
         if key.modifiers.is_empty()
             && !state.search_focused.get()
             && !review.composer_focused.get()
-            && matches!(key.code, Code::KeyE | Code::KeyS)
+            && key.code == Code::KeyS
         {
             let target = state
                 .hovered_item
@@ -333,10 +334,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .or_else(|| state.open_item.get())
                 .and_then(|id| state.item(&id));
             if let Some(item) = target {
-                match key.code {
-                    Code::KeyE => key_backend.mark_item(&item.id, None, Some(!item.is_done())),
-                    _ => key_backend.mark_item(&item.id, Some(!item.saved), None),
-                }
+                key_backend.mark_saved(&item.id, !item.saved);
                 return EventPropagation::Stop;
             }
         }

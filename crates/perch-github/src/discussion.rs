@@ -2,8 +2,8 @@
 //! and the line comments under them.
 //!
 //! Three list endpoints, each paginated to the end. The shapes here are the
-//! few fields the conversation and the knowledge archive keep; everything
-//! else GitHub sends is ignored on the way in.
+//! few fields the conversation keeps; everything else GitHub sends is
+//! ignored on the way in.
 //!
 //! The domain types are plain data and serialise as themselves: a
 //! discussion is stored as one JSON row and must load back whole. GitHub's
