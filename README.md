@@ -7,22 +7,34 @@ Kenn Forge.
 
 ## GitHub inbox
 
-GitHub notifications are Perch's inbox. Perch reads the complete current
-inbox from GitHub's REST API, keeps GitHub's ordering and unread state, and
-caches the latest response locally so the sidebar can paint immediately.
-Polling follows GitHub's `X-Poll-Interval`, uses `Last-Modified` when
-available, and paginates the full result.
+Perch builds its inbox from GitHub's REST notifications list. It preserves the
+API's order and unread state, and caches the latest response locally so the
+sidebar can paint immediately. Perch requests `all=true` so read threads remain
+visible alongside unread ones.
+
+Polling respects GitHub's `X-Poll-Interval` and paginates the full response.
+Perch performs an unconditional reconciliation at startup, on manual refresh,
+and on the first scheduled poll after 15 minutes; polls between reconciliations
+use `Last-Modified`. The full fetch repairs the sidebar when GitHub's validator
+does not change with the notification list.
 
 - Opening a notification marks its GitHub thread read. Read threads remain in
   the inbox.
 - **Mark Unread** restores the unread reminder in Perch for the current update.
   Opening it clears the reminder; later GitHub state takes precedence. GitHub's
   public API has no mark-unread operation, so this does not change github.com.
-- **Done** removes the thread from GitHub's inbox.
-- **Unsubscribe** ignores future activity on the thread and marks the current
-  notification done.
+- **Done** marks the thread done on GitHub and remembers that exact update in
+  Perch, so GitHub's `all=true` history cannot put it back. Newer activity
+  clears the local mark and lets the thread return.
+- **Unsubscribe** ignores future activity on the thread, marks its current
+  notification done, and remembers it the same way.
 - Pull requests and issues open inside Perch. Other notification types remain
   first-class inbox rows and open on GitHub.
+
+GitHub's public REST notification payload does not expose whether a thread is
+currently in the web Inbox or Done, and `all=true` can include Done history.
+Perch can therefore keep its own Done actions stable, but cannot reliably
+mirror Done or Restore actions performed on github.com.
 
 These actions affect only the notification or its local reminder. They do not
 archive or delete a Perch item, worktree, or local conversation.

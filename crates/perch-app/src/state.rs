@@ -65,8 +65,8 @@ pub struct AppState {
     pub repos: RwSignal<Vec<DeclaredRepo>>,
     /// Every item, active and archived.
     pub items: RwSignal<Vec<Item>>,
-    /// GitHub's notification inbox, in the order GitHub returned it.
-    /// Read threads stay here until GitHub removes them from the inbox.
+    /// Perch's visible notification list, in GitHub response order after local
+    /// Done watermarks have been applied.
     pub notifications: RwSignal<Vec<Thread>>,
     /// GitHub's wire name for the notification reason currently shown.
     /// Separate from local item filters because notifications are not items.

@@ -1,4 +1,4 @@
-//! GitHub REST client: the notifications inbox and targeted item lookups.
+//! GitHub REST client: notification history and targeted item lookups.
 //!
 //! Uses octocrab's raw `_get_with_headers` rather than its typed builders,
 //! because polling needs `X-Poll-Interval` and `Last-Modified`, targeted
@@ -70,8 +70,8 @@ pub enum PullLookup {
 /// Outcome of a notifications poll.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListResult {
-    /// The complete inbox when `unchanged` is false. Empty when the
-    /// conditional probe returned 304 and the cached inbox still stands.
+    /// The complete API result when `unchanged` is false. Empty when the
+    /// conditional probe returned 304 and the cached result still stands.
     pub threads: Vec<Thread>,
     pub unchanged: bool,
     /// The validator to use for the next poll.
@@ -143,7 +143,7 @@ impl GitHub {
         })
     }
 
-    /// Fetch the complete inbox unconditionally.
+    /// Fetch the complete notifications result unconditionally.
     ///
     /// This wrapper is useful for callers without a cached validator. Polling
     /// callers should use [`Self::list_threads_since`].
@@ -151,12 +151,13 @@ impl GitHub {
         self.list_threads_since(None).await
     }
 
-    /// Fetch the authenticated user's GitHub notifications inbox.
+    /// Fetch the authenticated user's GitHub notifications list.
     ///
-    /// Read and unread threads are both requested because github.com's Inbox
-    /// is one list with an Unread filter. `last_modified` is used only for a
-    /// conditional request. A 304 keeps the cached inbox; a 200 is the new
-    /// complete first page and is followed by any remaining pages.
+    /// `all=true` keeps read rows alongside unread ones, but can also include
+    /// Done history because the payload has no Inbox/Done membership field.
+    /// `last_modified` is used only for a conditional request. A 304 keeps the
+    /// cached result; a 200 is the new complete first page and is followed by
+    /// any remaining pages.
     pub async fn list_threads_since(
         &self,
         last_modified: Option<&str>,

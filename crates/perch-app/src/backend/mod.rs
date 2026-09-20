@@ -30,6 +30,10 @@ pub(crate) mod runs;
 
 /// How many avatar downloads may be in flight at once.
 const AVATAR_CONCURRENCY: usize = 6;
+/// Conditional notification polls are cheap, but GitHub's validator does not
+/// reliably change when inbox membership does. Periodically fetch the whole
+/// representation so a stale cached list heals without a restart or click.
+const NOTIFICATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Settings the UI keeps between launches. Sent back at startup. Show
 /// whole is not here: its key is per item, `review.folded.<item_id>`, so
 /// it is read when the item opens and carried on `ViewedReady`.
@@ -303,8 +307,9 @@ pub enum Event {
     Repos(Vec<perch_github::DeclaredRepo>),
     /// Every item, active and archived. Whole, for the same reason.
     Items(Vec<Item>),
-    /// GitHub's notification inbox, in GitHub's order. Read threads remain
-    /// here; Done and unsubscribed threads do not.
+    /// Perch's visible notification list, in GitHub response order. Read
+    /// threads remain; revisions marked Done in Perch stay hidden until newer
+    /// activity arrives.
     Notifications(Vec<Thread>),
     /// A remembered setting, sent once at startup for each key the UI
     /// asked to keep.
@@ -2056,6 +2061,8 @@ async fn run(
     // refresh never polls earlier than GitHub's X-Poll-Interval permits.
     let mut next_auto_poll = tokio::time::Instant::now();
     let mut next_allowed_poll = next_auto_poll;
+    let mut next_notification_reconcile = next_auto_poll;
+    let mut pending_notification_reconcile = false;
 
     loop {
         let (command, automatic) = tokio::select! {
@@ -2081,17 +2088,36 @@ async fn run(
         }
         match command {
             Command::Refresh => {
-                if !automatic && tokio::time::Instant::now() < next_allowed_poll {
+                let now = tokio::time::Instant::now();
+                if !automatic {
+                    pending_notification_reconcile = true;
+                }
+                if !automatic && now < next_allowed_poll {
                     // Remember the click. GitHub forbids polling before its
                     // advertised minimum, so wake at that boundary instead
                     // of silently dropping the manual refresh.
                     queue_manual_refresh(&mut next_auto_poll, next_allowed_poll);
                     continue;
                 }
-                let poll_after = refresh(&ctx, &source).await;
+                let mode = if pending_notification_reconcile
+                    || now >= next_notification_reconcile
+                {
+                    NotificationPollMode::Reconcile
+                } else {
+                    NotificationPollMode::Conditional
+                };
+                let poll_after = refresh(&ctx, &source, mode).await;
                 let now = tokio::time::Instant::now();
                 next_auto_poll = now + poll_after.automatic;
                 next_allowed_poll = now + poll_after.manual;
+                if mode == NotificationPollMode::Reconcile {
+                    if poll_after.completed {
+                        pending_notification_reconcile = false;
+                        next_notification_reconcile = now + NOTIFICATION_RECONCILE_INTERVAL;
+                    } else {
+                        pending_notification_reconcile = true;
+                    }
+                }
                 let open = ctx
                     .slot
                     .lock()
@@ -2197,9 +2223,7 @@ async fn run(
                 ctx.clear_notice();
                 if let Some(github) = ctx.github.as_ref() {
                     match github.mark_thread_done(&thread_id).await {
-                        Ok(()) => ctx.edit_notifications(|threads| {
-                            threads.retain(|thread| thread.id != thread_id);
-                        }),
+                        Ok(()) => ctx.dismiss_notification(&thread_id),
                         Err(e) => {
                             defer_polls_for_error(&e, &mut next_auto_poll, &mut next_allowed_poll);
                             tracing::warn!(thread = %thread_id, error = %e, "could not mark notification done");
@@ -2218,9 +2242,7 @@ async fn run(
                         Err(e) => Err(e),
                     };
                     match result {
-                        Ok(()) => ctx.edit_notifications(|threads| {
-                            threads.retain(|thread| thread.id != thread_id);
-                        }),
+                        Ok(()) => ctx.dismiss_notification(&thread_id),
                         Err(e) => {
                             defer_polls_for_error(&e, &mut next_auto_poll, &mut next_allowed_poll);
                             tracing::warn!(thread = %thread_id, error = %e, "could not unsubscribe from notification");
@@ -3022,9 +3044,14 @@ impl Ctx {
         }
     }
 
-    /// Replace the first-class inbox, persist it when possible, and publish
-    /// it whole so ordering always matches GitHub's response.
-    fn replace_notifications(&self, mut threads: Vec<Thread>, last_modified: Option<&str>) {
+    /// Replace the visible notification snapshot, apply local Done watermarks,
+    /// persist it when possible, and publish it whole so the remaining rows
+    /// retain GitHub's response order.
+    fn replace_notifications(
+        &self,
+        mut threads: Vec<Thread>,
+        last_modified: Option<&str>,
+    ) -> Vec<Thread> {
         // A local mark-unread reminder belongs to this exact notification
         // revision. Carry it across a full GitHub snapshot, but let newer
         // activity (a changed updated_at) replace it with GitHub's state.
@@ -3045,6 +3072,12 @@ impl Ctx {
                 thread.local_unread = true;
             }
         }
+        if let Some(result) = self.with_cache(|c| c.store_threads(&threads, last_modified)) {
+            match result {
+                Ok(visible) => threads = visible,
+                Err(e) => tracing::warn!(error = %e, "could not cache notifications"),
+            }
+        }
         let current_keys: std::collections::HashSet<(String, Timestamp)> = threads
             .iter()
             .map(|thread| (thread.id.clone(), thread.updated_at))
@@ -3055,15 +3088,13 @@ impl Ctx {
         if let Ok(mut current) = self.notifications.lock() {
             *current = threads.clone();
         }
-        if let Some(Err(e)) = self.with_cache(|c| c.store_threads(&threads, last_modified)) {
-            tracing::warn!(error = %e, "could not cache notifications");
-        }
         self.want_avatars(
             threads
                 .iter()
                 .map(|t| t.repository.owner_avatar_url.clone()),
         );
-        let _ = self.events.send(Event::Notifications(threads));
+        let _ = self.events.send(Event::Notifications(threads.clone()));
+        threads
     }
 
     /// Apply a notification mutation without touching the item, checkout,
@@ -3094,6 +3125,31 @@ impl Ctx {
                 thread.unread = true;
                 thread.local_unread = true;
             }
+        });
+    }
+
+    /// Hide the exact revision GitHub just accepted as Done. GitHub's list
+    /// endpoint can return Done history again under `all=true`, so the local
+    /// watermark is what keeps the row out until newer activity arrives.
+    fn dismiss_notification(&self, thread_id: &str) {
+        let updated_at = self.notifications.lock().ok().and_then(|threads| {
+            threads
+                .iter()
+                .find(|thread| thread.id == thread_id)
+                .map(|thread| thread.updated_at)
+        });
+        if let Some(updated_at) = updated_at {
+            if let Some(Err(error)) =
+                self.with_cache(|cache| cache.dismiss_notification(thread_id, updated_at))
+            {
+                tracing::warn!(thread = %thread_id, error = %error, "could not remember notification dismissal");
+                self.notice(format!(
+                    "The notification was marked Done, but Perch could not remember it: {error}"
+                ));
+            }
+        }
+        self.edit_notifications(|threads| {
+            threads.retain(|thread| thread.id != thread_id);
         });
     }
 
@@ -5655,6 +5711,15 @@ struct ReviewContext {
 struct PollAfter {
     automatic: Duration,
     manual: Duration,
+    /// Whether GitHub returned a usable response. A requested full
+    /// reconciliation remains pending after an error.
+    completed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationPollMode {
+    Conditional,
+    Reconcile,
 }
 
 fn queue_manual_refresh(
@@ -5684,7 +5749,7 @@ fn defer_polls_for_error(
 }
 
 /// One poll of the notifications API.
-async fn refresh(ctx: &Ctx, source: &str) -> PollAfter {
+async fn refresh(ctx: &Ctx, source: &str, mode: NotificationPollMode) -> PollAfter {
     let events = &ctx.events;
     let config = ctx.config.as_ref();
     let Some(github) = ctx.github.as_ref() else {
@@ -5695,11 +5760,14 @@ async fn refresh(ctx: &Ctx, source: &str) -> PollAfter {
         return PollAfter {
             automatic: wait,
             manual: wait,
+            completed: false,
         };
     };
     let _ = events.send(Event::Status(Status::Refreshing));
 
-    let last_modified = ctx.notifications_last_modified();
+    let last_modified = (mode == NotificationPollMode::Conditional)
+        .then(|| ctx.notifications_last_modified())
+        .flatten();
     match github.list_threads_since(last_modified.as_deref()).await {
         Ok(result) => {
             let manual = result.poll_interval;
@@ -5708,15 +5776,20 @@ async fn refresh(ctx: &Ctx, source: &str) -> PollAfter {
                 tracing::info!("notifications unchanged");
             } else {
                 tracing::info!(count = result.threads.len(), "notifications polled");
-                ctx.replace_notifications(result.threads.clone(), result.last_modified.as_deref());
-                attend(ctx, &result.threads).await;
+                let visible =
+                    ctx.replace_notifications(result.threads, result.last_modified.as_deref());
+                attend(ctx, &visible).await;
             }
 
             let _ = events.send(Event::Status(Status::Idle {
                 at: Timestamp::now(),
                 source: source.to_string(),
             }));
-            PollAfter { automatic, manual }
+            PollAfter {
+                automatic,
+                manual,
+                completed: true,
+            }
         }
         Err(e) => {
             tracing::warn!(error = %e, "list_threads failed");
@@ -5734,6 +5807,7 @@ async fn refresh(ctx: &Ctx, source: &str) -> PollAfter {
             PollAfter {
                 automatic: wait,
                 manual: wait,
+                completed: false,
             }
         }
     }
@@ -9200,6 +9274,12 @@ mod tests {
     fn serve_by_path(
         answer: impl Fn(&str) -> (&'static str, String) + Send + 'static,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
+        serve_by_request(move |path, _headers| answer(path))
+    }
+
+    fn serve_by_request(
+        answer: impl Fn(&str, &[String]) -> (&'static str, String) + Send + 'static,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let paths = Arc::new(Mutex::new(Vec::new()));
@@ -9207,10 +9287,10 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
-                let Some(path) = request_path(&mut stream) else {
+                let Some((path, headers)) = request(&mut stream) else {
                     continue;
                 };
-                let (status, body) = answer(&path);
+                let (status, body) = answer(&path, &headers);
                 seen.lock().unwrap().push(path);
                 let _ = write!(
                     stream,
@@ -9224,18 +9304,20 @@ mod tests {
 
     /// The path of one GET, read past its headers so the client sees the
     /// answer as the answer to it.
-    fn request_path(stream: &mut TcpStream) -> Option<String> {
+    fn request(stream: &mut TcpStream) -> Option<(String, Vec<String>)> {
         let mut reader = BufReader::new(stream.try_clone().ok()?);
         let mut start = String::new();
         reader.read_line(&mut start).ok()?;
         let path = start.split_whitespace().nth(1)?.to_string();
+        let mut headers = Vec::new();
         loop {
             let mut line = String::new();
             if reader.read_line(&mut line).ok()? == 0 || line.trim_end().is_empty() {
                 break;
             }
+            headers.push(line.trim_end().to_string());
         }
-        Some(path)
+        Some((path, headers))
     }
 
     /// A base nothing listens on, so a request the code should not make
@@ -9539,6 +9621,47 @@ mod tests {
         assert!(ctx.prepare_notification_open(&read));
     }
 
+    #[tokio::test]
+    async fn done_stays_hidden_until_newer_activity_arrives() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let dismissed = thread("7", "seven");
+        let other = thread("8", "eight");
+        ctx.replace_notifications(
+            vec![dismissed.clone(), other.clone()],
+            Some("first"),
+        );
+
+        ctx.dismiss_notification(&dismissed.id);
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![other.clone()]);
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_threads().unwrap())
+                .unwrap(),
+            vec![other.clone()]
+        );
+
+        let visible = ctx.replace_notifications(
+            vec![dismissed.clone(), other.clone()],
+            Some("same-revision"),
+        );
+        assert_eq!(visible, vec![other.clone()]);
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![other.clone()]);
+
+        let mut newer = dismissed;
+        newer.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        let visible = ctx.replace_notifications(
+            vec![newer.clone(), other.clone()],
+            Some("newer-revision"),
+        );
+        assert_eq!(visible, vec![newer.clone(), other.clone()]);
+        assert_eq!(*ctx.notifications.lock().unwrap(), visible);
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_threads().unwrap())
+                .unwrap(),
+            visible
+        );
+    }
+
     fn pull_request(number: u64) -> PullRequest {
         PullRequest {
             number,
@@ -9813,12 +9936,43 @@ mod tests {
         let (base, paths) = serve("200 OK", "[]");
         let (ctx, _received) = ctx(dir.path(), &base, &["a/b"]);
 
-        refresh(&ctx, "test").await;
+        refresh(&ctx, "test", NotificationPollMode::Reconcile).await;
 
         assert_eq!(
             paths.lock().unwrap().as_slice(),
             ["/notifications?all=true&participating=false&per_page=50&page=1"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_reconciliation_repairs_a_stale_conditional_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = thread("7", "stale");
+        let incoming = thread("8", "current");
+        let body = serde_json::to_string(&vec![incoming.clone()]).unwrap();
+        let (base, _paths) = serve_by_request(move |_path, headers| {
+            let conditional = headers.iter().any(|header| {
+                header
+                    .split_once(':')
+                    .is_some_and(|(name, _)| name.eq_ignore_ascii_case("if-modified-since"))
+            });
+            if conditional {
+                ("304 Not Modified", String::new())
+            } else {
+                ("200 OK", body.clone())
+            }
+        });
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        ctx.replace_notifications(
+            vec![old.clone()],
+            Some("Sat, 19 Sep 2026 12:00:00 GMT"),
+        );
+
+        refresh(&ctx, "test", NotificationPollMode::Conditional).await;
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![old]);
+
+        refresh(&ctx, "test", NotificationPollMode::Reconcile).await;
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![incoming]);
     }
 
     #[tokio::test]
@@ -9828,7 +9982,7 @@ mod tests {
         let (mut ctx, received) = ctx(dir.path(), &base, &["a/b"]);
         ctx.github = None;
 
-        refresh(&ctx, "test").await;
+        refresh(&ctx, "test", NotificationPollMode::Reconcile).await;
 
         assert!(paths.lock().unwrap().is_empty());
         assert!(received

@@ -25,12 +25,13 @@ mod review_store;
 
 /// The shape of the tables. Version 18 adds durable worktree-review history
 /// and repeat-review reconciliation records on top of the run schema. Version
-/// 19 persists the exact finding cohort used by verifier attempts.
-/// Versions 13 through 17 migrate in place so local conversations and agent
+/// 19 persists the exact finding cohort used by verifier attempts. Version 20
+/// remembers notifications marked Done in Perch until their next revision.
+/// Schemas 13 through 19 migrate in place so local conversations and agent
 /// history are never discarded.
-pub const SCHEMA_VERSION: u32 = 19;
+pub const SCHEMA_VERSION: u32 = 20;
 
-/// Metadata key holding the validator for the cached notifications inbox.
+/// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +92,10 @@ CREATE TABLE threads (
     id          TEXT PRIMARY KEY,
     updated_at  TEXT NOT NULL,
     json        TEXT NOT NULL
+);
+CREATE TABLE notification_dismissals (
+    thread_id   TEXT PRIMARY KEY,
+    updated_at  TEXT NOT NULL
 );
 CREATE TABLE items (
     id               TEXT PRIMARY KEY,
@@ -170,6 +175,13 @@ CREATE TABLE IF NOT EXISTS threads (
     id          TEXT PRIMARY KEY,
     updated_at  TEXT NOT NULL,
     json        TEXT NOT NULL
+);
+"#;
+
+const NOTIFICATION_DISMISSAL_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS notification_dismissals (
+    thread_id   TEXT PRIMARY KEY,
+    updated_at  TEXT NOT NULL
 );
 "#;
 
@@ -318,6 +330,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             16 => migrate_16_to_17(&tx)?,
             17 => review_store::migrate_17_to_18(&tx)?,
             18 => review_store::migrate_18_to_19(&tx)?,
+            19 => tx.execute_batch(NOTIFICATION_DISMISSAL_SCHEMA)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -1721,10 +1734,12 @@ impl Cache {
     }
 
     // -----------------------------------------------------------------
-    // GitHub notifications inbox
+    // GitHub notification snapshot
     // -----------------------------------------------------------------
 
-    /// Atomically replace the cached inbox and its polling validator.
+    /// Atomically replace the cached notification list and its polling
+    /// validator, retaining local Done marks for the exact revisions they
+    /// dismissed. Newer activity clears the mark and lets the row return.
     ///
     /// The API result is a snapshot, so rows missing from `threads` must be
     /// removed rather than accumulated. Keeping the validator in the same
@@ -1734,15 +1749,49 @@ impl Cache {
         &self,
         threads: &[Thread],
         last_modified: Option<&str>,
-    ) -> Result<(), CacheError> {
+    ) -> Result<Vec<Thread>, CacheError> {
         let tx = self.conn.unchecked_transaction()?;
+        let dismissals = {
+            let mut stmt = tx.prepare(
+                "SELECT thread_id, updated_at FROM notification_dismissals",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut dismissals = HashMap::new();
+            for row in rows {
+                let (thread_id, updated_at) = row?;
+                let updated_at = updated_at.parse::<Timestamp>().map_err(|error| {
+                    CacheError::Corrupt(format!(
+                        "notification dismissal {thread_id} has invalid updated_at: {error}"
+                    ))
+                })?;
+                dismissals.insert(thread_id, updated_at);
+            }
+            dismissals
+        };
+        let mut visible = Vec::with_capacity(threads.len());
+        for thread in threads {
+            match dismissals.get(&thread.id) {
+                Some(dismissed_at) if thread.updated_at <= *dismissed_at => {}
+                Some(_) => {
+                    tx.execute(
+                        "DELETE FROM notification_dismissals WHERE thread_id=?1",
+                        params![thread.id],
+                    )?;
+                    visible.push(thread.clone());
+                }
+                None => visible.push(thread.clone()),
+            }
+        }
+
         tx.execute("DELETE FROM threads", [])?;
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO threads (position, id, updated_at, json)
                  VALUES (?1, ?2, ?3, ?4)",
             )?;
-            for (position, thread) in threads.iter().enumerate() {
+            for (position, thread) in visible.iter().enumerate() {
                 stmt.execute(params![
                     position as i64,
                     thread.id,
@@ -1764,20 +1813,102 @@ impl Cache {
             )?;
         }
         tx.commit()?;
+        Ok(visible)
+    }
+
+    /// Remember that this exact notification revision was marked Done in
+    /// Perch. The mark deliberately outlives the replaceable thread snapshot.
+    pub fn dismiss_notification(
+        &self,
+        thread_id: &str,
+        updated_at: Timestamp,
+    ) -> Result<(), CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let previous = tx
+            .query_row(
+                "SELECT updated_at FROM notification_dismissals WHERE thread_id=?1",
+                params![thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| {
+                value.parse::<Timestamp>().map_err(|error| {
+                    CacheError::Corrupt(format!(
+                        "notification dismissal {thread_id} has invalid updated_at: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let dismissed_at = previous
+            .filter(|previous| *previous > updated_at)
+            .unwrap_or(updated_at);
+        tx.execute(
+            "INSERT INTO notification_dismissals (thread_id, updated_at)
+             VALUES (?1, ?2)
+             ON CONFLICT(thread_id) DO UPDATE SET updated_at=excluded.updated_at",
+            params![thread_id, dismissed_at.to_string()],
+        )?;
+        let cached_updated_at = tx
+            .query_row(
+                "SELECT updated_at FROM threads WHERE id=?1",
+                params![thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| {
+                value.parse::<Timestamp>().map_err(|error| {
+                    CacheError::Corrupt(format!(
+                        "notification {thread_id} has invalid updated_at: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        if cached_updated_at.is_some_and(|cached| cached <= dismissed_at) {
+            tx.execute("DELETE FROM threads WHERE id=?1", params![thread_id])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
-    /// Load the cached inbox in the same most-recent-first order GitHub sent.
+    /// Load the cached list in the same order GitHub sent. Applying the Done
+    /// marks here closes the small crash window between recording a dismissal
+    /// and rewriting the replaceable snapshot.
     pub fn load_threads(&self) -> Result<Vec<Thread>, CacheError> {
         let mut stmt = self
             .conn
             .prepare("SELECT json FROM threads ORDER BY position")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let mut threads = Vec::new();
+        let mut threads: Vec<Thread> = Vec::new();
         for row in rows {
             threads.push(serde_json::from_str(&row?)?);
         }
+        let dismissals = self.notification_dismissals()?;
+        threads.retain(|thread| {
+            dismissals
+                .get(&thread.id)
+                .is_none_or(|dismissed_at| thread.updated_at > *dismissed_at)
+        });
         Ok(threads)
+    }
+
+    fn notification_dismissals(&self) -> Result<HashMap<String, Timestamp>, CacheError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT thread_id, updated_at FROM notification_dismissals")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut dismissals = HashMap::new();
+        for row in rows {
+            let (thread_id, updated_at) = row?;
+            let updated_at = updated_at.parse::<Timestamp>().map_err(|error| {
+                CacheError::Corrupt(format!(
+                    "notification dismissal {thread_id} has invalid updated_at: {error}"
+                ))
+            })?;
+            dismissals.insert(thread_id, updated_at);
+        }
+        Ok(dismissals)
     }
 
     /// The validator paired atomically with [`Self::load_threads`].
@@ -4351,6 +4482,35 @@ mod tests {
     }
 
     #[test]
+    fn schema_19_adds_notification_dismissals_without_losing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let item = pr_item(19);
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&item).unwrap();
+            cache
+                .conn
+                .execute("DROP TABLE notification_dismissals", [])
+                .unwrap();
+            cache.set_meta("schema_version", "19").unwrap();
+        }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 19,
+                to: SCHEMA_VERSION,
+            }
+        );
+        assert_eq!(cache.load_item(&item.id).unwrap(), Some(item));
+        cache
+            .dismiss_notification("19", stamp("2026-09-19T12:00:00Z"))
+            .unwrap();
+    }
+
+    #[test]
     fn a_newer_schema_is_retained_and_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("perch.db");
@@ -4836,6 +4996,78 @@ mod tests {
 
         assert_eq!(c.load_threads().unwrap(), vec![replacement]);
         assert_eq!(c.notifications_last_modified().unwrap(), None);
+    }
+
+    #[test]
+    fn a_done_notification_stays_hidden_across_refresh_and_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let dismissed = notification_thread("1", "2026-09-19T12:00:00Z");
+        let other = notification_thread("2", "2026-09-19T11:00:00Z");
+        {
+            let c = Cache::open(&path, None).unwrap();
+            c.store_threads(
+                &[dismissed.clone(), other.clone()],
+                Some("Sat, 19 Sep 2026 12:00:00 GMT"),
+            )
+            .unwrap();
+            c.dismiss_notification(&dismissed.id, dismissed.updated_at)
+                .unwrap();
+            assert_eq!(c.load_threads().unwrap(), vec![other.clone()]);
+        }
+
+        let c = Cache::open(&path, None).unwrap();
+        assert_eq!(c.load_threads().unwrap(), vec![other.clone()]);
+        let visible = c
+            .store_threads(
+                &[dismissed, other.clone()],
+                Some("Sat, 19 Sep 2026 12:00:00 GMT"),
+            )
+            .unwrap();
+        assert_eq!(visible, vec![other.clone()]);
+        assert_eq!(c.load_threads().unwrap(), vec![other]);
+    }
+
+    #[test]
+    fn newer_activity_clears_done_and_returns_in_github_order() {
+        let c = Cache::open_in_memory().unwrap();
+        let dismissed = notification_thread("1", "2026-09-19T12:00:00Z");
+        c.dismiss_notification(&dismissed.id, dismissed.updated_at)
+            .unwrap();
+
+        let older = notification_thread("1", "2026-09-19T11:00:00Z");
+        let other = notification_thread("2", "2026-09-19T12:30:00Z");
+        let visible = c.store_threads(&[other.clone(), older], None).unwrap();
+        assert_eq!(visible, vec![other.clone()]);
+
+        let newer = notification_thread("1", "2026-09-20T09:00:00Z");
+        let visible = c
+            .store_threads(&[newer.clone(), other.clone()], None)
+            .unwrap();
+        assert_eq!(visible, vec![newer.clone(), other.clone()]);
+        assert_eq!(c.load_threads().unwrap(), vec![newer, other]);
+        assert!(c.notification_dismissals().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stale_done_cannot_hide_newer_activity_or_regress_the_watermark() {
+        let c = Cache::open_in_memory().unwrap();
+        let dismissed = notification_thread("1", "2026-09-19T12:00:00Z");
+        c.dismiss_notification(&dismissed.id, dismissed.updated_at)
+            .unwrap();
+
+        let stale = stamp("2026-09-19T11:00:00Z");
+        c.dismiss_notification(&dismissed.id, stale).unwrap();
+        assert_eq!(
+            c.notification_dismissals().unwrap().get(&dismissed.id),
+            Some(&dismissed.updated_at)
+        );
+
+        let newer = notification_thread("1", "2026-09-20T09:00:00Z");
+        c.store_threads(std::slice::from_ref(&newer), None)
+            .unwrap();
+        c.dismiss_notification(&newer.id, stale).unwrap();
+        assert_eq!(c.load_threads().unwrap(), vec![newer]);
     }
 
     #[test]
