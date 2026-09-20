@@ -74,7 +74,7 @@ fn bar_style(s: floem::style::Style) -> floem::style::Style {
         .gap(12.0)
         .background(theme::CANVAS)
         .border_bottom(1.0)
-        .border_color(theme::BORDER)
+        .border_color(theme::BORDER_MUTED)
 }
 
 
@@ -709,7 +709,7 @@ fn metadata_strip(app: AppState, state: ReviewState, backend: Rc<Backend>, open_
                     .gap(theme::METADATA_GAP)
                     .background(theme::CANVAS_SUBTLE)
                     .border_bottom(1.0)
-                    .border_color(theme::BORDER)
+                    .border_color(theme::BORDER_MUTED)
             })
             .into_any()
         },

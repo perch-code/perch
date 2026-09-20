@@ -1,6 +1,6 @@
 //! Conversation: the item's description, everything said about it on
 //! GitHub, and every thread the reader has had with an agent about it, in
-//! one column of cards in time order, with the composer at the end.
+//! one quiet reading column in time order, with the composer at the end.
 //!
 //! The order is `review::timeline`'s; this module only draws it. The cards
 //! are in `review::cards`, and a thread's card shares its views with the
@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
+use floem::text::FontWeight;
 use floem::views::{Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack};
 
 use crate::backend::Backend;
@@ -69,6 +70,7 @@ pub fn view(
 
     Container::new(
         Stack::vertical((
+            conversation_title(state),
             dyn_stack(
                 cards,
                 |(card, gap)| format!("{}:{gap}", cards::key(card)),
@@ -88,16 +90,40 @@ pub fn view(
                     .selectable(false)
                     .apply_if(!empty(), |s| s.hide())
             }),
-            composer(app, state, composer_backend),
+            composer(app, state, composer_backend)
+                .style(|s| s.width_full().padding_top(theme::CONVERSATION_ENTRY_PADDING)),
         ))
-        .style(|s| s.flex_col().width_full().max_width(theme::CONVERSATION_WIDTH).gap(theme::CARD_GAP)),
+        .style(|s| s.flex_col().width_full().max_width(theme::CONVERSATION_WIDTH)),
     )
     .style(|s| s.width_full().items_start().justify_center().padding(theme::CONVERSATION_PADDING))
     .scroll()
     // A bare key goes to the focused view and bubbles up from there, and
     // a click on the page would otherwise focus nothing: the column takes
     // the focus so `a` reaches the window's handler.
-    .style(|s| s.size_full().min_height(0.0).background(theme::CANVAS_SUBTLE).focusable())
+    .style(|s| s.size_full().min_height(0.0).background(theme::CANVAS).focusable())
+}
+
+/// The full item title belongs in the reading surface as well as the compact
+/// window bar. This mirrors Codex: the bar orients, while the page title starts
+/// the document at a comfortable reading size.
+fn conversation_title(state: ReviewState) -> impl IntoView {
+    let title = move || {
+        state
+            .pull_request
+            .with(|p| p.as_ref().map(|p| p.title.clone()))
+            .or_else(|| state.item.with(|i| i.as_ref().map(|i| i.title().to_string())))
+            .unwrap_or_default()
+    };
+    Label::derived(title)
+        .debug_name("conversation-title")
+        .style(|s| {
+            s.width_full()
+                .font_size(theme::TEXT_PAGE_TITLE)
+                .font_weight(FontWeight::MEDIUM)
+                .line_height(1.18)
+                .color(theme::FG)
+                .padding_bottom(theme::CONVERSATION_TITLE_GAP)
+        })
 }
 
 /// One card, with the room above it.

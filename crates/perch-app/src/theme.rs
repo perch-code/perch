@@ -1,32 +1,33 @@
 //! Every colour, size, and type choice in one place.
 //!
-//! The palette is GitHub Primer's light scale, so the app sits next to
-//! github.com without clashing. Dark mode is a later diff: add a second set
-//! here and select with floem's `dark_mode` style selector.
+//! The palette follows the warm, quiet neutrals of Codex's desktop UI. Dark
+//! mode is a later diff: add a second set here and select with floem's
+//! `dark_mode` style selector.
 
 use floem::peniko::Color;
 
 /// Surfaces.
 pub const CANVAS: Color = Color::from_rgb8(0xff, 0xff, 0xff);
-pub const CANVAS_SUBTLE: Color = Color::from_rgb8(0xf6, 0xf8, 0xfa);
-pub const CANVAS_SIDEBAR: Color = Color::from_rgb8(0xfa, 0xfb, 0xfc);
+pub const CANVAS_SUBTLE: Color = Color::from_rgb8(0xf7, 0xf7, 0xf5);
+pub const CANVAS_SIDEBAR: Color = Color::from_rgb8(0xf8, 0xf8, 0xf6);
 /// The activity rail sits a shade deeper than the panel beside it.
-pub const CANVAS_RAIL: Color = Color::from_rgb8(0xf2, 0xf4, 0xf6);
-pub const CANVAS_HOVER: Color = Color::from_rgb8(0xf3, 0xf4, 0xf6);
+pub const CANVAS_RAIL: Color = Color::from_rgb8(0xf2, 0xf2, 0xef);
+pub const CANVAS_HOVER: Color = Color::from_rgb8(0xee, 0xee, 0xeb);
 
 /// Lines.
-pub const BORDER: Color = Color::from_rgb8(0xd1, 0xd9, 0xe0);
-pub const BORDER_MUTED: Color = Color::from_rgb8(0xe4, 0xe8, 0xed);
+pub const BORDER: Color = Color::from_rgb8(0xdd, 0xdd, 0xd9);
+pub const BORDER_MUTED: Color = Color::from_rgb8(0xeb, 0xeb, 0xe8);
 
 /// Text.
-pub const FG: Color = Color::from_rgb8(0x1f, 0x23, 0x28);
-pub const FG_MUTED: Color = Color::from_rgb8(0x59, 0x63, 0x6e);
-pub const FG_SUBTLE: Color = Color::from_rgb8(0x87, 0x90, 0x9b);
+pub const FG: Color = Color::from_rgb8(0x25, 0x25, 0x23);
+pub const FG_MUTED: Color = Color::from_rgb8(0x68, 0x68, 0x63);
+pub const FG_SUBTLE: Color = Color::from_rgb8(0x98, 0x98, 0x92);
 
 /// Accents.
-pub const ACCENT: Color = Color::from_rgb8(0x09, 0x69, 0xda);
-pub const ACCENT_SUBTLE: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
-pub const ACCENT_RING: Color = Color::from_rgba8(0x09, 0x69, 0xda, 0x55);
+pub const ACCENT: Color = Color::from_rgb8(0x32, 0x32, 0x2f);
+pub const ACCENT_SUBTLE: Color = Color::from_rgb8(0xe9, 0xe9, 0xe6);
+pub const ACCENT_RING: Color = Color::from_rgba8(0x32, 0x32, 0x2f, 0x4d);
+pub const ACTION_HOVER: Color = Color::from_rgb8(0x43, 0x43, 0x3f);
 
 /// Subject states.
 pub const OPEN: Color = Color::from_rgb8(0x1a, 0x7f, 0x37);
@@ -42,8 +43,8 @@ pub const NOTICE_BG: Color = Color::from_rgb8(0xff, 0xf8, 0xc5);
 pub const NOTICE_BORDER: Color = Color::from_rgb8(0xd4, 0xa7, 0x2c);
 pub const NOTICE_FG: Color = Color::from_rgb8(0x7d, 0x4e, 0x00);
 
-pub const BADGE_BG: Color = Color::from_rgb8(0xea, 0xee, 0xf2);
-pub const SHADOW: Color = Color::from_rgba8(0x1f, 0x23, 0x28, 0x14);
+pub const BADGE_BG: Color = Color::from_rgb8(0xed, 0xed, 0xea);
+pub const SHADOW: Color = Color::from_rgba8(0x20, 0x20, 0x1e, 0x12);
 
 /// Avatar placeholders, cycled by name so a row is stable between launches.
 pub const AVATAR_TINTS: [Color; 6] = [
@@ -59,7 +60,8 @@ pub const AVATAR_TINTS: [Color; 6] = [
 /// cache key, so fractional sizes that round together share bitmaps on a
 /// non-retina display.
 pub const TEXT_TITLE: f32 = 15.0;
-pub const TEXT_BODY: f32 = 14.0;
+pub const TEXT_PAGE_TITLE: f32 = 26.0;
+pub const TEXT_BODY: f32 = 15.0;
 pub const TEXT_META: f32 = 13.0;
 pub const TEXT_BADGE: f32 = 12.0;
 pub const TEXT_SECTION: f32 = 11.0;
@@ -75,8 +77,8 @@ pub const OPTICAL_TEXT_LIFT: f64 = 1.0;
 
 /// Layout constants.
 /// The navigation panel beside the activity rail.
-pub const SIDEBAR_WIDTH: f64 = 260.0;
-pub const SIDEBAR_MIN_WIDTH: f64 = 240.0;
+pub const SIDEBAR_WIDTH: f64 = 320.0;
+pub const SIDEBAR_MIN_WIDTH: f64 = 260.0;
 pub const SIDEBAR_MAX_WIDTH: f64 = 520.0;
 /// The always-present rail of destination icons.
 ///
@@ -84,7 +86,7 @@ pub const SIDEBAR_MAX_WIDTH: f64 = 520.0;
 /// top of it, and they need the room.
 pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
 /// An item row in the sidebar: two lines of text and the glyph beside them.
-pub const ROW_HEIGHT: f64 = 46.0;
+pub const ROW_HEIGHT: f64 = 58.0;
 pub const STATUS_HEIGHT: f64 = 34.0;
 /// Room above the rail's first entry, where the traffic lights sit.
 ///
@@ -212,12 +214,12 @@ pub const GUTTER_WIDTH: f64 = 70.0;
 /// Gap between the gutter's change bar and the first character of code.
 pub const CODE_GUTTER_GAP: f64 = 12.0;
 pub const RAIL_WIDTH: f64 = 312.0;
-pub const REVIEW_HEADER_HEIGHT: f64 = 60.0;
+pub const REVIEW_HEADER_HEIGHT: f64 = 52.0;
 /// The thread column beside the editor.
 pub const THREADS_WIDTH: f64 = 360.0;
 pub const THREADS_MIN_WIDTH: f64 = 260.0;
 pub const THREADS_MAX_WIDTH: f64 = 640.0;
-pub const TAB_HEIGHT: f64 = 38.0;
+pub const TAB_HEIGHT: f64 = 42.0;
 /// Widest a tab grows before its name is ellipsized.
 pub const TAB_MAX_WIDTH: f64 = 210.0;
 
@@ -250,14 +252,16 @@ pub const METADATA_AVATAR: f64 = 16.0;
 pub const CHIP_HEIGHT: f64 = 18.0;
 
 /// How wide the reading column is. Prose past this is hard to follow.
-pub const CONVERSATION_WIDTH: f64 = 820.0;
-pub const CONVERSATION_PADDING: f64 = 20.0;
-/// Room between cards, and between an event line and its neighbours.
+pub const CONVERSATION_WIDTH: f64 = 845.0;
+pub const CONVERSATION_PADDING: f64 = 40.0;
+/// Breathing room under the in-page title and around a flat timeline entry.
+pub const CONVERSATION_TITLE_GAP: f64 = 28.0;
+pub const CONVERSATION_ENTRY_PADDING: f64 = 24.0;
+/// Room within entries, and between an event line and its neighbours.
 pub const CARD_GAP: f64 = 12.0;
 pub const EVENT_GAP: f64 = 4.0;
-/// The byline strip across the top of a card, and the text under it.
-pub const BYLINE_HEIGHT: f64 = 40.0;
-pub const CARD_PADDING: f64 = 16.0;
+/// The compact byline at the top of a Conversation entry.
+pub const BYLINE_HEIGHT: f64 = 32.0;
 /// A card's byline avatar, and the smaller one on a line comment nested
 /// inside a review.
 pub const CARD_AVATAR: f64 = 22.0;
@@ -310,7 +314,7 @@ pub const CHEVRON_GLYPH: f64 = 12.0;
 /// clicked.
 pub const CARD_FLASH_MILLIS: u64 = 900;
 /// The box that opens the composer, and the composer in its place.
-pub const ASK_BOX_HEIGHT: f64 = 48.0;
+pub const ASK_BOX_HEIGHT: f64 = 54.0;
 /// The scope button at the top of the rail, and the Viewed count row
 /// between it and the tree.
 pub const SCOPE_BUTTON_HEIGHT: f64 = 34.0;

@@ -157,10 +157,10 @@ pub fn item_row(
                 .width_full()
                 .height(theme::ROW_HEIGHT)
                 .items_center()
-                .padding_left(10.0)
-                .padding_right(6.0)
-                .margin_horiz(6.0)
-                .border_radius(theme::RADIUS);
+                .padding_left(12.0)
+                .padding_right(8.0)
+                .margin_horiz(10.0)
+                .border_radius(12.0);
             if selected() {
                 base.background(theme::ACCENT_SUBTLE)
             } else {

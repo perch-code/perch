@@ -1,13 +1,12 @@
-//! The cards on Conversation: the description, each comment and review
-//! from GitHub, a line for each event, and each local thread. The chrome
-//! is what the issue view's cards had, and the issue view is now a caller.
+//! The entries on Conversation: the description, each comment and review
+//! from GitHub, a line for each event, and each local thread. Conversation
+//! is a flat reading surface; its hierarchy comes from type, whitespace and
+//! hairlines rather than a stack of framed cards.
 //!
 //! A local thread and a GitHub comment must never look like one. Perch
-//! does not write to GitHub, so a card that could be taken for a comment
-//! on the pull request would be a lie. A GitHub card is white with a
-//! byline strip across the top; a thread card sits on the page's own grey
-//! inside a dashed border, with a Local chip in its byline that says on
-//! hover what Local means. The same holds in the code, where a review
+//! does not write to GitHub, so a local thread keeps an inset rule and a
+//! Local chip while GitHub entries remain directly on white. The same
+//! distinction holds in the code, where a review
 //! comment's block is a card under its line: white and solid, against
 //! the grey and dashed card of the reader's own.
 
@@ -68,36 +67,33 @@ pub fn key(card: &Card) -> String {
 // Chrome
 // ---------------------------------------------------------------------
 
-/// One card: a byline strip on top, the text below.
+/// One flat Conversation entry: a compact byline, then the text, with a
+/// single hairline separating it from the next entry.
 pub fn card(header: impl IntoView + 'static, body: floem::AnyView) -> impl IntoView {
     Stack::vertical((
         header,
-        Container::new(body).style(|s| s.width_full().padding(theme::CARD_PADDING)),
+        Container::new(body).style(|s| {
+            s.width_full()
+                .padding_top(10.0)
+                .padding_bottom(theme::CONVERSATION_ENTRY_PADDING)
+        }),
     ))
-    .style(|s| s.flex_col().width_full())
-    .clip()
     .style(|s| {
         s.width_full()
+            .flex_col()
             .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER)
-            .border_radius(theme::RADIUS_LG)
-            .box_shadow_blur(4.0)
-            .box_shadow_v_offset(1.0)
-            .box_shadow_color(theme::SHADOW)
+            .border_bottom(1.0)
+            .border_color(theme::BORDER_MUTED)
     })
 }
 
-/// The strip across the top of a card, with what a byline holds inside.
+/// The compact metadata row at the top of a flat entry.
 fn byline_strip(content: impl IntoView + 'static) -> impl IntoView {
     Container::new(content).style(|s| {
         s.items_center()
             .width_full()
             .height(theme::BYLINE_HEIGHT)
-            .padding_horiz(theme::CARD_PADDING)
-            .background(theme::CANVAS_SIDEBAR)
-            .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .background(theme::CANVAS)
     })
 }
 
@@ -255,15 +251,26 @@ fn ask_about(app: AppState, state: ReviewState, anchor: Option<Anchor>, author: 
 /// The pull request's or issue's own text, led by who opened it.
 pub fn description_card(app: AppState, author: String, avatar_url: String, at: Option<jiff::Timestamp>, body: String) -> impl IntoView {
     let who = Byline { login: author, avatar_url, avatar_size: theme::CARD_AVATAR, glyph: None, verb: "opened".into(), when: at };
+    let description = if body.trim().is_empty() {
+        Label::derived(|| "No description.".to_string())
+            .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG_SUBTLE))
+            .into_any()
+    } else {
+        markdown::render(&body).into_any()
+    };
     card(
         byline_strip(byline(app, who, Empty::new().into_any())),
-        if body.trim().is_empty() {
-            Label::derived(|| "No description.".to_string())
-                .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG_SUBTLE))
-                .into_any()
-        } else {
-            markdown::render(&body).into_any()
-        },
+        Stack::vertical((
+            Label::derived(|| "Description".to_string()).style(|s| {
+                s.font_size(18.0)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .color(theme::FG)
+                    .margin_bottom(10.0)
+            }),
+            description,
+        ))
+        .style(|s| s.flex_col().width_full())
+        .into_any(),
     )
 }
 
@@ -831,9 +838,9 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
         PullEventKind::Draft | PullEventKind::Ready => theme::FG_SUBTLE,
     };
     let at = event.at;
-    // The card's border, its padding and half an avatar put the dot under
-    // the avatars; the text then starts where a login does.
-    let dot_left = 1.0 + theme::CARD_PADDING + theme::CARD_AVATAR / 2.0 - theme::EVENT_DOT / 2.0;
+    // Half an avatar puts the dot under the byline avatars; the text then
+    // starts where their logins do.
+    let dot_left = theme::CARD_AVATAR / 2.0 - theme::EVENT_DOT / 2.0;
     let text_gap = theme::CARD_AVATAR / 2.0 - theme::EVENT_DOT / 2.0 + 9.0;
     Stack::horizontal((
         Empty::new().style(move |s| {
@@ -854,15 +861,22 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
         Label::derived(move || format!("{name} {}", timefmt::relative(at, app.now.get())))
             .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_MUTED).text_ellipsis().min_width(0.0)),
     ))
-    .style(move |s| s.items_center().width_full().height(theme::EVENT_HEIGHT).padding_left(dot_left))
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .height(theme::EVENT_HEIGHT)
+            .padding_left(dot_left)
+            .border_bottom(1.0)
+            .border_color(theme::BORDER_MUTED)
+    })
 }
 
 // ---------------------------------------------------------------------
 // The thread card
 // ---------------------------------------------------------------------
 
-/// A local thread. Not a GitHub card: the page's grey inside a dashed
-/// border, the reader's own avatar, and a Local chip.
+/// A local thread. A quiet inset rule and the Local chip keep it distinct
+/// from GitHub without breaking the transcript into another framed card.
 pub fn thread_card(
     app: AppState,
     state: ReviewState,
@@ -884,12 +898,13 @@ pub fn thread_card(
     .style(|s| {
         s.flex_col()
             .width_full()
-            .padding(theme::CARD_PADDING)
+            .padding_vert(theme::CONVERSATION_ENTRY_PADDING)
+            .padding_left(16.0)
             .gap(theme::CARD_GAP)
-            .background(theme::CANVAS_SUBTLE)
-            .border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
-            .border_color(theme::BORDER)
-            .border_radius(theme::RADIUS_LG)
+            .background(theme::CANVAS)
+            .border_left(2.0)
+            .border_bottom(1.0)
+            .border_color(theme::BORDER_MUTED)
     })
 }
 
@@ -1021,12 +1036,16 @@ pub fn ask_box(app: AppState, state: ReviewState) -> impl IntoView {
         s.items_center()
             .width_full()
             .height(theme::ASK_BOX_HEIGHT)
-            .padding_horiz(theme::CARD_PADDING)
-            .background(theme::CANVAS)
+            .padding_horiz(18.0)
+            .background(theme::CANVAS_SUBTLE)
             .border(1.0)
-            .border_color(theme::BORDER)
-            .border_radius(theme::RADIUS_LG)
-            .hover(|s| s.border_color(theme::ACCENT_RING).cursor(CursorStyle::Text))
+            .border_color(theme::BORDER_MUTED)
+            .border_radius(14.0)
+            .hover(|s| {
+                s.background(theme::CANVAS_HOVER)
+                    .border_color(theme::BORDER)
+                    .cursor(CursorStyle::Text)
+            })
     })
 }
 

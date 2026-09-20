@@ -134,7 +134,7 @@ impl ThreadFace {
     fn message_gap(self) -> f64 {
         match self {
             ThreadFace::Column | ThreadFace::Inline => theme::THREAD_GAP,
-            ThreadFace::Card => theme::CARD_GAP,
+            ThreadFace::Card => 20.0,
         }
     }
 }
@@ -379,18 +379,21 @@ pub fn composer_view(
                 floem::event::EventPropagation::Continue
             },
         )
-        .style(|s| {
-            s.width_full()
+        .style(move |s| {
+            let base = s.width_full()
                 .min_height(72.0)
                 .max_height(220.0)
                 .font_family(theme::FONT_STACK.to_string())
                 .font_size(theme::TEXT_BODY)
-                .padding(8.0)
+                .padding(10.0)
                 .background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS)
-                .focus(|s| s.border_color(theme::ACCENT))
+                .border_radius(10.0);
+            match face {
+                ThreadFace::Card => base.border(0.0),
+                ThreadFace::Column | ThreadFace::Inline => {
+                    base.border(1.0).border_color(theme::BORDER).focus(|s| s.border_color(theme::ACCENT))
+                }
+            }
         });
     // Take the keyboard as soon as the composer appears.
     //
@@ -459,26 +462,54 @@ pub fn composer_view(
             model_picker(app, state),
             effort_picker(app, state),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
-            text_button(|| "Send".to_string(), SidebarIcon::ChevronRight, move || send()),
+            send_button(send.clone()),
         ))
         .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0)),
     ))
     .debug_name("composer-box")
     .style(move |s| {
-        let base = s
-            .flex_col()
-            .padding(12.0)
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::ACCENT_RING)
-            .border_radius(theme::RADIUS_LG);
+        let base = s.flex_col().padding(12.0).border(1.0).border_radius(14.0);
         match face {
-            ThreadFace::Column => base.width_full().margin(theme::THREAD_PADDING).margin_bottom(0.0),
-            ThreadFace::Card => base.width_full(),
+            ThreadFace::Column => base
+                .width_full()
+                .margin(theme::THREAD_PADDING)
+                .margin_bottom(0.0)
+                .background(theme::CANVAS)
+                .border_color(theme::BORDER),
+            ThreadFace::Card => base.width_full().background(theme::CANVAS_SUBTLE).border_color(theme::BORDER_MUTED),
             // A card in the code is placed by its edges, and its width
             // follows from them.
-            ThreadFace::Inline => base,
+            ThreadFace::Inline => base.background(theme::CANVAS).border_color(theme::ACCENT_RING),
         }
+    })
+}
+
+/// The one high-contrast action in the composer, matching Codex's dark
+/// primary controls while the model and effort remain quiet selectors.
+fn send_button(on_click: Rc<dyn Fn()>) -> impl IntoView {
+    Container::new(
+        Stack::horizontal((
+            Label::derived(|| "Send".to_string()).style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .font_weight(FontWeight::MEDIUM)
+                    .color(theme::CANVAS)
+                    .margin_right(6.0)
+                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
+                    .selectable(false)
+            }),
+            sidebar_glyph(SidebarIcon::ChevronRight, theme::CANVAS).style(|s| s.size(13.0, 13.0)),
+        ))
+        .style(|s| s.items_center()),
+    )
+    .on_event_stop(el::Click, move |_, _| on_click())
+    .style(|s| {
+        clickable(s)
+            .height(30.0)
+            .items_center()
+            .padding_horiz(12.0)
+            .background(theme::FG)
+            .border_radius(9.0)
+            .hover(|s| s.background(theme::ACTION_HOVER))
     })
 }
 
@@ -1158,7 +1189,7 @@ pub fn message_view(
     // what the agent did, then what it said, then what it cost. While it
     // runs, or when it failed, the run sits under the question whole.
     let finished = message.run.as_ref().is_some_and(|r| r.status == RunStatus::Finished);
-    match message.run.clone() {
+    let message = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
             run_surface(steps_view(state, run.clone()), face),
             crate::review::markdown::render(&body),
@@ -1173,6 +1204,19 @@ pub fn message_view(
         .style(|s| s.flex_col().width_full().gap(8.0))
         .into_any(),
         None => crate::review::markdown::render(&body).into_any(),
+    };
+
+    if face == ThreadFace::Card && !is_agent {
+        Container::new(message)
+            .style(|s| {
+                s.width_full()
+                    .padding(14.0)
+                    .background(theme::CANVAS_SUBTLE)
+                    .border_radius(12.0)
+            })
+            .into_any()
+    } else {
+        message
     }
 }
 
@@ -1198,17 +1242,14 @@ pub fn run_block(
     )
 }
 
-/// The box a run's lines sit in. The column's cards are white, so the run
-/// sits on the page grey; a thread card on Conversation and a card in the
-/// code are the page grey, so the run sits on white.
+/// The box a run's lines sit in. Tool activity is an inset neutral surface,
+/// separate from the prose without becoming a second heavy card.
 fn run_surface(inner: impl IntoView + 'static, face: ThreadFace) -> impl IntoView {
     Container::new(inner).style(move |s| {
-        let base = s.width_full().padding(8.0).border_radius(theme::RADIUS);
+        let base = s.width_full().padding(10.0).border_radius(12.0);
         match face {
             ThreadFace::Column => base.background(theme::CANVAS_SUBTLE),
-            ThreadFace::Card | ThreadFace::Inline => {
-                base.background(theme::CANVAS).border(1.0).border_color(theme::BORDER_MUTED)
-            }
+            ThreadFace::Card | ThreadFace::Inline => base.background(theme::CANVAS_SUBTLE),
         }
     })
 }

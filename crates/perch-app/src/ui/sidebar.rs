@@ -113,11 +113,11 @@ fn scope_tabs(state: AppState) -> impl IntoView {
                 .style(move |s| {
                     let selected = state.item_filters.with(|f| f.scope == scope);
                     crate::ui::widgets::clickable(s)
-                        .height(28.0)
-                        .padding_horiz(8.0)
+                        .height(30.0)
+                        .padding_horiz(10.0)
                         .padding_vert(0.0)
                         .border(0.0)
-                        .border_radius(theme::RADIUS)
+                        .border_radius(9.0)
                         .font_size(theme::TEXT_META)
                         .color(if selected { theme::FG } else { theme::FG_MUTED })
                         .background(if selected { theme::BADGE_BG } else { theme::CANVAS_SIDEBAR })
@@ -132,7 +132,7 @@ fn scope_tabs(state: AppState) -> impl IntoView {
             .flex_row()
             .items_center()
             .gap(2.0)
-            .padding_horiz(10.0)
+            .padding_horiz(14.0)
             .padding_bottom(2.0)
             .flex_shrink(0.0_f32)
     })
@@ -154,7 +154,7 @@ fn search_row(state: AppState) -> impl IntoView {
         .style(|s| {
             s.width_full()
                 .min_width(0.0)
-                .height(28.0)
+                .height(34.0)
                 .font_size(theme::TEXT_META)
                 // The glyph takes the left padding, and the text starts at
                 // x=42 with the row titles: the row's 10, the border, and 31.
@@ -163,7 +163,7 @@ fn search_row(state: AppState) -> impl IntoView {
                 .background(theme::CANVAS)
                 .border(1.0)
                 .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS)
+                .border_radius(17.0)
                 .focus(|s| s.border_color(theme::ACCENT))
         });
     let id = input.view_id();
@@ -180,12 +180,12 @@ fn search_row(state: AppState) -> impl IntoView {
     // the filter button's is, and lets the pointer through: a click on it
     // is a click in the box. Six in from the box's edge puts it at x=16.
     let glyph = sidebar_glyph(SidebarIcon::Search, theme::FG_SUBTLE)
-        .style(|s| s.size(14.0, 14.0).position(Position::Absolute).inset_left(6.0).pointer_events_none());
+        .style(|s| s.size(14.0, 14.0).position(Position::Absolute).inset_left(8.0).pointer_events_none());
     let search_box =
         Stack::horizontal((input, glyph)).style(|s| s.items_center().flex_grow(1.0_f32).min_width(0.0));
 
     Stack::horizontal((search_box, filter_button(state)))
-        .style(|s| s.items_center().width_full().gap(6.0).padding_horiz(10.0).padding_top(6.0))
+        .style(|s| s.items_center().width_full().gap(8.0).padding_horiz(14.0).padding_top(8.0))
 }
 
 /// The filter menu, in the shape of a settings menu: one row per setting,
@@ -223,13 +223,13 @@ fn filter_button(state: AppState) -> impl IntoView {
         // reads as active.
         let border = if narrowed() { theme::ACCENT_RING } else { theme::BORDER };
         crate::ui::widgets::clickable(s)
-            .size(28.0, 28.0)
+            .size(34.0, 34.0)
             .items_center()
             .justify_center()
             .background(theme::CANVAS)
             .border(1.0)
             .border_color(border)
-            .border_radius(theme::RADIUS)
+            .border_radius(17.0)
             .hover(|s| s.background(theme::CANVAS_HOVER))
     })
 }

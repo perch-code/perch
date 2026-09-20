@@ -2,9 +2,8 @@
 //! has a checkout. The same strip on every item, so the view keeps its
 //! shape when Start work gives an issue a checkout.
 //!
-//! Drawn the way the file tabs draw theirs, an accent line on the active
-//! one, so the two strips read as related: this one picks what the view
-//! is about, that one picks a file within it.
+//! Drawn as the quiet segmented switch in Codex's toolbar: this one picks
+//! what the item view is about, while the file tabs still pick a file.
 
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
@@ -52,17 +51,17 @@ pub fn strip(state: ReviewState) -> impl IntoView {
         s.height(theme::TAB_HEIGHT)
             .width_full()
             .flex_shrink(0.0_f32)
-            .items_end()
-            .padding_left(14.0)
+            .items_center()
+            .justify_center()
             .gap(2.0)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::CANVAS)
             .border_bottom(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::BORDER_MUTED)
     })
 }
 
-/// One tab: its name, its count in the muted colour, and the accent line
-/// under the active one, sitting on the strip's bottom border.
+/// One segment: its name and a quiet count. Selection is a soft neutral
+/// fill, not an accent line, so the control stays out of the document's way.
 fn tab(state: ReviewState, which: ItemTab, name: &'static str, count: impl Fn() -> usize + 'static) -> impl IntoView {
     let active = move || state.tab.get() == which;
     let active_text = active;
@@ -83,12 +82,6 @@ fn tab(state: ReviewState, which: ItemTab, name: &'static str, count: impl Fn() 
                     s.font_size(theme::TEXT_SECTION)
                         .font_weight(FontWeight::MEDIUM)
                         .color(if active_count() { theme::FG_MUTED } else { theme::FG_SUBTLE })
-                        .background(theme::BADGE_BG)
-                        .border_radius(9.0)
-                        .height(18.0)
-                        .padding_horiz(6.0)
-                        .items_center()
-                        .justify_center()
                         .margin_left(6.0)
                         .selectable(false)
                 })
@@ -99,15 +92,15 @@ fn tab(state: ReviewState, which: ItemTab, name: &'static str, count: impl Fn() 
     .style(move |s| {
         let base = s
             .items_center()
-            .height(theme::TAB_HEIGHT)
-            .padding_horiz(10.0)
+            .height(30.0)
+            .padding_horiz(12.0)
             .flex_shrink(0.0_f32)
-            .border_bottom(2.0)
+            .border_radius(9.0)
             .hover(|s| s.cursor(CursorStyle::Pointer));
         if active() {
-            base.border_color(theme::ACCENT)
+            base.background(theme::CANVAS_SUBTLE)
         } else {
-            base.border_color(floem::peniko::Color::TRANSPARENT).hover(|s| s.border_color(theme::BORDER))
+            base.hover(|s| s.background(theme::CANVAS_HOVER))
         }
     })
 }
