@@ -35,7 +35,10 @@ pub use items::{
     Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind,
 };
 pub use model::{Reason, Repository, Subject, SubjectKind, SubjectState, Thread};
-pub use pulls::{CheckStatus, PullRequest, ReviewDecision, Reviewer};
+pub use pulls::{
+    CheckStatus, MergeMethod, MergeMethods, MergeResult, MergeState, MergeableState, PullRequest,
+    PullRequestOverview, RepositoryPermission, ReviewDecision, Reviewer,
+};
 pub use reviews::{
     AnchorMapping, AnchorMappingMethod, AnchorMappingStatus, DeletedReviewHistory, Finding,
     FindingAuditAction, FindingAuditEntry, FindingDisposition, FindingSeverity, FindingTarget,
@@ -46,4 +49,7 @@ pub use reviews::{
     ReviewVerificationInput, ReviewerAttempt, ReviewerOutputSave, ReviewerPhase,
     StoredReviewerOutput, MAX_REVIEW_VERIFICATION_FINDINGS,
 };
-pub use workflow_runs::{worst, CheckState, Checks, WorkflowRunPayload, WorkflowRunQuery};
+pub use workflow_runs::{
+    worst, Check, CheckKind, CheckRunState, CheckState, Checks, WorkflowRunPayload,
+    WorkflowRunQuery,
+};

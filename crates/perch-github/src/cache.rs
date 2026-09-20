@@ -2879,6 +2879,7 @@ mod tests {
         PullRequest {
             number,
             title: "Add a thing".into(),
+            html_url: format!("https://github.com/acme/widgets/pull/{number}"),
             author_login: "octocat".into(),
             author_avatar_url: "https://avatars/1".into(),
             head_sha: "abc123".into(),
@@ -4614,6 +4615,7 @@ mod tests {
                 workflow: "CI".into(),
             },
             url: Some("https://github.com/acme/widgets/actions/runs/1".into()),
+            runs: Vec::new(),
         };
         c.store_checks("item-pr-7", "abc123", &checks).unwrap();
         assert_eq!(
@@ -4631,6 +4633,7 @@ mod tests {
         let green = Checks {
             state: CheckState::Passing,
             url: None,
+            runs: Vec::new(),
         };
         c.store_checks("item-pr-7", "fff999", &green).unwrap();
         assert_eq!(c.load_checks("item-pr-7", "fff999").unwrap(), Some(green));
@@ -4761,6 +4764,7 @@ mod tests {
             &Checks {
                 state: CheckState::Passing,
                 url: None,
+                runs: Vec::new(),
             },
         )
         .unwrap();

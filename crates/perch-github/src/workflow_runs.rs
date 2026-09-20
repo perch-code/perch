@@ -66,7 +66,9 @@ fn parse_title(title: &str) -> Option<(String, String)> {
 pub enum CheckState {
     Passing,
     /// `workflow` is the name of the run that failed, for the hover.
-    Failing { workflow: String },
+    Failing {
+        workflow: String,
+    },
     Running,
     /// No runs, or none that finished with a verdict.
     Unknown,
@@ -78,6 +80,79 @@ pub struct Checks {
     pub state: CheckState,
     /// The failing run's page, else the newest run's. `None` with no runs.
     pub url: Option<String>,
+    /// Each check or legacy commit status in GitHub's rollup. Older cached
+    /// rows only held the aggregate fields above, so this must stay defaulted.
+    #[serde(default)]
+    pub runs: Vec<Check>,
+}
+
+/// One entry in GitHub's status-check rollup. A check run carries its
+/// workflow and event when GitHub Actions made it; a legacy commit status
+/// has neither and is distinguished by `kind`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Check {
+    pub name: String,
+    #[serde(default)]
+    pub workflow: Option<String>,
+    #[serde(default)]
+    pub event: Option<String>,
+    pub state: CheckRunState,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<Timestamp>,
+    #[serde(default)]
+    pub completed_at: Option<Timestamp>,
+    pub kind: CheckKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckKind {
+    CheckRun,
+    StatusContext,
+}
+
+/// A detailed check's state. The aggregate [`CheckState`] intentionally has
+/// fewer values because the header pill only needs red, yellow, and green.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckRunState {
+    Pending,
+    Success,
+    Failure,
+    Neutral,
+    Skipped,
+    Cancelled,
+    TimedOut,
+    ActionRequired,
+    StartupFailure,
+    Stale,
+    Unknown,
+}
+
+impl CheckRunState {
+    pub fn is_pending(self) -> bool {
+        self == Self::Pending
+    }
+
+    pub fn is_passing(self) -> bool {
+        matches!(self, Self::Success | Self::Neutral | Self::Skipped)
+    }
+
+    pub fn is_failing(self) -> bool {
+        matches!(
+            self,
+            Self::Failure
+                | Self::Cancelled
+                | Self::TimedOut
+                | Self::ActionRequired
+                | Self::StartupFailure
+                | Self::Stale
+        )
+    }
 }
 
 impl Checks {
@@ -89,6 +164,42 @@ impl Checks {
         Checks {
             state: worst(runs),
             url: run.map(|r| r.html_url.clone()),
+            runs: runs.iter().map(Check::from).collect(),
+        }
+    }
+}
+
+impl From<&WorkflowRunPayload> for Check {
+    fn from(run: &WorkflowRunPayload) -> Self {
+        let state = if run.is_failing() {
+            match run.conclusion.as_deref() {
+                Some("cancelled") => CheckRunState::Cancelled,
+                Some("timed_out") => CheckRunState::TimedOut,
+                Some("action_required") => CheckRunState::ActionRequired,
+                Some("startup_failure") => CheckRunState::StartupFailure,
+                _ => CheckRunState::Failure,
+            }
+        } else if run.is_running() {
+            CheckRunState::Pending
+        } else {
+            match run.conclusion.as_deref() {
+                Some("success") => CheckRunState::Success,
+                Some("neutral") => CheckRunState::Neutral,
+                Some("skipped") => CheckRunState::Skipped,
+                Some("stale") => CheckRunState::Stale,
+                _ => CheckRunState::Unknown,
+            }
+        };
+        Self {
+            name: run.name.clone(),
+            workflow: Some(run.name.clone()),
+            event: None,
+            state,
+            description: None,
+            url: (!run.html_url.is_empty()).then(|| run.html_url.clone()),
+            started_at: Some(run.created_at),
+            completed_at: (run.status == "completed").then_some(run.updated_at),
+            kind: CheckKind::CheckRun,
         }
     }
 }
@@ -102,7 +213,9 @@ impl Checks {
 /// of green is not green.
 pub fn worst(runs: &[WorkflowRunPayload]) -> CheckState {
     if let Some(run) = failing(runs) {
-        return CheckState::Failing { workflow: run.name.clone() };
+        return CheckState::Failing {
+            workflow: run.name.clone(),
+        };
     }
     if runs.iter().any(WorkflowRunPayload::is_running) {
         return CheckState::Running;
@@ -164,7 +277,10 @@ impl WorkflowRunPayload {
 
     fn is_passing(&self) -> bool {
         self.status == "completed"
-            && matches!(self.conclusion.as_deref(), Some("success" | "neutral" | "skipped"))
+            && matches!(
+                self.conclusion.as_deref(),
+                Some("success" | "neutral" | "skipped")
+            )
     }
 }
 
@@ -238,18 +354,37 @@ mod tests {
             "actor":{"login":"criccomini","avatar_url":"https://avatars/1"}
         }]}"#;
         let payload: WorkflowRunsPayload = serde_json::from_str(json).unwrap();
-        let [run] = payload.workflow_runs.as_slice() else { panic!("one run") };
+        let [run] = payload.workflow_runs.as_slice() else {
+            panic!("one run")
+        };
         assert_eq!(run.name, "Hourly DST");
         assert_eq!(run.run_number, 912);
         assert_eq!(run.head_branch.as_deref(), Some("main"));
-        assert_eq!(run.html_url, "https://github.com/slatedb/slatedb/actions/runs/35035566266");
-        assert_eq!(run.actor.as_ref().map(|a| a.login.as_str()), Some("criccomini"));
+        assert_eq!(
+            run.html_url,
+            "https://github.com/slatedb/slatedb/actions/runs/35035566266"
+        );
+        assert_eq!(
+            run.actor.as_ref().map(|a| a.login.as_str()),
+            Some("criccomini")
+        );
     }
 
     /// A run with the given status and conclusion, created `number`
     /// minutes into the hour so the newest is the highest number.
-    fn run_in(name: &str, number: u64, status: &str, conclusion: Option<&str>) -> WorkflowRunPayload {
-        let mut r = run(name, number, "2026-09-15T23:00:00Z", "2026-09-15T23:45:08Z", "");
+    fn run_in(
+        name: &str,
+        number: u64,
+        status: &str,
+        conclusion: Option<&str>,
+    ) -> WorkflowRunPayload {
+        let mut r = run(
+            name,
+            number,
+            "2026-09-15T23:00:00Z",
+            "2026-09-15T23:45:08Z",
+            "",
+        );
         r.created_at = format!("2026-09-15T23:{number:02}:00Z").parse().unwrap();
         r.status = status.into();
         r.conclusion = conclusion.map(str::to_string);
@@ -258,9 +393,18 @@ mod tests {
 
     #[test]
     fn every_conclusion_and_status_has_a_pill_state() {
-        let one = |status: &str, conclusion: Option<&str>| worst(&[run_in("CI", 1, status, conclusion)]);
-        let failing = CheckState::Failing { workflow: "CI".into() };
-        for c in ["failure", "timed_out", "cancelled", "action_required", "startup_failure"] {
+        let one =
+            |status: &str, conclusion: Option<&str>| worst(&[run_in("CI", 1, status, conclusion)]);
+        let failing = CheckState::Failing {
+            workflow: "CI".into(),
+        };
+        for c in [
+            "failure",
+            "timed_out",
+            "cancelled",
+            "action_required",
+            "startup_failure",
+        ] {
             assert_eq!(one("completed", Some(c)), failing, "{c}");
         }
         for s in ["queued", "in_progress", "waiting", "pending", "requested"] {
@@ -287,7 +431,9 @@ mod tests {
         assert_eq!(worst(&[pass.clone(), pass.clone()]), CheckState::Passing);
         assert_eq!(
             worst(&[pass.clone(), going.clone(), fail.clone(), fail_too.clone()]),
-            CheckState::Failing { workflow: "Test".into() },
+            CheckState::Failing {
+                workflow: "Test".into()
+            },
             "the first failing run in the list is the one named"
         );
         // Unknown runs alongside real ones do not drag the pill down.
@@ -307,22 +453,54 @@ mod tests {
         assert_eq!(green.url.as_deref(), Some(newer_pass.html_url.as_str()));
 
         let red = Checks::of(&[newer_pass, fail.clone(), older_pass]);
-        assert_eq!(red.state, CheckState::Failing { workflow: "Test".into() });
-        assert_eq!(red.url.as_deref(), Some(fail.html_url.as_str()), "not the newest: the one that failed");
+        assert_eq!(
+            red.state,
+            CheckState::Failing {
+                workflow: "Test".into()
+            }
+        );
+        assert_eq!(
+            red.url.as_deref(),
+            Some(fail.html_url.as_str()),
+            "not the newest: the one that failed"
+        );
 
         let none = Checks::of(&[]);
-        assert_eq!(none, Checks { state: CheckState::Unknown, url: None });
+        assert_eq!(
+            none,
+            Checks {
+                state: CheckState::Unknown,
+                url: None,
+                runs: Vec::new()
+            }
+        );
     }
 
     #[test]
     fn checks_round_trip_through_json() {
         let checks = Checks {
-            state: CheckState::Failing { workflow: "Hourly DST".into() },
+            state: CheckState::Failing {
+                workflow: "Hourly DST".into(),
+            },
             url: Some("https://github.com/slatedb/slatedb/actions/runs/912".into()),
+            runs: Vec::new(),
         };
         let json = serde_json::to_string(&checks).unwrap();
         assert_eq!(serde_json::from_str::<Checks>(&json).unwrap(), checks);
         let plain = serde_json::to_string(&CheckState::Passing).unwrap();
-        assert_eq!(serde_json::from_str::<CheckState>(&plain).unwrap(), CheckState::Passing);
+        assert_eq!(
+            serde_json::from_str::<CheckState>(&plain).unwrap(),
+            CheckState::Passing
+        );
+    }
+
+    #[test]
+    fn checks_cached_before_detailed_runs_still_load() {
+        let checks: Checks = serde_json::from_str(
+            r#"{"state":"passing","url":"https://github.com/a/b/actions/runs/1"}"#,
+        )
+        .unwrap();
+        assert_eq!(checks.state, CheckState::Passing);
+        assert!(checks.runs.is_empty());
     }
 }

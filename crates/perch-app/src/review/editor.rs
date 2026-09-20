@@ -1981,6 +1981,7 @@ mod window {
     fn pull_request() -> perch_github::PullRequest {
         perch_github::PullRequest {
             number: 812,
+            html_url: "https://github.com/slatedb/slatedb/pull/812".into(),
             title: "Fold the diff".into(),
             author_login: "octocat".into(),
             author_avatar_url: String::new(),

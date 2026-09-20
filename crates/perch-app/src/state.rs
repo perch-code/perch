@@ -839,10 +839,12 @@ impl AppState {
                 review.set_changed_files(files);
                 review.tree.set(tree);
                 self.open_item.set(Some(item.id.clone()));
+                let overview_loading = pull_request.is_some() && !offline;
                 review.item.set(Some(item));
                 review.stale_head.set(stale_head);
                 review.offline.set(offline);
                 review.pull_request.set(pull_request);
+                review.pull_request_overview_loading.set(overview_loading);
                 review.issue.set(None);
                 review.issue_comments.set(Arc::new(Vec::new()));
                 // The threads follow on their own event; whatever is here
@@ -1299,9 +1301,188 @@ impl AppState {
                     review.discussion.set(Some(discussion));
                 }
             }
-            Event::ChecksReady { item_id, checks } => {
-                if review.is_item(&item_id) {
+            Event::ChecksReady {
+                item_id,
+                repo_full_name,
+                number,
+                head_sha,
+                status_generation,
+                checks,
+            } => {
+                let is_current_subject = review.pull_request.with(|pull| {
+                    pull.as_ref().is_some_and(|pull| {
+                        pull.repo_full_name == repo_full_name
+                            && pull.number == number
+                            && pull.head_sha == head_sha
+                    })
+                });
+                let is_current_generation = status_generation
+                    >= review.pull_request_status_generation.get_untracked();
+                if review.is_item(&item_id) && is_current_subject && is_current_generation {
+                    review
+                        .pull_request_status_generation
+                        .set(status_generation);
                     review.checks.set(Some(checks));
+                }
+            }
+            Event::PullRequestOverviewLoading {
+                item_id,
+                repo_full_name,
+                number,
+                head_sha,
+                status_generation,
+            } => {
+                let is_current_subject = review.pull_request.with(|pull| {
+                    pull.as_ref().is_some_and(|pull| {
+                        pull.repo_full_name == repo_full_name
+                            && pull.number == number
+                            && pull.head_sha == head_sha
+                    })
+                });
+                let is_current_generation = status_generation
+                    >= review.pull_request_status_generation.get_untracked();
+                if review.is_item(&item_id) && is_current_subject && is_current_generation {
+                    review
+                        .pull_request_status_generation
+                        .set(status_generation);
+                    review.pull_request_overview.set(None);
+                    review.pull_request_overview_error.set(None);
+                    review.pull_request_overview_loading.set(true);
+                }
+            }
+            Event::PullRequestOverviewReady {
+                item_id,
+                repo_full_name,
+                number,
+                status_generation,
+                overview,
+            } => {
+                let is_current_subject = review.pull_request.with(|pull| {
+                    pull.as_ref().is_some_and(|pull| {
+                        pull.repo_full_name == repo_full_name
+                            && pull.number == number
+                            && pull.head_sha == overview.head_sha
+                    })
+                });
+                let is_current_generation = status_generation
+                    >= review.pull_request_status_generation.get_untracked();
+                if review.is_item(&item_id) && is_current_subject && is_current_generation {
+                    review
+                        .pull_request_status_generation
+                        .set(status_generation);
+                    review.pull_request_overview.set(Some(overview));
+                    review.pull_request_overview_loading.set(false);
+                    review.pull_request_overview_error.set(None);
+                }
+            }
+            Event::PullRequestOverviewFailed {
+                item_id,
+                repo_full_name,
+                number,
+                head_sha,
+                status_generation,
+                message,
+            } => {
+                let is_current_subject = review.pull_request.with(|pull| {
+                    pull.as_ref().is_some_and(|pull| {
+                        pull.repo_full_name == repo_full_name
+                            && pull.number == number
+                            && pull.head_sha == head_sha
+                    })
+                });
+                let is_current_generation = status_generation
+                    >= review.pull_request_status_generation.get_untracked();
+                if review.is_item(&item_id) && is_current_subject && is_current_generation {
+                    review
+                        .pull_request_status_generation
+                        .set(status_generation);
+                    review.pull_request_overview.set(None);
+                    review.pull_request_overview_loading.set(false);
+                    review.pull_request_overview_error.set(Some(message));
+                }
+            }
+            Event::PullRequestUpdated {
+                item_id,
+                item,
+                pull_request,
+                merge_attempt_id,
+            } => {
+                if review.is_item(&item_id) {
+                    review.item.set(Some(item));
+                    review.pull_request.set(Some(pull_request.clone()));
+                    review.checks.set(None);
+                    if let Some(attempt_id) = merge_attempt_id {
+                        let is_current_attempt = review
+                            .merge_attempt_id
+                            .get_untracked()
+                            .is_none_or(|current| attempt_id >= current);
+                        if is_current_attempt {
+                            review.merge_attempt_id.set(Some(attempt_id));
+                            review.merge_pending.set(false);
+                            review.merge_error.set(None);
+                        }
+                    }
+                    // A REST snapshot can arrive because rules, permissions,
+                    // or checks changed without the head moving. Never leave
+                    // the old live authorization snapshot enabled while its
+                    // replacement is being fetched.
+                    review.pull_request_overview.set(None);
+                    review.pull_request_overview_error.set(None);
+                    review
+                        .pull_request_overview_loading
+                        .set(pull_request.is_open() && !review.offline.get_untracked());
+                }
+            }
+            Event::PullRequestMergeStarted {
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                attempt_id,
+            } => {
+                let is_current_subject = review.pull_request.with(|pull| {
+                    pull.as_ref().is_some_and(|pull| {
+                        pull.repo_full_name == repo_full_name
+                            && pull.number == number
+                            && pull.head_sha == expected_head_sha
+                    })
+                });
+                let is_current_attempt = review
+                    .merge_attempt_id
+                    .get_untracked()
+                    .is_none_or(|current| attempt_id >= current);
+                if review.is_item(&item_id) && is_current_subject && is_current_attempt {
+                    review.merge_attempt_id.set(Some(attempt_id));
+                    review.merge_pending.set(true);
+                    review.merge_error.set(None);
+                }
+            }
+            Event::PullRequestMergeFailed {
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                attempt_id,
+                message,
+            } => {
+                let current_subject_is_open = review.pull_request.with(|pull| {
+                    pull.as_ref().is_some_and(|pull| {
+                        pull.repo_full_name == repo_full_name
+                            && pull.number == number
+                            && pull.head_sha == expected_head_sha
+                            && pull.is_open()
+                    })
+                });
+                let is_current_attempt = review
+                    .merge_attempt_id
+                    .get_untracked()
+                    .is_none_or(|current| attempt_id >= current);
+                if review.is_item(&item_id) && is_current_attempt {
+                    review.merge_attempt_id.set(Some(attempt_id));
+                    review.merge_pending.set(false);
+                    if current_subject_is_open {
+                        review.merge_error.set(Some(message));
+                    }
                 }
             }
             Event::CommitsReady {
@@ -1483,6 +1664,12 @@ impl AppState {
             | Event::DiscussionReady { .. }
             | Event::IssueComments { .. }
             | Event::ChecksReady { .. }
+            | Event::PullRequestOverviewLoading { .. }
+            | Event::PullRequestOverviewReady { .. }
+            | Event::PullRequestOverviewFailed { .. }
+            | Event::PullRequestUpdated { .. }
+            | Event::PullRequestMergeStarted { .. }
+            | Event::PullRequestMergeFailed { .. }
             | Event::CommitsReady { .. }
             | Event::ScopeReady { .. }
             | Event::ViewedReady { .. }
@@ -1606,7 +1793,10 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::review::model::ReviewState;
-    use perch_github::{Reason, Repository, Subject, SubjectKind};
+    use perch_github::{
+        CheckState, Checks, MergeMethods, MergeState, MergeableState, PullRequest,
+        PullRequestOverview, Reason, Repository, RepositoryPermission, Subject, SubjectKind,
+    };
 
     /// A review with an item open, by id.
     fn review_of(id: &str) -> ReviewState {
@@ -1614,6 +1804,68 @@ mod tests {
         let mut item = Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
         item.id = id.into();
         review.item.set(Some(Arc::new(item)));
+        review
+    }
+
+    fn pull_request(number: u64, head_sha: &str, state: &str) -> PullRequest {
+        PullRequest {
+            number,
+            title: format!("pull {number}"),
+            html_url: format!("https://github.com/slatedb/slatedb/pull/{number}"),
+            author_login: "u".into(),
+            author_avatar_url: String::new(),
+            head_sha: head_sha.into(),
+            head_ref: "feature".into(),
+            base_sha: "base".into(),
+            base_ref: "main".into(),
+            draft: false,
+            merged: false,
+            state: state.into(),
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            repo_full_name: "slatedb/slatedb".into(),
+            head_repo_full_name: Some("slatedb/slatedb".into()),
+            updated_at: None,
+            review_requested: false,
+            checks: None,
+            review_decision: None,
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: Vec::new(),
+            milestone: None,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+        }
+    }
+
+    fn pull_request_overview(head_sha: &str) -> Arc<PullRequestOverview> {
+        Arc::new(PullRequestOverview {
+            head_sha: head_sha.into(),
+            mergeable: MergeableState::Mergeable,
+            merge_state: MergeState::Clean,
+            review_decision: None,
+            viewer_can_merge_as_admin: false,
+            viewer_permission: Some(RepositoryPermission::Write),
+            allowed_merge_methods: MergeMethods {
+                merge: true,
+                squash: true,
+                rebase: true,
+            },
+            checks: Checks {
+                state: CheckState::Passing,
+                url: None,
+                runs: Vec::new(),
+            },
+        })
+    }
+
+    fn review_of_pull(id: &str, number: u64, head_sha: &str) -> ReviewState {
+        let review = review_of(id);
+        review
+            .pull_request
+            .set(Some(Arc::new(pull_request(number, head_sha, "open"))));
         review
     }
 
@@ -2067,6 +2319,207 @@ mod tests {
         assert!(review.historical_review.with(Option::is_none));
         assert!(app.accepts_navigation(51));
         assert!(!app.accepts_navigation(50));
+    }
+
+    #[test]
+    fn an_older_same_head_status_generation_cannot_replace_or_clear_the_latest_overview() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        let latest = pull_request_overview("head");
+
+        app.apply_with_review(
+            Event::PullRequestOverviewLoading {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                head_sha: "head".into(),
+                status_generation: 2,
+            },
+            review,
+        );
+        assert_eq!(review.pull_request_status_generation.get(), 2);
+        assert!(review.pull_request_overview_loading.get());
+
+        app.apply_with_review(
+            Event::PullRequestOverviewReady {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                status_generation: 1,
+                overview: pull_request_overview("head"),
+            },
+            review,
+        );
+        assert!(review.pull_request_overview.with(Option::is_none));
+        assert!(review.pull_request_overview_loading.get());
+
+        app.apply_with_review(
+            Event::PullRequestOverviewReady {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                status_generation: 2,
+                overview: latest.clone(),
+            },
+            review,
+        );
+        app.apply_with_review(
+            Event::PullRequestOverviewFailed {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                head_sha: "head".into(),
+                status_generation: 1,
+                message: "stale failure".into(),
+            },
+            review,
+        );
+
+        assert_eq!(review.pull_request_overview.get(), Some(latest));
+        assert!(!review.pull_request_overview_loading.get());
+        assert!(review.pull_request_overview_error.with(Option::is_none));
+        assert_eq!(review.pull_request_status_generation.get(), 2);
+    }
+
+    #[test]
+    fn a_current_status_failure_clears_the_merge_authorization_snapshot() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+
+        app.apply_with_review(
+            Event::PullRequestOverviewReady {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                status_generation: 4,
+                overview: pull_request_overview("head"),
+            },
+            review,
+        );
+        assert!(review.pull_request_overview.with(Option::is_some));
+
+        app.apply_with_review(
+            Event::PullRequestOverviewFailed {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                head_sha: "head".into(),
+                status_generation: 4,
+                message: "status unavailable".into(),
+            },
+            review,
+        );
+
+        assert!(review.pull_request_overview.with(Option::is_none));
+        assert!(!review.pull_request_overview_loading.get());
+        assert_eq!(
+            review.pull_request_overview_error.get().as_deref(),
+            Some("status unavailable")
+        );
+        assert_eq!(review.pull_request_status_generation.get(), 4);
+    }
+
+    #[test]
+    fn only_the_current_merge_attempt_can_be_settled_by_refresh_or_failure() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        let item = review.item.get().unwrap();
+
+        app.apply_with_review(
+            Event::PullRequestMergeStarted {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 10,
+            },
+            review,
+        );
+        assert!(review.merge_pending.get());
+        assert_eq!(review.merge_attempt_id.get(), Some(10));
+
+        app.apply_with_review(
+            Event::PullRequestUpdated {
+                item_id: "wt".into(),
+                item: item.clone(),
+                pull_request: Arc::new(pull_request(7, "head", "open")),
+                merge_attempt_id: None,
+            },
+            review,
+        );
+        app.apply_with_review(
+            Event::PullRequestUpdated {
+                item_id: "wt".into(),
+                item: item.clone(),
+                pull_request: Arc::new(pull_request(7, "head", "open")),
+                merge_attempt_id: Some(9),
+            },
+            review,
+        );
+        app.apply_with_review(
+            Event::PullRequestMergeFailed {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 9,
+                message: "stale failure".into(),
+            },
+            review,
+        );
+        assert!(review.merge_pending.get());
+        assert_eq!(review.merge_attempt_id.get(), Some(10));
+        assert!(review.merge_error.with(Option::is_none));
+
+        app.apply_with_review(
+            Event::PullRequestMergeFailed {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 10,
+                message: "merge failed".into(),
+            },
+            review,
+        );
+        assert!(!review.merge_pending.get());
+        assert_eq!(review.merge_attempt_id.get(), Some(10));
+        assert_eq!(review.merge_error.get().as_deref(), Some("merge failed"));
+
+        app.apply_with_review(
+            Event::PullRequestMergeStarted {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 11,
+            },
+            review,
+        );
+        app.apply_with_review(
+            Event::PullRequestUpdated {
+                item_id: "wt".into(),
+                item: item.clone(),
+                pull_request: Arc::new(pull_request(7, "head", "open")),
+                merge_attempt_id: Some(10),
+            },
+            review,
+        );
+        assert!(review.merge_pending.get());
+        assert_eq!(review.merge_attempt_id.get(), Some(11));
+
+        app.apply_with_review(
+            Event::PullRequestUpdated {
+                item_id: "wt".into(),
+                item,
+                pull_request: Arc::new(pull_request(7, "head", "closed")),
+                merge_attempt_id: Some(11),
+            },
+            review,
+        );
+        assert!(!review.merge_pending.get());
+        assert_eq!(review.merge_attempt_id.get(), Some(11));
+        assert!(review.merge_error.with(Option::is_none));
     }
 
     #[test]

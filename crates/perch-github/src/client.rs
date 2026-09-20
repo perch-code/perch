@@ -9,9 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{
-    HeaderMap, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED,
-};
+use http::header::{HeaderMap, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 use http::StatusCode;
 use http_body_util::BodyExt;
 use jiff::Timestamp;
@@ -23,7 +21,10 @@ use crate::discussion::{
 };
 use crate::items::{Issue, IssuePayload};
 use crate::model::Thread;
-use crate::pulls::{PullPayload, PullRequest};
+use crate::pulls::{
+    MergeMethod, MergeRequest, MergeResult, PullPayload, PullRequest, PullRequestOverview,
+    PullRequestOverviewAccumulator, PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
+};
 use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunsPayload};
 
 /// Page size for the notifications list. GitHub caps `per_page` at 50 here.
@@ -50,6 +51,8 @@ pub enum Error {
     Network(String),
     #[error("could not parse GitHub's response: {0}")]
     Decode(String),
+    #[error("GitHub GraphQL returned errors: {0}")]
+    Graphql(String),
 }
 
 /// What asking after a branch's pull request gave back.
@@ -58,7 +61,10 @@ pub enum PullLookup {
     /// A 304: whatever was known still holds.
     Unchanged,
     /// A fresh answer, and the tag to ask with next time.
-    Answer { pull: Option<Box<PullRequest>>, etag: Option<String> },
+    Answer {
+        pull: Option<Box<PullRequest>>,
+        etag: Option<String>,
+    },
 }
 
 /// Outcome of a notifications poll.
@@ -121,9 +127,7 @@ impl GitHub {
                 .base_uri(base)
                 .map_err(|e| Error::Network(e.to_string()))?;
         }
-        let octo = builder
-            .build()
-            .map_err(|e| Error::Network(e.to_string()))?;
+        let octo = builder.build().map_err(|e| Error::Network(e.to_string()))?;
 
         let http = reqwest::Client::builder()
             .user_agent(concat!("perch/", env!("CARGO_PKG_VERSION")))
@@ -190,8 +194,8 @@ impl GitHub {
                 poll_interval = poll_interval.max(response.poll_interval);
             }
 
-            let page_threads: Vec<Thread> = serde_json::from_str(&response.body)
-                .map_err(|e| Error::Decode(e.to_string()))?;
+            let page_threads: Vec<Thread> =
+                serde_json::from_str(&response.body).map_err(|e| Error::Decode(e.to_string()))?;
             let is_last_page = page_threads.len() < PER_PAGE;
             threads.extend(page_threads);
             if is_last_page {
@@ -221,8 +225,11 @@ impl GitHub {
             ._patch(&path, None::<&()>)
             .await
             .map_err(map_octocrab_error)?;
-        self.finish_mutation(response, &[StatusCode::RESET_CONTENT, StatusCode::NOT_MODIFIED])
-            .await
+        self.finish_mutation(
+            response,
+            &[StatusCode::RESET_CONTENT, StatusCode::NOT_MODIFIED],
+        )
+        .await
     }
 
     /// Remove one notification from github.com's inbox as Done.
@@ -235,7 +242,8 @@ impl GitHub {
             ._delete(&path, None::<&()>)
             .await
             .map_err(map_octocrab_error)?;
-        self.finish_mutation(response, &[StatusCode::NO_CONTENT]).await
+        self.finish_mutation(response, &[StatusCode::NO_CONTENT])
+            .await
     }
 
     /// Ignore future activity on a notification thread, including when the
@@ -261,9 +269,8 @@ impl GitHub {
         page: usize,
         last_modified: Option<&str>,
     ) -> Result<NotificationPage, Error> {
-        let uri = format!(
-            "/notifications?all=true&participating=false&per_page={PER_PAGE}&page={page}"
-        );
+        let uri =
+            format!("/notifications?all=true&participating=false&per_page={PER_PAGE}&page={page}");
         let fetched = self.get(&uri, modified_since(last_modified)).await?;
         let last_modified = header_str(&fetched.headers, LAST_MODIFIED.as_str());
         let poll_interval = header_str(&fetched.headers, "x-poll-interval")
@@ -296,6 +303,95 @@ impl GitHub {
         Ok(payload.into_pull_request(repo_full_name))
     }
 
+    /// GitHub's computed merge state and complete check/status rollup for a
+    /// pull request. Connections larger than GitHub's hundred-row page are
+    /// drained, with every page fenced to the first page's head SHA.
+    pub async fn fetch_pull_request_overview(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<PullRequestOverview, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        let number = i32::try_from(number)
+            .map_err(|_| Error::Decode(format!("pull request number is too large: {number}")))?;
+        let mut cursor = None::<String>;
+        let mut seen_cursors = std::collections::HashSet::<String>::new();
+        let mut overview = None::<PullRequestOverviewAccumulator>;
+
+        loop {
+            let payload = serde_json::json!({
+                "query": PULL_REQUEST_OVERVIEW_QUERY,
+                "variables": {
+                    "owner": owner,
+                    "name": name,
+                    "number": number,
+                    "contextsCursor": cursor.as_deref(),
+                }
+            });
+            let data: PullRequestOverviewQuery = self.graphql(&payload).await?;
+            let page = data.into_page().ok_or_else(|| {
+                Error::Decode(format!(
+                    "GitHub returned no pull request for {repo_full_name}#{number}"
+                ))
+            })?;
+            match overview.as_mut() {
+                Some(overview) => overview.push(page).map_err(Error::Decode)?,
+                None => {
+                    overview = Some(
+                        PullRequestOverviewAccumulator::new(page).map_err(Error::Decode)?,
+                    );
+                }
+            }
+
+            let next = overview
+                .as_ref()
+                .and_then(|overview| overview.next_contexts_cursor())
+                .map(str::to_owned);
+            let Some(next) = next else { break };
+            if !seen_cursors.insert(next.clone()) {
+                return Err(Error::Decode(
+                    "GitHub repeated a check-context page cursor".into(),
+                ));
+            }
+            cursor = Some(next);
+        }
+
+        overview
+            .map(PullRequestOverviewAccumulator::into_overview)
+            .ok_or_else(|| Error::Decode("GitHub returned no pull request overview".into()))
+    }
+
+    /// Merge exactly the head the user confirmed. GitHub rejects the request
+    /// with 409 if the pull request moved before this reaches the server.
+    pub async fn merge_pull_request(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        expected_head_sha: &str,
+        method: MergeMethod,
+    ) -> Result<MergeResult, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        if expected_head_sha.is_empty() || expected_head_sha.trim() != expected_head_sha {
+            return Err(Error::Decode(
+                "expected pull request head SHA is empty or invalid".into(),
+            ));
+        }
+        let path = format!("/repos/{owner}/{name}/pulls/{number}/merge");
+        let body = MergeRequest {
+            sha: expected_head_sha,
+            merge_method: method.as_str(),
+        };
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._put(&path, Some(&body))
+            .await
+            .map_err(map_octocrab_error)?;
+        let body = self.finish_response(response, &[StatusCode::OK]).await?;
+        serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))
+    }
+
     /// The workflow runs for one commit, newest first. What the checks
     /// pill is set from. One page: a head with more than a hundred runs is
     /// not a head anyone is reviewing.
@@ -305,7 +401,9 @@ impl GitHub {
         head_sha: &str,
     ) -> Result<Vec<WorkflowRunPayload>, Error> {
         let body = self
-            .get_text(&format!("/repos/{repo_full_name}/actions/runs?head_sha={head_sha}&per_page=100"))
+            .get_text(&format!(
+                "/repos/{repo_full_name}/actions/runs?head_sha={head_sha}&per_page=100"
+            ))
             .await?;
         let payload: WorkflowRunsPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
@@ -325,12 +423,15 @@ impl GitHub {
         let pull: PullSummary =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
 
-        let comments: Vec<IssueCommentPayload> =
-            self.list_all(&format!("{base}/issues/{number}/comments")).await?;
-        let reviews: Vec<ReviewPayload> =
-            self.list_all(&format!("{base}/pulls/{number}/reviews")).await?;
-        let review_comments: Vec<ReviewCommentPayload> =
-            self.list_all(&format!("{base}/pulls/{number}/comments")).await?;
+        let comments: Vec<IssueCommentPayload> = self
+            .list_all(&format!("{base}/issues/{number}/comments"))
+            .await?;
+        let reviews: Vec<ReviewPayload> = self
+            .list_all(&format!("{base}/pulls/{number}/reviews"))
+            .await?;
+        let review_comments: Vec<ReviewCommentPayload> = self
+            .list_all(&format!("{base}/pulls/{number}/comments"))
+            .await?;
 
         Ok(Discussion {
             opened_at: pull.created_at,
@@ -338,7 +439,10 @@ impl GitHub {
             body: pull.body.unwrap_or_default(),
             comments: comments.into_iter().map(IssueComment::from).collect(),
             reviews: reviews.into_iter().map(Review::from).collect(),
-            review_comments: review_comments.into_iter().map(ReviewComment::from).collect(),
+            review_comments: review_comments
+                .into_iter()
+                .map(ReviewComment::from)
+                .collect(),
         })
     }
 
@@ -354,7 +458,9 @@ impl GitHub {
         let payload: IssuePayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
         if payload.is_pull_request() {
-            return Err(Error::Decode(format!("{repo_full_name}#{number} is a pull request")));
+            return Err(Error::Decode(format!(
+                "{repo_full_name}#{number} is a pull request"
+            )));
         }
         Ok(payload.into_issue(repo_full_name))
     }
@@ -389,7 +495,8 @@ impl GitHub {
         etag: Option<&str>,
     ) -> Result<PullLookup, Error> {
         let head_raw = format!("{head_owner}:{branch}");
-        let head = percent_encoding::utf8_percent_encode(&head_raw, percent_encoding::NON_ALPHANUMERIC);
+        let head =
+            percent_encoding::utf8_percent_encode(&head_raw, percent_encoding::NON_ALPHANUMERIC);
         let path = format!("/repos/{repo_full_name}/pulls?head={head}&state=all&per_page=5");
 
         let fetched = self.get(&path, conditional(etag)).await?;
@@ -409,7 +516,10 @@ impl GitHub {
             let mut all = payloads;
             Box::new(all.swap_remove(i).into_pull_request(repo_full_name))
         });
-        Ok(PullLookup::Answer { pull, etag: new_etag })
+        Ok(PullLookup::Answer {
+            pull,
+            etag: new_etag,
+        })
     }
 
     /// Every page of a list endpoint, concatenated.
@@ -422,7 +532,9 @@ impl GitHub {
         for page in 1..=LIST_MAX_PAGES {
             let joiner = if path.contains('?') { '&' } else { '?' };
             let body = self
-                .get_text(&format!("{path}{joiner}per_page={LIST_PER_PAGE}&page={page}"))
+                .get_text(&format!(
+                    "{path}{joiner}per_page={LIST_PER_PAGE}&page={page}"
+                ))
                 .await?;
             let items: Vec<T> =
                 serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
@@ -460,7 +572,11 @@ impl GitHub {
         self.remember_rate_headers(remaining, reset, retry_after);
 
         if status == StatusCode::NOT_MODIFIED {
-            return Ok(Fetched { status, headers, body: String::new() });
+            return Ok(Fetched {
+                status,
+                headers,
+                body: String::new(),
+            });
         }
 
         let body = body_text(response).await;
@@ -469,7 +585,42 @@ impl GitHub {
             self.remember_rate_limit(&error);
             return Err(error);
         }
-        Ok(Fetched { status, headers, body })
+        Ok(Fetched {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    /// One GraphQL request with the same shared rate gate and HTTP error
+    /// classification as the REST client.
+    async fn graphql<T: serde::de::DeserializeOwned>(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<T, Error> {
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._post("/graphql", Some(payload))
+            .await
+            .map_err(map_octocrab_error)?;
+        let body = self.finish_response(response, &[StatusCode::OK]).await?;
+        let envelope: GraphqlEnvelope<T> =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        if !envelope.errors.is_empty() {
+            return Err(Error::Graphql(
+                envelope
+                    .errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
+        envelope
+            .data
+            .ok_or_else(|| Error::Decode("GitHub's GraphQL response had no data".into()))
     }
 
     /// Classify a mutation response with the same error behavior as GETs.
@@ -483,6 +634,18 @@ impl GitHub {
     where
         B: http_body::Body<Data = Bytes>,
     {
+        self.finish_response(response, accepted).await.map(drop)
+    }
+
+    /// Consume a response, preserving its body for a JSON-returning mutation.
+    async fn finish_response<B>(
+        &self,
+        response: http::Response<B>,
+        accepted: &[StatusCode],
+    ) -> Result<String, Error>
+    where
+        B: http_body::Body<Data = Bytes>,
+    {
         let status = response.status();
         let headers = response.headers().clone();
         let (remaining, reset, retry_after) = rate_headers(&headers);
@@ -490,7 +653,7 @@ impl GitHub {
         let body = body_text(response).await;
 
         if accepted.contains(&status) {
-            return Ok(());
+            return Ok(body);
         }
         let error = classify(status, remaining, reset, retry_after, body);
         self.remember_rate_limit(&error);
@@ -559,6 +722,32 @@ impl GitHub {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct GraphqlEnvelope<T> {
+    data: Option<T>,
+    #[serde(default)]
+    errors: Vec<GraphqlProblem>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GraphqlProblem {
+    #[serde(default)]
+    message: String,
+}
+
+/// Split a repository identity before placing it in either a GraphQL
+/// variable or REST path.
+fn repo_parts(repo_full_name: &str) -> Result<(&str, &str), Error> {
+    match repo_full_name.split_once('/') {
+        Some((owner, name)) if !owner.is_empty() && !name.is_empty() && !name.contains('/') => {
+            Ok((owner, name))
+        }
+        _ => Err(Error::Decode(format!(
+            "repository name is not owner/repo: {repo_full_name}"
+        ))),
+    }
+}
+
 /// The request headers for a conditional GET: `If-None-Match` when there
 /// is a tag to ask with, nothing otherwise.
 fn conditional(etag: Option<&str>) -> Option<HeaderMap> {
@@ -616,7 +805,9 @@ fn rate_limit_deadline(reset_epoch: Option<i64>, retry_after_secs: Option<u64>) 
         let seconds = i64::try_from(seconds.max(1)).unwrap_or(i64::MAX);
         return now.saturating_add(seconds);
     }
-    reset_epoch.filter(|reset| *reset > now).unwrap_or_else(|| now.saturating_add(60))
+    reset_epoch
+        .filter(|reset| *reset > now)
+        .unwrap_or_else(|| now.saturating_add(60))
 }
 
 async fn body_text(response: http::Response<impl http_body::Body<Data = Bytes>>) -> String {
@@ -653,7 +844,9 @@ fn classify(
 
 fn map_octocrab_error(e: octocrab::Error) -> Error {
     match &e {
-        octocrab::Error::GitHub { source, .. } if source.status_code == StatusCode::UNAUTHORIZED => {
+        octocrab::Error::GitHub { source, .. }
+            if source.status_code == StatusCode::UNAUTHORIZED =>
+        {
             Error::Unauthorized
         }
         _ => Error::Network(e.to_string()),
@@ -666,8 +859,14 @@ mod tests {
 
     #[test]
     fn avatar_urls_gain_a_size_parameter() {
-        assert_eq!(with_size_param("https://x/a.png", 64), "https://x/a.png?s=64");
-        assert_eq!(with_size_param("https://x/a?v=4", 64), "https://x/a?v=4&s=64");
+        assert_eq!(
+            with_size_param("https://x/a.png", 64),
+            "https://x/a.png?s=64"
+        );
+        assert_eq!(
+            with_size_param("https://x/a?v=4", 64),
+            "https://x/a?v=4&s=64"
+        );
     }
 
     #[test]
@@ -677,8 +876,17 @@ mod tests {
             Error::Unauthorized
         ));
         assert!(matches!(
-            classify(StatusCode::FORBIDDEN, Some(0), Some(123), None, String::new()),
-            Error::RateLimited { reset_epoch: Some(123), retry_after_secs: None }
+            classify(
+                StatusCode::FORBIDDEN,
+                Some(0),
+                Some(123),
+                None,
+                String::new()
+            ),
+            Error::RateLimited {
+                reset_epoch: Some(123),
+                retry_after_secs: None
+            }
         ));
         // A 403 that is not a rate limit stays a plain status error.
         assert!(matches!(
@@ -716,5 +924,4 @@ mod tests {
             }) if reset >= before + 3_600
         ));
     }
-
 }

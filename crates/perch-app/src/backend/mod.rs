@@ -16,7 +16,8 @@ use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, ReviewSnapshotStore, Store};
 use perch_github::{
     resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentThread,
-    Config, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, NewRunEvent, PullRequest,
+    Config, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, MergeMethod, MergeState,
+    MergeableState, NewRunEvent, PullRequest, PullRequestOverview, RepositoryPermission,
     RevisionContext, RunEvent as StoredRunEvent, RunEventRecord, RunHistoryFilter, RunLabels,
     RunOwner, RunPurpose, RunRecord, RunStatus, RunSummary, SubjectKind, TerminalReason, Thread,
     ThreadOrigin,
@@ -94,6 +95,18 @@ pub enum Command {
     /// from GitHub's inbox.
     UnsubscribeNotification {
         thread_id: String,
+    },
+    /// Merge the exact pull request head the reader confirmed. GitHub
+    /// performs the merge; `bypass_requirements` records the explicit UI
+    /// consent needed before an authorized rules bypass is attempted.
+    MergePullRequest {
+        attempt_id: u64,
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        expected_head_sha: String,
+        method: MergeMethod,
+        bypass_requirements: bool,
     },
     /// Read, diff, and highlight one file of the open checkout, over the
     /// scope that is set.
@@ -474,7 +487,58 @@ pub enum Event {
     /// The workflow runs' verdict for the item's head.
     ChecksReady {
         item_id: String,
+        repo_full_name: String,
+        number: u64,
+        head_sha: String,
+        status_generation: u64,
         checks: Arc<perch_github::Checks>,
+    },
+    PullRequestOverviewLoading {
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        head_sha: String,
+        status_generation: u64,
+    },
+    /// Live status for the pull request's exact head. Cached checks may
+    /// precede this, but merge controls only use this fresh answer.
+    PullRequestOverviewReady {
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        status_generation: u64,
+        overview: Arc<perch_github::PullRequestOverview>,
+    },
+    PullRequestOverviewFailed {
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        head_sha: String,
+        status_generation: u64,
+        message: String,
+    },
+    /// A fresh pull request and its durable item after a remote mutation or
+    /// notification refresh.
+    PullRequestUpdated {
+        item_id: String,
+        item: Arc<Item>,
+        pull_request: Arc<PullRequest>,
+        merge_attempt_id: Option<u64>,
+    },
+    PullRequestMergeStarted {
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        expected_head_sha: String,
+        attempt_id: u64,
+    },
+    PullRequestMergeFailed {
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        expected_head_sha: String,
+        attempt_id: u64,
+        message: String,
     },
     /// The commits over the base and whether the checkout has work in it,
     /// for the scope menu, and the head as it was at the previous open,
@@ -558,6 +622,7 @@ pub struct Backend {
     commands: UnboundedSender<Command>,
     navigation_requests: Arc<NavigationRequests>,
     scope_requests: Arc<ScopeRequests>,
+    merge_attempts: Arc<MergeAttempts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1211,6 +1276,68 @@ impl ScopeRequests {
     }
 }
 
+/// Monotonic generations for live pull-request status reads. Generations are
+/// per item because unrelated reviews may refresh concurrently.
+#[derive(Debug, Default)]
+struct PullRequestStatusRequests {
+    latest: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl PullRequestStatusRequests {
+    fn begin(&self, item_id: &str) -> u64 {
+        let Ok(mut latest) = self.latest.lock() else {
+            return 0;
+        };
+        let generation = latest
+            .get(item_id)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(1);
+        latest.insert(item_id.to_string(), generation);
+        generation
+    }
+
+    fn is_current(&self, item_id: &str, generation: u64) -> bool {
+        self.latest
+            .lock()
+            .ok()
+            .and_then(|latest| latest.get(item_id).copied())
+            == Some(generation)
+    }
+}
+
+/// Merge attempts are registered synchronously by the UI handle. Keeping the
+/// in-flight item here both assigns an ordering identity and suppresses a
+/// second REST mutation while the first is unresolved.
+#[derive(Debug, Default)]
+struct MergeAttempts {
+    next_id: std::sync::atomic::AtomicU64,
+    in_flight: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl MergeAttempts {
+    fn begin(&self, item_id: &str) -> Option<u64> {
+        let mut in_flight = self.in_flight.lock().ok()?;
+        if in_flight.contains_key(item_id) {
+            return None;
+        }
+        let attempt_id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        in_flight.insert(item_id.to_string(), attempt_id);
+        Some(attempt_id)
+    }
+
+    fn finish(&self, item_id: &str, attempt_id: u64) {
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            if in_flight.get(item_id).copied() == Some(attempt_id) {
+                in_flight.remove(item_id);
+            }
+        }
+    }
+}
+
 impl Backend {
     pub fn refresh(&self) {
         let _ = self.commands.send(Command::Refresh);
@@ -1263,6 +1390,32 @@ impl Backend {
         let _ = self.commands.send(Command::UnsubscribeNotification {
             thread_id: thread_id.to_string(),
         });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_pull_request(
+        &self,
+        item_id: &str,
+        repo_full_name: &str,
+        number: u64,
+        expected_head_sha: &str,
+        method: MergeMethod,
+        bypass_requirements: bool,
+    ) {
+        let Some(attempt_id) = self.merge_attempts.begin(item_id) else {
+            return;
+        };
+        if self.commands.send(Command::MergePullRequest {
+            attempt_id,
+            item_id: item_id.to_string(),
+            repo_full_name: repo_full_name.to_string(),
+            number,
+            expected_head_sha: expected_head_sha.to_string(),
+            method,
+            bypass_requirements,
+        }).is_err() {
+            self.merge_attempts.finish(item_id, attempt_id);
+        }
     }
 
     pub fn open_item(&self, id: &str) -> u64 {
@@ -1603,6 +1756,7 @@ impl Backend {
             commands,
             navigation_requests: Arc::default(),
             scope_requests: Arc::default(),
+            merge_attempts: Arc::default(),
         }
     }
 }
@@ -1615,6 +1769,8 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
     let worker_navigation_requests = navigation_requests.clone();
     let scope_requests = Arc::<ScopeRequests>::default();
     let worker_scope_requests = scope_requests.clone();
+    let merge_attempts = Arc::<MergeAttempts>::default();
+    let worker_merge_attempts = merge_attempts.clone();
 
     std::thread::Builder::new()
         .name("perch-backend".into())
@@ -1637,6 +1793,7 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
                 evt_tx,
                 worker_navigation_requests,
                 worker_scope_requests,
+                worker_merge_attempts,
             ));
         })
         .expect("spawn backend thread");
@@ -1646,6 +1803,7 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
             commands: cmd_tx,
             navigation_requests,
             scope_requests,
+            merge_attempts,
         },
         evt_rx,
     )
@@ -1656,6 +1814,7 @@ async fn run(
     events: EventSender<Event>,
     navigation_requests: Arc<NavigationRequests>,
     scope_requests: Arc<ScopeRequests>,
+    merge_attempts: Arc<MergeAttempts>,
 ) {
     tracing::info!("backend started");
     let mut config = Config::load();
@@ -1820,6 +1979,8 @@ async fn run(
         review_snapshots,
         navigation_requests,
         scope_requests,
+        status_requests: Arc::default(),
+        merge_attempts,
         review_navigation: Arc::new(tokio::sync::Mutex::new(())),
         review_admissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
@@ -2069,6 +2230,39 @@ async fn run(
                 } else {
                     ctx.notice("A GitHub token is required to change notifications");
                 }
+            }
+            Command::MergePullRequest {
+                attempt_id,
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                method,
+                bypass_requirements,
+            } => {
+                ctx.clear_notice();
+                let _ = ctx.events.send(Event::PullRequestMergeStarted {
+                    item_id: item_id.clone(),
+                    repo_full_name: repo_full_name.clone(),
+                    number,
+                    expected_head_sha: expected_head_sha.clone(),
+                    attempt_id,
+                });
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    merge_open_pull_request(
+                        &ctx,
+                        attempt_id,
+                        &item_id,
+                        &repo_full_name,
+                        number,
+                        &expected_head_sha,
+                        method,
+                        bypass_requirements,
+                    )
+                    .await;
+                    ctx.merge_attempts.finish(&item_id, attempt_id);
+                });
             }
             Command::OpenItem { id, navigation_id }
             | Command::RestoreItem { id, navigation_id } => {
@@ -2551,6 +2745,10 @@ struct Ctx {
     /// Latest requested diff scope, registered synchronously so concurrent
     /// Git reads cannot publish out of selection order.
     scope_requests: Arc<ScopeRequests>,
+    /// Latest live checks/mergeability read for each item.
+    status_requests: Arc<PullRequestStatusRequests>,
+    /// Monotonic merge identities and the one in-flight mutation per item.
+    merge_attempts: Arc<MergeAttempts>,
     /// Serialize reviewer-child owner opens. A newer click registers
     /// synchronously and makes the older worker stale; serialization then
     /// guarantees the newest accepted owner is the final backend slot.
@@ -4323,6 +4521,10 @@ async fn finish_open(
         if let Some(checks) = cached {
             let _ = ctx.events.send(Event::ChecksReady {
                 item_id: item.id.clone(),
+                repo_full_name: pr.repo_full_name.clone(),
+                number: pr.number,
+                head_sha: pr.head_sha.clone(),
+                status_generation: 0,
                 checks: Arc::new(checks),
             });
         }
@@ -4330,7 +4532,10 @@ async fn finish_open(
             let (ctx2, item_id2, pr2) = (ctx.clone(), item.id.clone(), pr.clone());
             tokio::spawn(async move { fetch_discussion(&ctx2, &item_id2, &pr2).await });
             let (ctx2, item_id2) = (ctx.clone(), item.id.clone());
-            tokio::spawn(async move { fetch_checks(&ctx2, &item_id2, &pr).await });
+            let status_generation = begin_pull_request_status(&ctx2, &item_id2, &pr);
+            tokio::spawn(async move {
+                fetch_checks(&ctx2, &item_id2, &pr, status_generation).await
+            });
         }
     }
     true
@@ -4664,32 +4869,430 @@ async fn root_base_revs(ctx: &Ctx, path: &Path, base: &str) -> Vec<String> {
     revs
 }
 
-/// One request for the workflow runs on the pull request's head, kept and
-/// shown. The pull request's, not the checkout's: a root or a branch of
-/// the reader's own may sit ahead of or behind what GitHub ran. A failure
-/// shows nothing: absent means unknown.
-///
-async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
+/// One coherent GraphQL snapshot for detailed checks and merge readiness.
+/// The checks are cached by head so they can paint immediately on the next
+/// open. Mergeability and permissions stay live-only: a stale authorization
+/// answer must never enable a remote mutation.
+fn begin_pull_request_status(ctx: &Ctx, item_id: &str, pr: &PullRequest) -> u64 {
+    let status_generation = ctx.status_requests.begin(item_id);
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::PullRequestOverviewLoading {
+            item_id: item_id.to_string(),
+            repo_full_name: pr.repo_full_name.clone(),
+            number: pr.number,
+            head_sha: pr.head_sha.clone(),
+            status_generation,
+        });
+    }
+    status_generation
+}
+
+async fn fetch_checks(
+    ctx: &Ctx,
+    item_id: &str,
+    pr: &PullRequest,
+    status_generation: u64,
+) {
     let Some(github) = ctx.github.as_ref() else {
         return;
     };
     let head = pr.head_sha.as_str();
-    match github
-        .list_workflow_runs_for_sha(&pr.repo_full_name, head)
-        .await
-    {
-        Ok(runs) => {
-            let checks = perch_github::Checks::of(&runs);
-            ctx.with_cache(|c| c.store_checks(item_id, head, &checks));
+    let result = github
+        .fetch_pull_request_overview(&pr.repo_full_name, pr.number)
+        .await;
+    if !ctx.status_requests.is_current(item_id, status_generation) {
+        return;
+    }
+    match result {
+        Ok(overview) if overview.head_sha == head => {
+            ctx.with_cache(|c| c.store_checks(item_id, head, &overview.checks));
             if ctx.is_open(item_id) {
                 let _ = ctx.events.send(Event::ChecksReady {
                     item_id: item_id.to_string(),
-                    checks: Arc::new(checks),
+                    repo_full_name: pr.repo_full_name.clone(),
+                    number: pr.number,
+                    head_sha: head.to_string(),
+                    status_generation,
+                    checks: Arc::new(overview.checks.clone()),
+                });
+                let _ = ctx.events.send(Event::PullRequestOverviewReady {
+                    item_id: item_id.to_string(),
+                    repo_full_name: pr.repo_full_name.clone(),
+                    number: pr.number,
+                    status_generation,
+                    overview: Arc::new(overview),
                 });
             }
         }
-        Err(e) => tracing::info!(item = item_id, error = %e, "could not fetch the checks"),
+        Ok(overview) => {
+            let message = format!(
+                "The pull request moved from {} to {}; refresh it before merging",
+                short_sha(head),
+                short_sha(&overview.head_sha)
+            );
+            tracing::info!(item = item_id, %message, "discarded stale pull request status");
+            if ctx.is_open(item_id) {
+                let _ = ctx.events.send(Event::PullRequestOverviewFailed {
+                    item_id: item_id.to_string(),
+                    repo_full_name: pr.repo_full_name.clone(),
+                    number: pr.number,
+                    head_sha: head.to_string(),
+                    status_generation,
+                    message,
+                });
+            }
+        }
+        Err(error) => {
+            tracing::info!(item = item_id, error = %error, "could not fetch pull request status");
+            if ctx.is_open(item_id) {
+                let _ = ctx.events.send(Event::PullRequestOverviewFailed {
+                    item_id: item_id.to_string(),
+                    repo_full_name: pr.repo_full_name.clone(),
+                    number: pr.number,
+                    head_sha: head.to_string(),
+                    status_generation,
+                    message: format!("Could not refresh checks and merge status: {error}"),
+                });
+            }
+        }
     }
+}
+
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(8)]
+}
+
+/// Merge only the exact live snapshot the reader confirmed. The REST merge
+/// endpoint remains the final authority, but these checks keep a stale view,
+/// a historical review, or an accidental bypass from ever reaching it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the remote mutation carries every identity and consent fence explicitly"
+)]
+async fn merge_open_pull_request(
+    ctx: &Ctx,
+    attempt_id: u64,
+    item_id: &str,
+    repo_full_name: &str,
+    number: u64,
+    expected_head_sha: &str,
+    method: MergeMethod,
+    bypass_requirements: bool,
+) {
+    let open = ctx.slot.lock().ok().and_then(|slot| {
+        slot.as_ref()
+            .filter(|open| open.item_id == item_id)
+            .and_then(|open| {
+                open.pull_request.clone().map(|pull_request| {
+                    (
+                        pull_request,
+                        open.checkout.head_sha.clone(),
+                        open.review_snapshot_id.is_some()
+                            || open.review_group_id.is_some()
+                            || open.review_request_id.is_some(),
+                    )
+                })
+            })
+    });
+    let Some((pull_request, checkout_head_sha, historical)) = open else {
+        send_merge_failure(
+            ctx,
+            attempt_id,
+            item_id,
+            repo_full_name,
+            number,
+            expected_head_sha,
+            "That pull request is no longer open in Perch",
+        );
+        return;
+    };
+    if pull_request.repo_full_name != repo_full_name || pull_request.number != number {
+        send_merge_failure(
+            ctx,
+            attempt_id,
+            item_id,
+            repo_full_name,
+            number,
+            expected_head_sha,
+            "The open pull request changed; review it again before merging",
+        );
+        return;
+    }
+    let Some(github) = ctx.github.as_ref() else {
+        send_merge_failure(
+            ctx,
+            attempt_id,
+            item_id,
+            repo_full_name,
+            number,
+            expected_head_sha,
+            "GitHub is unavailable while Perch is offline",
+        );
+        return;
+    };
+
+    let overview = match github
+        .fetch_pull_request_overview(repo_full_name, number)
+        .await
+    {
+        Ok(overview) => overview,
+        Err(error) => {
+            send_merge_failure(
+                ctx,
+                attempt_id,
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                format!("Could not refresh merge status: {error}"),
+            );
+            return;
+        }
+    };
+    if let Err(message) = validate_merge_attempt(
+        &pull_request,
+        &checkout_head_sha,
+        historical,
+        &overview,
+        expected_head_sha,
+        method,
+        bypass_requirements,
+    ) {
+        send_merge_failure(
+            ctx,
+            attempt_id,
+            item_id,
+            repo_full_name,
+            number,
+            expected_head_sha,
+            message,
+        );
+        return;
+    }
+
+    let result = match github
+        .merge_pull_request(repo_full_name, number, expected_head_sha, method)
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            send_merge_failure(
+                ctx,
+                attempt_id,
+                item_id,
+                repo_full_name,
+                number,
+                expected_head_sha,
+                format!("GitHub could not merge this pull request: {error}"),
+            );
+            return;
+        }
+    };
+    if !result.merged {
+        let message = if result.message.trim().is_empty() {
+            "GitHub did not merge this pull request".to_string()
+        } else {
+            result.message
+        };
+        send_merge_failure(
+            ctx,
+            attempt_id,
+            item_id,
+            repo_full_name,
+            number,
+            expected_head_sha,
+            message,
+        );
+        return;
+    }
+
+    // A successful mutation must never be reported as failed merely because
+    // the follow-up GET had a transient problem. Synthesize the closed state
+    // from the confirmed snapshot, then replace it with GitHub's richer answer
+    // whenever that answer arrives.
+    let mut merged = match github.fetch_pull_request(repo_full_name, number).await {
+        Ok(pull_request) => pull_request,
+        Err(error) => {
+            tracing::info!(
+                item = item_id,
+                error = %error,
+                "merged the pull request but could not refresh its snapshot"
+            );
+            (*pull_request).clone()
+        }
+    };
+    if !merged.merged {
+        let now = Timestamp::now();
+        merged.merged = true;
+        merged.state = "closed".into();
+        merged.merged_at = Some(now);
+        merged.closed_at = Some(now);
+        merged.updated_at = Some(now);
+    }
+
+    let installed = install_pull_request_snapshot(ctx, item_id, merged, Some(attempt_id));
+    ctx.notice(format!(
+        "Merged {repo_full_name}#{number} ({})",
+        method.as_str()
+    ));
+    if let Some((_, pull_request)) = installed {
+        fetch_discussion(ctx, item_id, &pull_request).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_merge_attempt(
+    pull_request: &PullRequest,
+    checkout_head_sha: &str,
+    historical: bool,
+    overview: &PullRequestOverview,
+    expected_head_sha: &str,
+    method: MergeMethod,
+    bypass_requirements: bool,
+) -> Result<(), String> {
+    if historical {
+        return Err("Return to the current review before merging".into());
+    }
+    if pull_request.merged || !pull_request.is_open() {
+        return Err("This pull request is no longer open".into());
+    }
+    if pull_request.draft {
+        return Err("Draft pull requests cannot be merged".into());
+    }
+    if pull_request.head_sha != expected_head_sha
+        || overview.head_sha != expected_head_sha
+        || checkout_head_sha != expected_head_sha
+    {
+        return Err("The pull request moved; refresh and review the new head before merging".into());
+    }
+    if !overview.allowed_merge_methods.allows(method) {
+        return Err(format!(
+            "The {} merge method is disabled for this repository",
+            method.as_str()
+        ));
+    }
+    let can_write = matches!(
+        overview.viewer_permission,
+        Some(
+            RepositoryPermission::Write
+                | RepositoryPermission::Maintain
+                | RepositoryPermission::Admin
+        )
+    );
+    if !can_write && !overview.viewer_can_merge_as_admin {
+        return Err("You do not have permission to merge this pull request".into());
+    }
+    if bypass_requirements && !overview.viewer_can_merge_as_admin {
+        return Err("You do not have permission to bypass branch requirements".into());
+    }
+    match overview.mergeable {
+        MergeableState::Conflicting => {
+            return Err("This pull request has conflicts that must be resolved on GitHub".into())
+        }
+        MergeableState::Unknown => {
+            return Err("GitHub is still calculating whether this pull request can merge".into())
+        }
+        MergeableState::Mergeable => {}
+    }
+    match overview.merge_state {
+        MergeState::Dirty => {
+            Err("This pull request has conflicts that must be resolved on GitHub".into())
+        }
+        MergeState::Draft => Err("Draft pull requests cannot be merged".into()),
+        MergeState::Unknown => {
+            Err("GitHub is still calculating whether this pull request can merge".into())
+        }
+        MergeState::Blocked if !bypass_requirements => {
+            Err("Merging is blocked until the repository requirements are met".into())
+        }
+        MergeState::Blocked if !overview.viewer_can_merge_as_admin => {
+            Err("You do not have permission to bypass branch requirements".into())
+        }
+        MergeState::Behind
+        | MergeState::Blocked
+        | MergeState::Clean
+        | MergeState::HasHooks
+        | MergeState::Unstable => Ok(()),
+    }
+}
+
+fn send_merge_failure(
+    ctx: &Ctx,
+    attempt_id: u64,
+    item_id: &str,
+    repo_full_name: &str,
+    number: u64,
+    expected_head_sha: &str,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    tracing::info!(item = item_id, %message, "pull request merge stopped");
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::PullRequestMergeFailed {
+            item_id: item_id.to_string(),
+            repo_full_name: repo_full_name.to_string(),
+            number,
+            expected_head_sha: expected_head_sha.to_string(),
+            attempt_id,
+            message,
+        });
+    }
+}
+
+/// Keep the durable row, open backend slot, sidebar and review signals on the
+/// same REST snapshot. A concurrently stored newer snapshot always wins.
+fn install_pull_request_snapshot(
+    ctx: &Ctx,
+    item_id: &str,
+    fetched: PullRequest,
+    merge_attempt_id: Option<u64>,
+) -> Option<(Arc<Item>, Arc<PullRequest>)> {
+    let mut item = ctx.item(item_id)?;
+    let current = item.pull_request()?;
+    if current.repo_full_name != fetched.repo_full_name || current.number != fetched.number {
+        tracing::info!(
+            item = item_id,
+            fetched_repo = %fetched.repo_full_name,
+            fetched_number = fetched.number,
+            "discarded a pull request refresh for a subject this item no longer owns"
+        );
+        return None;
+    }
+    let stored = item.subject.as_ref().and_then(ItemSubject::updated_at);
+    let pull_request = if merge_attempt_id.is_none() && stored_is_newer(stored, fetched.updated_at) {
+        item.pull_request()?.clone()
+    } else {
+        item.subject = Some(ItemSubject::PullRequest(fetched.clone()));
+        if let Some(Err(error)) = ctx.with_cache(|cache| cache.update_item(&item)) {
+            tracing::warn!(item = item_id, error = %error, "could not store pull request refresh");
+        }
+        fetched
+    };
+    let item = Arc::new(item);
+    let pull_request = Arc::new(pull_request);
+    let installed = ctx.slot.lock().ok().is_some_and(|mut slot| {
+        let Some(open) = slot.as_mut().filter(|open| {
+            open.item_id == item_id
+                && open.pull_request.as_ref().is_some_and(|current| {
+                    current.repo_full_name == pull_request.repo_full_name
+                        && current.number == pull_request.number
+                })
+        }) else {
+            return false;
+        };
+        open.pull_request = Some(pull_request.clone());
+        true
+    });
+    ctx.send_items();
+    if installed {
+        let _ = ctx.events.send(Event::PullRequestUpdated {
+            item_id: item_id.to_string(),
+            item: item.clone(),
+            pull_request: pull_request.clone(),
+            merge_attempt_id,
+        });
+    }
+    Some((item, pull_request))
 }
 
 /// The scope changed: the changed list is recomputed under it, kept in the
@@ -5220,31 +5823,36 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
             .await
         {
             Ok(fresh) => {
-                let fresh = Arc::new(fresh);
-                if let Ok(mut guard) = ctx.slot.lock() {
-                    if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
-                        open.pull_request = Some(fresh.clone());
-                    }
-                }
-                if let Some(mut item) = ctx.item(item_id) {
-                    // Unless a pass stored a later one while this was
-                    // asked, and its tag now vouches for the row.
-                    let stored = item.subject.as_ref().and_then(ItemSubject::updated_at);
-                    if !stored_is_newer(stored, fresh.updated_at) {
-                        item.subject = Some(ItemSubject::PullRequest((*fresh).clone()));
-                        ctx.with_cache(|c| c.update_item(&item));
-                        ctx.send_items();
-                    }
-                }
-                fresh
+                let Some((_, pull_request)) =
+                    install_pull_request_snapshot(ctx, item_id, fresh, None)
+                else {
+                    return;
+                };
+                pull_request
             }
             Err(e) => {
                 tracing::info!(item = item_id, error = %e, "could not fetch the pull request again");
                 pr
             }
         };
-        fetch_discussion(ctx, item_id, &pr).await;
-        fetch_checks(ctx, item_id, &pr).await;
+        let still_current = ctx.slot.lock().ok().is_some_and(|slot| {
+            slot.as_ref()
+                .filter(|open| open.item_id == item_id)
+                .and_then(|open| open.pull_request.as_ref())
+                .is_some_and(|current| {
+                    current.repo_full_name == pr.repo_full_name
+                        && current.number == pr.number
+                        && current.head_sha == pr.head_sha
+                })
+        });
+        if !still_current {
+            return;
+        }
+        let status_generation = begin_pull_request_status(ctx, item_id, &pr);
+        tokio::join!(
+            fetch_discussion(ctx, item_id, &pr),
+            fetch_checks(ctx, item_id, &pr, status_generation),
+        );
     } else if let Some(issue) = issue {
         let (issue, _) = &*issue;
         match github
@@ -8689,6 +9297,8 @@ mod tests {
             review_snapshots: Arc::new(ReviewSnapshotStore::new(dir.join("store"))),
             navigation_requests: Arc::default(),
             scope_requests: Arc::default(),
+            status_requests: Arc::default(),
+            merge_attempts: Arc::default(),
             review_navigation: Arc::new(tokio::sync::Mutex::new(())),
             review_admissions: Default::default(),
             review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
@@ -8946,6 +9556,7 @@ mod tests {
             deletions: 0,
             changed_files: 0,
             repo_full_name: "a/b".into(),
+            html_url: format!("https://github.com/a/b/pull/{number}"),
             head_repo_full_name: Some("a/b".into()),
             updated_at: Some("2026-09-16T11:40:00Z".parse().unwrap()),
             review_requested: false,
@@ -8959,6 +9570,168 @@ mod tests {
             labels: Vec::new(),
             assignees: Vec::new(),
         }
+    }
+
+    fn merge_overview(merge_state: MergeState) -> PullRequestOverview {
+        PullRequestOverview {
+            head_sha: "h7".into(),
+            mergeable: MergeableState::Mergeable,
+            merge_state,
+            review_decision: None,
+            viewer_can_merge_as_admin: false,
+            viewer_permission: Some(RepositoryPermission::Write),
+            allowed_merge_methods: perch_github::MergeMethods {
+                merge: true,
+                squash: true,
+                rebase: true,
+            },
+            checks: perch_github::Checks {
+                state: perch_github::CheckState::Passing,
+                url: None,
+                runs: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_clean_current_head_can_merge_with_an_enabled_method() {
+        assert_eq!(
+            validate_merge_attempt(
+                &pull_request(7),
+                "h7",
+                false,
+                &merge_overview(MergeState::Clean),
+                "h7",
+                MergeMethod::Squash,
+                false,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn blocked_merge_requires_explicit_authorized_bypass() {
+        let pull = pull_request(7);
+        let mut overview = merge_overview(MergeState::Blocked);
+        assert!(validate_merge_attempt(
+            &pull,
+            "h7",
+            false,
+            &overview,
+            "h7",
+            MergeMethod::Merge,
+            false,
+        )
+        .unwrap_err()
+        .contains("requirements"));
+
+        overview.viewer_can_merge_as_admin = true;
+        overview.viewer_permission = Some(RepositoryPermission::Admin);
+        assert_eq!(
+            validate_merge_attempt(
+                &pull,
+                "h7",
+                false,
+                &overview,
+                "h7",
+                MergeMethod::Merge,
+                true,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn conflicts_and_stale_heads_never_reach_the_merge_endpoint() {
+        let pull = pull_request(7);
+        let mut overview = merge_overview(MergeState::Dirty);
+        overview.viewer_can_merge_as_admin = true;
+        overview.viewer_permission = Some(RepositoryPermission::Admin);
+        assert!(validate_merge_attempt(
+            &pull,
+            "h7",
+            false,
+            &overview,
+            "h7",
+            MergeMethod::Rebase,
+            true,
+        )
+        .unwrap_err()
+        .contains("conflicts"));
+
+        let overview = merge_overview(MergeState::Clean);
+        assert!(validate_merge_attempt(
+            &pull,
+            "old-head",
+            false,
+            &overview,
+            "h7",
+            MergeMethod::Rebase,
+            false,
+        )
+        .unwrap_err()
+        .contains("moved"));
+    }
+
+    #[test]
+    fn disabled_methods_and_historical_reviews_cannot_merge() {
+        let pull = pull_request(7);
+        let mut overview = merge_overview(MergeState::Clean);
+        overview.allowed_merge_methods.squash = false;
+        assert!(validate_merge_attempt(
+            &pull,
+            "h7",
+            false,
+            &overview,
+            "h7",
+            MergeMethod::Squash,
+            false,
+        )
+        .unwrap_err()
+        .contains("disabled"));
+        assert!(validate_merge_attempt(
+            &pull,
+            "h7",
+            true,
+            &merge_overview(MergeState::Clean),
+            "h7",
+            MergeMethod::Merge,
+            false,
+        )
+        .unwrap_err()
+        .contains("current review"));
+    }
+
+    #[test]
+    fn pull_request_status_generations_are_monotonic_per_item() {
+        let requests = PullRequestStatusRequests::default();
+
+        let first = requests.begin("first");
+        let second = requests.begin("first");
+        let other = requests.begin("other");
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(other, 1);
+        assert!(!requests.is_current("first", first));
+        assert!(requests.is_current("first", second));
+        assert!(requests.is_current("other", other));
+        assert!(!requests.is_current("missing", 1));
+    }
+
+    #[test]
+    fn merge_attempts_suppress_duplicates_and_only_matching_finishes() {
+        let attempts = MergeAttempts::default();
+
+        let first = attempts.begin("item").expect("first attempt starts");
+        assert_eq!(attempts.begin("item"), None);
+
+        attempts.finish("item", first.saturating_add(1));
+        assert_eq!(attempts.begin("item"), None, "a stale finish is ignored");
+
+        attempts.finish("item", first);
+        let second = attempts.begin("item").expect("matching finish releases item");
+        assert!(second > first);
     }
 
     /// A durable row for `a/b#<number>`, as an on-demand open makes it.
@@ -9131,7 +9904,37 @@ mod tests {
         );
     }
 
-    const FAILING_RUN: &str = r#"{"workflow_runs":[{"name":"ci","run_number":1,"status":"completed","conclusion":"failure","head_branch":"branch-7","html_url":"https://github.com/a/b/actions/runs/1","created_at":"2026-09-18T11:00:00Z","updated_at":"2026-09-18T11:05:00Z"}]}"#;
+    const FAILING_RUN: &str = r#"{
+        "data": { "repository": {
+            "merge_commit_allowed": true,
+            "squash_merge_allowed": true,
+            "rebase_merge_allowed": true,
+            "viewer_permission": "WRITE",
+            "pull_request": {
+                "head_sha": "h7",
+                "mergeable": "MERGEABLE",
+                "merge_state": "BLOCKED",
+                "review_decision": "REVIEW_REQUIRED",
+                "viewer_can_merge_as_admin": false,
+                "status_check_rollup": {
+                    "state": "FAILURE",
+                    "contexts": { "nodes": [{
+                        "__typename": "CheckRun",
+                        "name": "ci",
+                        "status": "COMPLETED",
+                        "conclusion": "FAILURE",
+                        "details_url": "https://github.com/a/b/actions/runs/1",
+                        "started_at": "2026-09-18T11:00:00Z",
+                        "completed_at": "2026-09-18T11:05:00Z",
+                        "check_suite": { "workflow_run": {
+                            "event": "pull_request",
+                            "workflow": { "name": "CI" }
+                        }}
+                    }]}
+                }
+            }
+        }}
+    }"#;
 
     #[tokio::test]
     async fn red_checks_are_cached_without_mutating_the_item() {
@@ -9140,7 +9943,9 @@ mod tests {
         let (ctx, received) = ctx(dir.path(), &base, &[]);
         let item = store_pull(&ctx, 7);
 
-        fetch_checks(&ctx, &item.id, &pull_request(7)).await;
+        let pull_request = pull_request(7);
+        let status_generation = begin_pull_request_status(&ctx, &item.id, &pull_request);
+        fetch_checks(&ctx, &item.id, &pull_request, status_generation).await;
 
         let checks = ctx
             .with_cache(|c| c.load_checks(&item.id, "h7").unwrap())
@@ -9155,7 +9960,7 @@ mod tests {
         assert_eq!(items_sent(&received), 0);
         assert_eq!(
             paths.lock().unwrap().as_slice(),
-            ["/repos/a/b/actions/runs?head_sha=h7&per_page=100"]
+            ["/graphql"]
         );
     }
 

@@ -11,20 +11,26 @@ use floem::style::ObjectFit;
 
 use crate::theme;
 
-/// Open a link in the user's default browser.
+/// Open an HTTP(S) link supplied by GitHub in the user's default browser.
 ///
 /// Spawned and forgotten: waiting on `open` would block the UI thread for as
-/// long as the browser takes to come to the front.
+/// long as the browser takes to come to the front. Restricting the scheme keeps
+/// local files and application URLs out while allowing GitHub Enterprise and
+/// check providers to use their own hosts.
 pub fn open_in_browser(url: &str) {
-    // Only ever a github.com page derived from an API url, never anything a
-    // notification's contents could steer.
-    if !url.starts_with("https://github.com/") {
-        tracing::warn!(url, "refusing to open a non-GitHub link");
+    if !is_browser_url(url) {
+        tracing::warn!(url, "refusing to open a non-HTTP(S) link");
         return;
     }
     if let Err(e) = std::process::Command::new("open").arg(url).spawn() {
         tracing::warn!(url, error = %e, "could not open link");
     }
+}
+
+/// The browser boundary is deliberately scheme-only: URLs passed here come
+/// from GitHub, whose check details may live on another host.
+fn is_browser_url(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
 }
 
 /// Style a row that behaves as a button.
@@ -282,4 +288,30 @@ pub fn centered_message(
 /// A horizontal spacer that pushes what follows to the right.
 pub fn spacer() -> impl IntoView {
     Empty::new().style(|s| s.flex_grow(1.0_f32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_browser_url;
+
+    #[test]
+    fn browser_links_accept_explicit_http_schemes_only() {
+        for url in [
+            "https://github.example.com/acme/widgets/pull/7",
+            "https://checks.example.net/runs/42",
+            "http://github.enterprise.test/acme/widgets/pull/7",
+        ] {
+            assert!(is_browser_url(url), "rejected {url}");
+        }
+
+        for url in [
+            "//github.com/acme/widgets/pull/7",
+            "file:///tmp/report.html",
+            "javascript:alert(1)",
+            "https:github.com/acme/widgets/pull/7",
+            " HTTPS://github.com/acme/widgets/pull/7",
+        ] {
+            assert!(!is_browser_url(url), "accepted {url}");
+        }
+    }
 }

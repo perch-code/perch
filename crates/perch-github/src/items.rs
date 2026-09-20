@@ -133,6 +133,10 @@ impl IssuePayload {
 /// The GitHub thing an item is about.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "subjects are durable value snapshots and boxing one variant would ripple through the cache API"
+)]
 pub enum Subject {
     PullRequest(PullRequest),
     Issue(Issue),

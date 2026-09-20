@@ -2065,6 +2065,7 @@ mod column {
         let state = ReviewState::new();
         let pr = PullRequest {
             number: 812,
+            html_url: "https://github.com/slatedb/slatedb/pull/812".into(),
             title: "Fence the manifest".into(),
             author_login: "rohan".into(),
             author_avatar_url: String::new(),

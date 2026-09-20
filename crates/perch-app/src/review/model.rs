@@ -11,6 +11,7 @@ use perch_git::{
 };
 use perch_github::{
     Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest,
+    PullRequestOverview,
 };
 use perch_syntax::{Language, LineSpans};
 
@@ -442,6 +443,23 @@ pub struct ReviewState {
     /// The workflow runs' verdict for the head, once fetched. `None` means
     /// unknown, and the header shows no pill.
     pub checks: RwSignal<Option<Arc<Checks>>>,
+    /// Live GitHub mergeability, permissions, enabled merge methods, and
+    /// detailed checks for the pull request's exact head. Unlike `checks`,
+    /// this is never restored from disk: merge controls require a fresh
+    /// answer from GitHub.
+    pub pull_request_overview: RwSignal<Option<Arc<PullRequestOverview>>>,
+    pub pull_request_overview_loading: RwSignal<bool>,
+    pub pull_request_overview_error: RwSignal<Option<String>>,
+    /// Latest live status cycle accepted for the open pull request. Merge UI
+    /// uses this to discard consent captured against an older rules snapshot.
+    pub pull_request_status_generation: RwSignal<u64>,
+    /// State of the deliberate, confirmed merge mutation.
+    pub merge_pending: RwSignal<bool>,
+    pub merge_error: RwSignal<Option<String>>,
+    /// Latest merge mutation observed for the displayed checkout. Every event
+    /// also carries the item and pull-request identity, so checkout resets can
+    /// clear this without letting a different subject settle the new view.
+    pub merge_attempt_id: RwSignal<Option<u64>>,
     /// The (path, blob) pairs the reader has checked as viewed.
     pub viewed: RwSignal<Arc<std::collections::HashSet<(String, String)>>>,
     /// Whether the worktree's changed files are folded to their changes,
@@ -612,6 +630,13 @@ impl ReviewState {
             since_head: RwSignal::new(None),
             discussion: RwSignal::new(None),
             checks: RwSignal::new(None),
+            pull_request_overview: RwSignal::new(None),
+            pull_request_overview_loading: RwSignal::new(false),
+            pull_request_overview_error: RwSignal::new(None),
+            pull_request_status_generation: RwSignal::new(0),
+            merge_pending: RwSignal::new(false),
+            merge_error: RwSignal::new(None),
+            merge_attempt_id: RwSignal::new(None),
             viewed: RwSignal::new(Arc::new(std::collections::HashSet::new())),
             folded: RwSignal::new(true),
             reveals: RwSignal::new(HashMap::new()),
@@ -712,6 +737,13 @@ impl ReviewState {
         self.since_head.set(None);
         self.discussion.set(None);
         self.checks.set(None);
+        self.pull_request_overview.set(None);
+        self.pull_request_overview_loading.set(false);
+        self.pull_request_overview_error.set(None);
+        self.pull_request_status_generation.set(0);
+        self.merge_pending.set(false);
+        self.merge_error.set(None);
+        self.merge_attempt_id.set(None);
         self.viewed.set(Arc::new(std::collections::HashSet::new()));
         // Folded until the open's ViewedReady says what the item has. Only
         // written when they change: the open editor rebuilds its document

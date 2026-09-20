@@ -10,6 +10,7 @@ pub mod header;
 pub mod hover;
 pub mod issue;
 pub mod markdown;
+pub mod merge;
 pub mod model;
 pub mod rail;
 pub mod references;

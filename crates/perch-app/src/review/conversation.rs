@@ -104,6 +104,7 @@ pub fn view(
             )
             .style(|s| s.flex_col().width_full()),
             crate::review::review_launch::history(app, state, backend.clone()),
+            crate::review::merge::surface(state, backend.clone()),
             Label::derived(|| "Nothing here yet. Ask about the branch below.".to_string()).style(
                 move |s| {
                     // Hidden rather than absent, so it takes no share of the
@@ -360,6 +361,7 @@ mod tests {
             deletions: 3,
             changed_files: 1,
             repo_full_name: "criccomini/perch".into(),
+            html_url: "https://github.com/criccomini/perch/pull/57".into(),
             head_repo_full_name: None,
             updated_at: None,
             review_requested: false,

@@ -267,6 +267,7 @@ pub(crate) mod tests {
             deletions: 0,
             changed_files: 0,
             repo_full_name: "criccomini/perch".into(),
+            html_url: "https://github.com/criccomini/perch/pull/57".into(),
             head_repo_full_name: None,
             updated_at: None,
             review_requested: false,

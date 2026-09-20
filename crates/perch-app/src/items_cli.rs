@@ -132,6 +132,7 @@ mod tests {
         wanted.id = "a".into();
         wanted.subject = Some(ItemSubject::PullRequest(PullRequest {
             number: 57,
+            html_url: "https://github.com/criccomini/perch/pull/57".into(),
             title: "Fence the manifest".into(),
             author_login: "a".into(),
             author_avatar_url: String::new(),

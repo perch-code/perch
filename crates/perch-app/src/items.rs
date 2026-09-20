@@ -523,6 +523,7 @@ mod tests {
     fn pr(number: u64, title: &str, branch: &str, state: &str, updated: &str) -> ItemSubject {
         ItemSubject::PullRequest(PullRequest {
             number,
+            html_url: format!("https://github.com/criccomini/perch/pull/{number}"),
             title: title.into(),
             author_login: "a".into(),
             author_avatar_url: String::new(),
