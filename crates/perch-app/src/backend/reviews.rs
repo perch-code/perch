@@ -1124,13 +1124,7 @@ async fn execute_attempt(
                 }
             };
             let extraction = perch_agent::extract_review(&native_raw, &manifest);
-            let prior = cache(ctx, |cache| {
-                cache.list_findings(
-                    &snapshot_item_id(ctx, &snapshot_id).unwrap_or_default(),
-                    None,
-                )
-            })
-            .unwrap_or_default();
+            let prior = verification_prior_findings(ctx, &snapshot_id);
             let verification_input = ReviewVerificationInput {
                 finding_ids: prior
                     .iter()
@@ -3270,6 +3264,16 @@ fn snapshot_item_id(ctx: &Ctx, snapshot_id: &str) -> Option<String> {
         .ok()
         .flatten()
         .map(|snapshot| snapshot.item_id)
+}
+
+/// Load the prior findings without recursively taking the cache mutex.
+///
+/// Keep the snapshot lookup outside the second `cache` closure: the mutex is
+/// deliberately non-reentrant, and nesting `snapshot_item_id` there strands a
+/// finished reviewer in the extracting phase.
+pub(super) fn verification_prior_findings(ctx: &Ctx, snapshot_id: &str) -> Vec<Finding> {
+    let item_id = snapshot_item_id(ctx, snapshot_id).unwrap_or_default();
+    cache(ctx, |cache| cache.list_findings(&item_id, None)).unwrap_or_default()
 }
 
 fn launch_failed(ctx: &Ctx, item_id: &str, message: String) {

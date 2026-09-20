@@ -174,7 +174,7 @@ pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
         s.position(Position::Absolute)
             .inset_top(0.0)
             .inset_right(0.0)
-            .inset_bottom(theme::STATUS_HEIGHT)
+            .inset_bottom(0.0)
             .z_index(60)
     })
     .debug_name("agents-panel-slot")
@@ -844,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_contents_fill_the_allocated_width() {
+    fn panel_fills_the_window_and_its_contents_fill_the_allocated_width() {
         let root = TestRoot::new();
         let app = AppState::new();
         let review = ReviewState::new();
@@ -863,6 +863,10 @@ mod tests {
             .expect("the history list exists")
             .get_visual_rect_no_clip();
         assert_eq!(panel.width(), theme::AGENTS_WIDTH);
+        assert!(
+            panel.y0.abs() < 0.01 && (panel.y1 - 760.0).abs() < 0.01,
+            "the panel must reach both vertical window edges: panel={panel:?}"
+        );
         assert!(
             (panel.x1 - list.x1).abs() < 0.01,
             "the panel content must reach the panel's right edge: panel={panel:?}, list={list:?}"

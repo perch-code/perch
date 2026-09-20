@@ -9902,6 +9902,22 @@ mod tests {
         (ctx, received)
     }
 
+    #[tokio::test]
+    async fn review_verification_prior_lookup_does_not_reenter_the_cache_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _events) = ctx(dir.path(), &nowhere(), &[]);
+        let (done, completed) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let findings = reviews::verification_prior_findings(&ctx, "missing-snapshot");
+            let _ = done.send(findings.len());
+        });
+
+        assert_eq!(
+            completed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn a_new_historical_request_fences_older_groups_and_repeated_loads() {
         let requests = NavigationRequests::default();
