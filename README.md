@@ -15,14 +15,17 @@ available, and paginates the full result.
 
 - Opening a notification marks its GitHub thread read. Read threads remain in
   the inbox.
+- **Mark Unread** restores the unread reminder in Perch for the current update.
+  Opening it clears the reminder; later GitHub state takes precedence. GitHub's
+  public API has no mark-unread operation, so this does not change github.com.
 - **Done** removes the thread from GitHub's inbox.
 - **Unsubscribe** ignores future activity on the thread and marks the current
   notification done.
 - Pull requests and issues open inside Perch. Other notification types remain
   first-class inbox rows and open on GitHub.
 
-These actions only change the GitHub notification. They do not archive or
-delete a Perch item, worktree, or local conversation.
+These actions affect only the notification or its local reminder. They do not
+archive or delete a Perch item, worktree, or local conversation.
 
 Perch does not crawl a repository's open items or history. A pull request or
 issue is fetched when a notification is opened or when the user opens it by

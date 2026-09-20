@@ -81,6 +81,11 @@ pub enum Command {
         thread: Thread,
         navigation_id: Option<u64>,
     },
+    /// Keep a notification visually unread in Perch. GitHub's public API
+    /// has no per-thread mark-unread operation.
+    MarkNotificationUnread {
+        thread_id: String,
+    },
     /// Remove a notification from GitHub's inbox.
     DoneNotification {
         thread_id: String,
@@ -1248,6 +1253,12 @@ impl Backend {
         });
     }
 
+    pub fn mark_notification_unread(&self, thread_id: &str) {
+        let _ = self.commands.send(Command::MarkNotificationUnread {
+            thread_id: thread_id.to_string(),
+        });
+    }
+
     pub fn unsubscribe_notification(&self, thread_id: &str) {
         let _ = self.commands.send(Command::UnsubscribeNotification {
             thread_id: thread_id.to_string(),
@@ -1967,7 +1978,7 @@ async fn run(
                 navigation_id,
             } => {
                 ctx.clear_notice();
-                if thread.unread {
+                if ctx.prepare_notification_open(&thread) {
                     if let Some(github) = ctx.github.as_ref() {
                         match github.mark_thread_read(&thread.id).await {
                             Ok(()) => {
@@ -1975,6 +1986,7 @@ async fn run(
                                 ctx.edit_notifications(|threads| {
                                     if let Some(thread) = threads.iter_mut().find(|t| t.id == id) {
                                         thread.unread = false;
+                                        thread.local_unread = false;
                                         thread.last_read_at = Some(Timestamp::now());
                                     }
                                 });
@@ -2016,6 +2028,9 @@ async fn run(
                         }
                     });
                 }
+            }
+            Command::MarkNotificationUnread { thread_id } => {
+                ctx.mark_notification_unread(&thread_id);
             }
             Command::DoneNotification { thread_id } => {
                 ctx.clear_notice();
@@ -2811,7 +2826,27 @@ impl Ctx {
 
     /// Replace the first-class inbox, persist it when possible, and publish
     /// it whole so ordering always matches GitHub's response.
-    fn replace_notifications(&self, threads: Vec<Thread>, last_modified: Option<&str>) {
+    fn replace_notifications(&self, mut threads: Vec<Thread>, last_modified: Option<&str>) {
+        // A local mark-unread reminder belongs to this exact notification
+        // revision. Carry it across a full GitHub snapshot, but let newer
+        // activity (a changed updated_at) replace it with GitHub's state.
+        let local_unread = self
+            .notifications
+            .lock()
+            .map(|current| {
+                current
+                    .iter()
+                    .filter(|thread| thread.local_unread)
+                    .map(|thread| (thread.id.clone(), thread.updated_at))
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        for thread in &mut threads {
+            if !thread.unread && local_unread.contains(&(thread.id.clone(), thread.updated_at)) {
+                thread.unread = true;
+                thread.local_unread = true;
+            }
+        }
         let current_keys: std::collections::HashSet<(String, Timestamp)> = threads
             .iter()
             .map(|thread| (thread.id.clone(), thread.updated_at))
@@ -2833,8 +2868,8 @@ impl Ctx {
         let _ = self.events.send(Event::Notifications(threads));
     }
 
-    /// Apply a successful remote notification mutation locally without
-    /// touching the item, checkout, or conversation it may refer to.
+    /// Apply a notification mutation without touching the item, checkout,
+    /// or conversation it may refer to.
     fn edit_notifications(&self, edit: impl FnOnce(&mut Vec<Thread>)) {
         let threads = match self.notifications.lock() {
             Ok(mut current) => {
@@ -2850,6 +2885,44 @@ impl Ctx {
             tracing::warn!(error = %e, "could not cache changed notifications");
         }
         let _ = self.events.send(Event::Notifications(threads));
+    }
+
+    fn mark_notification_unread(&self, thread_id: &str) {
+        self.edit_notifications(|threads| {
+            if let Some(thread) = threads
+                .iter_mut()
+                .find(|thread| thread.id == thread_id && !thread.unread)
+            {
+                thread.unread = true;
+                thread.local_unread = true;
+            }
+        });
+    }
+
+    /// Consume a Perch-only unread reminder and report whether GitHub still
+    /// needs a mark-read request. Consult the current inbox rather than the
+    /// UI's captured row so a quick Mark Unread then Open cannot miss it.
+    fn prepare_notification_open(&self, opened: &Thread) -> bool {
+        let (unread, local_unread) = self
+            .notifications
+            .lock()
+            .ok()
+            .and_then(|threads| {
+                threads
+                    .iter()
+                    .find(|thread| thread.id == opened.id)
+                    .map(|thread| (thread.unread, thread.local_unread))
+            })
+            .unwrap_or((opened.unread, opened.local_unread));
+        if local_unread {
+            self.edit_notifications(|threads| {
+                if let Some(thread) = threads.iter_mut().find(|thread| thread.id == opened.id) {
+                    thread.unread = false;
+                    thread.local_unread = false;
+                }
+            });
+        }
+        unread && !local_unread
     }
 
     fn notice(&self, message: impl Into<String>) {
@@ -8485,6 +8558,7 @@ mod tests {
         Thread {
             id: id.into(),
             unread: true,
+            local_unread: false,
             reason: Reason::Subscribed,
             updated_at: "2026-09-17T18:00:00Z".parse().unwrap(),
             last_read_at: None,
@@ -8770,6 +8844,89 @@ mod tests {
 
         assert_eq!(backend.open_notification(&browser_only), None);
         assert!(backend.navigation_requests.is_current(current));
+    }
+
+    #[tokio::test]
+    async fn a_local_unread_reminder_survives_matching_snapshots_and_clears_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let last_read_at: Timestamp = "2026-09-17T17:00:00Z".parse().unwrap();
+        let mut read = thread("7", "seven");
+        read.unread = false;
+        read.last_read_at = Some(last_read_at);
+        ctx.replace_notifications(vec![read.clone()], Some("first"));
+
+        ctx.mark_notification_unread("7");
+
+        let marked = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(marked.unread);
+        assert!(marked.local_unread);
+        assert_eq!(marked.last_read_at, Some(last_read_at));
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_threads().unwrap())
+                .unwrap(),
+            vec![marked.clone()],
+            "the local reminder survives a restart"
+        );
+        let published = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Notifications(threads) => Some(threads),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        assert_eq!(published, vec![marked]);
+
+        ctx.replace_notifications(vec![read.clone()], Some("second"));
+        let matching = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(matching.unread);
+        assert!(matching.local_unread);
+
+        assert!(
+            !ctx.prepare_notification_open(&read),
+            "the already-read GitHub thread needs no request"
+        );
+        let opened = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(!opened.unread);
+        assert!(!opened.local_unread);
+        assert_eq!(opened.last_read_at, Some(last_read_at));
+    }
+
+    #[tokio::test]
+    async fn new_activity_replaces_a_local_unread_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut read = thread("7", "seven");
+        read.unread = false;
+        ctx.replace_notifications(vec![read.clone()], Some("first"));
+        ctx.mark_notification_unread("7");
+
+        read.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        ctx.replace_notifications(vec![read], Some("second"));
+
+        let newer = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(!newer.unread);
+        assert!(!newer.local_unread);
+    }
+
+    #[tokio::test]
+    async fn github_unread_state_replaces_a_local_unread_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut read = thread("7", "seven");
+        read.unread = false;
+        ctx.replace_notifications(vec![read.clone()], Some("first"));
+        ctx.mark_notification_unread("7");
+
+        read.unread = true;
+        ctx.replace_notifications(vec![read.clone()], Some("second"));
+        ctx.mark_notification_unread("7");
+
+        let github_unread = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(github_unread.unread);
+        assert!(!github_unread.local_unread);
+        assert!(ctx.prepare_notification_open(&read));
     }
 
     fn pull_request(number: u64) -> PullRequest {

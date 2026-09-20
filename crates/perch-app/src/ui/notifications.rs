@@ -205,7 +205,7 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> im
         })
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
-        .context_menu(move || notification_menu(menu_backend.clone(), &menu_thread.id))
+        .context_menu(move || notification_menu(menu_backend.clone(), &menu_thread))
         .style(|s| {
             clickable(s)
                 .width_full()
@@ -247,14 +247,14 @@ fn notification_actions(
             let done_backend = backend.clone();
             let done_id = thread.id.clone();
             let menu_backend = backend.clone();
-            let menu_id = thread.id.clone();
+            let menu_thread = thread.clone();
             Stack::horizontal((
                 icon_button(
                     || SidebarIcon::Check,
                     || theme::FG_SUBTLE,
                     move || done_backend.done_notification(&done_id),
                 ),
-                more_button(move || notification_menu(menu_backend.clone(), &menu_id)),
+                more_button(move || notification_menu(menu_backend.clone(), &menu_thread)),
             ))
             .style(|s| s.items_center().flex_shrink(0.0_f32))
             .into_any()
@@ -279,16 +279,25 @@ fn more_button(menu: impl Fn() -> Menu + 'static) -> impl IntoView {
     })
 }
 
-fn notification_menu(backend: Rc<Backend>, thread_id: &str) -> Menu {
+fn notification_menu(backend: Rc<Backend>, thread: &Thread) -> Menu {
+    let unread_backend = backend.clone();
+    let unread_id = thread.id.clone();
+    let unread = thread.unread;
     let done_backend = backend.clone();
-    let done_id = thread_id.to_string();
+    let done_id = thread.id.clone();
     let unsubscribe_backend = backend;
-    let unsubscribe_id = thread_id.to_string();
+    let unsubscribe_id = thread.id.clone();
     Menu::new()
         .item("Done", move |item| {
             let backend = done_backend.clone();
             let id = done_id.clone();
             item.action(move || backend.done_notification(&id))
+        })
+        .item("Mark Unread", move |item| {
+            let backend = unread_backend.clone();
+            let id = unread_id.clone();
+            item.enabled(!unread)
+                .action(move || backend.mark_notification_unread(&id))
         })
         .item("Unsubscribe", move |item| {
             let backend = unsubscribe_backend.clone();
@@ -388,6 +397,7 @@ mod tests {
         Thread {
             id: id.into(),
             unread,
+            local_unread: false,
             reason,
             updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
             last_read_at: (!unread).then(|| "2026-09-19T11:00:00Z".parse().unwrap()),

@@ -2938,6 +2938,7 @@ mod tests {
         Thread {
             id: id.into(),
             unread: true,
+            local_unread: false,
             reason: Reason::Subscribed,
             updated_at: stamp(updated_at),
             last_read_at: None,
@@ -4796,8 +4797,10 @@ mod tests {
     #[test]
     fn notification_snapshot_and_validator_round_trip_in_api_order() {
         let c = Cache::open_in_memory().unwrap();
+        let mut locally_unread = notification_thread("20", "2026-09-19T12:00:00Z");
+        locally_unread.local_unread = true;
         let threads = vec![
-            notification_thread("20", "2026-09-19T12:00:00Z"),
+            locally_unread,
             notification_thread("10", "2026-09-18T12:00:00Z"),
         ];
 

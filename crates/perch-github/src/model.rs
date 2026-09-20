@@ -12,6 +12,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub struct Thread {
     pub id: String,
     pub unread: bool,
+    /// A Perch-only unread reminder. GitHub's public API can mark a thread
+    /// read, but has no inverse operation. Cached threads retain this bit so
+    /// the reminder survives restarts and unrelated inbox refreshes.
+    #[serde(default)]
+    pub local_unread: bool,
     pub reason: Reason,
     #[serde(with = "ts")]
     pub updated_at: Timestamp,
@@ -347,10 +352,17 @@ mod tests {
             }
         }"#;
         let t: Thread = serde_json::from_str(json).unwrap();
+        assert!(!t.local_unread);
         assert_eq!(t.reason, Reason::Mention);
         assert_eq!(t.subject.kind, SubjectKind::PullRequest);
         assert_eq!(t.number_hint(), Some(2091));
         assert_eq!(t.repository.owner_avatar_url, "https://avatars.githubusercontent.com/u/1");
+
+        let mut cached = t;
+        cached.local_unread = true;
+        let round_tripped: Thread =
+            serde_json::from_str(&serde_json::to_string(&cached).unwrap()).unwrap();
+        assert!(round_tripped.local_unread);
     }
 
     #[test]
@@ -400,6 +412,7 @@ mod tests {
         Thread {
             id: "1".into(),
             unread: true,
+            local_unread: false,
             reason: Reason::Subscribed,
             updated_at: "2026-09-17T18:00:00Z".parse().unwrap(),
             last_read_at: None,

@@ -592,6 +592,7 @@ mod tests {
         Thread {
             id: id.into(),
             unread,
+            local_unread: false,
             reason: Reason::Mention,
             updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
             last_read_at: (!unread).then(|| "2026-09-19T11:00:00Z".parse().unwrap()),
