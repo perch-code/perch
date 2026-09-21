@@ -36,8 +36,7 @@ const AVATAR_CONCURRENCY: usize = 6;
 /// representation so a stale cached list heals without a restart or click.
 const NOTIFICATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Settings the UI keeps between launches. Sent back at startup. Show
-/// whole is not here: its key is per item, `review.folded.<item_id>`, so
-/// it is read when the item opens and carried on `ViewedReady`.
+/// whole is not here: it is the open tab's, and every file opens folded.
 pub const UI_META_KEYS: [&str; 6] = [
     "item_filters",
     "review.layout",
@@ -672,17 +671,14 @@ pub enum Event {
     },
     /// What the reader marked on the item's files, whole: every (path,
     /// blob) viewed, and, when the item opens, every run of head lines
-    /// revealed out of a fold by (path, blob) and whether the item's files
-    /// are folded to their changes, which they are unless the reader asked
-    /// for them whole. Sent again after a viewed write with the viewed set
-    /// alone: the reveals and the fold are the window's own, applied as
-    /// they are clicked, and an answer to an earlier write would put them
-    /// back as they were.
+    /// revealed out of a fold by (path, blob). Sent again after a viewed
+    /// write with the viewed set alone: the reveals are the window's own,
+    /// applied as they are clicked, and an answer to an earlier write
+    /// would put them back as they were.
     ViewedReady {
         item_id: String,
         viewed: Arc<std::collections::HashSet<(String, String)>>,
         reveals: Option<Arc<perch_github::StoredReveals>>,
-        folded: Option<bool>,
     },
 
     LspStatus {
@@ -5289,8 +5285,8 @@ async fn finish_open(
         return false;
     }
 
-    // What was viewed and revealed, and whether the files are folded, is
-    // small and local; it goes straight away.
+    // What was viewed and revealed is small and local; it goes straight
+    // away.
     send_viewed(ctx, &item.id, true);
 
     // The outdated check is a git call per moved thread; the log and the
@@ -5396,35 +5392,20 @@ async fn scoped_files(
 }
 
 /// What the reader marked on an item's files: every (path, blob) viewed,
-/// and on the open, every reveal and whether the files are folded, in one
-/// pass over the cache. Absent, or with no cache, the files are folded:
-/// that is the default, and the key is only ever written once the tile is
-/// clicked. After a write only the viewed set is sent; see `ViewedReady`.
+/// and on the open, every reveal, in one pass over the cache. After a
+/// write only the viewed set is sent; see `ViewedReady`.
 fn send_viewed(ctx: &Ctx, item_id: &str, opening: bool) {
-    use crate::review::model::{folded_from_meta, folded_meta_key};
-    let (viewed, folds) = ctx
+    let (viewed, reveals) = ctx
         .with_cache(|c| {
             let viewed = c.load_viewed(item_id).unwrap_or_default();
-            let folds = opening.then(|| {
-                (
-                    c.load_reveals(item_id).unwrap_or_default(),
-                    folded_from_meta(c.meta(&folded_meta_key(item_id)).ok().flatten().as_deref()),
-                )
-            });
-            (viewed, folds)
+            let reveals = opening.then(|| c.load_reveals(item_id).unwrap_or_default());
+            (viewed, reveals)
         })
-        .unwrap_or_else(|| {
-            (
-                Default::default(),
-                opening.then(|| (Default::default(), folded_from_meta(None))),
-            )
-        });
-    let (reveals, folded) = folds.unzip();
+        .unwrap_or_else(|| (Default::default(), opening.then(Default::default)));
     let _ = ctx.events.send(Event::ViewedReady {
         item_id: item_id.to_string(),
         viewed: Arc::new(viewed),
         reveals: reveals.map(Arc::new),
-        folded,
     });
 }
 

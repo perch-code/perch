@@ -759,28 +759,6 @@ pub enum RevealWrite {
     },
 }
 
-/// The `meta` key that remembers Show whole for an item. Per item rather
-/// than in the list the launch reads, because a reader folds one review
-/// and not another; the backend reads it when the item opens.
-pub fn folded_meta_key(item_id: &str) -> String {
-    format!("review.folded.{item_id}")
-}
-
-/// What is written under the key: `1` folded, `0` whole.
-pub fn folded_meta_value(folded: bool) -> &'static str {
-    if folded {
-        "1"
-    } else {
-        "0"
-    }
-}
-
-/// What a value read from under the key means. Absent is folded: the
-/// default, which only turning Show whole off ever writes over.
-pub fn folded_from_meta(value: Option<&str>) -> bool {
-    value.map(str::trim) != Some("0")
-}
-
 /// Everything the review view renders from. All fields are signals, so the
 /// struct is `Copy` and can be handed to any view closure.
 #[derive(Clone, Copy)]
@@ -896,10 +874,13 @@ pub struct ReviewState {
     pub merge_attempt_id: RwSignal<Option<u64>>,
     /// The (path, blob) pairs the reader has checked as viewed.
     pub viewed: RwSignal<Arc<std::collections::HashSet<(String, String)>>>,
-    /// Whether the worktree's changed files are folded to their changes,
-    /// which they are unless the reader asked for them whole. Per
-    /// worktree: a reader folds one review and not another.
-    pub folded: RwSignal<bool>,
+    /// The open files the reader asked to see whole rather than folded to
+    /// their changes, by path. Every file opens folded, and the strip's
+    /// Show whole tile asks and unasks for the one that is open; the
+    /// choice is the tab's, so it goes when the tab closes and a file
+    /// opened again opens folded. Not stored: a reader unfolds a file to
+    /// read it now, not to read it that way every time.
+    pub whole: RwSignal<HashSet<String>>,
     /// The runs the reader asked to see, by (path, blob), in head lines,
     /// so a reveal made in one layout holds in the other. Loaded with the
     /// viewed set when the item opens; a file with no blob keeps its
@@ -1108,7 +1089,7 @@ impl ReviewState {
             merge_error: RwSignal::new(None),
             merge_attempt_id: RwSignal::new(None),
             viewed: RwSignal::new(Arc::new(std::collections::HashSet::new())),
-            folded: RwSignal::new(true),
+            whole: RwSignal::new(HashSet::new()),
             reveals: RwSignal::new(HashMap::new()),
             pending_reveals: RwSignal::new(Vec::new()),
             references: RwSignal::new(None),
@@ -1231,11 +1212,10 @@ impl ReviewState {
         self.merge_error.set(None);
         self.merge_attempt_id.set(None);
         self.viewed.set(Arc::new(std::collections::HashSet::new()));
-        // Folded until the open's ViewedReady says what the item has. Only
-        // written when they change: the open editor rebuilds its document
-        // on either, and it is about to go.
-        if !self.folded.get_untracked() {
-            self.folded.set(true);
+        // Only written when they change: the open editor rebuilds its
+        // document on either, and it is about to go.
+        if !self.whole.with_untracked(HashSet::is_empty) {
+            self.whole.set(HashSet::new());
         }
         if !self.reveals.with_untracked(HashMap::is_empty) {
             self.reveals.set(HashMap::new());
@@ -1859,6 +1839,28 @@ impl ReviewState {
         });
     }
 
+    /// Whether the file at `path` is folded to its changes, which it is
+    /// unless the reader asked to see it whole. Tracked, so a document
+    /// built from it is rebuilt when the answer changes.
+    pub fn folded(&self, path: &str) -> bool {
+        self.whole.with(|paths| !paths.contains(path))
+    }
+
+    /// Show whole for the active file: fold it to its changes, or show it
+    /// whole. The folds come back with the reveals as they were; showing
+    /// the file whole does not throw the reveals away. The other tabs
+    /// stay as they are.
+    pub fn toggle_whole(&self) {
+        let Some(path) = self.active.get_untracked() else {
+            return;
+        };
+        self.whole.update(|paths| {
+            if !paths.remove(&path) {
+                paths.insert(path);
+            }
+        });
+    }
+
     pub fn is_loading(&self, path: &str) -> bool {
         self.loading.with(|m| m.contains_key(path))
     }
@@ -1869,6 +1871,7 @@ impl ReviewState {
     pub fn open_tab(&self, path: &str) -> bool {
         let already_open = self.tabs.with(|t| t.iter().any(|x| x.path == path));
         if !already_open {
+            let mut dropped = None;
             self.tabs.update(|tabs| {
                 tabs.push(Tab {
                     path: path.to_string(),
@@ -1876,9 +1879,12 @@ impl ReviewState {
                 });
                 // Oldest first, so the cap drops the least recently opened.
                 if tabs.len() > MAX_TABS {
-                    tabs.remove(0);
+                    dropped = Some(tabs.remove(0));
                 }
             });
+            if let Some(dropped) = dropped {
+                self.forget_whole(&dropped.path);
+            }
         }
         self.active.set(Some(path.to_string()));
         self.cursor_line.set(0);
@@ -1921,6 +1927,8 @@ impl ReviewState {
                     .map(|t| t.path.clone());
             }
         });
+        // Show whole was the tab's: opened again, the file opens folded.
+        self.forget_whole(path);
 
         // Keep the loaded content: reopening a closed tab should not refetch.
         if was_active {
@@ -1928,6 +1936,17 @@ impl ReviewState {
             self.cursor_line.set(0);
             self.editor_epoch.update(|e| *e += 1);
             self.keep_composer_in_view();
+        }
+    }
+
+    /// A tab is gone: its file is folded again next time. Only written
+    /// when the file was whole, since the open editor rebuilds its
+    /// document on every write.
+    fn forget_whole(&self, path: &str) {
+        if self.whole.with_untracked(|paths| paths.contains(path)) {
+            self.whole.update(|paths| {
+                paths.remove(path);
+            });
         }
     }
 

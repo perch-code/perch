@@ -1653,7 +1653,6 @@ impl AppState {
                 item_id,
                 viewed,
                 reveals,
-                folded,
             } => {
                 if review.is_item(&item_id) {
                     review.viewed.set(viewed);
@@ -1691,11 +1690,6 @@ impl AppState {
                                 held.retain(|(_, blob), _| blob.is_empty());
                                 held.extend(loaded);
                             });
-                        }
-                    }
-                    if let Some(folded) = folded {
-                        if review.folded.get_untracked() != folded {
-                            review.folded.set(folded);
                         }
                     }
                 }
@@ -2010,7 +2004,7 @@ mod tests {
 
     /// What the backend sends for an item on the open: `src/x.rs` at `b1`
     /// viewed, with two runs revealed in it.
-    fn viewed_ready(item_id: &str, reveals: Vec<(u32, u32)>, folded: bool) -> Event {
+    fn viewed_ready(item_id: &str, reveals: Vec<(u32, u32)>) -> Event {
         let key = ("src/x.rs".to_string(), "b1".to_string());
         Event::ViewedReady {
             item_id: item_id.into(),
@@ -2020,7 +2014,6 @@ mod tests {
             } else {
                 [(key, reveals)].into_iter().collect()
             })),
-            folded: Some(folded),
         }
     }
 
@@ -3238,20 +3231,18 @@ mod tests {
     }
 
     #[test]
-    fn viewed_ready_carries_the_reveals_and_the_folded_flag_into_the_open_item() {
+    fn viewed_ready_carries_the_reveals_into_the_open_item() {
         let app = AppState::new();
         let review = review_of("wt");
         // A file with no blob has reveals the store never sees.
         review.reveal("untracked.rs", "", 0, 9);
 
         // Another item's answer, arriving late, lands nowhere.
-        app.apply_with_review(viewed_ready("other", vec![(4, 23)], false), review);
-        assert!(review.folded.get());
+        app.apply_with_review(viewed_ready("other", vec![(4, 23)]), review);
         assert!(review.viewed.get().is_empty());
         assert!(review.reveals_for("src/x.rs", "b1").is_empty());
 
-        app.apply_with_review(viewed_ready("wt", vec![(4, 23), (40, 59)], false), review);
-        assert!(!review.folded.get(), "the item's files were left whole");
+        app.apply_with_review(viewed_ready("wt", vec![(4, 23), (40, 59)]), review);
         assert!(review
             .viewed
             .get()
@@ -3269,8 +3260,7 @@ mod tests {
         );
 
         // Opened again with fewer rows in the store, the state follows.
-        app.apply_with_review(viewed_ready("wt", vec![(40, 59)], true), review);
-        assert!(review.folded.get());
+        app.apply_with_review(viewed_ready("wt", vec![(40, 59)]), review);
         assert_eq!(
             review
                 .reveals_for("src/x.rs", "b1")
@@ -3278,7 +3268,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(40, 59)]
         );
-        app.apply_with_review(viewed_ready("wt", Vec::new(), true), review);
+        app.apply_with_review(viewed_ready("wt", Vec::new()), review);
         assert!(review.reveals_for("src/x.rs", "b1").is_empty());
         assert!(
             review.reveals_for("untracked.rs", "").overlaps(0, 9),
@@ -3287,15 +3277,14 @@ mod tests {
     }
 
     #[test]
-    fn a_writes_answer_carries_only_the_viewed_set_and_leaves_the_reveals_and_the_fold_alone() {
+    fn a_writes_answer_carries_only_the_viewed_set_and_leaves_the_reveals_alone() {
         let app = AppState::new();
         let review = review_of("wt");
-        // Down, then Show whole, both applied as they were clicked.
+        // Down, applied as it was clicked.
         review.reveal("src/x.rs", "b1", 4, 23);
-        review.folded.set(false);
 
-        // A viewed write's answer, read from the store before either
-        // reached it, changes neither.
+        // A viewed write's answer, read from the store before the reveal
+        // reached it, does not undo it.
         app.apply_with_review(
             Event::ViewedReady {
                 item_id: "wt".into(),
@@ -3305,7 +3294,6 @@ mod tests {
                         .collect(),
                 ),
                 reveals: None,
-                folded: None,
             },
             review,
         );
@@ -3319,10 +3307,6 @@ mod tests {
                 .iter()
                 .collect::<Vec<_>>(),
             vec![(4, 23)]
-        );
-        assert!(
-            !review.folded.get(),
-            "Show whole is not undone by a write that came before it"
         );
     }
 

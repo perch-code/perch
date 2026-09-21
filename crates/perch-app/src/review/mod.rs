@@ -277,9 +277,9 @@ fn hidden_lines_label(hidden: usize) -> String {
 
 /// One line under the review view, in the status bar's right-hand slot.
 /// The hidden count is a label of its own between the others: clicking it
-/// is Show whole for the item, and it is gone rather than blank when the
-/// file has nothing folded, so the line reads as it did without folds.
-pub fn review_status(app: AppState, state: ReviewState) -> impl IntoView {
+/// is Show whole for the open file, and it is gone rather than blank when
+/// the file has nothing folded, so the line reads as it did without folds.
+pub fn review_status(state: ReviewState) -> impl IntoView {
     use floem::views::{Empty, Label};
 
     let muted = |s: floem::style::Style| s.font_size(theme::TEXT_META).color(theme::FG_MUTED);
@@ -295,12 +295,12 @@ pub fn review_status(app: AppState, state: ReviewState) -> impl IntoView {
                     Label::derived(|| STATUS_SEPARATOR.to_string()).style(muted),
                     cards::tip(
                         Label::derived(move || text.clone())
-                            .on_event_stop(el::Click, move |_, _| tabs::toggle_folded(app, state))
+                            .on_event_stop(el::Click, move |_, _| state.toggle_whole())
                             .style(move |s| {
                                 crate::ui::widgets::clickable(muted(s))
                                     .hover(|s| s.color(theme::ACCENT))
                             }),
-                        "Show this worktree's files whole".to_string(),
+                        "Show this file whole".to_string(),
                     ),
                 ))
                 .style(|s| s.items_center().flex_shrink(0.0_f32))

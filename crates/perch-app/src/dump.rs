@@ -6,11 +6,12 @@
 //! folded away, and a spacer for each row a thread's card takes. Lets the
 //! data path be checked without a window. The folds are around the
 //! changes and the anchors of the item's threads, less the reveals stored
-//! for the file's blob, and none at all when Show whole is off for the
-//! item; the cards are the item's threads anchored in the file and
-//! GitHub's review threads on it, at their estimated heights, since
-//! nothing has laid them out; all read from the cache the app uses.
+//! for the file's blob; the cards are the item's threads anchored in the
+//! file and GitHub's review threads on it, at their estimated heights,
+//! since nothing has laid them out; all read from the cache the app uses.
 //! `--whole` renders the buffer whole, with nothing folded and no card.
+//! The window's Show whole is the open tab's and is not stored, so none
+//! of it is read here.
 //! `--split` renders both sides of the split, one after the other, each
 //! with its dividers and spacers, and ends in the two row counts, so that
 //! the sides being the same height can be checked by eye and by test.
@@ -22,7 +23,7 @@ use perch_github::{resolve_token, Cache, GitHub, ItemKind};
 
 use crate::review::doc::{self, Card, Doc, DocRow, Reveals, Tint};
 use crate::review::editor::{self, Side};
-use crate::review::model::{folded_from_meta, folded_meta_key, LoadedFile};
+use crate::review::model::LoadedFile;
 
 pub fn run(args: &[String]) {
     let mut positional = Vec::new();
@@ -122,8 +123,8 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     // The documents as the window would build them, from what the cache
     // holds for the item. A file with no base side is stacked in the
     // window whatever the layout, and here too.
-    let Kept { anchors, reveals, folded, cards } = if whole { Kept::none() } else { kept_for(full_name, number, &file) };
-    let folded = folded && !whole;
+    let Kept { anchors, reveals, cards } = if whole { Kept::none() } else { kept_for(full_name, number, &file) };
+    let folded = !whole;
     let sides = if split {
         let sides = editor::split_doc(&file, folded, &anchors, &reveals, &cards);
         if sides.is_none() {
@@ -147,7 +148,6 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     if !whole {
         println!("anchors:  {}", anchors.len());
         println!("reveals:  {}", reveals_line(&reveals));
-        println!("folded:   {}", if folded { "yes" } else { "no, the item's files are shown whole" });
         println!("hidden:   {}", rendered.hidden_lines());
         println!("cards:    {}", cards.len());
     }
@@ -263,21 +263,20 @@ fn reveals_line(reveals: &Reveals) -> String {
 /// What the cache holds for an item that shapes a file's document: the
 /// head lines its threads are anchored on, the reader's own and GitHub's
 /// review comments, as the window counts them; the reveals stored for the
-/// file's blob; whether the item's files are folded at all; and the
-/// reader's threads anchored in the file and GitHub's review threads on
-/// it as cards, each at its estimate, open, since nothing has been
-/// collapsed or laid out here. No composer: nothing is being written.
+/// file's blob; and the reader's threads anchored in the file and GitHub's
+/// review threads on it as cards, each at its estimate, open, since
+/// nothing has been collapsed or laid out here. No composer: nothing is
+/// being written.
 struct Kept {
     anchors: Vec<(usize, usize)>,
     reveals: Reveals,
-    folded: bool,
     cards: Vec<Card>,
 }
 
 impl Kept {
     /// Nothing kept: folded around the changes alone, as a new item is.
     fn none() -> Self {
-        Self { anchors: Vec::new(), reveals: Reveals::default(), folded: true, cards: Vec::new() }
+        Self { anchors: Vec::new(), reveals: Reveals::default(), cards: Vec::new() }
     }
 }
 
@@ -330,8 +329,7 @@ fn kept_in(db: &std::path::Path, full_name: &str, number: u64, file: &LoadedFile
             .map(|(a, b)| (a as usize, b as usize))
             .collect()
     };
-    let folded = folded_from_meta(cache.meta(&folded_meta_key(&item.id)).map_err(|e| e.to_string())?.as_deref());
     let github = crate::review::model::github_threads_of(discussion.as_ref(), &file.path);
     let cards = crate::review::model::cards_of(&threads, &github, None, file, &Default::default(), &Default::default());
-    Ok(Some(Kept { anchors, reveals, folded, cards }))
+    Ok(Some(Kept { anchors, reveals, cards }))
 }

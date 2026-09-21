@@ -17,7 +17,7 @@ use floem::views::{
 
 use crate::icons::SidebarIcon;
 use crate::review::cards::tip_with;
-use crate::review::model::{folded_meta_key, folded_meta_value, Layout, Origin, ReviewState};
+use crate::review::model::{Layout, Origin, ReviewState};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::icon_in;
@@ -301,14 +301,14 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 /// The rules are there because the groups are kinds of preference. The
 /// layout outlives the item: it is a way of reading, not a fact about a
 /// file, so it goes to `meta` under one key and comes back at the next
-/// launch. Show whole is the item's: a reader folds one review and not
-/// another, so it goes to `meta` under the item's key and comes back when
-/// the item opens. Source is the file's, for the app's life: a reader
-/// wants the markup of this SVG, not of SVGs.
+/// launch. Show whole is the open tab's: a reader unfolds the file they
+/// are reading and not the others, so it lasts as long as the tab and
+/// every file opens folded. Source is the file's, for the app's life: a
+/// reader wants the markup of this SVG, not of SVGs.
 fn layout_toggle(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
         source_group(state),
-        fold_tile(app, state),
+        fold_tile(state),
         tile_rule(),
         Stack::horizontal((
             layout_tile(app, state, Layout::Stacked, SidebarIcon::Stacked),
@@ -395,28 +395,22 @@ fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: Sidebar
     })
 }
 
-/// Folded to the changes, which is the default and is drawn filled, or
-/// the files whole.
-fn fold_tile(app: AppState, state: ReviewState) -> impl IntoView {
-    tip_with(tile(SidebarIcon::Fold, move || state.folded.get(), move || toggle_folded(app, state)), move || {
-        if state.folded.get() {
-            "Folded to the changes. Click to show files whole.".to_string()
+/// The open file folded to its changes, which is the default and is drawn
+/// filled, or shown whole. With no file open it is drawn as the default
+/// and does nothing.
+fn fold_tile(state: ReviewState) -> impl IntoView {
+    let folded = move || {
+        state
+            .active
+            .with(|a| a.as_deref().is_none_or(|path| state.folded(path)))
+    };
+    tip_with(tile(SidebarIcon::Fold, folded, move || state.toggle_whole()), move || {
+        if folded() {
+            "Folded to the changes. Click to show the file whole.".to_string()
         } else {
-            "Files shown whole. Click to fold to the changes.".to_string()
+            "Shown whole. Click to fold to the changes.".to_string()
         }
     })
-}
-
-/// Show whole for the open item: fold its files to their changes, or show
-/// them whole, and remember which under the item's `meta` key. The folds
-/// come back with the reveals as they were; showing the files whole does
-/// not throw the reveals away.
-pub fn toggle_folded(app: AppState, state: ReviewState) {
-    let folded = !state.folded.get_untracked();
-    state.folded.set(folded);
-    if let Some(id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) {
-        app.pending_meta.set(Some((folded_meta_key(&id), folded_meta_value(folded).to_string())));
-    }
 }
 
 /// One `LAYOUT_TILE` square: filled while `active`, a glyph otherwise.
@@ -445,20 +439,51 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn show_whole_flips_the_fold_and_writes_it_under_the_items_key() {
-        let app = AppState::new();
+    fn show_whole_is_the_open_tabs_alone_and_goes_with_the_tab() {
         let state = ReviewState::new();
         let mut item = perch_github::Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
         item.id = "wt".into();
         state.item.set(Some(Arc::new(item)));
-        assert!(state.folded.get(), "folded by default");
 
-        toggle_folded(app, state);
-        assert!(!state.folded.get());
-        assert_eq!(app.pending_meta.get(), Some(("review.folded.wt".to_string(), "0".to_string())));
+        // Nothing open: nothing to unfold.
+        state.toggle_whole();
+        assert!(state.whole.get().is_empty());
 
-        toggle_folded(app, state);
-        assert!(state.folded.get());
-        assert_eq!(app.pending_meta.get(), Some(("review.folded.wt".to_string(), "1".to_string())));
+        state.open_tab("src/a.rs");
+        state.open_tab("src/b.rs");
+        assert!(state.folded("src/a.rs"), "folded by default");
+        assert!(state.folded("src/b.rs"));
+
+        // Show whole on b, the open one: a stays folded.
+        state.toggle_whole();
+        assert!(!state.folded("src/b.rs"));
+        assert!(state.folded("src/a.rs"));
+
+        // Back to a: it is as it was, and b stays whole behind it. A file
+        // opened now opens folded.
+        state.open_tab("src/a.rs");
+        assert!(state.folded("src/a.rs"));
+        assert!(!state.folded("src/b.rs"));
+        state.open_tab("src/c.rs");
+        assert!(state.folded("src/c.rs"));
+
+        // Whole on a click, folded again on the next.
+        state.toggle_whole();
+        assert!(!state.folded("src/c.rs"));
+        state.toggle_whole();
+        assert!(state.folded("src/c.rs"));
+
+        // Closing b's tab forgets its Show whole: opened again, it opens
+        // folded.
+        state.close_tab("src/b.rs");
+        assert!(state.folded("src/b.rs"));
+        state.open_tab("src/b.rs");
+        assert!(state.folded("src/b.rs"));
+
+        // The item closing forgets them all.
+        state.toggle_whole();
+        assert!(!state.folded("src/b.rs"));
+        state.close();
+        assert!(state.whole.get().is_empty());
     }
 }

@@ -169,7 +169,7 @@ pub fn editor_pane(
 }
 
 /// What a file's document is built from besides the file: whether the
-/// worktree is folded, the head lines its threads are anchored on, the
+/// file is folded, the head lines its threads are anchored on, the
 /// reveals for its content, and its cards with the rows each has. Read
 /// tracked, so an effect over them runs when any changes, or untracked
 /// for the document an editor is built from.
@@ -202,7 +202,7 @@ impl Memos {
 
     fn inputs(&self, state: ReviewState, file: &LoadedFile) -> Inputs {
         Inputs {
-            folded: state.folded.get(),
+            folded: state.folded(&file.path),
             anchors: self.anchors.get(),
             reveals: state.reveals_for(&file.path, &file.blob),
             cards: self.cards.get(),
@@ -1545,7 +1545,7 @@ fn wire_jump(
         state.jump_to_line.set(None);
         let mut row = doc.with_untracked(|d| d.row_of_head(head_line));
         if row.is_none()
-            && state.folded.get_untracked()
+            && Effect::untrack(|| state.folded(&file.path))
             && file.buffer.display_line(head_line).is_some()
         {
             // The reveal reaches the editor before this returns: the
@@ -2396,7 +2396,7 @@ mod window {
         state.pull_request.set(Some(Arc::new(pull_request())));
         harness.rebuild();
         harness.paint();
-        assert!(state.folded.get(), "folded by default");
+        assert!(state.folded("src/x.rs"), "folded by default");
         assert_eq!(state.hidden_lines(), 54);
 
         // Twenty lines at the bottom of the run, to be kept through Show
@@ -2415,8 +2415,8 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert!(
-            !state.folded.get(),
-            "click at ({x}, {y}) over {under:?} did not show the files whole"
+            !state.folded("src/x.rs"),
+            "click at ({x}, {y}) over {under:?} did not show the file whole"
         );
         let doc = live.doc.get();
         assert_eq!(doc.len(), 64 + 72, "every line, no divider");
@@ -2431,7 +2431,7 @@ mod window {
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert!(state.folded.get());
+        assert!(state.folded("src/x.rs"));
         assert_eq!(
             live.doc.get().len(),
             103,
@@ -2735,7 +2735,7 @@ mod window {
             .expect("a line is first in view");
         let within = before - first_row as f64 * line_height;
 
-        state.folded.set(false);
+        state.toggle_whole();
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
@@ -2749,7 +2749,7 @@ mod window {
         );
         assert_eq!(laid_out_text(&live), doc.text);
 
-        state.folded.set(true);
+        state.toggle_whole();
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();

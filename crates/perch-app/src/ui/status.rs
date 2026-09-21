@@ -35,7 +35,7 @@ pub fn status_bar(
             move || review.pull_request.with(|p| p.is_some()),
             move |open| {
                 if open {
-                    crate::review::review_status(state, review).into_any()
+                    crate::review::review_status(review).into_any()
                 } else {
                     Label::derived(move || {
                         let (active, archived) = state.items.with(|all| {
