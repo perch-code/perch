@@ -77,7 +77,14 @@ pub fn navigable(
                 return EventPropagation::Continue;
             }
             let window_point = cx.world_transform.inverse() * e.state.logical_point();
-            if cmd_click(state, &click_backend, &click_ed, &doc, &click_path, window_point) {
+            if cmd_click(
+                state,
+                &click_backend,
+                &click_ed,
+                &doc,
+                &click_path,
+                window_point,
+            ) {
                 EventPropagation::Stop
             } else {
                 EventPropagation::Continue
@@ -112,7 +119,12 @@ pub fn navigable(
         let menu_backend = backend.clone();
         let menu_ed = ed.clone();
         content.update_context_menu(move || {
-            symbol_menu(state, &menu_backend, &menu_ed, state.pointer_symbol.get_untracked())
+            symbol_menu(
+                state,
+                &menu_backend,
+                &menu_ed,
+                state.pointer_symbol.get_untracked(),
+            )
         });
     }
 
@@ -186,7 +198,12 @@ pub fn hit(ed: &Editor, window_point: Point) -> Option<Hit> {
 
 /// The symbol under a window point, through the document's rows. `None`
 /// on a row that is no head line as well as past the text.
-pub fn symbol_under(ed: &Editor, doc: &RwSignal<Arc<Doc>>, path: &str, window_point: Point) -> Option<Symbol> {
+pub fn symbol_under(
+    ed: &Editor,
+    doc: &RwSignal<Arc<Doc>>,
+    path: &str,
+    window_point: Point,
+) -> Option<Symbol> {
     let hit = hit(ed, window_point)?;
     doc.with_untracked(|d| hit.symbol(d, path))
 }
@@ -208,7 +225,8 @@ pub fn cmd_click(
     let Some(symbol) = doc.with_untracked(|d| hit.symbol(d, path)) else {
         return false;
     };
-    ed.cursor.update(|c| c.set_offset(hit.caret, hit.affinity, false, false));
+    ed.cursor
+        .update(|c| c.set_offset(hit.caret, hit.affinity, false, false));
     go_to_definition(state, backend, &symbol);
     true
 }
@@ -226,7 +244,12 @@ pub fn go_to_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) 
         symbol: symbol.text.clone(),
         kind: Locations::Definitions,
     }));
-    backend.definition(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+    backend.definition(
+        token,
+        &symbol.path,
+        symbol.line as u32,
+        symbol.column as u32,
+    );
 }
 
 /// `F12`: the definition of the symbol at the caret.
@@ -249,7 +272,12 @@ pub fn go_to_type_definition(state: ReviewState, backend: &Backend, symbol: &Sym
         symbol: symbol.text.clone(),
         kind: Locations::Definitions,
     }));
-    backend.type_definition(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+    backend.type_definition(
+        token,
+        &symbol.path,
+        symbol.line as u32,
+        symbol.column as u32,
+    );
 }
 
 /// Ask for the impls of a trait, or of a trait method. One opens; several
@@ -264,7 +292,12 @@ pub fn go_to_implementations(state: ReviewState, backend: &Backend, symbol: &Sym
         symbol: symbol.text.clone(),
         kind: Locations::Implementations,
     }));
-    backend.implementation(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+    backend.implementation(
+        token,
+        &symbol.path,
+        symbol.line as u32,
+        symbol.column as u32,
+    );
 }
 
 /// `Cmd-F12`: the implementations of the symbol at the caret.
@@ -305,13 +338,17 @@ impl Entry {
 
     /// "Go to Definition of `parse`": the entry with the symbol it acts on.
     pub fn label(self, symbol: Option<&Symbol>) -> String {
-        let name = symbol.map(|s| format!(" of `{}`", s.text)).unwrap_or_default();
+        let name = symbol
+            .map(|s| format!(" of `{}`", s.text))
+            .unwrap_or_default();
         match self {
             Entry::Definition => format!("Go to Definition{name}"),
             Entry::TypeDefinition => format!("Go to Type Definition{name}"),
             Entry::Implementations => format!("Go to Implementations{name}"),
             Entry::References => format!("Find All References{}", name.replacen(" of ", " to ", 1)),
-            Entry::CallHierarchy => format!("Show Call Hierarchy{}", name.replacen(" of ", " for ", 1)),
+            Entry::CallHierarchy => {
+                format!("Show Call Hierarchy{}", name.replacen(" of ", " for ", 1))
+            }
             Entry::Copy => "Copy".to_string(),
         }
     }
@@ -331,7 +368,12 @@ impl Entry {
 
 /// The menu for a right-click in the code. The navigation entries each
 /// act on the symbol; Copy copies the editor's selection.
-fn symbol_menu(state: ReviewState, backend: &Rc<Backend>, ed: &Editor, symbol: Option<Symbol>) -> floem::Menu {
+fn symbol_menu(
+    state: ReviewState,
+    backend: &Rc<Backend>,
+    ed: &Editor,
+    symbol: Option<Symbol>,
+) -> floem::Menu {
     let mut menu = floem::Menu::new();
     for entry in Entry::for_symbol(symbol.as_ref()) {
         if entry == Entry::Copy && symbol.is_some() {
@@ -400,7 +442,10 @@ fn track(state: ReviewState, backend: &Rc<Backend>, symbol: Option<Symbol>) {
     }
     let backend = backend.clone();
     floem::action::exec_after(Duration::from_millis(hover::ASK_DELAY_MILLIS), move |_| {
-        if state.pointer_symbol.with_untracked(|s| s.as_ref() == Some(&symbol)) {
+        if state
+            .pointer_symbol
+            .with_untracked(|s| s.as_ref() == Some(&symbol))
+        {
             state.ask_hover(&backend, symbol);
         }
     });
@@ -411,7 +456,9 @@ fn track(state: ReviewState, backend: &Rc<Backend>, symbol: Option<Symbol>) {
 /// sits deepest under the pointer, so the hand goes on that element,
 /// where it wins.
 fn set_hand(cx: &mut floem::context::EventCx, ed: &Editor, hand: bool) {
-    let Some(content) = ed.editor_view_id.get_untracked() else { return };
+    let Some(content) = ed.editor_view_id.get_untracked() else {
+        return;
+    };
     if hand {
         cx.window_state.set_cursor(content, CursorStyle::Pointer);
     } else {
@@ -498,7 +545,9 @@ mod tests {
     }
 
     fn editor() -> Editor {
-        LAST_EDITOR.with(|e| e.borrow().clone()).expect("an editor was made navigable")
+        LAST_EDITOR
+            .with(|e| e.borrow().clone())
+            .expect("an editor was made navigable")
     }
 
     fn stacked_doc(state: ReviewState) -> Arc<Doc> {
@@ -512,7 +561,10 @@ mod tests {
     /// right of its caret, in the middle of its row.
     fn point_of(offset: usize) -> (f64, f64) {
         let ed = editor();
-        let content = ed.editor_view_id.get_untracked().expect("the editor has a content view");
+        let content = ed
+            .editor_view_id
+            .get_untracked()
+            .expect("the editor has a content view");
         let origin = content.get_visual_rect_no_clip().origin();
         let (top, bottom) = ed.points_of_offset(offset, CursorAffinity::Forward);
         (origin.x + top.x + 2.0, origin.y + (top.y + bottom.y) / 2.0)
@@ -534,7 +586,13 @@ mod tests {
     fn definitions_asked(commands: &mut UnboundedReceiver<Command>) -> Vec<(String, u32, u32)> {
         let mut out = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            if let Command::Definition { path, line, character, .. } = command {
+            if let Command::Definition {
+                path,
+                line,
+                character,
+                ..
+            } = command
+            {
                 out.push((path, line, character));
             }
         }
@@ -545,7 +603,13 @@ mod tests {
     fn implementations_asked(commands: &mut UnboundedReceiver<Command>) -> Vec<(String, u32, u32)> {
         let mut out = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            if let Command::Implementation { path, line, character, .. } = command {
+            if let Command::Implementation {
+                path,
+                line,
+                character,
+                ..
+            } = command
+            {
                 out.push((path, line, character));
             }
         }
@@ -597,17 +661,39 @@ mod tests {
         let (x, y) = point_of(doc.offset_of_row(3) + 5);
         harness.pointer_move(x, y);
         harness.rebuild();
-        assert_eq!(state.pointer_symbol.get().map(|s| (s.text, s.line, s.column)), Some(("alpha".into(), 2, 4)));
+        assert_eq!(
+            state
+                .pointer_symbol
+                .get()
+                .map(|s| (s.text, s.line, s.column)),
+            Some(("alpha".into(), 2, 4))
+        );
         harness.pointer_move(5.0, 5.0);
         harness.rebuild();
-        assert_eq!(state.pointer_symbol.get(), None, "leaving the editor clears the symbol");
+        assert_eq!(
+            state.pointer_symbol.get(),
+            None,
+            "leaving the editor clears the symbol"
+        );
     }
 
     #[test]
     fn the_tip_draws_only_an_answer_about_the_symbol_under_the_pointer() {
         let state = ReviewState::new();
-        let beta = Symbol { path: "src/x.rs".into(), line: 1, column: 3, end: 7, text: "beta".into() };
-        let alpha = Symbol { path: "src/x.rs".into(), line: 0, column: 3, end: 8, text: "alpha".into() };
+        let beta = Symbol {
+            path: "src/x.rs".into(),
+            line: 1,
+            column: 3,
+            end: 7,
+            text: "beta".into(),
+        };
+        let alpha = Symbol {
+            path: "src/x.rs".into(),
+            line: 0,
+            column: 3,
+            end: 8,
+            text: "alpha".into(),
+        };
         let backend = crate::backend::Backend::detached();
 
         state.pointer_symbol.set(Some(beta.clone()));
@@ -620,8 +706,13 @@ mod tests {
         assert_eq!(state.hover.get().unwrap().token, token);
 
         // The answer lands with its token.
-        state.hover.update(|h| h.as_mut().unwrap().markdown = "```rust\nfn beta()\n```".into());
-        assert_eq!(state.hover_for_pointer().as_deref(), Some("```rust\nfn beta()\n```"));
+        state
+            .hover
+            .update(|h| h.as_mut().unwrap().markdown = "```rust\nfn beta()\n```".into());
+        assert_eq!(
+            state.hover_for_pointer().as_deref(),
+            Some("```rust\nfn beta()\n```")
+        );
 
         // The pointer moves to another symbol: the answer is not its.
         state.pointer_symbol.set(Some(alpha));
@@ -629,14 +720,23 @@ mod tests {
         state.pointer_symbol.set(None);
         assert_eq!(state.hover_for_pointer(), None);
         state.pointer_symbol.set(Some(beta));
-        assert!(state.hover_for_pointer().is_some(), "and back, the answer is there again");
+        assert!(
+            state.hover_for_pointer().is_some(),
+            "and back, the answer is there again"
+        );
     }
 
     /// A Cmd-click, as the editor's capture handler makes it from the
     /// event. Not dispatched as an event: floem gives the pressed view the
     /// keyboard before any handler runs, and a focused editor asks the
     /// window for IME, which the headless window cannot give.
-    fn cmd_click_at(state: ReviewState, backend: &Backend, doc: &RwSignal<Arc<Doc>>, x: f64, y: f64) -> bool {
+    fn cmd_click_at(
+        state: ReviewState,
+        backend: &Backend,
+        doc: &RwSignal<Arc<Doc>>,
+        x: f64,
+        y: f64,
+    ) -> bool {
         cmd_click(state, backend, &editor(), doc, "src/x.rs", Point::new(x, y))
     }
 
@@ -654,13 +754,23 @@ mod tests {
         // On the `t` of `beta`, row 2, head line 1.
         let offset = doc.offset_of_row(2) + 5;
         let (x, y) = point_of(offset);
-        assert!(cmd_click_at(state, &backend, &live.doc, x, y), "a name takes the click");
+        assert!(
+            cmd_click_at(state, &backend, &live.doc, x, y),
+            "a name takes the click"
+        );
         harness.rebuild();
-        assert_eq!(definitions_asked(&mut asked), vec![("src/x.rs".into(), 1, 3)]);
+        assert_eq!(
+            definitions_asked(&mut asked),
+            vec![("src/x.rs".into(), 1, 3)]
+        );
         let ask = state.goto.get().expect("a definition is on its way");
         assert_eq!(ask.symbol, "beta");
         assert_eq!(ask.kind, Locations::Definitions);
-        assert_eq!(ed.cursor.get().offset(), offset, "the caret is where the click was");
+        assert_eq!(
+            ed.cursor.get().offset(),
+            offset,
+            "the caret is where the click was"
+        );
         assert_eq!(state.last_position.get(), Some((1, 5)));
 
         // On the ghost, and on the `(` after `alpha`, the click is the
@@ -675,7 +785,9 @@ mod tests {
 
         // With the server gone, the caret is placed and nothing is asked.
         state.goto.set(None);
-        state.lsp_status.set(perch_lsp::Status::Failed { reason: "gone".into() });
+        state.lsp_status.set(perch_lsp::Status::Failed {
+            reason: "gone".into(),
+        });
         let offset = doc.offset_of_row(0) + 4;
         let (x, y) = point_of(offset);
         assert!(cmd_click_at(state, &backend, &live.doc, x, y));
@@ -683,7 +795,10 @@ mod tests {
         assert!(definitions_asked(&mut asked).is_empty());
         assert!(state.goto.get().is_none());
         assert_eq!(ed.cursor.get().offset(), offset);
-        assert!(definitions_asked(&mut commands).is_empty(), "the window's own backend saw nothing");
+        assert!(
+            definitions_asked(&mut commands).is_empty(),
+            "the window's own backend saw nothing"
+        );
     }
 
     #[test]
@@ -695,20 +810,31 @@ mod tests {
         // The caret on `alpha` in the call, row 3, head line 2, as a click
         // would place it.
         let offset = doc.offset_of_row(3) + 6;
-        ed.cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
+        ed.cursor
+            .update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
         harness.rebuild();
         assert_eq!(state.last_position.get(), Some((2, 6)));
 
-        harness.dispatch_event(key(Code::F12, Key::Named(NamedKey::F12), Modifiers::empty()));
+        harness.dispatch_event(key(
+            Code::F12,
+            Key::Named(NamedKey::F12),
+            Modifiers::empty(),
+        ));
         harness.rebuild();
-        assert_eq!(definitions_asked(&mut commands), vec![("src/x.rs".into(), 2, 4)]);
+        assert_eq!(
+            definitions_asked(&mut commands),
+            vec![("src/x.rs".into(), 2, 4)]
+        );
         assert_eq!(state.goto.get().map(|g| g.symbol), Some("alpha".into()));
 
         // Shift-F12 still asks for references, and not for a definition.
         harness.dispatch_event(key(Code::F12, Key::Named(NamedKey::F12), Modifiers::SHIFT));
         harness.rebuild();
         assert!(definitions_asked(&mut commands).is_empty());
-        assert_eq!(state.references.get().map(|r| r.symbol.clone()), Some("alpha".into()));
+        assert_eq!(
+            state.references.get().map(|r| r.symbol.clone()),
+            Some("alpha".into())
+        );
     }
 
     #[test]
@@ -718,12 +844,23 @@ mod tests {
         let ed = editor();
 
         // The caret on `alpha` in the call, head line 2.
-        ed.cursor.update(|c| c.set_offset(doc.offset_of_row(3) + 6, CursorAffinity::Backward, false, false));
+        ed.cursor.update(|c| {
+            c.set_offset(
+                doc.offset_of_row(3) + 6,
+                CursorAffinity::Backward,
+                false,
+                false,
+            )
+        });
         harness.rebuild();
         assert_eq!(state.last_position.get(), Some((2, 6)));
 
         // The definition answers with the one place `alpha` is defined.
-        state.goto.set(Some(GotoAsk { token: 1, symbol: "alpha".into(), kind: Locations::Definitions }));
+        state.goto.set(Some(GotoAsk {
+            token: 1,
+            symbol: "alpha".into(),
+            kind: Locations::Definitions,
+        }));
         state.finish_goto(
             1,
             vec![crate::review::model::Located {
@@ -738,28 +875,48 @@ mod tests {
         harness.paint();
         assert_eq!(state.pending_jump.get(), None, "the view took the jump");
         assert_eq!(state.jump_to_line.get(), None, "and the editor took it");
-        assert_eq!(state.last_position.get(), Some((0, 3)), "the caret landed on the definition");
+        assert_eq!(
+            state.last_position.get(),
+            Some((0, 3)),
+            "the caret landed on the definition"
+        );
         assert_eq!(ed.cursor.get().offset(), doc.offset_of_row(0) + 3);
 
         // Ctrl-- goes back to where the jump left.
-        harness.dispatch_event(key(Code::Minus, Key::Character("-".into()), Modifiers::CONTROL));
+        harness.dispatch_event(key(
+            Code::Minus,
+            Key::Character("-".into()),
+            Modifiers::CONTROL,
+        ));
         harness.rebuild();
         harness.paint();
         assert_eq!(state.last_position.get(), Some((2, 0)));
         assert_eq!(ed.cursor.get().offset(), doc.offset_of_row(3));
 
         // Ctrl-Shift-- goes forward again.
-        harness.dispatch_event(key(Code::Minus, Key::Character("_".into()), Modifiers::CONTROL | Modifiers::SHIFT));
+        harness.dispatch_event(key(
+            Code::Minus,
+            Key::Character("_".into()),
+            Modifiers::CONTROL | Modifiers::SHIFT,
+        ));
         harness.rebuild();
         harness.paint();
         assert_eq!(state.last_position.get(), Some((0, 0)));
 
         // And once more back, twice: the second has nowhere to go.
-        harness.dispatch_event(key(Code::Minus, Key::Character("-".into()), Modifiers::CONTROL));
+        harness.dispatch_event(key(
+            Code::Minus,
+            Key::Character("-".into()),
+            Modifiers::CONTROL,
+        ));
         harness.rebuild();
         harness.paint();
         assert_eq!(state.last_position.get(), Some((2, 0)));
-        harness.dispatch_event(key(Code::Minus, Key::Character("-".into()), Modifiers::CONTROL));
+        harness.dispatch_event(key(
+            Code::Minus,
+            Key::Character("-".into()),
+            Modifiers::CONTROL,
+        ));
         harness.rebuild();
         harness.paint();
         assert_eq!(state.last_position.get(), Some((2, 0)));
@@ -769,11 +926,22 @@ mod tests {
     fn the_keys_type_nothing_and_open_nothing_while_a_composer_has_the_keyboard() {
         let (mut harness, state, mut commands) = recording_harness();
         let doc = stacked_doc(state);
-        editor().cursor.update(|c| c.set_offset(doc.offset_of_row(3) + 6, CursorAffinity::Backward, false, false));
+        editor().cursor.update(|c| {
+            c.set_offset(
+                doc.offset_of_row(3) + 6,
+                CursorAffinity::Backward,
+                false,
+                false,
+            )
+        });
         harness.rebuild();
         state.composer_focused.set(true);
 
-        harness.dispatch_event(key(Code::F12, Key::Named(NamedKey::F12), Modifiers::empty()));
+        harness.dispatch_event(key(
+            Code::F12,
+            Key::Named(NamedKey::F12),
+            Modifiers::empty(),
+        ));
         harness.dispatch_event(key(Code::F12, Key::Named(NamedKey::F12), Modifiers::SHIFT));
         harness.rebuild();
         assert!(definitions_asked(&mut commands).is_empty());
@@ -784,15 +952,32 @@ mod tests {
     fn cmd_f12_asks_for_the_implementations_of_the_symbol_at_the_caret() {
         let (mut harness, state, mut commands) = recording_harness();
         let doc = stacked_doc(state);
-        editor().cursor.update(|c| c.set_offset(doc.offset_of_row(2) + 4, CursorAffinity::Backward, false, false));
+        editor().cursor.update(|c| {
+            c.set_offset(
+                doc.offset_of_row(2) + 4,
+                CursorAffinity::Backward,
+                false,
+                false,
+            )
+        });
         harness.rebuild();
 
-        let os_mod = if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL };
+        let os_mod = if cfg!(target_os = "macos") {
+            Modifiers::META
+        } else {
+            Modifiers::CONTROL
+        };
         harness.dispatch_event(key(Code::F12, Key::Named(NamedKey::F12), os_mod));
         harness.rebuild();
-        assert_eq!(implementations_asked(&mut commands), vec![("src/x.rs".into(), 1, 3)]);
+        assert_eq!(
+            implementations_asked(&mut commands),
+            vec![("src/x.rs".into(), 1, 3)]
+        );
         let ask = state.goto.get().expect("implementations are on their way");
-        assert_eq!((ask.symbol.as_str(), ask.kind), ("beta", Locations::Implementations));
+        assert_eq!(
+            (ask.symbol.as_str(), ask.kind),
+            ("beta", Locations::Implementations)
+        );
 
         // Several answers list under the kind, and one opens.
         let located = |path: &str, line: usize| crate::review::model::Located {
@@ -802,7 +987,10 @@ mod tests {
             character: 0,
             text: "impl".into(),
         };
-        state.finish_goto(ask.token, vec![located("src/x.rs", 1), located("src/y.rs", 4)]);
+        state.finish_goto(
+            ask.token,
+            vec![located("src/x.rs", 1), located("src/y.rs", 4)],
+        );
         let panel = state.references.get().expect("the panel opened");
         assert_eq!(panel.kind, Locations::Implementations);
         assert_eq!(panel.symbol, "beta");
@@ -813,21 +1001,44 @@ mod tests {
     fn shift_alt_h_asks_for_the_call_hierarchy_of_the_symbol_at_the_caret() {
         let (mut harness, state, mut commands) = recording_harness();
         let doc = stacked_doc(state);
-        editor().cursor.update(|c| c.set_offset(doc.offset_of_row(3) + 6, CursorAffinity::Backward, false, false));
+        editor().cursor.update(|c| {
+            c.set_offset(
+                doc.offset_of_row(3) + 6,
+                CursorAffinity::Backward,
+                false,
+                false,
+            )
+        });
         harness.rebuild();
 
         // On a Mac, Alt-H types a dot above; the code says which key it was.
-        harness.dispatch_event(key(Code::KeyH, Key::Character("\u{02d9}".into()), Modifiers::SHIFT | Modifiers::ALT));
+        harness.dispatch_event(key(
+            Code::KeyH,
+            Key::Character("\u{02d9}".into()),
+            Modifiers::SHIFT | Modifiers::ALT,
+        ));
         harness.rebuild();
         let mut asked = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            if let Command::PrepareCallHierarchy { path, line, character, .. } = command {
+            if let Command::PrepareCallHierarchy {
+                path,
+                line,
+                character,
+                ..
+            } = command
+            {
                 asked.push((path, line, character));
             }
         }
         assert_eq!(asked, vec![("src/x.rs".into(), 2, 4)]);
-        assert_eq!(state.hierarchy_ask.get().map(|a| a.symbol), Some("alpha".into()));
-        assert!(state.hierarchy.get().is_none(), "nothing opens until the server names a function");
+        assert_eq!(
+            state.hierarchy_ask.get().map(|a| a.symbol),
+            Some("alpha".into())
+        );
+        assert!(
+            state.hierarchy.get().is_none(),
+            "nothing opens until the server names a function"
+        );
     }
 
     #[test]
@@ -835,7 +1046,13 @@ mod tests {
         let state = ReviewState::new();
         state.lsp_status.set(perch_lsp::Status::Ready);
         let (backend, mut commands) = crate::backend::Backend::recording();
-        let symbol = Symbol { path: "src/x.rs".into(), line: 4, column: 8, end: 12, text: "self".into() };
+        let symbol = Symbol {
+            path: "src/x.rs".into(),
+            line: 4,
+            column: 8,
+            end: 12,
+            text: "self".into(),
+        };
         go_to_type_definition(state, &backend, &symbol);
         assert!(matches!(
             commands.try_recv(),
@@ -858,10 +1075,19 @@ mod tests {
 
     #[test]
     fn the_menu_names_what_each_entry_acts_on_and_is_copy_alone_on_nothing() {
-        let parse = Symbol { path: "src/x.rs".into(), line: 0, column: 3, end: 8, text: "parse".into() };
+        let parse = Symbol {
+            path: "src/x.rs".into(),
+            line: 0,
+            column: 3,
+            end: 8,
+            text: "parse".into(),
+        };
         let entries = Entry::for_symbol(Some(&parse));
         assert_eq!(
-            entries.iter().map(|e| e.label(Some(&parse))).collect::<Vec<_>>(),
+            entries
+                .iter()
+                .map(|e| e.label(Some(&parse)))
+                .collect::<Vec<_>>(),
             vec![
                 "Go to Definition of `parse`",
                 "Go to Type Definition of `parse`",
@@ -883,7 +1109,11 @@ mod tests {
             ]
         );
         for keys in entries.iter().filter_map(|e| e.accelerator()) {
-            assert!(keys.parse::<floem::muda::accelerator::Accelerator>().is_ok(), "{keys}");
+            assert!(
+                keys.parse::<floem::muda::accelerator::Accelerator>()
+                    .is_ok(),
+                "{keys}"
+            );
         }
         assert_eq!(Entry::for_symbol(None), vec![Entry::Copy]);
         assert_eq!(Entry::Copy.label(None), "Copy");
@@ -897,10 +1127,20 @@ mod tests {
         let ed = editor();
 
         // The caret on `alpha` in the call: the ask, as the timer makes it.
-        ed.cursor.update(|c| c.set_offset(doc.offset_of_row(3) + 6, CursorAffinity::Backward, false, false));
+        ed.cursor.update(|c| {
+            c.set_offset(
+                doc.offset_of_row(3) + 6,
+                CursorAffinity::Backward,
+                false,
+                false,
+            )
+        });
         harness.rebuild();
         let alpha = references::symbol_at_cursor(state).expect("the caret is on alpha");
-        assert_eq!((alpha.text.as_str(), alpha.line, alpha.column), ("alpha", 2, 4));
+        assert_eq!(
+            (alpha.text.as_str(), alpha.line, alpha.column),
+            ("alpha", 2, 4)
+        );
         state.ask_highlights(&backend, alpha.clone());
         let token = state.highlight_ask.get().unwrap().0;
         assert!(matches!(
@@ -917,10 +1157,18 @@ mod tests {
         assert_eq!(state.highlights.get().as_slice(), &[(0, 3, 8), (2, 4, 9)]);
 
         // Along the word, the tint stays; off it, the tint clears.
-        ed.cursor.update(|c| c.set_offset(doc.offset_of_row(3) + 8, CursorAffinity::Backward, false, false));
+        ed.cursor.update(|c| {
+            c.set_offset(
+                doc.offset_of_row(3) + 8,
+                CursorAffinity::Backward,
+                false,
+                false,
+            )
+        });
         harness.rebuild();
         assert_eq!(state.highlights.get().len(), 2, "still on alpha");
-        ed.cursor.update(|c| c.set_offset(doc.offset_of_row(4), CursorAffinity::Backward, false, false));
+        ed.cursor
+            .update(|c| c.set_offset(doc.offset_of_row(4), CursorAffinity::Backward, false, false));
         harness.rebuild();
         assert!(state.highlights.get().is_empty(), "the brace is nothing");
         assert!(state.highlight_ask.get().is_none());

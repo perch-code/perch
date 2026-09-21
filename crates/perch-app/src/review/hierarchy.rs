@@ -16,7 +16,9 @@ use std::rc::Rc;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::text::FontWeight;
-use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack};
+use floem::views::{
+    dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
+};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -42,7 +44,12 @@ pub fn show(state: ReviewState, backend: &Backend, symbol: &Symbol) {
         token,
         symbol: symbol.text.clone(),
     }));
-    backend.prepare_call_hierarchy(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+    backend.prepare_call_hierarchy(
+        token,
+        &symbol.path,
+        symbol.line as u32,
+        symbol.column as u32,
+    );
 }
 
 /// `Shift-Alt-H`: the call hierarchy of the symbol at the caret.
@@ -75,7 +82,11 @@ pub(crate) enum Row {
     },
     /// A line under an expanded row with nothing under it: no callers,
     /// or a recursive call, or the calls still on their way.
-    Notice { at: usize, depth: usize, text: String },
+    Notice {
+        at: usize,
+        depth: usize,
+        text: String,
+    },
 }
 
 /// Where a row's place reads: a worktree file by its path, an outside
@@ -93,13 +104,20 @@ fn place_label(site: &Located) -> String {
 pub(crate) fn rows(hierarchy: &Hierarchy) -> Vec<Row> {
     let mut out = Vec::with_capacity(hierarchy.rows.len() * 2);
     for (at, row) in hierarchy.rows.iter().enumerate() {
-        let site = row.site.clone().unwrap_or_else(|| hierarchy.root_place.clone());
+        let site = row
+            .site
+            .clone()
+            .unwrap_or_else(|| hierarchy.root_place.clone());
         out.push(Row::Item {
             at,
             depth: row.depth,
             name: row.item.name.clone(),
             place: place_label(&site),
-            text: row.site.as_ref().map(|s| s.text.clone()).unwrap_or_default(),
+            text: row
+                .site
+                .as_ref()
+                .map(|s| s.text.clone())
+                .unwrap_or_default(),
             emphasis: row.emphasis.clone(),
             expanded: row.expanded,
             pending: row.pending.is_some(),
@@ -177,15 +195,24 @@ pub fn panel(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
 /// "Callers of `run`", the direction toggle, and the close glyph.
 fn header(state: ReviewState) -> impl IntoView {
     let heading = move || {
+        state.hierarchy.with(|h| {
+            h.as_ref()
+                .map(|h| h.direction.heading().to_string())
+                .unwrap_or_default()
+        })
+    };
+    let symbol = move || {
         state
             .hierarchy
-            .with(|h| h.as_ref().map(|h| h.direction.heading().to_string()).unwrap_or_default())
+            .with(|h| h.as_ref().map(|h| h.root.name.clone()).unwrap_or_default())
     };
-    let symbol = move || state.hierarchy.with(|h| h.as_ref().map(|h| h.root.name.clone()).unwrap_or_default());
 
     Stack::horizontal((
         Label::derived(heading).style(|s| {
-            s.font_size(theme::TEXT_META).color(theme::FG_MUTED).selectable(false).flex_shrink(0.0_f32)
+            s.font_size(theme::TEXT_META)
+                .color(theme::FG_MUTED)
+                .selectable(false)
+                .flex_shrink(0.0_f32)
         }),
         Label::derived(symbol).style(|s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
@@ -221,7 +248,11 @@ fn toggle(state: ReviewState) -> impl IntoView {
 }
 
 fn toggle_pill(state: ReviewState, direction: Direction, text: &'static str) -> impl IntoView {
-    let active = move || state.hierarchy.with(|h| h.as_ref().is_some_and(|h| h.direction == direction));
+    let active = move || {
+        state
+            .hierarchy
+            .with(|h| h.as_ref().is_some_and(|h| h.direction == direction))
+    };
     Label::derived(move || text.to_string())
         .on_event_stop(el::Click, move |_, _| state.turn_hierarchy(direction))
         .style(move |s| {
@@ -242,7 +273,11 @@ fn toggle_pill(state: ReviewState, direction: Direction, text: &'static str) -> 
 
 fn tree(state: ReviewState) -> impl IntoView {
     dyn_stack(
-        move || state.hierarchy.with(|h| h.as_ref().map(|h| rows(h)).unwrap_or_default()),
+        move || {
+            state
+                .hierarchy
+                .with(|h| h.as_ref().map(|h| rows(h)).unwrap_or_default())
+        },
         |row| row.clone(),
         move |row| match row {
             Row::Notice { depth, text, .. } => notice(depth, text).into_any(),
@@ -256,7 +291,10 @@ fn tree(state: ReviewState) -> impl IntoView {
                 expanded,
                 pending,
                 repeats,
-            } => item_row(state, at, depth, name, place, text, emphasis, expanded, pending, repeats).into_any(),
+            } => item_row(
+                state, at, depth, name, place, text, emphasis, expanded, pending, repeats,
+            )
+            .into_any(),
         },
     )
     .style(|s| s.flex_col().width_full().padding_vert(4.0))
@@ -298,7 +336,11 @@ fn item_row(
         Label::derived(move || name.clone()).style(move |s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::CODE_FONT_SIZE)
-                .font_weight(if is_root { FontWeight::BOLD } else { FontWeight::SEMI_BOLD })
+                .font_weight(if is_root {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::SEMI_BOLD
+                })
                 .color(if repeats { theme::FG_MUTED } else { theme::FG })
                 .flex_shrink(0.0_f32)
                 .selectable(false)
@@ -320,7 +362,11 @@ fn item_row(
     ))
     .on_event_stop(el::Click, move |_, _| {
         let place = state.hierarchy.with_untracked(|h| {
-            h.as_ref().and_then(|h| h.rows.get(at).map(|row| row.site.clone().unwrap_or_else(|| h.root_place.clone())))
+            h.as_ref().and_then(|h| {
+                h.rows
+                    .get(at)
+                    .map(|row| row.site.clone().unwrap_or_else(|| h.root_place.clone()))
+            })
         });
         if let Some(place) = place {
             state.open_located(&place);
@@ -341,25 +387,35 @@ fn item_row(
 /// is open, dimmed while its calls are on their way. Click opens or
 /// shuts; the row's own click, which opens the file, does not fire.
 fn chevron(state: ReviewState, at: usize, expanded: bool, pending: bool) -> impl IntoView {
-    let glyph = if expanded { SidebarIcon::ChevronDown } else { SidebarIcon::ChevronRight };
-    let color = if pending { theme::FG_SUBTLE } else { theme::FG_MUTED };
-    Container::new(sidebar_glyph(glyph, color).style(|s| s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH)))
-        .on_event_stop(el::Click, move |_, _| {
-            if expanded {
-                state.collapse_hierarchy_row(at);
-            } else {
-                state.expand_hierarchy_row(at);
-            }
-        })
-        .style(|s| {
-            s.size(theme::CHEVRON_SLOT, theme::CHEVRON_SLOT)
-                .items_center()
-                .justify_center()
-                .margin_right(6.0)
-                .border_radius(3.0)
-                .flex_shrink(0.0_f32)
-                .hover(|s| s.background(theme::BADGE_BG))
-        })
+    let glyph = if expanded {
+        SidebarIcon::ChevronDown
+    } else {
+        SidebarIcon::ChevronRight
+    };
+    let color = if pending {
+        theme::FG_SUBTLE
+    } else {
+        theme::FG_MUTED
+    };
+    Container::new(
+        sidebar_glyph(glyph, color).style(|s| s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH)),
+    )
+    .on_event_stop(el::Click, move |_, _| {
+        if expanded {
+            state.collapse_hierarchy_row(at);
+        } else {
+            state.expand_hierarchy_row(at);
+        }
+    })
+    .style(|s| {
+        s.size(theme::CHEVRON_SLOT, theme::CHEVRON_SLOT)
+            .items_center()
+            .justify_center()
+            .margin_right(6.0)
+            .border_radius(3.0)
+            .flex_shrink(0.0_f32)
+            .hover(|s| s.background(theme::BADGE_BG))
+    })
 }
 
 #[cfg(test)]
@@ -370,7 +426,10 @@ mod tests {
 
     fn item(name: &str, line: u32) -> CallHierarchyItem {
         let uri: Uri = format!("file:///wt/src/{name}.rs").parse().unwrap();
-        let range = Range::new(Position::new(line, 3), Position::new(line, 3 + name.len() as u32));
+        let range = Range::new(
+            Position::new(line, 3),
+            Position::new(line, 3 + name.len() as u32),
+        );
         CallHierarchyItem {
             name: name.into(),
             kind: SymbolKind::FUNCTION,
@@ -410,44 +469,79 @@ mod tests {
     fn the_tree_flattens_with_depths_and_a_repeated_ancestor_says_so() {
         let mut hierarchy = Hierarchy::new(item("run", 0), root_place(), Direction::Callers, 1);
         assert_eq!(rows(&hierarchy).len(), 2, "the root, and Looking under it");
-        assert!(matches!(&rows(&hierarchy)[1], Row::Notice { text, depth: 1, .. } if text == "Looking\u{2026}"));
+        assert!(
+            matches!(&rows(&hierarchy)[1], Row::Notice { text, depth: 1, .. } if text == "Looking\u{2026}")
+        );
 
         // Two callers of run: main, and step.
-        assert_eq!(hierarchy.fill(1, vec![call("main", 10, "run();"), call("step", 20, "run().await")]), Some(2));
+        assert_eq!(
+            hierarchy.fill(
+                1,
+                vec![call("main", 10, "run();"), call("step", 20, "run().await")]
+            ),
+            Some(2)
+        );
         assert_eq!(hierarchy.fill(1, vec![]), None, "answered once");
         let listed = rows(&hierarchy);
         assert_eq!(listed.len(), 3);
-        assert!(matches!(&listed[0], Row::Item { depth: 0, name, expanded: true, place, text, .. } if name == "run" && place == "src/run.rs:1" && text.is_empty()));
-        assert!(matches!(&listed[1], Row::Item { depth: 1, name, place, text, emphasis, .. }
-            if name == "main" && place == "src/main.rs:14" && text == "run();" && emphasis == "run"));
+        assert!(
+            matches!(&listed[0], Row::Item { depth: 0, name, expanded: true, place, text, .. } if name == "run" && place == "src/run.rs:1" && text.is_empty())
+        );
+        assert!(
+            matches!(&listed[1], Row::Item { depth: 1, name, place, text, emphasis, .. }
+            if name == "main" && place == "src/main.rs:14" && text == "run();" && emphasis == "run")
+        );
         assert!(matches!(&listed[2], Row::Item { depth: 1, name, .. } if name == "step"));
 
         // step's callers: run itself, a recursive call, and loop.
         hierarchy.expanding(2, 7);
-        assert!(matches!(&rows(&hierarchy)[2], Row::Item { pending: true, .. }));
-        assert!(matches!(&rows(&hierarchy)[3], Row::Notice { text, depth: 2, .. } if text == "Looking\u{2026}"));
-        hierarchy.fill(7, vec![call("run", 0, "step();"), call("loop", 30, "step()")]);
+        assert!(matches!(
+            &rows(&hierarchy)[2],
+            Row::Item { pending: true, .. }
+        ));
+        assert!(
+            matches!(&rows(&hierarchy)[3], Row::Notice { text, depth: 2, .. } if text == "Looking\u{2026}")
+        );
+        hierarchy.fill(
+            7,
+            vec![call("run", 0, "step();"), call("loop", 30, "step()")],
+        );
         let listed = rows(&hierarchy);
         assert_eq!(listed.len(), 5);
-        assert!(matches!(&listed[3], Row::Item { depth: 2, name, repeats: true, .. } if name == "run"));
-        assert!(matches!(&listed[4], Row::Item { depth: 2, name, repeats: false, .. } if name == "loop"));
+        assert!(
+            matches!(&listed[3], Row::Item { depth: 2, name, repeats: true, .. } if name == "run")
+        );
+        assert!(
+            matches!(&listed[4], Row::Item { depth: 2, name, repeats: false, .. } if name == "loop")
+        );
         assert!(hierarchy.rows[3].repeats && !hierarchy.rows[4].repeats);
 
         // Open the recursive row: it has nothing under it, and says so.
         hierarchy.rows[3].expanded = true;
         let listed = rows(&hierarchy);
-        assert!(matches!(&listed[4], Row::Notice { text, depth: 3, .. } if text == "Already open above."));
+        assert!(
+            matches!(&listed[4], Row::Notice { text, depth: 3, .. } if text == "Already open above.")
+        );
 
         // Fold step: its subtree goes, and run's other caller stays.
         hierarchy.collapse(2);
         assert_eq!(hierarchy.rows.len(), 3);
         assert!(!hierarchy.rows[2].expanded);
-        assert_eq!(hierarchy.rows.iter().map(|r| r.item.name.as_str()).collect::<Vec<_>>(), vec!["run", "main", "step"]);
+        assert_eq!(
+            hierarchy
+                .rows
+                .iter()
+                .map(|r| r.item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["run", "main", "step"]
+        );
 
         // A function with no callers reads so under it.
         hierarchy.expanding(1, 9);
         hierarchy.fill(9, vec![]);
-        assert!(matches!(&rows(&hierarchy)[2], Row::Notice { text, depth: 2, .. } if text == "No callers."));
+        assert!(
+            matches!(&rows(&hierarchy)[2], Row::Notice { text, depth: 2, .. } if text == "No callers.")
+        );
 
         // Turned the other way, the tree starts again from the root.
         let turned = hierarchy.turned(Direction::Callees, 11);
@@ -484,7 +578,13 @@ mod tests {
         let state = ReviewState::new();
         state.lsp_status.set(perch_lsp::Status::Ready);
         let (backend, mut commands) = crate::backend::Backend::recording();
-        let symbol = Symbol { path: "src/x.rs".into(), line: 4, column: 8, end: 11, text: "run".into() };
+        let symbol = Symbol {
+            path: "src/x.rs".into(),
+            line: 4,
+            column: 8,
+            end: 11,
+            text: "run".into(),
+        };
 
         show(state, &backend, &symbol);
         let token = state.hierarchy_ask.get().expect("asked").token;
@@ -502,13 +602,15 @@ mod tests {
         // for through the queue the panel drains.
         show(state, &backend, &symbol);
         let token = state.hierarchy_ask.get().unwrap().token;
-        state.references.set(Some(std::sync::Arc::new(crate::review::model::References {
-            kind: crate::review::model::Locations::References,
-            symbol: "x".into(),
-            locations: vec![],
-            pending: false,
-            token: 0,
-        })));
+        state.references.set(Some(std::sync::Arc::new(
+            crate::review::model::References {
+                kind: crate::review::model::Locations::References,
+                symbol: "x".into(),
+                locations: vec![],
+                pending: false,
+                token: 0,
+            },
+        )));
         state.finish_prepare_hierarchy(token, vec![item("run", 0)], Some(root_place()));
         let open = state.hierarchy.get().expect("the panel opened");
         assert_eq!(open.direction, Direction::Callers);
@@ -516,7 +618,10 @@ mod tests {
         assert!(state.references.get().is_none(), "one panel at a time");
         let queued = state.pending_calls.get();
         assert_eq!(queued.len(), 1);
-        assert_eq!((queued[0].0, queued[0].2), (open.rows[0].pending.unwrap(), Direction::Callers));
+        assert_eq!(
+            (queued[0].0, queued[0].2),
+            (open.rows[0].pending.unwrap(), Direction::Callers)
+        );
 
         // The calls land, one row is expanded, and the direction turns.
         state.finish_calls(queued[0].0, vec![call("main", 10, "run();")]);
@@ -529,7 +634,10 @@ mod tests {
         let turned = state.hierarchy.get().unwrap();
         assert_eq!(turned.direction, Direction::Callees);
         assert_eq!(turned.rows.len(), 1);
-        assert_eq!(state.pending_calls.get().last().map(|a| a.2), Some(Direction::Callees));
+        assert_eq!(
+            state.pending_calls.get().last().map(|a| a.2),
+            Some(Direction::Callees)
+        );
 
         // Escape closes whichever panel is open.
         assert!(state.panel_open());
