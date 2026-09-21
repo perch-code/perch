@@ -1,24 +1,31 @@
 //! Start rust-analyzer on a workspace and ask it about a position.
 //!
-//!     cargo run -p perch-lsp --example hover -- <worktree> <file> <line> <col> [hover|definition|references]
+//!     cargo run -p perch-lsp --example hover -- <worktree> <file> <line> <col> [mode]
 //!
-//! Line and col are counted from zero, as the protocol counts them. The
-//! definition and references modes print one `path:line:character` per
-//! location on stdout, counted from one as an editor shows them, with paths
-//! inside the worktree made relative to it.
+//! The modes are `hover`, `definition`, `type-definition`, `implementation`,
+//! `references`, `highlight`, `callers` and `callees`. Line and col are
+//! counted from zero, as the protocol counts them. Every mode but hover
+//! prints one `path:line:character` per location on stdout, counted from
+//! one as an editor shows them, with paths inside the worktree made relative
+//! to it, so each request can be checked against a checkout from the shell
+//! before the UI asks it.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use perch_lsp::client::{uri_to_path, Client, ServerEvent};
+use perch_lsp::lsp_types::{CallHierarchyItem, Location};
 use perch_lsp::{find_server, Request, Status};
+
+const MODES: &str =
+    "hover|definition|type-definition|implementation|references|highlight|callers|callees";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 4 {
-        eprintln!("usage: hover <worktree> <file> <line> <col> [hover|definition|references]");
+        eprintln!("usage: hover <worktree> <file> <line> <col> [{MODES}]");
         std::process::exit(2);
     }
     let root = PathBuf::from(&args[0]).canonicalize()?;
@@ -28,9 +35,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = match args.get(4).map(String::as_str) {
         None | Some("hover") => Request::Hover,
         Some("definition") => Request::Definition,
+        Some("type-definition") => Request::TypeDefinition,
+        Some("implementation") => Request::Implementation,
         Some("references") => Request::References,
+        Some("highlight") => Request::DocumentHighlight,
+        Some("callers") => Request::Callers,
+        Some("callees") => Request::Callees,
         Some(other) => {
-            eprintln!("unknown mode {other}: expected hover, definition or references");
+            eprintln!("unknown mode {other}: expected one of {MODES}");
             std::process::exit(2);
         }
     };
@@ -89,9 +101,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let found = poll(|| nonempty(client.definition(&file, line, col))).await;
             print_locations(&root, &found.unwrap_or_default());
         }
+        Request::TypeDefinition => {
+            let found = poll(|| nonempty(client.type_definition(&file, line, col))).await;
+            print_locations(&root, &found.unwrap_or_default());
+        }
+        Request::Implementation => {
+            let found = poll(|| nonempty(client.implementation(&file, line, col))).await;
+            print_locations(&root, &found.unwrap_or_default());
+        }
         Request::References => {
             let found = poll(|| nonempty(client.references(&file, line, col))).await;
             print_locations(&root, &found.unwrap_or_default());
+        }
+        Request::DocumentHighlight => {
+            let found = poll(|| nonempty(client.document_highlight(&file, line, col))).await;
+            // Highlights are ranges in the file asked about, so each is a
+            // location in it.
+            let locations: Vec<Location> = found
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|h| {
+                    Some(Location {
+                        uri: perch_lsp::client::path_to_uri(&file)?,
+                        range: h.range,
+                    })
+                })
+                .collect();
+            print_locations(&root, &locations);
+        }
+        Request::Callers | Request::Callees => {
+            let items = poll(|| nonempty(client.prepare_call_hierarchy(&file, line, col))).await;
+            let Some(item) = items.and_then(|items| items.into_iter().next()) else {
+                eprintln!("\nnothing at {line}:{col} has a call hierarchy");
+                client.shutdown().await;
+                return Ok(());
+            };
+            eprintln!("\n{}: {}", describe(&item), item.name);
+            // Each call is one location: the caller or callee, at the first
+            // place the call is made, which is how the panel lists them.
+            // Polled like the rest: the calls index later than the item.
+            let locations: Vec<Location> = if mode == Request::Callers {
+                poll(|| nonempty(client.incoming_calls(item.clone())))
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|c| {
+                        Some(Location {
+                            uri: c.from.uri.clone(),
+                            range: *c.from_ranges.first()?,
+                        })
+                    })
+                    .collect()
+            } else {
+                poll(|| nonempty(client.outgoing_calls(item.clone())))
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|c| Location {
+                        uri: c.to.uri.clone(),
+                        range: c.to.selection_range,
+                    })
+                    .collect()
+            };
+            print_locations(&root, &locations);
         }
     }
 
@@ -125,7 +197,11 @@ async fn nonempty<T>(ask: impl Future<Output = Vec<T>>) -> Option<Vec<T>> {
     (!found.is_empty()).then_some(found)
 }
 
-fn print_locations(root: &Path, locations: &[lsp_types::Location]) {
+fn describe(item: &CallHierarchyItem) -> String {
+    format!("{:?} at {}:{}", item.kind, item.uri.as_str().rsplit('/').next().unwrap_or("?"), item.selection_range.start.line + 1)
+}
+
+fn print_locations(root: &Path, locations: &[Location]) {
     eprintln!("\n{} locations", locations.len());
     for location in locations {
         let uri = location.uri.to_string();

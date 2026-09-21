@@ -1,7 +1,7 @@
 //! A small language server client.
 //!
-//! Hand-rolled rather than built on a framework: the review view needs seven
-//! requests and three notifications, and owning the loop keeps request
+//! Hand-rolled rather than built on a framework: the review view needs a
+//! dozen requests and three notifications, and owning the loop keeps request
 //! matching, progress reporting, and shutdown explicit.
 
 pub mod client;

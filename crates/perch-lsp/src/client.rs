@@ -8,11 +8,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lsp_types::{
-    ClientCapabilities, GotoDefinitionResponse, Hover, HoverClientCapabilities,
-    HoverParams, InitializeParams, InitializedParams, Location, MarkupKind, Position,
-    PublishDiagnosticsParams, ReferenceContext, ReferenceParams,
-    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, Uri, WindowClientCapabilities, WorkDoneProgressParams,
+    CallHierarchyClientCapabilities, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
+    CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
+    CallHierarchyPrepareParams, ClientCapabilities, DocumentHighlight,
+    DocumentHighlightClientCapabilities, DocumentHighlightParams, GotoCapability,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverClientCapabilities, HoverParams,
+    InitializeParams, InitializedParams, Location, MarkupKind, Position,
+    PublishDiagnosticsParams, ReferenceContext, ReferenceParams, TextDocumentClientCapabilities,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Uri,
+    WindowClientCapabilities, WorkDoneProgressParams,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -23,11 +27,18 @@ use crate::server::{ServerSpec, Status};
 use crate::transport::{decode, decode_result, frame, parse_header_block, Incoming};
 use crate::Error;
 
-/// How long a request waits before it is given up on.
-///
-/// A missing hover is not an error worth surfacing; the popup simply does not
-/// appear.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a request that answers a glance waits: a hover, a definition,
+/// the highlights in a file. A missing hover is not an error worth
+/// surfacing; the tooltip simply does not appear.
+pub const QUICK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a request that fills a panel waits: references, implementations,
+/// a call hierarchy's calls. A large crate still indexing can take this long
+/// to answer them, and the panel says it is pending while it does.
+pub const PANEL_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long the handshake and the shutdown wait.
+const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What the client tells the caller about, outside of request replies.
 #[derive(Debug, Clone)]
@@ -41,7 +52,16 @@ pub enum ServerEvent {
 pub enum Request {
     Hover,
     Definition,
+    TypeDefinition,
+    Implementation,
     References,
+    DocumentHighlight,
+    /// The callers of the function at a position: `prepareCallHierarchy`,
+    /// then `incomingCalls` on what it names.
+    Callers,
+    /// The functions the one at a position calls: `prepareCallHierarchy`,
+    /// then `outgoingCalls`.
+    Callees,
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
@@ -116,12 +136,19 @@ impl Client {
             capabilities: ClientCapabilities {
                 text_document: Some(TextDocumentClientCapabilities {
                     hover: Some(HoverClientCapabilities {
-                        // Plain text: rendering markdown in a popup is a
-                        // later milestone, and asking for it would only mean
-                        // stripping syntax back out.
-                        content_format: Some(vec![MarkupKind::PlainText]),
+                        // Markdown first: the tooltip renders it, with the
+                        // signature's fenced block in the code font. Plain
+                        // text second for a server that has no markdown.
+                        content_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
                         ..Default::default()
                     }),
+                    // Every goto answers with plain `Location`s: a link's
+                    // origin range is nothing the caller draws.
+                    definition: Some(plain_goto()),
+                    type_definition: Some(plain_goto()),
+                    implementation: Some(plain_goto()),
+                    call_hierarchy: Some(CallHierarchyClientCapabilities::default()),
+                    document_highlight: Some(DocumentHighlightClientCapabilities::default()),
                     ..Default::default()
                 }),
                 window: Some(WindowClientCapabilities {
@@ -133,8 +160,12 @@ impl Client {
             ..Default::default()
         };
 
-        self.request("initialize", serde_json::to_value(params).unwrap_or(Value::Null))
-            .await?;
+        self.request(
+            "initialize",
+            serde_json::to_value(params).unwrap_or(Value::Null),
+            LIFECYCLE_TIMEOUT,
+        )
+        .await?;
         self.notify(
             "initialized",
             serde_json::to_value(InitializedParams {}).unwrap_or(Value::Null),
@@ -167,17 +198,34 @@ impl Client {
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
         let value = self
-            .request("textDocument/hover", serde_json::to_value(params).ok()?)
+            .request("textDocument/hover", serde_json::to_value(params).ok()?, QUICK_TIMEOUT)
             .await
             .ok()?;
         decode_result(value)
     }
 
     pub async fn definition(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
+        self.goto("textDocument/definition", path, line, character).await
+    }
+
+    /// The type of the thing at a position: a binding's type, the struct
+    /// behind a `Self`.
+    pub async fn type_definition(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
+        self.goto("textDocument/typeDefinition", path, line, character).await
+    }
+
+    /// The impls of the trait, or of the trait method, at a position.
+    pub async fn implementation(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
+        self.goto("textDocument/implementation", path, line, character).await
+    }
+
+    /// The three gotos are one request with three names: a position in,
+    /// locations out, and a null reply is none.
+    async fn goto(&self, method: &str, path: &Path, line: u32, character: u32) -> Vec<Location> {
         let Some(position) = self.position(path, line, character) else {
             return Vec::new();
         };
-        let params = lsp_types::GotoDefinitionParams {
+        let params = GotoDefinitionParams {
             text_document_position_params: position,
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: Default::default(),
@@ -185,19 +233,10 @@ impl Client {
         let Ok(params) = serde_json::to_value(params) else {
             return Vec::new();
         };
-        let Ok(value) = self.request("textDocument/definition", params).await else {
+        let Ok(value) = self.request(method, params, QUICK_TIMEOUT).await else {
             return Vec::new();
         };
-
-        match decode_result::<GotoDefinitionResponse>(value) {
-            Some(GotoDefinitionResponse::Scalar(l)) => vec![l],
-            Some(GotoDefinitionResponse::Array(v)) => v,
-            Some(GotoDefinitionResponse::Link(links)) => links
-                .into_iter()
-                .map(|l| Location { uri: l.target_uri, range: l.target_selection_range })
-                .collect(),
-            None => Vec::new(),
-        }
+        goto_locations(value)
     }
 
     /// Every use of the symbol under the cursor, its declaration among them.
@@ -217,10 +256,105 @@ impl Client {
         let Ok(params) = serde_json::to_value(params) else {
             return Vec::new();
         };
-        let Ok(value) = self.request("textDocument/references", params).await else {
+        let Ok(value) = self.request("textDocument/references", params, PANEL_TIMEOUT).await
+        else {
             return Vec::new();
         };
         reference_locations(value)
+    }
+
+    /// Every use of the symbol at a position in its own file, as ranges,
+    /// for tinting them while the caret rests on one.
+    pub async fn document_highlight(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Vec<DocumentHighlight> {
+        let Some(position) = self.position(path, line, character) else {
+            return Vec::new();
+        };
+        let params = DocumentHighlightParams {
+            text_document_position_params: position,
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: Default::default(),
+        };
+        let Ok(params) = serde_json::to_value(params) else {
+            return Vec::new();
+        };
+        let Ok(value) = self
+            .request("textDocument/documentHighlight", params, QUICK_TIMEOUT)
+            .await
+        else {
+            return Vec::new();
+        };
+        decode_result(value).unwrap_or_default()
+    }
+
+    /// The call hierarchy items at a position: the function there, or none
+    /// when the position is not on one. The item goes back to the server
+    /// as it came, in `incoming_calls` and `outgoing_calls`.
+    pub async fn prepare_call_hierarchy(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Vec<CallHierarchyItem> {
+        let Some(position) = self.position(path, line, character) else {
+            return Vec::new();
+        };
+        let params = CallHierarchyPrepareParams {
+            text_document_position_params: position,
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        };
+        let Ok(params) = serde_json::to_value(params) else {
+            return Vec::new();
+        };
+        let Ok(value) = self
+            .request("textDocument/prepareCallHierarchy", params, PANEL_TIMEOUT)
+            .await
+        else {
+            return Vec::new();
+        };
+        decode_result(value).unwrap_or_default()
+    }
+
+    /// The callers of an item, each with where in the caller the call is.
+    pub async fn incoming_calls(&self, item: CallHierarchyItem) -> Vec<CallHierarchyIncomingCall> {
+        let params = CallHierarchyIncomingCallsParams {
+            item,
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: Default::default(),
+        };
+        let Ok(params) = serde_json::to_value(params) else {
+            return Vec::new();
+        };
+        let Ok(value) = self
+            .request("callHierarchy/incomingCalls", params, PANEL_TIMEOUT)
+            .await
+        else {
+            return Vec::new();
+        };
+        decode_result(value).unwrap_or_default()
+    }
+
+    /// The functions an item calls, each with where in the item the call is.
+    pub async fn outgoing_calls(&self, item: CallHierarchyItem) -> Vec<CallHierarchyOutgoingCall> {
+        let params = CallHierarchyOutgoingCallsParams {
+            item,
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: Default::default(),
+        };
+        let Ok(params) = serde_json::to_value(params) else {
+            return Vec::new();
+        };
+        let Ok(value) = self
+            .request("callHierarchy/outgoingCalls", params, PANEL_TIMEOUT)
+            .await
+        else {
+            return Vec::new();
+        };
+        decode_result(value).unwrap_or_default()
     }
 
     fn position(&self, path: &Path, line: u32, character: u32) -> Option<TextDocumentPositionParams> {
@@ -230,7 +364,8 @@ impl Client {
         })
     }
 
-    async fn request(&self, method: &str, params: Value) -> Result<Value, Error> {
+    /// Send a request and wait `timeout` for its answer.
+    async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, Error> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
@@ -241,7 +376,7 @@ impl Client {
             return Err(Error::Exited);
         }
 
-        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(message))) => Err(Error::Server(message)),
             Ok(Err(_)) => Err(Error::Exited),
@@ -271,7 +406,7 @@ impl Client {
     }
 
     pub async fn shutdown(&self) {
-        let _ = self.request("shutdown", Value::Null).await;
+        let _ = self.request("shutdown", Value::Null, LIFECYCLE_TIMEOUT).await;
         self.notify("exit", Value::Null).await;
     }
 }
@@ -352,6 +487,31 @@ fn handle_notification(method: &str, params: Value, events: &mpsc::UnboundedSend
             }
         }
         _ => {}
+    }
+}
+
+/// A goto capability that asks for locations and not links.
+fn plain_goto() -> GotoCapability {
+    GotoCapability {
+        dynamic_registration: None,
+        link_support: Some(false),
+    }
+}
+
+/// The locations in a goto reply, whichever of the protocol's three shapes
+/// it took. A link is reduced to where it points; a null reply is none.
+fn goto_locations(value: Value) -> Vec<Location> {
+    match decode_result::<GotoDefinitionResponse>(value) {
+        Some(GotoDefinitionResponse::Scalar(l)) => vec![l],
+        Some(GotoDefinitionResponse::Array(v)) => v,
+        Some(GotoDefinitionResponse::Link(links)) => links
+            .into_iter()
+            .map(|l| Location {
+                uri: l.target_uri,
+                range: l.target_selection_range,
+            })
+            .collect(),
+        None => Vec::new(),
     }
 }
 
@@ -492,5 +652,55 @@ mod tests {
     fn a_malformed_references_reply_is_empty_rather_than_fatal() {
         assert!(reference_locations(json!({"not":"a list"})).is_empty());
         assert!(reference_locations(json!([{"uri":"file:///a"}])).is_empty());
+    }
+
+    #[test]
+    fn a_goto_reply_is_read_in_each_of_its_shapes() {
+        let range = json!({"start":{"line":3,"character":4},"end":{"line":3,"character":9}});
+        let one = json!({"uri":"file:///a/src/lib.rs","range":range});
+        assert_eq!(goto_locations(one.clone()).len(), 1, "one location");
+        assert_eq!(goto_locations(json!([one.clone(), one.clone()])).len(), 2, "a list");
+
+        // A link, which the capabilities say not to send, still lands where
+        // it points if a server sends one anyway.
+        let link = json!([{
+            "targetUri":"file:///a/src/lib.rs",
+            "targetRange":{"start":{"line":0,"character":0},"end":{"line":9,"character":0}},
+            "targetSelectionRange":range
+        }]);
+        let located = goto_locations(link);
+        assert_eq!(located.len(), 1);
+        assert_eq!(located[0].range.start.line, 3);
+        assert_eq!(located[0].range.start.character, 4);
+
+        assert!(goto_locations(Value::Null).is_empty(), "null is none");
+        assert!(goto_locations(json!({"not":"a location"})).is_empty());
+    }
+
+    #[test]
+    fn a_null_highlight_or_hierarchy_reply_is_an_empty_list() {
+        assert!(decode_result::<Vec<DocumentHighlight>>(Value::Null)
+            .unwrap_or_default()
+            .is_empty());
+        assert!(decode_result::<Vec<CallHierarchyItem>>(Value::Null)
+            .unwrap_or_default()
+            .is_empty());
+        let calls = json!([{
+            "from":{
+                "name":"run","kind":12,"uri":"file:///a/src/main.rs",
+                "range":{"start":{"line":1,"character":0},"end":{"line":9,"character":1}},
+                "selectionRange":{"start":{"line":1,"character":3},"end":{"line":1,"character":6}}
+            },
+            "fromRanges":[{"start":{"line":4,"character":8},"end":{"line":4,"character":13}}]
+        }]);
+        let calls: Vec<CallHierarchyIncomingCall> = decode_result(calls).unwrap_or_default();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].from.name, "run");
+        assert_eq!(calls[0].from_ranges[0].start.line, 4);
+    }
+
+    #[test]
+    fn the_gotos_ask_for_locations_and_not_links() {
+        assert_eq!(plain_goto().link_support, Some(false));
     }
 }
