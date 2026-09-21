@@ -616,9 +616,10 @@ pub enum Event {
         navigation_id: u64,
         status: perch_lsp::Status,
     },
+    /// What rust-analyzer says about a symbol, as markdown.
     LspHover {
         token: u64,
-        text: String,
+        markdown: String,
     },
     /// A definition inside the worktree, or `None` when it lands outside it.
     LspDefinition {
@@ -2792,9 +2793,9 @@ async fn run(
                         return;
                     };
                     if let Some(hover) = client.hover(&full, line, character).await {
-                        let text = render_hover(&hover);
-                        if !text.trim().is_empty() {
-                            let _ = events.send(Event::LspHover { token, text });
+                        let markdown = render_hover(&hover);
+                        if !markdown.trim().is_empty() {
+                            let _ = events.send(Event::LspHover { token, markdown });
                         }
                     }
                 });
@@ -9470,7 +9471,7 @@ async fn read_references(
     (out, elsewhere)
 }
 
-/// Flatten a hover reply into the plain text the popup shows.
+/// Flatten a hover reply into the markdown the tooltip renders.
 fn render_hover(hover: &perch_lsp::lsp_types::Hover) -> String {
     use perch_lsp::lsp_types::{HoverContents, MarkedString};
     match &hover.contents {

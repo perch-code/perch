@@ -12,6 +12,7 @@ pub mod issue;
 pub mod markdown;
 pub mod merge;
 pub mod model;
+pub mod navigation;
 pub mod rail;
 pub mod references;
 pub mod review_launch;

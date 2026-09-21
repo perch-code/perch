@@ -1,11 +1,38 @@
-//! Asking the language server about whatever the reader just clicked.
+//! What is under the pointer, and the tooltip that says what it is.
 //!
-//! Driven by the editor's cursor rather than by raw pointer coordinates.
-//! floem places the cursor with its own hit-testing, which already accounts
-//! for scrolling, the hidden gutter, and per-line heights; recomputing that
-//! from a pointer position would be duplicating logic that is easy to get
-//! subtly wrong and hard to see wrong. Where the cursor's offset lands in
-//! the head file is the document's to say, in `review::doc`.
+//! The pointer's point is mapped to a byte offset by the editor's own
+//! hit-testing, which already accounts for scrolling, the hidden gutter
+//! and per-line heights. From there this module takes over: the offset to
+//! a row and a column, the row to a head line through the document's row
+//! table, and the column to the identifier around it. A row that is no
+//! line of the head file, a ghost, a divider, a filler or a spacer, is
+//! nowhere, and so is a column on whitespace or punctuation.
+//!
+//! The tooltip is floem's own, wrapped around the editor: floem owns the
+//! timer, the placement and the closing, and this module owns what is in
+//! it. The content is rust-analyzer's markdown, the signature in the code
+//! font and the doc comment under it, cut so the tip stays a glance.
+
+use floem::prelude::*;
+use floem::text::FontWeight;
+use floem::views::{Decorators, Empty, Label, Stack};
+
+use crate::review::doc::Doc;
+use crate::review::markdown::{self, Block};
+use crate::review::model::Symbol;
+use crate::review::references::{self, identifier_at};
+use crate::theme;
+
+/// How long the pointer rests before the tooltip opens.
+pub const TOOLTIP_DELAY_MILLIS: u64 = 500;
+/// How long the pointer rests on one identifier before the server is
+/// asked about it. Shorter than the tooltip's delay, so the answer is
+/// usually there when the tip opens.
+pub const ASK_DELAY_MILLIS: u64 = 150;
+/// How many lines of the doc comment the tooltip shows.
+pub const DOC_LINES: usize = 12;
+/// How wide the tooltip grows before it wraps.
+pub const TOOLTIP_WIDTH: f64 = 560.0;
 
 /// A byte offset in the buffer, as line and column.
 ///
@@ -29,40 +56,202 @@ pub fn line_col_of_offset(text: &str, offset: usize) -> (usize, usize) {
     (line, offset.saturating_sub(line_start))
 }
 
-/// Trim a hover reply to what fits in a popup.
-///
-/// rust-analyzer returns the whole doc comment, which for a well-documented
-/// type runs to dozens of lines and would cover the code being reviewed.
-pub fn condense(text: &str, max_lines: usize) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    let mut blank_run = 0;
+/// The identifier the character at a byte offset of an editor's document
+/// belongs to, as a symbol in the head file `path`. The offset is a
+/// character's, not a caret's: the one under the pointer, so a pointer on
+/// the `(` after a name is on nothing, where a caret there would still be
+/// on the name. `None` on a row that is no head line too.
+pub fn symbol_at(doc: &Doc, path: &str, offset: usize) -> Option<Symbol> {
+    let (row, column) = line_col_of_offset(doc.text(), offset);
+    let line = doc.head_line(row)?;
+    let text = doc.line(row);
+    if !text[column.min(text.len())..]
+        .chars()
+        .next()
+        .is_some_and(references::is_identifier_char)
+    {
+        return None;
+    }
+    let (start, text) = identifier_at(text, column)?;
+    Some(Symbol {
+        path: path.to_string(),
+        line,
+        column: start,
+        end: start + text.len(),
+        text: text.to_string(),
+    })
+}
 
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            blank_run += 1;
-            // Collapse the runs of blank lines markdown leaves behind.
-            if blank_run > 1 || out.is_empty() {
-                continue;
+/// Trim a hover's doc comment to what fits in a tooltip.
+///
+/// rust-analyzer's markdown opens with fenced blocks, the symbol's path
+/// and its signature, then a rule, then the doc comment. The blocks and
+/// the rule are kept whole; the doc comment after them is cut at
+/// `max_lines` with an ellipsis on a line of its own. A fence the cut
+/// lands inside is closed first, so the ellipsis is not swallowed by it.
+/// Runs of blank lines are collapsed on the way.
+pub fn cut(markdown: &str, max_lines: usize) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut lines = markdown.lines().peekable();
+
+    // The leading fenced blocks, and the rule after them.
+    let mut in_fence = false;
+    while let Some(line) = lines.peek() {
+        let trimmed = line.trim();
+        if in_fence {
+            out.push(line);
+            lines.next();
+            if trimmed.starts_with("```") {
+                in_fence = false;
             }
-        } else {
-            blank_run = 0;
+            continue;
         }
-        out.push(line);
-        if out.len() >= max_lines {
-            out.push("…");
+        if trimmed.starts_with("```") {
+            in_fence = true;
+            out.push(line);
+            lines.next();
+        } else if trimmed.is_empty() || trimmed == "---" {
+            out.push(line);
+            lines.next();
+        } else {
             break;
         }
     }
 
-    while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+    // The doc comment, its lines of text counted; a blank line between
+    // paragraphs is kept but is not one of the twelve. The ellipsis goes
+    // on only when a line of text was left out.
+    let rest: Vec<&str> = lines.collect();
+    let mut kept = 0usize;
+    let mut blank_run = 0usize;
+    let mut in_fence = false;
+    for (i, line) in rest.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            blank_run += 1;
+            if blank_run == 1 && kept > 0 {
+                out.push(line);
+            }
+            continue;
+        }
+        blank_run = 0;
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+        }
+        out.push(line);
+        kept += 1;
+        if kept >= max_lines && rest[i + 1..].iter().any(|l| !l.trim().is_empty()) {
+            if in_fence {
+                out.push("```");
+            }
+            out.push("\u{2026}");
+            break;
+        }
+    }
+
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
         out.pop();
     }
     out.join("\n")
 }
 
+/// The card inside the tooltip: the signature in the code font, and the
+/// doc comment under it. Nothing but the card carries chrome, so a tip
+/// with nothing to say draws nothing at all.
+pub fn card(markdown: &str) -> impl IntoView {
+    let blocks = markdown::parse(&cut(markdown, DOC_LINES));
+    // rust-analyzer opens with the symbol's path and then its signature,
+    // each in a fenced block. Every leading block is the signature area;
+    // the rest is the doc comment.
+    let leading = blocks
+        .iter()
+        .take_while(|b| matches!(b, Block::Code(_)))
+        .count();
+    let (signature, doc) = blocks.split_at(leading);
+    let signature: Vec<String> = signature
+        .iter()
+        .filter_map(|b| match b {
+            Block::Code(code) => Some(code.clone()),
+            _ => None,
+        })
+        .collect();
+    let doc = doc.to_vec();
+
+    Stack::vertical((
+        signature_view(signature),
+        if doc.is_empty() {
+            Empty::new().into_any()
+        } else {
+            markdown::render_blocks(doc, theme::TEXT_META)
+                .style(|s| {
+                    s.padding_horiz(12.0)
+                        .padding_vert(9.0)
+                        .width_full()
+                        .border_top(1.0)
+                        .border_color(theme::BORDER_MUTED)
+                })
+                .into_any()
+        },
+    ))
+    .style(|s| {
+        s.flex_col()
+            .max_width(TOOLTIP_WIDTH)
+            .background(theme::CANVAS)
+            .border(1.0)
+            .border_color(theme::BORDER)
+            .border_radius(theme::RADIUS_LG)
+            .box_shadow_blur(14.0)
+            .box_shadow_v_offset(4.0)
+            .box_shadow_color(theme::SHADOW)
+    })
+}
+
+/// The signature area: the symbol's path, muted and small, over its
+/// signature in the code font. Whatever rust-analyzer put in the leading
+/// fenced blocks, in order; a lone block is the signature.
+fn signature_view(blocks: Vec<String>) -> impl IntoView {
+    let count = blocks.len();
+    let children: Vec<_> = blocks
+        .into_iter()
+        .enumerate()
+        .map(|(i, code)| {
+            let is_path = count > 1 && i + 1 < count;
+            Label::derived(move || code.clone())
+                .style(move |s| {
+                    let s = s
+                        .font_family(theme::CODE_FONT_STACK.to_string())
+                        .width_full()
+                        .text_wrap()
+                        .selectable(false);
+                    if is_path {
+                        s.font_size(theme::TEXT_SECTION)
+                            .color(theme::FG_SUBTLE)
+                            .margin_bottom(4.0)
+                    } else {
+                        s.font_size(theme::CODE_FONT_SIZE)
+                            .font_weight(FontWeight::MEDIUM)
+                            .color(theme::FG)
+                            .line_height(1.45)
+                    }
+                })
+                .into_any()
+        })
+        .collect();
+    Stack::vertical_from_iter(children).style(|s| {
+        s.flex_col()
+            .width_full()
+            .padding_horiz(12.0)
+            .padding_vert(9.0)
+            .background(theme::CANVAS_SUBTLE)
+            .border_radius(theme::RADIUS_LG)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::doc::{self, Run};
+    use perch_git::DisplayBuffer;
 
     #[test]
     fn offsets_resolve_to_a_line_and_column() {
@@ -88,27 +277,109 @@ mod tests {
         assert_eq!(col, 6);
     }
 
-    #[test]
-    fn long_hover_text_is_cut_to_fit() {
-        let text = (1..=40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        let short = condense(&text, 10);
-        assert_eq!(short.lines().count(), 11, "ten lines plus an ellipsis");
-        assert!(short.ends_with('…'));
+    /// A changed file: `old` became `new` on the second line, and the
+    /// rest is context, so the stacked buffer has a ghost of `old` before
+    /// `new`.
+    fn diffed() -> DisplayBuffer {
+        let head = "fn alpha() {}\nfn new_name() {}\nfn gamma() {}\nfn delta() {}\nfn epsilon() {}\nfn zeta() {}\nfn eta() {}\nfn theta() {}\nfn iota() {}\nfn kappa() {}\n";
+        let base = "fn alpha() {}\nfn old_name() {}\nfn gamma() {}\nfn delta() {}\nfn epsilon() {}\nfn zeta() {}\nfn eta() {}\nfn theta() {}\nfn iota() {}\nfn kappa() {}\n";
+        let diff = perch_git::file_diff(base, head);
+        DisplayBuffer::unified(head, base, &diff)
     }
 
     #[test]
-    fn blank_runs_are_collapsed() {
-        let condensed = condense("a\n\n\n\nb", 20);
-        assert_eq!(condensed, "a\n\nb");
+    fn a_symbol_is_found_through_the_rows_of_a_document_with_a_ghost() {
+        let buffer = diffed();
+        let doc = doc::build(&buffer, &[], &[]);
+        // Row 0 is `fn alpha`, row 1 the ghost of `old_name`, row 2 `new_name`.
+        assert_eq!(doc.head_line(1), None, "the ghost is no head line");
+        let on_ghost = doc.offset_of_row(1) + 4;
+        assert_eq!(symbol_at(&doc, "src/x.rs", on_ghost), None);
+
+        let on_new = doc.offset_of_row(2) + 5;
+        assert_eq!(
+            symbol_at(&doc, "src/x.rs", on_new),
+            Some(Symbol {
+                path: "src/x.rs".into(),
+                line: 1,
+                column: 3,
+                end: 11,
+                text: "new_name".into(),
+            })
+        );
+
+        // Punctuation and whitespace are nothing: the character under the
+        // pointer, not the caret beside it, which would still be on the
+        // name it follows.
+        let on_paren = doc.offset_of_row(2) + 11;
+        assert_eq!(symbol_at(&doc, "src/x.rs", on_paren), None);
+        let on_space = doc.offset_of_row(0) + 2;
+        assert_eq!(symbol_at(&doc, "src/x.rs", on_space), None);
+        let on_f = doc.offset_of_row(0);
+        assert_eq!(symbol_at(&doc, "src/x.rs", on_f).map(|s| s.text), Some("fn".into()));
+        let past_the_end = doc.offset_of_row(0) + 13;
+        assert_eq!(symbol_at(&doc, "src/x.rs", past_the_end), None);
     }
 
     #[test]
-    fn leading_and_trailing_blanks_are_dropped() {
-        assert_eq!(condense("\n\nhello\n\n\n", 20), "hello");
+    fn a_symbol_below_a_fold_has_its_head_line_and_a_divider_has_none() {
+        let buffer = diffed();
+        // Fold display lines 4 to 8, head lines 3 to 7: rows are alpha,
+        // ghost, new_name, gamma, a divider, then iota and kappa.
+        let folds = vec![Run::new(4, 8, 3)];
+        let doc = doc::build(&buffer, &folds, &[]);
+        assert!(doc.run_of(4).is_some(), "row 4 is the divider");
+        assert_eq!(symbol_at(&doc, "src/x.rs", doc.offset_of_row(4)), None);
+
+        let on_iota = doc.offset_of_row(5) + 3;
+        let symbol = symbol_at(&doc, "src/x.rs", on_iota).expect("iota is a symbol");
+        assert_eq!(symbol.text, "iota");
+        assert_eq!(symbol.line, 8, "head line, past the fold");
+        assert_eq!((symbol.column, symbol.end), (3, 7));
+    }
+
+    const HOVER: &str = "```rust\nslatedb::db::Db\n```\n\n```rust\npub async fn flush(&self) -> Result<(), crate::Error>\n```\n\n---\n\nFlush in-memory writes.\n\nMore.\n";
+
+    #[test]
+    fn the_signature_is_kept_whole_and_the_doc_comment_is_cut() {
+        let short = cut(HOVER, 1);
+        assert!(short.starts_with("```rust\nslatedb::db::Db\n```\n\n```rust\npub async fn flush"));
+        assert!(short.contains("---"));
+        assert!(short.ends_with("Flush in-memory writes.\n\u{2026}"), "{short}");
+
+        // Room for it all, or exactly enough: nothing is cut, and there is
+        // no ellipsis.
+        assert!(!cut(HOVER, 20).contains('\u{2026}'));
+        assert!(!cut(HOVER, 2).contains('\u{2026}'));
     }
 
     #[test]
-    fn short_text_passes_through_unchanged() {
-        assert_eq!(condense("just this", 10), "just this");
+    fn a_cut_inside_a_fence_closes_the_fence_first() {
+        let text = "```rust\nfn x()\n```\n\nDocs.\n\n```rust\nlet a = 1;\nlet b = 2;\nlet c = 3;\n```\n";
+        let short = cut(text, 3);
+        assert!(short.ends_with("let a = 1;\n```\n\u{2026}"), "{short}");
+        let blocks = markdown::parse(&short);
+        assert!(
+            matches!(blocks.last(), Some(Block::Paragraph(_))),
+            "the ellipsis is a paragraph of its own, not code: {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn blank_runs_in_the_doc_comment_are_collapsed_and_not_counted() {
+        let text = "```rust\nfn x()\n```\n\na\n\n\n\nb\n";
+        assert_eq!(cut(text, 20), "```rust\nfn x()\n```\n\na\n\nb");
+        assert_eq!(cut(text, 2), "```rust\nfn x()\n```\n\na\n\nb", "two lines of text fit");
+        assert_eq!(cut(text, 1), "```rust\nfn x()\n```\n\na\n\u{2026}");
+    }
+
+    #[test]
+    fn a_hover_with_no_doc_comment_is_its_signature_alone() {
+        assert_eq!(cut("```rust\nfn x()\n```\n", 12), "```rust\nfn x()\n```");
+    }
+
+    #[test]
+    fn plain_text_passes_through_cut_unchanged() {
+        assert_eq!(cut("just this", 10), "just this");
     }
 }

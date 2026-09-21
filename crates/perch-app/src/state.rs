@@ -1234,11 +1234,15 @@ impl AppState {
                     review.lsp_status.set(status);
                 }
             }
-            Event::LspHover { token, text } => {
-                // Drop an answer the pointer has already moved past.
-                if review.request_token.get() == token {
-                    review.hover_text.set(Some(text));
-                }
+            Event::LspHover { token, markdown } => {
+                // Kept beside the symbol it answers, and only when it is the
+                // answer to the ask still waiting: the pointer may have
+                // moved to another symbol and asked about that since.
+                review.hover.update(|hover| {
+                    if let Some(h) = hover.as_mut().filter(|h| h.token == token) {
+                        h.markdown = markdown;
+                    }
+                });
             }
             Event::LspDefinition { token, path, line } => {
                 if review.request_token.get() == token {

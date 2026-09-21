@@ -140,37 +140,45 @@ enum Kind {
     Item(String),
 }
 
-/// The blocks, stacked.
+/// The blocks, stacked, at the body size.
 pub fn render(text: &str) -> impl IntoView {
-    let blocks = parse(text);
+    render_blocks(parse(text), theme::TEXT_BODY)
+}
+
+/// Blocks already parsed, stacked, with the prose at `size`. A fenced
+/// block is drawn in the code font a point smaller than the prose, as a
+/// conversation card draws one; a tooltip hands its blocks here at the
+/// meta size, so a doc comment reads a step below the signature.
+pub fn render_blocks(blocks: Vec<Block>, size: f32) -> impl IntoView {
+    let code_size = (size - 2.0).max(theme::TEXT_SECTION);
     dyn_stack(
         move || blocks.clone().into_iter().enumerate(),
         |(i, _)| *i,
-        |(_, block)| match block {
-            Block::Paragraph(spans) => styled_text(spans, theme::TEXT_BODY, FontWeight::NORMAL, theme::FG).into_any(),
-            Block::Heading(spans) => styled_text(spans, theme::TEXT_BODY, FontWeight::SEMI_BOLD, theme::FG)
+        move |(_, block)| match block {
+            Block::Paragraph(spans) => styled_text(spans, size, FontWeight::NORMAL, theme::FG).into_any(),
+            Block::Heading(spans) => styled_text(spans, size, FontWeight::SEMI_BOLD, theme::FG)
                 .style(|s| s.margin_top(4.0))
                 .into_any(),
-            Block::Quote(spans) => styled_text(spans, theme::TEXT_BODY, FontWeight::NORMAL, theme::FG_MUTED)
+            Block::Quote(spans) => styled_text(spans, size, FontWeight::NORMAL, theme::FG_MUTED)
                 .style(|s| s.padding_left(10.0).border_left(3.0).border_color(theme::BORDER))
                 .into_any(),
             Block::Item { marker, spans } => Stack::horizontal((
-                Label::derived(move || marker.clone()).style(|s| {
-                    s.font_size(theme::TEXT_BODY)
+                Label::derived(move || marker.clone()).style(move |s| {
+                    s.font_size(size)
                         .color(theme::FG_MUTED)
                         .min_width(18.0)
                         .flex_shrink(0.0_f32)
                         .selectable(false)
                 }),
-                styled_text(spans, theme::TEXT_BODY, FontWeight::NORMAL, theme::FG)
+                styled_text(spans, size, FontWeight::NORMAL, theme::FG)
                     .style(|s| s.min_width(0.0).flex_grow(1.0_f32)),
             ))
             .style(|s| s.width_full().items_start())
             .into_any(),
             Block::Code(code) => Label::derived(move || code.clone())
-                .style(|s| {
+                .style(move |s| {
                     s.font_family(theme::CODE_FONT_STACK.to_string())
-                        .font_size(theme::CODE_FONT_SIZE - 1.0)
+                        .font_size(code_size)
                         .color(theme::FG)
                         .line_height(1.45)
                         .padding(8.0)

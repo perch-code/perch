@@ -108,6 +108,30 @@ impl Layout {
     }
 }
 
+/// An identifier at a head position: what the pointer is over, and what
+/// the caret is on. `column` is where it starts on the line and `end`
+/// where it ends, both byte columns as the protocol counts them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Symbol {
+    pub path: String,
+    /// 0-based head line.
+    pub line: usize,
+    pub column: usize,
+    pub end: usize,
+    pub text: String,
+}
+
+/// What rust-analyzer said about a symbol, kept beside the symbol it
+/// answers. `markdown` is empty from the ask until the answer lands, and
+/// the tooltip draws it only while `symbol` is the pointer's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverAnswer {
+    pub symbol: Symbol,
+    pub markdown: String,
+    /// The request's token, which the answer is matched against.
+    pub token: u64,
+}
+
 /// One place a symbol is used, as rust-analyzer lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reference {
@@ -586,9 +610,12 @@ pub struct ReviewState {
     /// Rises with every hover and jump request. An answer carrying an older
     /// token is stale, because the pointer has moved on since it was asked.
     pub request_token: RwSignal<u64>,
-    /// Where the popup should appear, in editor-local coordinates.
-    pub hover_at: RwSignal<Option<(f64, f64)>>,
-    pub hover_text: RwSignal<Option<String>>,
+    /// The identifier under the pointer, kept by the editor's pointer
+    /// tracking. `None` over nothing: whitespace, punctuation, a removed
+    /// line, a divider, a filler row, or outside the code.
+    pub pointer_symbol: RwSignal<Option<Symbol>>,
+    /// The last hover asked for, and its answer once it lands.
+    pub hover: RwSignal<Option<HoverAnswer>>,
     /// A go-to-definition result waiting to be opened, as (path, head line).
     pub pending_jump: RwSignal<Option<(String, usize)>>,
     /// A head line to scroll to once the file it belongs to is loaded.
@@ -694,8 +721,8 @@ impl ReviewState {
             composer_box: RwSignal::new(None),
             lsp_status: RwSignal::new(perch_lsp::Status::Absent),
             request_token: RwSignal::new(0),
-            hover_at: RwSignal::new(None),
-            hover_text: RwSignal::new(None),
+            pointer_symbol: RwSignal::new(None),
+            hover: RwSignal::new(None),
             pending_jump: RwSignal::new(None),
             jump_to_line: RwSignal::new(None),
             last_position: RwSignal::new(None),
@@ -807,7 +834,9 @@ impl ReviewState {
         self.expanded.set(std::collections::HashSet::new());
         self.editor_epoch.update(|e| *e += 1);
         self.docs.set(None);
-        self.dismiss_hover();
+        self.pointer_symbol.set(None);
+        self.hover.set(None);
+        self.last_position.set(None);
     }
 
     /// Prepare to install an accepted live result. Agent history navigation
@@ -1025,9 +1054,35 @@ impl ReviewState {
         self.request_token.get()
     }
 
-    pub fn dismiss_hover(&self) {
-        self.hover_at.set(None);
-        self.hover_text.set(None);
+    /// Ask about the symbol under the pointer. The answer's slot is taken
+    /// at once, empty, so the tooltip can fill it in place when the answer
+    /// lands with the same token; asking about a symbol whose answer is
+    /// already here, or on its way, asks nothing.
+    pub fn ask_hover(&self, backend: &crate::backend::Backend, symbol: Symbol) {
+        if self
+            .hover
+            .with_untracked(|h| h.as_ref().is_some_and(|h| h.symbol == symbol))
+        {
+            return;
+        }
+        let token = self.next_token();
+        backend.hover(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+        self.hover.set(Some(HoverAnswer {
+            symbol,
+            markdown: String::new(),
+            token,
+        }));
+    }
+
+    /// The hover's answer, when it is about the symbol under the pointer
+    /// and has landed. What the tooltip draws; `None` draws nothing.
+    pub fn hover_for_pointer(&self) -> Option<String> {
+        let pointer = self.pointer_symbol.get()?;
+        self.hover.with(|h| {
+            h.as_ref()
+                .filter(|h| h.symbol == pointer && !h.markdown.is_empty())
+                .map(|h| h.markdown.clone())
+        })
     }
 
     pub fn file(&self, path: &str) -> Option<Arc<LoadedFile>> {

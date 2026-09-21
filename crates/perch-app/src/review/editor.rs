@@ -1,5 +1,5 @@
-//! The code pane: gutter, editor, symbol panel, and the states that stand in
-//! for them.
+//! The code pane: gutter, editor, references panel, and the states that
+//! stand in for them.
 //!
 //! Two layouts. Stacked is one editor over the document built from the
 //! unified buffer, the head with the removed lines spliced in. Split is two
@@ -33,15 +33,14 @@ use floem::event::PointerScrollEventExt;
 use floem::kurbo::{Rect, Size, Vec2};
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::{CursorStyle, Position};
-use floem::text::FontWeight;
+use floem::style::Position;
 use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
 use floem::views::editor::core::editor::EditType;
 use floem::views::editor::core::selection::Selection;
 use floem::views::scroll::ScrollCustomStyle;
 use floem::views::{
-    dyn_container, dyn_stack, text_editor, ClipExt, Container, Decorators, Empty, Label, ScrollExt,
-    Stack, TextEditor,
+    dyn_container, dyn_stack, text_editor, ClipExt, Container, Decorators, Empty, Label, Stack,
+    TextEditor,
 };
 use perch_github::CommentThread;
 
@@ -54,6 +53,7 @@ use crate::review::hover;
 use crate::review::model::{
     Composer, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState,
 };
+use crate::review::navigation;
 use crate::review::references;
 use crate::review::styling::PerchStyling;
 use crate::review::threads::{self, ThreadFace};
@@ -82,7 +82,7 @@ pub fn editor_pane(
         });
     }
 
-    let code_backend = backend.clone();
+    let code_backend = backend;
     let code_open = open_file.clone();
 
     Stack::vertical((
@@ -133,7 +133,6 @@ pub fn editor_pane(
                 .width_full()
                 .background(theme::CODE_BG)
         }),
-        symbol_panel(state, backend),
         references::panel(state, open_file),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0))
@@ -281,8 +280,9 @@ fn stacked_view(
             apply(&live, new, viewport, scroll_to, cursor, shifted)
         }
     });
-    wire_cursor(state, backend.clone(), file.clone(), doc, cursor, shifted);
+    wire_cursor(state, file.clone(), doc, cursor, shifted);
     wire_jump(state, file.clone(), doc, scroll_to, epoch);
+    let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
     let path = file.path.clone();
     Stack::horizontal((
@@ -1094,15 +1094,9 @@ fn split_view(
             );
         }
     });
-    wire_cursor(
-        state,
-        backend.clone(),
-        file.clone(),
-        right_doc,
-        right_cursor,
-        right_shifted,
-    );
+    wire_cursor(state, file.clone(), right_doc, right_cursor, right_shifted);
     wire_jump(state, file.clone(), right_doc, right_scroll_to, epoch);
+    let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
     // The left follows the right down the file. Sideways it keeps its own
     // place: the lines on the two sides are not the same length.
@@ -1238,22 +1232,22 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
         })
 }
 
-/// Clicking a symbol asks the language server about it, and the selection
-/// becomes the lines a thread would be anchored on. Reading the editor's own
-/// cursor rather than the pointer means floem's hit-testing does the
-/// coordinate work. The document is the one the editor that owns the
-/// cursor is laying out: the stacked one, or the head side of a split. It
-/// is read as it is when the cursor moves, not as it was when the editor
-/// was built, so a row is right after the document has been edited.
+/// The cursor's line goes to the status line, the selection becomes the
+/// lines a thread would be anchored on, and the head position under the
+/// caret is kept for the keys that act on the symbol there. Reading the
+/// editor's own cursor rather than the pointer means floem's hit-testing
+/// does the coordinate work. The document is the one the editor that owns
+/// the cursor is laying out: the stacked one, or the head side of a split.
+/// It is read as it is when the cursor moves, not as it was when the
+/// editor was built, so a row is right after the document has been edited.
 ///
 /// An edit above the cursor moves its offset to keep it on its text, and
 /// `apply` leaves the offset it moved it to in `shifted`. That move is no
 /// click: the line and the selection are read again, since their rows may
 /// have moved, but the symbol under the cursor is the one it was on, so
-/// the panel stays as it is, open or dismissed, and nothing is asked again.
+/// its position stands as it was.
 fn wire_cursor(
     state: ReviewState,
-    backend: Rc<Backend>,
     file: Arc<LoadedFile>,
     doc: RwSignal<Arc<Doc>>,
     cursor: RwSignal<Cursor>,
@@ -1297,14 +1291,8 @@ fn wire_cursor(
         if by_edit {
             return offset;
         }
-        state.hover_text.set(None);
-        if let Some((line, column)) = doc.head_position(offset) {
-            state.last_position.set(Some((line, column)));
-            let token = state.next_token();
-            backend.hover(token, &file.path, line as u32, column as u32);
-        } else {
-            state.last_position.set(None);
-        }
+        let _ = &file;
+        state.last_position.set(doc.head_position(offset));
         offset
     });
 }
@@ -1371,123 +1359,6 @@ fn wire_jump(
 pub enum Side {
     Base,
     Head,
-}
-
-/// What the language server says about the symbol under the cursor.
-///
-/// A strip below the code rather than a floating popup: it never covers the
-/// line being read, and it needs no pointer coordinates to place.
-fn symbol_panel(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    dyn_container(
-        move || state.hover_text.get(),
-        move |text| match text {
-            None => Empty::new().into_any(),
-            Some(text) => panel_body(state, backend.clone(), text).into_any(),
-        },
-    )
-    .style(|s| s.width_full().flex_shrink(0.0_f32))
-}
-
-fn panel_body(state: ReviewState, backend: Rc<Backend>, text: String) -> impl IntoView {
-    let condensed = hover::condense(&text, 12);
-
-    Stack::vertical((
-        Stack::horizontal((
-            Label::derived(|| "Symbol".to_string()).style(|s| {
-                s.font_size(theme::TEXT_SECTION)
-                    .font_weight(FontWeight::SEMI_BOLD)
-                    .color(theme::FG_SUBTLE)
-                    .flex_grow(1.0_f32)
-            }),
-            definition_button(state, backend.clone()),
-            references_button(state, backend),
-            dismiss_button(state),
-        ))
-        .style(|s| {
-            s.width_full()
-                .items_center()
-                .gap(6.0)
-                .padding_horiz(12.0)
-                .height(26.0)
-                .flex_shrink(0.0_f32)
-        }),
-        Label::derived(move || condensed.clone())
-            .style(|s| {
-                s.font_family(theme::CODE_FONT_STACK.to_string())
-                    .font_size(theme::CODE_FONT_SIZE)
-                    .color(theme::FG)
-                    .line_height(1.45)
-                    .padding_horiz(12.0)
-                    .padding_bottom(10.0)
-                    .width_full()
-            })
-            .scroll()
-            .style(|s| s.width_full().max_height(180.0)),
-    ))
-    .style(|s| {
-        s.width_full()
-            .flex_col()
-            .background(theme::CANVAS_SUBTLE)
-            .border_top(1.0)
-            .border_color(theme::BORDER)
-    })
-}
-
-fn definition_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    panel_button("Go to definition", move || {
-        let Some(file) = state.active_file() else {
-            return;
-        };
-        let Some(position) = state.last_position.get() else {
-            return;
-        };
-        let token = state.next_token();
-        backend.definition(token, &file.path, position.0 as u32, position.1 as u32);
-    })
-}
-
-/// Asks about the same symbol the panel is describing, the way the
-/// definition button does.
-fn references_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    panel_button("Find references", move || {
-        let Some((line, column)) = state.last_position.get() else {
-            return;
-        };
-        references::find(state, &backend, line, Some(column));
-    })
-}
-
-/// A text button in the panel's header row.
-fn panel_button(text: &'static str, on_click: impl Fn() + 'static) -> impl IntoView {
-    Container::new(
-        Label::derived(move || text.to_string())
-            .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::ACCENT)),
-    )
-    .on_event_stop(el::Click, move |_, _| on_click())
-    .style(|s| {
-        s.padding_horiz(8.0)
-            .padding_vert(2.0)
-            .border_radius(theme::RADIUS)
-            .hover(|s| {
-                s.background(theme::ACCENT_SUBTLE)
-                    .cursor(CursorStyle::Pointer)
-            })
-    })
-}
-
-fn dismiss_button(state: ReviewState) -> impl IntoView {
-    Container::new(
-        crate::ui::widgets::sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE)
-            .style(|s| s.size(11.0, 11.0)),
-    )
-    .on_event_stop(el::Click, move |_, _| state.dismiss_hover())
-    .style(|s| {
-        s.size(18.0, 18.0)
-            .items_center()
-            .justify_center()
-            .border_radius(3.0)
-            .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
-    })
 }
 
 fn loading_view(path: String) -> impl IntoView {
@@ -2431,16 +2302,15 @@ mod window {
     }
 
     #[test]
-    fn a_reveal_above_the_cursor_moves_it_without_asking_about_its_symbol_again() {
+    fn a_reveal_above_the_cursor_moves_it_and_keeps_its_head_position() {
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
         let cursor = super::STACKED_CURSOR
             .with(|c| c.get())
             .expect("a stacked editor was built");
         // The editor's cursor starts on row 0, a ghost, which is nowhere
-        // in the head file: nothing was asked.
+        // in the head file.
         assert_eq!(state.last_position.get(), None);
-        assert_eq!(state.request_token.get(), 0);
 
         // The cursor placed as a click would place it: on "new bottom",
         // head line 61, three columns in, below the divider at row 5.
@@ -2454,19 +2324,18 @@ mod window {
         assert_eq!(state.last_position.get(), Some((61, 3)));
         assert_eq!(
             state.request_token.get(),
-            1,
-            "the symbol under the cursor was asked about"
+            0,
+            "a click places the caret and asks the server nothing"
         );
         assert_eq!(
             state.cursor_line.get(),
             64,
             "new bottom is display line 64, after the pair's two ghosts"
         );
-        state.hover_text.set(Some("fn new_bottom()".into()));
 
         // Down on the divider above: twenty lines come in above the cursor,
         // which stays on its text, twenty rows down. The symbol under it is
-        // the one it was on, so nothing is asked again and the panel stays.
+        // the one it was on, so its head position stands.
         let run = doc.run_of(5).expect("row 5 is the divider");
         let (first, last) = run.bottom();
         state.reveal("src/x.rs", "", first, last);
@@ -2478,29 +2347,19 @@ mod window {
         assert_eq!(cursor.get().offset(), doc.offset_of_row(31) + 3);
         assert_eq!(state.cursor_line.get(), 64);
         assert_eq!(state.last_position.get(), Some((61, 3)));
-        assert_eq!(state.request_token.get(), 1, "nothing was asked again");
-        assert_eq!(
-            state.hover_text.get().as_deref(),
-            Some("fn new_bottom()"),
-            "the panel stays as it was"
-        );
 
         // Reset folds them away again, moving the cursor back up: the same.
         state.reset("src/x.rs", "", &[run.default_heads]);
         harness.rebuild();
         harness.paint();
         assert_eq!(cursor.get().offset(), offset);
-        assert_eq!(state.request_token.get(), 1);
-        assert_eq!(state.hover_text.get().as_deref(), Some("fn new_bottom()"));
+        assert_eq!(state.last_position.get(), Some((61, 3)));
 
-        // A click somewhere else is still a click: the panel closes and
-        // the new symbol is asked about.
+        // A click somewhere else is still a click: the position follows.
         let elsewhere = live.doc.get().offset_of_row(12);
         cursor.update(|c| c.set_offset(elsewhere, CursorAffinity::Backward, false, false));
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.hover_text.get(), None);
-        assert_eq!(state.request_token.get(), 2);
         assert_eq!(state.last_position.get(), Some((62, 0)));
     }
 

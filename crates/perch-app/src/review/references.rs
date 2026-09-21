@@ -70,7 +70,7 @@ pub fn find_at_cursor(state: ReviewState, backend: &Backend) {
     find(state, backend, head_line, column);
 }
 
-fn is_identifier_char(c: char) -> bool {
+pub fn is_identifier_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
