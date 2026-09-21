@@ -24,14 +24,16 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 jiff.workspace = true
-# vello rather than the default vger renderer. vger's glyph atlas keys on
-# (font file, glyph, rounded size, subpixel bin) without the face index or a
-# variable font's coordinates, so Regular and Bold from one .ttc collapse
-# into a single cached bitmap and whichever drew first wins. That showed up
-# as text changing weight mid-word and as bold glyphs drawn on regular
-# spacing. vello's cache keys on the blob, the index and the coordinates.
+# vger, floem's default renderer, named so the choice is on record: vello
+# was tried and dropped because it holds 165 MB of GPU scratch buffers sized
+# for its benchmark scenes before it draws anything, most of Perch's memory.
+# vger's glyph atlas keyed on (font file, glyph, rounded size, subpixel
+# bin) without the face index or a variable font's coordinates, so Regular
+# and Bold from one .ttc collapsed into a single cached bitmap and
+# whichever drew first won, which is what sent Perch to vello; the fork's
+# branch folds both into the key.
 floem = { git = "https://github.com/lapce/floem", branch = "main", default-features = false, features = [
-    "vello",
+    "vger",
     "editor",
     "serde",
     "default-image-formats",

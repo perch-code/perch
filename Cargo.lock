@@ -1004,7 +1004,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1101,7 +1101,7 @@ checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 [[package]]
 name = "floem"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#ae9a97c6db5a8e8b0b5b82168993d7064287ff70"
+source = "git+https://github.com/criccomini/floem?branch=perch#8526b9e8d49ebab62c66fae373525797294822c1"
 dependencies = [
  "bitflags 2.13.2",
  "clipboard-win",
@@ -1114,7 +1114,7 @@ dependencies = [
  "floem_reactive",
  "floem_renderer",
  "floem_tiny_skia_renderer",
- "floem_vello_renderer",
+ "floem_vger_renderer",
  "futures",
  "image",
  "imbl",
@@ -1155,7 +1155,7 @@ dependencies = [
 [[package]]
 name = "floem-editor-core"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#ae9a97c6db5a8e8b0b5b82168993d7064287ff70"
+source = "git+https://github.com/criccomini/floem?branch=perch#8526b9e8d49ebab62c66fae373525797294822c1"
 dependencies = [
  "bitflags 2.13.2",
  "itertools",
@@ -1165,6 +1165,18 @@ dependencies = [
  "strum",
  "strum_macros",
  "ui-events",
+]
+
+[[package]]
+name = "floem-vger"
+version = "0.3.2"
+source = "git+https://github.com/lapce/vger-rs?rev=54ab8135d9d870a4ac2b84fc6b9846b3b03ec919#54ab8135d9d870a4ac2b84fc6b9846b3b03ec919"
+dependencies = [
+ "euclid",
+ "fontdue",
+ "linebender_resource_handle",
+ "rect_packer",
+ "wgpu",
 ]
 
 [[package]]
@@ -1387,7 +1399,7 @@ dependencies = [
 [[package]]
 name = "floem_reactive"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#ae9a97c6db5a8e8b0b5b82168993d7064287ff70"
+source = "git+https://github.com/criccomini/floem?branch=perch#8526b9e8d49ebab62c66fae373525797294822c1"
 dependencies = [
  "parking_lot",
  "smallvec",
@@ -1396,7 +1408,7 @@ dependencies = [
 [[package]]
 name = "floem_renderer"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#ae9a97c6db5a8e8b0b5b82168993d7064287ff70"
+source = "git+https://github.com/criccomini/floem?branch=perch#8526b9e8d49ebab62c66fae373525797294822c1"
 dependencies = [
  "floem-winit",
  "fontique",
@@ -1412,7 +1424,7 @@ dependencies = [
 [[package]]
 name = "floem_tiny_skia_renderer"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#ae9a97c6db5a8e8b0b5b82168993d7064287ff70"
+source = "git+https://github.com/criccomini/floem?branch=perch#8526b9e8d49ebab62c66fae373525797294822c1"
 dependencies = [
  "anyhow",
  "floem_renderer",
@@ -1426,16 +1438,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "floem_vello_renderer"
+name = "floem_vger_renderer"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#ae9a97c6db5a8e8b0b5b82168993d7064287ff70"
+source = "git+https://github.com/criccomini/floem?branch=perch#8526b9e8d49ebab62c66fae373525797294822c1"
 dependencies = [
  "anyhow",
+ "floem-vger",
  "floem_renderer",
+ "image",
  "parley",
  "peniko",
- "vello",
- "vello_svg",
+ "resvg",
+ "swash",
  "wgpu",
 ]
 
@@ -1477,15 +1491,6 @@ dependencies = [
 
 [[package]]
 name = "font-types"
-version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b38ad915f6dadd993ced50848a8291a543bd41ca62bc10740d5e64e2ab4cfd7"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
-name = "font-types"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8eb065f3251655b3c90e22e5e363f310fc5332fb3402e37bbc94752283248f6"
@@ -1513,6 +1518,16 @@ dependencies = [
  "memmap2",
  "slotmap",
  "tinyvec",
+ "ttf-parser",
+]
+
+[[package]]
+name = "fontdue"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7894823fa221401399e2598f8b63f81ac77ff5c63248b7656779bff1632d7d3d"
+dependencies = [
+ "hashbrown 0.15.5",
  "ttf-parser",
 ]
 
@@ -1615,17 +1630,6 @@ dependencies = [
  "futures-core",
  "futures-task",
  "futures-util",
-]
-
-[[package]]
-name = "futures-intrusive"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d930c203dd0b6ff06e0201a4a2fe9149b43c684fd4420555b26d21b1a02956f"
-dependencies = [
- "futures-core",
- "lock_api",
- "parking_lot",
 ]
 
 [[package]]
@@ -2058,16 +2062,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "guillotiere"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b62d5865c036cb1393e23c50693df631d3f5d7bcca4c04fe4cc0fd592e74a782"
-dependencies = [
- "euclid",
- "svg_fmt",
-]
-
-[[package]]
 name = "h2"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2117,6 +2111,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -2465,8 +2461,6 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
- "color_quant",
- "gif",
  "image-webp",
  "moxcms",
  "num-traits",
@@ -4109,7 +4103,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4229,16 +4223,6 @@ dependencies = [
 
 [[package]]
 name = "read-fonts"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b634fabf032fab15307ffd272149b622260f55974d9fad689292a5d33df02e5"
-dependencies = [
- "bytemuck",
- "font-types 0.11.3",
-]
-
-[[package]]
-name = "read-fonts"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "046a7d674daf459825b32f5062056d6882db0d2f5a479fbd76ccfc870ac18709"
@@ -4247,6 +4231,12 @@ dependencies = [
  "font-types 0.12.5",
  "once_cell",
 ]
+
+[[package]]
+name = "rect_packer"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8ffb4dfda4b01cc420847665dc480760d596ce186f2772a66ed32fe9acb1c45"
 
 [[package]]
 name = "redox_syscall"
@@ -4507,7 +4497,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4520,7 +4510,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4922,16 +4912,6 @@ dependencies = [
 
 [[package]]
 name = "skrifa"
-version = "0.40.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fbdfe3d2475fbd7ddd1f3e5cf8288a30eb3e5f95832829570cd88115a7434ac"
-dependencies = [
- "bytemuck",
- "read-fonts 0.37.0",
-]
-
-[[package]]
-name = "skrifa"
 version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
@@ -5155,12 +5135,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
-name = "svg_fmt"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0193cc4331cfd2f3d2011ef287590868599a2f33c3e69bc22c1a3d3acf9e02fb"
-
-[[package]]
 name = "svgtypes"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5274,7 +5248,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5829,7 +5803,7 @@ dependencies = [
 [[package]]
 name = "ui-events-floem-winit"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#ae9a97c6db5a8e8b0b5b82168993d7064287ff70"
+source = "git+https://github.com/criccomini/floem?branch=perch#8526b9e8d49ebab62c66fae373525797294822c1"
 dependencies = [
  "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "floem-winit",
@@ -6006,63 +5980,6 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
-
-[[package]]
-name = "vello"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72fef40773530322d5c2ffe3c1107e9874bd8239ac137d1c2b6c1edad695146e"
-dependencies = [
- "bytemuck",
- "futures-intrusive",
- "log",
- "peniko",
- "png 0.17.16",
- "skrifa 0.40.0",
- "static_assertions",
- "thiserror 2.0.20",
- "vello_encoding",
- "vello_shaders",
- "wgpu",
-]
-
-[[package]]
-name = "vello_encoding"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24c91203ec4b483440614a9a5c7c2d991932af72c5349659a63ec49476f0b79c"
-dependencies = [
- "bytemuck",
- "guillotiere",
- "peniko",
- "skrifa 0.40.0",
- "smallvec",
-]
-
-[[package]]
-name = "vello_shaders"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a765d44d4bd354146e44f9a860f4e92effd91a97302549be9e47f0a18d8128c"
-dependencies = [
- "bytemuck",
- "log",
- "naga",
- "thiserror 2.0.20",
- "vello_encoding",
-]
-
-[[package]]
-name = "vello_svg"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79dfa03829a8fb45ad458a05bd533d399d2259d042cdd78f391b290dbbdf1bd3"
-dependencies = [
- "image",
- "thiserror 2.0.20",
- "usvg",
- "vello",
-]
 
 [[package]]
 name = "version-compare"
@@ -6519,7 +6436,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

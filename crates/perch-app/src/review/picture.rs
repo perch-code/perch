@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 use floem::context::{LayoutChanged, PaintCx};
-use floem::kurbo::{Rect, Size, Stroke};
+use floem::kurbo::{Size, Stroke};
 use floem::peniko::Brush;
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
@@ -236,15 +236,25 @@ fn frame_of(sides: &[&Result<Drawing, String>]) -> Size {
         })
 }
 
+/// The most a picture draws at, on a side, in logical pixels. The
+/// renderer rasterizes a picture into its atlas at the size it is drawn,
+/// and grows the atlas, once and for good, to twice the largest thing it
+/// has held: at this cap a picture is 2048 device pixels on a 2x screen
+/// and the atlas 4096 square, 80 MB across its colour and mask halves,
+/// and a side of 4096 would ask for a texture past the 8192 wgpu allows.
+const MAX_SIDE: f64 = 1024.0;
+
 /// How big a picture `natural` big draws in a box `bounds` big: at the
 /// one scale that fits `frame` into the box, keeping its shape. A
 /// picture scales up as readily as down: a 16-pixel icon is drawn to be
-/// looked at, and vector art loses nothing by it. `None` when there is
-/// no room, or nothing to fit.
+/// looked at, and vector art loses nothing by it; but no further than
+/// [`MAX_SIDE`], for the atlas. `None` when there is no room, or nothing
+/// to fit.
 fn fitted(natural: Size, frame: Size, bounds: Size) -> Option<Size> {
     if frame.width <= 0.0 || frame.height <= 0.0 || bounds.width <= 0.0 || bounds.height <= 0.0 {
         return None;
     }
+    let bounds = Size::new(bounds.width.min(MAX_SIDE), bounds.height.min(MAX_SIDE));
     let scale = (bounds.width / frame.width).min(bounds.height / frame.height);
     Some(Size::new(natural.width * scale, natural.height * scale))
 }
@@ -254,7 +264,7 @@ fn fitted(natural: Size, frame: Size, bounds: Size) -> Option<Size> {
 // nothing, so this is what says the fit was right.
 #[cfg(test)]
 thread_local! {
-    static DRAWN: std::cell::RefCell<Vec<(Size, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static DRAWN: std::cell::RefCell<Vec<(Size, floem::kurbo::Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// One SVG, filling its view. Under it, the wash and the hairline of its
@@ -263,6 +273,11 @@ thread_local! {
 struct Drawn {
     id: ViewId,
     drawing: Drawing,
+    /// The size the last paint drew at. The renderer keeps pictures in
+    /// an atlas it grows only as a frame begins, so the first paint at a
+    /// size the atlas cannot hold draws nothing; a paint at a new size
+    /// asks for one more.
+    painted: Size,
 }
 
 /// A picture in the room its side gives it: a box that takes the room,
@@ -270,10 +285,10 @@ struct Drawn {
 /// layout, so the box lays out first and the picture follows.
 ///
 /// The picture is a view of its own size rather than drawn into the box
-/// because floem's `draw_svg` scales a rect's origin along with the
-/// picture: nothing at an icon's scale of one, and a picture drawn at
-/// twelve times its size would land twelve times too far over. A view
-/// draws at its own origin, which no scale moves.
+/// because floem's vello `draw_svg` scales a rect's origin along with
+/// the picture: nothing at an icon's scale of one, and a picture drawn
+/// at twelve times its size would land twelve times too far over. A view
+/// draws at its own origin, which no scale moves, under vger as well.
 fn drawn(drawing: Drawing, frame: Size) -> impl IntoView {
     let natural = drawing.size();
     let bounds = RwSignal::new(Size::ZERO);
@@ -281,6 +296,7 @@ fn drawn(drawing: Drawing, frame: Size) -> impl IntoView {
         Drawn {
             id: ViewId::new(),
             drawing,
+            painted: Size::ZERO,
         }
         .style(move |s| {
             let size = fitted(natural, frame, bounds.get()).unwrap_or(Size::ZERO);
@@ -348,6 +364,10 @@ impl View for Drawn {
             None::<&Brush>,
         );
         cx.clear_clip();
+        if self.painted != rect.size() {
+            self.painted = rect.size();
+            self.id.request_paint();
+        }
     }
 }
 
@@ -450,6 +470,15 @@ mod tests {
         // Nothing to fit into, or to fit.
         assert!(fitted(Size::new(24.0, 24.0), Size::new(24.0, 24.0), Size::ZERO).is_none());
         assert!(fitted(Size::new(24.0, 24.0), Size::ZERO, bounds).is_none());
+        // Room past the cap is room the picture does not take, on
+        // either side, and a picture beside a bigger one keeps its scale.
+        let vast = Size::new(3000.0, 2000.0);
+        let capped = fitted(Size::new(24.0, 24.0), Size::new(24.0, 24.0), vast).unwrap();
+        assert_eq!(capped, Size::new(MAX_SIDE, MAX_SIDE));
+        let wide = fitted(Size::new(32.0, 16.0), Size::new(32.0, 16.0), vast).unwrap();
+        assert_eq!(wide, Size::new(MAX_SIDE, MAX_SIDE / 2.0));
+        let beside = fitted(Size::new(24.0, 24.0), Size::new(32.0, 32.0), vast).unwrap();
+        assert_eq!(beside, Size::new(MAX_SIDE * 0.75, MAX_SIDE * 0.75));
     }
 
     #[test]
