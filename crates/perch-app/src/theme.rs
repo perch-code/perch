@@ -24,6 +24,11 @@ pub const NAV_SELECTED_PRESSED: Color = Color::from_rgb8(0xee, 0xee, 0xee);
 pub const NAV_FG: Color = Color::from_rgb8(0x19, 0x1a, 0x1c);
 pub const NAV_MUTED: Color = Color::from_rgb8(0x88, 0x88, 0x8a);
 pub const NAV_SUBTLE: Color = Color::from_rgb8(0xa3, 0xa3, 0xa5);
+/// A row's churn: the additions and the deletions, in the quiet green and
+/// red Codex tints its figures with, softer than the diff's own colours so
+/// they sit beside the muted byline rather than shouting over it.
+pub const NAV_ADDED: Color = Color::from_rgb8(0x3b, 0x8f, 0x55);
+pub const NAV_DELETED: Color = Color::from_rgb8(0xc9, 0x4a, 0x4f);
 
 /// Lines.
 pub const BORDER: Color = Color::from_rgb8(0xdd, 0xdd, 0xd9);

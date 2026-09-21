@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod items;
+pub mod nav_row;
 pub mod notifications;
 pub mod sidebar;
 pub mod status;

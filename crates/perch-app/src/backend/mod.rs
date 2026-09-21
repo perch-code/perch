@@ -2164,6 +2164,7 @@ async fn run(
     }
     let _ = events.send(Event::Repos(config.declared_repos()));
     let mut initial_notifications = Vec::new();
+    let mut initial_items = Vec::new();
     if let Some(cache) = cache.as_ref() {
         if let Ok(guard) = cache.lock() {
             match guard.interrupt_active_runs(
@@ -2174,7 +2175,7 @@ async fn run(
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "could not reconcile runs"),
             }
-            send_items(&guard, &events);
+            initial_items = send_items(&guard, &events).unwrap_or_default();
             match guard.load_threads() {
                 Ok(threads) => {
                     initial_notifications = threads.clone();
@@ -2307,6 +2308,8 @@ async fn run(
     };
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
+    // The faces on the cached rows, from disk where they are there.
+    ctx.want_avatars(author_avatars(&initial_items));
 
     // Who the reader is on GitHub, for their own byline: once per launch,
     // kept in meta so the next launch has it before the network does.
@@ -3685,7 +3688,9 @@ impl Ctx {
     }
 
     fn send_items(&self) {
-        self.with_cache(|c| send_items(c, &self.events));
+        if let Some(items) = self.with_cache(|c| send_items(c, &self.events)).flatten() {
+            self.want_avatars(author_avatars(&items));
+        }
     }
 
     fn notifications_last_modified(&self) -> Option<String> {
@@ -3882,13 +3887,29 @@ impl Ctx {
     }
 }
 
-fn send_items(cache: &Cache, events: &EventSender<Event>) {
+/// Publish the rows, and hand them back so the caller can ask for the
+/// faces on them.
+fn send_items(cache: &Cache, events: &EventSender<Event>) -> Option<Vec<Item>> {
     match cache.load_items() {
         Ok(items) => {
-            let _ = events.send(Event::Items(items));
+            let _ = events.send(Event::Items(items.clone()));
+            Some(items)
         }
-        Err(e) => tracing::warn!(error = %e, "could not read items"),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read items");
+            None
+        }
     }
+}
+
+/// The avatar of whoever opened each pull request or issue: what the
+/// drawer's bylines show.
+fn author_avatars(items: &[Item]) -> impl Iterator<Item = String> + '_ {
+    items.iter().filter_map(|item| match &item.subject {
+        Some(ItemSubject::PullRequest(pr)) => Some(pr.author_avatar_url.clone()),
+        Some(ItemSubject::Issue(issue)) => Some(issue.author_avatar_url.clone()),
+        None => None,
+    })
 }
 
 fn review_group_summary(

@@ -1,11 +1,11 @@
 //! Item rows: a pull request, an issue, or a branch of the reader's own,
 //! in the sidebar's flat list.
 //!
-//! One row draws every shape an item can have. The glyph and the reference
-//! line come from which parts the item has, never from a stored kind. The
-//! row's menu has every entry on every row, with the ones that cannot
-//! apply greyed rather than hidden, so it is the same size and order
-//! everywhere.
+//! One row draws every shape an item can have, in the shape `nav_row`
+//! gives every row of the drawer. The glyph and the byline come from which
+//! parts the item has, never from a stored kind. The row's menu has every
+//! entry on every row, with the ones that cannot apply greyed rather than
+//! hidden, so it is the same size and order everywhere.
 
 // TextInput::on_enter is deprecated in favour of a listener; the name says
 // what it does, so it stays until the listener form is the only one.
@@ -17,19 +17,18 @@ use floem::menu::Menu;
 use floem::muda::accelerator::{Accelerator, Code as KeyCode};
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::CursorStyle;
 use floem::text::FontWeight;
 use floem::views::{Container, Decorators, Empty, Label, Stack, TextInput, dyn_container};
 use perch_github::{CheckStatus, Item, ItemSubject, SubjectState};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::items::full_reference;
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::nav_row;
 use crate::ui::widgets::{
-    clickable, copy_to_clipboard, icon_button, open_in_browser, open_in_terminal, reveal_in_finder,
-    sidebar_glyph, text_button,
+    copy_to_clipboard, icon_button, open_in_browser, open_in_terminal, reveal_in_finder, sidebar_glyph,
+    text_button,
 };
 
 /// Opening an item. Shared by every row.
@@ -74,13 +73,6 @@ pub fn item_row(
         move || state.open_item.with(|o| o.as_deref() == Some(id.as_str()))
     };
     let archived = item.is_archived();
-    let mut reference_text = full_reference(&item);
-    // A branch of the reader's own says how far it has gone from its base.
-    if item.subject.is_none() {
-        if let Some((a, d)) = item.checkout.as_ref().and_then(|c| c.churn) {
-            reference_text = format!("{reference_text}  +{a} \u{2212}{d}");
-        }
-    }
 
     let menu_item = item.clone();
     let menu_backend = backend.clone();
@@ -95,48 +87,27 @@ pub fn item_row(
     // the pointer through to it: the content stack is pointer_events_none
     // and every view in it inherits that, except the controls, which set
     // it back: the rename box and the hover buttons.
+    let title = dyn_container(
+        {
+            let id = item.id.clone();
+            move || state.renaming.with(|r| r.as_deref() == Some(id.as_str()))
+        },
+        move |renaming| {
+            if renaming {
+                rename_box(state, backend.clone(), title_item.clone()).into_any()
+            } else {
+                nav_row::title_label(title_item.title().to_string(), archived, false).into_any()
+            }
+        },
+    )
+    .style(|s| s.width_full().min_width(0.0));
     let content = Stack::horizontal((
-        glyph(&item),
-        Stack::vertical((
-            // The title, or a text box in its place while it is renamed.
-            dyn_container(
-                {
-                    let id = item.id.clone();
-                    move || state.renaming.with(|r| r.as_deref() == Some(id.as_str()))
-                },
-                move |renaming| {
-                    if renaming {
-                        rename_box(state, backend.clone(), title_item.clone()).into_any()
-                    } else {
-                        let title = title_item.title().to_string();
-                        Label::derived(move || title.clone())
-                            .style(move |s| {
-                                s.font_size(theme::TEXT_TITLE)
-                                    .color(if archived { theme::NAV_SUBTLE } else { theme::NAV_FG })
-                                    .text_ellipsis()
-                                    .max_width_full()
-                            })
-                            .into_any()
-                    }
-                },
-            )
-            .style(|s| s.width_full().min_width(0.0)),
-            Stack::horizontal((
-                Label::derived(move || reference_text.clone()).style(|s| {
-                    s.font_size(theme::TEXT_META)
-                        .color(theme::NAV_MUTED)
-                        .text_ellipsis()
-                        .min_width(0.0)
-                        .flex_shrink(1.0_f32)
-                        .margin_top(3.0)
-                }),
-                chips(state, &item),
-            ))
-            .style(|s| s.items_center().width_full().min_width(0.0)),
-        ))
-        .style(|s| s.flex_col().flex_grow(1.0_f32).min_width(0.0).justify_center()),
-        row_actions(state, actions_backend, row_item).style(|s| s.pointer_events_auto()),
-        trailing(item.is_pinned()),
+        nav_row::glyph_box(glyph(&item)),
+        nav_row::lines(
+            title,
+            row_trailing(state, actions_backend, row_item).style(|s| s.pointer_events_auto()),
+            byline(state, &item),
+        ),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0).pointer_events_none());
 
@@ -152,22 +123,8 @@ pub fn item_row(
             })
         })
         .context_menu(move || item_menu(state, menu_backend.clone(), menu_item.clone()))
-        .style(move |s| {
-            let base = clickable(s)
-                .width_full()
-                .height(theme::ROW_HEIGHT)
-                .items_center()
-                .padding_left(12.0)
-                .padding_right(13.0)
-                .border_radius(theme::NAV_ROW_RADIUS);
-            if selected() {
-                base.background(theme::NAV_SELECTED)
-                    .hover(|s| s.background(theme::NAV_SELECTED_PRESSED))
-            } else {
-                base.hover(|s| s.background(theme::NAV_HOVER))
-            }
-        });
-    let row = Container::new(row).style(|s| s.width_full().padding_horiz(24.0));
+        .style(move |s| nav_row::row_style(s, selected()));
+    let row = Container::new(row).style(nav_row::row_gutter);
 
     // What opens under the row: a Delete confirmation.
     let under_item = item.clone();
@@ -194,7 +151,7 @@ pub fn item_row(
 fn glyph(item: &Item) -> impl IntoView {
     let state = state_of(item);
     let muted = item.is_archived();
-    Container::new(match state {
+    match state {
         Some(state) => floem::views::svg(move || icons::state_icon(state))
             .style(move |s| {
                 s.size(16.0, 16.0)
@@ -203,14 +160,56 @@ fn glyph(item: &Item) -> impl IntoView {
             .into_any(),
         None => sidebar_glyph(SidebarIcon::Branch, if muted { theme::NAV_SUBTLE } else { theme::NAV_MUTED })
             .into_any(),
-    })
-    .style(|s| {
-        s.size(20.0, 20.0)
-            .items_center()
-            .justify_center()
-            .margin_right(10.0)
-            .flex_shrink(0.0_f32)
-    })
+    }
+}
+
+/// Whose face the byline carries: the author of the pull request or the
+/// issue, or the reader's own on a branch of their own.
+fn author(state: AppState, item: &Item) -> (impl Fn() -> String + 'static, String) {
+    let own = match &item.subject {
+        Some(ItemSubject::PullRequest(pr)) => Some((pr.author_login.clone(), pr.author_avatar_url.clone())),
+        Some(ItemSubject::Issue(issue)) => Some((issue.author_login.clone(), issue.author_avatar_url.clone())),
+        None => None,
+    };
+    match own {
+        Some((login, url)) => (Box::new(move || url.clone()) as Box<dyn Fn() -> String>, login),
+        // The viewer arrives after the rows do, so the face follows it.
+        None => (
+            Box::new(move || state.viewer.with(|v| v.as_ref().map(|(_, url)| url.clone()).unwrap_or_default()))
+                as Box<dyn Fn() -> String>,
+            state.viewer.with_untracked(|v| v.as_ref().map(|(login, _)| login.clone()).unwrap_or_default()),
+        ),
+    }
+}
+
+/// The repository, then the branch or the number, then the churn: what
+/// Codex's byline says of a branch.
+fn byline(state: AppState, item: &Item) -> impl IntoView {
+    let (avatar_url, login) = author(state, item);
+    let reference = match &item.subject {
+        Some(ItemSubject::PullRequest(pr)) => item.branch().unwrap_or(pr.head_ref.as_str()).to_string(),
+        Some(ItemSubject::Issue(issue)) => format!("#{}", issue.number),
+        None => item.branch().unwrap_or_default().to_string(),
+    };
+    // A checkout says how far it has gone from its base once the scan has
+    // measured it; a pull request says what GitHub counts until then.
+    let churn = item
+        .checkout
+        .as_ref()
+        .and_then(|c| c.churn)
+        .or_else(|| item.pull_request().map(|pr| (pr.additions, pr.deletions)));
+    nav_row::byline(
+        state,
+        avatar_url,
+        login,
+        item.repo_full_name.clone(),
+        reference,
+        chips(state, item),
+        match churn {
+            Some((added, deleted)) => nav_row::churn(added, deleted).into_any(),
+            None => Empty::new().into_any(),
+        },
+    )
 }
 
 /// The CI chip and the review chip after a pull request's reference, from
@@ -274,70 +273,49 @@ fn chips(state: AppState, item: &Item) -> impl IntoView {
     )
 }
 
-/// The right edge shows whether the item is pinned.
-fn trailing(pinned: bool) -> impl IntoView {
-    Container::new(if pinned {
-        sidebar_glyph(SidebarIcon::Pin, theme::FG_SUBTLE).style(|s| s.size(11.0, 11.0)).into_any()
-    } else {
-        Empty::new().into_any()
-    })
-    .style(|s| s.width(14.0).items_center().justify_center().flex_shrink(0.0_f32))
-}
-
-/// Save and the menu, on hover.
-fn row_actions(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoView {
+/// The title's right end: the pin, the bookmark and the age, or, while
+/// the pointer is over the row, Save and the menu in their place.
+fn row_trailing(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoView {
     let id = item.id.clone();
     let hovering = move || state.hovered_item.with(|h| h.as_deref() == Some(id.as_str()));
     let saved = item.saved;
+    let pinned = item.is_pinned();
+    let at = item.last_activity();
 
-    dyn_container(
-        move || (hovering(), saved),
-        move |(hovered, saved)| {
-            if !hovered && !saved {
-                return Empty::new().into_any();
-            }
-            let save_id = item.id.clone();
-            let save_backend = backend.clone();
-            let menu_item = item.clone();
-            let menu_backend = backend.clone();
-            Stack::horizontal((
-                icon_button(
-                    move || if saved { SidebarIcon::BookmarkFilled } else { SidebarIcon::Bookmark },
-                    move || if saved { theme::ACCENT } else { theme::FG_SUBTLE },
-                    move || save_backend.mark_saved(&save_id, !saved),
-                ),
-                if hovered {
-                    more_button(move || item_menu(state, menu_backend.clone(), menu_item.clone())).into_any()
+    dyn_container(hovering, move |hovered| {
+        if !hovered {
+            return Stack::horizontal((
+                if pinned {
+                    nav_row::mark(SidebarIcon::Pin, theme::FG_SUBTLE).into_any()
                 } else {
                     Empty::new().into_any()
                 },
+                if saved {
+                    nav_row::mark(SidebarIcon::BookmarkFilled, theme::ACCENT).into_any()
+                } else {
+                    Empty::new().into_any()
+                },
+                nav_row::age(state, at),
             ))
             .style(|s| s.items_center().flex_shrink(0.0_f32))
-            .into_any()
-        },
-    )
-    .style(|s| s.flex_shrink(0.0_f32))
-}
-
-/// The `...` button: the item menu.
-fn more_button(menu: impl Fn() -> Menu + 'static) -> impl IntoView {
-    Container::new(
-        sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE)
-            // The menu looks only at the deepest view under the pointer, so
-            // the glyph must not be it.
-            .style(|s| s.pointer_events_none()),
-    )
-    .popout_menu(menu)
-    // The row underneath is a button too.
-    .on_event_stop(el::Click, |_, _| {})
-    .style(|s| {
-        clickable(s)
-            .size(26.0, 26.0)
-            .items_center()
-            .justify_center()
-            .border_radius(13.0)
-            .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
+            .into_any();
+        }
+        let save_id = item.id.clone();
+        let save_backend = backend.clone();
+        let menu_item = item.clone();
+        let menu_backend = backend.clone();
+        Stack::horizontal((
+            icon_button(
+                move || if saved { SidebarIcon::BookmarkFilled } else { SidebarIcon::Bookmark },
+                move || if saved { theme::ACCENT } else { theme::FG_SUBTLE },
+                move || save_backend.mark_saved(&save_id, !saved),
+            ),
+            nav_row::more_button(move || item_menu(state, menu_backend.clone(), menu_item.clone())),
+        ))
+        .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(4.0))
+        .into_any()
     })
+    .style(|s| s.flex_shrink(0.0_f32))
 }
 
 fn key(code: KeyCode) -> Accelerator {

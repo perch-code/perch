@@ -8,8 +8,6 @@ use std::rc::Rc;
 use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
-use floem::style::CursorStyle;
-use floem::text::FontWeight;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
@@ -19,7 +17,8 @@ use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{clickable, icon_button, open_in_browser, sidebar_glyph};
+use crate::ui::nav_row;
+use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph};
 
 /// The notification list under the current search, repository, and reason
 /// filters. GitHub's ordering is retained.
@@ -32,8 +31,8 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
                     Label::new("No matching notifications")
                         .style(|s| {
                             s.font_size(theme::TEXT_META)
-                                .color(theme::FG_SUBTLE)
-                                .padding(16.0)
+                                .color(theme::NAV_SUBTLE)
+                                .padding(24.0)
                         })
                         .into_any()
                 } else {
@@ -54,12 +53,7 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
         )
         .style(|s| s.flex_col().width_full().gap(1.0)),
     ))
-    .style(|s| {
-        s.flex_col()
-            .width_full()
-            .padding_top(10.0)
-            .padding_bottom(12.0)
-    })
+    .style(nav_row::list_style)
     .scroll()
     .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
 }
@@ -138,7 +132,6 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> im
     let hovered = RwSignal::new(false);
     let unread = thread.unread;
     let title = thread.subject.title.clone();
-    let reference = reference(&thread);
     let open_thread = thread.clone();
     let open_backend = backend.clone();
     let url = github_url(&thread);
@@ -152,36 +145,13 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> im
     let action_backend = backend.clone();
 
     let content = Stack::horizontal((
-        notification_glyph(&thread),
-        Stack::vertical((
-            Label::derived(move || title.clone()).style(move |s| {
-                s.font_size(theme::TEXT_BODY)
-                    .font_weight(if unread {
-                        FontWeight::SEMI_BOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .color(if unread { theme::FG } else { theme::FG_MUTED })
-                    .text_ellipsis()
-                    .max_width_full()
-            }),
-            Label::derived(move || reference.clone()).style(|s| {
-                s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
-                    .text_ellipsis()
-                    .min_width(0.0)
-                    .margin_top(1.0)
-            }),
-        ))
-        .style(|s| {
-            s.flex_col()
-                .flex_grow(1.0_f32)
-                .min_width(0.0)
-                .justify_center()
-        }),
-        notification_actions(hovered, action_backend, action_thread)
-            .style(|s| s.pointer_events_auto()),
-        unread_dot(unread),
+        nav_row::glyph_box(notification_glyph(&thread)),
+        nav_row::lines(
+            nav_row::title_label(title, false, unread),
+            notification_trailing(state, hovered, action_backend, action_thread)
+                .style(|s| s.pointer_events_auto()),
+            byline(state, &thread),
+        ),
     ))
     .style(|s| {
         s.items_center()
@@ -190,7 +160,8 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> im
             .pointer_events_none()
     });
 
-    Container::new(content)
+    let row = Container::new(content)
+        .debug_name(format!("notification row:{}", thread.id))
         .on_event_stop(el::Click, move |_, _| {
             let navigation_id = open_backend.open_notification(&open_thread);
             if opens_inside {
@@ -206,17 +177,8 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> im
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
         .context_menu(move || notification_menu(menu_backend.clone(), &menu_thread))
-        .style(|s| {
-            clickable(s)
-                .width_full()
-                .height(theme::ROW_HEIGHT)
-                .items_center()
-                .padding_left(10.0)
-                .padding_right(6.0)
-                .margin_horiz(6.0)
-                .border_radius(theme::RADIUS)
-                .hover(|s| s.background(theme::CANVAS_HOVER))
-        })
+        .style(|s| nav_row::row_style(s, false));
+    Container::new(row).style(nav_row::row_gutter)
 }
 
 fn notification_glyph(thread: &Thread) -> impl IntoView {
@@ -229,20 +191,48 @@ fn notification_glyph(thread: &Thread) -> impl IntoView {
         SubjectKind::Release => SidebarIcon::Bookmark,
         SubjectKind::Other(_) => SidebarIcon::Comment,
     };
-    Container::new(sidebar_glyph(glyph, theme::FG_MUTED))
-        .style(|s| s.size(16.0, 16.0).margin_right(10.0).flex_shrink(0.0_f32))
+    sidebar_glyph(glyph, theme::NAV_MUTED)
 }
 
-fn notification_actions(
+/// The repository's face, the repository, the number, and why GitHub sent
+/// it at the right end.
+fn byline(state: AppState, thread: &Thread) -> impl IntoView {
+    let owner = thread
+        .repository
+        .full_name
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let avatar_url = thread.repository.owner_avatar_url.clone();
+    nav_row::byline(
+        state,
+        move || avatar_url.clone(),
+        owner,
+        thread.repository.full_name.clone(),
+        reference(thread),
+        Empty::new(),
+        nav_row::figure(thread.reason.label().to_string()),
+    )
+}
+
+/// The title's right end: the unread dot and the age, or, while the
+/// pointer is over the row, Done and the menu in their place.
+fn notification_trailing(
+    state: AppState,
     hovered: RwSignal<bool>,
     backend: Rc<Backend>,
     thread: Thread,
 ) -> impl IntoView {
+    let unread = thread.unread;
+    let at = thread.updated_at;
     dyn_container(
         move || hovered.get(),
         move |hovered| {
             if !hovered {
-                return Empty::new().into_any();
+                return Stack::horizontal((unread_dot(unread), nav_row::age(state, at)))
+                    .style(|s| s.items_center().flex_shrink(0.0_f32))
+                    .into_any();
             }
             let done_backend = backend.clone();
             let done_id = thread.id.clone();
@@ -254,29 +244,13 @@ fn notification_actions(
                     || theme::FG_SUBTLE,
                     move || done_backend.done_notification(&done_id),
                 ),
-                more_button(move || notification_menu(menu_backend.clone(), &menu_thread)),
+                nav_row::more_button(move || notification_menu(menu_backend.clone(), &menu_thread)),
             ))
-            .style(|s| s.items_center().flex_shrink(0.0_f32))
+            .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(4.0))
             .into_any()
         },
     )
     .style(|s| s.flex_shrink(0.0_f32))
-}
-
-fn more_button(menu: impl Fn() -> Menu + 'static) -> impl IntoView {
-    Container::new(
-        sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE).style(|s| s.pointer_events_none()),
-    )
-    .popout_menu(menu)
-    .on_event_stop(el::Click, |_, _| {})
-    .style(|s| {
-        clickable(s)
-            .size(26.0, 26.0)
-            .items_center()
-            .justify_center()
-            .border_radius(13.0)
-            .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
-    })
 }
 
 fn notification_menu(backend: Rc<Backend>, thread: &Thread) -> Menu {
@@ -306,37 +280,29 @@ fn notification_menu(backend: Rc<Backend>, thread: &Thread) -> Menu {
         })
 }
 
+/// The unread reminder, before the age.
 fn unread_dot(unread: bool) -> impl IntoView {
-    Container::new(if unread {
+    if unread {
         Empty::new()
             .style(|s| {
                 s.size(7.0, 7.0)
                     .border_radius(4.0)
                     .background(theme::ACCENT)
+                    .flex_shrink(0.0_f32)
+                    .margin_left(6.0)
             })
             .into_any()
     } else {
         Empty::new().into_any()
-    })
-    .style(|s| {
-        s.width(14.0)
-            .items_center()
-            .justify_center()
-            .flex_shrink(0.0_f32)
-    })
+    }
 }
 
+/// "#2085", or the kind of thing it is when it has no number.
 fn reference(thread: &Thread) -> String {
-    let subject = match thread.number_hint() {
+    match thread.number_hint() {
         Some(number) => format!("#{number}"),
         None => thread.subject.kind.wire().to_string(),
-    };
-    format!(
-        "{}  {} · {}",
-        thread.repository.full_name,
-        subject,
-        thread.reason.label()
-    )
+    }
 }
 
 /// A GitHub web URL derived without trusting notification text as a URL.

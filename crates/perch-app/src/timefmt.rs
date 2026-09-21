@@ -55,6 +55,31 @@ pub fn relative(when: Timestamp, now: Timestamp) -> String {
     }
 }
 
+/// The compact form a drawer row carries at its right edge: "now", "5m",
+/// "3h", "1d", "2w", "4mo", "1y". One unit, no "ago", the way Codex's
+/// rows read.
+pub fn short(when: Timestamp, now: Timestamp) -> String {
+    let secs = (now.as_second() - when.as_second()).max(0);
+    let minutes = secs / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+    if minutes < 1 {
+        "now".to_string()
+    } else if hours < 1 {
+        format!("{minutes}m")
+    } else if days < 1 {
+        format!("{hours}h")
+    } else if days < 7 {
+        format!("{days}d")
+    } else if days < 30 {
+        format!("{}w", days / 7)
+    } else if days < 365 {
+        format!("{}mo", days / 30)
+    } else {
+        format!("{}y", days / 365)
+    }
+}
+
 fn month_name(m: i8) -> &'static str {
     const NAMES: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -114,6 +139,22 @@ pub(crate) mod tests {
     fn a_previous_year_keeps_the_year() {
         let now = ts("2026-09-17T12:00:00Z");
         assert_eq!(relative(ts("2025-01-03T12:00:00Z"), now), "Jan 3, 2025");
+    }
+
+    #[test]
+    fn the_short_form_is_one_unit_with_no_ago() {
+        let now = ts("2026-09-20T12:00:00Z");
+        assert_eq!(short(ts("2026-09-20T11:59:40Z"), now), "now");
+        assert_eq!(short(ts("2026-09-20T12:00:05Z"), now), "now", "a clock ahead of ours");
+        assert_eq!(short(ts("2026-09-20T11:55:00Z"), now), "5m");
+        assert_eq!(short(ts("2026-09-20T09:00:00Z"), now), "3h");
+        assert_eq!(short(ts("2026-09-19T11:00:00Z"), now), "1d");
+        assert_eq!(short(ts("2026-09-14T12:00:00Z"), now), "6d");
+        assert_eq!(short(ts("2026-09-13T12:00:00Z"), now), "1w");
+        assert_eq!(short(ts("2026-09-06T12:00:00Z"), now), "2w");
+        assert_eq!(short(ts("2026-08-01T12:00:00Z"), now), "1mo");
+        assert_eq!(short(ts("2026-01-01T12:00:00Z"), now), "8mo");
+        assert_eq!(short(ts("2024-09-01T12:00:00Z"), now), "2y");
     }
 
     #[test]

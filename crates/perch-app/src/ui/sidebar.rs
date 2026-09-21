@@ -586,6 +586,55 @@ mod tests {
         item
     }
 
+    /// A pull request of the reader's own, checked out, with its churn
+    /// measured.
+    fn pull_request(id: &str, repo: &str, author: &str) -> Item {
+        let now = "2026-09-19T12:00:00Z".parse().unwrap();
+        let mut item = Item::new(repo, now);
+        item.id = id.into();
+        item.subject = Some(ItemSubject::PullRequest(perch_github::PullRequest {
+            number: 57,
+            title: format!("Pull {id}"),
+            html_url: String::new(),
+            author_login: author.into(),
+            author_avatar_url: String::new(),
+            head_sha: "h".into(),
+            head_ref: "fence".into(),
+            base_sha: "b".into(),
+            base_ref: "main".into(),
+            draft: false,
+            merged: false,
+            state: "open".into(),
+            additions: 10,
+            deletions: 2,
+            changed_files: 1,
+            repo_full_name: repo.into(),
+            head_repo_full_name: None,
+            updated_at: Some(now),
+            review_requested: false,
+            checks: None,
+            review_decision: None,
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: vec![],
+            milestone: None,
+            labels: vec![],
+            assignees: vec![],
+        }));
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: "fence".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: "/x".into(),
+            owned: true,
+            on_disk: true,
+            churn: Some((1192, 36)),
+            last_seen_head: None,
+        });
+        item
+    }
+
     fn notification(id: &str, repo: &str, title: &str, kind: SubjectKind, unread: bool) -> Thread {
         Thread {
             id: id.into(),
@@ -609,10 +658,13 @@ mod tests {
         let state = AppState::new();
         state.sidebar_width.set(theme::SIDEBAR_MIN_WIDTH);
         state.viewer.set(Some(("me".into(), String::new())));
+        // The clock the ages are read against: a day after the rows.
+        state.now.set("2026-09-20T12:00:00Z".parse().unwrap());
         state.items.set(vec![
             issue("mine", "org/one", "me"),
             issue("notification", "org/one", "someone"),
             issue("elsewhere", "org/two", "me"),
+            pull_request("pr", "org/one", "me"),
         ]);
         state.notifications.set(vec![
             notification("12", "org/one", "Read discussion", SubjectKind::Discussion, false),
@@ -756,6 +808,45 @@ mod tests {
         harness.paint();
         assert!(find(harness.root_id(), "No matching items").is_some());
         assert!(find(harness.root_id(), "Issue mine").is_none());
+    }
+
+    /// Every row of the drawer has Codex's shape: the title with the age
+    /// at its right end, then the avatar, the repository, the reference,
+    /// and the figures under the age. Item rows and notification rows are
+    /// the same shape at the same inset.
+    #[test]
+    fn every_row_is_the_title_and_age_over_the_byline() {
+        let (mut harness, _) = harness();
+        let row = find(harness.root_id(), "item row:pr").unwrap();
+        let rect = row.get_visual_rect_no_clip();
+        let title = find(row, "Pull pr").unwrap().get_visual_rect_no_clip();
+        let age = find(row, "row age").unwrap().get_visual_rect_no_clip();
+        let byline = find(row, "row byline").unwrap().get_visual_rect_no_clip();
+        let avatar = find(row, "row avatar").unwrap().get_visual_rect_no_clip();
+        let figures = find(row, "row figures").unwrap().get_visual_rect_no_clip();
+
+        assert!(find(row, "1d").is_some(), "the age is a day, short");
+        assert!(title.y1 <= byline.y0, "the title is over the byline");
+        assert!(title.x1 <= age.x0, "the age is at the title's right end");
+        assert_eq!(age.x1, rect.x1 - 13.0, "the age ends at the row's inset");
+        assert_eq!(figures.x1, age.x1, "the figures end under the age");
+        assert_eq!(avatar.x0, title.x0, "the avatar starts under the title");
+        assert_eq!(avatar.width(), crate::ui::nav_row::AVATAR);
+        assert!(find(row, "org/one").is_some(), "the repository");
+        assert!(find(row, "fence").is_some(), "then the branch");
+        assert!(find(row, "+1,192").is_some() && find(row, "-36").is_some(), "then the churn");
+
+        // A notification row has the same bones at the same inset.
+        click_scope(&mut harness, ItemScope::Notifications);
+        let thread = find(harness.root_id(), "notification row:11").unwrap();
+        let thread_rect = thread.get_visual_rect_no_clip();
+        assert_eq!((thread_rect.x0, thread_rect.x1), (rect.x0, rect.x1));
+        assert_eq!(thread_rect.height(), rect.height());
+        let thread_age = find(thread, "row age").unwrap().get_visual_rect_no_clip();
+        assert_eq!(thread_age.x1, age.x1);
+        assert_eq!(find(thread, "row figures").unwrap().get_visual_rect_no_clip().x1, age.x1);
+        assert!(find(thread, "#11").is_some(), "the number where the branch goes");
+        assert!(find(thread, "mention").is_some(), "the reason where the churn goes");
     }
 
     /// The whole window, so the drawer sits where it does in the app: at
