@@ -5,6 +5,7 @@
 //! `dark_mode` style selector.
 
 use floem::peniko::Color;
+use floem::text::FontWeight;
 
 /// Surfaces.
 pub const CANVAS: Color = Color::from_rgb8(0xff, 0xff, 0xff);
@@ -87,15 +88,48 @@ pub const AVATAR_TINTS: [Color; 6] = [
     Color::from_rgb8(0xe7, 0xeb, 0xff),
 ];
 
-/// Type scale, in whole pixels. The renderer rounds the size in its glyph
-/// cache key, so fractional sizes that round together share bitmaps on a
-/// non-retina display.
-pub const TEXT_TITLE: f32 = 15.0;
-pub const TEXT_PAGE_TITLE: f32 = 26.0;
-pub const TEXT_BODY: f32 = 15.0;
+/// Type scale, in whole pixels, as Codex's desktop window sets it: a 14px
+/// base for a row's title, the prose and a summary's rows; a step down
+/// for a toolbar's labels and the bar's title; two for a row's byline and
+/// age, a section's heading and a chip; and up to 16 for a section's
+/// title and 24 for the page's. Codex has nothing smaller than 12, so a
+/// section heading and a badge are the same size and differ in weight
+/// and colour. The renderer rounds the size in its glyph cache key, so
+/// fractional sizes that round together share bitmaps on a non-retina
+/// display.
+pub const TEXT_TITLE: f32 = 14.0;
+pub const TEXT_PAGE_TITLE: f32 = 24.0;
+pub const TEXT_SECTION_TITLE: f32 = 16.0;
+pub const TEXT_BODY: f32 = 14.0;
 pub const TEXT_META: f32 = 13.0;
 pub const TEXT_BADGE: f32 = 12.0;
-pub const TEXT_SECTION: f32 = 11.0;
+pub const TEXT_SECTION: f32 = 12.0;
+
+/// The weights, as Codex sets them. Its body is 430, a shade heavier
+/// than Regular, which the system font can draw because it is variable:
+/// asking for 430 sets its weight axis rather than rounding to a face.
+/// Emphasis is Medium, for a title, a section's heading, a selected tab
+/// and a button that matters; Codex keeps Semibold for prose, where a
+/// heading, a bold run and a table's header row carry it, and for the
+/// initial on a placeholder avatar. Nothing is Bold.
+///
+/// Functions rather than constants because a weight off the named
+/// steps cannot be built in a `const`.
+pub fn weight_body() -> FontWeight {
+    FontWeight::new(430.0)
+}
+pub fn weight_emphasis() -> FontWeight {
+    FontWeight::MEDIUM
+}
+pub fn weight_strong() -> FontWeight {
+    FontWeight::SEMI_BOLD
+}
+
+/// Line heights, as a multiple of the size. Prose runs at 1.625, Codex's
+/// relaxed leading, which is what its description and comments read at;
+/// the page title is set tight, at 1.2, so its two lines sit close.
+pub const PROSE_LINE_HEIGHT: f32 = 1.625;
+pub const PAGE_TITLE_LINE_HEIGHT: f32 = 1.2;
 
 /// How far to lift text that is centred inside a pill or a button.
 ///
@@ -241,15 +275,23 @@ pub fn syntax_color(capture: usize) -> Color {
     COLORS.get(capture).copied().unwrap_or(SYNTAX_DEFAULT)
 }
 
-/// Code metrics. The editor needs a fixed line height to place the gutter.
-pub const CODE_FONT_SIZE: f32 = 13.0;
-pub const CODE_LINE_HEIGHT: f32 = 21.0;
-/// Menlo by name, and nothing else.
+/// Code metrics, as Codex sets its diffs: 12px at 1.8, which is 21.6 and
+/// rounds up to a whole pixel here because the editor needs a fixed line
+/// height to place the gutter.
+pub const CODE_FONT_SIZE: f32 = 12.0;
+pub const CODE_LINE_HEIGHT: f32 = 22.0;
+/// A fenced block in prose: Codex gives its code content the greater of
+/// 1.5em and 20px, which at the code size is 20px.
+pub const PROSE_CODE_LINE_HEIGHT: f32 = 20.0 / 12.0;
+/// SF Mono, by the name the system's copy is installed under.
 ///
-/// "SF Mono" and "Consolas" are not installed here, and the `monospace`
-/// generic resolves to Courier rather than to anything a reviewer wants to
-/// read code in.
-pub const CODE_FONT_STACK: &str = "Menlo";
+/// Codex asks for `ui-monospace`, which is SF Mono on a Mac. There is no
+/// "SF Mono" family here unless the developer download is installed, but
+/// the copy the system ships is reachable as ".SF NS Mono", and it is a
+/// variable font, so it draws the body weight the sans does. The
+/// `monospace` generic resolves to Courier, and Menlo, which this used
+/// to name, is a different design.
+pub const CODE_FONT_STACK: &str = ".SF NS Mono";
 pub const GUTTER_WIDTH: f64 = 70.0;
 /// Gap between the gutter's change bar and the first character of code.
 pub const CODE_GUTTER_GAP: f64 = 12.0;

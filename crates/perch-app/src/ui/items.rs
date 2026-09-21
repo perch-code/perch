@@ -17,7 +17,6 @@ use floem::menu::Menu;
 use floem::muda::accelerator::{Accelerator, Code as KeyCode};
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::text::FontWeight;
 use floem::views::{Container, Decorators, Empty, Label, Stack, TextInput, dyn_container};
 use perch_github::{Item, ItemSubject, SubjectState};
 
@@ -452,7 +451,7 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
     let id = item.id.clone();
     Stack::vertical((
         Label::derived(move || format!("Delete {title}?")).style(|s| {
-            s.font_size(theme::TEXT_META).font_weight(FontWeight::SEMI_BOLD).color(theme::FG).selectable(false)
+            s.font_size(theme::TEXT_META).font_weight(theme::weight_emphasis()).color(theme::FG).selectable(false)
         }),
         Label::derived(move || what.clone()).style(|s| {
             s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).text_wrap().width_full().margin_top(2.0)

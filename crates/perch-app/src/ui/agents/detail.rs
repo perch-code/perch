@@ -7,7 +7,6 @@ use floem::peniko::kurbo::Point;
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::Position;
-use floem::text::FontWeight;
 use floem::views::scroll::ScrollChanged;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
@@ -233,7 +232,7 @@ fn summary_bar(
             }),
             Label::derived(move || meta.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
                     .text_ellipsis()
                     .min_width(0.0)
@@ -248,7 +247,7 @@ fn summary_bar(
             })
             .style(move |s| {
                 s.font_size(theme::TEXT_SECTION)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(theme::weight_emphasis())
                     .color(color)
                     .flex_shrink(0.0_f32)
                     .selectable(false)
@@ -292,7 +291,7 @@ fn summary_bar(
 fn heading(text: &'static str) -> impl IntoView {
     Label::derived(move || text.to_string()).style(|s| {
         s.font_size(theme::TEXT_SECTION)
-            .font_weight(FontWeight::SEMI_BOLD)
+            .font_weight(theme::weight_emphasis())
             .color(theme::FG_SUBTLE)
             .selectable(false)
     })
@@ -304,7 +303,7 @@ fn request_section(request: String) -> impl IntoView {
         Container::new(Label::derived(move || request.clone()).style(|s| {
             s.font_size(theme::TEXT_BODY)
                 .color(theme::FG)
-                .line_height(1.45)
+                .line_height(theme::PROSE_LINE_HEIGHT)
                 .text_wrap()
                 .width_full()
         }))
@@ -395,7 +394,7 @@ fn activity_section(
                             } else {
                                 theme::CLOSED
                             })
-                            .line_height(1.4)
+                            .line_height(theme::PROSE_LINE_HEIGHT)
                             .text_wrap()
                             .min_width(0.0)
                             .flex_grow(1.0_f32)
@@ -596,7 +595,7 @@ fn result_content(
             Container::new(Label::derived(move || error.clone()).style(move |s| {
                 s.font_size(theme::TEXT_BODY)
                     .color(outcome_color)
-                    .line_height(1.45)
+                    .line_height(theme::PROSE_LINE_HEIGHT)
                     .text_wrap()
                     .width_full()
             }))
@@ -616,7 +615,7 @@ fn result_content(
             Container::new(Label::derived(move || error.clone()).style(move |s| {
                 s.font_size(theme::TEXT_BODY)
                     .color(outcome_color)
-                    .line_height(1.45)
+                    .line_height(theme::PROSE_LINE_HEIGHT)
                     .text_wrap()
                     .width_full()
             }))
@@ -646,7 +645,7 @@ fn result_content(
             Container::new(Label::derived(move || message.to_string()).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::FG_SUBTLE)
-                    .line_height(1.4)
+                    .line_height(theme::PROSE_LINE_HEIGHT)
                     .text_wrap()
                     .width_full()
             }))

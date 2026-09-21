@@ -15,7 +15,6 @@ use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
 use floem::style::{CursorStyle, Style};
-use floem::text::FontWeight;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use jiff::Timestamp;
 use perch_github::{CheckStatus, ReviewDecision};
@@ -112,9 +111,9 @@ pub fn title_label(text: String, muted: bool, bold: bool) -> impl IntoView {
     Label::derived(move || text.clone()).style(move |s| {
         s.font_size(theme::TEXT_TITLE)
             .font_weight(if bold {
-                FontWeight::SEMI_BOLD
+                theme::weight_emphasis()
             } else {
-                FontWeight::NORMAL
+                theme::weight_body()
             })
             .color(if muted {
                 theme::NAV_SUBTLE
@@ -144,7 +143,7 @@ pub fn byline(
     figures: impl IntoView + 'static,
 ) -> impl IntoView {
     let muted_text = |s: Style| {
-        s.font_size(theme::TEXT_META)
+        s.font_size(theme::TEXT_BADGE)
             .color(theme::NAV_MUTED)
             .text_ellipsis()
             .min_width(0.0)
@@ -177,7 +176,7 @@ pub fn age(state: AppState, at: Timestamp) -> impl IntoView {
     Label::derived(move || timefmt::short(at, state.now.get()))
         .debug_name("row age")
         .style(|s| {
-            s.font_size(theme::TEXT_META)
+            s.font_size(theme::TEXT_BADGE)
                 .color(theme::NAV_MUTED)
                 .flex_shrink(0.0_f32)
                 .margin_left(8.0)
@@ -274,12 +273,12 @@ fn churn_figures(added: u32, deleted: u32) -> impl IntoView {
     );
     Stack::horizontal((
         Label::derived(move || added.clone()).style(|s| {
-            s.font_size(theme::TEXT_META)
+            s.font_size(theme::TEXT_BADGE)
                 .color(theme::NAV_ADDED)
                 .flex_shrink(0.0_f32)
         }),
         Label::derived(move || deleted.clone()).style(|s| {
-            s.font_size(theme::TEXT_META)
+            s.font_size(theme::TEXT_BADGE)
                 .color(theme::NAV_DELETED)
                 .flex_shrink(0.0_f32)
                 .margin_left(5.0)

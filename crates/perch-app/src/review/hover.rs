@@ -17,7 +17,6 @@ use floem::prelude::*;
 use floem::style::{
     BorderBottomLeftRadius, BorderBottomRightRadius, BorderTopLeftRadius, BorderTopRightRadius,
 };
-use floem::text::FontWeight;
 use floem::views::{Decorators, Empty, Label, Stack};
 
 use crate::review::doc::Doc;
@@ -291,9 +290,9 @@ fn signature_view(blocks: Vec<String>, alone: bool) -> impl IntoView {
                             .margin_bottom(4.0)
                     } else {
                         s.font_size(theme::CODE_FONT_SIZE)
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(theme::weight_emphasis())
                             .color(theme::FG)
-                            .line_height(1.45)
+                            .line_height(theme::PROSE_LINE_HEIGHT)
                     }
                 })
                 .into_any()

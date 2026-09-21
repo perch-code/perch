@@ -11,7 +11,6 @@ use std::rc::Rc;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
 use floem::style::CursorStyle;
-use floem::text::FontWeight;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
@@ -181,7 +180,7 @@ fn finding_filters(app: AppState, state: ReviewState) -> impl IntoView {
                 Stack::horizontal((
                     Label::derived(move || format!("Review findings · {open} open")).style(|s| {
                         s.font_size(theme::TEXT_META)
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(theme::weight_emphasis())
                             .color(theme::FG_MUTED)
                             .margin_right(4.0)
                     }),
@@ -257,8 +256,8 @@ fn conversation_title(state: ReviewState) -> impl IntoView {
         .style(|s| {
             s.width_full()
                 .font_size(theme::TEXT_PAGE_TITLE)
-                .font_weight(FontWeight::MEDIUM)
-                .line_height(1.18)
+                .font_weight(theme::weight_emphasis())
+                .line_height(theme::PAGE_TITLE_LINE_HEIGHT)
                 .color(theme::FG)
                 .padding_bottom(theme::CONVERSATION_TITLE_GAP)
         })

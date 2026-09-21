@@ -13,7 +13,6 @@ use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
-use floem::text::FontWeight;
 use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
 use perch_github::{
@@ -172,7 +171,7 @@ fn checks_section(state: ReviewState, expanded: RwSignal<bool>) -> impl IntoView
     let header = Stack::horizontal((
         Label::derived(|| "Checks".to_string()).style(|s| {
             s.font_size(theme::TEXT_BODY)
-                .font_weight(FontWeight::SEMI_BOLD)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG)
                 .selectable(false)
                 .pointer_events_none()
@@ -625,7 +624,7 @@ fn merge_status(decision: MergeDecision, overview: Option<&PullRequestOverview>)
         Stack::vertical((
             Label::derived(move || title.clone()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
             }),
             Label::derived(move || detail.clone()).style(|s| {
@@ -968,7 +967,7 @@ fn action_button(
     let click = action.clone();
     Container::new(Label::derived(move || label.clone()).style(move |s| {
         s.font_size(theme::TEXT_BADGE)
-            .font_weight(FontWeight::SEMI_BOLD)
+            .font_weight(theme::weight_emphasis())
             .color(if prominent {
                 theme::CANVAS
             } else {

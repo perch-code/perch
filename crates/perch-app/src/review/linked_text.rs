@@ -407,7 +407,7 @@ fn rules(layout: &TextLayout, len: usize, strikes: &[Strike]) -> Vec<(Rect, Colo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use floem::text::{Attrs, FamilyOwned, FontWeight, LineHeightValue};
+    use floem::text::{Attrs, FamilyOwned, LineHeightValue};
 
     fn links(text: &str, needle: &str, url: &str) -> Vec<Link> {
         let start = text.find(needle).unwrap();
@@ -493,9 +493,9 @@ mod tests {
         AttrsList::new(
             Attrs::new()
                 .font_size(size)
-                .weight(FontWeight::NORMAL)
+                .weight(crate::theme::weight_body())
                 .family(&family)
-                .line_height(LineHeightValue::Normal(1.4)),
+                .line_height(LineHeightValue::Normal(crate::theme::PROSE_LINE_HEIGHT)),
         )
     }
 

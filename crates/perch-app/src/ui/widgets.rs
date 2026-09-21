@@ -4,7 +4,6 @@ use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::style::Style;
-use floem::text::FontWeight;
 use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
 use perch_github::SubjectState;
 
@@ -352,7 +351,7 @@ pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, se
                 let tint = theme::tint_for(&seed);
                 Container::new(Label::derived(move || initial.clone()).style(move |s| {
                     s.font_size((size * 0.44) as f32)
-                        .font_weight(FontWeight::SEMI_BOLD)
+                        .font_weight(theme::weight_strong())
                         .color(theme::FG_MUTED)
                 }))
                 .style(move |s| {
@@ -387,7 +386,7 @@ pub fn centered_message(
             }),
             Label::derived(title).style(|s| {
                 s.font_size(theme::TEXT_TITLE)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
                     .margin_bottom(6.0)
             }),

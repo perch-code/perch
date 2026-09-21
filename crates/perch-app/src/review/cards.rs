@@ -21,7 +21,6 @@ use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
-use floem::text::FontWeight;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack, TooltipExt,
 };
@@ -149,7 +148,7 @@ fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> impl IntoView
             move || Name::Login(login.clone()),
             |s| {
                 s.font_size(theme::TEXT_META)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
             },
         ),
@@ -384,7 +383,7 @@ fn reaction_pill(
             }),
             Label::derived(move || count.to_string()).style(move |s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(theme::weight_emphasis())
                     .color(if mine { theme::UNREAD } else { theme::FG_MUTED })
                     .margin_left(5.0)
                     .margin_bottom(theme::OPTICAL_TEXT_LIFT)
@@ -554,8 +553,8 @@ pub fn description_card(
             )),
             Stack::vertical((
                 Label::derived(|| "Description".to_string()).style(|s| {
-                    s.font_size(18.0)
-                        .font_weight(FontWeight::SEMI_BOLD)
+                    s.font_size(theme::TEXT_SECTION_TITLE)
+                        .font_weight(theme::weight_emphasis())
                         .color(theme::FG)
                         .margin_bottom(10.0)
                 }),
@@ -1332,7 +1331,7 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
                 move || Name::Login(actor.clone()),
                 |s| {
                     s.font_size(theme::TEXT_META)
-                        .font_weight(FontWeight::SEMI_BOLD)
+                        .font_weight(theme::weight_emphasis())
                         .color(theme::FG)
                         .margin_right(4.0)
                 },
@@ -1573,7 +1572,7 @@ pub(crate) fn finding_controls(
                 Stack::vertical((
                     Label::derived(move || metadata.clone()).style(|s| {
                         s.font_size(theme::TEXT_BADGE)
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(theme::weight_emphasis())
                             .color(theme::FG_MUTED)
                             .text_wrap()
                     }),
@@ -1613,7 +1612,7 @@ fn finding_action(label: &'static str, action: impl Fn() + 'static) -> impl Into
                 .padding_horiz(8.0)
                 .items_center()
                 .font_size(theme::TEXT_BADGE)
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG_MUTED)
                 .background(theme::CANVAS)
                 .border(1.0)
@@ -1681,7 +1680,7 @@ fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> i
             },
             |s| {
                 s.font_size(theme::TEXT_META)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
             },
         ),
@@ -1707,7 +1706,7 @@ fn local_chip() -> impl IntoView {
     tip(
         Container::new(Label::derived(|| "Local".to_string()).style(|s| {
             s.font_size(theme::TEXT_SECTION)
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG_MUTED)
                 .selectable(false)
                 .margin_bottom(theme::OPTICAL_TEXT_LIFT)

@@ -469,7 +469,7 @@ fn all_control(explanation: String, on_click: impl Fn() + 'static) -> impl IntoV
             .style(|s| {
                 clickable(s)
                     .font_size(theme::TEXT_SECTION)
-                    .font_weight(floem::text::FontWeight::MEDIUM)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG_MUTED)
                     .height(16.0)
                     .padding_horiz(5.0)
@@ -518,8 +518,9 @@ fn row_view(
         Label::derived(move || number.map(|n| n.to_string()).unwrap_or_default()).style(move |s| {
             s.flex_grow(1.0_f32)
                 .selectable(false)
+                // The code's own size, as Codex numbers its diffs.
                 .font_family(theme::CODE_FONT_STACK.to_string())
-                .font_size(theme::CODE_FONT_SIZE - 1.0)
+                .font_size(theme::CODE_FONT_SIZE)
                 .color(if dimmed {
                     theme::DIFF_DELETED_BAR
                 } else {

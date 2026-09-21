@@ -12,7 +12,6 @@ use std::rc::Rc;
 use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalWith};
 use floem::style::CursorStyle;
-use floem::text::FontWeight;
 use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
 use perch_github::{CheckState, Item, ItemKind, ItemSubject, SubjectState};
 
@@ -325,7 +324,7 @@ fn state_pill(state: ReviewState) -> impl IntoView {
                         .style(move |s| s.size(14.0, 14.0).color(color).margin_right(5.0)),
                     Label::derived(move || state_word(state).to_string()).style(move |s| {
                         s.font_size(theme::TEXT_SECTION)
-                            .font_weight(FontWeight::SEMI_BOLD)
+                            .font_weight(theme::weight_emphasis())
                             .color(color)
                             .selectable(false)
                             .margin_bottom(theme::OPTICAL_TEXT_LIFT)
@@ -611,12 +610,12 @@ fn churn_labels(
     Stack::horizontal((
         Label::derived(move || format!("+{}", additions())).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .font_weight(FontWeight::SEMI_BOLD)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::STATUS_ADDED)
         }),
         Label::derived(move || format!("-{}", deletions())).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .font_weight(FontWeight::SEMI_BOLD)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::STATUS_DELETED)
                 .margin_left(6.0)
         }),
@@ -658,7 +657,7 @@ fn historical_review(app: AppState, state: ReviewState, backend: Rc<Backend>) ->
                 })
                 .style(|s| {
                     s.font_size(theme::TEXT_META)
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(theme::weight_emphasis())
                         .color(theme::FG_MUTED)
                         .selectable(false)
                 }),
@@ -703,7 +702,7 @@ pub fn back_to_current(app: AppState, state: ReviewState, backend: Rc<Backend>) 
                 .items_center()
                 .padding_horiz(6.0)
                 .font_size(theme::TEXT_BADGE)
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG)
                 .background(theme::CANVAS)
                 .border_radius(theme::RADIUS)
@@ -1008,7 +1007,7 @@ fn chip(
     let clicks = on_click.is_some();
     Container::new(Label::derived(move || text.clone()).style(move |s| {
         s.font_size(theme::TEXT_SECTION)
-            .font_weight(FontWeight::MEDIUM)
+            .font_weight(theme::weight_emphasis())
             .color(ink)
             .selectable(false)
             .text_ellipsis()

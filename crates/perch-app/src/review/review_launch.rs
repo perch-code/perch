@@ -11,7 +11,6 @@ use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{Effect, SignalGet, SignalUpdate, SignalWith};
 use floem::style::{CursorStyle, Position};
-use floem::text::FontWeight;
 use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
@@ -76,7 +75,7 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             .style(|s| s.size(13.0, 13.0).margin_right(6.0).pointer_events_none()),
         Label::derived(label).style(|s| {
             s.font_size(theme::TEXT_META)
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG)
                 .selectable(false)
                 .pointer_events_none()
@@ -220,7 +219,7 @@ fn launcher(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
             Stack::vertical((
                 Label::derived(|| "Review branch".to_string()).style(|s| {
                     s.font_size(theme::TEXT_BODY)
-                        .font_weight(FontWeight::SEMI_BOLD)
+                        .font_weight(theme::weight_emphasis())
                         .color(theme::FG)
                 }),
                 Label::derived(move || title.clone()).style(|s| {
@@ -337,7 +336,7 @@ fn reviewer_row(
         Stack::horizontal((
             Label::derived(move || backend_label(reviewer).to_string()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
                     .min_width(70.0)
             }),
@@ -495,7 +494,7 @@ fn base_row(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
         Label::derived(|| "Base".to_string()).style(|s| {
             s.font_size(theme::TEXT_BODY)
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG)
                 .min_width(70.0)
         }),
@@ -549,7 +548,7 @@ fn launch_error(app: AppState, state: ReviewState) -> impl IntoView {
             Some(error) => Container::new(Label::derived(move || error.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::CLOSED)
-                    .line_height(1.4)
+                    .line_height(theme::PROSE_LINE_HEIGHT)
                     .text_wrap()
                     .width_full()
             }))
@@ -664,7 +663,7 @@ pub fn history(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 Stack::horizontal((
                     Label::derived(|| "REVIEW HISTORY".to_string()).style(|s| {
                         s.font_size(theme::TEXT_SECTION)
-                            .font_weight(FontWeight::SEMI_BOLD)
+                            .font_weight(theme::weight_emphasis())
                             .color(theme::FG_SUBTLE)
                             .flex_grow(1.0_f32)
                     }),
@@ -743,7 +742,7 @@ fn group_card(
                 s.height(28.0)
                     .items_center()
                     .font_size(theme::TEXT_BADGE)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG_SUBTLE)
                     .selectable(false)
             })
@@ -802,7 +801,7 @@ fn group_card(
             Stack::horizontal((
                 Label::derived(move || title.clone()).style(|s| {
                     s.font_size(theme::TEXT_BODY)
-                        .font_weight(FontWeight::SEMI_BOLD)
+                        .font_weight(theme::weight_emphasis())
                         .color(theme::FG)
                         .text_wrap()
                         .min_width(0.0)
@@ -830,7 +829,7 @@ fn group_card(
                         Label::derived(|| "Newer changes exist".to_string())
                             .style(|s| {
                                 s.font_size(theme::TEXT_SECTION)
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(theme::weight_emphasis())
                                     .color(theme::ACCENT)
                             })
                             .into_any()
@@ -1263,7 +1262,7 @@ fn action_button(
     let click = action.clone();
     Container::new(Label::derived(move || label.clone()).style(move |s| {
         s.font_size(theme::TEXT_BADGE)
-            .font_weight(FontWeight::SEMI_BOLD)
+            .font_weight(theme::weight_emphasis())
             .color(if prominent {
                 theme::CANVAS
             } else {

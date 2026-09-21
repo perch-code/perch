@@ -157,7 +157,7 @@ fn search_row(state: AppState) -> impl IntoView {
             s.width_full()
                 .min_width(0.0)
                 .height(theme::NAV_CONTROL_HEIGHT)
-                .font_size(theme::TEXT_META)
+                .font_size(theme::TEXT_BODY)
                 // The glyph takes the left padding, and the text starts at
                 // the same optical inset as the item titles below it.
                 .padding_left(34.0)

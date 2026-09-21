@@ -12,7 +12,6 @@ use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::{Effect, SignalGet, SignalUpdate, SignalWith};
 use floem::style::{CursorStyle, Position};
-use floem::text::FontWeight;
 use floem::views::{dyn_container, text_editor, Container, Decorators, Empty, Label, Stack};
 use perch_github::PullReviewEvent;
 
@@ -66,7 +65,7 @@ fn available_control(state: ReviewState, backend: Rc<Backend>) -> impl IntoView 
         })
         .style(|s| {
             s.font_size(theme::TEXT_META)
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::CANVAS)
                 .selectable(false)
                 .pointer_events_none()
@@ -197,7 +196,7 @@ fn popover(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             Stack::vertical((
                 Label::derived(|| "Submit review".to_string()).style(|s| {
                     s.font_size(theme::TEXT_BODY)
-                        .font_weight(FontWeight::SEMI_BOLD)
+                        .font_weight(theme::weight_emphasis())
                         .color(theme::FG)
                 }),
                 Label::derived(|| "Leave a summary and choose an outcome.".to_string()).style(
@@ -426,7 +425,7 @@ fn outcome_row_content(state: ReviewState, event: PullReviewEvent) -> impl View 
         Stack::vertical((
             Label::derived(move || outcome_label(event).to_string()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
                     .selectable(false)
                     .pointer_events_none()
@@ -606,7 +605,7 @@ fn action_button(
     let click = action.clone();
     Container::new(Label::derived(label).style(move |s| {
         s.font_size(theme::TEXT_BADGE)
-            .font_weight(FontWeight::SEMI_BOLD)
+            .font_weight(theme::weight_emphasis())
             .color(if prominent {
                 theme::CANVAS
             } else {

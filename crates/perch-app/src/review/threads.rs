@@ -15,7 +15,6 @@ use std::rc::Rc;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
-use floem::text::FontWeight;
 use floem::views::{
     dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
@@ -374,7 +373,7 @@ fn send_button(on_click: Rc<dyn Fn()>) -> impl IntoView {
         Stack::horizontal((
             Label::derived(|| "Send".to_string()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::CANVAS)
                     .margin_right(6.0)
                     .margin_bottom(theme::OPTICAL_TEXT_LIFT)
@@ -571,7 +570,7 @@ pub fn outdated_pill(outdated: bool) -> impl IntoView {
     Label::derived(|| "Outdated".to_string())
         .style(|s| {
             s.font_size(theme::TEXT_SECTION)
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::NOTICE_FG)
                 .background(theme::NOTICE_BG)
                 .border(1.0)
@@ -792,7 +791,7 @@ pub(crate) fn collapsed_card_row(
         chevron(state, card_id, false),
         name_label(author, |s| {
             s.font_size(theme::TEXT_BADGE)
-                .font_weight(FontWeight::SEMI_BOLD)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG)
                 .selectable(false)
                 .margin_left(6.0)
@@ -845,7 +844,7 @@ fn more_pill(more: usize) -> impl IntoView {
     Label::derived(move || format!("{more} more"))
         .style(|s| {
             s.font_size(theme::TEXT_SECTION)
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG_SUBTLE)
                 .background(theme::BADGE_BG)
                 .height(theme::COLLAPSED_CARD_PILL)
@@ -922,7 +921,7 @@ pub fn delete_confirmation(
             Stack::vertical((
                 Label::derived(|| "Delete this thread?".to_string()).style(|s| {
                     s.font_size(theme::TEXT_META)
-                        .font_weight(FontWeight::SEMI_BOLD)
+                        .font_weight(theme::weight_emphasis())
                         .color(theme::FG)
                         .selectable(false)
                 }),

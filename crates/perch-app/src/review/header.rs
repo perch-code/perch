@@ -12,7 +12,6 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
-use floem::text::FontWeight;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
@@ -85,7 +84,6 @@ fn leading(app: AppState, state: ReviewState) -> impl IntoView {
             .debug_name("item title")
             .style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .font_weight(FontWeight::MEDIUM)
                     .color(theme::FG)
                     .text_ellipsis()
                     .min_width(0.0)
@@ -243,8 +241,8 @@ pub fn preparing_card(
                     .margin_bottom(14.0)
             }),
             Label::derived(|| "Preparing the checkout".to_string()).style(|s| {
-                s.font_size(15.0)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                s.font_size(theme::TEXT_SECTION_TITLE)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
                     .margin_bottom(6.0)
             }),

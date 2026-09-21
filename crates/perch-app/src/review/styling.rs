@@ -212,7 +212,7 @@ impl Styling for PerchStyling {
     }
 
     fn weight(&self, _edid: EditorId, _line: usize) -> FontWeight {
-        FontWeight::NORMAL
+        theme::weight_body()
     }
 }
 

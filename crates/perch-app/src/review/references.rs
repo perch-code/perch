@@ -12,7 +12,7 @@
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::{CursorStyle, Position};
-use floem::text::{Attrs, AttrsList, FamilyOwned, FontWeight, LineHeightValue};
+use floem::text::{Attrs, AttrsList, FamilyOwned, LineHeightValue};
 use floem::views::{
     ClipExt, Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack, rich_text,
 };
@@ -321,7 +321,7 @@ fn header(state: ReviewState) -> impl IntoView {
         Label::derived(symbol).style(|s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::TEXT_BADGE)
-                .font_weight(FontWeight::SEMI_BOLD)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG)
                 .margin_left(5.0)
                 .text_ellipsis()
@@ -429,7 +429,7 @@ fn file_row(
         }),
         Label::derived(move || name.clone()).style(|s| {
             s.font_size(theme::TEXT_META)
-                .font_weight(FontWeight::SEMI_BOLD)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG)
                 .flex_shrink(0.0_f32)
                 .selectable(false)
@@ -469,7 +469,7 @@ fn status_letter(status: ChangeStatus) -> impl IntoView {
     };
     Label::derived(move || status.letter()).style(move |s| {
         s.font_size(theme::TEXT_BADGE)
-            .font_weight(FontWeight::SEMI_BOLD)
+            .font_weight(theme::weight_emphasis())
             .color(color)
             .width(14.0)
             .flex_shrink(0.0_f32)
@@ -541,7 +541,7 @@ fn layout(text: &str, symbol: &str) -> (String, AttrsList) {
     };
     let mut list = AttrsList::new(base());
     for range in occurrences(text, symbol) {
-        list.add_span(range, base().weight(FontWeight::SEMI_BOLD).color(theme::ACCENT));
+        list.add_span(range, base().weight(theme::weight_strong()).color(theme::ACCENT));
     }
     (text.to_string(), list)
 }

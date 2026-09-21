@@ -876,11 +876,11 @@ pub fn render(text: &str) -> impl IntoView {
 }
 
 /// Blocks already parsed, stacked, with the prose at `size`. A fenced
-/// block is drawn in the code font a point smaller than the prose, as a
+/// block is drawn in the code font at Codex's small size, as a
 /// conversation card draws one; a tooltip hands its blocks here at the
 /// meta size, so a doc comment reads a step below the signature.
 pub fn render_blocks(blocks: Vec<Block>, size: f32) -> impl IntoView {
-    stack(blocks, Ctx { size, color: theme::FG, depth: 0 }, 6.0)
+    stack(blocks, Ctx { size, color: theme::FG, depth: 0 })
 }
 
 /// How the blocks in a container are drawn: the prose size, its colour,
@@ -892,18 +892,61 @@ struct Ctx {
     depth: usize,
 }
 
-fn stack(blocks: Vec<Block>, ctx: Ctx, gap: f64) -> AnyView {
-    let children: Vec<AnyView> = blocks.into_iter().map(|block| block_view(block, ctx)).collect();
+/// Codex's unit of vertical rhythm: a quarter of the prose size, 3.5px
+/// at the base size. Every gap between blocks is a whole number of these.
+fn space(size: f32) -> f64 {
+    size as f64 / 4.0
+}
+
+/// Codex's small size, for code and a table: seven eighths of the prose,
+/// but never under the code size, which is what a fenced block is set at.
+fn small_size(size: f32) -> f32 {
+    (size * 0.875).round().max(theme::CODE_FONT_SIZE)
+}
+
+/// The room over a block, in units of `space`, as Codex's margins settle
+/// it against what came before. Paragraphs sit four apart, and a heading
+/// stands four off whatever precedes it and close over what it heads; a
+/// fenced block takes five each side and a rule seven; a list or a table
+/// follows its paragraph at one, and anything else at two.
+fn gap_before(prev: &Block, block: &Block) -> f64 {
+    match (prev, block) {
+        (Block::Rule, _) | (_, Block::Rule) => 7.0,
+        (Block::Code { .. }, _) | (_, Block::Code { .. }) => 5.0,
+        (_, Block::Heading { .. }) => 4.0,
+        (Block::Heading { level, .. }, _) => match level {
+            1 | 5 | 6 => 2.0,
+            2 | 3 => 1.0,
+            _ => 0.0,
+        },
+        (Block::Paragraph(_), Block::Paragraph(_)) => 4.0,
+        (Block::Paragraph(_), Block::List { .. } | Block::Table { .. } | Block::Quote { .. }) => 1.0,
+        _ => 2.0,
+    }
+}
+
+fn stack(blocks: Vec<Block>, ctx: Ctx) -> AnyView {
+    let unit = space(ctx.size);
+    let gaps: Vec<f64> = std::iter::once(0.0)
+        .chain(blocks.windows(2).map(|pair| gap_before(&pair[0], &pair[1]) * unit))
+        .collect();
+    let children: Vec<AnyView> = blocks
+        .into_iter()
+        .zip(gaps)
+        .map(|(block, gap)| block_view(block, ctx).style(move |s| s.margin_top(gap)).into_any())
+        .collect();
     Stack::vertical_from_iter(children)
-        .style(move |s| s.flex_col().width_full().gap(gap))
+        .style(move |s| s.flex_col().width_full())
         .into_any()
 }
 
 fn block_view(block: Block, ctx: Ctx) -> AnyView {
     match block {
-        Block::Paragraph(spans) => text_view(spans, ctx.size, FontWeight::NORMAL, ctx.color),
+        Block::Paragraph(spans) => {
+            text_view(spans, ctx.size, theme::weight_body(), ctx.color, prose_leading(ctx.size))
+        }
         Block::Heading { level, spans } => heading_view(level, spans, ctx),
-        Block::Quote { alert: None, blocks } => stack(blocks, Ctx { color: theme::FG_MUTED, ..ctx }, 6.0)
+        Block::Quote { alert: None, blocks } => stack(blocks, Ctx { color: theme::FG_MUTED, ..ctx })
             .style(|s| s.padding_left(10.0).border_left(3.0).border_color(theme::BORDER))
             .into_any(),
         Block::Quote { alert: Some(alert), blocks } => alert_view(alert, blocks, ctx),
@@ -917,36 +960,47 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
     }
 }
 
-/// GitHub's scale, eased: its h1 is twice the body, which in a card a
-/// third of the window wide is a shout. Whole pixels, so sizes share
-/// glyph bitmaps.
+/// Codex's scale: an h1 half again the body, then a quarter, then an
+/// eighth, and the rest at the body's own size, told apart by weight
+/// alone. Whole pixels, so sizes share glyph bitmaps.
 fn heading_size(level: u8, body: f32) -> f32 {
     let scale = match level {
-        1 => 1.6,
-        2 => 1.35,
-        3 => 1.2,
-        4 => 1.0,
-        5 => 0.9,
-        _ => 0.85,
+        1 => 1.5,
+        2 => 1.25,
+        3 => 1.125,
+        _ => 1.0,
     };
     (body * scale).round()
 }
 
+/// A heading's line box, in Codex's units of the prose: eight for an h1,
+/// seven for an h2 or h3, six for an h4, and the prose's own leading for
+/// the two that share its size.
+fn heading_leading(level: u8, body: f32) -> LineHeightValue {
+    let units = match level {
+        1 => 8.0,
+        2 | 3 => 7.0,
+        4 => 6.0,
+        _ => return prose_leading(body),
+    };
+    LineHeightValue::Pt((space(body) * units) as f32)
+}
+
+/// The prose's leading.
+fn prose_leading(_body: f32) -> LineHeightValue {
+    LineHeightValue::Normal(theme::PROSE_LINE_HEIGHT)
+}
+
 fn heading_view(level: u8, spans: Vec<Span>, ctx: Ctx) -> AnyView {
-    let color = if level >= 6 { theme::FG_MUTED } else { ctx.color };
-    // GitHub rules under its two largest headings.
-    let ruled = level <= 2;
-    text_view(spans, heading_size(level, ctx.size), FontWeight::SEMI_BOLD, color)
-        .style(move |s| {
-            let s = s.margin_top(4.0);
-            if ruled {
-                s.padding_bottom(4.0).border_bottom(1.0).border_color(theme::BORDER_MUTED)
-            } else {
-                s
-            }
-        })
-        .debug_name(format!("heading:{level}"))
-        .into_any()
+    text_view(
+        spans,
+        heading_size(level, ctx.size),
+        theme::weight_strong(),
+        ctx.color,
+        heading_leading(level, ctx.size),
+    )
+    .debug_name(format!("heading:{level}"))
+    .into_any()
 }
 
 fn alert_view(alert: Alert, blocks: Vec<Block>, ctx: Ctx) -> AnyView {
@@ -962,14 +1016,14 @@ fn alert_view(alert: Alert, blocks: Vec<Block>, ctx: Ctx) -> AnyView {
         sidebar_glyph(icon, color).style(|s| s.margin_right(6.0).flex_shrink(0.0_f32)),
         Label::derived(move || title.to_string()).style(move |s| {
             s.font_size(size)
-                .font_weight(FontWeight::SEMI_BOLD)
+                .font_weight(theme::weight_emphasis())
                 .color(color)
                 .selectable(false)
                 .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
     ))
     .style(|s| s.items_center());
-    Stack::vertical((header, stack(blocks, ctx, 6.0)))
+    Stack::vertical((header, stack(blocks, ctx)))
         .style(move |s| {
             s.flex_col()
                 .width_full()
@@ -991,8 +1045,7 @@ fn bullet(depth: usize) -> &'static str {
     }
 }
 
-fn list_view(start: Option<u64>, tight: bool, items: Vec<Item>, ctx: Ctx) -> AnyView {
-    let gap = if tight { 2.0 } else { 6.0 };
+fn list_view(start: Option<u64>, _tight: bool, items: Vec<Item>, ctx: Ctx) -> AnyView {
     let inner = Ctx { depth: ctx.depth + 1, ..ctx };
     // One column for every marker in the list, wide enough for its
     // last number, so the text lines up down the list and the numbers
@@ -1016,7 +1069,10 @@ fn list_view(start: Option<u64>, tight: bool, items: Vec<Item>, ctx: Ctx) -> Any
                     Container::new(Label::derived(move || text.clone()).style(move |s| {
                         // The prose's line box, so the marker shares its
                         // baseline.
-                        s.font_size(size).line_height(1.4).color(theme::FG_MUTED).selectable(false)
+                        s.font_size(size)
+                            .line_height(theme::PROSE_LINE_HEIGHT)
+                            .color(theme::FG_MUTED)
+                            .selectable(false)
                     }))
                     .style(move |s| {
                         let s = s.width(column).padding_right(4.0).flex_shrink(0.0_f32);
@@ -1031,7 +1087,7 @@ fn list_view(start: Option<u64>, tight: bool, items: Vec<Item>, ctx: Ctx) -> Any
             };
             Stack::horizontal((
                 marker,
-                stack(item.blocks, inner, gap)
+                stack(item.blocks, inner)
                     .style(|s| s.min_width(0.0).flex_grow(1.0_f32))
                     .debug_name(format!("item-body:{}", ctx.depth)),
             ))
@@ -1039,8 +1095,10 @@ fn list_view(start: Option<u64>, tight: bool, items: Vec<Item>, ctx: Ctx) -> Any
             .into_any()
         })
         .collect();
+    // Codex puts no room between items, tight or loose: the leading is
+    // the air.
     Stack::vertical_from_iter(rows)
-        .style(move |s| s.flex_col().width_full().gap(gap))
+        .style(move |s| s.flex_col().width_full())
         .into_any()
 }
 
@@ -1056,7 +1114,7 @@ fn text_width(text: &str, size: f32) -> f64 {
 fn task_box(checked: bool, size: f32) -> AnyView {
     let side = 14.0;
     // Centred on the first line of the item's text.
-    let lift = ((size * 1.4) as f64 - side) / 2.0;
+    let lift = ((size * theme::PROSE_LINE_HEIGHT) as f64 - side) / 2.0;
     let glyph: AnyView = if checked {
         sidebar_glyph(SidebarIcon::Check, theme::CANVAS).into_any()
     } else {
@@ -1089,13 +1147,13 @@ fn task_box(checked: bool, size: f32) -> AnyView {
 /// copied, which a command in a description is for. The fence's
 /// language is parsed but not coloured.
 fn code_view(text: String, size: f32) -> AnyView {
-    let code_size = (size - 2.0).max(theme::TEXT_SECTION);
+    let code_size = small_size(size);
     Label::derived(move || text.clone())
         .style(move |s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(code_size)
                 .color(theme::FG)
-                .line_height(1.45)
+                .line_height(theme::PROSE_CODE_LINE_HEIGHT)
                 .padding(8.0)
                 .width_full()
                 .text_wrap()
@@ -1167,11 +1225,12 @@ enum Cell {
 }
 
 fn cell_view(spans: Vec<Span>, align: Align, ctx: Ctx, kind: Cell) -> AnyView {
-    let weight = if kind == Cell::Head { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL };
+    let weight = if kind == Cell::Head { theme::weight_strong() } else { theme::weight_body() };
     // The text sizes to its words, and sits where the alignment puts it:
     // a width of its own, even a percentage, would throw the column's
-    // measure off.
-    let text = prose_view(spans, ctx.size, weight, ctx.color);
+    // measure off. A table is set a step under the prose, as Codex sets it.
+    let size = small_size(ctx.size);
+    let text = prose_view(spans, size, weight, ctx.color, prose_leading(size));
     Container::new(text)
         .style(move |s| {
             let s = s.padding_horiz(10.0).padding_vert(5.0);
@@ -1202,16 +1261,28 @@ fn footnotes_view(notes: Vec<Vec<Block>>, ctx: Ctx) -> AnyView {
 }
 
 /// One wrapped run of text with inline styles, across its container.
-fn text_view(spans: Vec<Span>, size: f32, weight: FontWeight, color: Color) -> AnyView {
-    prose_view(spans, size, weight, color)
+fn text_view(
+    spans: Vec<Span>,
+    size: f32,
+    weight: FontWeight,
+    color: Color,
+    leading: LineHeightValue,
+) -> AnyView {
+    prose_view(spans, size, weight, color, leading)
         .style(|s| s.width_full())
         .into_any()
 }
 
 /// The run, sized by whoever places it: plain rich text, unless a link
 /// in it needs following or a struck span a rule.
-fn prose_view(spans: Vec<Span>, size: f32, weight: FontWeight, color: Color) -> AnyView {
-    let (text, attrs, links, strikes) = layout(&spans, size, weight, color);
+fn prose_view(
+    spans: Vec<Span>,
+    size: f32,
+    weight: FontWeight,
+    color: Color,
+    leading: LineHeightValue,
+) -> AnyView {
+    let (text, attrs, links, strikes) = layout(&spans, size, weight, color, leading);
     if links.is_empty() && strikes.is_empty() {
         let again = (text.clone(), attrs.clone());
         rich_text(text, attrs, move || again.clone()).into_any()
@@ -1229,6 +1300,7 @@ fn layout(
     size: f32,
     weight: FontWeight,
     color: Color,
+    leading: LineHeightValue,
 ) -> (String, AttrsList, Vec<(Range<usize>, String)>, Vec<Strike>) {
     let body: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::FONT_STACK).collect();
     let code: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
@@ -1238,7 +1310,7 @@ fn layout(
             .font_size(size)
             .weight(weight)
             .family(&body)
-            .line_height(LineHeightValue::Normal(1.4))
+            .line_height(leading)
     };
     let mut list = AttrsList::new(base());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
@@ -1270,13 +1342,13 @@ fn layout(
         }
         let mut attrs = base();
         if span.bold {
-            attrs = attrs.weight(FontWeight::SEMI_BOLD);
+            attrs = attrs.weight(theme::weight_strong());
         }
         if span.italic {
             attrs = attrs.font_style(FontStyle::Italic);
         }
         if span.code {
-            attrs = attrs.family(&code).font_size(size - 1.0);
+            attrs = attrs.family(&code).font_size(small_size(size));
         }
         if linked {
             attrs = attrs.color(ink);
@@ -1651,7 +1723,8 @@ mod tests {
             Span { text: "c".into(), strike: true, ..Default::default() },
             plain(" d"),
         ];
-        let (text, _, links, strikes) = layout(&spans, 14.0, FontWeight::NORMAL, theme::FG);
+        let (text, _, links, strikes) =
+            layout(&spans, 14.0, theme::weight_body(), theme::FG, prose_leading(14.0));
         assert_eq!(text, "a bc d");
         assert!(links.is_empty());
         assert_eq!(strikes, vec![(2..4, theme::FG)]);
@@ -1663,7 +1736,8 @@ mod tests {
             Span { text: "a".into(), strike: true, ..Default::default() },
             Span { text: "b".into(), strike: true, link: Some("https://x".into()), ..Default::default() },
         ];
-        let (_, _, links, strikes) = layout(&spans, 14.0, FontWeight::NORMAL, theme::FG);
+        let (_, _, links, strikes) =
+            layout(&spans, 14.0, theme::weight_body(), theme::FG, prose_leading(14.0));
         assert_eq!(links, vec![(1..2, "https://x".to_string())]);
         assert_eq!(strikes, vec![(0..1, theme::FG), (1..2, theme::ACCENT)]);
     }
@@ -1688,7 +1762,8 @@ mod tests {
                 ..Default::default()
             }
         );
-        let (text, _, links, _) = layout(spans, 14.0, FontWeight::NORMAL, theme::FG);
+        let (text, _, links, _) =
+            layout(spans, 14.0, theme::weight_body(), theme::FG, prose_leading(14.0));
         assert_eq!(text, "See the docs and more.");
         assert_eq!(
             links,
@@ -1702,8 +1777,8 @@ mod tests {
 
     #[test]
     fn heading_sizes_step_down_in_whole_pixels() {
-        let sizes: Vec<f32> = (1..=6).map(|l| heading_size(l, 15.0)).collect();
-        assert_eq!(sizes, vec![24.0, 20.0, 18.0, 15.0, 14.0, 13.0]);
+        let sizes: Vec<f32> = (1..=6).map(|l| heading_size(l, 14.0)).collect();
+        assert_eq!(sizes, vec![21.0, 18.0, 16.0, 14.0, 14.0, 14.0]);
         for pair in sizes.windows(2) {
             assert!(pair[0] >= pair[1], "{sizes:?}");
         }
@@ -1801,7 +1876,7 @@ mod tests {
             assert_eq!(bodies.len(), 2);
             assert!(bodies[0].x0 >= empty.x1, "{empty:?} {bodies:?}");
             // The box is centred on the first line of the text.
-            let line = theme::TEXT_BODY as f64 * 1.4;
+            let line = (theme::TEXT_BODY * theme::PROSE_LINE_HEIGHT) as f64;
             let centre = empty.y0 + empty.height() / 2.0;
             assert!((centre - (bodies[0].y0 + line / 2.0)).abs() < 2.0, "{empty:?} {bodies:?}");
         }

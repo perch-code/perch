@@ -6,7 +6,6 @@ use floem::event::EventPropagation;
 use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
-use floem::text::FontWeight;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
@@ -59,9 +58,9 @@ fn tabs(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             Label::derived(move || tab.label().to_string()).style(move |s| {
                 s.font_size(theme::TEXT_META)
                     .font_weight(if state.agents_tab.get() == tab {
-                        FontWeight::SEMI_BOLD
+                        theme::weight_emphasis()
                     } else {
-                        FontWeight::NORMAL
+                        theme::weight_body()
                     })
                     .color(if state.agents_tab.get() == tab {
                         theme::FG
@@ -102,7 +101,7 @@ fn tabs(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                         Label::derived(move || count.to_string())
                             .style(|s| {
                                 s.font_size(theme::TEXT_SECTION)
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(theme::weight_emphasis())
                                     .color(theme::FG_MUTED)
                                     .height(18.0)
                                     .padding_horiz(6.0)
@@ -367,7 +366,7 @@ fn group_view(
                         Label::derived(|| "Current".to_string())
                             .style(|s| {
                                 s.font_size(theme::TEXT_SECTION)
-                                    .font_weight(FontWeight::SEMI_BOLD)
+                                    .font_weight(theme::weight_emphasis())
                                     .color(theme::ACCENT)
                                     .margin_right(7.0)
                                     .selectable(false)
@@ -380,7 +379,7 @@ fn group_view(
             ),
             Label::derived(move || label.clone()).style(|s| {
                 s.font_size(theme::TEXT_SECTION)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG_SUBTLE)
                     .text_ellipsis()
                     .min_width(0.0)
@@ -624,7 +623,7 @@ fn review_group_row(
         Stack::vertical((
             Label::derived(move || title.clone()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
                     .text_ellipsis()
                     .min_width(0.0)
@@ -634,7 +633,7 @@ fn review_group_row(
             }),
             Label::derived(move || status.clone()).style(|s| {
                 s.font_size(theme::TEXT_SECTION)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG_MUTED)
                     .selectable(false)
                     .pointer_events_none()
@@ -774,7 +773,7 @@ fn run_row(
             }),
             Label::derived(move || meta.clone()).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG_MUTED)
                     .text_ellipsis()
                     .min_width(0.0)
@@ -800,7 +799,7 @@ fn run_row(
             })
             .style(move |s| {
                 s.font_size(theme::TEXT_SECTION)
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(theme::weight_emphasis())
                     .color(color)
                     .flex_shrink(0.0_f32)
                     .selectable(false)
@@ -810,7 +809,7 @@ fn run_row(
         .style(|s| s.items_center().width_full().gap(7.0).pointer_events_none()),
         Label::derived(move || subject.clone()).style(|s| {
             s.font_size(theme::TEXT_BODY)
-                .font_weight(FontWeight::SEMI_BOLD)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG)
                 .text_ellipsis()
                 .width_full()
@@ -1001,7 +1000,7 @@ fn empty_state(title: &'static str, body: &'static str) -> impl IntoView {
             }),
             Label::derived(move || title.to_string()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
                     .margin_bottom(5.0)
             }),
@@ -1023,7 +1022,7 @@ fn load_error(state: AppState, backend: Rc<Backend>, history_limit: usize) -> im
         Stack::vertical((
             Label::derived(|| "Could not load agents".to_string()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
             }),
             Label::derived(|| {

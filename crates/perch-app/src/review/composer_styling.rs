@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use floem::text::{Attrs, AttrsList, FamilyOwned, FontStyle, FontWeight};
+use floem::text::{Attrs, AttrsList, FamilyOwned, FontStyle};
 use floem::views::editor::id::EditorId;
 use floem::views::editor::text::{Document, Styling};
 use floem::views::editor::EditorStyle;
@@ -82,7 +82,7 @@ impl Styling for ComposerStyling {
                 }
                 let mut a = default.clone();
                 match capture_name(span.capture) {
-                    "text.strong" | "text.title" => a = a.weight(FontWeight::SEMI_BOLD),
+                    "text.strong" | "text.title" => a = a.weight(theme::weight_strong()),
                     "text.emphasis" => a = a.font_style(FontStyle::Italic),
                     "text.literal" => {
                         a = a.family(&self.code_families).color(theme::SYNTAX_STRING)

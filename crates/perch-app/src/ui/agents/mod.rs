@@ -17,7 +17,6 @@ use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::{CursorStyle, Position};
-use floem::text::FontWeight;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
@@ -259,7 +258,7 @@ fn panel_header(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     })
     .style(|s| {
         s.font_size(theme::TEXT_TITLE)
-            .font_weight(FontWeight::SEMI_BOLD)
+            .font_weight(theme::weight_emphasis())
             .color(theme::FG)
             .selectable(false)
             .pointer_events_none()
@@ -275,7 +274,7 @@ fn panel_header(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     })
     .style(move |s| {
         s.font_size(theme::TEXT_SECTION)
-            .font_weight(FontWeight::MEDIUM)
+            .font_weight(theme::weight_emphasis())
             .color(theme::FG_MUTED)
             .height(18.0)
             .padding_horiz(6.0)
@@ -374,11 +373,7 @@ pub(super) fn text_action(
     let click = action.clone();
     Container::new(Label::derived(text).style(move |s| {
         s.font_size(theme::TEXT_BADGE)
-            .font_weight(if prominent {
-                FontWeight::SEMI_BOLD
-            } else {
-                FontWeight::MEDIUM
-            })
+            .font_weight(theme::weight_emphasis())
             .color(if prominent {
                 theme::ACCENT
             } else {
@@ -649,7 +644,7 @@ pub fn completion_notice(state: AppState, backend: Rc<Backend>) -> impl IntoView
                     Stack::vertical((
                         Label::derived(move || title.clone()).style(|s| {
                             s.font_size(theme::TEXT_BODY)
-                                .font_weight(FontWeight::SEMI_BOLD)
+                                .font_weight(theme::weight_emphasis())
                                 .color(theme::FG)
                                 .selectable(false)
                         }),

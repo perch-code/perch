@@ -14,7 +14,6 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::SignalUpdate;
-use floem::text::FontWeight;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::{Backend, Status};
@@ -513,6 +512,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .position(floem::style::Position::Relative)
                 .font_family(theme::FONT_STACK.to_string())
                 .font_size(theme::TEXT_BODY)
+                .font_weight(theme::weight_body())
                 .color(theme::FG)
                 .background(theme::CANVAS)
         })
@@ -584,7 +584,7 @@ fn token_help(state: AppState) -> impl IntoView {
             }),
             Label::derived(|| "No GitHub token found".to_string()).style(|s| {
                 s.font_size(theme::TEXT_TITLE)
-                    .font_weight(FontWeight::SEMI_BOLD)
+                    .font_weight(theme::weight_emphasis())
                     .color(theme::FG)
                     .margin_bottom(6.0)
             }),
@@ -614,7 +614,7 @@ fn token_help(state: AppState) -> impl IntoView {
 fn code_line(text: &'static str) -> impl IntoView {
     Label::derived(move || text.to_string()).style(|s| {
         s.font_family(theme::CODE_FONT_STACK.to_string())
-            .font_size(theme::TEXT_META)
+            .font_size(theme::CODE_FONT_SIZE)
             .color(theme::FG)
             .background(theme::CANVAS_SUBTLE)
             .border(1.0)

@@ -8,7 +8,6 @@
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
 use floem::style::CursorStyle;
-use floem::text::FontWeight;
 use floem::views::{dyn_container, Decorators, Empty, Label, Stack};
 
 use crate::review::model::{ItemTab, ReviewState};
@@ -88,9 +87,9 @@ fn tab(
         Label::derived(move || name.to_string()).style(move |s| {
             s.font_size(theme::TEXT_META)
                 .font_weight(if active_text() {
-                    FontWeight::SEMI_BOLD
+                    theme::weight_emphasis()
                 } else {
-                    FontWeight::NORMAL
+                    theme::weight_body()
                 })
                 .color(if active_text() {
                     theme::FG
@@ -106,7 +105,7 @@ fn tab(
             Label::derived(move || n.to_string())
                 .style(move |s| {
                     s.font_size(theme::TEXT_SECTION)
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(theme::weight_emphasis())
                         .color(if active_count() {
                             theme::FG_MUTED
                         } else {

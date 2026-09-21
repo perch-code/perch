@@ -9,7 +9,6 @@ use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
-use floem::text::FontWeight;
 use floem::views::{dyn_container, dyn_stack, Decorators, Empty, Label, ScrollExt, Stack};
 use perch_git::{ChangeStatus, ChangedFile, TreeEntry};
 
@@ -352,9 +351,9 @@ fn tree_row(
                     theme::FG
                 })
                 .font_weight(if active_name() {
-                    FontWeight::SEMI_BOLD
+                    theme::weight_emphasis()
                 } else {
-                    FontWeight::NORMAL
+                    theme::weight_body()
                 })
                 .flex_grow(1.0_f32)
                 .min_width(0.0)
@@ -457,7 +456,7 @@ fn status_letter(status: ChangeStatus) -> impl IntoView {
     };
     Label::derived(move || status.letter()).style(move |s| {
         s.font_size(theme::TEXT_BADGE)
-            .font_weight(FontWeight::SEMI_BOLD)
+            .font_weight(theme::weight_emphasis())
             .color(color)
             .width(14.0)
             .flex_shrink(0.0_f32)

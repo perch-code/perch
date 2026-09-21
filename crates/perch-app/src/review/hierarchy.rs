@@ -15,7 +15,6 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, SignalGet, SignalUpdate, SignalWith};
-use floem::text::FontWeight;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
@@ -217,7 +216,7 @@ fn header(state: ReviewState) -> impl IntoView {
         Label::derived(symbol).style(|s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::TEXT_BADGE)
-                .font_weight(FontWeight::SEMI_BOLD)
+                .font_weight(theme::weight_emphasis())
                 .color(theme::FG)
                 .margin_left(5.0)
                 .text_ellipsis()
@@ -258,7 +257,7 @@ fn toggle_pill(state: ReviewState, direction: Direction, text: &'static str) -> 
         .style(move |s| {
             let s = clickable(s)
                 .font_size(theme::TEXT_SECTION)
-                .font_weight(FontWeight::SEMI_BOLD)
+                .font_weight(theme::weight_emphasis())
                 .padding_horiz(8.0)
                 .height(theme::ORIGIN_CHIP_HEIGHT + 2.0)
                 .items_center()
@@ -337,9 +336,9 @@ fn item_row(
             s.font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::CODE_FONT_SIZE)
                 .font_weight(if is_root {
-                    FontWeight::BOLD
+                    theme::weight_strong()
                 } else {
-                    FontWeight::SEMI_BOLD
+                    theme::weight_emphasis()
                 })
                 .color(if repeats { theme::FG_MUTED } else { theme::FG })
                 .flex_shrink(0.0_f32)
