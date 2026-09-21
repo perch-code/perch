@@ -82,6 +82,7 @@ fn main() {
         )
         .init();
     tracing::info!("perch starting");
+    theme::install_code_font();
 
     let (backend, events) = backend::spawn();
     let backend = Rc::new(backend);

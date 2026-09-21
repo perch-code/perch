@@ -4,8 +4,12 @@
 //! mode is a later diff: add a second set here and select with floem's
 //! `dark_mode` style selector.
 
-use floem::peniko::Color;
-use floem::text::FontWeight;
+use std::path::Path;
+use std::sync::Arc;
+
+use floem::peniko::{Blob, Color};
+use floem::text::{FontStyle, FontWeight, FONT_CONTEXT};
+use fontique::FontInfoOverride;
 
 /// Surfaces.
 pub const CANVAS: Color = Color::from_rgb8(0xff, 0xff, 0xff);
@@ -292,6 +296,45 @@ pub const PROSE_CODE_LINE_HEIGHT: f32 = 20.0 / 12.0;
 /// `monospace` generic resolves to Courier, and Menlo, which this used
 /// to name, is a different design.
 pub const CODE_FONT_STACK: &str = ".SF NS Mono";
+
+/// Puts SF Mono's two files under the name `CODE_FONT_STACK` asks for,
+/// each flagged with its slope. Called once, before any text is laid out.
+///
+/// Apple ships the italic without the italic bit in its OS/2 or head
+/// table: only its `post` angle and its "Light Italic" name say what it
+/// is. fontique reads the bits alone, so it files both as upright, and
+/// asked for an upright at the body weight it takes the last one it
+/// scanned, which is the italic. Every line of code in Perch then slants,
+/// and the branch pill's arrow goes missing, since the italic has no
+/// arrow glyph. A family registered by hand is found before a scanned one
+/// of the same name, so this is the family the code font resolves to. A
+/// file that is not there is skipped, and with neither the name falls
+/// through to the scanned family as before.
+pub fn install_code_font() {
+    let faces = [
+        ("SFNSMono.ttf", FontStyle::Normal),
+        ("SFNSMonoItalic.ttf", FontStyle::Italic),
+    ];
+    let mut fonts = FONT_CONTEXT.lock();
+    for (file, style) in faces {
+        let path = Path::new("/System/Library/Fonts").join(file);
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "code font file not read");
+                continue;
+            }
+        };
+        fonts.collection.register_fonts(
+            Blob::new(Arc::new(data)),
+            Some(FontInfoOverride {
+                family_name: Some(CODE_FONT_STACK),
+                style: Some(style),
+                ..Default::default()
+            }),
+        );
+    }
+}
 pub const GUTTER_WIDTH: f64 = 70.0;
 /// Gap between the gutter's change bar and the first character of code.
 pub const CODE_GUTTER_GAP: f64 = 12.0;
@@ -469,3 +512,39 @@ pub const SYMBOL_HIGHLIGHT_BG: Color = Color::from_rgba8(0x32, 0x32, 0x2f, 0x1c)
 /// diff on github.com does. floem's own default is black at half alpha
 /// in an editor and its theme's teal over a label.
 pub const SELECTION_BG: Color = Color::from_rgba8(0x00, 0x7a, 0xff, 0x4d);
+
+#[cfg(test)]
+mod tests {
+    use floem::text::{Attrs, AttrsList, FamilyOwned, TextLayout};
+
+    use super::*;
+
+    /// Every glyph `text` shapes to in the code font at the body weight.
+    fn code_glyphs(text: &str) -> Vec<u32> {
+        let family: Vec<FamilyOwned> = FamilyOwned::parse_list(CODE_FONT_STACK).collect();
+        let attrs = Attrs::new()
+            .font_size(TEXT_BADGE)
+            .family(&family)
+            .weight(weight_body());
+        let layout = TextLayout::new_with_text(text, AttrsList::new(attrs), None);
+        let mut ids = Vec::new();
+        for line in layout.parley_layout().lines() {
+            for run in line.runs() {
+                for cluster in run.clusters() {
+                    ids.extend(cluster.glyphs().map(|g| g.id));
+                }
+            }
+        }
+        ids
+    }
+
+    /// The branch pill's arrow is set in the code font, and the italic
+    /// file, which fontique takes for the upright, has no glyph for it.
+    #[test]
+    fn code_font_draws_the_arrow() {
+        install_code_font();
+        let ids = code_glyphs("main \u{2190} topic");
+        assert_eq!(ids.len(), 12, "one glyph a character: {ids:?}");
+        assert!(ids.iter().all(|&id| id != 0), "a .notdef among {ids:?}");
+    }
+}
