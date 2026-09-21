@@ -1224,7 +1224,7 @@ thread_local! {
     /// that an edit left it where it was.
     static STACKED_VIEWPORT: std::cell::Cell<Option<RwSignal<Rect>>> = const { std::cell::Cell::new(None) };
     /// The cursor of the last stacked editor built, so a test can place it
-    /// where a click would, since a headless editor cannot take a click.
+    /// where a click would without working out where the click goes.
     static STACKED_CURSOR: std::cell::Cell<Option<RwSignal<Cursor>>> = const { std::cell::Cell::new(None) };
 }
 
@@ -1856,9 +1856,7 @@ mod window {
     }
 
     /// The left takes no pointer events, so a click there moves no cursor
-    /// and changes no selection. (It would also focus the editor, which
-    /// asks the window for IME, and the headless window has none to give:
-    /// a left that took the click would fail this test by panicking.)
+    /// and changes no selection.
     #[test]
     fn a_click_on_the_left_is_nothing() {
         let (mut harness, state) = harness();
@@ -2164,10 +2162,9 @@ mod window {
         assert_eq!(state.cursor_line.get(), 0);
 
         // A bare key goes to whatever has the keyboard, and the window's
-        // handler catches it on the way down. A click in the code would
-        // give it to the editor, which cannot be focused headlessly; a
-        // click on the gutter gives it to the gutter. The divider's row,
-        // at its left edge, away from the controls.
+        // handler catches it on the way down. A click on the gutter gives
+        // it to the gutter: the divider's row, at its left edge, away from
+        // the controls.
         let (left, top) = pane_origin();
         harness.click(left + 5.0, top + 5.0 * line_height + line_height / 2.0);
         harness.rebuild();

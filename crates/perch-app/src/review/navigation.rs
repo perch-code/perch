@@ -500,6 +500,9 @@ mod tests {
 
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::reactive::SignalGet;
+    use floem::ui_events::pointer::{
+        PointerButton, PointerId, PointerInfo, PointerState, PointerType,
+    };
     use floem::views::editor::core::cursor::CursorAffinity;
     use perch_github::{Item, ItemCheckout};
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -746,42 +749,56 @@ mod tests {
         );
     }
 
-    /// A Cmd-click, as the editor's capture handler makes it from the
-    /// event. Not dispatched as an event: floem gives the pressed view the
-    /// keyboard before any handler runs, and a focused editor asks the
-    /// window for IME, which the headless window cannot give.
-    fn cmd_click_at(
-        state: ReviewState,
-        backend: &Backend,
-        doc: &RwSignal<Arc<Doc>>,
-        x: f64,
-        y: f64,
-    ) -> bool {
-        cmd_click(state, backend, &editor(), doc, "src/x.rs", Point::new(x, y))
+    /// A primary button going down and up at a window point with the
+    /// command key held, as the window receives a Cmd-click.
+    fn cmd_click_at(harness: &mut HeadlessHarness, x: f64, y: f64) {
+        let modifiers = if cfg!(target_os = "macos") {
+            Modifiers::META
+        } else {
+            Modifiers::CONTROL
+        };
+        for down in [true, false] {
+            let mut state = PointerState {
+                count: 1,
+                modifiers,
+                ..PointerState::default()
+            };
+            state.position.x = x;
+            state.position.y = y;
+            let event = PointerButtonEvent {
+                state,
+                button: Some(PointerButton::Primary),
+                pointer: PointerInfo {
+                    pointer_id: Some(PointerId::PRIMARY),
+                    persistent_device_id: None,
+                    pointer_type: PointerType::Mouse,
+                },
+            };
+            harness.dispatch_event(floem::event::Event::Pointer(if down {
+                PointerEvent::Down(event)
+            } else {
+                PointerEvent::Up(event)
+            }));
+        }
     }
 
     #[test]
     fn cmd_click_on_a_name_places_the_caret_and_asks_for_its_definition() {
         let (mut harness, state, mut commands) = recording_harness();
-        let (backend, mut asked) = crate::backend::Backend::recording();
-        let live = match state.docs.get().map(|d| d.layout) {
-            Some(crate::review::model::LiveLayout::Stacked(live)) => live,
-            _ => panic!("a stacked editor was built"),
-        };
-        let doc = live.doc.get();
+        let doc = stacked_doc(state);
         let ed = editor();
+        let content = ed.editor_view_id.get_untracked().unwrap();
 
         // On the `t` of `beta`, row 2, head line 1.
         let offset = doc.offset_of_row(2) + 5;
         let (x, y) = point_of(offset);
-        assert!(
-            cmd_click_at(state, &backend, &live.doc, x, y),
-            "a name takes the click"
-        );
+        cmd_click_at(&mut harness, x, y);
         harness.rebuild();
+        harness.paint();
         assert_eq!(
-            definitions_asked(&mut asked),
-            vec![("src/x.rs".into(), 1, 3)]
+            definitions_asked(&mut commands),
+            vec![("src/x.rs".into(), 1, 3)],
+            "click at ({x}, {y})"
         );
         let ask = state.goto.get().expect("a definition is on its way");
         assert_eq!(ask.symbol, "beta");
@@ -792,16 +809,31 @@ mod tests {
             "the caret is where the click was"
         );
         assert_eq!(state.last_position.get(), Some((1, 5)));
+        assert!(
+            harness.is_focused(content),
+            "the press gave the editor the keyboard, as any press does"
+        );
 
-        // On the ghost, and on the `(` after `alpha`, the click is the
-        // editor's: nothing is asked and the caret stays.
-        let (x, y) = point_of(doc.offset_of_row(1) + 3);
-        assert!(!cmd_click_at(state, &backend, &live.doc, x, y));
-        let (x, y) = point_of(doc.offset_of_row(0) + 8);
-        assert!(!cmd_click_at(state, &backend, &live.doc, x, y));
+        // On the ghost, the click is the editor's own: nothing is asked,
+        // and the editor places the caret there itself, which is nowhere
+        // in the head file.
+        let ghost = doc.offset_of_row(1) + 3;
+        let (x, y) = point_of(ghost);
+        cmd_click_at(&mut harness, x, y);
         harness.rebuild();
-        assert!(definitions_asked(&mut asked).is_empty());
-        assert_eq!(ed.cursor.get().offset(), offset);
+        harness.paint();
+        assert!(definitions_asked(&mut commands).is_empty());
+        assert_eq!(ed.cursor.get().offset(), ghost);
+        assert_eq!(state.last_position.get(), None);
+
+        // On the `(` after `alpha`: punctuation, so the editor's click too.
+        let paren = doc.offset_of_row(0) + 8;
+        let (x, y) = point_of(paren);
+        cmd_click_at(&mut harness, x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(definitions_asked(&mut commands).is_empty());
+        assert_eq!(ed.cursor.get().offset(), paren);
 
         // With the server gone, the caret is placed and nothing is asked.
         state.goto.set(None);
@@ -810,15 +842,12 @@ mod tests {
         });
         let offset = doc.offset_of_row(0) + 4;
         let (x, y) = point_of(offset);
-        assert!(cmd_click_at(state, &backend, &live.doc, x, y));
+        cmd_click_at(&mut harness, x, y);
         harness.rebuild();
-        assert!(definitions_asked(&mut asked).is_empty());
+        harness.paint();
+        assert!(definitions_asked(&mut commands).is_empty());
         assert!(state.goto.get().is_none());
         assert_eq!(ed.cursor.get().offset(), offset);
-        assert!(
-            definitions_asked(&mut commands).is_empty(),
-            "the window's own backend saw nothing"
-        );
     }
 
     #[test]

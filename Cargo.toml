@@ -33,8 +33,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 4
 
-# Carries a fix for a floem panic ("all view ids are created with a root") when a
-# view is removed in the same update batch as its listener registration. Drop once
-# upstream merges https://github.com/criccomini/floem/tree/stale-listener-ids.
+# The fork's `perch` branch is upstream main with the patches Perch waits on
+# cherry-picked onto it: a fix for a floem panic ("all view ids are created
+# with a root") when a view is removed in the same update batch as its
+# listener registration, and one for the headless window panicking when a
+# focused view asks for an IME (https://github.com/lapce/floem/pull/1088).
+# Drop a patch from the branch once upstream merges it; `cargo update -p floem`
+# takes the branch's new head.
 [patch."https://github.com/lapce/floem"]
-floem = { git = "https://github.com/criccomini/floem", rev = "d1184f236dd77ec7de0ac99aeb2a4006c1997bb7" }
+floem = { git = "https://github.com/criccomini/floem", branch = "perch" }

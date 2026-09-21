@@ -813,8 +813,6 @@ mod tests {
 
     /// `a` on Conversation opens the composer in place, about the item as
     /// a whole, and leaves its box registered for the next `a` to focus.
-    /// That second press asks the window for IME, which the headless
-    /// window cannot give, so it is not pressed here.
     #[test]
     fn a_opens_the_in_place_composer_and_leaves_its_box_for_the_next_press() {
         let (mut harness, _, state) = app_harness();

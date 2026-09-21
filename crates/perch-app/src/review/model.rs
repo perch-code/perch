@@ -989,8 +989,8 @@ pub struct ReviewState {
     /// from one with a question in it.
     pub composer_draft: RwSignal<String>,
     /// Whether a composer takes the keyboard when it opens. On, except in
-    /// the headless tests: a focused editor asks the window for IME, and
-    /// floem's headless window cannot give it and panics.
+    /// the headless tests, which drive the keys through the window and
+    /// want no text box taking them.
     pub composer_autofocus: RwSignal<bool>,
     /// The text box of a composer laid in place on Conversation, while one
     /// is open, so `a` can focus it and scroll to it.

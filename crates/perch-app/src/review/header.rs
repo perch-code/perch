@@ -1368,8 +1368,7 @@ mod tests {
         })));
         state.ready.set(true);
         state.phase.set(Phase::Ready);
-        // A focused editor asks the window for IME, which the headless
-        // window has none of.
+        // The keys are driven through the window; no text box takes them.
         state.composer_autofocus.set(false);
         state.submit_review_autofocus.set(false);
         let root = TestRoot::new();
