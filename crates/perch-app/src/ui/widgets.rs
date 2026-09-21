@@ -1,7 +1,9 @@
 //! Small building blocks shared by the panels.
 
+use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
+use floem::style::Style;
 use floem::text::FontWeight;
 use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
 
@@ -22,15 +24,123 @@ pub fn open_in_browser(url: &str) {
         tracing::warn!(url, "refusing to open a non-HTTP(S) link");
         return;
     }
+    #[cfg(test)]
+    OPENED.with(|opened| opened.borrow_mut().push(url.to_string()));
+    #[cfg(not(test))]
     if let Err(e) = std::process::Command::new("open").arg(url).spawn() {
         tracing::warn!(url, error = %e, "could not open link");
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The links opened, in order, so a test can see where a click led
+    /// without a browser coming to the front.
+    static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The links opened since the last call, and none of them again: a test
+/// takes them before it clicks, so nothing an earlier test on the thread
+/// opened is counted as its own.
+#[cfg(test)]
+pub(crate) fn opened() -> Vec<String> {
+    OPENED.with(|opened| std::mem::take(&mut *opened.borrow_mut()))
 }
 
 /// The browser boundary is deliberately scheme-only: URLs passed here come
 /// from GitHub, whose check details may live on another host.
 fn is_browser_url(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
+}
+
+/// Where a login's page is on github.com: the profile of a person or an
+/// organisation, and the app's page for a bot, whose login ends in
+/// `[bot]` and whose profile path is a 404. Copilot signs as plain
+/// `Copilot`, which has no page under that name either; the API sends
+/// that login for its reviewer and for its coding agent alike, and Perch
+/// keeps only the login, so the reviewer's page is assumed. `None` for the
+/// empty login Perch keeps when GitHub sends no user at all.
+pub fn profile_url(login: &str) -> Option<String> {
+    if login.is_empty() {
+        return None;
+    }
+    if login == "Copilot" {
+        return Some("https://github.com/apps/copilot-pull-request-reviewer".into());
+    }
+    Some(match login.strip_suffix("[bot]") {
+        Some(app) => format!("https://github.com/apps/{app}"),
+        None => format!("https://github.com/{login}"),
+    })
+}
+
+/// What a row calls someone: a login, which leads to their page on
+/// GitHub, or a name that leads nowhere, an agent's model or "You"
+/// before GitHub has said who the reader is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Name {
+    Login(String),
+    Plain(String),
+}
+
+impl Name {
+    fn text(&self) -> &str {
+        match self {
+            Name::Login(text) | Name::Plain(text) => text,
+        }
+    }
+
+    fn profile_url(&self) -> Option<String> {
+        match self {
+            Name::Login(login) => profile_url(login),
+            Name::Plain(_) => None,
+        }
+    }
+}
+
+/// A name as GitHub draws one: a login is a link, and a click on it opens
+/// the person's page in the browser. `style` is the label's own, since a
+/// byline and the strip set a name differently; the pointer and the
+/// underline under it come with the link. A name that leads nowhere is
+/// the same label, plain.
+///
+/// The underline is the label's bottom border, kept transparent until the
+/// pointer is over it, so a name is the same height whether or not it is
+/// a link, and the row does not shift when the reader's login arrives.
+/// The border comes out of the label's height, so a pixel of padding at
+/// the top balances it and the text sits level with the words beside it.
+pub fn name_label(
+    name: impl Fn() -> Name + 'static,
+    style: impl Fn(Style) -> Style + 'static,
+) -> impl IntoView {
+    let name = std::rc::Rc::new(name);
+    let text = {
+        let name = name.clone();
+        move || name().text().to_string()
+    };
+    let url = {
+        let name = name.clone();
+        move || name().profile_url()
+    };
+    Label::derived(text)
+        .on_event(el::Click, move |_, _| match url() {
+            Some(url) => {
+                open_in_browser(&url);
+                EventPropagation::Stop
+            }
+            None => EventPropagation::Continue,
+        })
+        .style(move |s| {
+            let s = style(s)
+                .padding_top(1.0)
+                .border_bottom(1.0)
+                .border_color(Color::TRANSPARENT);
+            if name().profile_url().is_some() {
+                clickable(s).hover(|s| s.border_color(theme::FG_MUTED))
+            } else {
+                s
+            }
+        })
+        .debug_name("name label")
 }
 
 /// Style a row that behaves as a button.
@@ -292,7 +402,72 @@ pub fn spacer() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use super::is_browser_url;
+    use super::{is_browser_url, profile_url, Name};
+
+    #[test]
+    fn a_login_leads_to_its_page_on_github() {
+        for (login, url) in [
+            ("criccomini", "https://github.com/criccomini"),
+            // An organisation's page is at the same path as a person's.
+            ("slatedb", "https://github.com/slatedb"),
+            // github.com finds a profile whatever the case; the login is
+            // passed through as GitHub spelt it.
+            ("CRICCOMINI", "https://github.com/CRICCOMINI"),
+            ("a-b-c", "https://github.com/a-b-c"),
+            // GitHub's stand-in for a deleted account is a login like any
+            // other.
+            ("ghost", "https://github.com/ghost"),
+            // An enterprise-managed user's suffix, and an imported
+            // mannequin's UUID, are plain path characters.
+            ("mona-cat_octo", "https://github.com/mona-cat_octo"),
+            (
+                "ebd80758-eb43-4a34-86bb-a2b2a2196e69",
+                "https://github.com/ebd80758-eb43-4a34-86bb-a2b2a2196e69",
+            ),
+        ] {
+            assert_eq!(profile_url(login).as_deref(), Some(url), "{login}");
+        }
+        assert_eq!(
+            Name::Login("rohan".into()).profile_url().as_deref(),
+            Some("https://github.com/rohan")
+        );
+    }
+
+    #[test]
+    fn a_bot_leads_to_its_app_page() {
+        for (login, url) in [
+            ("dependabot[bot]", "https://github.com/apps/dependabot"),
+            (
+                "github-actions[bot]",
+                "https://github.com/apps/github-actions",
+            ),
+            ("renovate[bot]", "https://github.com/apps/renovate"),
+            (
+                "copilot-pull-request-reviewer[bot]",
+                "https://github.com/apps/copilot-pull-request-reviewer",
+            ),
+            (
+                "Copilot",
+                "https://github.com/apps/copilot-pull-request-reviewer",
+            ),
+        ] {
+            assert_eq!(profile_url(login).as_deref(), Some(url), "{login}");
+        }
+        // The match is exact: `copilot` falls through to the profile path.
+        assert_eq!(
+            profile_url("copilot").as_deref(),
+            Some("https://github.com/copilot")
+        );
+    }
+
+    #[test]
+    fn nobody_has_no_page() {
+        // Not github.com's front page.
+        assert_eq!(profile_url(""), None);
+        assert_eq!(Name::Login(String::new()).profile_url(), None);
+        assert_eq!(Name::Plain("You".into()).profile_url(), None);
+        assert_eq!(Name::Plain("Sonnet".into()).profile_url(), None);
+    }
 
     #[test]
     fn browser_links_accept_explicit_http_schemes_only() {

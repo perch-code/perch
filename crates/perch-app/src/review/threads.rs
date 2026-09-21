@@ -27,7 +27,7 @@ use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, Composer, ReviewState};
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{clickable, icon_button, sidebar_glyph, text_button};
+use crate::ui::widgets::{clickable, icon_button, name_label, sidebar_glyph, text_button, Name};
 
 /// A model alias as the screen shows it: "Sonnet" for `sonnet`. A full id
 /// such as `claude-sonnet-5` is shown as typed.
@@ -771,7 +771,7 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
 pub(crate) fn collapsed_card_row(
     state: ReviewState,
     card_id: CardId,
-    author: impl Fn() -> String + 'static,
+    author: impl Fn() -> Name + 'static,
     line: String,
     more: usize,
     outdated: bool,
@@ -779,7 +779,7 @@ pub(crate) fn collapsed_card_row(
 ) -> impl IntoView {
     Stack::horizontal((
         chevron(state, card_id, false),
-        Label::derived(author).style(|s| {
+        name_label(author, |s| {
             s.font_size(theme::TEXT_BADGE)
                 .font_weight(FontWeight::SEMI_BOLD)
                 .color(theme::FG)
@@ -809,17 +809,19 @@ pub(crate) fn collapsed_card_row(
 }
 
 /// Who wrote a message, as a collapsed card names them: the reader by
-/// their login once GitHub has said it, the agent by its model.
-fn author_name(app: AppState, author: &Author) -> String {
+/// their login once GitHub has said it, the agent by its model. A login
+/// is a link to its page; a model and "You" lead nowhere.
+fn author_name(app: AppState, author: &Author) -> Name {
     match author {
         Author::User => app
             .viewer
             .get()
             .map(|(login, _)| login)
             .filter(|l| !l.is_empty())
-            .unwrap_or_else(|| "You".into()),
-        Author::Agent { model, .. } => model_label(model),
-        Author::GitHubUser(login) => login.clone(),
+            .map(Name::Login)
+            .unwrap_or_else(|| Name::Plain("You".into())),
+        Author::Agent { model, .. } => Name::Plain(model_label(model)),
+        Author::GitHubUser(login) => Name::Login(login.clone()),
     }
 }
 

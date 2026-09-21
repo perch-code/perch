@@ -26,7 +26,7 @@ use crate::theme;
 use crate::ui::items::{github_url, OpenItem};
 use crate::ui::titlebar::title_bar;
 use crate::ui::widgets::{
-    avatar, clickable, icon_button, open_in_browser, sidebar_glyph, worktree_menu,
+    avatar, clickable, icon_button, name_label, open_in_browser, sidebar_glyph, worktree_menu, Name,
 };
 
 /// The bar and the strip, the same for every kind of item: a pull request,
@@ -1127,8 +1127,10 @@ fn reviewers(app: AppState, reviewers: Vec<(String, String, Option<String>)>) ->
             Stack::horizontal((
                 avatar(app, move || url.clone(), theme::METADATA_AVATAR, seed)
                     .style(|s| s.margin_right(5.0)),
-                Label::derived(move || login.clone())
-                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED)),
+                name_label(
+                    move || Name::Login(login.clone()),
+                    |s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED),
+                ),
                 match verdict {
                     Some(state) => {
                         let review = perch_github::Review {
@@ -1162,8 +1164,10 @@ fn assignees(app: AppState, logins: Vec<String>) -> impl IntoView {
             Stack::horizontal((
                 avatar(app, String::new, theme::METADATA_AVATAR, seed)
                     .style(|s| s.margin_right(5.0)),
-                Label::derived(move || login.clone())
-                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED)),
+                name_label(
+                    move || Name::Login(login.clone()),
+                    |s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED),
+                ),
             ))
             .style(|s| s.items_center())
         },
@@ -1617,6 +1621,49 @@ mod tests {
         assert_eq!(launcher.x1, strip.x1 - theme::REVIEW_HEADER_PADDING);
         assert!(rect(&harness, "branches").width() > 60.0);
         assert!(rect(&harness, "worktree menu").width() > 60.0);
+    }
+
+    #[test]
+    fn a_reviewer_or_an_assignee_is_a_link_to_their_page_on_github() {
+        let mut pull = pull_request(812);
+        pull.requested_reviewers = vec![
+            perch_github::Reviewer {
+                login: "agavra".into(),
+                avatar_url: String::new(),
+            },
+            perch_github::Reviewer {
+                login: "dependabot[bot]".into(),
+                avatar_url: String::new(),
+            },
+        ];
+        pull.assignees = vec!["cadonna".into()];
+        let (mut harness, ..) = pull_request_harness_with(pull);
+        let opened = crate::ui::widgets::opened;
+        opened();
+        for (login, url) in [
+            ("agavra", "https://github.com/agavra"),
+            ("dependabot[bot]", "https://github.com/apps/dependabot"),
+            ("cadonna", "https://github.com/cadonna"),
+        ] {
+            let c = rect(&harness, &format!("name label - Label: {login:?}")).center();
+            harness.click(c.x, c.y);
+            assert_eq!(opened(), vec![url.to_string()], "{login}");
+        }
+        // Under the pointer a name shows the underline and the pointer
+        // that say it is a link; off it, neither.
+        use floem::style::{BorderBottomColor, Cursor, CursorStyle};
+        let id = named(harness.root_id(), "name label - Label: \"agavra\"").unwrap();
+        harness.pointer_move(0.0, 0.0);
+        harness.recompute_styles();
+        let away = harness.get_computed_style(id);
+        assert_eq!(away.get(BorderBottomColor), Some(Color::TRANSPARENT.into()));
+        assert_eq!(away.get(Cursor), None);
+        let c = id.get_visual_rect_no_clip().center();
+        harness.pointer_move(c.x, c.y);
+        harness.recompute_styles();
+        let under = harness.get_computed_style(id);
+        assert_eq!(under.get(BorderBottomColor), Some(theme::FG_MUTED.into()));
+        assert_eq!(under.get(Cursor), Some(CursorStyle::Pointer));
     }
 
     #[test]

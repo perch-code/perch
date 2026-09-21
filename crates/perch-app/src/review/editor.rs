@@ -2951,6 +2951,66 @@ mod window {
         assert!(find(harness.root_id(), "inline-card:").is_none());
     }
 
+    /// A name on a collapsed card is a link to its page on GitHub, and
+    /// the click opens the page, not the card. The reader's own row says
+    /// "You" until GitHub has named them, and "You" leads nowhere.
+    #[test]
+    fn a_name_on_a_collapsed_card_is_a_link_to_its_page_on_github() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        let opened = crate::ui::widgets::opened;
+        opened();
+        let click = |harness: &mut HeadlessHarness, name: &str| {
+            let id = find(harness.root_id(), &format!("name label - Label: {name:?}"))
+                .unwrap_or_else(|| panic!("no name {name:?}"));
+            let c = id.get_visual_rect_no_clip().center();
+            assert_eq!(
+                harness.element_id_at(c.x, c.y).map(|e| e.owning_id()),
+                Some(id),
+                "{name} is not under the pointer at {c:?}"
+            );
+            harness.click(c.x, c.y);
+            harness.rebuild();
+            harness.paint();
+        };
+
+        // GitHub's thread on head line 7, collapsed to its row.
+        let comments = vec![github_comment(100, 7, None, "nit: name this")];
+        state
+            .discussion
+            .set(Some(Arc::new(discussion_of(comments))));
+        harness.rebuild();
+        harness.paint();
+        let card = CardId::GitHub(100);
+        state.toggle_card(&card);
+        harness.rebuild();
+        harness.paint();
+        assert!(state.is_collapsed(&card));
+        click(&mut harness, "octocat");
+        assert_eq!(opened(), vec!["https://github.com/octocat".to_string()]);
+        assert!(
+            state.is_collapsed(&card),
+            "the click on the name opened the card"
+        );
+
+        // The reader's own thread on the same lines, collapsed.
+        state.discussion.set(None);
+        state.set_comment_threads(Arc::new(vec![thread_on("t1", 5, 7, false)]));
+        harness.rebuild();
+        harness.paint();
+        let card = CardId::Thread("t1".into());
+        state.toggle_card(&card);
+        harness.rebuild();
+        harness.paint();
+        assert!(state.is_collapsed(&card));
+        click(&mut harness, "You");
+        assert_eq!(opened(), Vec::<String>::new(), "You led somewhere");
+        assert!(
+            state.is_collapsed(&card),
+            "the click on You opened the card"
+        );
+    }
+
     #[test]
     fn a_marker_click_focuses_the_card_and_scrolls_it_into_view() {
         use crate::review::doc::CardId;

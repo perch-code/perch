@@ -606,6 +606,73 @@ mod tests {
         assert!(!shown(&harness, "Nothing here yet"));
     }
 
+    /// A name on a card is a link to its page on GitHub: the author of a
+    /// comment, and who opened the pull request on its event line. The
+    /// reader's own thread says "You" until GitHub has said who they are,
+    /// and "You" is no link, in look or in deed.
+    #[test]
+    fn a_name_on_a_card_is_a_link_to_its_page_on_github() {
+        use crate::theme;
+        use floem::peniko::Color;
+        use floem::style::{BorderBottomColor, Cursor, CursorStyle};
+        let (mut harness, app, _) = app_harness();
+        let opened = crate::ui::widgets::opened;
+        opened();
+        // The name label under a card, and the click that reaches it. The
+        // lookup is scoped to the card: chris also reviewed, so the strip
+        // under the header names them first, and rohan wrote the
+        // description as well as opening.
+        let name_in = |card: floem::ViewId, name: &str| {
+            find(card, &format!("name label - Label: {name:?}"))
+                .unwrap_or_else(|| panic!("no name {name:?} on {}", card.debug_name()))
+        };
+        let click = |harness: &mut HeadlessHarness, id: floem::ViewId| {
+            let c = id.get_visual_rect_no_clip().center();
+            assert_eq!(
+                harness.element_id_at(c.x, c.y).map(|e| e.owning_id()),
+                Some(id),
+                "{} is not under the pointer at {c:?}",
+                id.debug_name()
+            );
+            harness.click(c.x, c.y);
+        };
+        let root = harness.root_id();
+        let comment = find(root, "card:comment").unwrap();
+        click(&mut harness, name_in(comment, "chris"));
+        assert_eq!(opened(), vec!["https://github.com/chris".to_string()]);
+        let event = find(root, "card:event").unwrap();
+        click(&mut harness, name_in(event, "rohan"));
+        assert_eq!(opened(), vec!["https://github.com/rohan".to_string()]);
+
+        // The reader: "You" has no underline and no pointer, and leads
+        // nowhere; once GitHub has named them, the same label is a link.
+        let thread = find(root, "card:thread").unwrap();
+        let you = name_in(thread, "You");
+        let c = you.get_visual_rect_no_clip().center();
+        harness.pointer_move(c.x, c.y);
+        harness.recompute_styles();
+        let plain = harness.get_computed_style(you);
+        assert_eq!(
+            plain.get(BorderBottomColor),
+            Some(Color::TRANSPARENT.into())
+        );
+        assert_ne!(plain.get(Cursor), Some(CursorStyle::Pointer));
+        click(&mut harness, you);
+        assert_eq!(opened(), Vec::<String>::new(), "You led somewhere");
+        app.viewer.set(Some(("me".into(), String::new())));
+        harness.rebuild();
+        harness.paint();
+        let me = name_in(thread, "me");
+        assert_eq!(me, you, "the label was rebuilt rather than reworded");
+        harness.pointer_move(c.x, c.y);
+        harness.recompute_styles();
+        let linked = harness.get_computed_style(me);
+        assert_eq!(linked.get(BorderBottomColor), Some(theme::FG_MUTED.into()));
+        assert_eq!(linked.get(Cursor), Some(CursorStyle::Pointer));
+        click(&mut harness, me);
+        assert_eq!(opened(), vec!["https://github.com/me".to_string()]);
+    }
+
     /// Conversation is the home for local threads that have no inline card:
     /// item-level threads, stale anchors, and anchors in another file.
     #[test]

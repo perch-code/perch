@@ -36,7 +36,9 @@ use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
-use crate::ui::widgets::{avatar, clickable, icon_button, open_in_browser, sidebar_glyph};
+use crate::ui::widgets::{
+    avatar, clickable, icon_button, name_label, open_in_browser, sidebar_glyph, Name,
+};
 
 /// What a card's row in the column is keyed by. A row with the same key is
 /// kept as it is, so the key changes with anything the card shows that
@@ -137,11 +139,14 @@ fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> impl IntoView
                 .into_any(),
             None => Empty::new().into_any(),
         },
-        Label::derived(move || login.clone()).style(|s| {
-            s.font_size(theme::TEXT_META)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .color(theme::FG)
-        }),
+        name_label(
+            move || Name::Login(login.clone()),
+            |s| {
+                s.font_size(theme::TEXT_META)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .color(theme::FG)
+            },
+        ),
         Label::derived(move || match when {
             Some(at) if verb.is_empty() => timefmt::relative(at, app.now.get()),
             Some(at) => format!("{verb} {}", timefmt::relative(at, app.now.get())),
@@ -655,7 +660,7 @@ fn collapsed_github_row(state: ReviewState, thread: LineThread) -> impl IntoView
     threads::collapsed_card_row(
         state,
         CardId::GitHub(thread.comment.id),
-        move || user.clone(),
+        move || Name::Login(user.clone()),
         crate::review::timeline::first_line(&thread.comment.body),
         thread.replies.len(),
         false,
@@ -1069,14 +1074,16 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
                 .margin_right(text_gap)
         }),
         match actor {
-            Some(actor) => Label::derived(move || actor.clone())
-                .style(|s| {
+            Some(actor) => name_label(
+                move || Name::Login(actor.clone()),
+                |s| {
                     s.font_size(theme::TEXT_META)
                         .font_weight(FontWeight::SEMI_BOLD)
                         .color(theme::FG)
                         .margin_right(4.0)
-                })
-                .into_any(),
+                },
+            )
+            .into_any(),
             None => Empty::new().into_any(),
         },
         Label::derived(move || format!("{name} {}", timefmt::relative(at, app.now.get()))).style(
@@ -1413,7 +1420,11 @@ fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> i
             seed,
         )
         .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
-        Label::derived(move || viewer().map(|(l, _)| l).unwrap_or_else(|| "You".into())).style(
+        name_label(
+            move || match viewer() {
+                Some((login, _)) => Name::Login(login),
+                None => Name::Plain("You".into()),
+            },
             |s| {
                 s.font_size(theme::TEXT_META)
                     .font_weight(FontWeight::SEMI_BOLD)
