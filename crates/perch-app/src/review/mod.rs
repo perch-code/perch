@@ -16,9 +16,9 @@ pub mod rail;
 pub mod references;
 pub mod review_launch;
 pub mod scope;
-pub mod strip;
 pub mod styling;
 pub mod submit_review;
+pub mod switch;
 pub mod tabs;
 pub mod threads;
 pub mod timeline;
@@ -65,58 +65,23 @@ pub fn review_view(
     });
 
     let body_backend = backend.clone();
-    let header_open_item = open_item;
-    let on_back: Rc<dyn Fn()> = Rc::new({
-        let backend = backend.clone();
-        move || {
-            let navigation_id = backend.close_review();
-            app.begin_close(state, navigation_id);
-        }
-    });
 
     // The backend closes the review itself when the archive goes through,
     // and the Items event that follows closes the view. A refusal leaves
     // everything as it was, with the reason in the status line.
-    let on_archive: Rc<dyn Fn(String)> = Rc::new({
+    let on_archive = {
         let backend = backend.clone();
         move |id: String| {
             backend.archive_item(&id);
         }
-    });
+    };
 
-    let header_backend = backend.clone();
-    // A memo, so the header is rebuilt when the kind of thing open changes
-    // and not on the way from Preparing to Ready.
-    let is_issue = floem::reactive::Memo::new(move |_| state.phase.get() == Phase::Issue);
     Stack::vertical((
-        dyn_container(
-            move || is_issue.get(),
-            move |is_issue| {
-                if is_issue {
-                    header::issue_header(
-                        app,
-                        state,
-                        header_backend.clone(),
-                        header_open_item.clone(),
-                    )
-                    .into_any()
-                } else {
-                    let (back, archive) = (on_back.clone(), on_archive.clone());
-                    header::header(
-                        app,
-                        state,
-                        header_backend.clone(),
-                        header_open_item.clone(),
-                        move || back(),
-                        move |id| archive(id),
-                    )
-                    .into_any()
-                }
-            },
-        )
-        // Keep header-owned popovers above the item surface. Floem does not
-        // let a descendant's z-index escape its parent's sibling context.
-        .style(|s| s.width_full().flex_shrink(0.0_f32).z_index(1)),
+        header::header(app, state, backend.clone(), open_item, on_archive)
+            // Keep header-owned popovers above the item surface. Floem does
+            // not let a descendant's z-index escape its parent's sibling
+            // context.
+            .style(|s| s.width_full().flex_shrink(0.0_f32).z_index(1)),
         dyn_container(
             move || state.phase.get(),
             move |phase| match phase {
@@ -155,9 +120,8 @@ pub fn review_view(
     })
 }
 
-/// The tab strip, then the tab: Conversation for every item, Files for one
-/// with a checkout. The strip is drawn for an issue too, with one tab, so
-/// the view keeps its shape when Start work adds a checkout.
+/// The tab the header's switch has picked: Conversation for every item,
+/// Files for one with a checkout.
 fn item_view(
     app: AppState,
     state: ReviewState,
@@ -175,20 +139,16 @@ fn item_view(
             _ => ItemTab::Conversation,
         }
     });
-    Stack::vertical((
-        strip::strip(state),
-        dyn_container(
-            move || tab.get(),
-            move |tab| match tab {
-                ItemTab::Conversation => {
-                    conversation::view(app, state, backend.clone(), open_file.clone()).into_any()
-                }
-                ItemTab::Files => body(app, state, open_file.clone(), backend.clone()).into_any(),
-            },
-        )
-        .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
-    ))
-    .style(|s| s.size_full().flex_col().min_height(0.0))
+    dyn_container(
+        move || tab.get(),
+        move |tab| match tab {
+            ItemTab::Conversation => {
+                conversation::view(app, state, backend.clone(), open_file.clone()).into_any()
+            }
+            ItemTab::Files => body(app, state, open_file.clone(), backend.clone()).into_any(),
+        },
+    )
+    .style(|s| s.size_full().min_height(0.0))
 }
 
 /// The file rail and the code. Threads anchored in the open file are drawn
@@ -345,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn review_launcher_stays_above_metadata_and_item_content() {
+    fn review_launcher_stays_above_item_content() {
         let app = AppState::new();
         let state = ReviewState::new();
         let now = "2026-09-20T12:00:00Z".parse().unwrap();
@@ -367,8 +327,8 @@ mod tests {
         state.phase.set(Phase::Ready);
         state.review_launcher_open.set(true);
 
-        // Force the metadata sibling to exist as well as the item content
-        // sibling below the complete header.
+        // Something for the strip's GitHub parts to show as well, beside
+        // the worktree's own.
         let mut child = perch_github::Item::new("local/perch", now);
         child.id = "child-worktree".into();
         child.name = Some("Child branch".into());
@@ -386,21 +346,29 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
+        // The launcher is at the strip's right end, and its popover hangs
+        // from it over the item.
         let popover = named(harness.root_id(), "review-launch-popover").unwrap();
         let bounds = popover.get_visual_rect_no_clip();
         let x = bounds.x0 + 2.0;
-        let metadata_y = theme::REVIEW_HEADER_HEIGHT + theme::METADATA_HEIGHT / 2.0;
-        let content_y = theme::REVIEW_HEADER_HEIGHT + theme::METADATA_HEIGHT + 10.0;
-        assert!(bounds.y0 < metadata_y && bounds.y1 > content_y);
+        // The strip's second line, which the child branch puts there, and
+        // the item under the strip.
+        let github_y = theme::REVIEW_HEADER_HEIGHT + theme::METADATA_LINE + 10.0;
+        let content_y =
+            theme::REVIEW_HEADER_HEIGHT + theme::METADATA_HEIGHT + theme::METADATA_LINE + 10.0;
+        assert!(
+            bounds.y0 < github_y && bounds.y1 > content_y,
+            "popover at {bounds:?} does not reach the item"
+        );
 
-        for (layer, y) in [("metadata", metadata_y), ("content", content_y)] {
+        for (layer, y) in [("strip", github_y), ("item", content_y)] {
             let target = harness
                 .element_id_at(x, y)
-                .unwrap_or_else(|| panic!("no hit target over {layer}"))
+                .unwrap_or_else(|| panic!("no hit target over the {layer}"))
                 .owning_id();
             assert!(
                 descends_from(target, popover),
-                "{layer} painted over the review launcher"
+                "the {layer} painted over the review launcher"
             );
         }
 

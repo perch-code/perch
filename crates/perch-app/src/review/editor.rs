@@ -1848,14 +1848,13 @@ mod window {
         assert!(state.docs.get().is_none(), "no editor, no document");
     }
 
-    /// Where the two editors sit: the activity rail, the sidebar and the
-    /// file rail on the left, then the rest of the window in halves.
+    /// Where the two editors sit: the open drawer and the file rail on
+    /// the left, then the rest of the window in halves, under the header's
+    /// bar and strip and the file tabs.
     fn pane_centers() -> (f64, f64, f64) {
-        let left_edge = crate::theme::ACTIVITY_RAIL_WIDTH
-            + crate::theme::SIDEBAR_WIDTH
-            + crate::theme::RAIL_WIDTH;
+        let left_edge = crate::theme::SIDEBAR_WIDTH + crate::theme::RAIL_WIDTH;
         let half = (1400.0 - left_edge) / 2.0;
-        let y = crate::theme::REVIEW_HEADER_HEIGHT + 2.0 * crate::theme::TAB_HEIGHT + 300.0;
+        let y = pane_origin().1 + 300.0;
         (left_edge + half * 0.6, left_edge + half * 1.6, y)
     }
 
@@ -1889,14 +1888,16 @@ mod window {
         );
         assert_eq!(left.get().y0, right.get().y0);
 
-        // And a jump lands both on the same row.
-        state.jump_to_line.set(Some(60));
+        // And a jump lands both on the same row. Line 50 rather than one
+        // nearer the end, so the scroll it asks for is short of the
+        // document's bottom, whatever the header above the pane is.
+        state.jump_to_line.set(Some(50));
         harness.rebuild();
         harness.paint();
         assert_eq!(left.get().y0, right.get().y0);
         assert_eq!(
             right.get().y0,
-            (60.0 - 4.0) * crate::theme::CODE_LINE_HEIGHT as f64
+            (50.0 - 4.0) * crate::theme::CODE_LINE_HEIGHT as f64
         );
     }
 
@@ -1922,8 +1923,8 @@ mod window {
 
     /// The tiles sit at the strip's right end: 8 of padding, then Split
     /// then Stacked reading leftwards, each `LAYOUT_TILE` square with 2
-    /// between, in a strip `TAB_HEIGHT` tall under the header and the
-    /// item's tab strip.
+    /// between, in a strip `TAB_HEIGHT` tall under the header's bar and
+    /// strip.
     fn tile_center(layout: Layout) -> (f64, f64) {
         let tile = crate::theme::LAYOUT_TILE;
         let x = match layout {
@@ -1931,7 +1932,7 @@ mod window {
             Layout::Stacked => 1400.0 - 8.0 - tile - 2.0 - tile / 2.0,
         };
         let y = crate::theme::REVIEW_HEADER_HEIGHT
-            + crate::theme::TAB_HEIGHT
+            + crate::theme::METADATA_HEIGHT
             + crate::theme::TAB_HEIGHT / 2.0;
         (x, y)
     }
@@ -2102,11 +2103,13 @@ mod window {
     }
 
     /// Where the code pane starts: after the open drawer and the file
-    /// rail, under the header and the two strips.
+    /// rail, under the header's bar and strip and the file tabs.
     fn pane_origin() -> (f64, f64) {
         (
             crate::theme::SIDEBAR_WIDTH + crate::theme::RAIL_WIDTH,
-            crate::theme::REVIEW_HEADER_HEIGHT + 2.0 * crate::theme::TAB_HEIGHT,
+            crate::theme::REVIEW_HEADER_HEIGHT
+                + crate::theme::METADATA_HEIGHT
+                + crate::theme::TAB_HEIGHT,
         )
     }
 

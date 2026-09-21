@@ -255,6 +255,37 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M8 14 V10.4 M5.9 12.3 L8 10.2 L10.1 12.3" fill="none" stroke="{c}"
                      stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
+        // A frame with a rule down its left third: the drawer, as Codex and
+        // the system draw the sidebar toggle.
+        SidebarIcon::Drawer => format!(
+            r#"<path d="M3.7 2.7 H12.3 a1.5 1.5 0 0 1 1.5 1.5 V11.8 a1.5 1.5 0 0 1 -1.5 1.5 H3.7
+                       a1.5 1.5 0 0 1 -1.5 -1.5 V4.2 a1.5 1.5 0 0 1 1.5 -1.5 Z" fill="none"
+                     stroke="{c}" stroke-width="1.4"/>
+               <path d="M6.3 2.7 V13.3" stroke="{c}" stroke-width="1.4"/>"#
+        ),
+        // A box with an arrow leaving its top right corner: open elsewhere.
+        SidebarIcon::External => format!(
+            r#"<path d="M7 3.5 H4.2 a1.5 1.5 0 0 0 -1.5 1.5 V11.8 a1.5 1.5 0 0 0 1.5 1.5 H10.5
+                       a1.5 1.5 0 0 0 1.5 -1.5 V9" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M9.4 2.5 H13.5 V6.6 M13.5 2.5 L7.6 8.4" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
+        // Two arrows on the diagonal, pointing out: the pane to the whole
+        // window.
+        SidebarIcon::Expand => format!(
+            r#"<path d="M9.4 2.5 H13.5 V6.6 M13.5 2.5 L9 7" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M6.6 13.5 H2.5 V9.4 M2.5 13.5 L7 9" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
+        // The same arrows pointing in: the drawer back.
+        SidebarIcon::Contract => format!(
+            r#"<path d="M9 2.9 V7 H13.1 M9 7 L13.5 2.5" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M7 13.1 V9 H2.9 M7 9 L2.5 13.5" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
     };
     svg16(&body)
 }
@@ -305,13 +336,25 @@ pub enum SidebarIcon {
     /// A rule with a chevron pointing at it from above and below: a diff
     /// folded to its changes.
     Fold,
+    /// A frame with a rule down its left third: the drawer toggle.
+    Drawer,
+    /// A box with an arrow leaving it: open on GitHub.
+    External,
+    /// Two diagonal arrows pointing out: the pane to the whole window.
+    Expand,
+    /// Two diagonal arrows pointing in: the drawer back.
+    Contract,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 30] = [
+    pub const ALL: [SidebarIcon; 34] = [
+        SidebarIcon::Drawer,
+        SidebarIcon::External,
+        SidebarIcon::Expand,
+        SidebarIcon::Contract,
         SidebarIcon::Link,
         SidebarIcon::ThreadHollow,
         SidebarIcon::ChangesRequested,

@@ -1,6 +1,6 @@
-//! The tab strip under the header: Conversation, and Files when the item
-//! has a checkout. The same strip on every item, so the view keeps its
-//! shape when Start work gives an issue a checkout.
+//! The switch in the middle of the header: Conversation, and Files when
+//! the item has a checkout. The same switch on every item, so the bar
+//! keeps its shape when Start work gives an issue a checkout.
 //!
 //! Drawn as the quiet segmented switch in Codex's toolbar: this one picks
 //! what the item view is about, while the file tabs still pick a file.
@@ -14,7 +14,7 @@ use floem::views::{dyn_container, Decorators, Empty, Label, Stack};
 use crate::review::model::{ItemTab, ReviewState};
 use crate::theme;
 
-pub fn strip(state: ReviewState) -> impl IntoView {
+pub fn switch(state: ReviewState) -> impl IntoView {
     let has_files = move || {
         state
             .item
@@ -62,16 +62,14 @@ pub fn strip(state: ReviewState) -> impl IntoView {
             }
         }),
     ))
+    .debug_name("item switch")
+    // The bar it sits in is the window's title bar, and lets the pointer
+    // through everywhere but its controls; this is one.
     .style(|s| {
-        s.height(theme::TAB_HEIGHT)
-            .width_full()
-            .flex_shrink(0.0_f32)
-            .items_center()
-            .justify_center()
+        s.items_center()
             .gap(2.0)
-            .background(theme::CANVAS)
-            .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .flex_shrink(0.0_f32)
+            .pointer_events_auto()
     })
 }
 

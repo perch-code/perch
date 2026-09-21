@@ -45,7 +45,7 @@ pub fn control(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
-fn is_available(state: ReviewState) -> bool {
+pub(crate) fn is_available(state: ReviewState) -> bool {
     state.ready.get()
         && !state.offline.get()
         && state.stale_head.with(Option::is_none)

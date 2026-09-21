@@ -91,10 +91,9 @@ pub const OPTICAL_TEXT_LIFT: f64 = 1.0;
 pub const SIDEBAR_WIDTH: f64 = 442.0;
 pub const SIDEBAR_MIN_WIDTH: f64 = 320.0;
 pub const SIDEBAR_MAX_WIDTH: f64 = 520.0;
-/// The always-present rail of destination icons.
-///
-/// Wider than an editor's activity bar because the traffic lights sit at the
-/// top of it, and they need the room.
+/// The lane the traffic lights sit in, at the left of whichever bar is at
+/// the top left: the drawer's strip, or the main pane's bar while the
+/// drawer is shut.
 pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
 /// An item row in the sidebar: two lines of text and the glyph beside them.
 pub const ROW_HEIGHT: f64 = 68.0;
@@ -106,9 +105,10 @@ pub const AGENTS_MIN_WIDTH: f64 = 336.0;
 pub const AGENTS_MAX_WIDTH: f64 = 620.0;
 pub const AGENTS_HEADER_HEIGHT: f64 = 46.0;
 pub const AGENT_ROW_MIN_HEIGHT: f64 = 88.0;
-/// Room above the rail's first entry, where the traffic lights sit.
+/// The strip at the top of the drawer, where the traffic lights sit.
 ///
-/// The lights and the scope controls share this strip.
+/// The lights and the scope controls share this strip, and the bar over
+/// the item is the same height so the two read as one title bar.
 pub const TITLEBAR_HEIGHT: f64 = 56.0;
 pub const RADIUS: f64 = 6.0;
 pub const RADIUS_LG: f64 = 10.0;
@@ -234,7 +234,9 @@ pub const GUTTER_WIDTH: f64 = 70.0;
 /// Gap between the gutter's change bar and the first character of code.
 pub const CODE_GUTTER_GAP: f64 = 12.0;
 pub const RAIL_WIDTH: f64 = 312.0;
-pub const REVIEW_HEADER_HEIGHT: f64 = 52.0;
+pub const REVIEW_HEADER_HEIGHT: f64 = TITLEBAR_HEIGHT;
+/// The room at either end of the bar over the item.
+pub const REVIEW_HEADER_PADDING: f64 = 14.0;
 pub const TAB_HEIGHT: f64 = 42.0;
 /// Widest a tab grows before its name is ellipsized.
 pub const TAB_MAX_WIDTH: f64 = 210.0;
@@ -256,12 +258,17 @@ pub fn language_color(language: Option<perch_syntax::Language>) -> Color {
 // The item view: the header's pills and strip, and Conversation's cards
 // ---------------------------------------------------------------------------
 
-/// The state pill before the title: the state's colour as text on a wash
-/// of the same colour.
+/// The state pill at the start of the strip: the state's colour as text
+/// on a wash of the same colour.
 pub const STATE_PILL_HEIGHT: f64 = 20.0;
 pub const STATE_WASH: f32 = 0.12;
-/// The strip under the header bar: reviewers, labels, assignees, milestone.
+/// The strip under the header bar at one line: the item's state, number,
+/// branches, checks and worktree, and the rule under it. What GitHub says
+/// about the item, reviewers, labels, assignees and milestone, is a second
+/// line, and wraps onto more when a line is full.
 pub const METADATA_HEIGHT: f64 = 30.0;
+/// One line of the strip: the strip less its rule.
+pub const METADATA_LINE: f64 = METADATA_HEIGHT - 1.0;
 pub const METADATA_GAP: f64 = 16.0;
 pub const METADATA_AVATAR: f64 = 16.0;
 /// A small chip: a label, a linked issue, the Local mark on a thread.

@@ -523,8 +523,8 @@ mod tests {
     /// The whole window on Files with a worktree of `src` and a README,
     /// a branch that changed three of the files in `src`, the second of
     /// them viewed, and the drawer shut so the rail starts at the
-    /// activity rail's edge. The filter is on, so the rows are `src`
-    /// and the three changed files.
+    /// window's edge. The filter is on, so the rows are `src` and the
+    /// three changed files.
     fn app_harness() -> (HeadlessHarness, ReviewState) {
         let root = TestRoot::new();
         let app = AppState::new();
@@ -579,11 +579,12 @@ mod tests {
         (harness, state)
     }
 
-    /// The top of the tree: header, tab strip, scope button, viewed row,
-    /// then the list's 4px of padding.
+    /// The top of the tree: the header's bar and strip (the worktree has
+    /// branches to show), scope button, viewed row, then the list's 4px
+    /// of padding.
     fn list_top() -> f64 {
         theme::REVIEW_HEADER_HEIGHT
-            + theme::TAB_HEIGHT
+            + theme::METADATA_HEIGHT
             + theme::SCOPE_BUTTON_HEIGHT
             + theme::VIEWED_ROW_HEIGHT
             + 4.0
@@ -591,24 +592,24 @@ mod tests {
 
     /// The centre of a row's name, `row` rows down the tree.
     fn name_center(row: usize) -> (f64, f64) {
-        let x = theme::ACTIVITY_RAIL_WIDTH + 60.0;
+        let x = 60.0;
         let y = list_top() + row as f64 * theme::TREE_ROW_HEIGHT + theme::TREE_ROW_HEIGHT / 2.0;
         (x, y)
     }
 
     /// The centre of a row's checkbox: 26 square against the row's 4px
-    /// right padding, in a rail `RAIL_WIDTH` wide from the activity rail.
+    /// right padding, in a rail `RAIL_WIDTH` wide from the window's edge.
     fn checkbox_center(row: usize) -> (f64, f64) {
-        let x = theme::ACTIVITY_RAIL_WIDTH + theme::RAIL_WIDTH - 4.0 - 13.0;
+        let x = theme::RAIL_WIDTH - 4.0 - 13.0;
         (x, name_center(row).1)
     }
 
     /// The centre of the filter button, at the right end of the viewed
     /// row, the same 26 square against the same 4px.
     fn filter_center() -> (f64, f64) {
-        let x = theme::ACTIVITY_RAIL_WIDTH + theme::RAIL_WIDTH - 4.0 - 13.0;
+        let x = theme::RAIL_WIDTH - 4.0 - 13.0;
         let y = theme::REVIEW_HEADER_HEIGHT
-            + theme::TAB_HEIGHT
+            + theme::METADATA_HEIGHT
             + theme::SCOPE_BUTTON_HEIGHT
             + theme::VIEWED_ROW_HEIGHT / 2.0;
         (x, y)
@@ -776,7 +777,7 @@ mod tests {
         // The chevron, at the row's left edge after the 10px padding,
         // opens the run: the change is the directory itself, so only the
         // way to it started open.
-        let x = theme::ACTIVITY_RAIL_WIDTH + 10.0 + 7.0;
+        let x = 10.0 + 7.0;
         let y = name_center(0).1;
         assert!(state.expanded.get().contains("vendor"));
         assert!(!state.expanded.get().contains("vendor/lib"));

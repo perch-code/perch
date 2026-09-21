@@ -40,60 +40,57 @@ pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl
     })
 }
 
-/// The drawer, folded: the strip the lights sit over and the way back.
-pub fn collapsed_sidebar(state: AppState) -> impl IntoView {
-    Stack::vertical((
-        title_bar(Empty::new()).style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().flex_shrink(0.0_f32)),
-        toggle_button(state).style(|s| s.margin_top(2.0)),
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-    ))
-    .style(|s| {
-        s.width(theme::ACTIVITY_RAIL_WIDTH)
-            .height_full()
-            .flex_col()
-            .flex_shrink(0.0_f32)
-            .items_center()
-            .background(theme::NAV_CANVAS)
-            .border_right(1.0)
-            .border_color(theme::NAV_DIVIDER)
-    })
-}
-
 /// The strip the traffic lights sit over, followed by the drawer control and
 /// the three scopes.
 fn lights_strip(state: AppState) -> impl IntoView {
     title_bar(
         Stack::horizontal((
-            // The native traffic lights occupy this first lane. Codex puts
-            // the drawer control immediately after them, then the scopes.
-            Empty::new().style(|s| s.width(theme::ACTIVITY_RAIL_WIDTH).pointer_events_none()),
-            toggle_button(state),
+            lights_lane(state, 0.0),
             scope_tabs(state).style(|s| s.margin_left(8.0)),
             Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
         ))
+        .debug_name("drawer strip")
         .style(|s| s.items_center().width_full().padding_right(12.0)),
     )
     .style(|s| s.height(theme::TITLEBAR_HEIGHT).width_full().flex_shrink(0.0_f32).items_center())
 }
 
-/// Show or hide the drawer.
+/// The lane the native traffic lights occupy, then the drawer control right
+/// after them, as Codex has it.
+///
+/// The drawer's strip starts with this while the drawer is open. While it is
+/// shut there is no drawer, and the bar over the main pane starts with it
+/// instead, so the lights and the way back are always at the top left.
+///
+/// The lane is measured from the window's edge; `inset` is how far in the
+/// bar's own padding has already put its first child.
+///
+/// The lane is part of whichever bar it is in, and lets a press through to
+/// it, so the window drags from beside the lights; the control alone
+/// takes the pointer.
+pub fn lights_lane(state: AppState, inset: f64) -> impl IntoView {
+    Stack::horizontal((
+        Empty::new().style(move |s| s.width(theme::ACTIVITY_RAIL_WIDTH - inset)),
+        toggle_button(state),
+    ))
+    .style(|s| s.items_center().flex_shrink(0.0_f32).pointer_events_none())
+}
+
+/// Show or hide the drawer. The same glyph either way, as the system's
+/// sidebar toggle is: it names the drawer, not the direction.
 fn toggle_button(state: AppState) -> impl IntoView {
-    let open = move || state.sidebar_open.get();
-    Container::new(dyn_container(open, |open| {
-        sidebar_glyph(
-            if open { SidebarIcon::ChevronLeft } else { SidebarIcon::ChevronRight },
-            theme::NAV_MUTED,
-        )
-        .style(|s| s.size(14.0, 14.0))
-        .into_any()
-    }))
+    Container::new(
+        sidebar_glyph(SidebarIcon::Drawer, theme::NAV_MUTED).style(|s| s.size(16.0, 16.0)),
+    )
     .on_event_stop(el::Click, move |_, _| state.sidebar_open.update(|o| *o = !*o))
+    .debug_name("drawer toggle")
     .style(|s| {
         crate::ui::widgets::clickable(s)
             .size(26.0, 26.0)
             .items_center()
             .justify_center()
             .border_radius(8.0)
+            .pointer_events_auto()
             .hover(|s| s.background(theme::NAV_HOVER))
     })
 }
@@ -681,6 +678,26 @@ mod tests {
         click_scope(&mut harness, ItemScope::All);
         assert!(find(harness.root_id(), "Issue mine").is_some());
         assert!(find(harness.root_id(), "Issue notification").is_some());
+    }
+
+    #[test]
+    fn a_press_beside_the_lights_is_the_strips_and_the_drawer_control_keeps_its_click() {
+        let (mut harness, state) = harness();
+        let strip = find(harness.root_id(), "drawer strip").unwrap();
+        let y = theme::TITLEBAR_HEIGHT / 2.0;
+
+        // The lane the lights sit in is the strip's own surface: what the
+        // window drags from.
+        let hit = harness
+            .element_id_at(theme::ACTIVITY_RAIL_WIDTH / 2.0, y)
+            .expect("nothing under the lane");
+        assert_eq!(hit.owning_id(), strip, "the lane took the press");
+
+        let toggle = find(harness.root_id(), "drawer toggle").unwrap().get_visual_rect_no_clip();
+        assert_eq!(toggle.x0, theme::ACTIVITY_RAIL_WIDTH, "right after the lights");
+        assert!(state.sidebar_open.get());
+        harness.click(toggle.center().x, toggle.center().y);
+        assert!(!state.sidebar_open.get(), "the control did not shut the drawer");
     }
 
     #[test]

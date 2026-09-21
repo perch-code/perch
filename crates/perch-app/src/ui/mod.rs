@@ -14,7 +14,7 @@ use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::SignalUpdate;
 use floem::text::FontWeight;
-use floem::views::{dyn_container, Container, Decorators, Label, Stack};
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::{Backend, Status};
 use crate::icons::SidebarIcon;
@@ -143,7 +143,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         })
                         .into_any()
                     } else {
-                        sidebar::collapsed_sidebar(state).into_any()
+                        // Shut, the drawer is gone altogether: the main pane
+                        // has the whole window, and its bar takes the lights.
+                        Empty::new().into_any()
                     }
                 },
             ),
@@ -167,15 +169,18 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         )
                         .into_any()
                     } else if no_token {
-                        token_help(state).into_any()
+                        empty_pane(state, token_help(state)).into_any()
                     } else {
-                        widgets::centered_message(
-                            SidebarIcon::Branch,
-                            || "Nothing open".to_string(),
-                            || {
-                                "Pick a pull request, an issue, or a branch from the sidebar."
-                                    .to_string()
-                            },
+                        empty_pane(
+                            state,
+                            widgets::centered_message(
+                                SidebarIcon::Branch,
+                                || "Nothing open".to_string(),
+                                || {
+                                    "Pick a pull request, an issue, or a branch from the sidebar."
+                                        .to_string()
+                                },
+                            ),
                         )
                         .into_any()
                     }
@@ -478,6 +483,36 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         })
 }
 
+/// The main pane with nothing open in it. While the drawer is shut the
+/// lights and the drawer control have nowhere else to be, so a bare bar
+/// carries them; while it is open the drawer's strip has them and the
+/// message runs to the top.
+fn empty_pane(state: AppState, message: impl IntoView + 'static) -> impl IntoView {
+    Stack::vertical((
+        dyn_container(
+            move || state.sidebar_open.get(),
+            move |open| {
+                if open {
+                    Empty::new().into_any()
+                } else {
+                    titlebar::title_bar(Container::new(sidebar::lights_lane(state, 0.0)))
+                        .debug_name("empty bar")
+                        .style(|s| {
+                            s.height(theme::TITLEBAR_HEIGHT)
+                                .width_full()
+                                .flex_shrink(0.0_f32)
+                                .items_center()
+                        })
+                        .into_any()
+                }
+            },
+        )
+        .style(|s| s.width_full().flex_shrink(0.0_f32)),
+        Container::new(message).style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
+    ))
+    .style(|s| s.size_full().flex_col().min_height(0.0))
+}
+
 /// Floem exposes focus membership rather than its private current-focus slot.
 /// Walking the existing root is cheap for the one app-wide shortcut and lets
 /// the overlay restore the exact editor, composer, or sidebar control.
@@ -553,4 +588,63 @@ fn code_line(text: &'static str) -> impl IntoView {
             .padding_horiz(10.0)
             .padding_vert(5.0)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floem::headless::{HeadlessHarness, TestRoot};
+
+    fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
+        if id.debug_name().contains(name) {
+            return Some(id);
+        }
+        id.children()
+            .into_iter()
+            .find_map(|child| named(child, name))
+    }
+
+    /// The window with nothing open and the drawer shut: the lights and
+    /// the drawer control have only the main pane's bare bar to sit in.
+    #[test]
+    fn with_nothing_open_and_the_drawer_shut_a_bare_bar_carries_the_lights_and_the_way_back() {
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.sidebar_open.set(false);
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+
+        let bar = named(harness.root_id(), "empty bar").expect("no bare bar");
+        let bounds = bar.get_visual_rect_no_clip();
+        assert_eq!(
+            (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+            (0.0, 0.0, 1400.0, theme::TITLEBAR_HEIGHT)
+        );
+        let toggle = named(harness.root_id(), "drawer toggle")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert_eq!(toggle.x0, theme::ACTIVITY_RAIL_WIDTH, "after the lights");
+
+        // Beside the lights is the bar's own surface: the window drags
+        // from it.
+        let hit = harness
+            .element_id_at(theme::ACTIVITY_RAIL_WIDTH / 2.0, bounds.center().y)
+            .expect("nothing under the lane");
+        assert_eq!(hit.owning_id(), bar, "the lane took the press");
+
+        harness.click(toggle.center().x, toggle.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert!(
+            state.sidebar_open.get(),
+            "the control did not open the drawer"
+        );
+        assert!(
+            named(harness.root_id(), "empty bar").is_none(),
+            "the drawer's strip has the lights now"
+        );
+    }
 }

@@ -344,6 +344,20 @@ fn key(code: KeyCode) -> Accelerator {
     Accelerator::new(None, code)
 }
 
+/// The pull request's or the issue's page on github.com. A branch of the
+/// reader's own has none.
+pub fn github_url(item: &Item) -> Option<String> {
+    match &item.subject {
+        Some(ItemSubject::PullRequest(pr)) => {
+            Some(format!("https://github.com/{}/pull/{}", pr.repo_full_name, pr.number))
+        }
+        Some(ItemSubject::Issue(i)) => {
+            Some(format!("https://github.com/{}/issues/{}", i.repo_full_name, i.number))
+        }
+        None => None,
+    }
+}
+
 /// The menu every row has, in one shape.
 ///
 /// Every entry is present on every row; those that cannot apply are greyed.
@@ -353,13 +367,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
     let has_subject = item.subject.is_some();
     let on_disk = item.checkout.as_ref().is_some_and(|c| c.on_disk);
     let path = item.checkout.as_ref().map(|c| c.path.clone());
-    let github_url = match &item.subject {
-        Some(ItemSubject::PullRequest(pr)) => {
-            Some(format!("https://github.com/{}/pull/{}", pr.repo_full_name, pr.number))
-        }
-        Some(ItemSubject::Issue(i)) => Some(format!("https://github.com/{}/issues/{}", i.repo_full_name, i.number)),
-        None => None,
-    };
+    let github_url = github_url(&item);
     let pinned = item.is_pinned();
     let archived = item.is_archived();
     let is_issue = item.issue().is_some();
