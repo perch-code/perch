@@ -337,7 +337,9 @@ fn reference(thread: &Thread) -> String {
 }
 
 /// A GitHub web URL derived without trusting notification text as a URL.
-/// Subjects without a reliable page fall back to their repository.
+/// Subjects without a reliable page fall back to their repository. A
+/// workflow run opens the run once a look has found it, and the
+/// repository's Actions page until then.
 pub(crate) fn github_url(thread: &Thread) -> Option<String> {
     let repo = &thread.repository.full_name;
     let repository = format!("https://github.com/{repo}");
@@ -365,7 +367,11 @@ pub(crate) fn github_url(thread: &Thread) -> Option<String> {
                 .or(Some(repository))
         }
         SubjectKind::Release => Some(format!("{repository}/releases")),
-        SubjectKind::CheckSuite => Some(format!("{repository}/actions")),
+        SubjectKind::CheckSuite => thread
+            .run_snapshot
+            .as_ref()
+            .map(|run| run.html_url.clone())
+            .or_else(|| Some(format!("{repository}/actions"))),
         SubjectKind::RepositoryVulnerabilityAlert => {
             Some(format!("{repository}/security/dependabot"))
         }
@@ -409,6 +415,7 @@ mod tests {
                 owner_avatar_url: String::new(),
             },
             subject_snapshot: None,
+            run_snapshot: None,
         }
     }
 
@@ -534,6 +541,30 @@ mod tests {
         assert_eq!(
             github_url(&release).as_deref(),
             Some("https://github.com/org/repo/releases")
+        );
+    }
+
+    #[test]
+    fn a_workflow_run_opens_its_run_once_found_and_the_actions_page_until_then() {
+        let mut run = thread(
+            "5",
+            "org/repo",
+            "CI workflow run failed for main branch",
+            SubjectKind::CheckSuite,
+            Reason::CiActivity,
+            true,
+        );
+        assert_eq!(
+            github_url(&run).as_deref(),
+            Some("https://github.com/org/repo/actions")
+        );
+        run.run_snapshot = Some(perch_github::RunSnapshot {
+            html_url: "https://github.com/org/repo/actions/runs/35614559713".into(),
+            at: run.updated_at,
+        });
+        assert_eq!(
+            github_url(&run).as_deref(),
+            Some("https://github.com/org/repo/actions/runs/35614559713")
         );
     }
 }

@@ -7,6 +7,8 @@
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::workflow_runs::WorkflowRunQuery;
+
 /// A notification thread, as returned by `GET /notifications`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thread {
@@ -29,6 +31,10 @@ pub struct Thread {
     /// then, and for every other kind of subject.
     #[serde(default)]
     pub subject_snapshot: Option<SubjectSnapshot>,
+    /// The run a workflow run notification is about, once a look has
+    /// found it. `None` until then, and for every other kind of subject.
+    #[serde(default)]
+    pub run_snapshot: Option<RunSnapshot>,
 }
 
 impl Thread {
@@ -52,6 +58,18 @@ impl Thread {
                 .as_ref()
                 .is_none_or(|snapshot| snapshot.at < self.updated_at)
     }
+
+    /// Whether the run wants looking for: a workflow run notification
+    /// whose title names one, with no run found yet or one found before
+    /// the thread's latest activity.
+    pub fn wants_run(&self) -> bool {
+        self.subject.kind == SubjectKind::CheckSuite
+            && WorkflowRunQuery::from_thread(self).is_some()
+            && self
+                .run_snapshot
+                .as_ref()
+                .is_none_or(|run| run.at < self.updated_at)
+    }
 }
 
 /// What one look at a notification's pull request or issue found: who
@@ -69,6 +87,21 @@ pub struct SubjectSnapshot {
     /// The thread's `updated_at` when the look was taken. Activity since
     /// can have changed the state, so a thread newer than this is looked
     /// at again.
+    #[serde(with = "ts")]
+    pub at: Timestamp,
+}
+
+/// Where a workflow run notification's run is, once a look has found it.
+///
+/// A `CheckSuite` notification names its workflow and branch in its title
+/// and carries no URL. The run is asked for after the thread arrives and
+/// kept on the thread, so its row opens the run itself rather than the
+/// repository's Actions page.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RunSnapshot {
+    pub html_url: String,
+    /// The thread's `updated_at` when the look was taken. A re-run moves
+    /// the thread on, and its run is looked for again.
     #[serde(with = "ts")]
     pub at: Timestamp,
 }
@@ -311,7 +344,6 @@ mod ts_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow_runs::WorkflowRunQuery;
 
     #[test]
     fn known_reasons_map_to_variants() {
@@ -394,6 +426,56 @@ mod tests {
         from_wire.as_object_mut().unwrap().remove("subject_snapshot");
         let bare: Thread = serde_json::from_value(from_wire).unwrap();
         assert_eq!(bare.subject_snapshot, None);
+    }
+
+    #[test]
+    fn a_run_wants_looking_for_until_one_is_found_after_the_latest_activity() {
+        let mut t = thread_with_url(None);
+        t.subject.kind = SubjectKind::CheckSuite;
+        t.subject.title = "CI workflow run failed for main branch".into();
+        assert!(t.wants_run());
+
+        // A run found for this revision of the thread settles it.
+        t.run_snapshot = Some(RunSnapshot {
+            html_url: "https://github.com/a/b/actions/runs/1".into(),
+            at: t.updated_at,
+        });
+        assert!(!t.wants_run());
+
+        // A re-run moves the thread on, and is a new attempt to find.
+        t.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        t.subject.title = "CI workflow run, Attempt #2 failed for main branch".into();
+        assert!(t.wants_run());
+
+        // A title that names no run is nothing to look for.
+        t.run_snapshot = None;
+        t.subject.title = "Something else entirely".into();
+        assert!(!t.wants_run());
+
+        // Only a workflow run notification has a run.
+        t.subject.title = "CI workflow run failed for main branch".into();
+        t.subject.kind = SubjectKind::Issue;
+        assert!(!t.wants_run());
+    }
+
+    #[test]
+    fn a_found_run_round_trips_through_the_cache_and_is_absent_from_the_wire() {
+        let mut t = thread_with_url(None);
+        t.subject.kind = SubjectKind::CheckSuite;
+        t.run_snapshot = Some(RunSnapshot {
+            html_url: "https://github.com/a/b/actions/runs/1".into(),
+            at: t.updated_at,
+        });
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Thread = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
+
+        // GitHub's payload has no such field, nor do rows cached before
+        // runs were looked for, and neither is refused for it.
+        let mut from_wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        from_wire.as_object_mut().unwrap().remove("run_snapshot");
+        let bare: Thread = serde_json::from_value(from_wire).unwrap();
+        assert_eq!(bare.run_snapshot, None);
     }
 
     #[test]
@@ -511,6 +593,7 @@ mod tests {
                 owner_avatar_url: String::new(),
             },
             subject_snapshot: None,
+            run_snapshot: None,
         }
     }
 }

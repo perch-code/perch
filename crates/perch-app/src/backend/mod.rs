@@ -3723,8 +3723,10 @@ impl Ctx {
         // activity (a changed updated_at) replace it with GitHub's state.
         // What a look found of the subject is carried whatever the
         // revision: the face is the same, and a state gone stale is looked
-        // at again, which the snapshot's own timestamp says.
-        let (local_unread, snapshots) = self
+        // at again, which the snapshot's own timestamp says. The run a
+        // workflow run notification is about is carried the same way, and
+        // looked for again when a re-run moves the thread on.
+        let (local_unread, snapshots, runs) = self
             .notifications
             .lock()
             .map(|current| {
@@ -3743,6 +3745,15 @@ impl Ctx {
                                 .map(|snapshot| (thread.id.clone(), snapshot))
                         })
                         .collect::<std::collections::HashMap<_, _>>(),
+                    current
+                        .iter()
+                        .filter_map(|thread| {
+                            thread
+                                .run_snapshot
+                                .clone()
+                                .map(|run| (thread.id.clone(), run))
+                        })
+                        .collect::<std::collections::HashMap<_, _>>(),
                 )
             })
             .unwrap_or_default();
@@ -3753,6 +3764,9 @@ impl Ctx {
             }
             if thread.subject_snapshot.is_none() {
                 thread.subject_snapshot = snapshots.get(&thread.id).cloned();
+            }
+            if thread.run_snapshot.is_none() {
+                thread.run_snapshot = runs.get(&thread.id).cloned();
             }
         }
         if let Some(result) = self.with_cache(|c| c.store_threads(&threads, last_modified)) {
@@ -6824,10 +6838,14 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
             }
             // Off the poll, which the command loop waits on: the rows
             // without a face or a state yet, unchanged inbox or not, since
-            // the cached rows may predate the look.
+            // the cached rows may predate the look. The workflow runs
+            // without their run's page, the same.
             {
                 let ctx = ctx.clone();
-                tokio::spawn(async move { look_at_subjects(&ctx).await });
+                tokio::spawn(async move {
+                    look_at_subjects(&ctx).await;
+                    look_for_runs(&ctx).await;
+                });
             }
 
             let _ = events.send(Event::Status(Status::Idle {
@@ -6970,6 +6988,110 @@ async fn look_at_subjects(ctx: &Ctx) {
             }
         });
     }
+}
+
+/// Ask GitHub which run each workflow run notification in the inbox is
+/// about, for the rows whose run is missing or was found before the
+/// thread moved on, and keep the answers on the threads.
+///
+/// The notification names the workflow and the branch and nothing else,
+/// so the branch's runs from around when it was sent are listed and the
+/// workflow's run that finished nearest then is the one. Notifications
+/// for the same branch in the same days share a listing. Each thread
+/// revision is asked about once: a run GitHub does not have is not asked
+/// about again until the thread moves on, and its row keeps opening the
+/// repository's Actions page. A listing that fails is left for the next
+/// poll.
+async fn look_for_runs(ctx: &Ctx) {
+    let Some(github) = ctx.github() else {
+        return;
+    };
+    let wanting: Vec<Thread> = {
+        let asked = ctx
+            .asked_subjects
+            .lock()
+            .map(|asked| asked.clone())
+            .unwrap_or_default();
+        ctx.notifications
+            .lock()
+            .map(|threads| {
+                threads
+                    .iter()
+                    .filter(|thread| {
+                        thread.wants_run()
+                            && !asked.contains(&(thread.id.clone(), thread.updated_at))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // One listing per branch and days, shared by the notifications that
+    // fall in it; one that failed is not asked for again this look.
+    let mut listings: std::collections::HashMap<
+        (String, String, String),
+        Vec<perch_github::WorkflowRunPayload>,
+    > = std::collections::HashMap::new();
+    let mut failed: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    let mut found = Vec::new();
+    for thread in &wanting {
+        let Some(query) = perch_github::WorkflowRunQuery::from_thread(thread) else {
+            continue;
+        };
+        let created = query.created();
+        let key = (
+            query.repo_full_name.clone(),
+            query.branch.clone(),
+            created.clone(),
+        );
+        if failed.contains(&key) {
+            continue;
+        }
+        let runs = match listings.entry(key) {
+            std::collections::hash_map::Entry::Occupied(runs) => runs.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                match github
+                    .list_workflow_runs_for_branch(&query.repo_full_name, &query.branch, &created)
+                    .await
+                {
+                    Ok(runs) => slot.insert(runs),
+                    Err(e) => {
+                        tracing::info!(
+                            error = %e,
+                            repo = %query.repo_full_name,
+                            branch = %query.branch,
+                            "could not list the branch's workflow runs"
+                        );
+                        failed.insert(slot.into_key());
+                        continue;
+                    }
+                }
+            }
+        };
+        if let Ok(mut asked) = ctx.asked_subjects.lock() {
+            asked.insert((thread.id.clone(), thread.updated_at));
+        }
+        if let Some(run) = query.pick(runs) {
+            found.push((
+                thread.id.clone(),
+                perch_github::RunSnapshot {
+                    html_url: run.html_url.clone(),
+                    at: thread.updated_at,
+                },
+            ));
+        }
+    }
+    if found.is_empty() {
+        return;
+    }
+    ctx.edit_notifications(|threads| {
+        for (id, run) in found {
+            if let Some(thread) = threads.iter_mut().find(|thread| thread.id == id) {
+                thread.run_snapshot = Some(run);
+            }
+        }
+    });
 }
 
 /// Fetch again what the open item shows from GitHub: the pull request and
@@ -10500,6 +10622,7 @@ mod tests {
                 owner_avatar_url: String::new(),
             },
             subject_snapshot: None,
+            run_snapshot: None,
         }
     }
 
@@ -11541,6 +11664,165 @@ mod tests {
                 .map(|s| s.at),
             Some(carried.updated_at)
         );
+    }
+
+    /// A workflow run notification, as GitHub sends one: a title and no
+    /// subject URL.
+    fn run_thread(id: &str, title: &str, at: &str) -> Thread {
+        let mut thread = thread(id, title);
+        thread.reason = Reason::CiActivity;
+        thread.subject.kind = SubjectKind::CheckSuite;
+        thread.subject.url = None;
+        thread.updated_at = at.parse().unwrap();
+        thread
+    }
+
+    #[tokio::test]
+    async fn a_look_finds_each_workflow_run_notification_its_run_once_per_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = r#"{"total_count":3,"workflow_runs":[
+          {"id":3,"name":"Hourly DST","run_number":914,"status":"completed","conclusion":"failure",
+           "head_branch":"main","html_url":"https://github.com/a/b/actions/runs/3",
+           "created_at":"2026-09-16T00:01:00Z","updated_at":"2026-09-16T00:14:00Z"},
+          {"id":2,"name":"Hourly DST","run_number":912,"status":"completed","conclusion":"failure",
+           "head_branch":"main","html_url":"https://github.com/a/b/actions/runs/2",
+           "created_at":"2026-09-15T23:25:07Z","updated_at":"2026-09-15T23:45:08Z"},
+          {"id":1,"name":"PR Checks","run_number":913,"status":"completed","conclusion":"success",
+           "head_branch":"main","html_url":"https://github.com/a/b/actions/runs/1",
+           "created_at":"2026-09-15T23:26:00Z","updated_at":"2026-09-15T23:44:00Z"}
+        ]}"#;
+        let (base, paths) = serve_by_path(move |path| {
+            if path.starts_with("/repos/a/b/actions/runs?branch=main&") {
+                ("200 OK", runs.to_string())
+            } else {
+                ("404 Not Found", "{}".to_string())
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        ctx.replace_notifications(
+            vec![
+                run_thread(
+                    "7",
+                    "Hourly DST workflow run failed for main branch",
+                    "2026-09-15T23:45:10Z",
+                ),
+                // Same branch, same days: found in the same listing.
+                run_thread(
+                    "8",
+                    "PR Checks workflow run succeeded for main branch",
+                    "2026-09-15T23:44:02Z",
+                ),
+                // A workflow GitHub has no run of on that branch.
+                run_thread(
+                    "9",
+                    "Nightly workflow run failed for main branch",
+                    "2026-09-15T23:50:00Z",
+                ),
+            ],
+            Some("first"),
+        );
+
+        look_for_runs(&ctx).await;
+
+        let threads = ctx.notifications.lock().unwrap().clone();
+        assert_eq!(
+            threads[0].run_snapshot,
+            Some(perch_github::RunSnapshot {
+                html_url: "https://github.com/a/b/actions/runs/2".into(),
+                at: threads[0].updated_at,
+            })
+        );
+        assert_eq!(
+            threads[1]
+                .run_snapshot
+                .as_ref()
+                .map(|run| run.html_url.as_str()),
+            Some("https://github.com/a/b/actions/runs/1")
+        );
+        assert_eq!(threads[2].run_snapshot, None);
+        // One listing for the three, kept for the next launch, and told
+        // to the sidebar.
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/repos/a/b/actions/runs?branch=main&created=2026-09-08..2026-09-15&per_page=100"]
+        );
+        assert_eq!(
+            ctx.with_cache(|c| c.load_threads().unwrap()).unwrap(),
+            threads
+        );
+        let told = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Notifications(threads) => Some(threads),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        assert_eq!(told, threads);
+
+        // Nothing left to ask: 7 and 8 have their runs, and 9 was asked.
+        look_for_runs(&ctx).await;
+        assert_eq!(paths.lock().unwrap().len(), 1);
+
+        // A re-run moves 7 on: the run is carried across the poll and
+        // looked for again, since the new attempt may be another run's.
+        let mut newer = run_thread(
+            "7",
+            "Hourly DST workflow run, Attempt #2 failed for main branch",
+            "2026-09-16T00:14:02Z",
+        );
+        newer.unread = true;
+        ctx.replace_notifications(vec![newer], Some("second"));
+        let carried = ctx.notifications.lock().unwrap()[0].clone();
+        assert_eq!(
+            carried
+                .run_snapshot
+                .as_ref()
+                .map(|run| run.html_url.as_str()),
+            Some("https://github.com/a/b/actions/runs/2")
+        );
+        assert!(carried.wants_run());
+        look_for_runs(&ctx).await;
+        assert_eq!(paths.lock().unwrap().len(), 2);
+        assert_eq!(
+            ctx.notifications.lock().unwrap()[0].run_snapshot,
+            Some(perch_github::RunSnapshot {
+                html_url: "https://github.com/a/b/actions/runs/3".into(),
+                at: carried.updated_at,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listing_that_fails_leaves_the_runs_for_the_next_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("403 Forbidden", r#"{"message":"Forbidden"}"#);
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        ctx.replace_notifications(
+            vec![
+                run_thread(
+                    "7",
+                    "CI workflow run failed for main branch",
+                    "2026-09-15T23:45:10Z",
+                ),
+                run_thread(
+                    "8",
+                    "Nightly workflow run failed for main branch",
+                    "2026-09-15T23:50:00Z",
+                ),
+            ],
+            Some("first"),
+        );
+
+        // The branch's listing is asked for once, not once per row.
+        look_for_runs(&ctx).await;
+        let threads = ctx.notifications.lock().unwrap().clone();
+        assert!(threads.iter().all(|thread| thread.run_snapshot.is_none()));
+        assert_eq!(paths.lock().unwrap().len(), 1);
+
+        // Not written down as asked: the next look tries again.
+        look_for_runs(&ctx).await;
+        assert_eq!(paths.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

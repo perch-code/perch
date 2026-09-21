@@ -461,6 +461,30 @@ impl GitHub {
         Ok(payload.workflow_runs)
     }
 
+    /// The workflow runs on one branch created within `created`, a range
+    /// of days as GitHub's search syntax writes one, newest first. What a
+    /// workflow run notification's run is found among. One page: the run
+    /// started shortly before the notification was sent, and a branch
+    /// with a hundred newer runs in the same days is not one the reader
+    /// is waiting on.
+    pub async fn list_workflow_runs_for_branch(
+        &self,
+        repo_full_name: &str,
+        branch: &str,
+        created: &str,
+    ) -> Result<Vec<WorkflowRunPayload>, Error> {
+        let branch =
+            percent_encoding::utf8_percent_encode(branch, percent_encoding::NON_ALPHANUMERIC);
+        let body = self
+            .get_text(&format!(
+                "/repos/{repo_full_name}/actions/runs?branch={branch}&created={created}&per_page=100"
+            ))
+            .await?;
+        let payload: WorkflowRunsPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(payload.workflow_runs)
+    }
+
     /// Everything said on a pull request: description, conversation,
     /// reviews, and line comments. Three lists, each read to the end, and
     /// the events the pull request's own payload carries.

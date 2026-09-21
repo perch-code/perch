@@ -238,6 +238,7 @@ mod tests {
                 owner_avatar_url: String::new(),
             },
             subject_snapshot: None,
+            run_snapshot: None,
         }
     }
 

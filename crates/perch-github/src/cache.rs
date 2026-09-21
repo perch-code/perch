@@ -3087,6 +3087,7 @@ mod tests {
                 owner_avatar_url: "https://avatars/1".into(),
             },
             subject_snapshot: None,
+            run_snapshot: None,
         }
     }
 

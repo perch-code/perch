@@ -76,3 +76,22 @@ async fn the_runs_for_a_head_are_asked_for_by_sha_and_read_whole() {
     let paths = paths.lock().unwrap();
     assert_eq!(paths.as_slice(), ["/repos/slatedb/slatedb/actions/runs?head_sha=abc123&per_page=100"]);
 }
+
+#[tokio::test]
+async fn the_runs_for_a_branch_are_asked_for_by_branch_and_days() {
+    let (base, paths) = spawn(RUNS);
+    let gh = GitHub::with_base_uri("t", &base).unwrap();
+
+    let runs = gh
+        .list_workflow_runs_for_branch("slatedb/slatedb", "feature/dst", "2026-09-08..2026-09-15")
+        .await
+        .unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].run_number, 912);
+
+    let paths = paths.lock().unwrap();
+    assert_eq!(
+        paths.as_slice(),
+        ["/repos/slatedb/slatedb/actions/runs?branch=feature%2Fdst&created=2026-09-08..2026-09-15&per_page=100"]
+    );
+}

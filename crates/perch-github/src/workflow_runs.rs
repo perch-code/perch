@@ -4,11 +4,12 @@
 //! A `CheckSuite` notification carries a title and nothing else: no URL, no
 //! run id, no check suite id. The workflow's name and the branch are read
 //! out of the title, which is enough to say whether the notification is
-//! about the open pull request's branch and its checks want asking after.
+//! about the open pull request's branch and its checks want asking after,
+//! and to find the run itself among the branch's runs.
 //!
 //! The pill reads the runs for one commit and shows the worst of them.
 
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Thread, UserPayload};
@@ -39,6 +40,40 @@ impl WorkflowRunQuery {
             branch,
             at: thread.updated_at,
         })
+    }
+
+    /// The days of runs to ask GitHub for, as `created` on the runs
+    /// listing takes them: from a week before the notification to the day
+    /// it was sent, since the run started before it was sent, and a run
+    /// that took over a week is not one anyone is waiting on.
+    pub fn created(&self) -> String {
+        let from = self
+            .at
+            .checked_sub(SignedDuration::from_hours(7 * 24))
+            .unwrap_or(self.at);
+        format!(
+            "{}..{}",
+            from.strftime("%Y-%m-%d"),
+            self.at.strftime("%Y-%m-%d")
+        )
+    }
+
+    /// The run this notification is about, among the branch's runs: the
+    /// workflow's, started by the time the notification was sent, and
+    /// finished nearest to then.
+    ///
+    /// Nearest finished rather than latest started because a re-run keeps
+    /// its `created_at` and moves its `updated_at` to the new attempt's
+    /// end, which is when GitHub sends the "Attempt #2" notification; the
+    /// hourly run that came in between is nowhere near it.
+    pub fn pick<'a>(&self, runs: &'a [WorkflowRunPayload]) -> Option<&'a WorkflowRunPayload> {
+        runs.iter()
+            .filter(|run| {
+                run.name == self.workflow
+                    && run.head_branch.as_deref() == Some(self.branch.as_str())
+                    && run.created_at <= self.at
+            })
+            .min_by_key(|run| run.updated_at.duration_since(self.at).abs())
     }
 }
 
@@ -386,6 +421,107 @@ mod tests {
             None
         );
         assert_eq!(parse_title("CI workflow run failed"), None);
+    }
+
+    fn query(workflow: &str, branch: &str, at: &str) -> WorkflowRunQuery {
+        WorkflowRunQuery {
+            repo_full_name: "slatedb/slatedb".into(),
+            workflow: workflow.into(),
+            branch: branch.into(),
+            at: at.parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn the_run_picked_is_the_workflows_on_the_branch_that_finished_when_the_notification_came() {
+        let runs = [
+            run(
+                "Hourly DST",
+                911,
+                "2026-09-15T20:01:11Z",
+                "2026-09-15T20:14:21Z",
+                "success",
+            ),
+            run(
+                "Hourly DST",
+                912,
+                "2026-09-15T23:25:07Z",
+                "2026-09-15T23:45:08Z",
+                "failure",
+            ),
+            run(
+                "PR Checks",
+                913,
+                "2026-09-15T23:26:00Z",
+                "2026-09-15T23:44:00Z",
+                "failure",
+            ),
+            run(
+                "Hourly DST",
+                914,
+                "2026-09-16T00:01:00Z",
+                "2026-09-16T00:14:00Z",
+                "failure",
+            ),
+        ];
+        let picked = query("Hourly DST", "main", "2026-09-15T23:45:10Z").pick(&runs);
+        assert_eq!(picked.map(|r| r.run_number), Some(912));
+
+        // Another workflow's run at the same moment is another workflow's.
+        let picked = query("PR Checks", "main", "2026-09-15T23:44:02Z").pick(&runs);
+        assert_eq!(picked.map(|r| r.run_number), Some(913));
+
+        // Another branch's runs are not this branch's, and a run started
+        // after the notification was sent cannot be what it announced.
+        assert!(query("Hourly DST", "release", "2026-09-15T23:45:10Z")
+            .pick(&runs)
+            .is_none());
+        assert!(query("Hourly DST", "main", "2026-09-15T20:00:00Z")
+            .pick(&runs)
+            .is_none());
+    }
+
+    #[test]
+    fn a_re_run_is_picked_by_when_it_finished_not_when_it_started() {
+        // Run 10 failed, run 11 ran an hour later, then 10 was re-run and
+        // finished after both. Each notification finds its own run.
+        let runs = [
+            run(
+                "Hourly DST",
+                10,
+                "2026-09-15T10:00:00Z",
+                "2026-09-15T11:45:00Z",
+                "failure",
+            ),
+            run(
+                "Hourly DST",
+                11,
+                "2026-09-15T11:00:00Z",
+                "2026-09-15T11:20:00Z",
+                "failure",
+            ),
+        ];
+        let attempt_two = query("Hourly DST", "main", "2026-09-15T11:45:02Z").pick(&runs);
+        assert_eq!(attempt_two.map(|r| r.run_number), Some(10));
+        let eleven = query("Hourly DST", "main", "2026-09-15T11:20:01Z").pick(&runs);
+        assert_eq!(eleven.map(|r| r.run_number), Some(11));
+        // The first attempt's notification still finds its run, now
+        // finished later, since nothing else of its workflow was nearer.
+        let attempt_one = query("Hourly DST", "main", "2026-09-15T10:20:00Z").pick(&runs);
+        assert_eq!(attempt_one.map(|r| r.run_number), Some(10));
+    }
+
+    #[test]
+    fn the_days_asked_for_run_from_a_week_before_to_the_day_it_was_sent() {
+        assert_eq!(
+            query("CI", "main", "2026-09-15T23:45:10Z").created(),
+            "2026-09-08..2026-09-15"
+        );
+        // Days are GitHub's, in UTC, not the reader's.
+        assert_eq!(
+            query("CI", "main", "2026-10-01T00:00:00Z").created(),
+            "2026-09-24..2026-10-01"
+        );
     }
 
     #[test]

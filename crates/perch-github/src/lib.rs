@@ -37,7 +37,9 @@ pub use discussion::{
 pub use items::{
     Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind,
 };
-pub use model::{Reason, Repository, Subject, SubjectKind, SubjectSnapshot, SubjectState, Thread};
+pub use model::{
+    Reason, Repository, RunSnapshot, Subject, SubjectKind, SubjectSnapshot, SubjectState, Thread,
+};
 pub use pulls::{
     CheckStatus, MergeMethod, MergeMethods, MergeResult, MergeState, MergeableState, PullRequest,
     PullRequestOverview, RepositoryPermission, ReviewDecision, Reviewer,

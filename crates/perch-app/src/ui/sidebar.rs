@@ -654,6 +654,7 @@ mod tests {
             },
             repository: Repository { full_name: repo.into(), owner_avatar_url: String::new() },
             subject_snapshot: None,
+            run_snapshot: None,
         }
     }
 
