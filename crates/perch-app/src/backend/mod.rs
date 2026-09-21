@@ -8338,15 +8338,28 @@ async fn review_finding_followup(
     };
 
     let latest = observations.last();
+    // The review agent wrote these from repository text nobody vetted.
     let title = original
         .as_ref()
         .or(latest)
-        .map(|observation| bounded_review_text(&observation.title, 12, 1_000))
+        .map(|observation| {
+            bounded_review_text(
+                &perch_knowledge::sanitize::clean(&observation.title),
+                12,
+                1_000,
+            )
+        })
         .unwrap_or_else(|| "Review finding".into());
     let report = original
         .as_ref()
         .or(latest)
-        .map(|observation| bounded_review_text(&observation.body, 60, 8_000))
+        .map(|observation| {
+            bounded_review_text(
+                &perch_knowledge::sanitize::clean(&observation.body),
+                60,
+                8_000,
+            )
+        })
         .unwrap_or_default();
     let original_location = original_anchor
         .map(review_anchor_label)

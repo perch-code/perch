@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{toml_string, Backend, ORCHESTRATION_TOOLS, READ_ONLY_TOOLS, WRITING_TOOLS};
+use crate::{
+    claude_settings, denied_tools, toml_string, Backend, ORCHESTRATION_TOOLS, READ_ONLY_TOOLS,
+};
 
 pub const REVIEW_ADAPTER_VERSION: u32 = 1;
 pub const REVIEW_OUTPUT_FORMAT_VERSION: u32 = 1;
@@ -434,10 +436,13 @@ impl ReviewSpec {
             "--print".into(),
             // Safe mode disables CLAUDE.md, skills, plugins, hooks, MCP,
             // commands, and agents from the repository. The strict MCP flag
-            // provides a second fail-closed boundary for process spawning.
+            // provides a second fail-closed boundary for process spawning,
+            // and the sandbox settings keep the shell offline and read-only.
             "--safe-mode".into(),
             "--strict-mcp-config".into(),
             "--no-session-persistence".into(),
+            "--settings".into(),
+            claude_settings(&self.cwd),
             "--output-format".into(),
             "stream-json".into(),
             "--verbose".into(),
@@ -454,7 +459,7 @@ impl ReviewSpec {
         args.extend(READ_ONLY_TOOLS.iter().map(|tool| (*tool).to_string()));
         args.extend(ORCHESTRATION_TOOLS.iter().map(|tool| (*tool).to_string()));
         args.push("--disallowedTools".into());
-        args.extend(WRITING_TOOLS.iter().map(|tool| (*tool).to_string()));
+        args.extend(denied_tools());
         args.push("--".into());
         args.push(prompt);
         args
@@ -463,7 +468,7 @@ impl ReviewSpec {
 
 /// A structured prior-finding verifier running inside the same fail-closed
 /// boundary as native review. This is intentionally separate from `RunSpec`:
-/// ordinary questions may honor the user's agent configuration, while review
+/// ordinary questions honor the user's Claude Code settings, while review
 /// verification must not trust configuration from the captured repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewVerificationSpec {
@@ -550,6 +555,8 @@ impl ReviewVerificationSpec {
             "--safe-mode".into(),
             "--strict-mcp-config".into(),
             "--no-session-persistence".into(),
+            "--settings".into(),
+            claude_settings(&self.cwd),
             "--output-format".into(),
             "stream-json".into(),
             "--verbose".into(),
@@ -565,7 +572,7 @@ impl ReviewVerificationSpec {
         ];
         args.extend(READ_ONLY_TOOLS.iter().map(|tool| (*tool).to_string()));
         args.push("--disallowedTools".into());
-        args.extend(WRITING_TOOLS.iter().map(|tool| (*tool).to_string()));
+        args.extend(denied_tools());
         args.push("--".into());
         args.push(self.prompt.clone());
         args
@@ -1407,12 +1414,15 @@ mod tests {
 
     #[test]
     fn claude_verifier_uses_the_exact_fail_closed_invocation() {
-        let args = verification_spec(Backend::ClaudeCode).args();
+        let spec = verification_spec(Backend::ClaudeCode);
+        let args = spec.args();
         let mut expected = vec![
             "--print".to_string(),
             "--safe-mode".into(),
             "--strict-mcp-config".into(),
             "--no-session-persistence".into(),
+            "--settings".into(),
+            claude_settings(&spec.cwd),
             "--output-format".into(),
             "stream-json".into(),
             "--verbose".into(),
@@ -1428,7 +1438,7 @@ mod tests {
         ];
         expected.extend(READ_ONLY_TOOLS.iter().map(|tool| (*tool).to_string()));
         expected.push("--disallowedTools".into());
-        expected.extend(WRITING_TOOLS.iter().map(|tool| (*tool).to_string()));
+        expected.extend(denied_tools());
         expected.extend(["--".into(), "--structured verifier prompt".into()]);
         assert_eq!(args, expected);
         assert!(!args.iter().any(|arg| {

@@ -8,6 +8,9 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false }
+pulldown-cmark-to-cmark = "22"
+unicode-general-category = "1"
 
 [dev-dependencies]
 tempfile = "3"

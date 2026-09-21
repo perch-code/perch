@@ -126,6 +126,56 @@ launching an agent. `perch --ask owner/repo#N path:start-end "question"`
 runs the same question flow from a terminal; omit the path to ask about the
 whole item.
 
+### What the agent can and cannot do
+
+An agent reads text nobody vetted: the pull request, its comments, and the
+repository itself. Any of it can contain instructions aimed at the agent.
+Perch does not try to detect them; it limits what following one could do.
+
+- **Read-only tools.** Claude Code gets `Read`, `Glob`, `Grep`, `LS`, and
+  `Bash` for `git diff`, `git log`, `git show`, and `git blame` only. `Edit`,
+  `Write`, `MultiEdit`, `NotebookEdit`, `WebFetch`, and `WebSearch` are
+  denied by name, so no setting can allow them. Anything else is refused
+  without a prompt, and the refusal shows up as activity. Codex runs in its
+  `read-only` sandbox.
+- **A sandboxed shell.** Every Claude Code command runs inside Claude Code's
+  own sandbox with no network access and no write access anywhere, the
+  worktree included: `git diff --output=` fails like any other write. There
+  is no unsandboxed retry, and a machine that cannot start the sandbox
+  refuses to run rather than running without it.
+- **No repository-supplied configuration.** Claude Code reads only
+  `~/.claude/settings.json`, never the repository's `.claude/settings*.json`
+  or `.mcp.json`, and starts no MCP server. Codex is told the worktree is
+  untrusted, so its `.codex/` config, hooks, and rules are not loaded even
+  when you have trusted the repository elsewhere, and it runs without
+  `~/.codex/config.toml`, plugins, or hooks, since the MCP servers named
+  there run outside its sandbox. Reviews run Claude Code in `--safe-mode`
+  as well.
+- **No secrets.** The agent does not inherit `GITHUB_TOKEN`, `GH_TOKEN`,
+  Perch's own git token, or any variable named `*_TOKEN`, `*_SECRET`,
+  `*_KEY`, `*_APIKEY`, `*_PASSWORD`, `*_PASSWD`, `*_PASS`, `*_PAT`, or
+  `*_CREDENTIALS`. The CLIs' own credentials (`ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,
+  `CODEX_API_KEY`) are the exception, since without them there is no run.
+  Credentials for other providers, such as `AWS_SECRET_ACCESS_KEY`, fall
+  under the rule, so a CLI configured that way must be signed in instead.
+- **Cleaned quotes.** Text quoted into a prompt keeps the words a reader
+  sees and loses the rest: HTML tags and the comments GitHub renders as
+  nothing, link titles and image alt text, and invisible formatting
+  characters, however they were written. It is set between
+  `[BEGIN untrusted text: …]` and `[END untrusted text]` lines, a line
+  inside it that imitates a marker is spoiled, and your question comes
+  last. The review history export under `knowledge/reviews/` is cleaned
+  the same way.
+- **Inert links.** A link in an answer or a comment does nothing until it
+  is clicked. Hovering it shows the full destination; a click opens `http`
+  and `https` links only.
+
+What remains: the CLIs still read the repository's `CLAUDE.md` and
+`AGENTS.md` as instructions, along with your own user-level configuration,
+and the agent can read any file your user can, not only the worktree. What
+it reads can reach you only through its answer.
+
 ## Worktree reviews
 
 **Review** runs Claude Code and/or Codex's native review workflow against the

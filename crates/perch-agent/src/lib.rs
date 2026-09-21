@@ -129,9 +129,10 @@ impl std::fmt::Display for Effort {
     }
 }
 
-/// The tools a read-only run may use. This list is the whole permission
-/// story: in print mode anything not on it is denied without asking, and
-/// the denial arrives as an event.
+/// The tools a read-only run may use. In print mode anything not on the
+/// list is denied without asking, and the denial arrives as an event. The
+/// shell commands run inside Claude Code's sandbox as well, see
+/// [`claude_settings`]. `rg` is not here: `rg --pre` runs any program.
 pub const READ_ONLY_TOOLS: &[&str] = &[
     "Read",
     "Glob",
@@ -141,18 +142,152 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "Bash(git log:*)",
     "Bash(git show:*)",
     "Bash(git blame:*)",
-    "Bash(rg:*)",
 ];
 
 /// Tools that change files, named so that no setting of the user's can let
 /// them through.
 const WRITING_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
+/// Tools that reach the network from inside Claude Code itself, where the
+/// shell sandbox does not apply. Denied by name for the same reason.
+const NETWORK_TOOLS: &[&str] = &["WebFetch", "WebSearch"];
+
+/// Everything a run is denied, whatever the user's settings allow.
+pub fn denied_tools() -> impl Iterator<Item = String> {
+    WRITING_TOOLS
+        .iter()
+        .chain(NETWORK_TOOLS)
+        .map(|tool| (*tool).to_string())
+}
+
 /// Claude Code's delegation tools, allowed only at `Effort::Ultra`. The init
 /// event lists the subagent tool as `Task` and the model calls it `Agent`,
 /// so both are named. Subagents inherit the parent's allowed and denied
 /// lists, which keeps them read-only too.
 pub const ORCHESTRATION_TOOLS: &[&str] = &["Workflow", "Agent", "Task"];
+
+/// The `--settings` every Claude Code run starts with. They outrank the
+/// user's file, and the repository's files are not read at all.
+///
+/// The shell runs in Claude Code's own sandbox: no network, and no writes
+/// anywhere, the worktree included, so `git diff --output=` fails like any
+/// other write. Commands still go through the allowed list; the sandbox
+/// is the second boundary, not a licence to run more. There is no
+/// unsandboxed retry, and a machine without the sandbox refuses to run
+/// rather than running without it.
+pub fn claude_settings(cwd: &std::path::Path) -> String {
+    serde_json::json!({
+        "sandbox": {
+            "enabled": true,
+            "autoAllowBashIfSandboxed": false,
+            "allowUnsandboxedCommands": false,
+            "failIfUnavailable": true,
+            "filesystem": {
+                "denyWrite": [real_path(cwd)],
+            },
+            "network": {
+                "allowedDomains": [],
+                "deniedDomains": ["*"],
+                "strictAllowlist": true,
+            },
+        },
+    })
+    .to_string()
+}
+
+/// The arguments that keep a Claude Code run to the user's own settings:
+/// only `~/.claude/settings.json` is read, never the repository's
+/// `.claude/settings*.json` or `.mcp.json`, and no MCP server starts.
+pub fn claude_isolation_args(cwd: &std::path::Path) -> Vec<String> {
+    vec![
+        "--setting-sources".into(),
+        "user".into(),
+        "--strict-mcp-config".into(),
+        "--mcp-config".into(),
+        r#"{"mcpServers":{}}"#.into(),
+        "--settings".into(),
+        claude_settings(cwd),
+    ]
+}
+
+/// The `-c` override that keeps Codex from reading the repository's
+/// `.codex/` directory: config, hooks and rules there load only for a
+/// trusted project, and this marks the worktree untrusted whatever the
+/// user's config says about it or the repository it belongs to. The
+/// whole `projects` table goes in as one inline value: `-c` splits its
+/// key on every dot and knows no quoting, so a path cannot be a key
+/// segment. Codex merges the table into the user's, and looks the
+/// directory up under its given and its resolved name.
+pub fn codex_untrusted_project_override(cwd: &std::path::Path) -> String {
+    let mut keys = vec![cwd.to_path_buf()];
+    let real = real_path(cwd);
+    // Spelled differently, not merely a different path: `Path` equality
+    // ignores a trailing slash or a `.` component, Codex's lookup does not.
+    if real.as_os_str() != cwd.as_os_str() {
+        keys.push(real);
+    }
+    let entries = keys
+        .iter()
+        .map(|key| {
+            format!(
+                "{}={{trust_level=\"untrusted\"}}",
+                toml_string(&key.to_string_lossy())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("projects={{{entries}}}")
+}
+
+/// The path with symlinks resolved, as the sandbox and Codex see it, or
+/// the path as given when it cannot be resolved.
+fn real_path(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether an environment variable is kept from the agent. GitHub's
+/// tokens, the one Perch's own git commands carry, and anything named
+/// like a secret: the process runs a model on text nobody vetted, and
+/// what it cannot see it cannot be talked into repeating. The credentials
+/// the CLIs themselves sign in with are the exception, since without them
+/// there is no run; other providers' credentials are not, so a CLI
+/// configured that way has to be signed in instead.
+pub fn is_scrubbed_env(name: &str) -> bool {
+    const KEPT: &[&str] = &[
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+    ];
+    const ALWAYS: &[&str] = &["GITHUB_TOKEN", "GH_TOKEN", "PERCH_GIT_TOKEN"];
+    const SUFFIXES: &[&str] = &[
+        "_TOKEN",
+        "_SECRET",
+        "_KEY",
+        "_APIKEY",
+        "_PASSWORD",
+        "_PASSWD",
+        "_PASS",
+        "_PAT",
+        "_CREDENTIAL",
+        "_CREDENTIALS",
+    ];
+    let name = name.to_ascii_uppercase();
+    if KEPT.contains(&name.as_str()) {
+        return false;
+    }
+    ALWAYS.contains(&name.as_str()) || SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
+}
+
+/// Drop every scrubbed variable from a command's inherited environment.
+fn scrub_env(command: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(is_scrubbed_env) {
+            command.env_remove(name);
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RunSpec {
@@ -197,6 +332,7 @@ impl RunSpec {
             "--permission-mode".into(),
             "default".into(),
         ];
+        args.extend(claude_isolation_args(&self.cwd));
         if let Some(system) = &self.system {
             args.push("--append-system-prompt".into());
             args.push(system.clone());
@@ -211,7 +347,7 @@ impl RunSpec {
             args.extend(ORCHESTRATION_TOOLS.iter().map(|t| t.to_string()));
         }
         args.push("--disallowedTools".into());
-        args.extend(WRITING_TOOLS.iter().map(|t| t.to_string()));
+        args.extend(denied_tools());
         args.push("--".into());
         args.push(self.prompt.clone());
         args
@@ -220,7 +356,10 @@ impl RunSpec {
     /// `codex exec --json`. A new thread takes `-s` and `-C`; `resume`
     /// rejects both, so the sandbox goes in as config and the directory is
     /// the thread's own. The model is repeated on resume because Codex
-    /// otherwise falls back to its config default.
+    /// otherwise falls back to its config default. Either way the worktree
+    /// is marked untrusted so its `.codex/` directory is not read, and the
+    /// user's own config, plugins and hooks stay out too: the MCP servers
+    /// in it run outside the read-only sandbox, and a prompt can call them.
     fn codex_args(&self) -> Vec<String> {
         let mut args = vec!["exec".to_string(), "--json".into()];
         match &self.resume {
@@ -232,10 +371,20 @@ impl RunSpec {
                 args.extend(["resume".into(), thread.clone()]);
             }
         }
+        // Accepted by `exec` and by `exec resume` alike, after the
+        // subcommand.
+        args.extend([
+            "--ignore-user-config".into(),
+            "--disable".into(),
+            "plugins".into(),
+            "--disable".into(),
+            "hooks".into(),
+        ]);
         args.extend(["-m".into(), self.model.clone()]);
         if self.resume.is_some() {
             args.extend(["-c".into(), "sandbox_mode=\"read-only\"".into()]);
         }
+        args.extend(["-c".into(), codex_untrusted_project_override(&self.cwd)]);
         args.extend([
             "-c".into(),
             format!("model_reasoning_effort={}", self.effort.name()),
@@ -737,6 +886,7 @@ impl Run {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        scrub_env(&mut command);
         // Put every CLI invocation in its own process group. Claude and
         // Codex may launch commands and subagents of their own; signalling
         // the group keeps those descendants under the same lifetime.
@@ -1253,6 +1403,18 @@ mod tests {
             .iter()
             .any(|a| a.contains("dangerously") || a.contains("bypass")));
         assert!(!args.contains(&"--resume".to_string()));
+        assert_isolated_claude(&args, &spec.cwd);
+    }
+
+    #[test]
+    fn the_network_tools_are_denied_whatever_the_user_allows() {
+        let args = claude(Effort::Medium).args();
+        let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        let end = args.iter().position(|a| a == "--").unwrap();
+        for tool in ["WebFetch", "WebSearch", "Edit", "Write"] {
+            let at = args.iter().position(|a| a == tool).unwrap();
+            assert!(denied < at && at < end, "{tool} is in the denied list");
+        }
     }
 
     #[test]
@@ -1271,6 +1433,148 @@ mod tests {
         let args = spec.args();
         assert!(args.windows(2).any(|w| w == ["--resume", "sess-1"]));
         assert!(!args.contains(&"--append-system-prompt".to_string()));
+        assert_isolated_claude(&args, &spec.cwd);
+    }
+
+    /// The repository's settings, MCP servers and shell are kept out of
+    /// every Claude Code run, first or resumed.
+    fn assert_isolated_claude(args: &[String], cwd: &std::path::Path) {
+        assert!(args.windows(2).any(|w| w == ["--setting-sources", "user"]));
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--mcp-config", r#"{"mcpServers":{}}"#]));
+        let settings = args
+            .windows(2)
+            .find(|w| w[0] == "--settings")
+            .map(|w| w[1].clone())
+            .expect("--settings is passed");
+        assert_eq!(settings, claude_settings(cwd));
+        let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
+        let sandbox = &value["sandbox"];
+        assert_eq!(sandbox["enabled"], true);
+        assert_eq!(sandbox["autoAllowBashIfSandboxed"], false);
+        assert_eq!(sandbox["allowUnsandboxedCommands"], false);
+        assert_eq!(sandbox["failIfUnavailable"], true);
+        assert_eq!(sandbox["network"]["allowedDomains"], serde_json::json!([]));
+        assert_eq!(
+            sandbox["network"]["deniedDomains"],
+            serde_json::json!(["*"])
+        );
+        assert_eq!(sandbox["network"]["strictAllowlist"], true);
+        let real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        assert_eq!(
+            sandbox["filesystem"]["denyWrite"],
+            serde_json::json!([real.to_string_lossy()]),
+            "the worktree itself is read-only to the shell"
+        );
+        assert!(
+            !args.iter().any(|a| a == "Bash(rg:*)"),
+            "rg --pre runs any program"
+        );
+        assert_eq!(
+            args.iter().filter(|a| *a == "--setting-sources").count(),
+            1,
+            "one settings source list, so a later one cannot widen it"
+        );
+        assert!(
+            !args
+                .windows(2)
+                .any(|w| w[0] == "--setting-sources" && w[1].contains("project")),
+            "no project settings source"
+        );
+    }
+
+    #[test]
+    fn the_sandbox_names_the_real_worktree_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&claude_settings(&link)).unwrap();
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["denyWrite"],
+            serde_json::json!([real.to_string_lossy()])
+        );
+        let missing = dir.path().join("gone");
+        let settings: serde_json::Value = serde_json::from_str(&claude_settings(&missing)).unwrap();
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["denyWrite"],
+            serde_json::json!([missing.to_string_lossy()]),
+            "an unresolvable path is passed as given"
+        );
+    }
+
+    #[test]
+    fn codex_is_told_the_worktree_is_untrusted_under_every_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // Codex splits `-c key=value` at the first `=` and parses the
+        // value as TOML.
+        let projects = |cwd: &std::path::Path| -> toml::Table {
+            let arg = codex_untrusted_project_override(cwd);
+            let (key, value) = arg.split_once('=').unwrap();
+            assert_eq!(key, "projects");
+            value.parse::<toml::Value>().unwrap().try_into().unwrap()
+        };
+        let both = projects(&link);
+        assert_eq!(both.len(), 2, "{both:?}");
+        for key in [link.to_string_lossy(), real.to_string_lossy()] {
+            assert_eq!(
+                both[key.as_ref()]["trust_level"].as_str(),
+                Some("untrusted")
+            );
+        }
+        assert_eq!(projects(&real).len(), 1);
+        // The same directory under a spelling Codex would not match: both
+        // spellings go in.
+        let dotted = real.join(".");
+        let both = projects(&dotted);
+        assert_eq!(both.len(), 2, "{both:?}");
+        assert!(both.contains_key(dotted.to_string_lossy().as_ref()));
+        assert!(both.contains_key(real.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn secrets_are_scrubbed_by_name_and_the_agents_own_keys_are_not() {
+        for name in [
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "PERCH_GIT_TOKEN",
+            "NPM_TOKEN",
+            "AWS_SECRET",
+            "AWS_SECRET_ACCESS_KEY",
+            "STRIPE_KEY",
+            "github_token",
+            "some_api_key",
+            "OPENROUTER_APIKEY",
+            "DOCKER_PASSWORD",
+            "DB_PASSWD",
+            "SMTP_PASS",
+            "GITHUB_PAT",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "AZURE_CREDENTIAL",
+        ] {
+            assert!(is_scrubbed_env(name), "{name}");
+        }
+        for name in [
+            "PATH",
+            "HOME",
+            "TOKENIZER",
+            "KEYBOARD",
+            "SECRETARY",
+            "COMPASS",
+            "PATTERN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+        ] {
+            assert!(!is_scrubbed_env(name), "{name}");
+        }
     }
 
     #[test]
@@ -1374,6 +1678,12 @@ mod tests {
         assert_eq!(&args[args.len() - 2..], ["--", "why?"]);
         assert!(!args.contains(&"resume".to_string()));
         assert!(!args.iter().any(|a| a.starts_with("sandbox_mode")));
+        assert!(args.windows(2).any(|w| w
+            == [
+                "-c",
+                &codex_untrusted_project_override(std::path::Path::new("/tmp/w t"))
+            ]));
+        assert!(args.iter().any(|a| a.contains("trust_level=\"untrusted\"")));
         assert!(!args.iter().any(|a| a.contains("ephemeral")
             || a.contains("dangerously")
             || a.contains("approve")));
@@ -1381,6 +1691,15 @@ mod tests {
             !args.iter().any(|a| a.starts_with("Bash(")),
             "the tool list is Claude's"
         );
+        assert_codex_without_user_config(&args);
+    }
+
+    /// The user's `~/.codex/config.toml`, and the MCP servers, plugins and
+    /// hooks it names, stay out of every Codex run, first or resumed.
+    fn assert_codex_without_user_config(args: &[String]) {
+        assert!(args.contains(&"--ignore-user-config".to_string()));
+        assert!(args.windows(2).any(|w| w == ["--disable", "plugins"]));
+        assert!(args.windows(2).any(|w| w == ["--disable", "hooks"]));
     }
 
     #[test]
@@ -1405,6 +1724,15 @@ mod tests {
         assert_eq!(&args[args.len() - 2..], ["--", "why?"]);
         assert!(!args.contains(&"-s".to_string()));
         assert!(!args.contains(&"-C".to_string()));
+        assert!(
+            args.windows(2).any(|w| w
+                == [
+                    "-c",
+                    &codex_untrusted_project_override(std::path::Path::new("/tmp/w t"))
+                ]),
+            "the resumed thread's directory stays untrusted"
+        );
+        assert_codex_without_user_config(&args);
     }
 
     #[test]

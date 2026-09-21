@@ -140,6 +140,68 @@ async fn completion_is_not_published_until_the_process_is_reaped() {
     assert!(matches!(rx.recv().await, Some(RunEvent::Finished { .. })));
 }
 
+#[tokio::test]
+async fn the_agent_does_not_inherit_secrets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env_file = tmp.path().join("env.txt");
+    let result = r#"{"type":"result","subtype":"success","session_id":"s1","duration_ms":5}"#;
+    let bin = fake_agent(
+        tmp.path(),
+        &format!(
+            "env > '{}'\necho '{INIT}'\necho '{result}'",
+            env_file.display()
+        ),
+    );
+    // Set in this process, under names of this test's own so nothing else
+    // in the process reads them; the rules for the well-known names are
+    // pinned by the unit tests. Only one test touches the environment.
+    let scrubbed = [
+        ("PERCH_TEST_NPM_TOKEN", "npm_secret"),
+        ("PERCH_TEST_WEBHOOK_SECRET", "hook_secret"),
+        ("PERCH_TEST_SIGNING_KEY", "signing_secret"),
+        ("PERCH_TEST_DB_PASSWORD", "db_secret"),
+    ];
+    let kept = [
+        ("PERCH_TEST_PLAIN", "plain"),
+        ("PERCH_TEST_KEYBOARD", "qwerty"),
+        ("PERCH_TEST_TOKEN_FILE", "/tmp/not-a-secret"),
+    ];
+    for (name, value) in scrubbed.iter().chain(kept.iter()) {
+        std::env::set_var(name, value);
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = Run::spawn(spec(bin, tmp.path().to_path_buf()), tx).unwrap();
+    assert!(matches!(rx.recv().await, Some(RunEvent::Started { .. })));
+    assert!(matches!(run.wait().await, RunOutcome::Finished { .. }));
+    for (name, _) in scrubbed.iter().chain(kept.iter()) {
+        std::env::remove_var(name);
+    }
+
+    let seen = std::fs::read_to_string(&env_file).unwrap();
+    let names: Vec<&str> = seen
+        .lines()
+        .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+        .collect();
+    let values: Vec<&str> = seen
+        .lines()
+        .filter_map(|line| line.split_once('=').map(|(_, value)| value))
+        .collect();
+    for (name, value) in scrubbed {
+        assert!(!names.contains(&name), "{name} reached the agent:\n{seen}");
+        assert!(!values.contains(&value), "{value} reached the agent:\n{seen}");
+    }
+    for (name, value) in kept {
+        assert!(
+            seen.lines().any(|line| line == format!("{name}={value}")),
+            "{name} was lost:\n{seen}"
+        );
+    }
+    assert!(
+        seen.contains("PATH="),
+        "the rest of the environment is inherited"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn cancel_hard_kills_a_stubborn_descendant_and_reaps_the_run() {

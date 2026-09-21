@@ -3,13 +3,20 @@
 //!
 //! pulldown-cmark does the parsing. Inline styles become spans on a rich
 //! text view, so bold, italics, code and links show as such and still wrap.
+//! A link does nothing until it is clicked, and hovering it shows where
+//! it goes: the text is an agent's or a stranger's, and the words of a
+//! link are no evidence of its destination.
+
+use std::ops::Range;
 
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::text::{Attrs, AttrsList, FamilyOwned, FontStyle, FontWeight, LineHeightValue};
 use floem::views::{rich_text, Decorators, Label, Stack, dyn_stack};
+use floem::AnyView;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
+use crate::review::linked_text::linked_text;
 use crate::theme;
 
 /// A run of text with the styles that apply to it.
@@ -19,7 +26,8 @@ pub struct Span {
     pub bold: bool,
     pub italic: bool,
     pub code: bool,
-    pub link: bool,
+    /// The destination, when the run is a link.
+    pub link: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,8 +114,8 @@ pub fn parse(text: &str) -> Vec<Block> {
             Event::End(TagEnd::Strong) => style.bold = false,
             Event::Start(Tag::Emphasis) => style.italic = true,
             Event::End(TagEnd::Emphasis) => style.italic = false,
-            Event::Start(Tag::Link { .. }) => style.link = true,
-            Event::End(TagEnd::Link) => style.link = false,
+            Event::Start(Tag::Link { dest_url, .. }) => style.link = Some(dest_url.to_string()),
+            Event::End(TagEnd::Link) => style.link = None,
             Event::Text(t) => match code.as_mut() {
                 Some(c) => c.push_str(&t),
                 None => push_text(&mut spans, &style, &t),
@@ -196,13 +204,28 @@ pub fn render_blocks(blocks: Vec<Block>, size: f32) -> impl IntoView {
 }
 
 /// One wrapped run of text with inline styles.
-fn styled_text(spans: Vec<Span>, size: f32, weight: FontWeight, color: Color) -> impl IntoView {
-    let (text, attrs) = layout(&spans, size, weight, color);
-    let again = (text.clone(), attrs.clone());
-    rich_text(text, attrs, move || again.clone()).style(|s| s.width_full())
+fn styled_text(spans: Vec<Span>, size: f32, weight: FontWeight, color: Color) -> AnyView {
+    let (text, attrs, links) = layout(&spans, size, weight, color);
+    if links.is_empty() {
+        let again = (text.clone(), attrs.clone());
+        rich_text(text, attrs, move || again.clone())
+            .style(|s| s.width_full())
+            .into_any()
+    } else {
+        linked_text(text, attrs, links)
+            .style(|s| s.width_full())
+            .into_any()
+    }
 }
 
-fn layout(spans: &[Span], size: f32, weight: FontWeight, color: Color) -> (String, AttrsList) {
+/// The text of the spans, the attributes over it, and where its links
+/// are, as byte ranges of the text.
+fn layout(
+    spans: &[Span],
+    size: f32,
+    weight: FontWeight,
+    color: Color,
+) -> (String, AttrsList, Vec<(Range<usize>, String)>) {
     let body: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::FONT_STACK).collect();
     let code: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
     let base = || {
@@ -214,6 +237,7 @@ fn layout(spans: &[Span], size: f32, weight: FontWeight, color: Color) -> (Strin
             .line_height(LineHeightValue::Normal(1.4))
     };
     let mut list = AttrsList::new(base());
+    let mut links: Vec<(Range<usize>, String)> = Vec::new();
 
     let mut text = String::new();
     for span in spans {
@@ -233,14 +257,20 @@ fn layout(spans: &[Span], size: f32, weight: FontWeight, color: Color) -> (Strin
         if span.code {
             attrs = attrs.family(&code).font_size(size - 1.0);
         }
-        if span.link {
+        if let Some(url) = &span.link {
             attrs = attrs.color(theme::ACCENT);
+            // Adjacent runs of one link, split by another style, are one
+            // link to the pointer.
+            match links.last_mut() {
+                Some((last, u)) if last.end == range.start && u == url => last.end = range.end,
+                _ => links.push((range.clone(), url.clone())),
+            }
         }
-        if span.bold || span.italic || span.code || span.link {
+        if span.bold || span.italic || span.code || span.link.is_some() {
             list.add_span(range, attrs);
         }
     }
-    (text, list)
+    (text, list, links)
 }
 
 #[cfg(test)]
@@ -285,7 +315,44 @@ mod tests {
     #[test]
     fn spans_map_to_byte_ranges() {
         let spans = vec![plain("a "), Span { text: "b".into(), code: true, ..Default::default() }];
-        let (text, _) = layout(&spans, 14.0, FontWeight::NORMAL, theme::FG);
+        let (text, _, links) = layout(&spans, 14.0, FontWeight::NORMAL, theme::FG);
         assert_eq!(text, "a b");
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn a_link_keeps_its_destination_and_its_byte_range() {
+        let blocks =
+            parse("See [the **docs**](https://example.com/x) and [more](https://example.com/y).");
+        let Block::Paragraph(spans) = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(
+            spans[1],
+            Span {
+                text: "the ".into(),
+                link: Some("https://example.com/x".into()),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            spans[2],
+            Span {
+                text: "docs".into(),
+                bold: true,
+                link: Some("https://example.com/x".into()),
+                ..Default::default()
+            }
+        );
+        let (text, _, links) = layout(spans, 14.0, FontWeight::NORMAL, theme::FG);
+        assert_eq!(text, "See the docs and more.");
+        assert_eq!(
+            links,
+            vec![
+                (4..12, "https://example.com/x".to_string()),
+                (17..21, "https://example.com/y".to_string()),
+            ],
+            "one link stays one range across its styles"
+        );
     }
 }

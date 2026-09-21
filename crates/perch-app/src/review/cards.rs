@@ -227,23 +227,25 @@ pub fn tip_with<V: IntoView + 'static>(
     view: V,
     text: impl Fn() -> String + Clone + 'static,
 ) -> impl IntoView {
-    view.tooltip(move || {
-        let text = text.clone();
-        Label::derived(text).style(|s| {
-            s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG)
-                .padding_vert(5.0)
-                .padding_horiz(8.0)
-                .max_width(320.0)
-                .text_wrap()
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS)
-                .box_shadow_blur(6.0)
-                .box_shadow_v_offset(2.0)
-                .box_shadow_color(theme::SHADOW)
-        })
+    view.tooltip(move || tip_body(text.clone()))
+}
+
+/// The tooltip itself, for a view that shows one on its own terms.
+pub fn tip_body(text: impl Fn() -> String + 'static) -> Label {
+    Label::derived(text).style(|s| {
+        s.font_size(theme::TEXT_BADGE)
+            .color(theme::FG)
+            .padding_vert(5.0)
+            .padding_horiz(8.0)
+            .max_width(320.0)
+            .text_wrap()
+            .background(theme::CANVAS)
+            .border(1.0)
+            .border_color(theme::BORDER)
+            .border_radius(theme::RADIUS)
+            .box_shadow_blur(6.0)
+            .box_shadow_v_offset(2.0)
+            .box_shadow_color(theme::SHADOW)
     })
 }
 
