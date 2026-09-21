@@ -61,10 +61,15 @@ pub fn header(
 }
 
 fn bar_style(s: floem::style::Style) -> floem::style::Style {
+    // The bottom border comes out of the bar's height, so a pixel of
+    // padding at the top balances it: the bar's contents then centre on
+    // the same line as the drawer's strip, which has no border, and the
+    // drawer control stays put when the drawer shuts.
     s.height(theme::REVIEW_HEADER_HEIGHT)
         .width_full()
         .flex_shrink(0.0_f32)
         .items_center()
+        .padding_top(1.0)
         .padding_horiz(theme::REVIEW_HEADER_PADDING)
         .gap(12.0)
         .background(theme::CANVAS)
@@ -1414,6 +1419,26 @@ mod tests {
 
     fn within(inner: Rect, outer: Rect) -> bool {
         inner.x0 >= outer.x0 && inner.x1 <= outer.x1 && inner.y0 >= outer.y0 && inner.y1 <= outer.y1
+    }
+
+    /// The drawer control moves from the drawer's strip to the item bar
+    /// when the drawer shuts. The bar has a border along its bottom and
+    /// the strip has none, and the control must not move up a pixel with
+    /// the room the border takes.
+    #[test]
+    fn the_drawer_control_keeps_its_line_when_the_drawer_shuts() {
+        let (mut harness, app, _) = pull_request_harness();
+        let in_strip = rect(&harness, "drawer toggle");
+
+        app.sidebar_open.set(false);
+        harness.rebuild();
+        harness.paint();
+        let in_bar = rect(&harness, "drawer toggle");
+        assert_eq!(
+            (in_bar.y0, in_bar.y1),
+            (in_strip.y0, in_strip.y1),
+            "the control at {in_bar:?} is not on the strip's line {in_strip:?}"
+        );
     }
 
     #[test]
