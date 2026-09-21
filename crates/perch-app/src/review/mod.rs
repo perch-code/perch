@@ -7,6 +7,7 @@ pub mod doc;
 pub mod editor;
 pub mod gutter;
 pub mod header;
+pub mod hierarchy;
 pub mod hover;
 pub mod issue;
 pub mod markdown;

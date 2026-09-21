@@ -283,6 +283,198 @@ fn crate_name_and_version(dir: &str) -> Option<(&str, &str)> {
     Some((&dir[..at], &dir[at + 1..]))
 }
 
+/// Which way the call hierarchy reads: who calls the function, or what it
+/// calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    Callers,
+    Callees,
+}
+
+impl Direction {
+    /// "Callers of", "Callees of": what the heading says before the symbol.
+    pub fn heading(self) -> &'static str {
+        match self {
+            Direction::Callers => "Callers of",
+            Direction::Callees => "Callees of",
+        }
+    }
+
+    /// "No callers.", "No callees.": the row under a function nothing
+    /// calls, or that calls nothing.
+    pub fn none(self) -> &'static str {
+        match self {
+            Direction::Callers => "No callers.",
+            Direction::Callees => "No callees.",
+        }
+    }
+}
+
+/// One function the server named in the call hierarchy: a caller or a
+/// callee of the row above it, or the root. The item goes back to the
+/// server as it came when the row is expanded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    pub item: perch_lsp::lsp_types::CallHierarchyItem,
+    /// Where the call is made: the file and line of the call, with the
+    /// line's text. In the caller's file for a caller, and in the file of
+    /// the function above for a callee.
+    pub site: Located,
+}
+
+/// One row of the call hierarchy panel's tree, which is flat with depths
+/// the way the sidebar's lists are, so `dyn_stack` draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HierarchyRow {
+    pub item: perch_lsp::lsp_types::CallHierarchyItem,
+    pub depth: usize,
+    /// The call sites: none for the root, whose place is its definition.
+    pub site: Option<Located>,
+    /// Which name the call's line emphasises: the callee's.
+    pub emphasis: String,
+    pub expanded: bool,
+    /// The token of the ask for this row's children, while one is out.
+    pub pending: Option<u64>,
+    /// True when the same function is open above this row: a recursive
+    /// call, which expands to nothing.
+    pub repeats: bool,
+}
+
+impl HierarchyRow {
+    /// Whether two items are the same function: the server's items carry
+    /// no identity but where they are.
+    fn same(a: &perch_lsp::lsp_types::CallHierarchyItem, b: &perch_lsp::lsp_types::CallHierarchyItem) -> bool {
+        a.uri == b.uri && a.selection_range == b.selection_range && a.name == b.name
+    }
+}
+
+/// The call hierarchy panel's content: a root function and the tree under
+/// it, one way or the other.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hierarchy {
+    pub root: perch_lsp::lsp_types::CallHierarchyItem,
+    /// Where the root is, for its row.
+    pub root_place: Located,
+    pub direction: Direction,
+    pub rows: Vec<HierarchyRow>,
+}
+
+impl Hierarchy {
+    /// A fresh tree of the root alone, with its children on their way
+    /// under `token`.
+    pub fn new(
+        root: perch_lsp::lsp_types::CallHierarchyItem,
+        root_place: Located,
+        direction: Direction,
+        token: u64,
+    ) -> Self {
+        let rows = vec![HierarchyRow {
+            item: root.clone(),
+            depth: 0,
+            site: None,
+            emphasis: root.name.clone(),
+            expanded: false,
+            pending: Some(token),
+            repeats: false,
+        }];
+        Self {
+            root,
+            root_place,
+            direction,
+            rows,
+        }
+    }
+
+    /// The children asked for under `token` arrived: they go under the row
+    /// that asked, one deeper, each marked when it repeats a function open
+    /// above it. `None` when no row was waiting on the token.
+    pub fn fill(&mut self, token: u64, calls: Vec<Call>) -> Option<usize> {
+        let at = self.rows.iter().position(|r| r.pending == Some(token))?;
+        let depth = self.rows[at].depth;
+        let ancestors: Vec<perch_lsp::lsp_types::CallHierarchyItem> = self.ancestors(at);
+        let parent_name = self.rows[at].item.name.clone();
+        let direction = self.direction;
+        let children: Vec<HierarchyRow> = calls
+            .into_iter()
+            .map(|call| {
+                let repeats = ancestors.iter().any(|a| HierarchyRow::same(a, &call.item));
+                // The call's line emphasises the callee: the function above
+                // for a caller, the row's own for a callee.
+                let emphasis = match direction {
+                    Direction::Callers => parent_name.clone(),
+                    Direction::Callees => call.item.name.clone(),
+                };
+                HierarchyRow {
+                    item: call.item,
+                    depth: depth + 1,
+                    site: Some(call.site),
+                    emphasis,
+                    expanded: false,
+                    pending: None,
+                    repeats,
+                }
+            })
+            .collect();
+        let row = &mut self.rows[at];
+        row.pending = None;
+        row.expanded = true;
+        let count = children.len();
+        self.rows.splice(at + 1..at + 1, children);
+        Some(count)
+    }
+
+    /// The row and every ancestor of it, root first.
+    fn ancestors(&self, at: usize) -> Vec<perch_lsp::lsp_types::CallHierarchyItem> {
+        let mut out = Vec::new();
+        let mut depth = self.rows[at].depth;
+        out.push(self.rows[at].item.clone());
+        for row in self.rows[..at].iter().rev() {
+            if row.depth < depth {
+                out.push(row.item.clone());
+                depth = row.depth;
+            }
+        }
+        out.reverse();
+        out
+    }
+
+    /// Fold a row: its subtree goes. Nothing for one that is not open.
+    pub fn collapse(&mut self, at: usize) {
+        let Some(row) = self.rows.get_mut(at) else { return };
+        if !row.expanded {
+            return;
+        }
+        row.expanded = false;
+        let depth = row.depth;
+        let end = self.rows[at + 1..]
+            .iter()
+            .position(|r| r.depth <= depth)
+            .map(|n| at + 1 + n)
+            .unwrap_or(self.rows.len());
+        self.rows.drain(at + 1..end);
+    }
+
+    /// Mark a row's children as asked for under `token`.
+    pub fn expanding(&mut self, at: usize, token: u64) {
+        if let Some(row) = self.rows.get_mut(at) {
+            row.pending = Some(token);
+        }
+    }
+
+    /// The same root, the other way: the tree starts again.
+    pub fn turned(&self, direction: Direction, token: u64) -> Self {
+        Self::new(self.root.clone(), self.root_place.clone(), direction, token)
+    }
+}
+
+/// A call hierarchy asked for and not yet prepared: the panel opens when
+/// the server names a function, and does not when it names nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchyAsk {
+    pub token: u64,
+    pub symbol: String,
+}
+
 /// A goto in flight: a definition, a type definition or an implementation
 /// asked for and not yet answered. One answer opens; several list under
 /// `kind`; none does nothing visible.
@@ -701,6 +893,15 @@ pub struct ReviewState {
     pub references: RwSignal<Option<Arc<References>>>,
     /// A goto asked for and not yet answered.
     pub goto: RwSignal<Option<GotoAsk>>,
+    /// The call hierarchy panel's content, when it is open. One panel at a
+    /// time: opening this one closes the references panel.
+    pub hierarchy: RwSignal<Option<Arc<Hierarchy>>>,
+    /// A call hierarchy asked for and not yet prepared.
+    pub hierarchy_ask: RwSignal<Option<HierarchyAsk>>,
+    /// Asks for the calls under an item not yet sent, drained by the panel,
+    /// which holds the backend handle: the event that opens the panel has
+    /// none, and asks for the root's calls this way.
+    pub pending_calls: RwSignal<Vec<(u64, perch_lsp::lsp_types::CallHierarchyItem, Direction)>>,
     /// Where the jumps came from, for `Ctrl--` and `Ctrl-Shift--`. Lives
     /// as long as the item is open.
     pub history: RwSignal<History>,
@@ -883,6 +1084,9 @@ impl ReviewState {
             pending_reveals: RwSignal::new(Vec::new()),
             references: RwSignal::new(None),
             goto: RwSignal::new(None),
+            hierarchy: RwSignal::new(None),
+            hierarchy_ask: RwSignal::new(None),
+            pending_calls: RwSignal::new(Vec::new()),
             history: RwSignal::new(History::default()),
             references_height: RwSignal::new(crate::theme::REFERENCES_HEIGHT),
             changed_files: RwSignal::new(Arc::new(Vec::new())),
@@ -1006,6 +1210,9 @@ impl ReviewState {
         self.pending_reveals.set(Vec::new());
         self.references.set(None);
         self.goto.set(None);
+        self.hierarchy.set(None);
+        self.hierarchy_ask.set(None);
+        self.pending_calls.set(Vec::new());
         self.history.set(History::default());
         self.pending_jump.set(None);
         self.changed_files.set(Arc::new(Vec::new()));
@@ -1343,14 +1550,127 @@ impl ReviewState {
         match locations.as_slice() {
             [] => {}
             [one] => self.open_located(one),
-            _ => self.references.set(Some(Arc::new(References {
+            _ => self.open_references(References {
                 kind: ask.kind,
                 symbol: ask.symbol,
                 locations,
                 pending: false,
                 token,
-            }))),
+            }),
         }
+    }
+
+    /// Open the references panel with an answer, or an ask. One panel at a
+    /// time: the call hierarchy's closes.
+    pub fn open_references(&self, references: References) {
+        self.hierarchy.set(None);
+        self.references.set(Some(Arc::new(references)));
+    }
+
+    /// Open the call hierarchy panel. The references panel closes.
+    pub fn open_hierarchy(&self, hierarchy: Hierarchy) {
+        self.references.set(None);
+        self.hierarchy.set(Some(Arc::new(hierarchy)));
+    }
+
+    /// Ask for the calls under an item, one way or the other: queued for
+    /// the panel to send, under a fresh token, which the answer carries.
+    pub fn ask_calls(&self, item: perch_lsp::lsp_types::CallHierarchyItem, direction: Direction) -> u64 {
+        let token = self.next_token();
+        self.pending_calls.update(|p| p.push((token, item, direction)));
+        token
+    }
+
+    /// The server named what a call hierarchy can start from. Nothing
+    /// named opens nothing; the first item opens the panel as its callers,
+    /// with the calls on their way.
+    pub fn finish_prepare_hierarchy(
+        &self,
+        token: u64,
+        items: Vec<perch_lsp::lsp_types::CallHierarchyItem>,
+        place: Option<Located>,
+    ) {
+        let ask = self
+            .hierarchy_ask
+            .try_update(|a| a.take_if(|a| a.token == token))
+            .flatten();
+        let Some(_) = ask else { return };
+        let Some(root) = items.into_iter().next() else { return };
+        let place = place.unwrap_or_else(|| Located {
+            path: root.uri.as_str().to_string(),
+            outside: None,
+            line: root.selection_range.start.line as usize + 1,
+            character: root.selection_range.start.character as usize,
+            text: String::new(),
+        });
+        let token = self.ask_calls(root.clone(), Direction::Callers);
+        self.open_hierarchy(Hierarchy::new(root, place, Direction::Callers, token));
+    }
+
+    /// Expand a row of the call hierarchy: its calls are asked for. A row
+    /// that repeats a function open above it, a recursive call, expands
+    /// to nothing and says so, and asks nothing.
+    pub fn expand_hierarchy_row(&self, at: usize) {
+        let Some(hierarchy) = self.hierarchy.get_untracked() else { return };
+        let Some(row) = hierarchy.rows.get(at) else { return };
+        if row.expanded || row.pending.is_some() {
+            return;
+        }
+        let token = if row.repeats {
+            None
+        } else {
+            Some(self.ask_calls(row.item.clone(), hierarchy.direction))
+        };
+        let mut open = (*hierarchy).clone();
+        match token {
+            Some(token) => open.expanding(at, token),
+            None => {
+                open.rows[at].expanded = true;
+            }
+        }
+        self.hierarchy.set(Some(Arc::new(open)));
+    }
+
+    /// Fold a row of the call hierarchy: its subtree goes.
+    pub fn collapse_hierarchy_row(&self, at: usize) {
+        let Some(hierarchy) = self.hierarchy.get_untracked() else { return };
+        let mut open = (*hierarchy).clone();
+        open.collapse(at);
+        self.hierarchy.set(Some(Arc::new(open)));
+    }
+
+    /// Turn the call hierarchy the other way: the same root, its tree
+    /// started again.
+    pub fn turn_hierarchy(&self, direction: Direction) {
+        let Some(hierarchy) = self.hierarchy.get_untracked() else { return };
+        if hierarchy.direction == direction {
+            return;
+        }
+        let token = self.ask_calls(hierarchy.root.clone(), direction);
+        self.hierarchy.set(Some(Arc::new(hierarchy.turned(direction, token))));
+    }
+
+    /// The calls under a row arrived.
+    pub fn finish_calls(&self, token: u64, calls: Vec<Call>) {
+        self.hierarchy.update(|h| {
+            if let Some(h) = h.as_mut() {
+                let mut open = (**h).clone();
+                if open.fill(token, calls).is_some() {
+                    *h = Arc::new(open);
+                }
+            }
+        });
+    }
+
+    /// Whether a panel is open under the editor, for Escape.
+    pub fn panel_open(&self) -> bool {
+        self.references.with(Option::is_some) || self.hierarchy.with(Option::is_some)
+    }
+
+    /// Escape: whichever panel is open closes.
+    pub fn close_panel(&self) {
+        self.references.set(None);
+        self.hierarchy.set(None);
     }
 
     pub fn file(&self, path: &str) -> Option<Arc<LoadedFile>> {

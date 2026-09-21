@@ -207,6 +207,24 @@ pub enum Command {
         line: u32,
         character: u32,
     },
+    /// The function at a position, as the server names it for a call
+    /// hierarchy, or nothing when the position is not on one.
+    PrepareCallHierarchy {
+        token: u64,
+        path: String,
+        line: u32,
+        character: u32,
+    },
+    /// The callers of an item, or the functions it calls. The item goes
+    /// back as the server gave it.
+    IncomingCalls {
+        token: u64,
+        item: Box<perch_lsp::lsp_types::CallHierarchyItem>,
+    },
+    OutgoingCalls {
+        token: u64,
+        item: Box<perch_lsp::lsp_types::CallHierarchyItem>,
+    },
     CloseReview {
         navigation_id: u64,
     },
@@ -660,6 +678,17 @@ pub enum Event {
     LspReferences {
         token: u64,
         locations: Vec<crate::review::model::Located>,
+    },
+    /// The items a call hierarchy can start from, with where the first is.
+    LspCallHierarchy {
+        token: u64,
+        items: Vec<perch_lsp::lsp_types::CallHierarchyItem>,
+        place: Option<crate::review::model::Located>,
+    },
+    /// The calls under an item, each with its item and where the call is.
+    LspCalls {
+        token: u64,
+        calls: Vec<crate::review::model::Call>,
     },
 }
 
@@ -1717,6 +1746,28 @@ impl Backend {
             path: path.to_string(),
             line,
             character,
+        });
+    }
+
+    pub fn prepare_call_hierarchy(&self, token: u64, path: &str, line: u32, character: u32) {
+        let _ = self.commands.send(Command::PrepareCallHierarchy {
+            token,
+            path: path.to_string(),
+            line,
+            character,
+        });
+    }
+
+    pub fn calls(
+        &self,
+        token: u64,
+        item: perch_lsp::lsp_types::CallHierarchyItem,
+        direction: crate::review::model::Direction,
+    ) {
+        let item = Box::new(item);
+        let _ = self.commands.send(match direction {
+            crate::review::model::Direction::Callers => Command::IncomingCalls { token, item },
+            crate::review::model::Direction::Callees => Command::OutgoingCalls { token, item },
         });
     }
 
@@ -2976,6 +3027,68 @@ async fn run(
                     let _ = events.send(Event::LspReferences { token, locations });
                 });
             }
+            Command::PrepareCallHierarchy {
+                token,
+                path,
+                line,
+                character,
+            } => {
+                let checkout = checkout.clone();
+                let language_server = language_server.clone();
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    else {
+                        return;
+                    };
+                    let worktree = checkout
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
+                    let Some(worktree) = worktree else { return };
+                    let items = client.prepare_call_hierarchy(&full, line, character).await;
+                    // Where the first item is, read as a location is, so the
+                    // root row has its path, line and text.
+                    let place = match items.first() {
+                        Some(item) => read_locations(
+                            &worktree,
+                            &[perch_lsp::lsp_types::Location {
+                                uri: item.uri.clone(),
+                                range: item.selection_range,
+                            }],
+                        )
+                        .await
+                        .into_iter()
+                        .next(),
+                        None => None,
+                    };
+                    let _ = events.send(Event::LspCallHierarchy {
+                        token,
+                        items,
+                        place,
+                    });
+                });
+            }
+            Command::IncomingCalls { token, item } => {
+                spawn_calls(
+                    crate::review::model::Direction::Callers,
+                    token,
+                    *item,
+                    checkout.clone(),
+                    language_server.clone(),
+                    events.clone(),
+                );
+            }
+            Command::OutgoingCalls { token, item } => {
+                spawn_calls(
+                    crate::review::model::Direction::Callees,
+                    token,
+                    *item,
+                    checkout.clone(),
+                    language_server.clone(),
+                    events.clone(),
+                );
+            }
             // The three gotos: a position in, every location out, each
             // answered by the event of its name.
             Command::Definition {
@@ -3097,6 +3210,85 @@ fn spawn_goto(
             Goto::TypeDefinition => Event::LspTypeDefinition { token, locations },
             Goto::Implementation => Event::LspImplementation { token, locations },
         });
+    });
+}
+
+/// Ask for the calls under an item, one way or the other, and answer with
+/// each call's item and where the call is made. A caller's call is in the
+/// caller's file; a callee's is in the item's own, which is what the
+/// protocol's `from_ranges` are relative to.
+fn spawn_calls(
+    direction: crate::review::model::Direction,
+    token: u64,
+    item: perch_lsp::lsp_types::CallHierarchyItem,
+    checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    events: EventSender<Event>,
+) {
+    use crate::review::model::Direction;
+    tokio::spawn(async move {
+        let Some(client) = language_server.lock().await.clone() else {
+            return;
+        };
+        let worktree = checkout
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
+        let Some(worktree) = worktree else { return };
+
+        // Each call as its item and the location of its first call site.
+        let named: Vec<(perch_lsp::lsp_types::CallHierarchyItem, perch_lsp::lsp_types::Location)> =
+            match direction {
+                Direction::Callers => client
+                    .incoming_calls(item)
+                    .await
+                    .into_iter()
+                    .filter_map(|c| {
+                        let range = *c.from_ranges.first()?;
+                        let uri = c.from.uri.clone();
+                        Some((c.from, perch_lsp::lsp_types::Location { uri, range }))
+                    })
+                    .collect(),
+                Direction::Callees => {
+                    let uri = item.uri.clone();
+                    client
+                        .outgoing_calls(item)
+                        .await
+                        .into_iter()
+                        .filter_map(|c| {
+                            let range = *c.from_ranges.first()?;
+                            Some((
+                                c.to,
+                                perch_lsp::lsp_types::Location {
+                                    uri: uri.clone(),
+                                    range,
+                                },
+                            ))
+                        })
+                        .collect()
+                }
+            };
+        let mut calls = Vec::with_capacity(named.len());
+        for (call_item, location) in named {
+            let Some(site) = read_locations(&worktree, &[location]).await.into_iter().next() else {
+                continue;
+            };
+            calls.push(crate::review::model::Call {
+                item: call_item,
+                site,
+            });
+        }
+        // Callers in the order the panel lists locations: by file, the
+        // worktree's first, then by line.
+        calls.sort_by(|a, b| {
+            a.site
+                .outside
+                .is_some()
+                .cmp(&b.site.outside.is_some())
+                .then_with(|| a.site.path.cmp(&b.site.path))
+                .then(a.site.line.cmp(&b.site.line))
+        });
+        let _ = events.send(Event::LspCalls { token, calls });
     });
 }
 

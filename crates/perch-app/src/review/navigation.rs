@@ -27,6 +27,7 @@ use floem::views::{dyn_container, tooltip, Decorators, Delay, Empty, TextEditor}
 
 use crate::backend::Backend;
 use crate::review::doc::Doc;
+use crate::review::hierarchy;
 use crate::review::hover;
 use crate::review::model::{GotoAsk, LoadedFile, Locations, ReviewState, Symbol};
 use crate::review::references;
@@ -282,6 +283,7 @@ pub enum Entry {
     TypeDefinition,
     Implementations,
     References,
+    CallHierarchy,
     Copy,
 }
 
@@ -294,6 +296,7 @@ impl Entry {
                 Entry::TypeDefinition,
                 Entry::Implementations,
                 Entry::References,
+                Entry::CallHierarchy,
                 Entry::Copy,
             ],
             None => vec![Entry::Copy],
@@ -308,6 +311,7 @@ impl Entry {
             Entry::TypeDefinition => format!("Go to Type Definition{name}"),
             Entry::Implementations => format!("Go to Implementations{name}"),
             Entry::References => format!("Find All References{}", name.replacen(" of ", " to ", 1)),
+            Entry::CallHierarchy => format!("Show Call Hierarchy{}", name.replacen(" of ", " for ", 1)),
             Entry::Copy => "Copy".to_string(),
         }
     }
@@ -319,6 +323,7 @@ impl Entry {
             Entry::TypeDefinition => None,
             Entry::Implementations => Some("super+F12"),
             Entry::References => Some("shift+F12"),
+            Entry::CallHierarchy => Some("shift+alt+KeyH"),
             Entry::Copy => Some("super+KeyC"),
         }
     }
@@ -352,6 +357,7 @@ fn symbol_menu(state: ReviewState, backend: &Rc<Backend>, ed: &Editor, symbol: O
                 (Entry::References, Some(symbol)) => {
                     references::find(state, &backend, symbol, Locations::References)
                 }
+                (Entry::CallHierarchy, Some(symbol)) => hierarchy::show(state, &backend, symbol),
                 (Entry::Copy, _) => copy_selection(&ed),
                 (_, None) => {}
             })
@@ -804,6 +810,27 @@ mod tests {
     }
 
     #[test]
+    fn shift_alt_h_asks_for_the_call_hierarchy_of_the_symbol_at_the_caret() {
+        let (mut harness, state, mut commands) = recording_harness();
+        let doc = stacked_doc(state);
+        editor().cursor.update(|c| c.set_offset(doc.offset_of_row(3) + 6, CursorAffinity::Backward, false, false));
+        harness.rebuild();
+
+        // On a Mac, Alt-H types a dot above; the code says which key it was.
+        harness.dispatch_event(key(Code::KeyH, Key::Character("\u{02d9}".into()), Modifiers::SHIFT | Modifiers::ALT));
+        harness.rebuild();
+        let mut asked = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let Command::PrepareCallHierarchy { path, line, character, .. } = command {
+                asked.push((path, line, character));
+            }
+        }
+        assert_eq!(asked, vec![("src/x.rs".into(), 2, 4)]);
+        assert_eq!(state.hierarchy_ask.get().map(|a| a.symbol), Some("alpha".into()));
+        assert!(state.hierarchy.get().is_none(), "nothing opens until the server names a function");
+    }
+
+    #[test]
     fn the_type_definition_answers_as_a_definition_does() {
         let state = ReviewState::new();
         state.lsp_status.set(perch_lsp::Status::Ready);
@@ -840,12 +867,20 @@ mod tests {
                 "Go to Type Definition of `parse`",
                 "Go to Implementations of `parse`",
                 "Find All References to `parse`",
+                "Show Call Hierarchy for `parse`",
                 "Copy",
             ]
         );
         assert_eq!(
             entries.iter().map(|e| e.accelerator()).collect::<Vec<_>>(),
-            vec![Some("F12"), None, Some("super+F12"), Some("shift+F12"), Some("super+KeyC")]
+            vec![
+                Some("F12"),
+                None,
+                Some("super+F12"),
+                Some("shift+F12"),
+                Some("shift+alt+KeyH"),
+                Some("super+KeyC")
+            ]
         );
         for keys in entries.iter().filter_map(|e| e.accelerator()) {
             assert!(keys.parse::<floem::muda::accelerator::Accelerator>().is_ok(), "{keys}");

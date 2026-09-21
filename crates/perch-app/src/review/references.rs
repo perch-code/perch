@@ -9,8 +9,6 @@
 //! status letter here as in the rail. A file outside the worktree, in a
 //! dependency, is grouped under the label its tab's chip would show.
 
-use std::sync::Arc;
-
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::{CursorStyle, Position};
@@ -76,13 +74,13 @@ pub fn find(state: ReviewState, backend: &Backend, symbol: &Symbol, kind: Locati
         return;
     }
     let token = state.next_token();
-    state.references.set(Some(Arc::new(References {
+    state.open_references(References {
         kind,
         symbol: symbol.text.clone(),
         locations: Vec::new(),
         pending: true,
         token,
-    })));
+    });
     let (line, character) = (symbol.line as u32, symbol.column as u32);
     match kind {
         Locations::Implementations => backend.implementation(token, &symbol.path, line, character),
@@ -265,13 +263,32 @@ pub fn panel(state: ReviewState, open_file: OpenFile) -> impl IntoView {
 }
 
 fn body(state: ReviewState, open_file: OpenFile) -> impl IntoView {
+    panel_frame(state, header(state), list(state, open_file))
+}
+
+/// The panel's frame, shared with the call hierarchy: the handle along the
+/// top, a header strip, the content, and the sheet that keeps the cursor
+/// while the handle is dragged. The handle and the sheet are placed over
+/// the panel's edges, so the panel is their positioning box.
+pub(crate) fn panel_frame(
+    state: ReviewState,
+    header: impl IntoView + 'static,
+    content: impl IntoView + 'static,
+) -> impl IntoView {
     let resizing = RwSignal::new(false);
-    // The handle and the sheet are placed over the panel's edges, so the
-    // panel is their positioning box.
     Stack::vertical((
         resize_handle(state, resizing),
-        header(state),
-        list(state, open_file),
+        header.style(|s| {
+            s.height(theme::REFERENCES_HEADER_HEIGHT)
+                .width_full()
+                .flex_shrink(0.0_f32)
+                .items_center()
+                .padding_horiz(12.0)
+                .background(theme::CANVAS_SUBTLE)
+                .border_bottom(1.0)
+                .border_color(theme::BORDER)
+        }),
+        content,
         resize_cursor_sheet(resizing),
     ))
     .style(move |s| {
@@ -322,21 +339,13 @@ fn header(state: ReviewState) -> impl IntoView {
         }),
         close_button(state),
     ))
-    .style(|s| {
-        s.height(theme::REFERENCES_HEADER_HEIGHT)
-            .width_full()
-            .flex_shrink(0.0_f32)
-            .items_center()
-            .padding_horiz(12.0)
-            .background(theme::CANVAS_SUBTLE)
-            .border_bottom(1.0)
-            .border_color(theme::BORDER)
-    })
 }
 
-fn close_button(state: ReviewState) -> impl IntoView {
+/// The close glyph at the header's right end, for either panel: whichever
+/// is open closes.
+pub(crate) fn close_button(state: ReviewState) -> impl IntoView {
     Container::new(sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE).style(|s| s.size(11.0, 11.0)))
-        .on_event_stop(el::Click, move |_, _| state.references.set(None))
+        .on_event_stop(el::Click, move |_, _| state.close_panel())
         .style(|s| {
             clickable(s)
                 .size(18.0, 18.0)
@@ -512,7 +521,7 @@ fn location_row(
 /// symbol in the accent colour and semibold. Rich text wraps, and a long
 /// line must not; the clip is one row tall, so only the first line shows
 /// and the row keeps its height.
-fn line_text(text: String, symbol: String) -> impl IntoView {
+pub(crate) fn line_text(text: String, symbol: String) -> impl IntoView {
     let (text, attrs) = layout(&text, &symbol);
     let again = (text.clone(), attrs.clone());
     rich_text(text, attrs, move || again.clone())
@@ -542,8 +551,9 @@ fn layout(text: &str, symbol: &str) -> (String, AttrsList) {
 // ---------------------------------------------------------------------
 
 /// The strip along the panel's top edge that drags it taller: the thread
-/// column's handle turned sideways.
-fn resize_handle(state: ReviewState, resizing: RwSignal<bool>) -> impl IntoView {
+/// column's handle turned sideways. Shared with the call hierarchy panel,
+/// which sits in the same place and drags to the same height.
+pub(crate) fn resize_handle(state: ReviewState, resizing: RwSignal<bool>) -> impl IntoView {
     use floem::event::DragConfig;
 
     let grab = RwSignal::new(0.0_f64);
@@ -603,7 +613,7 @@ fn resize_handle(state: ReviewState, resizing: RwSignal<bool>) -> impl IntoView 
 /// that is the code above or a row below rather than the handle, which
 /// is only there once layout has caught up. The sheet reaches up as far
 /// as the panel can grow, which is as far as the pointer can take it.
-fn resize_cursor_sheet(resizing: RwSignal<bool>) -> impl IntoView {
+pub(crate) fn resize_cursor_sheet(resizing: RwSignal<bool>) -> impl IntoView {
     Empty::new().style(move |s| {
         s.position(Position::Absolute)
             .inset_left(0.0)

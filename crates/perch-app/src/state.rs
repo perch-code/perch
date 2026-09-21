@@ -1249,6 +1249,12 @@ impl AppState {
             | Event::LspImplementation { token, locations } => {
                 review.finish_goto(token, locations);
             }
+            Event::LspCallHierarchy { token, items, place } => {
+                review.finish_prepare_hierarchy(token, items, place);
+            }
+            Event::LspCalls { token, calls } => {
+                review.finish_calls(token, calls);
+            }
             // A load for the last item, still on its way when the next one
             // opened, is nobody's now.
             Event::FileLoaded {
@@ -1747,6 +1753,8 @@ impl AppState {
             | Event::LspDefinition { .. }
             | Event::LspTypeDefinition { .. }
             | Event::LspImplementation { .. }
+            | Event::LspCallHierarchy { .. }
+            | Event::LspCalls { .. }
             | Event::DiscussionReady { .. }
             | Event::IssueComments { .. }
             | Event::ChecksReady { .. }

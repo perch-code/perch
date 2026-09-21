@@ -49,6 +49,7 @@ use crate::icons::SidebarIcon;
 use crate::review::cards;
 use crate::review::doc::{self, Card, CardId, Doc, Reveals, Run};
 use crate::review::gutter::{diff_gutter, plain_gutter, side_gutter, visible_lines};
+use crate::review::hierarchy;
 use crate::review::hover;
 use crate::review::model::{
     Composer, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState,
@@ -88,7 +89,7 @@ pub fn editor_pane(
         });
     }
 
-    let code_backend = backend;
+    let code_backend = backend.clone();
     let code_open = open_file.clone();
 
     Stack::vertical((
@@ -140,6 +141,7 @@ pub fn editor_pane(
                 .background(theme::CODE_BG)
         }),
         references::panel(state, open_file),
+        hierarchy::panel(state, backend),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0))
 }

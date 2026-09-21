@@ -261,8 +261,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 // The navigation keys, VS Code's: F12 goes to the definition
                 // of the caret's symbol, Cmd-F12 to its implementations,
-                // and Shift-F12 asks for its references; Ctrl-- and
-                // Ctrl-Shift-- walk the jumps back and forward.
+                // Shift-F12 asks for its references and Shift-Alt-H for its
+                // call hierarchy; Ctrl-- and Ctrl-Shift-- walk the jumps
+                // back and forward.
                 if key.code == Code::F12 && key.modifiers.is_empty() {
                     crate::review::navigation::definition_at_cursor(review, &references_backend);
                     return EventPropagation::Stop;
@@ -273,6 +274,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 if key.code == Code::F12 && key.modifiers == Modifiers::SHIFT {
                     crate::review::references::find_at_cursor(review, &references_backend);
+                    return EventPropagation::Stop;
+                }
+                if key.code == Code::KeyH && key.modifiers == Modifiers::SHIFT | Modifiers::ALT {
+                    crate::review::hierarchy::show_at_cursor(review, &references_backend);
                     return EventPropagation::Stop;
                 }
                 if key.code == Code::Minus && key.modifiers == Modifiers::CONTROL {
@@ -291,17 +296,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     review.confirm_thread.set(None);
                     return EventPropagation::Stop;
                 }
-                // Escape closes the references panel when nothing else claims
-                // it: a composer, or something open under a sidebar row.
+                // Escape closes the panel under the editor, references or
+                // the call hierarchy, when nothing else claims it: a
+                // composer, or something open under a sidebar row.
                 let claimed = review.composer.with(Option::is_some)
                     || state.renaming.with(Option::is_some)
                     || state.confirm_delete.with(Option::is_some);
-                if key.code == Code::Escape
-                    && key.modifiers.is_empty()
-                    && !claimed
-                    && review.references.with(Option::is_some)
-                {
-                    review.references.set(None);
+                if key.code == Code::Escape && key.modifiers.is_empty() && !claimed && review.panel_open() {
+                    review.close_panel();
                     return EventPropagation::Stop;
                 }
 
