@@ -33,6 +33,47 @@ pub const ASK_DELAY_MILLIS: u64 = 150;
 pub const DOC_LINES: usize = 12;
 /// How wide the tooltip grows before it wraps.
 pub const TOOLTIP_WIDTH: f64 = 560.0;
+/// How narrow the tooltip goes to stay inside the code pane when the
+/// pointer is near its right edge, before it is moved left instead.
+pub const TOOLTIP_MIN_WIDTH: f64 = 300.0;
+
+/// How the tooltip fits beside the pointer: `width` is what it may grow
+/// to, the room between the pointer and the pane's right edge up to the
+/// full width, and `shift` is how far left it moves when even the
+/// narrowest tip would not fit there. floem opens the tip at the pointer
+/// and clamps nothing; this keeps a long signature on screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fit {
+    pub width: f64,
+    pub shift: f64,
+}
+
+impl Fit {
+    /// The fit for a pointer `room` pixels from the pane's right edge.
+    pub fn in_room(room: f64) -> Fit {
+        let room = room.max(0.0);
+        if room >= TOOLTIP_MIN_WIDTH {
+            Fit {
+                width: room.min(TOOLTIP_WIDTH),
+                shift: 0.0,
+            }
+        } else {
+            Fit {
+                width: TOOLTIP_MIN_WIDTH,
+                shift: TOOLTIP_MIN_WIDTH - room,
+            }
+        }
+    }
+
+    /// The full width, for a pointer with room to spare.
+    #[cfg(test)]
+    pub fn full() -> Fit {
+        Fit {
+            width: TOOLTIP_WIDTH,
+            shift: 0.0,
+        }
+    }
+}
 
 /// A byte offset in the buffer, as line and column.
 ///
@@ -158,7 +199,7 @@ pub fn cut(markdown: &str, max_lines: usize) -> String {
 /// The card inside the tooltip: the signature in the code font, and the
 /// doc comment under it. Nothing but the card carries chrome, so a tip
 /// with nothing to say draws nothing at all.
-pub fn card(markdown: &str) -> impl IntoView {
+pub fn card(markdown: &str, fit: Fit) -> impl IntoView {
     let blocks = markdown::parse(&cut(markdown, DOC_LINES));
     // rust-analyzer opens with the symbol's path and then its signature,
     // each in a fenced block. Every leading block is the signature area;
@@ -193,9 +234,10 @@ pub fn card(markdown: &str) -> impl IntoView {
                 .into_any()
         },
     ))
-    .style(|s| {
+    .style(move |s| {
         s.flex_col()
-            .max_width(TOOLTIP_WIDTH)
+            .max_width(fit.width)
+            .margin_left(-fit.shift)
             .background(theme::CANVAS)
             .border(1.0)
             .border_color(theme::BORDER)
@@ -381,5 +423,54 @@ mod tests {
     #[test]
     fn plain_text_passes_through_cut_unchanged() {
         assert_eq!(cut("just this", 10), "just this");
+    }
+
+    #[test]
+    fn the_tip_narrows_to_the_room_beside_the_pointer_and_then_moves_left() {
+        assert_eq!(Fit::in_room(900.0), Fit { width: TOOLTIP_WIDTH, shift: 0.0 });
+        assert_eq!(Fit::in_room(400.0), Fit { width: 400.0, shift: 0.0 });
+        assert_eq!(Fit::in_room(120.0), Fit { width: TOOLTIP_MIN_WIDTH, shift: TOOLTIP_MIN_WIDTH - 120.0 });
+        assert_eq!(Fit::in_room(-5.0), Fit { width: TOOLTIP_MIN_WIDTH, shift: TOOLTIP_MIN_WIDTH });
+    }
+
+    /// The card laid out in a window, so its size can be measured: wider
+    /// text wraps inside the width rather than running past it.
+    #[test]
+    fn the_card_is_no_wider_than_its_width_and_wraps_inside_it() {
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::views::Decorators;
+        use floem::{HasViewId, IntoView};
+
+        let long = format!(
+            "```rust\nslatedb::db::Db\n```\n\n```rust\npub async fn flush_with_options(&self, options: FlushOptions, wait_for_durability: bool) -> Result<(), crate::Error>\n```\n\n---\n\n{}\n",
+            "Flush in-memory writes to object storage, and wait until they are durable. ".repeat(6)
+        );
+        let root = TestRoot::new();
+        let view = card(&long, Fit::full())
+            .into_view()
+            .style(|s| s.position(floem::style::Position::Absolute));
+        let id = view.view_id();
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        let rect = harness.get_layout_rect(id);
+        assert!(rect.width() <= TOOLTIP_WIDTH + 0.5, "{} wide", rect.width());
+        assert!(rect.width() > 400.0, "{} wide: the card takes its width", rect.width());
+        // Two signature lines, a rule, and a wrapped paragraph: taller than
+        // one line of each.
+        assert!(rect.height() > 4.0 * theme::CODE_LINE_HEIGHT as f64, "{} tall", rect.height());
+
+        // A short one is only as wide as its text.
+        let root = TestRoot::new();
+        let view = card("```rust\nfn x()\n```", Fit::full())
+            .into_view()
+            .style(|s| s.position(floem::style::Position::Absolute));
+        let id = view.view_id();
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        let rect = harness.get_layout_rect(id);
+        assert!(rect.width() < 200.0, "{} wide", rect.width());
+        assert!(rect.height() < 3.0 * theme::CODE_LINE_HEIGHT as f64, "{} tall", rect.height());
     }
 }

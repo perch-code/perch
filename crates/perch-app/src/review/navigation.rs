@@ -23,7 +23,8 @@ use floem::style::CursorStyle;
 use floem::views::editor::core::buffer::rope_text::RopeText;
 use floem::views::editor::core::cursor::CursorAffinity;
 use floem::views::editor::Editor;
-use floem::views::{dyn_container, tooltip, Decorators, Delay, Empty, TextEditor};
+use floem::views::{dyn_container, tooltip, Decorators, Delay, Empty, TextEditor, TooltipClass};
+use floem::HasViewId;
 
 use crate::backend::Backend;
 use crate::review::doc::Doc;
@@ -92,12 +93,19 @@ pub fn navigable(
         },
     );
 
+    // Where the pointer last was, in window coordinates, for fitting the
+    // tip beside it: floem opens the tip there and clamps nothing.
+    let pointer_at = Rc::new(std::cell::Cell::new(Point::ZERO));
+    let editor_id = editor.view_id();
+
     let track_ed = ed.clone();
     let track_path = path.clone();
     let track_backend = backend.clone();
+    let track_pointer = pointer_at.clone();
     let editor = editor
         .on_event_cont(el::PointerMove, move |cx, update| {
             let window_point = cx.world_transform.inverse() * update.current.logical_point();
+            track_pointer.set(window_point);
             let symbol = symbol_under(&track_ed, &doc, &track_path, window_point);
             let hand = symbol.is_some() && command_held(&update.current.modifiers);
             set_hand(cx, &track_ed, hand);
@@ -131,12 +139,15 @@ pub fn navigable(
     tooltip(editor, move || {
         // Read each time the tip is drawn, and again when the answer lands:
         // nothing, an empty view with no chrome, until there is an answer
-        // about the symbol the pointer is on.
+        // about the symbol the pointer is on. The card fits the room
+        // between the pointer and the pane's right edge.
+        let room = editor_id.get_visual_rect_no_clip().x1 - pointer_at.get().x - 12.0;
+        let fit = hover::Fit::in_room(room);
         dyn_container(
             move || state.hover_for_pointer(),
-            |markdown| match markdown {
+            move |markdown| match markdown {
                 None => Empty::new().into_any(),
-                Some(markdown) => hover::card(&markdown).into_any(),
+                Some(markdown) => hover::card(&markdown, fit).into_any(),
             },
         )
     })
@@ -144,6 +155,15 @@ pub fn navigable(
         s.set(Delay, Duration::from_millis(hover::TOOLTIP_DELAY_MILLIS))
             .size_full()
             .min_width(0.0)
+            // floem's theme dresses a tooltip with padding, a background
+            // and shadows. The chrome is the card's, so that a tip with
+            // nothing to say is nothing and not an empty box.
+            .class(TooltipClass, |s| {
+                s.padding(0.0)
+                    .border(0.0)
+                    .background(Color::TRANSPARENT)
+                    .apply_box_shadows(Vec::new())
+            })
     })
 }
 
