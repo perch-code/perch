@@ -295,6 +295,22 @@ pub const CODE_FONT_STACK: &str = ".SF NS Mono";
 pub const GUTTER_WIDTH: f64 = 70.0;
 /// Gap between the gutter's change bar and the first character of code.
 pub const CODE_GUTTER_GAP: f64 = 12.0;
+/// The Files view's scrollbars, as VSCode draws its own: a bar down the
+/// right edge, over the content rather than beside it, and one along the
+/// bottom that is there only while a line is wider than the view; the
+/// editor's are this wide, and the rail's and the panels' the width
+/// VSCode gives a list's. The slider is a flat, translucent grey that
+/// darkens under the pointer and again while it is dragged; the track
+/// paints nothing but, on the editor's vertical bar, the line VSCode
+/// draws down the left of its overview ruler, which is there whether or
+/// not the file is taller than the view. VSCode's light theme, over
+/// Perch's white code.
+pub const EDITOR_SCROLLBAR: f64 = 14.0;
+pub const LIST_SCROLLBAR: f64 = 10.0;
+pub const SCROLLBAR_SLIDER: Color = Color::from_rgba8(0x64, 0x64, 0x64, 0x66);
+pub const SCROLLBAR_SLIDER_HOVER: Color = Color::from_rgba8(0x64, 0x64, 0x64, 0xb3);
+pub const SCROLLBAR_SLIDER_ACTIVE: Color = Color::from_rgba8(0x00, 0x00, 0x00, 0x99);
+pub const SCROLLBAR_TRACK_LINE: Color = Color::from_rgba8(0x7f, 0x7f, 0x7f, 0x4d);
 pub const RAIL_WIDTH: f64 = 312.0;
 pub const REVIEW_HEADER_HEIGHT: f64 = TITLEBAR_HEIGHT;
 /// The room at either end of the bar over the item.

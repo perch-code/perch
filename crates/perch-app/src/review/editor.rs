@@ -42,7 +42,7 @@ use floem::style::Position;
 use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
 use floem::views::editor::core::editor::EditType;
 use floem::views::editor::core::selection::Selection;
-use floem::views::scroll::ScrollCustomStyle;
+use floem::views::scroll::{ScrollClass, ScrollCustomStyle};
 use floem::views::{
     dyn_container, dyn_stack, text_editor, ClipExt, Container, Decorators, Empty, Label, Stack,
     TextEditor,
@@ -68,7 +68,7 @@ use crate::review::timeline::LineThread;
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::centered_message;
+use crate::ui::widgets::{centered_message, scrollbars};
 
 pub fn editor_pane(
     app: AppState,
@@ -329,7 +329,7 @@ fn stacked_view(
         // relative position; the editor fills it. The cards are over the
         // dividers, since a card is never in a divider.
         Stack::vertical((
-            over_tints(editor, doc, viewport),
+            over_tints(editor, doc, viewport, Scrollbar::Shown),
             divider_layer(state, doc, viewport, scroll_delta, Bars::Editor),
             card_layer(
                 app,
@@ -615,21 +615,67 @@ fn tint_layer(doc: RwSignal<Arc<Doc>>, viewport: RwSignal<Rect>) -> impl IntoVie
         .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none())
 }
 
+/// Whether an editor's box has a vertical scrollbar: the stacked
+/// editor's and a split's head side do, and a split's base side, which
+/// scrolls with the head side and hides its own bars, does not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scrollbar {
+    Shown,
+    Hidden,
+}
+
 /// An editor over its rows' tints: a box with the code's background, the
-/// tint layer over that, and the editor over both, painting no background
-/// of its own.
+/// tint layer over that, the vertical scrollbar's track at the right
+/// when the editor has a bar, and the editor over all of them, painting
+/// no background of its own and set in from the left by the gap before
+/// the code.
 fn over_tints(
     editor: impl IntoView + 'static,
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
+    scrollbar: Scrollbar,
 ) -> impl IntoView {
-    Stack::vertical((tint_layer(doc, viewport), editor))
+    // Breathing room between the change bars and the first character, so
+    // a bar never reads as part of the code. Padding on this box rather
+    // than on the editor: see `code_editor`.
+    let editor = Container::new(editor).style(|s| {
+        s.size_full()
+            .min_width(0.0)
+            .padding_left(theme::CODE_GUTTER_GAP)
+    });
+    let track = match scrollbar {
+        Scrollbar::Shown => scrollbar_track().into_any(),
+        Scrollbar::Hidden => Empty::new().style(|s| s.hide()).into_any(),
+    };
+    Stack::vertical((tint_layer(doc, viewport), track, editor))
         .debug_name("tinted editor")
         .style(|s| {
             s.size_full()
                 .min_width(0.0)
                 .position(Position::Relative)
                 .background(theme::CODE_BG)
+        })
+}
+
+/// The vertical scrollbar's track: a strip down the code's right edge,
+/// as wide as the bar, with the line VSCode draws down the left of its
+/// overview ruler. floem draws the bar only while the file is taller
+/// than the view; the strip is there whether or not it is, so the bar's
+/// place is always marked. Under the editor, so that the slider is over
+/// the line as VSCode's is, and taking no pointer events, so the slider
+/// answers the pointer through it.
+fn scrollbar_track() -> impl IntoView {
+    Empty::new()
+        .debug_name("scrollbar track")
+        .style(|s| {
+            s.absolute()
+                .inset_top(0.0)
+                .inset_bottom(0.0)
+                .inset_right(0.0)
+                .width(theme::EDITOR_SCROLLBAR)
+                .border_left(1.0)
+                .border_color(theme::SCROLLBAR_TRACK_LINE)
+                .pointer_events_none()
         })
 }
 
@@ -959,8 +1005,8 @@ fn card_layer(
 /// its inline face, the block for one of GitHub's
 /// without its heading and lines, or the composer, set into its first
 /// spacer row a little way in, so its border never touches a tinted
-/// line, from the first code column to the right edge less the same
-/// margin. Collapsed, it is its one row whole. The wheel over it scrolls
+/// line, from the first code column to the scrollbar's track less the
+/// same margin. Collapsed, it is its one row whole. The wheel over it scrolls
 /// the code, as it does over the gutter, unless what is inside it takes
 /// the wheel first.
 ///
@@ -1055,7 +1101,7 @@ fn inline_card(
             s.absolute()
                 .inset_top(top)
                 .inset_left(left)
-                .inset_right(theme::CODE_GUTTER_GAP)
+                .inset_right(theme::EDITOR_SCROLLBAR + theme::CODE_GUTTER_GAP)
                 .pointer_events_auto()
         })
 }
@@ -1234,7 +1280,7 @@ fn split_view(
             left_viewport,
             right_delta,
         ),
-        Container::new(over_tints(left, left_doc, left_viewport))
+        Container::new(over_tints(left, left_doc, left_viewport, Scrollbar::Hidden))
             .on_event_stop(el::PointerWheel, move |_, wheel| {
                 let size = left_viewport.get_untracked().size();
                 let delta =
@@ -1263,7 +1309,7 @@ fn split_view(
             right_viewport,
             right_delta,
         ),
-        over_tints(right, right_doc, right_viewport),
+        over_tints(right, right_doc, right_viewport, Scrollbar::Shown),
     ))
     .style(|s| {
         s.flex_basis(0.0)
@@ -1325,6 +1371,11 @@ thread_local! {
 }
 
 /// A read-only editor over one document, drawn as code.
+///
+/// The editor fills its box: floem sizes the scroll inside it to the
+/// box's padding box, so padding here would push the scroll, and the
+/// vertical bar at its right edge, out past the box. The gap before the
+/// code is `over_tints`'s.
 fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
     text_editor(text)
         .read_only()
@@ -1339,12 +1390,12 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
         })
         // No background: the box the editor sits in paints the code's,
         // and the rows' tints over it, under the editor. See `over_tints`.
+        // The scroll is floem's, inside; its bars are styled through its
+        // class.
         .style(|s| {
             s.size_full()
                 .min_width(0.0)
-                // Breathing room between the change bars and the first
-                // character, so a bar never reads as part of the code.
-                .padding_left(theme::CODE_GUTTER_GAP)
+                .class(ScrollClass, |s| scrollbars(s, theme::EDITOR_SCROLLBAR))
         })
 }
 
@@ -1764,7 +1815,7 @@ mod window {
     use std::sync::Arc;
 
     use floem::headless::{HeadlessHarness, TestRoot};
-    use floem::peniko::Brush;
+    use floem::peniko::{Brush, Color};
     use floem::reactive::{SignalGet, SignalUpdate};
     use floem::views::editor::core::cursor::CursorAffinity;
     use perch_github::{Item, ItemCheckout};
@@ -2094,6 +2145,161 @@ mod window {
         let (_, rect, bg) = tint(&harness, right, 1);
         assert_eq!((rect.x0, rect.x1, rect.y0), (right_box.x0, right_box.x1, top + line_height));
         assert_eq!(bg, Some(Brush::Solid(DIFF_MODIFIED_BG)));
+    }
+
+    /// The scrollbar's element under a window point, when the point is
+    /// on the bar of the given scroll: floem draws its bars as elements
+    /// of the scroll view beside the view's own, and only while there is
+    /// something to scroll on that axis.
+    fn bar_at(harness: &HeadlessHarness, scroll: floem::ViewId, x: f64, y: f64) -> bool {
+        harness
+            .element_id_at(x, y)
+            .is_some_and(|e| e.owning_id() == scroll && !e.is_view())
+    }
+
+    /// The editor's scroll ends at the pane's right edge, so floem's
+    /// vertical bar, which it draws over the scroll's last `EDITOR_SCROLLBAR`
+    /// pixels, is on the screen: padding on the editor for the gap before
+    /// the code had pushed the scroll, which floem sizes to the editor's
+    /// padding box, out past the window, and the bar with it. The bar is
+    /// there while the file is taller than the view, and the track's
+    /// strip whether or not it is; along the bottom there is a bar only
+    /// while a line is wider than the view. The scroll is styled as
+    /// VSCode's: the bar's width, a flat slider over a bare track.
+    #[test]
+    fn the_vertical_bar_is_at_the_codes_right_edge_and_the_horizontal_one_only_under_a_long_line() {
+        use floem::style::{Background, StyleSelector};
+        use floem::views::scroll::{Handle, Rounded, Track};
+        let bar = crate::theme::EDITOR_SCROLLBAR;
+        let (harness, _) = harness();
+        let root = harness.root_id();
+        let editor = find(root, "tinted editor").expect("the code editor's box");
+        let editor_box = editor.get_visual_rect_no_clip();
+        let scroll = find(editor, "Scroll").expect("the editor's scroll");
+        let scroll_box = scroll.get_visual_rect_no_clip();
+        assert_eq!(
+            (scroll_box.x0, scroll_box.x1),
+            (editor_box.x0 + crate::theme::CODE_GUTTER_GAP, editor_box.x1),
+            "the scroll runs from the gap to the pane's edge"
+        );
+        let style = harness.get_computed_style(scroll);
+        assert_eq!(style.get(floem::style::ScrollbarWidth).0, bar);
+        // The slider's style is in the scroll's own, as the theme puts
+        // its pill there, so it is this that reaches the slider and not
+        // the theme's: flat, and the grey darker under the pointer.
+        let slider = style.clone().apply_class(Handle);
+        assert!(!slider.get(Rounded), "VSCode's slider is a flat rectangle");
+        assert_eq!(
+            slider.get(Background),
+            Some(Brush::Solid(crate::theme::SCROLLBAR_SLIDER))
+        );
+        assert_eq!(
+            slider.apply_selectors(&[StyleSelector::Hover]).get(Background),
+            Some(Brush::Solid(crate::theme::SCROLLBAR_SLIDER_HOVER))
+        );
+        let track = style.clone().apply_class(Track);
+        assert_eq!(track.get(Background), Some(Brush::Solid(Color::TRANSPARENT)));
+        assert_eq!(
+            track.apply_selectors(&[StyleSelector::Hover]).get(Background),
+            Some(Brush::Solid(Color::TRANSPARENT)),
+            "no wash under the pointer"
+        );
+
+        // The strip is the bar's width down the box's right edge.
+        let track = find(editor, "scrollbar track").expect("the track's strip");
+        let strip = track.get_visual_rect_no_clip();
+        assert_eq!(
+            (strip.x0, strip.x1, strip.y0, strip.y1),
+            (editor_box.x1 - bar, editor_box.x1, editor_box.y0, editor_box.y1)
+        );
+
+        // Ninety lines is taller than the view: the bar is over the last
+        // `bar` pixels of the code and answers the pointer there, through
+        // the strip, and the code answers it left of the bar.
+        let y = editor_box.y0 + 100.0;
+        assert!(bar_at(&harness, scroll, editor_box.x1 - bar + 1.0, y));
+        assert!(bar_at(&harness, scroll, editor_box.x1 - 1.0, y));
+        assert!(
+            !bar_at(&harness, scroll, editor_box.x1 - bar - 1.0, y),
+            "the code is left of the bar"
+        );
+        // No line is wider than the view: nothing along the bottom.
+        let x = editor_box.x0 + 100.0;
+        assert!(!bar_at(&harness, scroll, x, editor_box.y1 - 1.0));
+        assert!(!bar_at(&harness, scroll, x, editor_box.y1 - bar + 1.0));
+        drop(harness);
+
+        // A file that fits the view has no bar, and the strip still.
+        let (harness, _) = harness_with(
+            "fn a() {}\nfn b() {}\n".to_string(),
+            "fn a() {}\n".to_string(),
+        );
+        let editor = find(harness.root_id(), "tinted editor").unwrap();
+        let editor_box = editor.get_visual_rect_no_clip();
+        let scroll = find(editor, "Scroll").unwrap();
+        assert!(!bar_at(&harness, scroll, editor_box.x1 - 1.0, editor_box.y0 + 5.0));
+        let strip = find(editor, "scrollbar track").unwrap().get_visual_rect_no_clip();
+        assert_eq!((strip.x0, strip.x1), (editor_box.x1 - bar, editor_box.x1));
+        drop(harness);
+
+        // Lines wider than the view, in a file that fits it: a bar along
+        // the bottom, the same height, and none at the right.
+        let wide: String = (0..20)
+            .map(|i| format!("fn f{i}() {{ {} }}\n", "x".repeat(200)))
+            .collect();
+        let (harness, _) = harness_with(wide.clone(), wide);
+        let editor = find(harness.root_id(), "tinted editor").unwrap();
+        let editor_box = editor.get_visual_rect_no_clip();
+        let scroll = find(editor, "Scroll").unwrap();
+        let x = editor_box.x0 + 100.0;
+        assert!(bar_at(&harness, scroll, x, editor_box.y1 - 1.0));
+        assert!(bar_at(&harness, scroll, x, editor_box.y1 - bar + 1.0));
+        assert!(
+            !bar_at(&harness, scroll, x, editor_box.y1 - bar - 1.0),
+            "the code is above the bar"
+        );
+        assert!(!bar_at(&harness, scroll, editor_box.x1 - 1.0, editor_box.y0 + 5.0));
+    }
+
+    /// A split scrolls by the head side's bar alone: its scroll ends at
+    /// the pane's edge with the bar and the strip there, and the base
+    /// side's scroll ends at its own pane's edge, before the divider,
+    /// with its bars hidden and no strip.
+    #[test]
+    fn a_split_has_one_bar_on_the_head_side() {
+        use floem::views::scroll::HideBars;
+        let bar = crate::theme::EDITOR_SCROLLBAR;
+        let (mut harness, state) = harness();
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let root = harness.root_id();
+        let mut editors = Vec::new();
+        find_all(root, "tinted editor", &mut editors);
+        let [left, right] = editors[..] else {
+            panic!("a split has two editors, not {}", editors.len())
+        };
+        let (left_box, right_box) = (
+            left.get_visual_rect_no_clip(),
+            right.get_visual_rect_no_clip(),
+        );
+        let left_scroll = find(left, "Scroll").unwrap();
+        let right_scroll = find(right, "Scroll").unwrap();
+        assert_eq!(left_scroll.get_visual_rect_no_clip().x1, left_box.x1);
+        assert_eq!(right_scroll.get_visual_rect_no_clip().x1, right_box.x1);
+        assert_eq!(right_box.x1, 1400.0);
+
+        let y = right_box.y0 + 100.0;
+        assert!(bar_at(&harness, right_scroll, right_box.x1 - 1.0, y));
+        assert!(!harness.get_computed_style(right_scroll).get(HideBars));
+        assert!(harness.get_computed_style(left_scroll).get(HideBars));
+        let mut strips = Vec::new();
+        find_all(root, "scrollbar track", &mut strips);
+        let [strip] = strips[..] else {
+            panic!("one strip, not {}", strips.len())
+        };
+        let strip = strip.get_visual_rect_no_clip();
+        assert_eq!((strip.x0, strip.x1), (right_box.x1 - bar, right_box.x1));
     }
 
     /// The tiles sit at the strip's right end: 8 of padding, then Split
@@ -3326,8 +3532,8 @@ mod window {
         let (pane_left, _) = pane_origin();
         assert_eq!(
             rect.x1,
-            1400.0 - pane_left - crate::theme::CODE_GUTTER_GAP,
-            "to the right edge, less the margin"
+            1400.0 - pane_left - crate::theme::EDITOR_SCROLLBAR - crate::theme::CODE_GUTTER_GAP,
+            "to the scrollbar's track, less the margin"
         );
 
         // Collapsing it shrinks both sides by the difference.
@@ -3995,8 +4201,12 @@ mod window {
         let (pane_left, _) = pane_origin();
         assert_eq!(
             rect.x1,
-            1400.0 - pane_left - crate::theme::GUTTER_WIDTH - crate::theme::CODE_GUTTER_GAP,
-            "to the right edge, less the margin"
+            1400.0
+                - pane_left
+                - crate::theme::GUTTER_WIDTH
+                - crate::theme::EDITOR_SCROLLBAR
+                - crate::theme::CODE_GUTTER_GAP,
+            "to the scrollbar's track, less the margin"
         );
 
         // Escape, with nothing typed, puts the composer away, and the

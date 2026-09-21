@@ -20,7 +20,7 @@ use crate::review::OpenFile;
 use crate::review::{cards, scope};
 use crate::state::{AppState, Checked};
 use crate::theme;
-use crate::ui::widgets::{checkbox, icon_button, sidebar_glyph};
+use crate::ui::widgets::{checkbox, icon_button, scrollbars, sidebar_glyph};
 
 /// The changed files by path, for the tree, which lists every file and
 /// knows the changed ones only by path.
@@ -266,7 +266,7 @@ fn tree_list(
     )
     .style(|s| s.flex_col().width_full().padding_vert(4.0))
     .scroll()
-    .style(|s| s.size_full().min_height(0.0))
+    .style(|s| scrollbars(s.size_full().min_height(0.0), theme::LIST_SCROLLBAR))
 }
 
 fn tree_row(
@@ -672,6 +672,41 @@ mod tests {
         // src, a.rs, gone.rs: the tree's order, not the list's.
         click(&mut harness, checkbox_center(2));
         assert_eq!(state.active.get().as_deref(), Some("src/gone.rs"));
+    }
+
+    /// The tree scrolls under VSCode's bar, at the width VSCode gives a
+    /// list's: the one scroll in the rail, its slider flat and grey.
+    #[test]
+    fn the_tree_scrolls_under_vscodes_list_bar() {
+        use floem::peniko::Brush;
+        use floem::style::Background;
+        use floem::views::scroll::{Handle, Rounded};
+        fn scrolls(id: floem::ViewId, out: &mut Vec<floem::ViewId>) {
+            if id.debug_name() == "Scroll" {
+                out.push(id);
+            }
+            for child in id.children() {
+                scrolls(child, out);
+            }
+        }
+        let (harness, _) = app_harness();
+        let mut found = Vec::new();
+        scrolls(harness.root_id(), &mut found);
+        let rail: Vec<_> = found
+            .into_iter()
+            .filter(|id| harness.get_layout_rect(*id).x1 <= theme::RAIL_WIDTH)
+            .collect();
+        let [scroll] = rail[..] else {
+            panic!("one scroll in the rail, not {}", rail.len())
+        };
+        let style = harness.get_computed_style(scroll);
+        assert_eq!(style.get(floem::style::ScrollbarWidth).0, theme::LIST_SCROLLBAR);
+        let slider = style.apply_class(Handle);
+        assert!(!slider.get(Rounded), "flat, not floem's pill");
+        assert_eq!(
+            slider.get(Background),
+            Some(Brush::Solid(theme::SCROLLBAR_SLIDER))
+        );
     }
 
     /// The filter cuts the tree to the changed files; off, the whole

@@ -23,7 +23,7 @@ use crate::icons::SidebarIcon;
 use crate::review::model::{Located, Locations, References, ReviewState, Symbol};
 use crate::review::OpenFile;
 use crate::theme;
-use crate::ui::widgets::{clickable, sidebar_glyph};
+use crate::ui::widgets::{clickable, scrollbars, sidebar_glyph};
 
 // ---------------------------------------------------------------------
 // Asking
@@ -372,7 +372,12 @@ fn list(state: ReviewState, open_file: OpenFile) -> impl IntoView {
     )
     .style(|s| s.flex_col().width_full().padding_bottom(6.0))
     .scroll()
-    .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
+    .style(|s| {
+        scrollbars(
+            s.width_full().flex_grow(1.0_f32).min_height(0.0),
+            theme::LIST_SCROLLBAR,
+        )
+    })
 }
 
 fn notice(text: String) -> impl IntoView {
