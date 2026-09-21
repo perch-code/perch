@@ -419,7 +419,9 @@ fn change_marks(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> 
 
 /// The Viewed check at the row's right edge. A deletion has no head
 /// content to have viewed, so it gets the space and no box, and the
-/// counts stay in their column.
+/// counts stay in their column. Checking a file is being done with it,
+/// so its tab shuts as well; unchecking leaves the tab, since the reader
+/// is going back to the file.
 fn viewed_box(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> impl IntoView {
     let Some(blob) = file.head_blob.clone() else {
         return Empty::new()
@@ -440,7 +442,11 @@ fn viewed_box(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> im
             let Some(item_id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
                 return;
             };
-            backend.set_viewed(&item_id, &path, &blob, !state.is_viewed(&toggle_file));
+            let viewed = !state.is_viewed(&toggle_file);
+            backend.set_viewed(&item_id, &path, &blob, viewed);
+            if viewed && state.tabs.with(|t| t.iter().any(|x| x.path == path)) {
+                state.close_tab(&path);
+            }
         },
     )
     .style(|s| s.flex_shrink(0.0_f32))
@@ -654,6 +660,48 @@ mod tests {
         // The same row, on its name, does open it.
         click(&mut harness, name_center(1));
         assert_eq!(state.active.get().as_deref(), Some("src/a.rs"));
+    }
+
+    /// Checking an open file shuts its tab, and the row opens it again.
+    /// Unchecking leaves the tab: b.rs starts viewed, and the detached
+    /// backend never answers, so its check unchecks every time.
+    #[test]
+    fn checking_an_open_file_closes_its_tab() {
+        let (mut harness, state) = app_harness();
+        click(&mut harness, name_center(1));
+        click(&mut harness, name_center(2));
+        assert_eq!(state.active.get().as_deref(), Some("src/b.rs"));
+        assert_eq!(state.tabs.get().len(), 2);
+
+        click(&mut harness, checkbox_center(1));
+        assert_eq!(
+            state
+                .tabs
+                .get()
+                .iter()
+                .map(|t| t.path.as_str())
+                .collect::<Vec<_>>(),
+            ["src/b.rs"],
+            "the check shut a.rs"
+        );
+        assert_eq!(state.active.get().as_deref(), Some("src/b.rs"));
+
+        click(&mut harness, checkbox_center(2));
+        assert_eq!(state.tabs.get().len(), 1, "unchecking b.rs left its tab");
+        assert_eq!(state.active.get().as_deref(), Some("src/b.rs"));
+
+        // Checking the active file shows its neighbour, as its close button does.
+        click(&mut harness, name_center(1));
+        assert_eq!(state.active.get().as_deref(), Some("src/a.rs"));
+        assert_eq!(state.tabs.get().len(), 2);
+        click(&mut harness, checkbox_center(1));
+        assert_eq!(state.tabs.get().len(), 1);
+        assert_eq!(state.active.get().as_deref(), Some("src/b.rs"));
+
+        // A check on a file with no tab changes nothing.
+        click(&mut harness, checkbox_center(3));
+        assert_eq!(state.tabs.get().len(), 1);
+        assert_eq!(state.active.get().as_deref(), Some("src/b.rs"));
     }
 
     /// A deletion has nothing to view; its row keeps the check's space so
