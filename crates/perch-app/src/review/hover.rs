@@ -213,24 +213,7 @@ pub fn cut(markdown: &str, max_lines: usize) -> String {
 /// doc comment under it. Nothing but the card carries chrome, so a tip
 /// with nothing to say draws nothing at all.
 pub fn card(markdown: &str, fit: Fit) -> impl IntoView {
-    let blocks = markdown::parse(&cut(markdown, DOC_LINES));
-    // rust-analyzer opens with the symbol's path and then its signature,
-    // each in a fenced block. Every leading block is the signature area;
-    // the rest is the doc comment.
-    let leading = blocks
-        .iter()
-        .take_while(|b| matches!(b, Block::Code(_)))
-        .count();
-    let (signature, doc) = blocks.split_at(leading);
-    let signature: Vec<String> = signature
-        .iter()
-        .filter_map(|b| match b {
-            Block::Code(code) => Some(code.clone()),
-            _ => None,
-        })
-        .collect();
-    let doc = doc.to_vec();
-
+    let (signature, doc) = split(markdown::parse(&cut(markdown, DOC_LINES)));
     let alone = doc.is_empty();
     Stack::vertical((
         signature_view(signature, alone),
@@ -267,6 +250,27 @@ pub fn card(markdown: &str, fit: Fit) -> impl IntoView {
 /// fenced blocks, in order; a lone block is the signature. Its corners
 /// follow the card's at the top, and at the bottom only when nothing
 /// follows it; over the doc comment's rule they are square.
+/// The signature area and the doc comment. rust-analyzer opens with the
+/// symbol's path and then its signature, each in a fenced block, so every
+/// leading block is the signature; then a rule, which the card's own
+/// border stands in for; then the doc.
+fn split(blocks: Vec<Block>) -> (Vec<String>, Vec<Block>) {
+    let leading = blocks
+        .iter()
+        .take_while(|b| matches!(b, Block::Code { .. }))
+        .count();
+    let (signature, doc) = blocks.split_at(leading);
+    let signature = signature
+        .iter()
+        .filter_map(|b| match b {
+            Block::Code { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    let doc = doc.iter().skip_while(|b| matches!(b, Block::Rule)).cloned().collect();
+    (signature, doc)
+}
+
 fn signature_view(blocks: Vec<String>, alone: bool) -> impl IntoView {
     let count = blocks.len();
     let children: Vec<_> = blocks
@@ -471,6 +475,22 @@ mod tests {
 
     /// The card laid out in a window, so its size can be measured: wider
     /// text wraps inside the width rather than running past it.
+    #[test]
+    fn the_rule_after_the_signature_is_the_cards_border_not_a_second_line() {
+        let (signature, doc) = split(markdown::parse(HOVER));
+        assert_eq!(signature.len(), 2, "{signature:?}");
+        assert_eq!(
+            doc,
+            vec![
+                Block::Paragraph(vec![markdown::Span { text: "Flush in-memory writes.".into(), ..Default::default() }]),
+                Block::Paragraph(vec![markdown::Span { text: "More.".into(), ..Default::default() }]),
+            ]
+        );
+        // A signature with nothing after its rule stands alone.
+        let (_, doc) = split(markdown::parse("```rust\nfn x()\n```\n\n---"));
+        assert!(doc.is_empty(), "{doc:?}");
+    }
+
     #[test]
     fn the_card_is_no_wider_than_its_width_and_wraps_inside_it() {
         use floem::headless::{HeadlessHarness, TestRoot};

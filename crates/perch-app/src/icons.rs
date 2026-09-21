@@ -224,6 +224,32 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M8 6.2 V9.3" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
                <circle cx="8" cy="11.3" r="0.95" fill="{c}"/>"#
         ),
+        // A circle with an i in it: a note alert.
+        SidebarIcon::Note => format!(
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <path d="M8 7.2 V11.2" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+               <circle cx="8" cy="4.9" r="0.95" fill="{c}"/>"#
+        ),
+        // A bulb on a stem: a tip alert.
+        SidebarIcon::Tip => format!(
+            r#"<path d="M5.2 9.6 a4 4 0 1 1 5.6 0 L10.2 10.6 V11.6 H5.8 V10.6 Z" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M6.4 13.6 H9.6" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
+        // A speech bubble with a mark in it: an important alert.
+        SidebarIcon::Important => format!(
+            r#"<path d="M2.4 2.6 h11.2 v8.2 h-4.6 l-3.1 2.8 v-2.8 h-3.5 z" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M8 4.8 V7.4" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+               <circle cx="8" cy="9.2" r="0.95" fill="{c}"/>"#
+        ),
+        // An octagon with a mark in it: a caution alert.
+        SidebarIcon::Caution => format!(
+            r#"<path d="M5.5 1.8 H10.5 L14.2 5.5 V10.5 L10.5 14.2 H5.5 L1.8 10.5 V5.5 Z" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M8 4.8 V8.4" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+               <circle cx="8" cy="10.9" r="0.95" fill="{c}"/>"#
+        ),
         // Two links of a chain, on the diagonal: a permalink.
         SidebarIcon::Link => format!(
             r#"<path d="M6.3 5.5 L8.4 3.4 a3 3 0 0 1 4.2 4.2 L10.5 9.7" fill="none" stroke="{c}"
@@ -386,18 +412,30 @@ pub enum SidebarIcon {
     Issue,
     /// A book: a repository, for a branch's Repository row.
     Repository,
+    /// A circle with an i in it: a note alert.
+    Note,
+    /// A bulb on a stem: a tip alert.
+    Tip,
+    /// A speech bubble with a mark in it: an important alert.
+    Important,
+    /// An octagon with a mark in it: a caution alert.
+    Caution,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 39] = [
+    pub const ALL: [SidebarIcon; 43] = [
         SidebarIcon::Person,
         SidebarIcon::Tag,
         SidebarIcon::PullRequest,
         SidebarIcon::Issue,
         SidebarIcon::Repository,
+        SidebarIcon::Note,
+        SidebarIcon::Tip,
+        SidebarIcon::Important,
+        SidebarIcon::Caution,
         SidebarIcon::Drawer,
         SidebarIcon::External,
         SidebarIcon::Expand,

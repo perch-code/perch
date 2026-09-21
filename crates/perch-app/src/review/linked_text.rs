@@ -1,4 +1,5 @@
-//! Wrapped rich text whose links can be followed, one click at a time.
+//! Wrapped rich text whose links can be followed, one click at a time,
+//! and whose struck spans are ruled through.
 //!
 //! The text comes from an agent or from GitHub, so a link's words say
 //! nothing reliable about where it goes. Nothing happens on hover but a
@@ -6,21 +7,30 @@
 //! browser, HTTP(S) only. floem's rich text view keeps its layout to
 //! itself, so this wraps one and lays the same text out again for
 //! hit-testing, at the width the wrapped view was given.
+//!
+//! floem's text attributes have no strikethrough either, and the rich
+//! text view draws only glyphs. So the same second layout says where a
+//! struck range's glyphs sit, and a rule is drawn through them where the
+//! font puts its strikeout, in the glyphs' colour. The rule goes down
+//! before the child's glyphs, since floem reaches no `post_paint`
+//! through a boxed view, and a rule under glyphs of its own colour reads
+//! the same as one over them.
 
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
 use floem::action::{add_overlay, exec_after, remove_overlay, TimerToken};
-use floem::context::{EventCx, UpdateCx};
+use floem::context::{EventCx, PaintCx, UpdateCx};
 use floem::event::{Event, EventPropagation, Phase};
 use floem::kurbo::{Point, Rect};
+use floem::peniko::Color;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
 use floem::style::CursorStyle;
 use floem::text::{AttrsList, OverflowWrap, TextLayout, TextWrapMode};
 use floem::ui_events::pointer::{PointerButton, PointerButtonEvent, PointerEvent};
 use floem::views::{rich_text, Decorators};
-use floem::{IntoView, View, ViewId};
+use floem::{IntoView, Renderer, View, ViewId};
 
 use crate::review::cards::tip_body;
 use crate::ui::widgets::open_in_browser;
@@ -33,13 +43,18 @@ struct Link {
     url: String,
 }
 
+/// A byte range to strike through, and the colour of its text.
+pub type Strike = (Range<usize>, Color);
+
 /// A rich text view with links, see the module.
 pub struct LinkedText {
     id: ViewId,
     text: String,
     attrs: AttrsList,
     links: Vec<Link>,
-    /// The layout used for hit-testing, and the width it was made for.
+    strikes: Vec<Strike>,
+    /// The layout used for hit-testing and for the rules, and the width
+    /// it was made for.
     shadow: RefCell<Option<(f32, TextLayout)>>,
     /// The link under the pointer, as an index into `links`. A signal so
     /// the cursor style can follow it.
@@ -53,11 +68,13 @@ pub struct LinkedText {
 }
 
 /// `text` with `attrs`, where each of `links` is a byte range of the text
-/// and its destination.
+/// and its destination, and each of `strikes` a byte range to rule
+/// through in its colour.
 pub fn linked_text(
     text: String,
     attrs: AttrsList,
     links: Vec<(Range<usize>, String)>,
+    strikes: Vec<Strike>,
 ) -> impl IntoView {
     let id = ViewId::new();
     let again = (text.clone(), attrs.clone());
@@ -74,6 +91,7 @@ pub fn linked_text(
             .into_iter()
             .map(|(range, url)| Link { range, url })
             .collect(),
+        strikes,
         shadow: RefCell::new(None),
         hovered,
         pressed: None,
@@ -95,8 +113,9 @@ pub fn linked_text(
 }
 
 impl LinkedText {
-    /// The link under `point`, in this view's coordinates.
-    fn link_at(&self, point: Point) -> Option<usize> {
+    /// The shadow layout at the width the wrapped view's text has now,
+    /// built or rebuilt when that width is new, run through `with`.
+    fn with_shadow<T>(&self, with: impl FnOnce(&TextLayout, Point) -> T) -> Option<T> {
         let child = *self.id.children().first()?;
         let width = text_width(child)?;
         if width <= 0.0 || width.is_nan() {
@@ -111,7 +130,13 @@ impl LinkedText {
         // The wrapped view fills this one, so its text starts at the
         // child's own origin.
         let origin = child.get_layout_rect().origin();
-        link_under(layout, &self.links, point - origin.to_vec2())
+        Some(with(layout, origin))
+    }
+
+    /// The link under `point`, in this view's coordinates.
+    fn link_at(&self, point: Point) -> Option<usize> {
+        self.with_shadow(|layout, origin| link_under(layout, &self.links, point - origin.to_vec2()))
+            .flatten()
     }
 
     /// The text laid out as the wrapped view lays it out at `width`.
@@ -243,6 +268,24 @@ impl View for LinkedText {
         "LinkedText".into()
     }
 
+    fn paint(&mut self, cx: &mut PaintCx) {
+        if self.strikes.is_empty() {
+            return;
+        }
+        let len = self.text.len();
+        let rules = self
+            .with_shadow(|layout, origin| {
+                rules(layout, len, &self.strikes)
+                    .into_iter()
+                    .map(|(rule, color)| (rule + origin.to_vec2(), color))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (rule, color) in rules {
+            cx.fill(&rule, color, 0.0);
+        }
+    }
+
     fn update(&mut self, _cx: &mut UpdateCx, state: Box<dyn std::any::Any>) {
         let Ok(token) = state.downcast::<TimerToken>() else {
             return;
@@ -307,10 +350,64 @@ impl View for LinkedText {
     }
 }
 
+/// One rule per run of glyphs a strike crosses, at that run's strikeout
+/// position and thickness, so a code span keeps its own rule and a line
+/// that wraps gets one rule per visual line. A break's own cluster and
+/// the whitespace hanging off a line's end carry no rule.
+fn rules(layout: &TextLayout, len: usize, strikes: &[Strike]) -> Vec<(Rect, Color)> {
+    let mut out = Vec::new();
+    for line in layout.parley_layout().lines() {
+        let baseline = line.metrics().baseline;
+        // Runs sit one after another along the line from its alignment
+        // offset; nothing here lays out an inline box between them.
+        let mut next = line.metrics().offset;
+        for run in line.runs() {
+            let start = next;
+            next += run.advance();
+            let covered = run.text_range();
+            let metrics = run.metrics();
+            let top = baseline - metrics.strikethrough_offset;
+            let thickness = metrics.strikethrough_size.max(1.0) as f64;
+            for (range, color) in strikes {
+                let lo = range.start.max(covered.start);
+                let hi = range.end.min(covered.end).min(len);
+                if lo >= hi {
+                    continue;
+                }
+                // The clusters of this run inside the strike, by their
+                // drawn positions.
+                let mut x = start;
+                let mut extent: Option<(f32, f32)> = None;
+                for cluster in run.visual_clusters() {
+                    let advance = cluster.advance();
+                    let text = cluster.text_range();
+                    let inside = text.start < hi && text.end > lo;
+                    let hanging = cluster.is_hard_line_break()
+                        || (cluster.is_space_or_nbsp() && cluster.is_end_of_line());
+                    if inside && !hanging && advance > 0.0 {
+                        extent = Some(match extent {
+                            Some((x0, x1)) => (x0.min(x), x1.max(x + advance)),
+                            None => (x, x + advance),
+                        });
+                    }
+                    x += advance;
+                }
+                if let Some((x0, x1)) = extent {
+                    out.push((
+                        Rect::new(x0 as f64, top as f64, x1 as f64, top as f64 + thickness),
+                        *color,
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use floem::text::Attrs;
+    use floem::text::{Attrs, FamilyOwned, FontWeight, LineHeightValue};
 
     fn links(text: &str, needle: &str, url: &str) -> Vec<Link> {
         let start = text.find(needle).unwrap();
@@ -382,5 +479,131 @@ mod tests {
         }
         let wide = layout_at(text, attrs, 5000.0);
         assert_eq!(wide.visual_line_count(), 1, "and not when there is room");
+    }
+
+    const BLACK: Color = Color::from_rgb8(0, 0, 0);
+    const RED: Color = Color::from_rgb8(0xff, 0, 0);
+
+    fn family(stack: &str) -> Vec<FamilyOwned> {
+        FamilyOwned::parse_list(stack).collect()
+    }
+
+    fn prose(size: f32) -> AttrsList {
+        let family = family(crate::theme::FONT_STACK);
+        AttrsList::new(
+            Attrs::new()
+                .font_size(size)
+                .weight(FontWeight::NORMAL)
+                .family(&family)
+                .line_height(LineHeightValue::Normal(1.4)),
+        )
+    }
+
+    fn one(range: Range<usize>) -> Vec<Strike> {
+        vec![(range, BLACK)]
+    }
+
+    fn strike_lines(
+        text: &str,
+        attrs: &AttrsList,
+        width: f32,
+        strikes: &[Strike],
+    ) -> Vec<(Rect, Color)> {
+        rules(&layout_at(text, attrs.clone(), width), text.len(), strikes)
+    }
+
+    fn natural_width(text: &str) -> f32 {
+        layout_at(text, prose(15.0), 10_000.0).size().width as f32
+    }
+
+    #[test]
+    fn a_strike_runs_along_its_span_and_sits_inside_the_line() {
+        let text = "keep gone keep";
+        let lines = strike_lines(text, &prose(15.0), 1000.0, &one(5..9));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let (line, color) = lines[0];
+        assert_eq!(color, BLACK);
+        // Starts after "keep " and ends before " keep": the words either
+        // side are the same width, so the rule is centred in the run.
+        let width = natural_width(text) as f64;
+        assert!(line.x0 > 0.0 && line.x1 < width, "{line:?} in {width}");
+        assert!(
+            (line.x0 - (width - line.x1)).abs() < 1.0,
+            "{line:?} in {width}"
+        );
+        // Somewhere in the line's 21px, not on its edge.
+        assert!(line.y0 > 0.0 && line.y1 < 21.0, "{line:?}");
+        assert!(line.height() >= 1.0, "{line:?}");
+    }
+
+    #[test]
+    fn a_strike_that_wraps_is_one_rule_per_visual_line() {
+        let text = "one two three four five six seven eight nine ten";
+        let all = 0..text.len();
+        let wide = strike_lines(text, &prose(15.0), 10_000.0, &one(all.clone()));
+        assert_eq!(wide.len(), 1, "{wide:?}");
+        let narrow = strike_lines(text, &prose(15.0), 120.0, &one(all));
+        assert!(narrow.len() > 1, "{narrow:?}");
+        // Each rule sits lower than the one before, and none hangs into
+        // the margin past the words.
+        for pair in narrow.windows(2) {
+            assert!(pair[1].0.y0 > pair[0].0.y0, "{narrow:?}");
+        }
+        for (rule, _) in &narrow {
+            assert!(rule.x1 <= 120.0, "{narrow:?}");
+        }
+    }
+
+    #[test]
+    fn a_strike_across_a_line_break_stops_at_the_last_letter() {
+        // The break is a character of its own; the rule must not run on
+        // past "alpha" to where the newline would be.
+        let alone = strike_lines("alpha", &prose(15.0), 1000.0, &one(0..5));
+        let broken = strike_lines("alpha\nbeta", &prose(15.0), 1000.0, &one(0..10));
+        assert_eq!(broken.len(), 2, "{broken:?}");
+        assert!(
+            (broken[0].0.x1 - alone[0].0.x1).abs() < 0.01,
+            "{broken:?} vs {alone:?}"
+        );
+    }
+
+    #[test]
+    fn a_code_span_in_a_struck_run_keeps_its_own_rule_and_colour() {
+        let text = "before code after";
+        let mut list = prose(15.0);
+        let code = family(crate::theme::CODE_FONT_STACK);
+        list.add_span(7..11, Attrs::new().font_size(14.0).family(&code).color(RED));
+        let strikes = vec![(0..7, BLACK), (7..11, RED), (11..17, BLACK)];
+        let lines = strike_lines(text, &list, 1000.0, &strikes);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[1].1, RED);
+        // The three rules abut along the line, and the code font's sits
+        // at its own height.
+        assert!((lines[0].0.x1 - lines[1].0.x0).abs() < 0.01, "{lines:?}");
+        assert!((lines[1].0.x1 - lines[2].0.x0).abs() < 0.01, "{lines:?}");
+        assert_eq!(lines[0].0.y0, lines[2].0.y0, "{lines:?}");
+        assert_ne!(lines[0].0.y0, lines[1].0.y0, "{lines:?}");
+    }
+
+    #[test]
+    fn a_word_too_wide_for_the_column_is_laid_out_at_its_own_width() {
+        // As the rich text view does: the text node grows to the word,
+        // so the rules follow the lines the word forces, not the column.
+        let word = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let text = format!("{word} bbbbbbbb cccccccc");
+        let all = 0..text.len();
+        let column = strike_lines(&text, &prose(15.0), 120.0, &one(all.clone()));
+        let node = strike_lines(&text, &prose(15.0), natural_width(word) + 1.0, &one(all));
+        assert!(column.len() > node.len(), "{column:?} vs {node:?}");
+        assert_eq!(node.len(), 2, "{node:?}");
+    }
+
+    #[test]
+    fn an_empty_strike_draws_nothing_and_one_past_the_end_stops_at_it() {
+        let text = "short";
+        assert!(strike_lines(text, &prose(15.0), 1000.0, &one(2..2)).is_empty());
+        let over = strike_lines(text, &prose(15.0), 1000.0, &one(0..99));
+        let whole = strike_lines(text, &prose(15.0), 1000.0, &one(0..5));
+        assert_eq!(over, whole);
     }
 }

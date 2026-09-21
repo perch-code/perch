@@ -59,6 +59,14 @@ pub const NOTICE_BG: Color = Color::from_rgb8(0xff, 0xf8, 0xc5);
 pub const NOTICE_BORDER: Color = Color::from_rgb8(0xd4, 0xa7, 0x2c);
 pub const NOTICE_FG: Color = Color::from_rgb8(0x7d, 0x4e, 0x00);
 
+/// GitHub's alert callouts in a blockquote: `> [!NOTE]` and its kin, each
+/// with the colour the site gives its border and title.
+pub const ALERT_NOTE: Color = Color::from_rgb8(0x09, 0x69, 0xda);
+pub const ALERT_TIP: Color = Color::from_rgb8(0x1a, 0x7f, 0x37);
+pub const ALERT_IMPORTANT: Color = Color::from_rgb8(0x82, 0x50, 0xdf);
+pub const ALERT_WARNING: Color = Color::from_rgb8(0x9a, 0x67, 0x00);
+pub const ALERT_CAUTION: Color = Color::from_rgb8(0xcf, 0x22, 0x2e);
+
 pub const BADGE_BG: Color = Color::from_rgb8(0xed, 0xed, 0xea);
 pub const SHADOW: Color = Color::from_rgba8(0x20, 0x20, 0x1e, 0x12);
 
