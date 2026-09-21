@@ -1816,7 +1816,7 @@ mod window {
 
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::peniko::{Brush, Color};
-    use floem::reactive::{SignalGet, SignalUpdate};
+    use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
     use floem::views::editor::core::cursor::CursorAffinity;
     use perch_github::{Item, ItemCheckout};
 
@@ -2021,6 +2021,79 @@ mod window {
         harness.paint();
         assert_eq!(state.selection.get(), selection);
         assert_eq!(state.cursor_line.get(), line);
+    }
+
+    /// The primary button going down or up at a point, `count` clicks
+    /// in: the harness's own `double_click` sends the two together, with
+    /// no move between.
+    fn button(x: f64, y: f64, count: u8, down: bool) -> floem::event::Event {
+        use floem::ui_events::pointer::{
+            PointerButton, PointerButtonEvent, PointerEvent, PointerId, PointerInfo, PointerState,
+            PointerType,
+        };
+        let mut state = PointerState::default();
+        state.position.x = x;
+        state.position.y = y;
+        state.count = count;
+        let event = PointerButtonEvent {
+            state,
+            button: Some(PointerButton::Primary),
+            pointer: PointerInfo {
+                pointer_id: Some(PointerId::PRIMARY),
+                persistent_device_id: None,
+                pointer_type: PointerType::Mouse,
+            },
+        };
+        floem::event::Event::Pointer(if down {
+            PointerEvent::Down(event)
+        } else {
+            PointerEvent::Up(event)
+        })
+    }
+
+    /// macOS sends a pointer move between a double click's press and its
+    /// release, without the pointer having left the character, and the
+    /// editor took it as a drag that cut the word off at the pointer. The
+    /// fork's editor keeps the word: this is the sequence as the window
+    /// gets it, through the pane's own listeners.
+    #[test]
+    fn a_double_click_selects_the_whole_word() {
+        let word = "the_word_under_a_double_click_stays_whole_wherever_the_pointer_settles";
+        let (mut harness, state) = harness_with(
+            format!(
+                "{word} = 1;\n{}",
+                "fn a() {}\nfn b() {}\nfn c() {}\n".repeat(30)
+            ),
+            "fn a() {}\nfn old() {}\nfn c() {}\n".repeat(30),
+        );
+        let live = stacked(state);
+        let cursor = super::STACKED_CURSOR
+            .with(|c| c.get())
+            .expect("a stacked editor was built");
+        let doc = live.doc.get();
+        let row = doc.row_of_head(0).expect("the word's line is shown");
+        let start = doc.text.find(word).expect("the word is laid out");
+        let whole = (start, start + word.len());
+        let selected = || cursor.with(|c| (c.start_offset(), c.offset()));
+
+        // Forty points into the code is a few characters into the word.
+        let (left, top) = pane_origin();
+        let x = left + crate::theme::GUTTER_WIDTH + crate::theme::CODE_GUTTER_GAP + 40.0;
+        let y = top + (row as f64 + 0.5) * crate::theme::CODE_LINE_HEIGHT as f64;
+        harness.dispatch_event(button(x, y, 2, true));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(selected(), whole, "the press selects the word");
+
+        harness.pointer_move(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(selected(), whole, "the move that follows leaves it whole");
+
+        harness.dispatch_event(button(x, y, 2, false));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(selected(), whole);
     }
 
     /// Every view under `id`, itself included, with `text` in its debug

@@ -39,10 +39,13 @@ codegen-units = 4
 # listener registration, one for the headless window panicking when a
 # focused view asks for an IME (https://github.com/lapce/floem/pull/1088),
 # one for a view behind two boxes painting twice a frame and never
-# getting its `post_paint` (https://github.com/lapce/floem/pull/1089), and
-# one that sets a variable font's `opsz` axis to the text's size, as CSS's
+# getting its `post_paint` (https://github.com/lapce/floem/pull/1089), one
+# that sets a variable font's `opsz` axis to the text's size, as CSS's
 # `font-optical-sizing: auto` does, without which San Francisco draws small
-# text from its display cut, tighter than any native view or browser.
+# text from its display cut, tighter than any native view or browser, and
+# one that keeps the word a double click selects, which the pointer move
+# macOS sends before the release used to cut off at the pointer (a drag
+# after a double or triple click now grows the selection by words or lines).
 # Drop a patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
