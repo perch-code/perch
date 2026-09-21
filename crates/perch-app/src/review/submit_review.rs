@@ -19,7 +19,7 @@ use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::theme;
-use crate::ui::widgets::{clickable, sidebar_glyph};
+use crate::ui::widgets::{clickable, editor_box, sidebar_glyph};
 
 /// The upper-right action. It only exists for a live, current pull request;
 /// branches, issues, stale/offline checkouts and historical snapshots cannot
@@ -324,26 +324,16 @@ fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
             },
         )
         .style(move |s| {
-            let pending = state.submit_review_pending.with(Option::is_some);
-            s.width_full()
-                .min_height(96.0)
-                .max_height(220.0)
+            s.size_full()
                 .font_family(theme::FONT_STACK.to_string())
                 .font_size(theme::TEXT_BODY)
-                .padding(10.0)
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS_LG)
-                .focus(|s| s.border_color(theme::ACCENT))
-                .set_disabled(pending)
-                .apply_if(pending, |s| s.opacity(0.6_f32))
+                .set_disabled(state.submit_review_pending.with(Option::is_some))
         })
         .debug_name("submit-review-editor");
 
     let inner = editor.editor().editor_view_id;
     let asked = Rc::new(Cell::new(false));
-    editor.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+    let editor = editor.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
         if asked.replace(true) {
             return;
         }
@@ -352,6 +342,11 @@ fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
                 id.request_focus();
             }
         }
+    });
+    editor_box(editor, 96.0, true).style(move |s| {
+        s.apply_if(state.submit_review_pending.with(Option::is_some), |s| {
+            s.opacity(0.6_f32)
+        })
     })
 }
 

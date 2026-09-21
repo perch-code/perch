@@ -26,7 +26,9 @@ use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, Composer, ReviewState};
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{clickable, icon_button, name_label, sidebar_glyph, text_button, Name};
+use crate::ui::widgets::{
+    clickable, editor_box, icon_button, name_label, sidebar_glyph, text_button, Name,
+};
 
 /// A model alias as the screen shows it: "Sonnet" for `sonnet`. A full id
 /// such as `claude-sonnet-5` is shown as typed.
@@ -253,23 +255,10 @@ pub fn composer_view(
                 floem::event::EventPropagation::Continue
             },
         )
-        .style(move |s| {
-            let base = s
-                .width_full()
-                .min_height(72.0)
-                .max_height(220.0)
+        .style(|s| {
+            s.size_full()
                 .font_family(theme::FONT_STACK.to_string())
                 .font_size(theme::TEXT_BODY)
-                .padding(10.0)
-                .background(theme::CANVAS)
-                .border_radius(10.0);
-            match face {
-                ThreadFace::Card => base.border(0.0),
-                ThreadFace::Inline => base
-                    .border(1.0)
-                    .border_color(theme::BORDER)
-                    .focus(|s| s.border_color(theme::ACCENT)),
-            }
         });
     // Take the keyboard as soon as the composer appears.
     //
@@ -340,7 +329,7 @@ pub fn composer_view(
             .style(|s| s.size(theme::THREAD_MENU, theme::THREAD_MENU)),
         ))
         .style(|s| s.items_center().width_full().margin_bottom(8.0)),
-        editor,
+        editor_box(editor, 72.0, face == ThreadFace::Inline),
         Stack::horizontal((
             model_picker(app, state),
             effort_picker(app, state),
@@ -1762,6 +1751,72 @@ mod tests {
             model_groups(&shared)[1],
             vec![(Backend::ClaudeCode, "shared".to_string())],
             "config decides, not the section"
+        );
+    }
+
+    /// The lines wrap inside the box's padding, and the box's border takes
+    /// the accent while the lines have the keyboard. floem lays the lines
+    /// out in a layer the size of the editor's padding box, so padding on
+    /// the editor itself, as the box once had, left the layer 10px into
+    /// the padding on each side and the last word of a line over the
+    /// border; and the keyboard is the inner editor view's, so a `focus`
+    /// style on anything around it never applied.
+    #[test]
+    fn the_lines_wrap_inside_the_box_and_the_border_follows_the_keyboard() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut item =
+            perch_github::Item::new("acme/repo", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "item-1".into();
+        state.item.set(Some(Arc::new(item)));
+        state.open_composer(
+            None,
+            None,
+            "why?".into(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
+        let composer = state.composer.get().unwrap();
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Inline);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+
+        fn find(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
+            if id.debug_name().starts_with(name) {
+                return Some(id);
+            }
+            id.children().into_iter().find_map(|c| find(c, name))
+        }
+        let text_box = find(harness.root_id(), "editor-box").expect("the box");
+        let lines = find(text_box, "Editor View").expect("the lines in it");
+        let room = text_box.get_content_rect_local();
+        let outer = text_box.get_visual_rect();
+        assert!(room.x0 > 0.0, "the box has padding");
+        assert_eq!(
+            lines.get_visual_rect(),
+            floem::kurbo::Rect::new(
+                outer.x0 + room.x0,
+                outer.y0 + room.y0,
+                outer.x0 + room.x1,
+                outer.y0 + room.y1,
+            ),
+            "the lines fill the room inside the padding, and no more"
+        );
+
+        assert!(harness.is_focused(lines), "the lines took the keyboard");
+        harness.recompute_styles();
+        assert_eq!(
+            harness
+                .get_computed_style(text_box)
+                .get(floem::style::BorderLeftColor),
+            Some(theme::ACCENT.into()),
+            "the border follows the keyboard into the box"
         );
     }
 }
