@@ -84,7 +84,6 @@ fn tab_view(state: ReviewState, path: String, origin: Origin) -> impl IntoView {
     let is_active_text = move || state.active.with(|a| a.as_deref() == Some(active_text.as_str()));
 
     let dot_path = path.clone();
-    let count_path = path.clone();
     let select_path = path.clone();
     let close_path = path.clone();
 
@@ -105,7 +104,6 @@ fn tab_view(state: ReviewState, path: String, origin: Origin) -> impl IntoView {
                 .into_any(),
             None => Empty::new().into_any(),
         },
-        change_count(state, count_path),
         close_button(state, close_path),
     ))
     .on_event_stop(el::Click, move |_, _| {
@@ -170,27 +168,6 @@ fn language_dot(state: ReviewState, path: String) -> impl IntoView {
     })
 }
 
-/// How much of this file the pull request touched.
-fn change_count(state: ReviewState, path: String) -> impl IntoView {
-    let count = move || state.file(&path).map(|f| f.change_count()).unwrap_or(0);
-
-    dyn_container(count, move |n| {
-        if n == 0 {
-            Empty::new().into_any()
-        } else {
-            Label::derived(move || n.to_string())
-                .style(|s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .color(theme::STATUS_MODIFIED)
-                        .selectable(false)
-                        .margin_right(5.0)
-                })
-                .into_any()
-        }
-    })
-    .style(|s| s.flex_shrink(0.0_f32))
-}
-
 fn close_button(state: ReviewState, path: String) -> impl IntoView {
     Container::new(
         crate::ui::widgets::sidebar_glyph(crate::icons::SidebarIcon::Close, theme::FG_SUBTLE)
@@ -212,7 +189,7 @@ fn close_button(state: ReviewState, path: String) -> impl IntoView {
 /// The count is the point as much as the buttons: it says at a glance how
 /// much of this file the pull request actually touched. A file drawn as a
 /// picture has no lines on the screen to jump between, so it has none of
-/// this until it is shown as markup; its tab still carries the count.
+/// this until it is shown as markup.
 fn change_nav(state: ReviewState) -> impl IntoView {
     let count = move || {
         if state.drawn_picture().is_some() {
