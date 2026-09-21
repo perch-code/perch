@@ -85,6 +85,11 @@ impl Preparer {
         &self.store
     }
 
+    /// Use this token for every git command from now on.
+    pub fn set_token(&self, token: Option<String>) {
+        self.git.set_token(token);
+    }
+
     /// Clone if needed, fetch the pull request, and put its head on
     /// `branch` in a worktree.
     ///

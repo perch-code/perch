@@ -7,6 +7,7 @@
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -38,12 +39,28 @@ fn credential_args() -> [String; 4] {
 
 #[derive(Debug, Clone)]
 pub struct Git {
-    token: Option<String>,
+    /// Shared by every clone, so a token taken up after launch reaches
+    /// the git commands already in flight from the same `Preparer`.
+    token: Arc<RwLock<Option<String>>>,
 }
 
 impl Git {
     pub fn new(token: Option<String>) -> Self {
-        Self { token }
+        Self {
+            token: Arc::new(RwLock::new(token)),
+        }
+    }
+
+    /// Use this token from the next command on. The one GitHub rotated
+    /// under the app is no good to git either.
+    pub fn set_token(&self, token: Option<String>) {
+        if let Ok(mut current) = self.token.write() {
+            *current = token;
+        }
+    }
+
+    fn token(&self) -> Option<String> {
+        self.token.read().ok().and_then(|token| token.clone())
     }
 
     /// Run git and return stdout, failing on a non-zero exit.
@@ -245,7 +262,7 @@ impl Git {
         // Some of git's messages are read back as text; a translated git
         // would say them differently.
         command.env("LC_ALL", "C");
-        if let Some(token) = &self.token {
+        if let Some(token) = self.token() {
             command.env(TOKEN_ENV, token);
         }
         command.kill_on_drop(true);

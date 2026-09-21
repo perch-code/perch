@@ -2070,15 +2070,15 @@ async fn run(
     // useful without a token, so only polling and remote actions are gated
     // on a client below.
     let token = resolve_token(&config);
-    let source = token
-        .as_ref()
-        .map(|token| token.source.describe().to_string())
-        .unwrap_or_default();
-    let github = match token.as_ref() {
+    let session = match token.as_ref() {
         Some(token) => match GitHub::new(&token.value) {
             Ok(github) => {
                 tracing::info!("github client ready");
-                Some(Arc::new(github))
+                Some(Session {
+                    github: Arc::new(github),
+                    token: token.value.clone(),
+                    source: token.source.describe().to_string(),
+                })
             }
             Err(e) => {
                 let _ = events.send(Event::Status(Status::Error {
@@ -2140,7 +2140,11 @@ async fn run(
         events.clone(),
     );
     let ctx = Ctx {
-        github: github.clone(),
+        session: Arc::new(std::sync::RwLock::new(session)),
+        credentials: Arc::new(Credentials {
+            resolve: Box::new(resolve_token),
+            build: Box::new(GitHub::new),
+        }),
         preparer: preparer.clone(),
         cache: cache.clone(),
         config: config.clone(),
@@ -2171,10 +2175,10 @@ async fn run(
 
     // Who the reader is on GitHub, for their own byline: once per launch,
     // kept in meta so the next launch has it before the network does.
-    if ctx.github.is_some() {
+    if ctx.github().is_some() {
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            let Some(github) = ctx.github.as_ref() else {
+            let Some(github) = ctx.github() else {
                 return;
             };
             match github.viewer().await {
@@ -2217,7 +2221,7 @@ async fn run(
     if scan_roots(&ctx).await {
         ctx.send_items();
     }
-    if ctx.github.is_some() {
+    if ctx.github().is_some() {
         let ctx = ctx.clone();
         tokio::spawn(async move {
             if attach_pull_requests(&ctx).await {
@@ -2236,7 +2240,7 @@ async fn run(
 
     loop {
         let (command, automatic) = tokio::select! {
-            _ = tokio::time::sleep_until(next_auto_poll), if ctx.github.is_some() => {
+            _ = tokio::time::sleep_until(next_auto_poll), if ctx.github().is_some() => {
                 (Command::Refresh, true)
             },
             cmd = commands.recv() => match cmd {
@@ -2276,7 +2280,7 @@ async fn run(
                 } else {
                     NotificationPollMode::Conditional
                 };
-                let poll_after = refresh(&ctx, &source, mode).await;
+                let poll_after = refresh(&ctx, mode).await;
                 let now = tokio::time::Instant::now();
                 next_auto_poll = now + poll_after.automatic;
                 next_allowed_poll = now + poll_after.manual;
@@ -2336,7 +2340,7 @@ async fn run(
             } => {
                 ctx.clear_notice();
                 if ctx.prepare_notification_open(&thread) {
-                    if let Some(github) = ctx.github.as_ref() {
+                    if let Some(github) = ctx.github() {
                         match github.mark_thread_read(&thread.id).await {
                             Ok(()) => {
                                 let id = thread.id.clone();
@@ -2391,7 +2395,7 @@ async fn run(
             }
             Command::DoneNotification { thread_id } => {
                 ctx.clear_notice();
-                if let Some(github) = ctx.github.as_ref() {
+                if let Some(github) = ctx.github() {
                     match github.mark_thread_done(&thread_id).await {
                         Ok(()) => ctx.dismiss_notification(&thread_id),
                         Err(e) => {
@@ -2406,7 +2410,7 @@ async fn run(
             }
             Command::UnsubscribeNotification { thread_id } => {
                 ctx.clear_notice();
-                if let Some(github) = ctx.github.as_ref() {
+                if let Some(github) = ctx.github() {
                     let result = match github.ignore_thread(&thread_id).await {
                         Ok(()) => github.mark_thread_done(&thread_id).await,
                         Err(e) => Err(e),
@@ -2958,7 +2962,11 @@ const CHECKOUT_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 struct Ctx {
     /// Present when remote polling and GitHub mutations are available.
     /// Local items, cached conversations and agent runs do not require it.
-    github: Option<Arc<GitHub>>,
+    /// Behind a lock because a poll that finds the token rotated swaps in
+    /// a new client, and every task holding a `Ctx` should see it.
+    session: Arc<std::sync::RwLock<Option<Session>>>,
+    /// How a token is looked for again and a client made from it.
+    credentials: Arc<Credentials>,
     preparer: Arc<Preparer>,
     cache: SharedCache,
     config: Arc<Config>,
@@ -3014,7 +3022,43 @@ struct Ctx {
     notifications: Arc<std::sync::Mutex<Vec<Thread>>>,
 }
 
+/// The GitHub client and the token it was built on.
+#[derive(Clone)]
+struct Session {
+    github: Arc<GitHub>,
+    /// Kept to tell a rotated token from the same one resolved again.
+    token: String,
+    /// Where the token came from, named in the status bar.
+    source: String,
+}
+
+/// Where a token comes from and how a client is made from one. The app
+/// resolves the way the launch did and talks to api.github.com; a test
+/// hands in its own token and its own server.
+struct Credentials {
+    resolve: Box<TokenResolver>,
+    build: Box<ClientBuilder>,
+}
+
+type TokenResolver = dyn Fn(&Config) -> Option<perch_github::Token> + Send + Sync;
+type ClientBuilder = dyn Fn(&str) -> Result<GitHub, perch_github::Error> + Send + Sync;
+
 impl Ctx {
+    /// The GitHub client, when there is a token.
+    fn github(&self) -> Option<Arc<GitHub>> {
+        self.session().map(|session| session.github)
+    }
+
+    fn session(&self) -> Option<Session> {
+        self.session.read().ok().and_then(|session| session.clone())
+    }
+
+    fn set_session(&self, session: Option<Session>) {
+        if let Ok(mut current) = self.session.write() {
+            *current = session;
+        }
+    }
+
     /// Have these faces on hand, from disk or the network.
     fn want_avatars(&self, urls: impl IntoIterator<Item = String>) {
         let mut seen = std::collections::HashSet::new();
@@ -3023,7 +3067,7 @@ impl Ctx {
                 continue;
             }
             spawn_avatar(
-                self.github.clone(),
+                self.github(),
                 self.cache.clone(),
                 self.events.clone(),
                 self.avatars.clone(),
@@ -5167,7 +5211,7 @@ async fn fetch_checks(
     pr: &PullRequest,
     status_generation: u64,
 ) {
-    let Some(github) = ctx.github.as_ref() else {
+    let Some(github) = ctx.github() else {
         return;
     };
     let head = pr.head_sha.as_str();
@@ -5292,7 +5336,7 @@ async fn merge_open_pull_request(
         );
         return;
     }
-    let Some(github) = ctx.github.as_ref() else {
+    let Some(github) = ctx.github() else {
         send_merge_failure(
             ctx,
             attempt_id,
@@ -5473,7 +5517,7 @@ async fn submit_open_pull_request_review(
         );
         return false;
     }
-    let Some(github) = ctx.github.as_ref() else {
+    let Some(github) = ctx.github() else {
         send_pull_request_review_failure(
             ctx,
             attempt_id,
@@ -6234,27 +6278,86 @@ fn defer_polls_for_error(
     *next_allowed_poll = (*next_allowed_poll).max(deadline);
 }
 
+/// Look for the token again and take it up if it is not the one in use:
+/// a new client for every task, and the token for git as well. `None`
+/// when there is none, or it is the one GitHub just refused.
+async fn adopt_new_token(ctx: &Ctx) -> Option<Session> {
+    let credentials = ctx.credentials.clone();
+    let config = ctx.config.clone();
+    // `gh auth token` is a subprocess, so off the runtime's threads.
+    let token = tokio::task::spawn_blocking(move || (credentials.resolve)(&config))
+        .await
+        .ok()
+        .flatten()?;
+    if ctx
+        .session()
+        .is_some_and(|session| session.token == token.value)
+    {
+        return None;
+    }
+    let github = match (ctx.credentials.build)(&token.value) {
+        Ok(github) => Arc::new(github),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not build the GitHub client");
+            return None;
+        }
+    };
+    let session = Session {
+        github,
+        token: token.value,
+        source: token.source.describe().to_string(),
+    };
+    tracing::info!(source = %session.source, "github token taken up");
+    ctx.set_session(Some(session.clone()));
+    ctx.preparer.set_token(Some(session.token.clone()));
+    Some(session)
+}
+
 /// One poll of the notifications API.
-async fn refresh(ctx: &Ctx, source: &str, mode: NotificationPollMode) -> PollAfter {
+async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
     let events = &ctx.events;
     let config = ctx.config.as_ref();
-    let Some(github) = ctx.github.as_ref() else {
-        let wait = Duration::from_secs(config.poll_interval_secs.max(30));
+    let wait = Duration::from_secs(config.poll_interval_secs.max(30));
+    let no_poll = PollAfter {
+        automatic: wait,
+        manual: wait,
+        completed: false,
+    };
+    // A launch without a token is not the last word: a `gh auth login`
+    // since is found here, on the reader's refresh.
+    let mut session = ctx.session();
+    if session.is_none() {
+        session = adopt_new_token(ctx).await;
+    }
+    let Some(mut session) = session else {
         let _ = events.send(Event::Status(Status::NoToken {
             detail: "Set GITHUB_TOKEN, or run `gh auth login` in a terminal.".into(),
         }));
-        return PollAfter {
-            automatic: wait,
-            manual: wait,
-            completed: false,
-        };
+        return no_poll;
     };
     let _ = events.send(Event::Status(Status::Refreshing));
 
     let last_modified = (mode == NotificationPollMode::Conditional)
         .then(|| ctx.notifications_last_modified())
         .flatten();
-    match github.list_threads_since(last_modified.as_deref()).await {
+    let mut result = session
+        .github
+        .list_threads_since(last_modified.as_deref())
+        .await;
+    // A token GitHub refuses may have been rotated under the app: another
+    // `gh auth login`, an expired token replaced. Whatever resolves now
+    // gets its try in this poll, so the fix is noticed at the next poll
+    // and not the next launch. The same token again is reported as is.
+    if matches!(result, Err(perch_github::Error::Unauthorized)) {
+        if let Some(fresh) = adopt_new_token(ctx).await {
+            result = fresh
+                .github
+                .list_threads_since(last_modified.as_deref())
+                .await;
+            session = fresh;
+        }
+    }
+    match result {
         Ok(result) => {
             let manual = result.poll_interval;
             let automatic = manual.max(Duration::from_secs(config.poll_interval_secs.max(1)));
@@ -6269,7 +6372,7 @@ async fn refresh(ctx: &Ctx, source: &str, mode: NotificationPollMode) -> PollAft
 
             let _ = events.send(Event::Status(Status::Idle {
                 at: Timestamp::now(),
-                source: source.to_string(),
+                source: session.source,
             }));
             PollAfter {
                 automatic,
@@ -6287,7 +6390,7 @@ async fn refresh(ctx: &Ctx, source: &str, mode: NotificationPollMode) -> PollAft
             {
                 backoff_until(*reset_epoch, *retry_after_secs)
             } else {
-                Duration::from_secs(config.poll_interval_secs.max(30))
+                wait
             };
             let _ = events.send(Event::Status(status));
             PollAfter {
@@ -6365,7 +6468,7 @@ async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
 }
 
 async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
-    let Some(github) = ctx.github.as_ref() else {
+    let Some(github) = ctx.github() else {
         return;
     };
     let open = ctx.slot.lock().ok().and_then(|g| {
@@ -6712,7 +6815,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
 /// becomes that pull request's, in the same row. A branch of a local
 /// repository is on nobody's GitHub, and is not asked about.
 async fn attach_pull_requests(ctx: &Ctx) -> bool {
-    let Some(github) = ctx.github.as_ref() else {
+    let Some(github) = ctx.github() else {
         return false;
     };
     let items = ctx
@@ -6952,7 +7055,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
         })
         .map(|(_, d)| d.comments)
         .unwrap_or_default();
-    let (issue, comments, offline) = if let Some(github) = ctx.github.as_ref() {
+    let (issue, comments, offline) = if let Some(github) = ctx.github() {
         match github.fetch_issue(&repo_full_name, number).await {
             Ok(issue) => {
                 let comments = match github.fetch_issue_comments(&repo_full_name, number).await {
@@ -7219,7 +7322,7 @@ async fn open_pull_request(
         .as_ref()
         .and_then(|item| item.checkout.as_ref())
         .is_some_and(|checkout| checkout.path.join(".git").exists());
-    let (pull_request, offline) = if let Some(github) = ctx.github.as_ref() {
+    let (pull_request, offline) = if let Some(github) = ctx.github() {
         match github.fetch_pull_request(&repo_full_name, number).await {
             Ok(pr) => (pr, false),
             Err(e) => {
@@ -7553,7 +7656,7 @@ async fn fetch_discussion(
     pr: &perch_github::PullRequest,
     discussion_generation: u64,
 ) {
-    let Some(github) = ctx.github.as_ref() else {
+    let Some(github) = ctx.github() else {
         return;
     };
     let discussion = match github.fetch_discussion(&pr.repo_full_name, pr.number).await {
@@ -9873,7 +9976,15 @@ mod tests {
         let cache = Some(Arc::new(std::sync::Mutex::new(cache)));
         let runs = runs::RunManager::new(4, cache.clone(), events.clone());
         let ctx = Ctx {
-            github: Some(Arc::new(GitHub::with_base_uri("token", base).unwrap())),
+            session: Arc::new(std::sync::RwLock::new(Some(Session {
+                github: Arc::new(GitHub::with_base_uri("token", base).unwrap()),
+                token: "token".into(),
+                source: "test".into(),
+            }))),
+            credentials: Arc::new(Credentials {
+                resolve: Box::new(|_| None),
+                build: Box::new(|_| Err(perch_github::Error::Network("no builder".into()))),
+            }),
             preparer: Arc::new(Preparer::new(Store::new(dir.join("store")), None)),
             cache,
             config: Arc::new(config),
@@ -10673,7 +10784,7 @@ mod tests {
         let (base, paths) = serve("200 OK", "[]");
         let (ctx, _received) = ctx(dir.path(), &base, &["a/b"]);
 
-        refresh(&ctx, "test", NotificationPollMode::Reconcile).await;
+        refresh(&ctx, NotificationPollMode::Reconcile).await;
 
         assert_eq!(
             paths.lock().unwrap().as_slice(),
@@ -10705,21 +10816,128 @@ mod tests {
             Some("Sat, 19 Sep 2026 12:00:00 GMT"),
         );
 
-        refresh(&ctx, "test", NotificationPollMode::Conditional).await;
+        refresh(&ctx, NotificationPollMode::Conditional).await;
         assert_eq!(*ctx.notifications.lock().unwrap(), vec![old]);
 
-        refresh(&ctx, "test", NotificationPollMode::Reconcile).await;
+        refresh(&ctx, NotificationPollMode::Reconcile).await;
         assert_eq!(*ctx.notifications.lock().unwrap(), vec![incoming]);
+    }
+
+    /// A GitHub that refuses every token but `accepted`, and answers the
+    /// inbox with `body` for that one.
+    fn serve_accepting(
+        accepted: &'static str,
+        body: String,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        serve_by_request(move |_path, headers| {
+            let bearer = format!("Bearer {accepted}");
+            let authorized = headers.iter().any(|header| {
+                header.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization") && value.trim() == bearer
+                })
+            });
+            if authorized {
+                ("200 OK", body.clone())
+            } else {
+                (
+                    "401 Unauthorized",
+                    r#"{"message":"Bad credentials"}"#.to_string(),
+                )
+            }
+        })
+    }
+
+    /// From now on the token resolves as `token`, as if from `gh`, and a
+    /// client built on it talks to `base`.
+    fn resolving(ctx: &mut Ctx, base: &str, token: &'static str) {
+        let base = base.to_string();
+        ctx.credentials = Arc::new(Credentials {
+            resolve: Box::new(move |_| {
+                Some(perch_github::Token {
+                    value: token.into(),
+                    source: perch_github::TokenSource::GhCli,
+                })
+            }),
+            build: Box::new(move |token| GitHub::with_base_uri(token, &base)),
+        });
+    }
+
+    fn statuses(received: &Receiver<Event>) -> Vec<Status> {
+        received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Status(status) => Some(status),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_is_looked_for_again_and_the_new_one_tried_in_the_same_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let incoming = thread("8", "current");
+        let body = serde_json::to_string(&vec![incoming.clone()]).unwrap();
+        let (base, paths) = serve_accepting("rotated", body);
+        let (mut ctx, received) = ctx(dir.path(), &base, &[]);
+        resolving(&mut ctx, &base, "rotated");
+
+        refresh(&ctx, NotificationPollMode::Reconcile).await;
+
+        // The refusal, then the retry with the token that resolves now.
+        assert_eq!(paths.lock().unwrap().len(), 2);
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![incoming]);
+        assert_eq!(ctx.session().unwrap().token, "rotated");
+        let statuses = statuses(&received);
+        assert!(
+            matches!(statuses.last(), Some(Status::Idle { source, .. }) if source == "gh auth token"),
+            "{statuses:?}"
+        );
+        assert!(!statuses
+            .iter()
+            .any(|status| matches!(status, Status::NoToken { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_that_resolves_the_same_is_reported_and_not_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("401 Unauthorized", r#"{"message":"Bad credentials"}"#);
+        let (mut ctx, received) = ctx(dir.path(), &base, &[]);
+        resolving(&mut ctx, &base, "token");
+
+        refresh(&ctx, NotificationPollMode::Reconcile).await;
+
+        assert_eq!(paths.lock().unwrap().len(), 1);
+        assert_eq!(ctx.session().unwrap().token, "token");
+        assert!(statuses(&received)
+            .iter()
+            .any(|status| matches!(status, Status::NoToken { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_refresh_without_a_client_looks_for_the_token_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("200 OK", "[]");
+        let (mut ctx, received) = ctx(dir.path(), &base, &[]);
+        ctx.set_session(None);
+        resolving(&mut ctx, &base, "late");
+
+        refresh(&ctx, NotificationPollMode::Reconcile).await;
+
+        assert_eq!(paths.lock().unwrap().len(), 1);
+        assert_eq!(ctx.session().unwrap().token, "late");
+        assert!(!statuses(&received)
+            .iter()
+            .any(|status| matches!(status, Status::NoToken { .. })));
     }
 
     #[tokio::test]
     async fn an_offline_refresh_reports_no_token_without_a_request() {
         let dir = tempfile::tempdir().unwrap();
         let (base, paths) = serve("200 OK", "[]");
-        let (mut ctx, received) = ctx(dir.path(), &base, &["a/b"]);
-        ctx.github = None;
+        let (ctx, received) = ctx(dir.path(), &base, &["a/b"]);
+        ctx.set_session(None);
 
-        refresh(&ctx, "test", NotificationPollMode::Reconcile).await;
+        refresh(&ctx, NotificationPollMode::Reconcile).await;
 
         assert!(paths.lock().unwrap().is_empty());
         assert!(received
@@ -10730,8 +10948,8 @@ mod tests {
     #[tokio::test]
     async fn cached_agent_history_and_detail_do_not_need_github() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
-        ctx.github = None;
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        ctx.set_session(None);
         let run = RunRecord {
             id: "offline-run".into(),
             backend: "codex".into(),
