@@ -221,11 +221,14 @@ pub fn card(markdown: &str, fit: Fit) -> impl IntoView {
         } else {
             markdown::render_blocks(doc, theme::TEXT_META)
                 .style(|s| {
+                    // Not for dragging over, like the signature: the card
+                    // is up only while the pointer rests.
                     s.padding_horiz(12.0)
                         .padding_vert(9.0)
                         .width_full()
                         .border_top(1.0)
                         .border_color(theme::BORDER_MUTED)
+                        .selectable(false)
                 })
                 .into_any()
         },

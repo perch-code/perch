@@ -164,9 +164,24 @@ pub fn open_in_terminal(path: &std::path::Path) {
 }
 
 pub fn copy_to_clipboard(text: String) {
+    #[cfg(test)]
+    COPIED.with(|copied| copied.borrow_mut().push(text.clone()));
     if let Err(e) = floem::Clipboard::set_contents(text) {
         tracing::warn!(error = ?e, "could not write to the clipboard");
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What was copied, in order: the headless window has no clipboard
+    /// to read back.
+    static COPIED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// What was copied since the last call, and none of it again.
+#[cfg(test)]
+pub(crate) fn copied() -> Vec<String> {
+    COPIED.with(|copied| std::mem::take(&mut *copied.borrow_mut()))
 }
 
 /// The menu every worktree offers: where it is, and how to get there.

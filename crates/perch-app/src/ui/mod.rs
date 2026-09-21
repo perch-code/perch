@@ -24,7 +24,7 @@ use crate::theme;
 use crate::ui::widgets::sidebar_glyph;
 
 /// The platform's command modifier.
-const OS_MOD: Modifiers = if cfg!(target_os = "macos") {
+pub(crate) const OS_MOD: Modifiers = if cfg!(target_os = "macos") {
     Modifiers::META
 } else {
     Modifiers::CONTROL
@@ -515,6 +515,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .font_weight(theme::weight_body())
                 .color(theme::FG)
                 .background(theme::CANVAS)
+                // A selection over a label, a fenced block's or a title's,
+                // in the same blue as one over prose and in an editor.
+                .custom_style_class(|s: floem::views::LabelCustomStyle| {
+                    s.selection_color(theme::SELECTION_BG)
+                })
         })
 }
 
@@ -680,6 +685,27 @@ mod tests {
         assert!(
             named(harness.root_id(), "empty bar").is_none(),
             "the drawer's strip has the lights now"
+        );
+    }
+
+    /// A label anywhere in the window selects in the editor's blue, not
+    /// floem's teal: the root sets the label class's colour.
+    #[test]
+    fn a_selection_over_a_label_is_the_editors_blue() {
+        use floem::peniko::Brush;
+        use floem::views::editor::SelectionColor;
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+
+        let label = named(harness.root_id(), "Label: ").expect("no label in the window");
+        assert_eq!(
+            harness.get_computed_style(label).get(SelectionColor),
+            Brush::Solid(theme::SELECTION_BG)
         );
     }
 }

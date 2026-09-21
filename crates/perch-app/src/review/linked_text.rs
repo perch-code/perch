@@ -1,5 +1,6 @@
 //! Wrapped rich text whose links can be followed, one click at a time,
-//! and whose struck spans are ruled through.
+//! whose struck spans are ruled through, and whose words can be dragged
+//! over and copied.
 //!
 //! The text comes from an agent or from GitHub, so a link's words say
 //! nothing reliable about where it goes. Nothing happens on hover but a
@@ -15,6 +16,16 @@
 //! before the child's glyphs, since floem reaches no `post_paint`
 //! through a boxed view, and a rule under glyphs of its own colour reads
 //! the same as one over them.
+//!
+//! Nor does the rich text view select, where a label does. So the second
+//! layout also says which glyph the primary button went down on and
+//! which the pointer has been dragged to, and a selection runs between
+//! them while the button is held, then stays until a click or the focus
+//! leaving clears it, for Cmd-C to copy. A double click takes the word
+//! under the pointer and a triple the whole run; a drag from a word grows
+//! by words. The selection is painted from the shadow, under the glyphs
+//! as a browser paints one. It is this view's alone, as a label's is the
+//! label's: a drag does not run on into the next paragraph.
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -22,21 +33,30 @@ use std::rc::Rc;
 
 use floem::action::{add_overlay, exec_after, remove_overlay, TimerToken};
 use floem::context::{EventCx, PaintCx, UpdateCx};
-use floem::event::{Event, EventPropagation, Phase};
+use floem::event::{Event, EventPropagation, FocusEvent, Phase};
 use floem::kurbo::{Point, Rect};
 use floem::peniko::Color;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
-use floem::style::CursorStyle;
-use floem::text::{AttrsList, OverflowWrap, TextLayout, TextWrapMode};
-use floem::ui_events::pointer::{PointerButton, PointerButtonEvent, PointerEvent};
+use floem::style::{CursorStyle, Selectable};
+use floem::text::{
+    AttrsList, Cursor, OverflowWrap, Selection, TextLayout, TextSelection, TextWrapMode,
+};
+use floem::ui_events::keyboard::{Code, KeyState, KeyboardEvent};
+use floem::ui_events::pointer::{PointerButton, PointerButtonEvent, PointerEvent, PointerId};
 use floem::views::{rich_text, Decorators};
 use floem::{IntoView, Renderer, View, ViewId};
 
 use crate::review::cards::tip_body;
-use crate::ui::widgets::open_in_browser;
+use crate::theme;
+use crate::ui::widgets::{copy_to_clipboard, open_in_browser};
+use crate::ui::OS_MOD;
 
 /// How long the pointer rests on a link before its destination shows.
 const TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How far the pointer moves with the button down before that is a drag
+/// and not a click, in logical pixels.
+const DRAG_SLOP: f64 = 2.0;
 
 struct Link {
     range: Range<usize>,
@@ -45,6 +65,29 @@ struct Link {
 
 /// A byte range to strike through, and the colour of its text.
 pub type Strike = (Range<usize>, Color);
+
+floem::prop_extractor! {
+    SelectProps {
+        selectable: Selectable,
+    }
+}
+
+/// A selection, from the primary button going down to the focus leaving.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Selecting {
+    None,
+    /// The button went down at `origin`, off any link, by the glyph edge
+    /// `from`. A drag past the slop starts a selection there; a release
+    /// first was a click.
+    Armed {
+        origin: Point,
+        from: Cursor,
+    },
+    /// The button is down and the selection's far end follows the pointer.
+    Dragging(TextSelection),
+    /// The button is up and the selection stays.
+    Done(TextSelection),
+}
 
 /// A rich text view with links, see the module.
 pub struct LinkedText {
@@ -65,6 +108,10 @@ pub struct LinkedText {
     /// the pointer moves first, and where the pointer was.
     pending_tip: Option<(usize, Point, TimerToken)>,
     tip: Rc<RefCell<Option<ViewId>>>,
+    selecting: Selecting,
+    /// Whether the text may be selected: inherited, and off inside a row
+    /// that is a button.
+    props: SelectProps,
 }
 
 /// `text` with `attrs`, where each of `links` is a byte range of the text
@@ -97,8 +144,20 @@ pub fn linked_text(
         pressed: None,
         pending_tip: None,
         tip: tip.clone(),
+        selecting: Selecting::None,
+        props: SelectProps::default(),
     };
     view.style(move |s| {
+        // Focusable, so a drag can take the focus and keep its selection
+        // until the focus goes, and so Cmd-C reaches it. Under the
+        // pointer the text cursor, as over a label, unless the text is
+        // not selectable or a link is under it.
+        let s = s.focusable().with::<Selectable>(|s, selectable| {
+            s.set_context_opt(
+                floem::style::Cursor,
+                selectable.def(|selectable| selectable.then_some(CursorStyle::Text)),
+            )
+        });
         if hovered.get().is_some() {
             s.cursor(CursorStyle::Pointer)
         } else {
@@ -184,6 +243,21 @@ fn link_under(layout: &TextLayout, links: &[Link], point: Point) -> Option<usize
     })
 }
 
+/// floem's selection around a parley one. floem makes its own from a
+/// pair of cursors alone, which forgets that a selection began as a word
+/// and grows by words; a collapsed one is made and the parley selection
+/// put in it.
+fn wrap(layout: &TextLayout, selection: Selection) -> TextSelection {
+    let mut wrapped = layout.collapsed_selection(selection.anchor());
+    *wrapped = selection;
+    wrapped
+}
+
+/// Whether `key` is the copy shortcut.
+fn is_copy(key: &KeyboardEvent) -> bool {
+    key.state == KeyState::Down && key.modifiers == OS_MOD && key.code == Code::KeyC
+}
+
 impl LinkedText {
     fn set_hovered(&mut self, link: Option<usize>) {
         if self.hovered.get() != link {
@@ -198,10 +272,122 @@ impl LinkedText {
         }
     }
 
+    /// The selection, while there is one with something in it.
+    fn selection(&self) -> Option<TextSelection> {
+        match self.selecting {
+            Selecting::Dragging(selection) | Selecting::Done(selection)
+                if !selection.is_collapsed() =>
+            {
+                Some(selection)
+            }
+            _ => None,
+        }
+    }
+
+    /// The selected text.
+    fn selected_text(&self) -> Option<String> {
+        let selection = self.selection()?;
+        self.with_shadow(|layout, _| self.text[layout.selection_text_range(&selection)].to_string())
+    }
+
+    /// Whether the primary button is down for a selection, armed or drawn.
+    fn dragging(&self) -> bool {
+        matches!(
+            self.selecting,
+            Selecting::Armed { .. } | Selecting::Dragging(_)
+        )
+    }
+
+    /// The primary button down at `point`, off any link, for the `count`th
+    /// click in a row: one arms a drag from the nearest glyph edge, two
+    /// takes the word there, and three or more the whole text. Whatever
+    /// it begins, the pointer is captured so the drag and the release
+    /// reach here wherever they land.
+    fn press(&mut self, point: Point, count: u8, pointer: Option<PointerId>) {
+        let len = self.text.len();
+        let next = self
+            .with_shadow(|layout, child| {
+                let at = point - child.to_vec2();
+                match count {
+                    0 | 1 => layout.hit_test(at).map(|from| Selecting::Armed {
+                        origin: point,
+                        from,
+                    }),
+                    2 => {
+                        TextLayout::clear_selection_geometry_cache();
+                        let word = Selection::word_from_point(
+                            layout.parley_layout(),
+                            at.x as f32,
+                            at.y as f32,
+                        );
+                        Some(Selecting::Dragging(wrap(layout, word)))
+                    }
+                    _ => {
+                        TextLayout::clear_selection_geometry_cache();
+                        Some(Selecting::Done(layout.selection_from_byte_range(0, len)))
+                    }
+                }
+            })
+            .flatten();
+        let Some(next) = next else {
+            return;
+        };
+        self.selecting = next;
+        if let Some(pointer) = pointer {
+            self.id.set_pointer_capture(pointer);
+        }
+        if self.selection().is_some() {
+            self.id.request_focus();
+        }
+    }
+
+    /// The pointer at `point` with the button down: from armed, past the
+    /// slop, a selection from the pressed glyph edge to the one under the
+    /// pointer; from there on, the far end follows.
+    fn drag_to(&mut self, point: Point) -> bool {
+        let next = match self.selecting {
+            Selecting::Armed { origin, from } => {
+                if origin.distance(point) <= DRAG_SLOP {
+                    return false;
+                }
+                self.with_shadow(|layout, child| {
+                    let to = layout.hit_test(point - child.to_vec2())?;
+                    Some(layout.begin_selection(from, to))
+                })
+                .flatten()
+            }
+            Selecting::Dragging(selection) => self.with_shadow(|layout, child| {
+                let at = point - child.to_vec2();
+                wrap(
+                    layout,
+                    selection.extend_to_point(layout.parley_layout(), at.x as f32, at.y as f32),
+                )
+            }),
+            Selecting::None | Selecting::Done(_) => None,
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        self.selecting = Selecting::Dragging(next);
+        true
+    }
+
     fn handle_pointer(&mut self, event: &PointerEvent, cx: &mut EventCx) -> EventPropagation {
         match event {
             PointerEvent::Move(update) => {
                 let point = update.current.logical_point();
+                if self.dragging() {
+                    // A drag is a selection, not a hover: no link lights
+                    // up or offers its tip under it.
+                    let began = matches!(self.selecting, Selecting::Armed { .. });
+                    if self.drag_to(point) {
+                        if began {
+                            self.id.request_focus();
+                        }
+                        cx.window_state.request_paint(self.id);
+                    }
+                    return EventPropagation::Continue;
+                }
                 let hit = self.link_at(point);
                 if hit != self.hovered.get() {
                     self.dismiss_tip();
@@ -219,23 +405,43 @@ impl LinkedText {
                 }
                 EventPropagation::Continue
             }
-            PointerEvent::Down(PointerButtonEvent { button, state, .. }) => {
+            PointerEvent::Down(PointerButtonEvent {
+                button,
+                state,
+                pointer,
+            }) => {
                 self.dismiss_tip();
                 if *button != Some(PointerButton::Primary) {
                     return EventPropagation::Continue;
                 }
-                self.pressed = self.link_at(state.logical_point());
+                // Any press clears what was selected, as in a browser.
+                self.selecting = Selecting::None;
+                cx.window_state.request_paint(self.id);
+                let point = state.logical_point();
+                self.pressed = self.link_at(point);
                 if self.pressed.is_some() {
-                    EventPropagation::Stop
-                } else {
-                    EventPropagation::Continue
+                    return EventPropagation::Stop;
                 }
+                if self.props.selectable() {
+                    self.press(point, state.count, pointer.pointer_id);
+                }
+                EventPropagation::Continue
             }
             PointerEvent::Up(PointerButtonEvent { button, state, .. }) => {
                 let pressed = self.pressed.take();
                 if *button != Some(PointerButton::Primary) {
                     return EventPropagation::Continue;
                 }
+                self.selecting = match self.selecting {
+                    Selecting::Dragging(selection) if !selection.is_collapsed() => {
+                        Selecting::Done(selection)
+                    }
+                    Selecting::Done(selection) => Selecting::Done(selection),
+                    Selecting::None | Selecting::Armed { .. } | Selecting::Dragging(_) => {
+                        Selecting::None
+                    }
+                };
+                cx.window_state.request_paint(self.id);
                 match pressed {
                     Some(link) if self.link_at(state.logical_point()) == Some(link) => {
                         open_in_browser(&self.links[link].url);
@@ -244,10 +450,20 @@ impl LinkedText {
                     _ => EventPropagation::Continue,
                 }
             }
-            PointerEvent::Leave(_) | PointerEvent::Cancel(_) => {
+            PointerEvent::Leave(_) => {
                 self.dismiss_tip();
                 self.pressed = None;
                 self.set_hovered(None);
+                EventPropagation::Continue
+            }
+            PointerEvent::Cancel(_) => {
+                self.dismiss_tip();
+                self.pressed = None;
+                self.set_hovered(None);
+                if self.dragging() {
+                    self.selecting = Selecting::None;
+                    cx.window_state.request_paint(self.id);
+                }
                 EventPropagation::Continue
             }
             PointerEvent::Scroll(_) | PointerEvent::Gesture(_) => {
@@ -269,6 +485,26 @@ impl View for LinkedText {
     }
 
     fn paint(&mut self, cx: &mut PaintCx) {
+        // The selection goes down first, under the rules and the glyphs.
+        if let Some(selection) = self.selection() {
+            if cx.window_state.is_focused(self.id) {
+                let rects = self
+                    .with_shadow(|layout, origin| {
+                        let mut rects = Vec::new();
+                        layout.selection_geometry_with_line_metrics(
+                            &selection,
+                            |x0, y0, x1, y1| {
+                                rects.push(Rect::new(x0, y0, x1, y1) + origin.to_vec2());
+                            },
+                        );
+                        rects
+                    })
+                    .unwrap_or_default();
+                for rect in rects {
+                    cx.fill(&rect, theme::SELECTION_BG, 0.0);
+                }
+            }
+        }
         if self.strikes.is_empty() {
             return;
         }
@@ -311,7 +547,11 @@ impl View for LinkedText {
         *self.tip.borrow_mut() = Some(overlay);
     }
 
-    fn style_pass(&mut self, _cx: &mut floem::context::StyleCx<'_>) {
+    fn style_pass(&mut self, cx: &mut floem::context::StyleCx<'_>) {
+        if self.props.read(cx) && !self.props.selectable() && self.selecting != Selecting::None {
+            self.selecting = Selecting::None;
+            cx.window_state.request_paint(self.id);
+        }
         if self.tip.borrow().is_some() && self.id.is_hidden() {
             self.dismiss_tip();
         }
@@ -337,14 +577,31 @@ impl View for LinkedText {
     /// included, and only to it: there is no capture pass for it. The
     /// same goes for a pointer over this view's own padding or border,
     /// where it is the target, so a move off the text onto a quote's
-    /// gutter is seen too.
+    /// gutter is seen too, and for the pointer while this view holds it
+    /// for a drag. The focus and the keys come here as well: a selection
+    /// lasts while this view has the focus, and Cmd-C copies it.
     fn event(&mut self, cx: &mut EventCx) -> EventPropagation {
-        if let Event::Pointer(pointer) = &cx.event {
-            let own = cx.phase == Phase::Target;
-            if own || matches!(pointer, PointerEvent::Leave(_) | PointerEvent::Cancel(_)) {
-                let pointer = pointer.clone();
-                return self.handle_pointer(&pointer, cx);
+        match &cx.event {
+            Event::Pointer(pointer) => {
+                let own = cx.phase == Phase::Target;
+                if own || matches!(pointer, PointerEvent::Leave(_) | PointerEvent::Cancel(_)) {
+                    let pointer = pointer.clone();
+                    return self.handle_pointer(&pointer, cx);
+                }
             }
+            Event::Focus(FocusEvent::Lost) => {
+                if self.selecting != Selecting::None {
+                    self.selecting = Selecting::None;
+                    cx.window_state.request_paint(self.id);
+                }
+            }
+            Event::Key(key) if cx.phase == Phase::Target && is_copy(key) => {
+                if let Some(text) = self.selected_text() {
+                    copy_to_clipboard(text);
+                    return EventPropagation::Stop;
+                }
+            }
+            _ => {}
         }
         EventPropagation::Continue
     }
@@ -605,5 +862,268 @@ mod tests {
         let over = strike_lines(text, &prose(15.0), 1000.0, &one(0..99));
         let whole = strike_lines(text, &prose(15.0), 1000.0, &one(0..5));
         assert_eq!(over, whole);
+    }
+
+    mod selecting {
+        use super::*;
+        use crate::ui::widgets::{copied, opened};
+        use crate::ui::OS_MOD;
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::style::{Cursor as CursorProp, CursorStyle};
+        use floem::ui_events::keyboard::{Key, KeyState, KeyboardEvent};
+        use floem::ui_events::pointer::{PointerId, PointerInfo, PointerState, PointerType};
+        use floem::views::Container;
+
+        const WIDTH: f64 = 1000.0;
+        const TEXT: &str = "The quick brown fox jumps over the lazy dog.";
+
+        /// `TEXT` on one line in a column `WIDTH` wide, at the window's
+        /// top left, with `links` in it, and the view that carries it.
+        /// The column is a button when `selectable` is off.
+        fn harness(
+            links: Vec<(Range<usize>, String)>,
+            selectable: bool,
+        ) -> (HeadlessHarness, ViewId) {
+            let root = TestRoot::new();
+            let view = Container::new(linked_text(TEXT.into(), prose(15.0), links, Vec::new()))
+                .style(move |s| s.width(WIDTH).padding(0.0).selectable(selectable));
+            let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 400.0);
+            harness.rebuild();
+            harness.paint();
+            let id = find(harness.root_id(), "LinkedText").expect("no linked text");
+            assert_eq!(id.get_visual_rect().origin(), Point::ZERO);
+            copied();
+            opened();
+            (harness, id)
+        }
+
+        fn find(id: ViewId, name: &str) -> Option<ViewId> {
+            if id.debug_name() == name {
+                return Some(id);
+            }
+            id.children()
+                .into_iter()
+                .find_map(|child| find(child, name))
+        }
+
+        /// Where the glyphs of `needle` sit, as the shadow lays them out
+        /// and so as the window shows them.
+        fn glyphs(needle: &str) -> Rect {
+            let start = TEXT.find(needle).unwrap();
+            let layout = layout_at(TEXT, prose(15.0), WIDTH as f32);
+            let link = Link {
+                range: start..start + needle.len(),
+                url: String::new(),
+            };
+            let rects = line_rects(&layout, &link);
+            assert_eq!(rects.len(), 1, "{needle:?} on one line: {rects:?}");
+            rects[0]
+        }
+
+        /// The primary button going down or up at a point, for the
+        /// `count`th click in a row.
+        fn button(harness: &mut HeadlessHarness, down: bool, x: f64, y: f64, count: u8) {
+            let mut state = PointerState {
+                count,
+                ..PointerState::default()
+            };
+            state.position.x = x;
+            state.position.y = y;
+            let event = PointerButtonEvent {
+                state,
+                button: Some(PointerButton::Primary),
+                pointer: PointerInfo {
+                    pointer_id: Some(PointerId::PRIMARY),
+                    persistent_device_id: None,
+                    pointer_type: PointerType::Mouse,
+                },
+            };
+            harness.dispatch_event(Event::Pointer(if down {
+                PointerEvent::Down(event)
+            } else {
+                PointerEvent::Up(event)
+            }));
+        }
+
+        /// A drag with the primary button from one point to another: down,
+        /// a first move past the slop, the move to the end, and up.
+        fn drag(harness: &mut HeadlessHarness, from: Point, to: Point) {
+            harness.pointer_down(from.x, from.y);
+            harness.pointer_move(from.x + DRAG_SLOP + 1.0, from.y);
+            harness.pointer_move(to.x, to.y);
+            harness.pointer_up(to.x, to.y);
+        }
+
+        /// Cmd-C pressed, and what it copied.
+        fn copy(harness: &mut HeadlessHarness) -> Vec<String> {
+            harness.dispatch_event(Event::Key(KeyboardEvent {
+                state: KeyState::Down,
+                key: Key::Character("c".into()),
+                code: Code::KeyC,
+                location: Default::default(),
+                modifiers: OS_MOD,
+                repeat: false,
+                is_composing: false,
+            }));
+            copied()
+        }
+
+        fn cursor(harness: &mut HeadlessHarness, id: ViewId, at: Point) -> Option<CursorStyle> {
+            harness.pointer_move(at.x, at.y);
+            harness.recompute_styles();
+            harness.get_computed_style(id).get(CursorProp)
+        }
+
+        #[test]
+        fn a_drag_selects_between_its_ends_and_cmd_c_copies_it() {
+            let (mut h, id) = harness(Vec::new(), true);
+            let (quick, fox) = (glyphs("quick"), glyphs("fox"));
+            let y = quick.center().y;
+            drag(
+                &mut h,
+                Point::new(quick.x0 + 2.0, y),
+                Point::new(fox.x1 - 2.0, y),
+            );
+            assert!(h.is_focused(id), "the drag took the focus");
+            assert_eq!(copy(&mut h), vec!["quick brown fox".to_string()]);
+            // The selection stays for a second copy.
+            assert_eq!(copy(&mut h), vec!["quick brown fox".to_string()]);
+            // Backwards is the same words.
+            drag(
+                &mut h,
+                Point::new(fox.x1 - 2.0, y),
+                Point::new(quick.x0 + 2.0, y),
+            );
+            assert_eq!(copy(&mut h), vec!["quick brown fox".to_string()]);
+        }
+
+        #[test]
+        fn a_click_selects_nothing_and_clears_what_was_selected() {
+            let (mut h, id) = harness(Vec::new(), true);
+            let (quick, fox) = (glyphs("quick"), glyphs("fox"));
+            let y = quick.center().y;
+            h.click(quick.center().x, y);
+            assert!(h.is_focused(id));
+            assert_eq!(copy(&mut h), Vec::<String>::new());
+            drag(
+                &mut h,
+                Point::new(quick.x0 + 2.0, y),
+                Point::new(fox.x1 - 2.0, y),
+            );
+            assert_eq!(copy(&mut h), vec!["quick brown fox".to_string()]);
+            h.click(fox.center().x, y);
+            assert_eq!(copy(&mut h), Vec::<String>::new());
+        }
+
+        /// macOS sends a pointer move between a double click's press and
+        /// its release, without the pointer having moved: the sequence
+        /// here is the window's, and the word stays whole through it.
+        #[test]
+        fn a_double_click_takes_the_word_and_a_triple_the_whole_text() {
+            let (mut h, _) = harness(Vec::new(), true);
+            let brown = glyphs("brown");
+            let at = brown.center();
+            button(&mut h, true, at.x, at.y, 2);
+            h.pointer_move(at.x, at.y);
+            button(&mut h, false, at.x, at.y, 2);
+            assert_eq!(copy(&mut h), vec!["brown".to_string()]);
+            // Dragging on from the word grows the selection by words.
+            let quick = glyphs("quick");
+            button(&mut h, true, at.x, at.y, 2);
+            h.pointer_move(quick.center().x, at.y);
+            h.pointer_up(quick.center().x, at.y);
+            assert_eq!(copy(&mut h), vec!["quick brown".to_string()]);
+            button(&mut h, true, at.x, at.y, 3);
+            h.pointer_move(at.x, at.y);
+            button(&mut h, false, at.x, at.y, 3);
+            assert_eq!(copy(&mut h), vec![TEXT.to_string()]);
+        }
+
+        #[test]
+        fn a_drag_that_leaves_the_text_still_reaches_its_end() {
+            let (mut h, _) = harness(Vec::new(), true);
+            let quick = glyphs("quick");
+            let y = quick.center().y;
+            // Well below and to the right of the text, inside the window.
+            drag(
+                &mut h,
+                Point::new(quick.x0 + 2.0, y),
+                Point::new(WIDTH - 1.0, y + 300.0),
+            );
+            assert_eq!(
+                copy(&mut h),
+                vec!["quick brown fox jumps over the lazy dog.".to_string()]
+            );
+            let dog = glyphs("dog.");
+            drag(
+                &mut h,
+                Point::new(dog.x1 - 2.0, y),
+                Point::new(0.0, y - 100.0),
+            );
+            assert_eq!(copy(&mut h), vec![TEXT.to_string()]);
+        }
+
+        #[test]
+        fn a_press_on_a_link_is_the_links_and_selects_nothing() {
+            let start = TEXT.find("fox").unwrap();
+            let link = (start..start + 3, "https://example.com/fox".to_string());
+            let (mut h, id) = harness(vec![link], true);
+            let (fox, lazy) = (glyphs("fox"), glyphs("lazy"));
+            let y = fox.center().y;
+            drag(&mut h, fox.center(), lazy.center());
+            assert_eq!(
+                opened(),
+                Vec::<String>::new(),
+                "a drag off the link opened it"
+            );
+            assert_eq!(copy(&mut h), Vec::<String>::new());
+            h.click(fox.center().x, y);
+            assert_eq!(opened(), vec!["https://example.com/fox".to_string()]);
+            // And a drag from beside it into it is a selection.
+            let quick = glyphs("quick");
+            drag(
+                &mut h,
+                Point::new(quick.x0 + 2.0, y),
+                Point::new(fox.x1 - 2.0, y),
+            );
+            assert_eq!(copy(&mut h), vec!["quick brown fox".to_string()]);
+            assert_eq!(opened(), Vec::<String>::new());
+            assert_eq!(cursor(&mut h, id, quick.center()), Some(CursorStyle::Text));
+            assert_eq!(cursor(&mut h, id, fox.center()), Some(CursorStyle::Pointer));
+        }
+
+        #[test]
+        fn the_selection_goes_with_the_focus() {
+            let (mut h, id) = harness(Vec::new(), true);
+            let (quick, fox) = (glyphs("quick"), glyphs("fox"));
+            let y = quick.center().y;
+            drag(
+                &mut h,
+                Point::new(quick.x0 + 2.0, y),
+                Point::new(fox.x1 - 2.0, y),
+            );
+            assert_eq!(copy(&mut h), vec!["quick brown fox".to_string()]);
+            h.root_id().request_focus();
+            h.rebuild();
+            assert!(!h.is_focused(id));
+            id.request_focus();
+            h.rebuild();
+            assert!(h.is_focused(id));
+            assert_eq!(copy(&mut h), Vec::<String>::new());
+        }
+
+        #[test]
+        fn text_that_is_not_selectable_is_left_alone() {
+            let (mut h, id) = harness(Vec::new(), false);
+            let (quick, fox) = (glyphs("quick"), glyphs("fox"));
+            let y = quick.center().y;
+            assert_eq!(cursor(&mut h, id, quick.center()), None);
+            drag(
+                &mut h,
+                Point::new(quick.x0 + 2.0, y),
+                Point::new(fox.x1 - 2.0, y),
+            );
+            assert_eq!(copy(&mut h), Vec::<String>::new());
+        }
     }
 }

@@ -463,8 +463,9 @@ pub const ORIGIN_CHIP_HEIGHT: f64 = 16.0;
 /// accent at low alpha, so it reads through a diff's green and under a
 /// selection alike.
 pub const SYMBOL_HIGHLIGHT_BG: Color = Color::from_rgba8(0x32, 0x32, 0x2f, 0x1c);
-/// The selection in an editor, the code's and the composers' alike: the
-/// system's selection blue, translucent so that a selected line keeps its
-/// diff tint, the way a selection over a diff on github.com does. floem's
-/// own default is black at half alpha.
+/// The selection in an editor, the code's and the composers' alike, and
+/// over prose and a label: the system's selection blue, translucent so
+/// that a selected line keeps its diff tint, the way a selection over a
+/// diff on github.com does. floem's own default is black at half alpha
+/// in an editor and its theme's teal over a label.
 pub const SELECTION_BG: Color = Color::from_rgba8(0x00, 0x7a, 0xff, 0x4d);

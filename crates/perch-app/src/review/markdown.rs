@@ -6,9 +6,9 @@
 //! pulldown-cmark does the parsing, with the extensions GitHub turns on.
 //! Its events become a tree of blocks, which the column then draws.
 //! Inline styles become spans on a rich text view, so bold, italics, code
-//! and links show as such and still wrap; a link is followed and a
-//! struck span ruled through by [`linked_text`], since the text stack
-//! has neither of its own.
+//! and links show as such and still wrap; a link is followed, a struck
+//! span ruled through and the words dragged over and copied by
+//! [`linked_text`], since the text stack has none of those of its own.
 //!
 //! What GitHub does that this does not: images are shown by their alt
 //! text or file name, raw HTML by its text, code in a fence is not
@@ -24,7 +24,7 @@ use floem::prelude::*;
 use floem::taffy::prelude::auto;
 use floem::taffy::GridTemplateComponent;
 use floem::text::{Attrs, AttrsList, FamilyOwned, FontStyle, FontWeight, LineHeightValue, TextLayout};
-use floem::views::{rich_text, Container, Decorators, Empty, Label, Stack};
+use floem::views::{Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
 use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
@@ -1143,9 +1143,8 @@ fn task_box(checked: bool, size: f32) -> AnyView {
     .into_any()
 }
 
-/// A label rather than rich text: a label can be dragged over and
-/// copied, which a command in a description is for. The fence's
-/// language is parsed but not coloured.
+/// A label, there being no spans to style. The fence's language is
+/// parsed but not coloured.
 fn code_view(text: String, size: f32) -> AnyView {
     let code_size = small_size(size);
     Label::derived(move || text.clone())
@@ -1273,8 +1272,9 @@ fn text_view(
         .into_any()
 }
 
-/// The run, sized by whoever places it: plain rich text, unless a link
-/// in it needs following or a struck span a rule.
+/// The run, sized by whoever places it: rich text wrapped so that it can
+/// be dragged over and copied, its links followed and its struck spans
+/// ruled through, none of which floem's own view does.
 fn prose_view(
     spans: Vec<Span>,
     size: f32,
@@ -1283,12 +1283,7 @@ fn prose_view(
     leading: LineHeightValue,
 ) -> AnyView {
     let (text, attrs, links, strikes) = layout(&spans, size, weight, color, leading);
-    if links.is_empty() && strikes.is_empty() {
-        let again = (text.clone(), attrs.clone());
-        rich_text(text, attrs, move || again.clone()).into_any()
-    } else {
-        linked_text(text, attrs, links, strikes).into_any()
-    }
+    linked_text(text, attrs, links, strikes).into_any()
 }
 
 /// The text of `spans` run together, the attributes over each styled
@@ -1905,6 +1900,33 @@ mod tests {
             assert!(inner[0].x0 > outer[0].x0 + 10.0, "{outer:?} {inner:?}");
             assert!(inner[0].y0 > outer[0].y0, "{outer:?} {inner:?}");
             assert!(outer[1].y0 >= inner[0].y1, "{outer:?} {inner:?}");
+        }
+
+        /// A paragraph's runs are one text to the pointer: a drag across
+        /// it copies the words as read, whatever their styles.
+        #[test]
+        fn a_paragraph_can_be_dragged_over_and_copied_as_read() {
+            use crate::ui::widgets::copied;
+            use crate::ui::OS_MOD;
+            use floem::ui_events::keyboard::{Code, Key, KeyState, KeyboardEvent};
+            let mut h = harness("Some **bold** words, `code` and a [link](https://example.com).");
+            copied();
+            let run = rect(&h, "LinkedText");
+            let y = run.y0 + 10.0;
+            h.pointer_down(run.x0 + 1.0, y);
+            h.pointer_move(run.x0 + 6.0, y);
+            h.pointer_move(run.x1 - 1.0, y);
+            h.pointer_up(run.x1 - 1.0, y);
+            h.dispatch_event(floem::event::Event::Key(KeyboardEvent {
+                state: KeyState::Down,
+                key: Key::Character("c".into()),
+                code: Code::KeyC,
+                location: Default::default(),
+                modifiers: OS_MOD,
+                repeat: false,
+                is_composing: false,
+            }));
+            assert_eq!(copied(), vec!["Some bold words, code and a link.".to_string()]);
         }
 
         #[test]
