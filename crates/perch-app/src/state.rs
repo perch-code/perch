@@ -1244,7 +1244,9 @@ impl AppState {
                     }
                 });
             }
-            Event::LspDefinition { token, locations } => {
+            Event::LspDefinition { token, locations }
+            | Event::LspTypeDefinition { token, locations }
+            | Event::LspImplementation { token, locations } => {
                 review.finish_goto(token, locations);
             }
             // A load for the last item, still on its way when the next one
@@ -1743,6 +1745,8 @@ impl AppState {
             | Event::LspStatus { .. }
             | Event::LspHover { .. }
             | Event::LspDefinition { .. }
+            | Event::LspTypeDefinition { .. }
+            | Event::LspImplementation { .. }
             | Event::DiscussionReady { .. }
             | Event::IssueComments { .. }
             | Event::ChecksReady { .. }

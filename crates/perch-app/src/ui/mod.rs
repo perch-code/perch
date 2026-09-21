@@ -260,11 +260,15 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 }
                 // The navigation keys, VS Code's: F12 goes to the definition
-                // of the caret's symbol and Shift-F12 asks for its
-                // references; Ctrl-- and Ctrl-Shift-- walk the jumps back
-                // and forward.
+                // of the caret's symbol, Cmd-F12 to its implementations,
+                // and Shift-F12 asks for its references; Ctrl-- and
+                // Ctrl-Shift-- walk the jumps back and forward.
                 if key.code == Code::F12 && key.modifiers.is_empty() {
                     crate::review::navigation::definition_at_cursor(review, &references_backend);
+                    return EventPropagation::Stop;
+                }
+                if key.code == Code::F12 && key.modifiers == OS_MOD {
+                    crate::review::navigation::implementations_at_cursor(review, &references_backend);
                     return EventPropagation::Stop;
                 }
                 if key.code == Code::F12 && key.modifiers == Modifiers::SHIFT {

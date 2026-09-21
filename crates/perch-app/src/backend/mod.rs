@@ -189,6 +189,18 @@ pub enum Command {
         line: u32,
         character: u32,
     },
+    TypeDefinition {
+        token: u64,
+        path: String,
+        line: u32,
+        character: u32,
+    },
+    Implementation {
+        token: u64,
+        path: String,
+        line: u32,
+        character: u32,
+    },
     References {
         token: u64,
         path: String,
@@ -629,8 +641,17 @@ pub enum Event {
         markdown: String,
     },
     /// Every location a definition names, with each line's text. The app
-    /// opens one and lists several; the backend does not decide.
+    /// opens one and lists several; the backend does not decide. The type
+    /// definition and the implementations answer the same way.
     LspDefinition {
+        token: u64,
+        locations: Vec<crate::review::model::Located>,
+    },
+    LspTypeDefinition {
+        token: u64,
+        locations: Vec<crate::review::model::Located>,
+    },
+    LspImplementation {
         token: u64,
         locations: Vec<crate::review::model::Located>,
     },
@@ -1925,6 +1946,24 @@ impl Backend {
             character,
         });
     }
+
+    pub fn type_definition(&self, token: u64, path: &str, line: u32, character: u32) {
+        let _ = self.commands.send(Command::TypeDefinition {
+            token,
+            path: path.to_string(),
+            line,
+            character,
+        });
+    }
+
+    pub fn implementation(&self, token: u64, path: &str, line: u32, character: u32) {
+        let _ = self.commands.send(Command::Implementation {
+            token,
+            path: path.to_string(),
+            line,
+            character,
+        });
+    }
 }
 
 impl Backend {
@@ -2937,29 +2976,58 @@ async fn run(
                     let _ = events.send(Event::LspReferences { token, locations });
                 });
             }
+            // The three gotos: a position in, every location out, each
+            // answered by the event of its name.
             Command::Definition {
                 token,
                 path,
                 line,
                 character,
             } => {
-                let checkout = checkout.clone();
-                let language_server = language_server.clone();
-                let events = events.clone();
-                tokio::spawn(async move {
-                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
-                    else {
-                        return;
-                    };
-                    let worktree = checkout
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
-                    let Some(worktree) = worktree else { return };
-                    let locations = client.definition(&full, line, character).await;
-                    let locations = read_locations(&worktree, &locations).await;
-                    let _ = events.send(Event::LspDefinition { token, locations });
-                });
+                spawn_goto(
+                    Goto::Definition,
+                    token,
+                    path,
+                    line,
+                    character,
+                    checkout.clone(),
+                    language_server.clone(),
+                    events.clone(),
+                );
+            }
+            Command::TypeDefinition {
+                token,
+                path,
+                line,
+                character,
+            } => {
+                spawn_goto(
+                    Goto::TypeDefinition,
+                    token,
+                    path,
+                    line,
+                    character,
+                    checkout.clone(),
+                    language_server.clone(),
+                    events.clone(),
+                );
+            }
+            Command::Implementation {
+                token,
+                path,
+                line,
+                character,
+            } => {
+                spawn_goto(
+                    Goto::Implementation,
+                    token,
+                    path,
+                    line,
+                    character,
+                    checkout.clone(),
+                    language_server.clone(),
+                    events.clone(),
+                );
             }
             Command::CloseReview { navigation_id } => {
                 let ctx = ctx.clone();
@@ -2986,6 +3054,50 @@ async fn run(
             }
         }
     }
+}
+
+/// Which of the three gotos to ask.
+#[derive(Debug, Clone, Copy)]
+enum Goto {
+    Definition,
+    TypeDefinition,
+    Implementation,
+}
+
+/// Ask a goto about a position and answer with every location it names,
+/// each with its line's text, by the event of the goto's name.
+#[allow(clippy::too_many_arguments)]
+fn spawn_goto(
+    goto: Goto,
+    token: u64,
+    path: String,
+    line: u32,
+    character: u32,
+    checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    events: EventSender<Event>,
+) {
+    tokio::spawn(async move {
+        let Some((client, full)) = resolve(&checkout, &language_server, &path).await else {
+            return;
+        };
+        let worktree = checkout
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
+        let Some(worktree) = worktree else { return };
+        let locations = match goto {
+            Goto::Definition => client.definition(&full, line, character).await,
+            Goto::TypeDefinition => client.type_definition(&full, line, character).await,
+            Goto::Implementation => client.implementation(&full, line, character).await,
+        };
+        let locations = read_locations(&worktree, &locations).await;
+        let _ = events.send(match goto {
+            Goto::Definition => Event::LspDefinition { token, locations },
+            Goto::TypeDefinition => Event::LspTypeDefinition { token, locations },
+            Goto::Implementation => Event::LspImplementation { token, locations },
+        });
+    });
 }
 
 /// How long an owned checkout stays on disk without being opened before

@@ -196,15 +196,17 @@ pub struct Located {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Locations {
     References,
+    Implementations,
     Definitions,
 }
 
 impl Locations {
-    /// "References to", "Definitions of": what the heading says before the
-    /// symbol.
+    /// "References to", "Implementations of", "Definitions of": what the
+    /// heading says before the symbol.
     pub fn heading(self) -> &'static str {
         match self {
             Locations::References => "References to",
+            Locations::Implementations => "Implementations of",
             Locations::Definitions => "Definitions of",
         }
     }

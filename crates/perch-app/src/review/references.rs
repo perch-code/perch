@@ -67,28 +67,35 @@ pub fn symbol_at_cursor(state: ReviewState) -> Option<Symbol> {
     symbol_on(state, head_line, column)
 }
 
-/// Ask where a symbol is used. The panel opens at once, empty under its
-/// heading, and fills when the answer comes back with the same token.
-/// Nothing while the server is not there: the status line already says so.
-pub fn find(state: ReviewState, backend: &Backend, symbol: &Symbol) {
+/// Ask where a symbol is: its references, or its implementations. The
+/// panel opens at once, empty under the kind's heading, and fills when the
+/// answer comes back with the same token. Nothing while the server is not
+/// there: the status line already says so.
+pub fn find(state: ReviewState, backend: &Backend, symbol: &Symbol, kind: Locations) {
     if !state.lsp_status.with(|s| s.is_usable()) {
         return;
     }
     let token = state.next_token();
     state.references.set(Some(Arc::new(References {
-        kind: Locations::References,
+        kind,
         symbol: symbol.text.clone(),
         locations: Vec::new(),
         pending: true,
         token,
     })));
-    backend.references(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+    let (line, character) = (symbol.line as u32, symbol.column as u32);
+    match kind {
+        Locations::Implementations => backend.implementation(token, &symbol.path, line, character),
+        Locations::References | Locations::Definitions => {
+            backend.references(token, &symbol.path, line, character)
+        }
+    }
 }
 
 /// `Shift-F12`: the references to the symbol at the caret.
 pub fn find_at_cursor(state: ReviewState, backend: &Backend) {
     if let Some(symbol) = symbol_at_cursor(state) {
-        find(state, backend, &symbol);
+        find(state, backend, &symbol, Locations::References);
     }
 }
 
@@ -741,6 +748,7 @@ mod tests {
     #[test]
     fn the_heading_reads_the_kind() {
         assert_eq!(Locations::References.heading(), "References to");
+        assert_eq!(Locations::Implementations.heading(), "Implementations of");
         assert_eq!(Locations::Definitions.heading(), "Definitions of");
     }
 

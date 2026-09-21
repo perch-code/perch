@@ -1,6 +1,7 @@
 //! The editor made navigable: the pointer tracked to the symbol under it,
 //! the tooltip that says what the symbol is, the hand while Cmd is held
-//! over one, and the Cmd-click that goes to its definition.
+//! over one, the Cmd-click that goes to its definition, and the menu on
+//! a right-click that offers the rest.
 //!
 //! The editor's own hit-testing maps the pointer to a byte offset, and
 //! `review::hover` maps the offset to a symbol. The symbol under the
@@ -19,6 +20,7 @@ use floem::kurbo::Point;
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
+use floem::views::editor::core::buffer::rope_text::RopeText;
 use floem::views::editor::core::cursor::CursorAffinity;
 use floem::views::editor::Editor;
 use floem::views::{dyn_container, tooltip, Decorators, Delay, Empty, TextEditor};
@@ -100,6 +102,18 @@ pub fn navigable(
                 state.pointer_symbol.set(None);
             }
         });
+
+    // The menu is on the editor's content view: floem looks for one on
+    // the view under the pointer alone. Its closure gets no position, so
+    // it reads the symbol the pointer tracking last saw, which at the
+    // moment of the click is the one clicked.
+    if let Some(content) = ed.editor_view_id.get_untracked() {
+        let menu_backend = backend.clone();
+        let menu_ed = ed.clone();
+        content.update_context_menu(move || {
+            symbol_menu(state, &menu_backend, &menu_ed, state.pointer_symbol.get_untracked())
+        });
+    }
 
     tooltip(editor, move || {
         // Read each time the tip is drawn, and again when the answer lands:
@@ -218,6 +232,150 @@ pub fn go_to_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) 
 pub fn definition_at_cursor(state: ReviewState, backend: &Backend) {
     if let Some(symbol) = references::symbol_at_cursor(state) {
         go_to_definition(state, backend, &symbol);
+    }
+}
+
+/// Ask for the type of the thing a symbol is: a binding's type, the
+/// struct behind a `Self`. It nearly always has one answer, which opens;
+/// several list as definitions.
+pub fn go_to_type_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) {
+    if !state.lsp_status.with_untracked(|s| s.is_usable()) {
+        return;
+    }
+    let token = state.next_token();
+    state.goto.set(Some(GotoAsk {
+        token,
+        symbol: symbol.text.clone(),
+        kind: Locations::Definitions,
+    }));
+    backend.type_definition(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+}
+
+/// Ask for the impls of a trait, or of a trait method. One opens; several
+/// open the panel as "Implementations of".
+pub fn go_to_implementations(state: ReviewState, backend: &Backend, symbol: &Symbol) {
+    if !state.lsp_status.with_untracked(|s| s.is_usable()) {
+        return;
+    }
+    let token = state.next_token();
+    state.goto.set(Some(GotoAsk {
+        token,
+        symbol: symbol.text.clone(),
+        kind: Locations::Implementations,
+    }));
+    backend.implementation(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+}
+
+/// `Cmd-F12`: the implementations of the symbol at the caret.
+pub fn implementations_at_cursor(state: ReviewState, backend: &Backend) {
+    if let Some(symbol) = references::symbol_at_cursor(state) {
+        go_to_implementations(state, backend, &symbol);
+    }
+}
+
+/// The entries of the right-click menu, in order, for the symbol under
+/// the pointer: each names what it acts on. `None` on nothing, whitespace
+/// or a removed line, where the menu is Copy alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    Definition,
+    TypeDefinition,
+    Implementations,
+    References,
+    Copy,
+}
+
+impl Entry {
+    /// Which entries a menu has: the navigation for a symbol, then Copy.
+    pub fn for_symbol(symbol: Option<&Symbol>) -> Vec<Entry> {
+        match symbol {
+            Some(_) => vec![
+                Entry::Definition,
+                Entry::TypeDefinition,
+                Entry::Implementations,
+                Entry::References,
+                Entry::Copy,
+            ],
+            None => vec![Entry::Copy],
+        }
+    }
+
+    /// "Go to Definition of `parse`": the entry with the symbol it acts on.
+    pub fn label(self, symbol: Option<&Symbol>) -> String {
+        let name = symbol.map(|s| format!(" of `{}`", s.text)).unwrap_or_default();
+        match self {
+            Entry::Definition => format!("Go to Definition{name}"),
+            Entry::TypeDefinition => format!("Go to Type Definition{name}"),
+            Entry::Implementations => format!("Go to Implementations{name}"),
+            Entry::References => format!("Find All References{}", name.replacen(" of ", " to ", 1)),
+            Entry::Copy => "Copy".to_string(),
+        }
+    }
+
+    /// The key that does the same, as a menu accelerator: VS Code's keys.
+    pub fn accelerator(self) -> Option<&'static str> {
+        match self {
+            Entry::Definition => Some("F12"),
+            Entry::TypeDefinition => None,
+            Entry::Implementations => Some("super+F12"),
+            Entry::References => Some("shift+F12"),
+            Entry::Copy => Some("super+KeyC"),
+        }
+    }
+}
+
+/// The menu for a right-click in the code. The navigation entries each
+/// act on the symbol; Copy copies the editor's selection.
+fn symbol_menu(state: ReviewState, backend: &Rc<Backend>, ed: &Editor, symbol: Option<Symbol>) -> floem::Menu {
+    let mut menu = floem::Menu::new();
+    for entry in Entry::for_symbol(symbol.as_ref()) {
+        if entry == Entry::Copy && symbol.is_some() {
+            menu = menu.separator();
+        }
+        let label = entry.label(symbol.as_ref());
+        let backend = backend.clone();
+        let ed = ed.clone();
+        let symbol = symbol.clone();
+        menu = menu.item(label, move |item| {
+            let item = match entry.accelerator().and_then(|keys| keys.parse().ok()) {
+                Some(accelerator) => item.accelerator(accelerator),
+                None => item,
+            };
+            item.action(move || match (entry, &symbol) {
+                (Entry::Definition, Some(symbol)) => go_to_definition(state, &backend, symbol),
+                (Entry::TypeDefinition, Some(symbol)) => {
+                    go_to_type_definition(state, &backend, symbol)
+                }
+                (Entry::Implementations, Some(symbol)) => {
+                    go_to_implementations(state, &backend, symbol)
+                }
+                (Entry::References, Some(symbol)) => {
+                    references::find(state, &backend, symbol, Locations::References)
+                }
+                (Entry::Copy, _) => copy_selection(&ed),
+                (_, None) => {}
+            })
+        });
+    }
+    menu
+}
+
+/// Copy the editor's selection to the clipboard, as Cmd-C does.
+fn copy_selection(ed: &Editor) {
+    let doc = ed.doc();
+    let text = ed.cursor.with_untracked(|c| {
+        let rope = doc.rope_text();
+        c.mode
+            .regions_iter()
+            .map(|(a, b, _)| {
+                let (start, end) = (a.min(b), a.max(b));
+                rope.slice_to_cow(start..end).into_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    if !text.is_empty() {
+        crate::ui::widgets::copy_to_clipboard(text);
     }
 }
 
@@ -371,6 +529,17 @@ mod tests {
         let mut out = Vec::new();
         while let Ok(command) = commands.try_recv() {
             if let Command::Definition { path, line, character, .. } = command {
+                out.push((path, line, character));
+            }
+        }
+        out
+    }
+
+    /// The implementation asks the window sent.
+    fn implementations_asked(commands: &mut UnboundedReceiver<Command>) -> Vec<(String, u32, u32)> {
+        let mut out = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let Command::Implementation { path, line, character, .. } = command {
                 out.push((path, line, character));
             }
         }
@@ -603,5 +772,85 @@ mod tests {
         harness.rebuild();
         assert!(definitions_asked(&mut commands).is_empty());
         assert!(state.references.get().is_none());
+    }
+
+    #[test]
+    fn cmd_f12_asks_for_the_implementations_of_the_symbol_at_the_caret() {
+        let (mut harness, state, mut commands) = recording_harness();
+        let doc = stacked_doc(state);
+        editor().cursor.update(|c| c.set_offset(doc.offset_of_row(2) + 4, CursorAffinity::Backward, false, false));
+        harness.rebuild();
+
+        let os_mod = if cfg!(target_os = "macos") { Modifiers::META } else { Modifiers::CONTROL };
+        harness.dispatch_event(key(Code::F12, Key::Named(NamedKey::F12), os_mod));
+        harness.rebuild();
+        assert_eq!(implementations_asked(&mut commands), vec![("src/x.rs".into(), 1, 3)]);
+        let ask = state.goto.get().expect("implementations are on their way");
+        assert_eq!((ask.symbol.as_str(), ask.kind), ("beta", Locations::Implementations));
+
+        // Several answers list under the kind, and one opens.
+        let located = |path: &str, line: usize| crate::review::model::Located {
+            path: path.into(),
+            outside: None,
+            line,
+            character: 0,
+            text: "impl".into(),
+        };
+        state.finish_goto(ask.token, vec![located("src/x.rs", 1), located("src/y.rs", 4)]);
+        let panel = state.references.get().expect("the panel opened");
+        assert_eq!(panel.kind, Locations::Implementations);
+        assert_eq!(panel.symbol, "beta");
+        assert_eq!(panel.locations.len(), 2);
+    }
+
+    #[test]
+    fn the_type_definition_answers_as_a_definition_does() {
+        let state = ReviewState::new();
+        state.lsp_status.set(perch_lsp::Status::Ready);
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let symbol = Symbol { path: "src/x.rs".into(), line: 4, column: 8, end: 12, text: "self".into() };
+        go_to_type_definition(state, &backend, &symbol);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::TypeDefinition { path, line: 4, character: 8, .. }) if path == "src/x.rs"
+        ));
+        let ask = state.goto.get().unwrap();
+        assert_eq!(ask.kind, Locations::Definitions);
+        state.finish_goto(
+            ask.token,
+            vec![crate::review::model::Located {
+                path: "src/y.rs".into(),
+                outside: None,
+                line: 10,
+                character: 11,
+                text: "pub struct Db".into(),
+            }],
+        );
+        assert_eq!(state.pending_jump.get(), Some(("src/y.rs".into(), 9, 11)));
+    }
+
+    #[test]
+    fn the_menu_names_what_each_entry_acts_on_and_is_copy_alone_on_nothing() {
+        let parse = Symbol { path: "src/x.rs".into(), line: 0, column: 3, end: 8, text: "parse".into() };
+        let entries = Entry::for_symbol(Some(&parse));
+        assert_eq!(
+            entries.iter().map(|e| e.label(Some(&parse))).collect::<Vec<_>>(),
+            vec![
+                "Go to Definition of `parse`",
+                "Go to Type Definition of `parse`",
+                "Go to Implementations of `parse`",
+                "Find All References to `parse`",
+                "Copy",
+            ]
+        );
+        assert_eq!(
+            entries.iter().map(|e| e.accelerator()).collect::<Vec<_>>(),
+            vec![Some("F12"), None, Some("super+F12"), Some("shift+F12"), Some("super+KeyC")]
+        );
+        for keys in entries.iter().filter_map(|e| e.accelerator()) {
+            assert!(keys.parse::<floem::muda::accelerator::Accelerator>().is_ok(), "{keys}");
+        }
+        assert_eq!(Entry::for_symbol(None), vec![Entry::Copy]);
+        assert_eq!(Entry::Copy.label(None), "Copy");
     }
 }

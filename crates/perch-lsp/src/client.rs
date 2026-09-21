@@ -205,23 +205,34 @@ impl Client {
     }
 
     pub async fn definition(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
-        self.goto("textDocument/definition", path, line, character).await
+        self.goto("textDocument/definition", path, line, character, QUICK_TIMEOUT)
+            .await
     }
 
     /// The type of the thing at a position: a binding's type, the struct
     /// behind a `Self`.
     pub async fn type_definition(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
-        self.goto("textDocument/typeDefinition", path, line, character).await
+        self.goto("textDocument/typeDefinition", path, line, character, QUICK_TIMEOUT)
+            .await
     }
 
-    /// The impls of the trait, or of the trait method, at a position.
+    /// The impls of the trait, or of the trait method, at a position. A
+    /// search of the workspace, like references, so it waits as long.
     pub async fn implementation(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
-        self.goto("textDocument/implementation", path, line, character).await
+        self.goto("textDocument/implementation", path, line, character, PANEL_TIMEOUT)
+            .await
     }
 
     /// The three gotos are one request with three names: a position in,
     /// locations out, and a null reply is none.
-    async fn goto(&self, method: &str, path: &Path, line: u32, character: u32) -> Vec<Location> {
+    async fn goto(
+        &self,
+        method: &str,
+        path: &Path,
+        line: u32,
+        character: u32,
+        timeout: Duration,
+    ) -> Vec<Location> {
         let Some(position) = self.position(path, line, character) else {
             return Vec::new();
         };
@@ -233,7 +244,7 @@ impl Client {
         let Ok(params) = serde_json::to_value(params) else {
             return Vec::new();
         };
-        let Ok(value) = self.request(method, params, QUICK_TIMEOUT).await else {
+        let Ok(value) = self.request(method, params, timeout).await else {
             return Vec::new();
         };
         goto_locations(value)
