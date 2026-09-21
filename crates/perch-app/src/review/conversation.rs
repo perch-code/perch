@@ -992,4 +992,98 @@ mod tests {
         assert_eq!((composer.thread_id, composer.anchor), (None, None));
         assert!(state.composer_box.get().is_some());
     }
+
+    /// The poll's status, which the main pane's key reads, must not build
+    /// the page again: the reader's place on it is in the scroll, and a
+    /// new scroll starts at the top.
+    #[test]
+    fn a_poll_leaves_the_page_where_it_was_scrolled_to() {
+        use crate::backend::{Event, Status};
+
+        let (mut harness, app, _) = app_harness();
+        let scroll = find(harness.root_id(), "conversation").unwrap();
+        let viewport = scroll.get_visual_rect_no_clip();
+        let title = find(harness.root_id(), "conversation-title").unwrap();
+        let top = title.get_visual_rect_no_clip().y0;
+        harness.scroll_down(viewport.center().x, viewport.center().y, 300.0);
+        harness.rebuild();
+        harness.paint();
+        let scrolled = title.get_visual_rect_no_clip().y0;
+        assert!(
+            scrolled < top,
+            "the page did not scroll: {top} then {scrolled}"
+        );
+
+        app.apply(Event::Status(Status::Refreshing));
+        app.apply(Event::Status(Status::Idle {
+            at: at("2026-09-18T10:00:00Z"),
+            source: "GITHUB_TOKEN".into(),
+        }));
+        harness.rebuild();
+        harness.paint();
+
+        let after = find(harness.root_id(), "conversation").unwrap();
+        assert_eq!(after, scroll, "the poll built the page again");
+        assert_eq!(
+            title.get_visual_rect_no_clip().y0,
+            scrolled,
+            "the poll moved the page"
+        );
+    }
+
+    /// What a notification has the poll fetch lands on the page as it
+    /// is: a comment said while the reader is on it is one more card in
+    /// the same scroll, and the reader is where they were.
+    #[test]
+    fn a_comment_that_arrives_joins_the_page_in_place() {
+        use crate::backend::Event;
+
+        let (mut harness, app, state) = app_harness();
+        let scroll = find(harness.root_id(), "conversation").unwrap();
+        let viewport = scroll.get_visual_rect_no_clip();
+        let title = find(harness.root_id(), "conversation-title").unwrap();
+        harness.scroll_down(viewport.center().x, viewport.center().y, 300.0);
+        harness.rebuild();
+        harness.paint();
+        let scrolled = title.get_visual_rect_no_clip().y0;
+        let before = cards_in_order(&harness);
+
+        let mut discussion = discussion();
+        discussion.comments.push(IssueComment {
+            id: 2,
+            user: "rohan".into(),
+            user_avatar_url: String::new(),
+            body: "One more thing.".into(),
+            created_at: at("2026-09-18T09:00:00Z"),
+            updated_at: None,
+            html_url: "https://github.com/criccomini/perch/pull/57#issuecomment-2".into(),
+        });
+        app.apply_with_review(
+            Event::DiscussionReady {
+                item_id: "wt".into(),
+                discussion: Arc::new(discussion),
+            },
+            state,
+        );
+        harness.rebuild();
+        harness.paint();
+
+        let mut expected = before.clone();
+        expected.push("card:comment".into());
+        assert_eq!(
+            cards_in_order(&harness),
+            expected,
+            "the comment is not a new card"
+        );
+        assert_eq!(
+            find(harness.root_id(), "conversation").unwrap(),
+            scroll,
+            "the comment built the page again"
+        );
+        assert_eq!(
+            title.get_visual_rect_no_clip().y0,
+            scrolled,
+            "the comment moved the page"
+        );
+    }
 }

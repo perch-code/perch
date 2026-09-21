@@ -125,6 +125,13 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         });
     }
 
+    let main_pane = floem::reactive::Memo::new(move |_| {
+        (
+            review.is_showing(),
+            state.status.with(|s| matches!(s, Status::NoToken { .. })),
+        )
+    });
+
     let root = Stack::vertical((
         Stack::horizontal((
             dyn_container(
@@ -152,14 +159,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             ),
             // The main area: the review view over the sidebar, or the
             // empty state, which on a fresh install with no token is what
-            // to do about that.
+            // to do about that. A memo, because a signal tells its readers
+            // about every write and the container builds its child again
+            // on each: the status is written on every poll, and a page
+            // built again is a scroll back at the top.
             dyn_container(
-                move || {
-                    (
-                        review.is_showing(),
-                        state.status.with(|s| matches!(s, Status::NoToken { .. })),
-                    )
-                },
+                move || main_pane.get(),
                 move |(open, no_token)| {
                     if open {
                         crate::review::review_view(
