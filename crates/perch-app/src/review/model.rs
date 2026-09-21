@@ -1005,6 +1005,13 @@ pub struct ReviewState {
     pub pointer_symbol: RwSignal<Option<Symbol>>,
     /// The last hover asked for, and its answer once it lands.
     pub hover: RwSignal<Option<HoverAnswer>>,
+    /// Every other use in the file of the symbol the caret rests on, as
+    /// head line, start column and end column, tinted by the editor.
+    /// Empty is none.
+    pub highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
+    /// The document highlight asked for, with the symbol at the caret it
+    /// is about, until the caret leaves the symbol.
+    pub highlight_ask: RwSignal<Option<(u64, Symbol)>>,
     /// A jump waiting to be made, as the file, the head line and the column
     /// the caret lands on. The view with the file-opening closure takes it.
     pub pending_jump: RwSignal<Option<(String, usize, usize)>>,
@@ -1123,6 +1130,8 @@ impl ReviewState {
             request_token: RwSignal::new(0),
             pointer_symbol: RwSignal::new(None),
             hover: RwSignal::new(None),
+            highlights: RwSignal::new(Arc::new(Vec::new())),
+            highlight_ask: RwSignal::new(None),
             pending_jump: RwSignal::new(None),
             jump_to_line: RwSignal::new(None),
             jump_caret: RwSignal::new(None),
@@ -1243,6 +1252,7 @@ impl ReviewState {
         self.docs.set(None);
         self.pointer_symbol.set(None);
         self.hover.set(None);
+        self.clear_highlights();
         self.last_position.set(None);
     }
 
@@ -1481,6 +1491,38 @@ impl ReviewState {
         }));
     }
 
+    /// The caret left the symbol whose uses were tinted, or nothing was:
+    /// no tint, and no answer taken.
+    pub fn clear_highlights(&self) {
+        if !self.highlights.with_untracked(|h| h.is_empty()) {
+            self.highlights.set(Arc::new(Vec::new()));
+        }
+        if self.highlight_ask.with_untracked(Option::is_some) {
+            self.highlight_ask.set(None);
+        }
+    }
+
+    /// Ask for every use in the file of the symbol the caret rests on.
+    pub fn ask_highlights(&self, backend: &crate::backend::Backend, symbol: Symbol) {
+        if !self.lsp_status.with_untracked(|s| s.is_usable()) {
+            return;
+        }
+        let token = self.next_token();
+        backend.document_highlight(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+        self.highlight_ask.set(Some((token, symbol)));
+    }
+
+    /// The uses arrived. Kept only for the ask still waiting: the caret
+    /// may have moved on since.
+    pub fn finish_highlights(&self, token: u64, ranges: Vec<(usize, usize, usize)>) {
+        if self
+            .highlight_ask
+            .with_untracked(|a| a.as_ref().is_some_and(|(t, _)| *t == token))
+        {
+            self.highlights.set(Arc::new(ranges));
+        }
+    }
+
     /// The hover's answer, when it is about the symbol under the pointer
     /// and has landed. What the tooltip draws; `None` draws nothing.
     pub fn hover_for_pointer(&self) -> Option<String> {
@@ -1705,6 +1747,8 @@ impl ReviewState {
         }
         self.active.set(Some(path.to_string()));
         self.cursor_line.set(0);
+        // The tint was another file's, or another caret's.
+        self.clear_highlights();
         self.editor_epoch.update(|e| *e += 1);
         self.keep_composer_in_view();
 

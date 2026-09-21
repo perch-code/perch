@@ -369,3 +369,7 @@ pub const REFERENCES_LINE_WIDTH: f64 = 48.0;
 /// The chip on a tab, and on a panel's file row, naming where a file
 /// outside the worktree is from.
 pub const ORIGIN_CHIP_HEIGHT: f64 = 16.0;
+/// The tint behind every other use of the symbol the caret rests on: the
+/// accent at low alpha, so it reads through a diff's green and under a
+/// selection alike.
+pub const SYMBOL_HIGHLIGHT_BG: Color = Color::from_rgba8(0x32, 0x32, 0x2f, 0x1c);

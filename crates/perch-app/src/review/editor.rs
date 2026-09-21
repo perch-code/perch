@@ -32,7 +32,7 @@ use floem::context::LayoutChanged;
 use floem::event::PointerScrollEventExt;
 use floem::kurbo::{Rect, Size, Vec2};
 use floem::prelude::*;
-use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use floem::style::Position;
 use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
 use floem::views::editor::core::editor::EditType;
@@ -248,7 +248,7 @@ fn stacked_view(
     });
     let text = built.text.clone();
     let doc = RwSignal::new(Arc::new(built));
-    let editor = code_editor(text, PerchStyling::new(file.clone(), doc, epoch));
+    let editor = code_editor(text, PerchStyling::new(file.clone(), doc, state.highlights, epoch));
     let live = LiveDoc {
         handle: editor.doc(),
         doc,
@@ -275,6 +275,7 @@ fn stacked_view(
     // The folds are wired before the jump: a jump into a fold reveals it,
     // and the reveal has to reach the editor before the jump looks for the
     // row to scroll to.
+    wire_highlights(state, &live);
     wire_folds(state, file.clone(), memos, epoch, {
         let file = file.clone();
         move |inputs: &Inputs| {
@@ -288,7 +289,7 @@ fn stacked_view(
             apply(&live, new, viewport, scroll_to, cursor, shifted)
         }
     });
-    wire_cursor(state, file.clone(), doc, cursor, shifted);
+    wire_cursor(state, backend.clone(), file.clone(), doc, cursor, shifted);
     wire_jump(state, file.clone(), doc, scroll_to, cursor, epoch);
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
@@ -1030,7 +1031,7 @@ fn split_view(
     // Distinct cache keys, in case the two ever share a layout cache.
     let left = code_editor(
         left_text,
-        PerchStyling::side(file.clone(), Side::Base, left_doc, epoch.wrapping_mul(2)),
+        PerchStyling::side(file.clone(), Side::Base, left_doc, state.highlights, epoch.wrapping_mul(2)),
     )
     .style(|s| {
         s.pointer_events_none()
@@ -1042,6 +1043,7 @@ fn split_view(
             file.clone(),
             Side::Head,
             right_doc,
+            state.highlights,
             epoch.wrapping_mul(2) + 1,
         ),
     );
@@ -1079,6 +1081,7 @@ fn split_view(
 
     // The folds are wired before the jump, as in the stacked layout. The
     // right is edited first: it owns the scroll, and the left follows.
+    wire_highlights(state, &right_live);
     wire_folds(state, file.clone(), memos, epoch, {
         let file = file.clone();
         move |inputs: &Inputs| {
@@ -1109,7 +1112,7 @@ fn split_view(
             );
         }
     });
-    wire_cursor(state, file.clone(), right_doc, right_cursor, right_shifted);
+    wire_cursor(state, backend.clone(), file.clone(), right_doc, right_cursor, right_shifted);
     wire_jump(state, file.clone(), right_doc, right_scroll_to, right_cursor, epoch);
     let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
@@ -1256,6 +1259,10 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
 /// It is read as it is when the cursor moves, not as it was when the
 /// editor was built, so a row is right after the document has been edited.
 ///
+/// The caret resting on an identifier tints its other uses in the file:
+/// after a moment still, the server is asked for them, and the caret
+/// moving off the identifier clears them.
+///
 /// An edit above the cursor moves its offset to keep it on its text, and
 /// `apply` leaves the offset it moved it to in `shifted`. That move is no
 /// click: the line and the selection are read again, since their rows may
@@ -1263,6 +1270,7 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
 /// its position stands as it was.
 fn wire_cursor(
     state: ReviewState,
+    backend: Rc<Backend>,
     file: Arc<LoadedFile>,
     doc: RwSignal<Arc<Doc>>,
     cursor: RwSignal<Cursor>,
@@ -1306,9 +1314,56 @@ fn wire_cursor(
         if by_edit {
             return offset;
         }
-        let _ = &file;
-        state.last_position.set(doc.head_position(offset));
+        let position = doc.head_position(offset);
+        state.last_position.set(position);
+
+        // The identifier at the caret, by the caret's reading: just past
+        // a word is still on it. The tint stays while the caret stays on
+        // the symbol it is for, wherever in the word it is.
+        let symbol = position.and_then(|(line, column)| {
+            let (start, text) = references::identifier_at(doc.line(row), column)?;
+            Some(crate::review::model::Symbol {
+                path: file.path.clone(),
+                line,
+                column: start,
+                end: start + text.len(),
+                text: text.to_string(),
+            })
+        });
+        let same = state
+            .highlight_ask
+            .with_untracked(|a| a.as_ref().map(|(_, s)| s) == symbol.as_ref());
+        if same {
+            return offset;
+        }
+        state.clear_highlights();
+        if let Some(symbol) = symbol {
+            let backend = backend.clone();
+            floem::action::exec_after(
+                std::time::Duration::from_millis(hover::ASK_DELAY_MILLIS),
+                move |_| {
+                    if state.last_position.with_untracked(|p| *p == position) {
+                        state.ask_highlights(&backend, symbol);
+                    }
+                },
+            );
+        }
         offset
+    });
+}
+
+/// The editor lays its lines out through the styling, and caches them;
+/// when the tint changes, the cached layouts are stale, and are dropped
+/// so the lines in view are laid out again with the tint, or without it.
+fn wire_highlights(state: ReviewState, live: &LiveDoc) {
+    let handle = live.handle.clone();
+    Effect::new(move |before: Option<()>| {
+        state.highlights.track();
+        // The layouts built with the editor are right; only a change
+        // after that makes them stale.
+        if before.is_some() {
+            handle.cache_rev().update(|rev| *rev += 1);
+        }
     });
 }
 

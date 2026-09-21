@@ -1249,6 +1249,9 @@ impl AppState {
             | Event::LspImplementation { token, locations } => {
                 review.finish_goto(token, locations);
             }
+            Event::LspDocumentHighlight { token, ranges } => {
+                review.finish_highlights(token, ranges);
+            }
             Event::LspCallHierarchy { token, items, place } => {
                 review.finish_prepare_hierarchy(token, items, place);
             }
@@ -1753,6 +1756,7 @@ impl AppState {
             | Event::LspDefinition { .. }
             | Event::LspTypeDefinition { .. }
             | Event::LspImplementation { .. }
+            | Event::LspDocumentHighlight { .. }
             | Event::LspCallHierarchy { .. }
             | Event::LspCalls { .. }
             | Event::DiscussionReady { .. }

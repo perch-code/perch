@@ -888,4 +888,49 @@ mod tests {
         assert_eq!(Entry::for_symbol(None), vec![Entry::Copy]);
         assert_eq!(Entry::Copy.label(None), "Copy");
     }
+
+    #[test]
+    fn the_caret_resting_on_a_symbol_tints_its_uses_and_leaving_it_clears_them() {
+        let (mut harness, state, _) = recording_harness();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let doc = stacked_doc(state);
+        let ed = editor();
+
+        // The caret on `alpha` in the call: the ask, as the timer makes it.
+        ed.cursor.update(|c| c.set_offset(doc.offset_of_row(3) + 6, CursorAffinity::Backward, false, false));
+        harness.rebuild();
+        let alpha = references::symbol_at_cursor(state).expect("the caret is on alpha");
+        assert_eq!((alpha.text.as_str(), alpha.line, alpha.column), ("alpha", 2, 4));
+        state.ask_highlights(&backend, alpha.clone());
+        let token = state.highlight_ask.get().unwrap().0;
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::DocumentHighlight { path, line: 2, character: 4, .. }) if path == "src/x.rs"
+        ));
+
+        // A stale answer is dropped; the right one lands.
+        state.finish_highlights(token + 1, vec![(9, 0, 1)]);
+        assert!(state.highlights.get().is_empty());
+        state.finish_highlights(token, vec![(0, 3, 8), (2, 4, 9)]);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.highlights.get().as_slice(), &[(0, 3, 8), (2, 4, 9)]);
+
+        // Along the word, the tint stays; off it, the tint clears.
+        ed.cursor.update(|c| c.set_offset(doc.offset_of_row(3) + 8, CursorAffinity::Backward, false, false));
+        harness.rebuild();
+        assert_eq!(state.highlights.get().len(), 2, "still on alpha");
+        ed.cursor.update(|c| c.set_offset(doc.offset_of_row(4), CursorAffinity::Backward, false, false));
+        harness.rebuild();
+        assert!(state.highlights.get().is_empty(), "the brace is nothing");
+        assert!(state.highlight_ask.get().is_none());
+
+        // Another tab clears them too.
+        state.finish_highlights(token, vec![(0, 3, 8)]);
+        state.highlight_ask.set(Some((token, alpha)));
+        state.finish_highlights(token, vec![(0, 3, 8)]);
+        assert!(!state.highlights.get().is_empty());
+        state.open_tab("src/y.rs");
+        assert!(state.highlights.get().is_empty());
+    }
 }

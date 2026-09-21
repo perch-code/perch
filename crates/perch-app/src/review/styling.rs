@@ -2,16 +2,18 @@
 //!
 //! Two hooks do all the work. `apply_attr_styles` colours the text from
 //! tree-sitter spans, and `apply_layout_styles` paints the diff background
-//! behind a whole line. Both are handed a row of the editor, so anything
-//! that needs a real file position goes through the document's rows first,
-//! and from there through the buffer's row table.
+//! behind a whole line, and the tint behind every other use of the symbol
+//! the caret rests on, on the range rather than the line. Both are handed
+//! a row of the editor, so anything that needs a real file position goes
+//! through the document's rows first, and from there through the buffer's
+//! row table.
 
 use std::borrow::Cow;
 use std::sync::Arc;
 
 use floem::peniko::Color;
 use floem::reactive::{RwSignal, SignalWith};
-use floem::text::{Attrs, AttrsList, FamilyOwned, FontWeight};
+use floem::text::{Affinity, Attrs, AttrsList, FamilyOwned, FontWeight};
 use floem::views::editor::id::EditorId;
 use floem::views::editor::layout::{LineExtraStyle, TextLayoutLine};
 use floem::views::editor::text::Styling;
@@ -32,6 +34,10 @@ pub struct PerchStyling {
     /// Set for one half of a split: the base side's document is over the
     /// base file, and its spans are that file's.
     side: Option<Side>,
+    /// The uses of the caret's symbol, as head positions. Read live: the
+    /// editor's layouts are dropped when they change, and rebuilt through
+    /// this.
+    highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
     families: Vec<FamilyOwned>,
     /// Cache key. Bumped per loaded file so the editor drops layouts from the
     /// file before; without this a second file reuses the first one's colours.
@@ -40,19 +46,49 @@ pub struct PerchStyling {
 
 impl PerchStyling {
     /// The stacked view: the document over the unified buffer.
-    pub fn new(file: Arc<LoadedFile>, doc: RwSignal<Arc<Doc>>, id: u64) -> Self {
+    pub fn new(
+        file: Arc<LoadedFile>,
+        doc: RwSignal<Arc<Doc>>,
+        highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
+        id: u64,
+    ) -> Self {
         Self {
             file,
             doc,
             side: None,
+            highlights,
             families: FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect(),
             id,
         }
     }
 
     /// One half of a split.
-    pub fn side(file: Arc<LoadedFile>, side: Side, doc: RwSignal<Arc<Doc>>, id: u64) -> Self {
-        Self { side: Some(side), ..Self::new(file, doc, id) }
+    pub fn side(
+        file: Arc<LoadedFile>,
+        side: Side,
+        doc: RwSignal<Arc<Doc>>,
+        highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
+        id: u64,
+    ) -> Self {
+        Self { side: Some(side), ..Self::new(file, doc, highlights, id) }
+    }
+
+    /// The columns of the caret's symbol's uses on a row: those on the
+    /// row's head line, clamped to the line. A row that is no head line,
+    /// a ghost or a base side's line, has none; a use inside a fold is on
+    /// no row, and is not drawn until a reveal puts it on one.
+    fn highlights_for(&self, row: usize) -> Vec<(usize, usize)> {
+        let Some(head) = self.doc.with_untracked(|d| d.head_line(row)) else {
+            return Vec::new();
+        };
+        let len = self.line_len(row);
+        self.highlights.with_untracked(|h| {
+            h.iter()
+                .filter(|(line, _, _)| *line == head)
+                .map(|(_, start, end)| ((*start).min(len), (*end).min(len)))
+                .filter(|(start, end)| start < end)
+                .collect()
+        })
     }
 
     fn row(&self, row: usize) -> Option<DocRow> {
@@ -167,23 +203,90 @@ impl Styling for PerchStyling {
         line: usize,
         layout_line: &mut TextLayoutLine,
     ) {
-        let Some(bg) = self.background_for(line) else {
-            return;
-        };
-        layout_line.extra_style.push(LineExtraStyle {
-            x: 0.0,
-            y: 0.0,
-            // None means the full viewport width, so the tint runs to the
-            // right edge rather than stopping at the end of the text.
-            width: None,
-            height: theme::CODE_LINE_HEIGHT as f64,
-            bg_color: Some(bg),
-            under_line: None,
-            wave_line: None,
-        });
+        if let Some(bg) = self.background_for(line) {
+            layout_line.extra_style.push(LineExtraStyle {
+                x: 0.0,
+                y: 0.0,
+                // None means the full viewport width, so the tint runs to
+                // the right edge rather than stopping at the end of the
+                // text.
+                width: None,
+                height: theme::CODE_LINE_HEIGHT as f64,
+                bg_color: Some(bg),
+                under_line: None,
+                wave_line: None,
+            });
+        }
+        // The symbol's uses, over the diff tint: the range's columns as
+        // the layout places them.
+        for (start, end) in self.highlights_for(line) {
+            let x0 = layout_line.text.cursor_point(start, Affinity::Downstream).x;
+            let x1 = layout_line.text.cursor_point(end, Affinity::Upstream).x;
+            if x1 <= x0 {
+                continue;
+            }
+            layout_line.extra_style.push(LineExtraStyle {
+                x: x0,
+                y: 0.0,
+                width: Some(x1 - x0),
+                height: theme::CODE_LINE_HEIGHT as f64,
+                bg_color: Some(theme::SYMBOL_HIGHLIGHT_BG),
+                under_line: None,
+                wave_line: None,
+            });
+        }
     }
 
     fn weight(&self, _edid: EditorId, _line: usize) -> FontWeight {
         FontWeight::NORMAL
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review::doc::{self, Run};
+    use floem::reactive::SignalUpdate;
+    use perch_git::DisplayBuffer;
+
+    fn styling(text: &str, folds: Vec<Run>) -> PerchStyling {
+        let file = Arc::new(crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            text.into(),
+            String::new(),
+            None,
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        ));
+        let doc = RwSignal::new(Arc::new(doc::build(&DisplayBuffer::plain(text), &folds, &[])));
+        PerchStyling::new(file, doc, RwSignal::new(Arc::new(Vec::new())), 1)
+    }
+
+    #[test]
+    fn the_uses_on_a_row_are_its_head_lines_and_a_folded_one_is_on_no_row() {
+        let text = "let path = 1;\nlet a = path;\nlet b = path;\nlet c = path;\nlet d = path;\nlet e = path;\nlet f = 2;\n";
+        // Display lines 2 to 4 folded away: rows are lines 0, 1, a
+        // divider, then 5 and 6.
+        let styling = styling(text, vec![Run::new(2, 4, 2)]);
+        styling.highlights.set(Arc::new(vec![(0, 4, 8), (1, 8, 12), (3, 8, 12), (5, 8, 12), (5, 40, 44)]));
+
+        assert_eq!(styling.highlights_for(0), vec![(4, 8)]);
+        assert_eq!(styling.highlights_for(1), vec![(8, 12)]);
+        assert!(styling.highlights_for(2).is_empty(), "the divider is no head line");
+        assert_eq!(styling.highlights_for(3), vec![(8, 12)], "row 3 is head line 5, past the fold");
+        assert!(styling.highlights_for(4).is_empty());
+        // Head line 3's use is inside the fold: on no row, so not drawn.
+        assert!(!(0..5).any(|row| styling.highlights_for(row).contains(&(8, 12)) && styling.doc.with_untracked(|d| d.head_line(row)) == Some(3)));
+
+        // Revealed, the fold's lines have rows, and the use is drawn.
+        let whole = doc::build(&DisplayBuffer::plain(text), &[], &[]);
+        styling.doc.set(Arc::new(whole));
+        assert_eq!(styling.highlights_for(3), vec![(8, 12)]);
+        assert_eq!(styling.doc.with_untracked(|d| d.head_line(3)), Some(3));
+
+        // A range past the line is clamped to it, and one on nothing is
+        // dropped.
+        assert_eq!(styling.highlights_for(5), vec![(8, 12)]);
     }
 }

@@ -207,6 +207,13 @@ pub enum Command {
         line: u32,
         character: u32,
     },
+    /// Every use in its file of the symbol at a position, as ranges.
+    DocumentHighlight {
+        token: u64,
+        path: String,
+        line: u32,
+        character: u32,
+    },
     /// The function at a position, as the server names it for a call
     /// hierarchy, or nothing when the position is not on one.
     PrepareCallHierarchy {
@@ -678,6 +685,12 @@ pub enum Event {
     LspReferences {
         token: u64,
         locations: Vec<crate::review::model::Located>,
+    },
+    /// Every use in its file of a symbol: head line, start column, end
+    /// column, as the protocol counts them.
+    LspDocumentHighlight {
+        token: u64,
+        ranges: Vec<(usize, usize, usize)>,
     },
     /// The items a call hierarchy can start from, with where the first is.
     LspCallHierarchy {
@@ -1742,6 +1755,15 @@ impl Backend {
 
     pub fn references(&self, token: u64, path: &str, line: u32, character: u32) {
         let _ = self.commands.send(Command::References {
+            token,
+            path: path.to_string(),
+            line,
+            character,
+        });
+    }
+
+    pub fn document_highlight(&self, token: u64, path: &str, line: u32, character: u32) {
+        let _ = self.commands.send(Command::DocumentHighlight {
             token,
             path: path.to_string(),
             line,
@@ -3025,6 +3047,40 @@ async fn run(
                     let locations = client.references(&full, line, character).await;
                     let locations = read_locations(&worktree, &locations).await;
                     let _ = events.send(Event::LspReferences { token, locations });
+                });
+            }
+            Command::DocumentHighlight {
+                token,
+                path,
+                line,
+                character,
+            } => {
+                let checkout = checkout.clone();
+                let language_server = language_server.clone();
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    else {
+                        return;
+                    };
+                    // A range on one line is its columns; one that runs on
+                    // to another line is tinted to the end of its first,
+                    // which the editor clamps to the line.
+                    let ranges = client
+                        .document_highlight(&full, line, character)
+                        .await
+                        .into_iter()
+                        .map(|h| {
+                            let (start, end) = (h.range.start, h.range.end);
+                            let end_column = if end.line == start.line {
+                                end.character as usize
+                            } else {
+                                usize::MAX
+                            };
+                            (start.line as usize, start.character as usize, end_column)
+                        })
+                        .collect();
+                    let _ = events.send(Event::LspDocumentHighlight { token, ranges });
                 });
             }
             Command::PrepareCallHierarchy {
