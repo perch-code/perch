@@ -479,8 +479,9 @@ fn local_item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> 
 ///
 /// Sits over the panel's border rather than beside it, so the layout does
 /// not gain a gap. The new width is the pointer's distance from the panel's
-/// left edge, which is the rail's right edge; no delta bookkeeping, so a
-/// fast drag cannot drift.
+/// left edge, which is the window's left edge: the lights lane is part of
+/// the open drawer, not a rail beside it. No delta bookkeeping, so a fast
+/// drag cannot drift.
 pub fn resize_handle(state: AppState) -> impl IntoView {
     use floem::event::DragConfig;
     use floem::style::{CursorStyle, Position};
@@ -516,8 +517,7 @@ pub fn resize_handle(state: AppState) -> impl IntoView {
             // handle moves with the edge it drags, so measured from there
             // the pointer never gets far. Map it back to the window first.
             let point = cx.world_transform.inverse() * e.current_state.logical_point();
-            let width = (point.x - theme::ACTIVITY_RAIL_WIDTH)
-                .clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
+            let width = point.x.clamp(theme::SIDEBAR_MIN_WIDTH, theme::SIDEBAR_MAX_WIDTH);
             state.sidebar_width.set(width);
         })
         .on_event_stop(el::DragEnd, move |_, _: &floem::event::DragEndEvent| {
@@ -526,6 +526,7 @@ pub fn resize_handle(state: AppState) -> impl IntoView {
         .on_event_stop(el::DragCancel, move |_, _: &floem::event::DragCancelEvent| {
             state.sidebar_resizing.set(false);
         })
+        .debug_name("sidebar resize handle")
         .style(|s| {
             s.position(Position::Absolute)
                 .inset_top(0.0)
@@ -755,5 +756,60 @@ mod tests {
         harness.paint();
         assert!(find(harness.root_id(), "No matching items").is_some());
         assert!(find(harness.root_id(), "Issue mine").is_none());
+    }
+
+    /// The whole window, so the drawer sits where it does in the app: at
+    /// the left edge, with the lights lane inside it.
+    fn window() -> (HeadlessHarness, AppState) {
+        let root = TestRoot::new();
+        let state = AppState::new();
+        let review = crate::review::model::ReviewState::new();
+        let view = crate::ui::app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1200.0, 760.0);
+        harness.rebuild();
+        harness.paint();
+        (harness, state)
+    }
+
+    fn drawer_right_edge(harness: &HeadlessHarness) -> f64 {
+        find(harness.root_id(), "sidebar resize handle")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .x1
+            - 3.0
+    }
+
+    #[test]
+    fn the_drawer_edge_follows_the_pointer_while_resizing() {
+        let (mut harness, state) = window();
+        assert_eq!(state.sidebar_width.get(), theme::SIDEBAR_WIDTH);
+        assert_eq!(drawer_right_edge(&harness), theme::SIDEBAR_WIDTH);
+
+        // Grab the edge and nudge it one pixel: the drawer must not jump.
+        let y = 300.0;
+        let grab = theme::SIDEBAR_WIDTH - 1.0;
+        harness.pointer_down(grab, y);
+        harness.pointer_move(grab + 1.0, y);
+        assert!(state.sidebar_resizing.get());
+        assert_eq!(state.sidebar_width.get(), grab + 1.0);
+
+        // Then the edge tracks the pointer, in both directions.
+        harness.pointer_move(480.0, y);
+        assert_eq!(state.sidebar_width.get(), 480.0);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(drawer_right_edge(&harness), 480.0);
+        harness.pointer_move(400.0, y);
+        assert_eq!(state.sidebar_width.get(), 400.0);
+
+        // Past either limit the width stops at the limit.
+        harness.pointer_move(900.0, y);
+        assert_eq!(state.sidebar_width.get(), theme::SIDEBAR_MAX_WIDTH);
+        harness.pointer_move(100.0, y);
+        assert_eq!(state.sidebar_width.get(), theme::SIDEBAR_MIN_WIDTH);
+
+        harness.pointer_up(100.0, y);
+        assert!(!state.sidebar_resizing.get());
+        assert_eq!(state.sidebar_width.get(), theme::SIDEBAR_MIN_WIDTH);
     }
 }
