@@ -34,7 +34,8 @@
     <use href="#tile" fill="url(#blue)"/>
     <use href="#tile" fill="url(#light)"/>
   </g>
-  <g id="bird" fill="url(#cream)">
+  <!-- Shift the bird right so its silhouette (tail tip to beak) is centered on the tile. -->
+  <g id="bird" fill="url(#cream)" transform="translate(56 0)">
     <path id="tail" d="M397 591L278 418C271 407 275 394 284 385L326 344C340 330 355 333 361 350L432 538Z"/>
     <path id="body" d="M352 589C411 567 455 522 510 480C561 441 607 403 665 398C730 392 783 421 811 475L863 485Q872 488 863 493L817 511C819 595 802 657 761 704C721 749 666 769 608 767C553 768 508 751 463 724C406 690 367 644 350 612C345 602 348 592 352 589Z"/>
     <path id="left-leg" d="M489 733L527 745L552 807H524Z"/>
