@@ -32,8 +32,10 @@ pub fn view(
     state: ReviewState,
     backend: Rc<Backend>,
     open_file: OpenFile,
+    open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
     let card_backend = backend.clone();
+    let summary_backend = backend.clone();
     let composer_backend = backend.clone();
     // Each card with the room above it: cards sit the standard gap apart,
     // and an event line is pulled in toward whatever is on either side of
@@ -87,6 +89,7 @@ pub fn view(
     Container::new(
         Stack::vertical((
             conversation_title(state),
+            crate::review::summary::summary(app, state, summary_backend, open_item),
             finding_filters(app, state),
             dyn_stack(
                 cards,
@@ -123,10 +126,16 @@ pub fn view(
                     .padding_top(theme::CONVERSATION_ENTRY_PADDING)
             }),
         ))
+        // A definite width, cut to the page's when the page is narrower,
+        // rather than the page's width capped: under a cap, the pass that
+        // sizes the page unconstrained lands on the cap's width as well,
+        // and taffy takes its unwrapped height for the constrained pass
+        // at that same width. The column's bottom, wrapped rows and long
+        // comments included, could then not be scrolled into view.
         .style(|s| {
             s.flex_col()
-                .width_full()
-                .max_width(theme::CONVERSATION_WIDTH)
+                .width(theme::CONVERSATION_WIDTH)
+                .max_width_full()
         }),
     )
     .style(|s| {
@@ -136,6 +145,7 @@ pub fn view(
             .padding(theme::CONVERSATION_PADDING)
     })
     .scroll()
+    .debug_name("conversation")
     // A bare key goes to the focused view and bubbles up from there, and
     // a click on the page would otherwise focus nothing: the column takes
     // the focus so `a` reaches the window's handler.
@@ -266,8 +276,8 @@ fn card_view(
     let pull = state.pull_request.get_untracked();
     let debug = card.kind();
     let view: floem::AnyView = match card {
-        // What Perch started from an issue is in the strip under the
-        // header, as chips, not repeated under the description.
+        // What Perch started from an issue is the summary's In Perch row,
+        // not repeated under the description.
         Card::Description {
             author,
             avatar_url,
@@ -574,6 +584,88 @@ mod tests {
             .collect()
     }
 
+    /// The page's end can be scrolled to, whatever wraps on it. Under a
+    /// width cap taffy served the column's unwrapped height for the pass
+    /// at the cap's width, and the composer under long comments or a
+    /// wrapped summary row sat past the scroll's end.
+    #[test]
+    fn the_end_of_the_page_can_be_scrolled_into_view_when_its_text_and_rows_wrap() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut pr = pull();
+        pr.labels = (0..40)
+            .map(|i| perch_github::Label {
+                name: format!("label-{i}"),
+                color: "0e8a16".into(),
+            })
+            .collect();
+        let now = at("2026-09-18T09:59:00Z");
+        let mut item = Item::new("criccomini/perch", now);
+        item.id = "wt".into();
+        item.subject = Some(ItemSubject::PullRequest(pr.clone()));
+        state.item.set(Some(Arc::new(item)));
+        state.ready.set(true);
+        state.set_phase(crate::review::model::Phase::Ready);
+        state.pull_request.set(Some(Arc::new(pr)));
+        let mut discussion = discussion();
+        for i in 0..3 {
+            discussion.comments.push(IssueComment {
+                id: 100 + i,
+                user: "chris".into(),
+                user_avatar_url: String::new(),
+                body: "A sentence that runs on well past the column's width, ".repeat(12),
+                created_at: at("2026-09-15T11:00:00Z"),
+                updated_at: None,
+                html_url: format!("https://github.com/criccomini/perch/pull/57#issuecomment-{i}"),
+            });
+        }
+        state.discussion.set(Some(Arc::new(discussion)));
+        state.composer_autofocus.set(false);
+        let backend = crate::backend::Backend::detached();
+        let view = crate::ui::app_view(app, state, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+
+        // The column is at its full width, and its rows and comments
+        // wrap.
+        let scroll = find(harness.root_id(), "conversation").unwrap();
+        let column = find(harness.root_id(), "conversation-title")
+            .unwrap()
+            .parent()
+            .unwrap();
+        assert_eq!(
+            harness.get_layout_rect(column).width(),
+            crate::theme::CONVERSATION_WIDTH
+        );
+        let labels = find(harness.root_id(), "summary row Labels").unwrap();
+        assert!(harness.get_layout_rect(labels).height() > crate::theme::SUMMARY_ROW);
+
+        // What the scroll thinks it holds is what the column is, with the
+        // page's padding around it.
+        let child = scroll.children()[0];
+        assert_eq!(
+            harness.get_layout_rect(child).height(),
+            harness.get_layout_rect(column).height() + 2.0 * crate::theme::CONVERSATION_PADDING,
+            "the scroll's content is not the column"
+        );
+
+        // And so the composer, at the column's end, can be reached.
+        let viewport = scroll.get_visual_rect_no_clip();
+        harness.scroll_down(viewport.center().x, viewport.center().y, 100_000.0);
+        harness.rebuild();
+        harness.paint();
+        let composer = find(harness.root_id(), "composer")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert_eq!(
+            composer.y1,
+            viewport.y1 - crate::theme::CONVERSATION_PADDING,
+            "the composer at {composer:?} is not at the end of the scroll {viewport:?}"
+        );
+    }
+
     #[test]
     fn the_cards_are_in_time_order_with_the_thread_between_the_review_and_the_merge() {
         let (harness, _, state) = app_harness();
@@ -648,6 +740,10 @@ mod tests {
         // nowhere; once GitHub has named them, the same label is a link.
         let thread = find(root, "card:thread").unwrap();
         let you = name_in(thread, "You");
+        // The summary over the cards puts the thread under the fold.
+        you.scroll_to(None);
+        harness.rebuild();
+        harness.paint();
         let c = you.get_visual_rect_no_clip().center();
         harness.pointer_move(c.x, c.y);
         harness.recompute_styles();

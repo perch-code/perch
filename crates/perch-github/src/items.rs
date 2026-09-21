@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
+use crate::model::SubjectState;
 use crate::pulls::{PullRequest, UserRef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -54,6 +55,17 @@ pub struct Issue {
 impl Issue {
     pub fn is_open(&self) -> bool {
         self.state.eq_ignore_ascii_case("open")
+    }
+
+    /// Open, closed or not planned, as the sidebar's glyphs draw it.
+    pub fn subject_state(&self) -> SubjectState {
+        if self.is_open() {
+            SubjectState::IssueOpen
+        } else if self.state_reason.as_deref() == Some("not_planned") {
+            SubjectState::IssueNotPlanned
+        } else {
+            SubjectState::IssueClosed
+        }
     }
 }
 
@@ -169,6 +181,14 @@ impl Subject {
         match self {
             Subject::PullRequest(pr) => pr.is_open(),
             Subject::Issue(i) => i.is_open(),
+        }
+    }
+
+    /// The state as the sidebar's glyphs draw it.
+    pub fn subject_state(&self) -> SubjectState {
+        match self {
+            Subject::PullRequest(pr) => pr.subject_state(),
+            Subject::Issue(i) => i.subject_state(),
         }
     }
 

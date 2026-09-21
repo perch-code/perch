@@ -25,8 +25,10 @@ use crate::theme;
 use crate::ui::agents::model::{AgentsTab, BackendFilter, WorktreeFilter};
 use crate::ui::widgets::{clickable, sidebar_glyph};
 
-/// Header entry point. An active review opens Agents; otherwise it opens the
-/// launch surface without changing the review's current tab or file.
+/// The bar's entry point, drawn as Codex draws Chat beside Submit review:
+/// a quiet button of the same height. An active review opens Agents;
+/// otherwise it opens the launch surface without changing the review's
+/// current tab or file.
 pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // History and an in-flight group's progress belong in the worktree view,
     // not behind the launcher's first click. Reload when the open item changes;
@@ -108,18 +110,16 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         })
         .style(move |s| {
             let base = clickable(s)
-                .height(26.0)
-                .padding_horiz(9.0)
+                .height(30.0)
+                .padding_horiz(12.0)
                 .items_center()
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS)
-                .background(theme::CANVAS)
+                .border_radius(9.0)
+                .background(theme::BADGE_BG)
                 .keyboard_navigable()
                 .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-                .hover(|s| s.background(theme::CANVAS_HOVER));
+                .hover(|s| s.background(theme::BORDER));
             if state.review_launcher_open.get() {
-                base.background(theme::BADGE_BG)
+                base.background(theme::BORDER)
             } else {
                 base
             }
@@ -141,7 +141,7 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         )
         .style(|s| {
             s.position(Position::Absolute)
-                .inset_top(31.0)
+                .inset_top(34.0)
                 .inset_right(0.0)
                 .z_index(100)
         }),

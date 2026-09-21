@@ -260,22 +260,26 @@ pub fn language_color(language: Option<perch_syntax::Language>) -> Color {
 }
 
 // ---------------------------------------------------------------------------
-// The item view: the header's pills and strip, and Conversation's cards
+// The item view: the summary's rows and pills, and Conversation's cards
 // ---------------------------------------------------------------------------
 
-/// The state pill at the start of the strip: the state's colour as text
-/// on a wash of the same colour.
+/// The state pill in the summary's Status row: the state's colour as
+/// text on a wash of the same colour.
 pub const STATE_PILL_HEIGHT: f64 = 20.0;
 pub const STATE_WASH: f32 = 0.12;
-/// The strip under the header bar at one line: the item's state, number,
-/// branches, checks and worktree, and the rule under it. What GitHub says
-/// about the item, reviewers, labels, assignees and milestone, is a second
-/// line, and wraps onto more when a line is full.
-pub const METADATA_HEIGHT: f64 = 30.0;
-/// One line of the strip: the strip less its rule.
-pub const METADATA_LINE: f64 = METADATA_HEIGHT - 1.0;
-pub const METADATA_GAP: f64 = 16.0;
-pub const METADATA_AVATAR: f64 = 16.0;
+/// A row of the summary under Conversation's title: its name in a column
+/// at the left, then its value. A value that wraps, reviewers or labels
+/// past the column's edge, makes its row taller; the name stays on the
+/// first line.
+pub const SUMMARY_ROW: f64 = 32.0;
+/// The name column: the glyph, its gap, and the longest name with room
+/// to spare.
+pub const SUMMARY_NAME_WIDTH: f64 = 124.0;
+pub const SUMMARY_GLYPH: f64 = 14.0;
+/// Between the parts of a value: the branches and their churn, the pill
+/// and the number.
+pub const SUMMARY_GAP: f64 = 12.0;
+pub const SUMMARY_AVATAR: f64 = 16.0;
 /// A small chip: a label, a linked issue, the Local mark on a thread.
 pub const CHIP_HEIGHT: f64 = 18.0;
 

@@ -22,6 +22,9 @@ use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::icon_in;
 
+/// The open files as tabs, then, at the right end, the notice about what
+/// the files are when it is not the pull request's latest, the change
+/// navigation and the layout toggle.
 pub fn tab_bar(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
         dyn_container(
@@ -34,10 +37,21 @@ pub fn tab_bar(app: AppState, state: ReviewState) -> impl IntoView {
                 }
             },
         )
-        .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full()),
+        // A zero basis, so the tabs take the room the notice and the
+        // controls leave rather than their full width, which would have
+        // squeezed the notice to its glyph; the strip scrolls sideways
+        // for the rest.
+        .style(|s| {
+            s.flex_grow(1.0_f32)
+                .flex_basis(0.0)
+                .min_width(0.0)
+                .height_full()
+        }),
+        crate::review::summary::notice(state).style(|s| s.margin_horiz(8.0)),
         change_nav(state),
         layout_toggle(app, state),
     ))
+    .debug_name("file tabs")
     .style(|s| {
         s.height(theme::TAB_HEIGHT)
             .width_full()

@@ -68,14 +68,14 @@ pub struct PullRequest {
     /// The milestone's title.
     #[serde(default)]
     pub milestone: Option<String>,
-    /// As on an issue, for the strip under the header.
+    /// As on an issue, for the item's summary.
     #[serde(default)]
     pub labels: Vec<crate::items::Label>,
     #[serde(default)]
     pub assignees: Vec<String>,
 }
 
-/// Someone asked to review, for the strip under the header.
+/// Someone asked to review, for the item's summary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Reviewer {
     pub login: String,
@@ -205,6 +205,19 @@ impl ReviewDecision {
 impl PullRequest {
     pub fn is_open(&self) -> bool {
         self.state.eq_ignore_ascii_case("open")
+    }
+
+    /// Merged, closed, draft or open, as the sidebar's glyphs draw it.
+    pub fn subject_state(&self) -> crate::SubjectState {
+        if self.merged {
+            crate::SubjectState::PrMerged
+        } else if !self.is_open() {
+            crate::SubjectState::PrClosed
+        } else if self.draft {
+            crate::SubjectState::PrDraft
+        } else {
+            crate::SubjectState::PrOpen
+        }
     }
 }
 

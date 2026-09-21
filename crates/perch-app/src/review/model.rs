@@ -856,7 +856,7 @@ pub struct ReviewState {
     /// back from the cache.
     pub discussion: RwSignal<Option<Arc<Discussion>>>,
     /// The workflow runs' verdict for the head, once fetched. `None` means
-    /// unknown, and the header shows no pill.
+    /// unknown, and the summary has no Checks row.
     pub checks: RwSignal<Option<Arc<Checks>>>,
     /// Live GitHub mergeability, permissions, enabled merge methods, and
     /// detailed checks for the pull request's exact head. Unlike `checks`,

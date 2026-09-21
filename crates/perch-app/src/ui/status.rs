@@ -59,6 +59,7 @@ pub fn status_bar(
         crate::ui::agents::control(state, backend.clone()),
         refresh_button(backend),
     ))
+    .debug_name("status bar")
     .style(|s| {
         s.height(theme::STATUS_HEIGHT)
             .width_full()

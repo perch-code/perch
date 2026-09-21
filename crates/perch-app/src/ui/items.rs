@@ -37,25 +37,7 @@ pub type OpenItem = Rc<dyn Fn(&Item)>;
 /// The state glyph an item shows: the pull request or issue state icon,
 /// or a branch for a checkout with no subject.
 pub fn state_of(item: &Item) -> Option<SubjectState> {
-    match &item.subject {
-        Some(ItemSubject::PullRequest(pr)) => Some(if pr.merged {
-            SubjectState::PrMerged
-        } else if !pr.is_open() {
-            SubjectState::PrClosed
-        } else if pr.draft {
-            SubjectState::PrDraft
-        } else {
-            SubjectState::PrOpen
-        }),
-        Some(ItemSubject::Issue(issue)) => Some(if issue.is_open() {
-            SubjectState::IssueOpen
-        } else if issue.state_reason.as_deref() == Some("not_planned") {
-            SubjectState::IssueNotPlanned
-        } else {
-            SubjectState::IssueClosed
-        }),
-        None => None,
-    }
+    item.subject.as_ref().map(|subject| subject.subject_state())
 }
 
 /// One item as the sidebar draws it.

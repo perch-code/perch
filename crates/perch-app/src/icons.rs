@@ -41,10 +41,7 @@ pub fn state_color(state: SubjectState) -> Color {
 pub fn state_icon(state: SubjectState) -> String {
     let c = hex(state_color(state));
     let body = match state {
-        SubjectState::IssueOpen => format!(
-            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <circle cx="8" cy="8" r="2" fill="{c}"/>"#
-        ),
+        SubjectState::IssueOpen => issue_body(&c),
         SubjectState::IssueClosed => format!(
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
                <path d="M5.1 8.2 L7.1 10.2 L11 5.9" fill="none" stroke="{c}"
@@ -54,16 +51,7 @@ pub fn state_icon(state: SubjectState) -> String {
             r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
                <path d="M3.9 12.1 L12.1 3.9" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>"#
         ),
-        SubjectState::PrOpen | SubjectState::PrDraft => format!(
-            r#"<circle cx="4.5" cy="3.4" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <circle cx="4.5" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M4.5 5.3 V10.7" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
-               <circle cx="11.6" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
-               <path d="M11.6 10.7 V6.6 A2 2 0 0 0 9.6 4.6 H7.9" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round"/>
-               <path d="M9.4 3.1 L7.7 4.6 L9.4 6.1" fill="none" stroke="{c}"
-                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
-        ),
+        SubjectState::PrOpen | SubjectState::PrDraft => pull_request_body(&c),
         SubjectState::PrMerged => format!(
             r#"<circle cx="4.5" cy="3.4" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
                <circle cx="4.5" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
@@ -83,6 +71,31 @@ pub fn state_icon(state: SubjectState) -> String {
         ),
     };
     svg16(&body)
+}
+
+/// An open pull request: a branch with an arrow curving into it. The
+/// state glyph for open and draft, and the summary's Status glyph in the
+/// caller's colour.
+fn pull_request_body(c: &str) -> String {
+    format!(
+        r#"<circle cx="4.5" cy="3.4" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
+           <circle cx="4.5" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
+           <path d="M4.5 5.3 V10.7" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+           <circle cx="11.6" cy="12.6" r="1.9" fill="none" stroke="{c}" stroke-width="1.5"/>
+           <path d="M11.6 10.7 V6.6 A2 2 0 0 0 9.6 4.6 H7.9" fill="none" stroke="{c}"
+                 stroke-width="1.5" stroke-linecap="round"/>
+           <path d="M9.4 3.1 L7.7 4.6 L9.4 6.1" fill="none" stroke="{c}"
+                 stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+    )
+}
+
+/// An open issue: a ring with a dot. The state glyph for open, and the
+/// summary's Closes glyph in the caller's colour.
+fn issue_body(c: &str) -> String {
+    format!(
+        r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
+           <circle cx="8" cy="8" r="2" fill="{c}"/>"#
+    )
 }
 
 /// Sidebar glyphs. Drawn at 16px, tinted by the caller's colour.
@@ -286,6 +299,23 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M7 13.1 V9 H2.9 M7 9 L2.5 13.5" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
+        SidebarIcon::Person => format!(
+            r#"<circle cx="8" cy="5.3" r="2.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <path d="M2.8 13.6 C2.8 10.6 5.1 9.1 8 9.1 S13.2 10.6 13.2 13.6" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::Tag => format!(
+            r#"<path d="M2.2 2.2 H7.6 L13.8 8.4 L8.4 13.8 L2.2 7.6 Z" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linejoin="round"/>
+               <circle cx="5.4" cy="5.4" r="1.1" fill="{c}"/>"#
+        ),
+        SidebarIcon::PullRequest => pull_request_body(&c),
+        SidebarIcon::Issue => issue_body(&c),
+        SidebarIcon::Repository => format!(
+            r#"<path d="M4.6 1.9 H13 V11.6 H4.8 a1.6 1.6 0 0 0 0 3.2 H13 M3.2 13.2 V3.3
+                       A1.4 1.4 0 0 1 4.6 1.9 M13 11.6 V14.8" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
     };
     svg16(&body)
 }
@@ -344,13 +374,30 @@ pub enum SidebarIcon {
     Expand,
     /// Two diagonal arrows pointing in: the drawer back.
     Contract,
+    /// A head and shoulders: the reviewers and the assignees.
+    Person,
+    /// A luggage tag: the labels.
+    Tag,
+    /// The pull request glyph in the caller's colour, for a row's name
+    /// rather than a state.
+    PullRequest,
+    /// The issue glyph in the caller's colour, for a row's name rather
+    /// than a state.
+    Issue,
+    /// A book: a repository, for a branch's Repository row.
+    Repository,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 34] = [
+    pub const ALL: [SidebarIcon; 39] = [
+        SidebarIcon::Person,
+        SidebarIcon::Tag,
+        SidebarIcon::PullRequest,
+        SidebarIcon::Issue,
+        SidebarIcon::Repository,
         SidebarIcon::Drawer,
         SidebarIcon::External,
         SidebarIcon::Expand,

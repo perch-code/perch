@@ -187,7 +187,15 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 },
             )
-            .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full()),
+            // A zero basis: the pane takes what the drawer leaves, and
+            // taffy never measures the whole item view unconstrained to
+            // find out how wide it would like to be.
+            .style(|s| {
+                s.flex_grow(1.0_f32)
+                    .flex_basis(0.0)
+                    .min_width(0.0)
+                    .height_full()
+            }),
         ))
         .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
         status::status_bar(state, review, backend.clone()),

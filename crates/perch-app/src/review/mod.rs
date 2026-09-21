@@ -21,6 +21,7 @@ pub mod review_launch;
 pub mod scope;
 pub mod styling;
 pub mod submit_review;
+pub mod summary;
 pub mod switch;
 pub mod tabs;
 pub mod threads;
@@ -77,18 +78,8 @@ pub fn review_view(
 
     let body_backend = backend.clone();
 
-    // The backend closes the review itself when the archive goes through,
-    // and the Items event that follows closes the view. A refusal leaves
-    // everything as it was, with the reason in the status line.
-    let on_archive = {
-        let backend = backend.clone();
-        move |id: String| {
-            backend.archive_item(&id);
-        }
-    };
-
     Stack::vertical((
-        header::header(app, state, backend.clone(), open_item, on_archive)
+        header::header(app, state, backend.clone())
             // Keep header-owned popovers above the item surface. Floem does
             // not let a descendant's z-index escape its parent's sibling
             // context.
@@ -116,9 +107,14 @@ pub fn review_view(
                     },
                 )
                 .into_any(),
-                Phase::Issue | Phase::Ready => {
-                    item_view(app, state, open_file.clone(), body_backend.clone()).into_any()
-                }
+                Phase::Issue | Phase::Ready => item_view(
+                    app,
+                    state,
+                    open_file.clone(),
+                    body_backend.clone(),
+                    open_item.clone(),
+                )
+                .into_any(),
             },
         )
         .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
@@ -138,6 +134,7 @@ fn item_view(
     state: ReviewState,
     open_file: OpenFile,
     backend: Rc<Backend>,
+    open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
     // An item without a checkout has no Files to show, whatever the tab
     // remembered for it says.
@@ -153,9 +150,14 @@ fn item_view(
     dyn_container(
         move || tab.get(),
         move |tab| match tab {
-            ItemTab::Conversation => {
-                conversation::view(app, state, backend.clone(), open_file.clone()).into_any()
-            }
+            ItemTab::Conversation => conversation::view(
+                app,
+                state,
+                backend.clone(),
+                open_file.clone(),
+                open_item.clone(),
+            )
+            .into_any(),
             ItemTab::Files => body(app, state, open_file.clone(), backend.clone()).into_any(),
         },
     )
@@ -171,7 +173,7 @@ fn body(
     backend: Rc<Backend>,
 ) -> impl IntoView {
     Stack::horizontal((
-        rail::rail(state, open_file.clone(), backend.clone()),
+        rail::rail(app, state, open_file.clone(), backend.clone()),
         Stack::vertical((
             tabs::tab_bar(app, state),
             editor::editor_pane(app, state, backend, open_file),
@@ -302,105 +304,6 @@ pub fn review_status(app: AppState, state: ReviewState) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use floem::headless::{HeadlessHarness, TestRoot};
-
-    fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
-        if id.debug_name().split_whitespace().any(|part| part == name) {
-            return Some(id);
-        }
-        id.children()
-            .into_iter()
-            .find_map(|child| named(child, name))
-    }
-
-    fn descends_from(mut id: floem::ViewId, ancestor: floem::ViewId) -> bool {
-        loop {
-            if id == ancestor {
-                return true;
-            }
-            let Some(parent) = id.parent() else {
-                return false;
-            };
-            id = parent;
-        }
-    }
-
-    #[test]
-    fn review_launcher_stays_above_item_content() {
-        let app = AppState::new();
-        let state = ReviewState::new();
-        let now = "2026-09-20T12:00:00Z".parse().unwrap();
-
-        let mut item = perch_github::Item::new("local/perch", now);
-        item.id = "worktree".into();
-        item.checkout = Some(perch_github::ItemCheckout {
-            branch: "feature/review-layer".into(),
-            base_ref: "main".into(),
-            head_sha: "abcdef0123456789".into(),
-            path: std::path::PathBuf::from("/tmp/perch-review-layer-test"),
-            owned: true,
-            on_disk: true,
-            churn: None,
-            last_seen_head: None,
-        });
-        state.item.set(Some(std::sync::Arc::new(item)));
-        state.ready.set(true);
-        state.phase.set(Phase::Ready);
-        state.review_launcher_open.set(true);
-
-        // Something for the strip's GitHub parts to show as well, beside
-        // the worktree's own.
-        let mut child = perch_github::Item::new("local/perch", now);
-        child.id = "child-worktree".into();
-        child.name = Some("Child branch".into());
-        child.from_item_id = Some("worktree".into());
-        app.items.set(vec![child]);
-
-        let root = TestRoot::new();
-        let view = review_view(
-            app,
-            state,
-            Rc::new(Backend::detached()),
-            Rc::new(|_: &perch_github::Item| {}),
-        );
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 700.0);
-        harness.rebuild();
-        harness.paint();
-
-        // The launcher is at the strip's right end, and its popover hangs
-        // from it over the item.
-        let popover = named(harness.root_id(), "review-launch-popover").unwrap();
-        let bounds = popover.get_visual_rect_no_clip();
-        let x = bounds.x0 + 2.0;
-        // The strip's second line, which the child branch puts there, and
-        // the item under the strip.
-        let github_y = theme::REVIEW_HEADER_HEIGHT + theme::METADATA_LINE + 10.0;
-        let content_y =
-            theme::REVIEW_HEADER_HEIGHT + theme::METADATA_HEIGHT + theme::METADATA_LINE + 10.0;
-        assert!(
-            bounds.y0 < github_y && bounds.y1 > content_y,
-            "popover at {bounds:?} does not reach the item"
-        );
-
-        for (layer, y) in [("strip", github_y), ("item", content_y)] {
-            let target = harness
-                .element_id_at(x, y)
-                .unwrap_or_else(|| panic!("no hit target over the {layer}"))
-                .owning_id();
-            assert!(
-                descends_from(target, popover),
-                "the {layer} painted over the review launcher"
-            );
-        }
-
-        let close = named(harness.root_id(), "review-launch-close").unwrap();
-        let close_bounds = close.get_visual_rect_no_clip();
-        harness.click(
-            (close_bounds.x0 + close_bounds.x1) / 2.0,
-            (close_bounds.y0 + close_bounds.y1) / 2.0,
-        );
-        assert!(!state.review_launcher_open.get());
-    }
 
     #[test]
     fn the_status_line_names_the_hidden_lines_only_when_the_file_has_some() {

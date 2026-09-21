@@ -15,17 +15,6 @@ use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::ui::widgets::text_button;
 
-/// The state the sidebar's glyphs draw an issue in.
-pub fn state_of(issue: &Issue) -> perch_github::SubjectState {
-    if issue.is_open() {
-        perch_github::SubjectState::IssueOpen
-    } else if issue.state_reason.as_deref() == Some("not_planned") {
-        perch_github::SubjectState::IssueNotPlanned
-    } else {
-        perch_github::SubjectState::IssueClosed
-    }
-}
-
 /// Cut a branch from the default branch and open it. When one exists
 /// already, opens that. The issue's primary action, where a pull
 /// request's is Submit review.

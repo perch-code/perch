@@ -19,7 +19,7 @@ use crate::review::model::ReviewState;
 use crate::review::tree::{self, Row};
 use crate::review::OpenFile;
 use crate::review::{cards, scope};
-use crate::state::Checked;
+use crate::state::{AppState, Checked};
 use crate::theme;
 use crate::ui::widgets::{checkbox, icon_button, sidebar_glyph};
 
@@ -27,7 +27,12 @@ use crate::ui::widgets::{checkbox, icon_button, sidebar_glyph};
 /// knows the changed ones only by path.
 type ChangedByPath = Memo<Arc<HashMap<String, ChangedFile>>>;
 
-pub fn rail(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl IntoView {
+pub fn rail(
+    app: AppState,
+    state: ReviewState,
+    on_open: OpenFile,
+    backend: Rc<Backend>,
+) -> impl IntoView {
     let changed: ChangedByPath = Memo::new(move |_| {
         state
             .changed_files
@@ -38,24 +43,39 @@ pub fn rail(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl
     Stack::vertical((
         dyn_container(
             move || state.historical_review.get(),
+            // A retained snapshot has no scope to pick and nothing to mark
+            // viewed: the rows say so, and the way back to the item as it
+            // is now is here, since Files has no summary to hold it.
             move |historical| match historical {
-                Some(review) => Label::derived(move || {
-                    format!(
-                        "Review #{} retained snapshot · read-only",
-                        review.group.number
-                    )
-                })
+                Some(review) => Stack::horizontal((
+                    Label::derived(move || {
+                        format!(
+                            "Review #{} retained snapshot · read-only",
+                            review.group.number
+                        )
+                    })
+                    .style(|s| {
+                        s.font_size(theme::TEXT_BADGE)
+                            .color(theme::FG_MUTED)
+                            .flex_grow(1.0_f32)
+                            .min_width(0.0)
+                            .text_wrap()
+                    }),
+                    crate::review::summary::back_to_current(
+                        app,
+                        state,
+                        controls_backend.clone(),
+                    ),
+                ))
                 .style(|s| {
                     s.height(theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT)
                         .width_full()
                         .padding_horiz(10.0)
                         .items_center()
-                        .font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_MUTED)
+                        .gap(8.0)
                         .background(theme::CANVAS_SUBTLE)
                         .border_bottom(1.0)
                         .border_color(theme::BORDER)
-                        .text_wrap()
                 })
                 .into_any(),
                 None => Stack::vertical((
@@ -579,15 +599,10 @@ mod tests {
         (harness, state)
     }
 
-    /// The top of the tree: the header's bar and strip (the worktree has
-    /// branches to show), scope button, viewed row, then the list's 4px
-    /// of padding.
+    /// The top of the tree: the header's bar, scope button, viewed row,
+    /// then the list's 4px of padding.
     fn list_top() -> f64 {
-        theme::REVIEW_HEADER_HEIGHT
-            + theme::METADATA_HEIGHT
-            + theme::SCOPE_BUTTON_HEIGHT
-            + theme::VIEWED_ROW_HEIGHT
-            + 4.0
+        theme::REVIEW_HEADER_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT + 4.0
     }
 
     /// The centre of a row's name, `row` rows down the tree.
@@ -609,7 +624,6 @@ mod tests {
     fn filter_center() -> (f64, f64) {
         let x = theme::RAIL_WIDTH - 4.0 - 13.0;
         let y = theme::REVIEW_HEADER_HEIGHT
-            + theme::METADATA_HEIGHT
             + theme::SCOPE_BUTTON_HEIGHT
             + theme::VIEWED_ROW_HEIGHT / 2.0;
         (x, y)
