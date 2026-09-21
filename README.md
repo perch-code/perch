@@ -165,6 +165,41 @@ deterministic Markdown at
 document rather than duplicating unchanged entries; unrelated legacy files in
 the knowledge directory are not imported.
 
+## Code navigation
+
+Files reads like an IDE when rust-analyzer is installed. Rest the pointer on
+an identifier and a tooltip says what it is: the signature in the code font,
+then the first lines of its doc comment. The tooltip cannot be entered and has
+no scroll. It opens where the pointer is and goes away when the pointer does,
+so nothing has to be dismissed; the panel under the editor is where a list
+goes, and the tooltip is a glance. A reader who wants the whole doc comment
+goes to the definition.
+
+A definition in a dependency or the standard library opens as a tab like any
+other, with a chip naming where it is from (`tokio 1.40.0`, `std`, `git:
+floem`). Such a tab is a place to read: whole, with no diff, no Viewed and no
+threads, and it is not remembered when the item is closed.
+
+The keys are VS Code's. Right-click an identifier for the same entries, each
+naming the symbol it acts on; on whitespace the menu is Copy alone.
+
+| Action | Key |
+|---|---|
+| Go to Definition | `Cmd-click`, `F12` |
+| Go to Type Definition | menu |
+| Go to Implementations | `Cmd-F12` |
+| Find All References | `Shift-F12` |
+| Show Call Hierarchy | `Shift-Alt-H` |
+| Back, Forward | `Ctrl--`, `Ctrl-Shift--` |
+| Close the panel | `Escape` |
+
+One location opens; several open the panel and the reader picks. The call
+hierarchy is a tree: a chevron on a row asks for that row's callers, and a
+toggle in the panel's header turns it to callees. The caret resting on an
+identifier tints its other uses in the file. All of it is read-only, and all
+of it is rust-analyzer: while the server is absent or failed, the status line
+says so and nothing else happens.
+
 ## Development
 
 ```sh
