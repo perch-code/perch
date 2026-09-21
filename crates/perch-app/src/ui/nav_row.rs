@@ -3,21 +3,22 @@
 //! A glyph at the left, then two lines. The first is the title, with a
 //! compact age at its right end ("1d", "2w"), which the row's controls
 //! stand in for while the pointer is over it. The second is the byline:
-//! a small avatar, the repository, then the branch or the number, each
-//! cut short with an ellipsis as the drawer narrows, and at its right end
-//! what the row has to say in figures: "+658 -0" on a branch, the reason
-//! on a notification.
+//! a small avatar, the repository, then the number when the row has one,
+//! each cut short with an ellipsis as the drawer narrows, then a pull
+//! request's chips, and at its right end the churn: "+658 -0" on a pull
+//! request or a branch.
 //!
-//! Item rows and notification rows share these pieces so the two scopes
-//! read as one list.
+//! Item rows and notification rows share these pieces so the three
+//! scopes read as one list.
 
 use floem::menu::Menu;
 use floem::prelude::*;
-use floem::reactive::SignalGet;
+use floem::reactive::{SignalGet, SignalWith};
 use floem::style::{CursorStyle, Style};
 use floem::text::FontWeight;
-use floem::views::{Container, Decorators, Empty, Label, Stack};
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use jiff::Timestamp;
+use perch_github::{CheckStatus, ReviewDecision};
 
 use crate::icons::SidebarIcon;
 use crate::state::AppState;
@@ -130,8 +131,9 @@ pub fn title_label(text: String, muted: bool, bold: bool) -> impl IntoView {
 ///
 /// The repository and the reference each give way with an ellipsis as
 /// the drawer narrows; the figures never do. `after` sits between the
-/// reference and the figures: the CI and review chips on a pull request.
-/// The figures are `churn` on a branch, `figure` on a notification.
+/// reference and the figures: the `chips` on a pull request. The figures
+/// are the `churn`, on a pull request or a branch, and nothing on an
+/// issue or a row that is neither.
 pub fn byline(
     state: AppState,
     avatar_url: impl Fn() -> String + 'static,
@@ -187,18 +189,85 @@ pub fn mark(glyph: SidebarIcon, color: floem::peniko::Color) -> impl IntoView {
     sidebar_glyph(glyph, color).style(|s| s.size(11.0, 11.0).flex_shrink(0.0_f32).margin_left(6.0))
 }
 
-/// A single figure at the byline's right end, in the byline's grey.
-pub fn figure(text: String) -> impl IntoView {
-    Label::derived(move || text.clone()).style(|s| {
-        s.font_size(theme::TEXT_META)
-            .color(theme::NAV_MUTED)
-            .flex_shrink(0.0_f32)
-    })
+/// "#2085", or nothing: the reference a byline carries is the number
+/// when the row has one.
+pub fn reference(number: Option<u64>) -> String {
+    number
+        .map(|number| format!("#{number}"))
+        .unwrap_or_default()
+}
+
+/// The CI chip and the review pill after a pull request's reference,
+/// while the filter menu shows PR status. Nothing on a row with neither.
+pub fn chips(
+    state: AppState,
+    checks: Option<CheckStatus>,
+    review: Option<ReviewDecision>,
+) -> impl IntoView {
+    dyn_container(
+        move || {
+            state.item_filters.with(|f| f.show_pr_status) && (checks.is_some() || review.is_some())
+        },
+        move |show| {
+            if !show {
+                return Empty::new().into_any();
+            }
+            Stack::horizontal((
+                match checks {
+                    Some(CheckStatus::Success) => sidebar_glyph(SidebarIcon::Check, theme::OPEN)
+                        .style(|s| s.size(11.0, 11.0))
+                        .into_any(),
+                    Some(CheckStatus::Failure) => sidebar_glyph(SidebarIcon::Close, theme::CLOSED)
+                        .style(|s| s.size(11.0, 11.0))
+                        .into_any(),
+                    Some(CheckStatus::Pending) => Empty::new()
+                        .style(|s| {
+                            s.size(7.0, 7.0)
+                                .border_radius(4.0)
+                                .background(theme::DRAFT_YELLOW)
+                        })
+                        .into_any(),
+                    None => Empty::new().into_any(),
+                },
+                match review {
+                    Some(r) => Label::derived(move || r.label().to_string())
+                        .style(move |s| {
+                            let color = match r {
+                                ReviewDecision::Approved => theme::OPEN,
+                                ReviewDecision::ChangesRequested => theme::CLOSED,
+                                ReviewDecision::ReviewRequested => theme::FG_MUTED,
+                            };
+                            s.font_size(theme::TEXT_SECTION)
+                                .color(color)
+                                .border(1.0)
+                                .border_color(color.with_alpha(0.4))
+                                // A pill, at the radius the review's chips use.
+                                .border_radius(theme::CHIP_HEIGHT / 2.0)
+                                .padding_horiz(5.0)
+                                .margin_left(5.0)
+                                .selectable(false)
+                        })
+                        .into_any(),
+                    None => Empty::new().into_any(),
+                },
+            ))
+            .style(|s| s.items_center().margin_left(6.0).flex_shrink(0.0_f32))
+            .into_any()
+        },
+    )
 }
 
 /// "+1,192 -0", the way Codex writes a branch's churn: the additions in
-/// green, the deletions in red.
-pub fn churn(added: u32, deleted: u32) -> impl IntoView {
+/// green, the deletions in red. `None` draws nothing, for a row that has
+/// no churn to say.
+pub fn churn(churn: Option<(u32, u32)>) -> impl IntoView {
+    match churn {
+        Some((added, deleted)) => churn_figures(added, deleted).into_any(),
+        None => Empty::new().into_any(),
+    }
+}
+
+fn churn_figures(added: u32, deleted: u32) -> impl IntoView {
     let (added, deleted) = (
         format!("+{}", thousands(added)),
         format!("-{}", thousands(deleted)),
@@ -256,6 +325,12 @@ pub fn more_button(menu: impl Fn() -> Menu + 'static) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reference_is_the_number_or_nothing() {
+        assert_eq!(reference(Some(2085)), "#2085");
+        assert_eq!(reference(None), "");
+    }
 
     #[test]
     fn a_comma_goes_every_three_digits_as_codex_writes_a_count() {

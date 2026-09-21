@@ -671,12 +671,15 @@ mod tests {
             issue("elsewhere", "org/two", "me"),
             pull_request("pr", "org/one", "me"),
         ]);
-        // The pull request has been looked at: someone opened it.
+        // The pull request has been looked at: someone opened it, it
+        // changes a few lines, and a review is still wanted.
         let mut looked = notification("11", "org/one", "Unread pull request", SubjectKind::PullRequest, true);
         looked.subject_snapshot = Some(SubjectSnapshot {
             author_login: "someone".into(),
             author_avatar_url: String::new(),
             state: SubjectState::PrMerged,
+            churn: Some((3, 1)),
+            review_requested: true,
             at: looked.updated_at,
         });
         state.notifications.set(vec![
@@ -824,9 +827,9 @@ mod tests {
     }
 
     /// Every row of the drawer has Codex's shape: the title with the age
-    /// at its right end, then the avatar, the repository, the reference,
-    /// and the figures under the age. Item rows and notification rows are
-    /// the same shape at the same inset.
+    /// at its right end, then the avatar, the repository, the number,
+    /// and the churn under the age. Item rows and notification rows are
+    /// the same shape at the same inset, and say the same things.
     #[test]
     fn every_row_is_the_title_and_age_over_the_byline() {
         let (mut harness, _) = harness();
@@ -846,10 +849,13 @@ mod tests {
         assert_eq!(avatar.x0, title.x0, "the avatar starts under the title");
         assert_eq!(avatar.width(), crate::ui::nav_row::AVATAR);
         assert!(find(row, "org/one").is_some(), "the repository");
-        assert!(find(row, "fence").is_some(), "then the branch");
+        assert!(find(row, "#57").is_some(), "then the number");
+        assert!(find(row, "fence").is_none(), "never the branch");
         assert!(find(row, "+1,192").is_some() && find(row, "-36").is_some(), "then the churn");
 
-        // A notification row has the same bones at the same inset.
+        // A notification row has the same bones at the same inset, and
+        // says the same things of its pull request once it has been
+        // looked at.
         click_scope(&mut harness, ItemScope::Notifications);
         let thread = find(harness.root_id(), "notification row:11").unwrap();
         let thread_rect = thread.get_visual_rect_no_clip();
@@ -858,8 +864,20 @@ mod tests {
         let thread_age = find(thread, "row age").unwrap().get_visual_rect_no_clip();
         assert_eq!(thread_age.x1, age.x1);
         assert_eq!(find(thread, "row figures").unwrap().get_visual_rect_no_clip().x1, age.x1);
-        assert!(find(thread, "#11").is_some(), "the number where the branch goes");
-        assert!(find(thread, "mention").is_some(), "the reason where the churn goes");
+        assert!(find(thread, "#11").is_some(), "the number");
+        assert!(find(thread, "review requested").is_some(), "then the review pill");
+        assert!(find(thread, "+3").is_some() && find(thread, "-1").is_some(), "then the churn");
+        assert!(find(thread, "mention").is_none(), "the reason is the filter menu's, not the row's");
+
+        // One not looked at yet, and not a pull request, says only where
+        // it is: no kind where the number goes, nothing where the churn
+        // goes.
+        let discussion = find(harness.root_id(), "notification row:12").unwrap();
+        assert!(find(discussion, "#12").is_some());
+        assert!(find(discussion, SubjectKind::Discussion.wire()).is_none(), "not the kind");
+        let figures = find(discussion, "row figures").unwrap().get_visual_rect_no_clip();
+        assert_eq!(figures.width(), 0.0, "nothing at the right end");
+        assert!(find(discussion, "mention").is_none());
     }
 
     #[test]

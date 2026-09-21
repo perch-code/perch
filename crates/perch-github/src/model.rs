@@ -47,16 +47,17 @@ impl Thread {
 
     /// Whether the subject wants looking at: a pull request or an issue
     /// with a number, whose snapshot is missing or was taken before the
-    /// thread's latest activity.
+    /// thread's latest activity. A pull request's snapshot from before
+    /// the look asked for its churn is taken again too.
     pub fn wants_snapshot(&self) -> bool {
         matches!(
             self.subject.kind,
             SubjectKind::PullRequest | SubjectKind::Issue
         ) && self.number_hint().is_some()
-            && self
-                .subject_snapshot
-                .as_ref()
-                .is_none_or(|snapshot| snapshot.at < self.updated_at)
+            && self.subject_snapshot.as_ref().is_none_or(|snapshot| {
+                snapshot.at < self.updated_at
+                    || (self.subject.kind == SubjectKind::PullRequest && snapshot.churn.is_none())
+            })
     }
 
     /// Whether the run wants looking for: a workflow run notification
@@ -73,7 +74,8 @@ impl Thread {
 }
 
 /// What one look at a notification's pull request or issue found: who
-/// opened it, and the state it was in.
+/// opened it, the state it was in, and on a pull request its churn and
+/// whether a review is still wanted.
 ///
 /// The notifications API says the subject's title and kind and nothing
 /// else. This is asked for after the thread arrives, and kept on the
@@ -84,6 +86,15 @@ pub struct SubjectSnapshot {
     pub author_login: String,
     pub author_avatar_url: String,
     pub state: SubjectState,
+    /// A pull request's additions and deletions, as GitHub counts them.
+    /// `None` on an issue, and on a snapshot taken before this was asked
+    /// for.
+    #[serde(default)]
+    pub churn: Option<(u32, u32)>,
+    /// Whether someone has been asked to review the pull request and has
+    /// not yet.
+    #[serde(default)]
+    pub review_requested: bool,
     /// The thread's `updated_at` when the look was taken. Activity since
     /// can have changed the state, so a thread newer than this is looked
     /// at again.
@@ -392,6 +403,8 @@ mod tests {
             author_login: "someone".into(),
             author_avatar_url: "https://avatars/2".into(),
             state: SubjectState::IssueOpen,
+            churn: None,
+            review_requested: false,
             at: t.updated_at,
         });
         assert!(!t.wants_snapshot());
@@ -409,17 +422,56 @@ mod tests {
     }
 
     #[test]
+    fn a_pull_requests_snapshot_without_its_churn_is_taken_again() {
+        let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/pulls/9"));
+        t.subject.kind = SubjectKind::PullRequest;
+        let mut snapshot = SubjectSnapshot {
+            author_login: "someone".into(),
+            author_avatar_url: "https://avatars/2".into(),
+            state: SubjectState::PrOpen,
+            churn: None,
+            review_requested: false,
+            at: t.updated_at,
+        };
+        // Taken by a version that did not ask.
+        t.subject_snapshot = Some(snapshot.clone());
+        assert!(t.wants_snapshot());
+        snapshot.churn = Some((12, 3));
+        t.subject_snapshot = Some(snapshot.clone());
+        assert!(!t.wants_snapshot());
+
+        // An issue has no churn to wait for.
+        t.subject.kind = SubjectKind::Issue;
+        snapshot.churn = None;
+        t.subject_snapshot = Some(snapshot);
+        assert!(!t.wants_snapshot());
+    }
+
+    #[test]
     fn a_snapshot_round_trips_through_the_cache_and_is_absent_from_the_wire() {
         let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/pulls/9"));
         t.subject_snapshot = Some(SubjectSnapshot {
             author_login: "someone".into(),
             author_avatar_url: "https://avatars/2".into(),
             state: SubjectState::PrMerged,
+            churn: Some((1192, 36)),
+            review_requested: true,
             at: t.updated_at,
         });
         let json = serde_json::to_string(&t).unwrap();
         let back: Thread = serde_json::from_str(&json).unwrap();
         assert_eq!(back, t);
+
+        // A snapshot cached before the churn was asked for still reads,
+        // with none.
+        let mut older: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let snapshot = older["subject_snapshot"].as_object_mut().unwrap();
+        snapshot.remove("churn");
+        snapshot.remove("review_requested");
+        let older: Thread = serde_json::from_value(older).unwrap();
+        let snapshot = older.subject_snapshot.unwrap();
+        assert_eq!(snapshot.churn, None);
+        assert!(!snapshot.review_requested);
 
         // GitHub's payload has no such field, and is not refused for it.
         let mut from_wire: serde_json::Value = serde_json::from_str(&json).unwrap();

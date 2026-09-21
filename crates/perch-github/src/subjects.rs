@@ -1,10 +1,11 @@
 //! A look at the subjects of many notifications at once.
 //!
 //! The notifications API names a pull request or an issue and says nothing
-//! of who opened it or the state it is in. One GraphQL query asks after
-//! every subject in a batch, aliased by repository and number, so a full
-//! inbox costs a request or two rather than one a row. The answer is read
-//! back onto the threads by those aliases.
+//! of who opened it, the state it is in, or what a pull request changes.
+//! One GraphQL query asks after every subject in a batch, aliased by
+//! repository and number, so a full inbox costs a request or two rather
+//! than one a row. The answer is read back onto the threads by those
+//! aliases.
 
 use std::collections::HashMap;
 
@@ -40,6 +41,13 @@ pub(crate) struct SubjectNode {
     pull_state: Option<String>,
     #[serde(default)]
     is_draft: bool,
+    /// A pull request's counts; an issue has none.
+    #[serde(default)]
+    additions: Option<u32>,
+    #[serde(default)]
+    deletions: Option<u32>,
+    #[serde(default)]
+    review_requests: Option<CountNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +56,13 @@ pub(crate) struct ActorNode {
     login: String,
     #[serde(default)]
     avatar_url: String,
+}
+
+/// A connection asked only how many it holds.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CountNode {
+    #[serde(default)]
+    total_count: u32,
 }
 
 /// The answer's `data`: each repository alias to its subjects by alias,
@@ -66,6 +81,9 @@ fragment subject on IssueOrPullRequest {
     author { login avatar_url: avatarUrl }
     pull_state: state
     is_draft: isDraft
+    additions
+    deletions
+    review_requests: reviewRequests { total_count: totalCount }
   }
 }
 "#;
@@ -173,6 +191,8 @@ impl SubjectLook {
                     .author
                     .map(|actor| (actor.login, actor.avatar_url))
                     .unwrap_or_default();
+                let churn = node.additions.zip(node.deletions);
+                let review_requested = node.review_requests.is_some_and(|r| r.total_count > 0);
                 for (id, at) in self.threads.get(&(repo, number)).into_iter().flatten() {
                     found.push((
                         id.clone(),
@@ -180,6 +200,8 @@ impl SubjectLook {
                             author_login: author_login.clone(),
                             author_avatar_url: author_avatar_url.clone(),
                             state,
+                            churn,
+                            review_requested,
                             at: *at,
                         },
                     ));
@@ -273,6 +295,10 @@ mod tests {
         assert!(!query.contains("number: 9"), "{query}");
         assert!(!query.contains("number: 1)"), "{query}");
         assert!(query.contains("fragment subject on IssueOrPullRequest"));
+        assert!(
+            query.contains("review_requests: reviewRequests { total_count: totalCount }"),
+            "{query}"
+        );
     }
 
     #[test]
@@ -302,7 +328,10 @@ mod tests {
                   "__typename": "PullRequest",
                   "author": { "login": "someone", "avatar_url": "https://avatars/2" },
                   "pull_state": "MERGED",
-                  "is_draft": false
+                  "is_draft": false,
+                  "additions": 2799,
+                  "deletions": 494,
+                  "review_requests": { "total_count": 0 }
                 },
                 "n2097": {
                   "__typename": "Issue",
@@ -317,7 +346,10 @@ mod tests {
                   "__typename": "PullRequest",
                   "author": { "login": "me", "avatar_url": "https://avatars/1" },
                   "pull_state": "OPEN",
-                  "is_draft": true
+                  "is_draft": true,
+                  "additions": 0,
+                  "deletions": 0,
+                  "review_requests": { "total_count": 2 }
                 }
               },
               "r2": null
@@ -336,6 +368,8 @@ mod tests {
                         author_login: "someone".into(),
                         author_avatar_url: "https://avatars/2".into(),
                         state: SubjectState::PrMerged,
+                        churn: Some((2799, 494)),
+                        review_requested: false,
                         at,
                     }
                 ),
@@ -345,6 +379,8 @@ mod tests {
                         author_login: String::new(),
                         author_avatar_url: String::new(),
                         state: SubjectState::IssueNotPlanned,
+                        churn: None,
+                        review_requested: false,
                         at,
                     }
                 ),
@@ -354,6 +390,8 @@ mod tests {
                         author_login: "me".into(),
                         author_avatar_url: "https://avatars/1".into(),
                         state: SubjectState::PrDraft,
+                        churn: Some((0, 0)),
+                        review_requested: true,
                         at,
                     }
                 ),

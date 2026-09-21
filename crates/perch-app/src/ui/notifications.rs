@@ -217,9 +217,10 @@ fn notification_glyph(thread: &Thread) -> impl IntoView {
 }
 
 /// The face of whoever opened the subject, the repository, the number,
-/// and why GitHub sent it at the right end. The repository's face stands
-/// in until a look has found the person, and on a subject nobody opened:
-/// a workflow run, a release.
+/// and on a pull request its review pill and its churn, once a look has
+/// found them: the shape an item's byline has. The repository's face
+/// stands in until a look has found the person, and on a subject nobody
+/// opened: a workflow run, a release.
 fn byline(state: AppState, thread: &Thread) -> impl IntoView {
     let owner = thread
         .repository
@@ -236,14 +237,18 @@ fn byline(state: AppState, thread: &Thread) -> impl IntoView {
         Some(snapshot) => (snapshot.author_avatar_url.clone(), snapshot.author_login.clone()),
         None => (thread.repository.owner_avatar_url.clone(), owner),
     };
+    let snapshot = thread.subject_snapshot.as_ref();
+    let review = snapshot
+        .is_some_and(|snapshot| snapshot.review_requested)
+        .then_some(perch_github::ReviewDecision::ReviewRequested);
     nav_row::byline(
         state,
         move || avatar_url.clone(),
         seed,
         thread.repository.full_name.clone(),
-        reference(thread),
-        Empty::new(),
-        nav_row::figure(thread.reason.label().to_string()),
+        nav_row::reference(number(thread)),
+        nav_row::chips(state, None, review),
+        nav_row::churn(snapshot.and_then(|snapshot| snapshot.churn)),
     )
 }
 
@@ -328,11 +333,13 @@ fn unread_dot(unread: bool) -> impl IntoView {
     }
 }
 
-/// "#2085", or the kind of thing it is when it has no number.
-fn reference(thread: &Thread) -> String {
-    match thread.number_hint() {
-        Some(number) => format!("#{number}"),
-        None => thread.subject.kind.wire().to_string(),
+/// The number GitHub shows for the subject: a pull request's, an issue's
+/// or a discussion's. A release's URL ends in an id nobody sees, and a
+/// commit's in its hash.
+fn number(thread: &Thread) -> Option<u64> {
+    match thread.subject.kind {
+        SubjectKind::PullRequest | SubjectKind::Issue | SubjectKind::Discussion => thread.number_hint(),
+        _ => None,
     }
 }
 
@@ -502,6 +509,17 @@ mod tests {
                 ("review_requested".into(), "review requested".into())
             ]
         );
+    }
+
+    #[test]
+    fn the_byline_numbers_only_what_github_numbers() {
+        let pull = thread("42", "org/repo", "Pull", SubjectKind::PullRequest, Reason::Mention, true);
+        assert_eq!(number(&pull), Some(42));
+        let mut release = thread("246813", "org/repo", "v1.0", SubjectKind::Release, Reason::Subscribed, true);
+        release.subject.url = Some("https://api.github.com/repos/org/repo/releases/246813".into());
+        assert_eq!(number(&release), None);
+        let run = thread("9", "org/repo", "Run", SubjectKind::CheckSuite, Reason::CiActivity, true);
+        assert_eq!(number(&run), None);
     }
 
     #[test]

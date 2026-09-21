@@ -19,7 +19,7 @@ use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::text::FontWeight;
 use floem::views::{Container, Decorators, Empty, Label, Stack, TextInput, dyn_container};
-use perch_github::{CheckStatus, Item, ItemSubject, SubjectState};
+use perch_github::{Item, ItemSubject, SubjectState};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
@@ -162,15 +162,11 @@ fn author(state: AppState, item: &Item) -> (impl Fn() -> String + 'static, Strin
     }
 }
 
-/// The repository, then the branch or the number, then the churn: what
-/// Codex's byline says of a branch.
+/// The repository, then the number, then the churn: what Codex's byline
+/// says of a branch. A branch with no pull request or issue has no
+/// number, and its name is already the title.
 fn byline(state: AppState, item: &Item) -> impl IntoView {
     let (avatar_url, login) = author(state, item);
-    let reference = match &item.subject {
-        Some(ItemSubject::PullRequest(pr)) => item.branch().unwrap_or(pr.head_ref.as_str()).to_string(),
-        Some(ItemSubject::Issue(issue)) => format!("#{}", issue.number),
-        None => item.branch().unwrap_or_default().to_string(),
-    };
     // A checkout says how far it has gone from its base once the scan has
     // measured it; a pull request says what GitHub counts until then.
     let churn = item
@@ -178,23 +174,6 @@ fn byline(state: AppState, item: &Item) -> impl IntoView {
         .as_ref()
         .and_then(|c| c.churn)
         .or_else(|| item.pull_request().map(|pr| (pr.additions, pr.deletions)));
-    nav_row::byline(
-        state,
-        avatar_url,
-        login,
-        item.repo_full_name.clone(),
-        reference,
-        chips(state, item),
-        match churn {
-            Some((added, deleted)) => nav_row::churn(added, deleted).into_any(),
-            None => Empty::new().into_any(),
-        },
-    )
-}
-
-/// The CI chip and the review chip after a pull request's reference, from
-/// the snapshot alone.
-fn chips(state: AppState, item: &Item) -> impl IntoView {
     let (checks, review) = match item.pull_request() {
         Some(pr) => (
             pr.checks,
@@ -206,50 +185,14 @@ fn chips(state: AppState, item: &Item) -> impl IntoView {
         ),
         None => (None, None),
     };
-    dyn_container(
-        move || state.item_filters.with(|f| f.show_pr_status) && (checks.is_some() || review.is_some()),
-        move |show| {
-            if !show {
-                return Empty::new().into_any();
-            }
-            Stack::horizontal((
-                match checks {
-                    Some(CheckStatus::Success) => {
-                        sidebar_glyph(SidebarIcon::Check, theme::OPEN).style(|s| s.size(11.0, 11.0)).into_any()
-                    }
-                    Some(CheckStatus::Failure) => {
-                        sidebar_glyph(SidebarIcon::Close, theme::CLOSED).style(|s| s.size(11.0, 11.0)).into_any()
-                    }
-                    Some(CheckStatus::Pending) => Empty::new()
-                        .style(|s| s.size(7.0, 7.0).border_radius(4.0).background(theme::DRAFT_YELLOW))
-                        .into_any(),
-                    None => Empty::new().into_any(),
-                },
-                match review {
-                    Some(r) => Label::derived(move || r.label().to_string())
-                        .style(move |s| {
-                            let color = match r {
-                                perch_github::ReviewDecision::Approved => theme::OPEN,
-                                perch_github::ReviewDecision::ChangesRequested => theme::CLOSED,
-                                perch_github::ReviewDecision::ReviewRequested => theme::FG_MUTED,
-                            };
-                            s.font_size(theme::TEXT_SECTION)
-                                .color(color)
-                                .border(1.0)
-                                .border_color(color.with_alpha(0.4))
-                                // A pill, at the radius the review's chips use.
-                                .border_radius(theme::CHIP_HEIGHT / 2.0)
-                                .padding_horiz(5.0)
-                                .margin_left(5.0)
-                                .selectable(false)
-                        })
-                        .into_any(),
-                    None => Empty::new().into_any(),
-                },
-            ))
-            .style(|s| s.items_center().margin_left(6.0).flex_shrink(0.0_f32))
-            .into_any()
-        },
+    nav_row::byline(
+        state,
+        avatar_url,
+        login,
+        item.repo_full_name.clone(),
+        nav_row::reference(item.subject.as_ref().map(|subject| subject.number())),
+        nav_row::chips(state, checks, review),
+        nav_row::churn(churn),
     )
 }
 

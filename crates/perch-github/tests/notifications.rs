@@ -368,7 +368,10 @@ async fn a_look_at_the_subjects_is_one_graphql_query_read_past_what_github_could
             "__typename": "PullRequest",
             "author": { "login": "someone", "avatar_url": "https://avatars/2" },
             "pull_state": "OPEN",
-            "is_draft": false
+            "is_draft": false,
+            "additions": 2799,
+            "deletions": 494,
+            "review_requests": { "total_count": 1 }
           },
           "n2": null
         }
@@ -387,6 +390,8 @@ async fn a_look_at_the_subjects_is_one_graphql_query_read_past_what_github_could
     assert_eq!(snapshot.author_login, "someone");
     assert_eq!(snapshot.author_avatar_url, "https://avatars/2");
     assert_eq!(snapshot.state, perch_github::SubjectState::PrOpen);
+    assert_eq!(snapshot.churn, Some((2799, 494)));
+    assert!(snapshot.review_requested);
     assert_eq!(snapshot.at, threads[0].updated_at);
 
     let requests = requests.lock().unwrap();

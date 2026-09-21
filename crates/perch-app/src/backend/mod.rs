@@ -11595,7 +11595,10 @@ mod tests {
               "__typename": "PullRequest",
               "author": { "login": "someone", "avatar_url": "" },
               "pull_state": "MERGED",
-              "is_draft": false
+              "is_draft": false,
+              "additions": 12,
+              "deletions": 3,
+              "review_requests": { "total_count": 0 }
             },
             "n8": null
           } },
@@ -11620,6 +11623,8 @@ mod tests {
                 author_login: "someone".into(),
                 author_avatar_url: String::new(),
                 state: perch_github::SubjectState::PrMerged,
+                churn: Some((12, 3)),
+                review_requested: false,
                 at: threads[0].updated_at,
             })
         );
