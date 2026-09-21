@@ -3,16 +3,21 @@
 //! is a flat reading surface; its hierarchy comes from type, whitespace and
 //! hairlines rather than a stack of framed cards.
 //!
-//! A local thread and a GitHub comment must never look like one. Perch
-//! does not write to GitHub, so a local thread keeps an inset rule and a
+//! A local thread and a GitHub comment must never look like one. Nothing
+//! local reaches GitHub, so a local thread keeps an inset rule and a
 //! Local chip while GitHub entries remain directly on white. The same
 //! distinction holds in the code, where a review
 //! comment's block is a card under its line: white and solid, against
 //! the grey and dashed card of the reader's own.
+//!
+//! What a GitHub entry does carry of the reader's is its reactions: the
+//! pills under its text, and the face in its byline that opens the
+//! picker. A click toggles the pill where it is and asks GitHub after.
 
 use std::rc::Rc;
 
 use floem::peniko::Color;
+use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
@@ -22,7 +27,8 @@ use floem::views::{
 };
 use perch_git::{LineStatus, Row};
 use perch_github::{
-    Anchor, CommentThread, IssueComment, PullEvent, PullEventKind, Review, ReviewComment,
+    Anchor, CommentThread, IssueComment, PullEvent, PullEventKind, ReactionGroup, ReactionKind,
+    Review, ReviewComment,
 };
 
 use crate::backend::Backend;
@@ -165,12 +171,25 @@ fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> impl IntoView
     .style(|s| s.items_center().width_full().min_width(0.0))
 }
 
-/// The right end of a GitHub byline: Ask about this while the card is
-/// hovered, and the permalink always.
-fn actions(hovered: RwSignal<bool>, ask: Option<Rc<dyn Fn()>>, url: String) -> floem::AnyView {
+/// The right end of a GitHub byline: Ask about this and the reaction
+/// picker while the card is hovered, and the permalink always. `react` is
+/// the subject's node id; an entry an older build kept without one has no
+/// picker, since GitHub could not be told what it was for.
+fn actions(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    hovered: RwSignal<bool>,
+    ask: Option<Rc<dyn Fn()>>,
+    react: Option<String>,
+    url: String,
+) -> floem::AnyView {
     Stack::horizontal((
         match ask {
             Some(ask) => ask_button(hovered, ask).into_any(),
+            None => Empty::new().into_any(),
+        },
+        match react {
+            Some(node_id) => react_button(state, backend, node_id, Some(hovered)).into_any(),
             None => Empty::new().into_any(),
         },
         if url.is_empty() {
@@ -218,6 +237,183 @@ fn track_hover<V: IntoView + 'static>(view: V, hovered: RwSignal<bool>) -> impl 
     view.into_intermediate()
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
+}
+
+// ---------------------------------------------------------------------
+// Reactions
+// ---------------------------------------------------------------------
+
+/// The node id a reaction is left by, when the entry has one.
+fn reactable(node_id: &str) -> Option<String> {
+    (!node_id.is_empty()).then(|| node_id.to_string())
+}
+
+/// The row of pills under an entry's text, for an entry with a node id;
+/// nothing for one without, since nothing could be left on it.
+fn reactions_under(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    react: &Option<String>,
+) -> floem::AnyView {
+    match react {
+        Some(node_id) => reactions_row(state, backend, node_id.clone()).into_any(),
+        None => Empty::new().into_any(),
+    }
+}
+
+/// Toggle the reader's reaction where it is shown, then ask GitHub. A
+/// pill already asked about takes no second click until GitHub answers.
+fn react(state: ReviewState, backend: &Backend, node_id: &str, kind: ReactionKind) {
+    let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
+        return;
+    };
+    if let Some(add) = state.toggle_reaction(node_id, kind) {
+        backend.set_reaction(&item_id, node_id, kind, add);
+    }
+}
+
+/// The picker: GitHub's eight, each checked when the reader has left it,
+/// so picking one again takes it back. Built on each open, so it shows
+/// the reactions as they stand then.
+fn reaction_menu(state: ReviewState, backend: Rc<Backend>, node_id: String) -> Menu {
+    let reactions = state
+        .reactions
+        .with_untracked(|m| m.get(&node_id).cloned())
+        .unwrap_or_default();
+    let mut menu = Menu::new();
+    for kind in ReactionKind::ALL {
+        let mine = reactions.viewer_reacted(kind);
+        let busy = state.reacting.with_untracked(|r| r.contains(&(node_id.clone(), kind)));
+        let (node_id, backend) = (node_id.clone(), backend.clone());
+        menu = menu.item(format!("{}  {}", kind.emoji(), kind.label()), move |item| {
+            item.checked(mine)
+                .enabled(!busy)
+                .action(move || react(state, &backend, &node_id, kind))
+        });
+    }
+    menu
+}
+
+/// A face that opens the picker. In a byline it is drawn only while the
+/// card is under the pointer, as Ask about this is, and hidden rather
+/// than absent so the byline keeps its shape; at the end of a row of
+/// pills it is always there.
+fn react_button(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    node_id: String,
+    hovered: Option<RwSignal<bool>>,
+) -> impl IntoView {
+    let menu = move || reaction_menu(state, backend.clone(), node_id.clone());
+    tip(
+        Container::new(
+            sidebar_glyph(SidebarIcon::Smiley, theme::FG_MUTED)
+                .style(|s| s.size(14.0, 14.0).pointer_events_none()),
+        )
+        .popout_menu(menu)
+        .style(move |s| {
+            clickable(s)
+                .size(24.0, 24.0)
+                .items_center()
+                .justify_center()
+                .border_radius(12.0)
+                .hover(|s| s.background(theme::BADGE_BG))
+                .apply_if(hovered.is_some_and(|h| !h.get()), |s| s.hide())
+        })
+        .debug_name("react-button"),
+        "React".into(),
+    )
+}
+
+/// The reactions under an entry's text: a pill per kind anyone left,
+/// each with its count, the reader's own washed blue, and the picker at
+/// the end. Nothing at all while nobody has reacted; the byline's face
+/// is the way in then. A click on a pill toggles the reader's.
+fn reactions_row(state: ReviewState, backend: Rc<Backend>, node_id: String) -> impl IntoView {
+    let each_node = node_id.clone();
+    let pill_node = node_id.clone();
+    let pill_backend = backend.clone();
+    let empty_node = node_id.clone();
+    let empty = Memo::new(move |_| {
+        state
+            .reactions
+            .with(|m| m.get(&empty_node).is_none_or(|r| r.is_empty()))
+    });
+    Stack::horizontal((
+        dyn_stack(
+            move || state.reactions_of(&each_node).groups,
+            // The pill is rebuilt on any change to it: it is a glyph and
+            // a number, and the row is at most eight of them.
+            |g| (g.kind, g.count, g.viewer_reacted),
+            move |g| reaction_pill(state, pill_backend.clone(), pill_node.clone(), g),
+        )
+        .style(|s| s.items_center().gap(6.0).flex_wrap(floem::taffy::FlexWrap::Wrap)),
+        react_button(state, backend, node_id, None),
+    ))
+    .debug_name("reactions")
+    .style(move |s| {
+        s.items_center()
+            .gap(6.0)
+            .flex_wrap(floem::taffy::FlexWrap::Wrap)
+            .padding_top(theme::REACTIONS_GAP)
+            .apply_if(empty.get(), |s| s.hide())
+    })
+}
+
+/// One reaction: its emoji and how many left it. Blue when the reader is
+/// among them. While GitHub is being asked about it, a click is nothing.
+fn reaction_pill(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    node_id: String,
+    group: ReactionGroup,
+) -> impl IntoView {
+    let ReactionGroup {
+        kind,
+        count,
+        viewer_reacted: mine,
+    } = group;
+    let click_node = node_id.clone();
+    let busy = Memo::new(move |_| state.is_reacting(&node_id, kind));
+    tip(
+        Stack::horizontal((
+            Label::derived(move || kind.emoji().to_string()).style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .selectable(false)
+                    .pointer_events_none()
+            }),
+            Label::derived(move || count.to_string()).style(move |s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .font_weight(FontWeight::MEDIUM)
+                    .color(if mine { theme::UNREAD } else { theme::FG_MUTED })
+                    .margin_left(5.0)
+                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
+                    .selectable(false)
+                    .pointer_events_none()
+            }),
+        ))
+        .on_event_stop(el::Click, move |_, _| {
+            if !busy.get_untracked() {
+                react(state, &backend, &click_node, kind);
+            }
+        })
+        .debug_name(format!("reaction:{}", kind.graphql()))
+        .style(move |s| {
+            clickable(s)
+                .items_center()
+                .height(theme::REACTION_PILL_HEIGHT)
+                .padding_horiz(9.0)
+                .border(1.0)
+                .border_radius(theme::REACTION_PILL_HEIGHT / 2.0)
+                .border_color(if mine { theme::REACTED_BORDER } else { theme::BORDER })
+                .background(if mine { theme::REACTED_BG } else { theme::CANVAS })
+                .hover(move |s| {
+                    s.background(if mine { theme::REACTED_BG } else { theme::BADGE_BG })
+                        .border_color(if mine { theme::UNREAD } else { theme::FG_SUBTLE })
+                })
+        }),
+        kind.label().to_string(),
+    )
 }
 
 /// A view with a line of explanation on hover, in the window's overlay so
@@ -318,14 +514,20 @@ fn ask_about(
 // GitHub's cards
 // ---------------------------------------------------------------------
 
-/// The pull request's or issue's own text, led by who opened it.
+/// The pull request's or issue's own text, led by who opened it, with the
+/// reactions on it under.
+#[allow(clippy::too_many_arguments)]
 pub fn description_card(
     app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
     author: String,
     avatar_url: String,
     at: Option<jiff::Timestamp>,
     body: String,
+    node_id: String,
 ) -> impl IntoView {
+    let hovered = RwSignal::new(false);
     let who = Byline {
         login: author,
         avatar_url,
@@ -341,24 +543,39 @@ pub fn description_card(
     } else {
         markdown::render(&body).into_any()
     };
-    card(
-        byline_strip(byline(app, who, Empty::new().into_any())),
-        Stack::vertical((
-            Label::derived(|| "Description".to_string()).style(|s| {
-                s.font_size(18.0)
-                    .font_weight(FontWeight::SEMI_BOLD)
-                    .color(theme::FG)
-                    .margin_bottom(10.0)
-            }),
-            description,
-        ))
-        .style(|s| s.flex_col().width_full())
-        .into_any(),
+    let react = reactable(&node_id);
+    let reactions = reactions_under(state, backend.clone(), &react);
+    track_hover(
+        card(
+            byline_strip(byline(
+                app,
+                who,
+                actions(state, backend, hovered, None, react, String::new()),
+            )),
+            Stack::vertical((
+                Label::derived(|| "Description".to_string()).style(|s| {
+                    s.font_size(18.0)
+                        .font_weight(FontWeight::SEMI_BOLD)
+                        .color(theme::FG)
+                        .margin_bottom(10.0)
+                }),
+                description,
+                reactions,
+            ))
+            .style(|s| s.flex_col().width_full())
+            .into_any(),
+        ),
+        hovered,
     )
 }
 
-/// One conversation comment.
-pub fn comment_card(app: AppState, state: ReviewState, comment: IssueComment) -> impl IntoView {
+/// One conversation comment, with the reactions on it under.
+pub fn comment_card(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    comment: IssueComment,
+) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let who = Byline {
         login: comment.user.clone(),
@@ -374,14 +591,18 @@ pub fn comment_card(app: AppState, state: ReviewState, comment: IssueComment) ->
         comment.body.clone(),
     );
     let ask: Rc<dyn Fn()> = Rc::new(move || ask_about(app, state, None, &author, &url, &body));
+    let react = reactable(&comment.node_id);
+    let reactions = reactions_under(state, backend.clone(), &react);
     track_hover(
         card(
             byline_strip(byline(
                 app,
                 who,
-                actions(hovered, Some(ask), comment.html_url.clone()),
+                actions(state, backend, hovered, Some(ask), react, comment.html_url.clone()),
             )),
-            markdown::render(&comment.body).into_any(),
+            Stack::vertical((markdown::render(&comment.body), reactions))
+                .style(|s| s.flex_col().width_full())
+                .into_any(),
         ),
         hovered,
     )
@@ -438,24 +659,38 @@ pub fn review_card(
         let (author, url) = (login.clone(), url.clone());
         Rc::new(move || ask_about(app, state, None, &author, &url, &body)) as Rc<dyn Fn()>
     });
+    // A review with no summary has nothing to react to; GitHub allows it,
+    // but there would be nothing to draw the pills under.
+    let react = summary
+        .as_ref()
+        .and(review.as_ref())
+        .and_then(|r| reactable(&r.node_id));
 
     let body = Stack::vertical((
         match summary {
-            Some(text) => markdown::render(&text).into_any(),
+            Some(text) => Stack::vertical((
+                markdown::render(&text),
+                reactions_under(state, backend.clone(), &react),
+            ))
+            .style(|s| s.flex_col().width_full())
+            .into_any(),
             None => Empty::new().into_any(),
         },
         dyn_stack(
             move || comments.clone(),
             |t| t.comment.id,
-            move |t| {
-                line_thread_block(
-                    app,
-                    state,
-                    backend.clone(),
-                    open_file.clone(),
-                    t,
-                    ThreadFace::Card,
-                )
+            {
+                let backend = backend.clone();
+                move |t| {
+                    line_thread_block(
+                        app,
+                        state,
+                        backend.clone(),
+                        open_file.clone(),
+                        t,
+                        ThreadFace::Card,
+                    )
+                }
             },
         )
         .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP)),
@@ -464,7 +699,7 @@ pub fn review_card(
 
     track_hover(
         card(
-            byline_strip(byline(app, who, actions(hovered, ask, url))),
+            byline_strip(byline(app, who, actions(state, backend, hovered, ask, react, url))),
             body.into_any(),
         ),
         hovered,
@@ -487,7 +722,7 @@ pub fn line_thread_block(
 ) -> floem::AnyView {
     match face {
         ThreadFace::Card => located_block(app, state, backend, open_file, thread).into_any(),
-        ThreadFace::Inline => github_card(app, state, thread).into_any(),
+        ThreadFace::Inline => github_card(app, state, backend, thread).into_any(),
     }
 }
 
@@ -555,7 +790,7 @@ fn located_block(
     Stack::vertical((
         location_row(state, open_file, path, line, heading, false),
         lines_view,
-        comments_view(app, state, &thread).style(|s| s.padding(12.0)),
+        comments_view(app, state, backend, &thread).style(|s| s.padding(12.0)),
     ))
     .style(|s| s.flex_col().width_full())
     .clip()
@@ -570,18 +805,23 @@ fn located_block(
 
 /// The comment and its replies, each with Ask about this, a reply flush
 /// under the comment it answers.
-fn comments_view(app: AppState, state: ReviewState, thread: &LineThread) -> impl IntoView {
+fn comments_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread: &LineThread,
+) -> impl IntoView {
     let first = thread.comment.clone();
     let replies = thread.replies.clone();
     let anchor_of = move |c: &ReviewComment| anchor_for(state, c);
     Stack::vertical((
-        nested_comment(app, state, first.clone(), anchor_of(&first), false),
+        nested_comment(app, state, backend.clone(), first.clone(), anchor_of(&first), false),
         dyn_stack(
             move || replies.clone(),
             |r| r.id,
             move |r| {
                 let anchor = anchor_of(&r);
-                nested_comment(app, state, r, anchor, true)
+                nested_comment(app, state, backend.clone(), r, anchor, true)
             },
         )
         .style(|s| s.flex_col().width_full().gap(10.0)),
@@ -598,7 +838,12 @@ fn comments_view(app: AppState, state: ReviewState, thread: &LineThread) -> impl
 /// A gutter marker click on the thread flashes the border. Nothing here
 /// says whether GitHub has the thread resolved: the comments GitHub
 /// sends do not say, so the card starts open.
-fn github_card(app: AppState, state: ReviewState, thread: LineThread) -> impl IntoView {
+fn github_card(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread: LineThread,
+) -> impl IntoView {
     let card_id = CardId::GitHub(thread.comment.id);
     let flashing = RwSignal::new(false);
     let collapsed = {
@@ -612,7 +857,7 @@ fn github_card(app: AppState, state: ReviewState, thread: LineThread) -> impl In
             if collapsed {
                 collapsed_github_row(state, open_thread.clone()).into_any()
             } else {
-                open_github_card(app, state, open_thread.clone()).into_any()
+                open_github_card(app, state, backend.clone(), open_thread.clone()).into_any()
             }
         },
     )
@@ -636,12 +881,17 @@ fn github_card(app: AppState, state: ReviewState, thread: LineThread) -> impl In
 
 /// The GitHub card open: the chevron row, then the comments, which
 /// scroll inside the card once it is as tall as a card may be.
-fn open_github_card(app: AppState, state: ReviewState, thread: LineThread) -> impl IntoView {
+fn open_github_card(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread: LineThread,
+) -> impl IntoView {
     let card_id = CardId::GitHub(thread.comment.id);
     Stack::vertical((
         threads::chevron_row(state, card_id, false, Empty::new().into_any())
             .style(|s| s.flex_shrink(0.0_f32)),
-        comments_view(app, state, &thread)
+        comments_view(app, state, backend, &thread)
             .scroll()
             .style(threads::card_scroll),
     ))
@@ -744,12 +994,13 @@ fn location_row(
     })
 }
 
-/// One comment inside a review's block: a small byline, then the body. A
-/// reply sits flush under the comment it answers, with a rule down its
-/// left.
+/// One comment inside a review's block: a small byline, then the body,
+/// then the reactions on it. A reply sits flush under the comment it
+/// answers, with a rule down its left.
 fn nested_comment(
     app: AppState,
     state: ReviewState,
+    backend: Rc<Backend>,
     comment: ReviewComment,
     anchor: Option<Anchor>,
     reply: bool,
@@ -770,14 +1021,17 @@ fn nested_comment(
     );
     let ask: Rc<dyn Fn()> =
         Rc::new(move || ask_about(app, state, anchor.clone(), &author, &url, &body));
+    let react = reactable(&comment.node_id);
+    let reactions = reactions_under(state, backend.clone(), &react);
     track_hover(
         Stack::vertical((
             byline(
                 app,
                 who,
-                actions(hovered, Some(ask), comment.html_url.clone()),
+                actions(state, backend, hovered, Some(ask), react, comment.html_url.clone()),
             ),
             markdown::render(&comment.body),
+            reactions,
         ))
         .style(move |s| {
             let base = s.flex_col().width_full().gap(6.0);
@@ -1684,6 +1938,8 @@ mod tests {
         use crate::review::timeline::tests::at;
         let comment = |edited: Option<&str>| {
             Card::Comment(IssueComment {
+                node_id: String::new(),
+                reactions: Default::default(),
                 id: 7,
                 user: "chris".into(),
                 user_avatar_url: String::new(),

@@ -11,7 +11,7 @@ use perch_git::{
 };
 use perch_github::{
     Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest,
-    PullRequestOverview, PullReviewEvent, Review,
+    PullRequestOverview, PullReviewEvent, ReactionKind, Reactions, Review,
 };
 use perch_syntax::{Language, LineSpans};
 
@@ -855,6 +855,15 @@ pub struct ReviewState {
     /// Everything said on the pull request on GitHub, once fetched or read
     /// back from the cache.
     pub discussion: RwSignal<Option<Arc<Discussion>>>,
+    /// The reactions on everything said, by the subject's node id: the
+    /// discussion's or the issue's when they land, then whatever the
+    /// reader toggles. Kept apart from the discussion so a click redraws
+    /// one row of pills, not the column.
+    pub reactions: RwSignal<HashMap<String, Reactions>>,
+    /// The reactions asked of GitHub and not yet answered, by subject and
+    /// kind. A pill in flight takes no second click, and a discussion that
+    /// lands meanwhile does not put its older count over the toggle.
+    pub reacting: RwSignal<HashSet<(String, ReactionKind)>>,
     /// The workflow runs' verdict for the head, once fetched. `None` means
     /// unknown, and the summary has no Checks row.
     pub checks: RwSignal<Option<Arc<Checks>>>,
@@ -1077,6 +1086,8 @@ impl ReviewState {
             dirty: RwSignal::new(Dirt::default()),
             since_head: RwSignal::new(None),
             discussion: RwSignal::new(None),
+            reactions: RwSignal::new(HashMap::new()),
+            reacting: RwSignal::new(HashSet::new()),
             checks: RwSignal::new(None),
             pull_request_overview: RwSignal::new(None),
             pull_request_overview_loading: RwSignal::new(false),
@@ -1198,6 +1209,8 @@ impl ReviewState {
         self.dirty.set(Dirt::default());
         self.since_head.set(None);
         self.discussion.set(None);
+        self.reactions.set(HashMap::new());
+        self.reacting.set(HashSet::new());
         self.checks.set(None);
         self.pull_request_overview.set(None);
         self.pull_request_overview_loading.set(false);
@@ -1449,6 +1462,88 @@ impl ReviewState {
             }
         }
         Arc::new(merged)
+    }
+
+    /// The reactions on a subject, as the pills draw them. Tracked.
+    pub fn reactions_of(&self, node_id: &str) -> Reactions {
+        self.reactions
+            .with(|m| m.get(node_id).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Whether a reaction of this kind on this subject is with GitHub.
+    pub fn is_reacting(&self, node_id: &str, kind: ReactionKind) -> bool {
+        self.reacting
+            .with(|r| r.contains(&(node_id.to_string(), kind)))
+    }
+
+    /// Take the reactions a discussion or an issue landed with. A subject
+    /// with a toggle in flight keeps what the reader sees: the answer to
+    /// the toggle settles it, and an older read must not.
+    pub fn install_reactions<'a>(&self, read: impl IntoIterator<Item = (&'a str, &'a Reactions)>) {
+        let in_flight: HashSet<String> = self
+            .reacting
+            .with_untracked(|r| r.iter().map(|(id, _)| id.clone()).collect());
+        self.reactions.update(|m| {
+            for (id, reactions) in read {
+                if id.is_empty() || in_flight.contains(id) {
+                    continue;
+                }
+                m.insert(id.to_string(), reactions.clone());
+            }
+        });
+    }
+
+    /// An issue's reactions: the body's and each comment's.
+    pub fn install_issue_reactions(&self, issue: &Issue, comments: &[IssueComment]) {
+        self.install_reactions(
+            std::iter::once((issue.node_id.as_str(), &issue.reactions))
+                .chain(comments.iter().map(|c| (c.node_id.as_str(), &c.reactions))),
+        );
+    }
+
+    /// The reader's reaction, toggled where it is shown before GitHub is
+    /// asked: what to ask, or `None` while an earlier ask on the same pill
+    /// is unanswered.
+    pub fn toggle_reaction(&self, node_id: &str, kind: ReactionKind) -> Option<bool> {
+        let busy = self
+            .reacting
+            .with_untracked(|r| r.contains(&(node_id.to_string(), kind)));
+        if node_id.is_empty() || busy {
+            return None;
+        }
+        let add = !self
+            .reactions
+            .with_untracked(|m| m.get(node_id).is_some_and(|r| r.viewer_reacted(kind)));
+        self.reacting.update(|r| {
+            r.insert((node_id.to_string(), kind));
+        });
+        self.reactions.update(|m| {
+            m.entry(node_id.to_string()).or_default().toggle(kind, add);
+        });
+        Some(add)
+    }
+
+    /// GitHub's answer to a toggle: the subject's reactions as it has them.
+    pub fn settle_reaction(&self, node_id: &str, kind: ReactionKind, reactions: Reactions) {
+        self.reacting.update(|r| {
+            r.remove(&(node_id.to_string(), kind));
+        });
+        self.reactions.update(|m| {
+            m.insert(node_id.to_string(), reactions);
+        });
+    }
+
+    /// GitHub's refusal of a toggle: the pill goes back to what it showed.
+    pub fn revert_reaction(&self, node_id: &str, kind: ReactionKind, add: bool) {
+        self.reacting.update(|r| {
+            r.remove(&(node_id.to_string(), kind));
+        });
+        self.reactions.update(|m| {
+            if let Some(reactions) = m.get_mut(node_id) {
+                reactions.toggle(kind, !add);
+            }
+        });
     }
 
     /// Whether the review view should be on screen at all.
@@ -2908,6 +3003,8 @@ mod tests {
                 messages: Vec::new(),
             };
         let comment = |id: u64, path: &str, line: Option<u64>, side: Side| ReviewComment {
+            node_id: String::new(),
+            reactions: Default::default(),
             id,
             pull_request_review_id: None,
             in_reply_to_id: None,
@@ -2931,6 +3028,8 @@ mod tests {
             worktree,
         ];
         let discussion = Discussion {
+            node_id: String::new(),
+            reactions: Default::default(),
             opened_at: None,
             body: String::new(),
             comments: Vec::new(),
@@ -3274,6 +3373,8 @@ mod tests {
         reply_to: Option<u64>,
     ) -> perch_github::ReviewComment {
         perch_github::ReviewComment {
+            node_id: String::new(),
+            reactions: Default::default(),
             id,
             pull_request_review_id: None,
             in_reply_to_id: reply_to,
@@ -3311,6 +3412,8 @@ mod tests {
         // Two of GitHub's on c, the later by id first in the list, one on
         // e, and one on the base side, which has nowhere in the head to be.
         let discussion = Discussion {
+            node_id: String::new(),
+            reactions: Default::default(),
             opened_at: None,
             body: String::new(),
             comments: Vec::new(),

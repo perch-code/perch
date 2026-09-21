@@ -879,6 +879,7 @@ impl AppState {
                 review.pull_request.set(None);
                 review.stale_head.set(None);
                 review.offline.set(offline);
+                review.install_issue_reactions(&issue, &comments);
                 review.issue.set(Some(issue));
                 review.issue_comments.set(comments);
                 review.comment_threads.set(Arc::new(Vec::new()));
@@ -1274,9 +1275,42 @@ impl AppState {
                     review.finish_load(&path, file);
                 }
             }
-            Event::IssueComments { item_id, comments } => {
+            Event::IssueComments {
+                item_id,
+                comments,
+                body_reactions,
+            } => {
                 if review.is_item(&item_id) {
+                    let body = review
+                        .issue
+                        .with_untracked(|i| i.as_ref().map(|i| i.node_id.clone()))
+                        .unwrap_or_default();
+                    review.install_reactions(
+                        std::iter::once((body.as_str(), &body_reactions))
+                            .chain(comments.iter().map(|c| (c.node_id.as_str(), &c.reactions))),
+                    );
                     review.issue_comments.set(comments);
+                }
+            }
+            Event::ReactionsUpdated {
+                item_id,
+                node_id,
+                kind,
+                reactions,
+            } => {
+                if review.is_item(&item_id) {
+                    review.settle_reaction(&node_id, kind, reactions);
+                }
+            }
+            // The complaint itself came as a notice.
+            Event::ReactionFailed {
+                item_id,
+                node_id,
+                kind,
+                add,
+            } => {
+                if review.is_item(&item_id) {
+                    review.revert_reaction(&node_id, kind, add);
                 }
             }
             Event::FileFailed {
@@ -1309,6 +1343,7 @@ impl AppState {
                 discussion,
             } => {
                 if review.is_item(&item_id) {
+                    review.install_reactions(discussion.reactions_by_id());
                     review
                         .discussion
                         .set(Some(review.with_submitted_reviews(discussion)));
@@ -1761,6 +1796,8 @@ impl AppState {
             | Event::LspCalls { .. }
             | Event::DiscussionReady { .. }
             | Event::IssueComments { .. }
+            | Event::ReactionsUpdated { .. }
+            | Event::ReactionFailed { .. }
             | Event::ChecksReady { .. }
             | Event::PullRequestOverviewLoading { .. }
             | Event::PullRequestOverviewReady { .. }
@@ -2627,6 +2664,181 @@ mod tests {
         assert!(review.merge_error.with(Option::is_none));
     }
 
+    /// A discussion with one comment, `IC_1`, carrying `reactions`.
+    fn discussion_with_reactions(reactions: perch_github::Reactions) -> perch_github::Discussion {
+        perch_github::Discussion {
+            node_id: "PR_7".into(),
+            comments: vec![perch_github::IssueComment {
+                id: 1,
+                node_id: "IC_1".into(),
+                user: "chris".into(),
+                user_avatar_url: String::new(),
+                body: "q".into(),
+                created_at: "2026-09-15T09:14:00Z".parse().unwrap(),
+                updated_at: None,
+                html_url: String::new(),
+                reactions,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Somebody else's reaction, `count` of them, none the reader's.
+    fn theirs(kind: perch_github::ReactionKind, count: u32) -> perch_github::Reactions {
+        perch_github::Reactions {
+            groups: vec![perch_github::ReactionGroup {
+                kind,
+                count,
+                viewer_reacted: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_reaction_is_toggled_where_it_is_shown_and_github_settles_or_reverts_it() {
+        use perch_github::{ReactionKind, Reactions};
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        app.apply_with_review(
+            Event::DiscussionReady {
+                item_id: "wt".into(),
+                discussion: Arc::new(discussion_with_reactions(theirs(ReactionKind::Heart, 1))),
+            },
+            review,
+        );
+        // Landed by node id: the comment's, and the description's, empty.
+        assert_eq!(review.reactions_of("IC_1").count(ReactionKind::Heart), 1);
+        assert!(review.reactions_of("PR_7").is_empty());
+
+        // The pill toggles before GitHub is asked, and asks to add.
+        assert_eq!(review.toggle_reaction("IC_1", ReactionKind::Heart), Some(true));
+        assert_eq!(review.reactions_of("IC_1").count(ReactionKind::Heart), 2);
+        assert!(review.reactions_of("IC_1").viewer_reacted(ReactionKind::Heart));
+        assert!(review.is_reacting("IC_1", ReactionKind::Heart));
+        // A second click on the same pill waits for the answer; another
+        // pill does not.
+        assert_eq!(review.toggle_reaction("IC_1", ReactionKind::Heart), None);
+        assert_eq!(review.toggle_reaction("IC_1", ReactionKind::Eyes), Some(true));
+        assert_eq!(review.toggle_reaction("", ReactionKind::Eyes), None, "no id, nothing to ask");
+
+        // A read that lands meanwhile, with the older counts, does not
+        // put them over the toggle; the description's it may set.
+        let mut read = discussion_with_reactions(theirs(ReactionKind::Heart, 1));
+        read.reactions = theirs(ReactionKind::Rocket, 1);
+        app.apply_with_review(
+            Event::DiscussionReady {
+                item_id: "wt".into(),
+                discussion: Arc::new(read),
+            },
+            review,
+        );
+        assert_eq!(review.reactions_of("IC_1").count(ReactionKind::Heart), 2);
+        assert_eq!(review.reactions_of("IC_1").count(ReactionKind::Eyes), 1);
+        assert_eq!(review.reactions_of("PR_7").count(ReactionKind::Rocket), 1);
+
+        // GitHub's answer is what is shown from then on.
+        let mut settled = theirs(ReactionKind::Heart, 2);
+        settled.toggle(ReactionKind::Heart, true);
+        settled.toggle(ReactionKind::Eyes, true);
+        app.apply_with_review(
+            Event::ReactionsUpdated {
+                item_id: "wt".into(),
+                node_id: "IC_1".into(),
+                kind: ReactionKind::Heart,
+                reactions: settled.clone(),
+            },
+            review,
+        );
+        assert!(!review.is_reacting("IC_1", ReactionKind::Heart));
+        assert!(review.is_reacting("IC_1", ReactionKind::Eyes), "the other ask is still out");
+        assert_eq!(review.reactions_of("IC_1"), settled);
+
+        // A refusal puts the pill back as it was before the click.
+        app.apply_with_review(
+            Event::ReactionFailed {
+                item_id: "wt".into(),
+                node_id: "IC_1".into(),
+                kind: ReactionKind::Eyes,
+                add: true,
+            },
+            review,
+        );
+        assert!(!review.is_reacting("IC_1", ReactionKind::Eyes));
+        assert_eq!(review.reactions_of("IC_1").count(ReactionKind::Eyes), 0);
+        assert_eq!(review.reactions_of("IC_1").count(ReactionKind::Heart), 3);
+
+        // Another item's answer is not this one's.
+        app.apply_with_review(
+            Event::ReactionsUpdated {
+                item_id: "other".into(),
+                node_id: "IC_1".into(),
+                kind: ReactionKind::Heart,
+                reactions: Reactions::default(),
+            },
+            review,
+        );
+        assert_eq!(review.reactions_of("IC_1").count(ReactionKind::Heart), 3);
+
+        // Leaving the item forgets them, in flight or not.
+        review.close();
+        assert!(review.reactions_of("IC_1").is_empty());
+        assert!(!review.is_reacting("IC_1", ReactionKind::Heart));
+    }
+
+    #[test]
+    fn an_issue_lands_with_the_reactions_on_its_body_and_comments() {
+        use perch_github::{ReactionKind, Reactions};
+        let app = AppState::new();
+        let review = review_of("wt");
+        let thumbs = theirs(ReactionKind::ThumbsUp, 4);
+        let issue = perch_github::Issue {
+            number: 42,
+            node_id: "I_42".into(),
+            title: "Fence the manifest".into(),
+            body: String::new(),
+            reactions: thumbs.clone(),
+            state: "open".into(),
+            state_reason: None,
+            author_login: "a".into(),
+            author_avatar_url: String::new(),
+            labels: vec![],
+            assignees: vec![],
+            comments: 1,
+            created_at: None,
+            updated_at: "2026-09-18T10:00:00Z".parse().unwrap(),
+            repo_full_name: "slatedb/slatedb".into(),
+        };
+        let comments = discussion_with_reactions(thumbs.clone()).comments;
+        let item = review.item.get_untracked().unwrap();
+        app.expect_item_navigation("wt", 7);
+        app.apply_with_review(
+            Event::IssueReady {
+                navigation_id: 7,
+                scope_gen: 1,
+                item,
+                issue: Arc::new(issue),
+                comments: Arc::new(comments),
+                offline: false,
+            },
+            review,
+        );
+        assert_eq!(review.reactions_of("I_42"), thumbs);
+        assert_eq!(review.reactions_of("IC_1"), thumbs);
+
+        // Fetched again: the comments' and the body's, read together.
+        let hooray = theirs(ReactionKind::Hooray, 1);
+        app.apply_with_review(
+            Event::IssueComments {
+                item_id: "wt".into(),
+                comments: Arc::new(discussion_with_reactions(hooray.clone()).comments),
+                body_reactions: Reactions::default(),
+            },
+            review,
+        );
+        assert_eq!(review.reactions_of("IC_1"), hooray);
+        assert!(review.reactions_of("I_42").is_empty());
+    }
+
     #[test]
     fn only_the_current_review_attempt_settles_and_survives_stale_discussion_reads() {
         let app = AppState::new();
@@ -2659,6 +2871,8 @@ mod tests {
         assert_eq!(review.submit_review_pending.get(), Some(10));
 
         let accepted = Review {
+            node_id: String::new(),
+            reactions: Default::default(),
             id: 99,
             user: "reviewer".into(),
             body: "Please cover the failure path".into(),
@@ -2802,6 +3016,8 @@ mod tests {
                 expected_head_sha: "head".into(),
                 attempt_id: 12,
                 review: Arc::new(Review {
+                    node_id: String::new(),
+                    reactions: Default::default(),
                     id: 101,
                     user: "reviewer".into(),
                     body: "Approved before navigation".into(),

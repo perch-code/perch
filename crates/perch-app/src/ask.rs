@@ -1441,6 +1441,8 @@ mod tests {
     #[test]
     fn an_issue_takes_the_pull_request_block_s_place() {
         let issue = perch_github::Issue {
+            node_id: String::new(),
+            reactions: Default::default(),
             number: 42,
             title: "Fence the manifest".into(),
             body: "It races.".into(),
@@ -1456,6 +1458,8 @@ mod tests {
             repo_full_name: "slatedb/slatedb".into(),
         };
         let comments = vec![perch_github::IssueComment {
+            node_id: String::new(),
+            reactions: Default::default(),
             id: 1,
             user: "chris".into(),
             user_avatar_url: String::new(),

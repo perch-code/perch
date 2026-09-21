@@ -555,6 +555,8 @@ mod tests {
 
     fn issue(number: u64, title: &str, state: &str, updated: &str) -> ItemSubject {
         ItemSubject::Issue(Issue {
+            node_id: String::new(),
+            reactions: Default::default(),
             number,
             title: title.into(),
             body: String::new(),

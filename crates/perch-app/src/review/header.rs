@@ -360,6 +360,8 @@ pub(crate) mod tests {
         let state = ReviewState::new();
         let now = "2026-09-20T12:00:00Z".parse().unwrap();
         let issue = perch_github::Issue {
+            node_id: String::new(),
+            reactions: Default::default(),
             number: 400,
             title: "Trace reads".into(),
             body: String::new(),

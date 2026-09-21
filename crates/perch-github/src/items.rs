@@ -26,9 +26,16 @@ pub struct Label {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Issue {
     pub number: u64,
+    /// The GraphQL node id, which reactions on the body are read and left
+    /// by. Empty on a snapshot an older build kept.
+    #[serde(default)]
+    pub node_id: String,
     pub title: String,
     #[serde(default)]
     pub body: String,
+    /// The reactions on the body, once read with the comments.
+    #[serde(default)]
+    pub reactions: crate::reactions::Reactions,
     /// `open` or `closed`.
     pub state: String,
     /// `completed` or `not_planned`, for a closed issue.
@@ -78,6 +85,8 @@ impl Issue {
 pub(crate) struct IssuePayload {
     pub number: u64,
     #[serde(default)]
+    pub node_id: String,
+    #[serde(default)]
     pub title: String,
     #[serde(default)]
     pub body: Option<String>,
@@ -122,8 +131,10 @@ impl IssuePayload {
             .unwrap_or_default();
         Issue {
             number: self.number,
+            node_id: self.node_id,
             title: self.title,
             body: self.body.unwrap_or_default(),
+            reactions: crate::reactions::Reactions::default(),
             state: self.state,
             state_reason: self.state_reason,
             author_login,
@@ -399,8 +410,10 @@ mod tests {
         assert_eq!(i.title(), "perch/issue-42");
         i.subject = Some(Subject::Issue(Issue {
             number: 42,
+            node_id: String::new(),
             title: "Fence the manifest".into(),
             body: String::new(),
+            reactions: Default::default(),
             state: "open".into(),
             state_reason: None,
             author_login: "a".into(),
@@ -425,8 +438,10 @@ mod tests {
         let mut i = item();
         i.subject = Some(Subject::Issue(Issue {
             number: 1,
+            node_id: String::new(),
             title: "t".into(),
             body: String::new(),
+            reactions: Default::default(),
             state: "closed".into(),
             state_reason: Some("completed".into()),
             author_login: String::new(),
@@ -503,8 +518,10 @@ mod tests {
     fn a_subject_serialises_with_its_kind() {
         let s = Subject::Issue(Issue {
             number: 7,
+            node_id: String::new(),
             title: "t".into(),
             body: "b".into(),
+            reactions: Default::default(),
             state: "open".into(),
             state_reason: None,
             author_login: "a".into(),

@@ -12,6 +12,7 @@ pub mod discussion;
 pub mod items;
 pub mod model;
 pub mod pulls;
+pub mod reactions;
 pub mod reviews;
 mod subjects;
 pub mod workflow_runs;
@@ -44,6 +45,7 @@ pub use pulls::{
     CheckStatus, MergeMethod, MergeMethods, MergeResult, MergeState, MergeableState, PullRequest,
     PullRequestOverview, RepositoryPermission, ReviewDecision, Reviewer,
 };
+pub use reactions::{ReactionGroup, ReactionKind, Reactions};
 pub use reviews::{
     AnchorMapping, AnchorMappingMethod, AnchorMappingStatus, DeletedReviewHistory, Finding,
     FindingAuditAction, FindingAuditEntry, FindingDisposition, FindingSeverity, FindingTarget,

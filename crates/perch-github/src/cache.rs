@@ -4696,27 +4696,34 @@ mod tests {
     fn discussion() -> Discussion {
         use crate::discussion::{IssueComment, PullEvent, PullEventKind, Review, ReviewComment};
         Discussion {
+            node_id: "PR_7".into(),
             opened_at: Some(stamp_of("2026-09-14T14:02:00Z")),
             body: "The description.".into(),
+            reactions: Default::default(),
             comments: vec![IssueComment {
                 id: 1,
+                node_id: "IC_1".into(),
                 user: "chris".into(),
                 user_avatar_url: "https://avatars/1".into(),
                 body: "q".into(),
                 created_at: stamp_of("2026-09-15T09:14:00Z"),
                 updated_at: None,
                 html_url: "https://github.com/acme/widgets/pull/7#issuecomment-1".into(),
+                reactions: Default::default(),
             }],
             reviews: vec![Review {
                 id: 9,
+                node_id: "PRR_9".into(),
                 user: "rohan".into(),
                 body: "nice".into(),
                 state: "APPROVED".into(),
                 submitted_at: Some(stamp_of("2026-09-16T11:40:00Z")),
                 html_url: String::new(),
+                reactions: Default::default(),
             }],
             review_comments: vec![ReviewComment {
                 id: 3,
+                node_id: "PRRC_3".into(),
                 pull_request_review_id: Some(9),
                 in_reply_to_id: None,
                 user: "rohan".into(),
@@ -4729,6 +4736,7 @@ mod tests {
                 created_at: stamp_of("2026-09-16T11:38:00Z"),
                 updated_at: None,
                 html_url: String::new(),
+                reactions: Default::default(),
             }],
             events: vec![
                 PullEvent {

@@ -341,6 +341,14 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                      stroke-width="1.4" stroke-linejoin="round"/>
                <circle cx="5.4" cy="5.4" r="1.1" fill="{c}"/>"#
         ),
+        // A face: leave a reaction.
+        SidebarIcon::Smiley => format!(
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <circle cx="5.7" cy="6.3" r="0.95" fill="{c}"/>
+               <circle cx="10.3" cy="6.3" r="0.95" fill="{c}"/>
+               <path d="M5.1 9.5 C5.7 11 6.9 11.7 8 11.7 C9.1 11.7 10.3 11 10.9 9.5" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
         SidebarIcon::PullRequest => pull_request_body(&c),
         SidebarIcon::Issue => issue_body(&c),
         SidebarIcon::Repository => format!(
@@ -428,13 +436,16 @@ pub enum SidebarIcon {
     Caution,
     /// A circle with a slash through it: a run that was cancelled.
     Skip,
+    /// A face: leave a reaction.
+    Smiley,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 44] = [
+    pub const ALL: [SidebarIcon; 45] = [
+        SidebarIcon::Smiley,
         SidebarIcon::Skip,
         SidebarIcon::Person,
         SidebarIcon::Tag,

@@ -95,7 +95,7 @@ mod tests {
                     replies: vec![line(32, Some(10), Some(31), "2026-09-16T12:00:00Z", "  the reply ")],
                 }],
             },
-            Card::Description { author: "rohan".into(), avatar_url: String::new(), at: None, body: String::new() },
+            Card::Description { author: "rohan".into(), avatar_url: String::new(), at: None, body: String::new(), node_id: String::new() },
         ];
         let mut out = String::new();
         render(&mut out, &cards);

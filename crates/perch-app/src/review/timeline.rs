@@ -16,8 +16,9 @@ use perch_github::{CommentThread, Discussion, Issue, IssueComment, PullEvent, Pu
 #[derive(Debug, Clone, PartialEq)]
 pub enum Card {
     /// The pull request's or issue's own text, led by who opened it. Always
-    /// first.
-    Description { author: String, avatar_url: String, at: Option<Timestamp>, body: String },
+    /// first. `node_id` is what reactions on it are left by; empty when the
+    /// pull request's discussion has not landed, or an older build kept it.
+    Description { author: String, avatar_url: String, at: Option<Timestamp>, body: String, node_id: String },
     Comment(IssueComment),
     /// A review with its verdict and the line comments that belong to it.
     /// `review` is None for line comments whose review is not in the list
@@ -149,12 +150,14 @@ pub fn timeline(
             avatar_url: pr.author_avatar_url.clone(),
             at: discussion.and_then(|d| d.opened_at),
             body: discussion.map(|d| d.body.clone()).unwrap_or_default(),
+            node_id: discussion.map(|d| d.node_id.clone()).unwrap_or_default(),
         }),
         (None, Some((issue, _))) => cards.push(Card::Description {
             author: issue.author_login.clone(),
             avatar_url: issue.author_avatar_url.clone(),
             at: issue.created_at,
             body: issue.body.clone(),
+            node_id: issue.node_id.clone(),
         }),
         (None, None) => {}
     }
@@ -285,6 +288,8 @@ pub(crate) mod tests {
 
     fn issue() -> Issue {
         Issue {
+            node_id: String::new(),
+            reactions: Default::default(),
             number: 42,
             title: "Fence the manifest".into(),
             body: "The manifest can be written twice.".into(),
@@ -303,6 +308,8 @@ pub(crate) mod tests {
 
     fn discussion(reviews: Vec<Review>, review_comments: Vec<ReviewComment>) -> Discussion {
         Discussion {
+            node_id: String::new(),
+            reactions: Default::default(),
             opened_at: Some(at("2026-09-14T14:02:00Z")),
             body: "The description.".into(),
             comments: vec![],
@@ -314,6 +321,8 @@ pub(crate) mod tests {
 
     fn comment(id: u64, when: &str, body: &str) -> IssueComment {
         IssueComment {
+            node_id: String::new(),
+            reactions: Default::default(),
             id,
             user: "chris".into(),
             user_avatar_url: String::new(),
@@ -326,6 +335,8 @@ pub(crate) mod tests {
 
     pub(crate) fn review(id: u64, state: &str, body: &str, when: Option<&str>) -> Review {
         Review {
+            node_id: String::new(),
+            reactions: Default::default(),
             id,
             user: "chris".into(),
             body: body.into(),
@@ -337,6 +348,8 @@ pub(crate) mod tests {
 
     pub(crate) fn line(id: u64, review: Option<u64>, reply_to: Option<u64>, when: &str, body: &str) -> ReviewComment {
         ReviewComment {
+            node_id: String::new(),
+            reactions: Default::default(),
             id,
             pull_request_review_id: review,
             in_reply_to_id: reply_to,
@@ -466,7 +479,7 @@ pub(crate) mod tests {
         let t = thread("t1", "2026-09-16T09:00:00Z", "2026-09-16T09:00:00Z", "where?");
         let cards = timeline(None, None, Some((&issue, &comments)), &[t]);
         assert_eq!(kinds(&cards), ["description", "comment", "thread"]);
-        let Card::Description { author, avatar_url, at: opened, body } = &cards[0] else { panic!("{cards:?}") };
+        let Card::Description { author, avatar_url, at: opened, body, .. } = &cards[0] else { panic!("{cards:?}") };
         assert_eq!(author, "rohan");
         assert_eq!(avatar_url, "https://avatars/2");
         assert_eq!(*opened, Some(at("2026-09-14T14:02:00Z")));

@@ -489,6 +489,8 @@ mod tests {
         let mut i = Item::new("criccomini/perch", "2026-09-18T10:00:00Z".parse().unwrap());
         assert_eq!(state_of(&i), None);
         i.subject = Some(ItemSubject::Issue(perch_github::Issue {
+            node_id: String::new(),
+            reactions: Default::default(),
             number: 1,
             title: "t".into(),
             body: String::new(),

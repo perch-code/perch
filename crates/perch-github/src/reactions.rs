@@ -1,0 +1,395 @@
+//! Emoji reactions: the eight GitHub offers, how many of each a comment
+//! has, and which of them the reader left.
+//!
+//! GitHub's REST lists count reactions but do not say whose they are, and
+//! count none on a review or on a pull request's own body. GraphQL says
+//! both for any node in one `nodes(ids:)` query, a hundred ids at a time,
+//! so a discussion's reactions are read there after its lists, and a
+//! reaction is added or taken back there too, by the subject's node id.
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+
+/// The eight reactions GitHub offers, in the order its picker shows them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionKind {
+    ThumbsUp,
+    ThumbsDown,
+    Laugh,
+    Hooray,
+    Confused,
+    Heart,
+    Rocket,
+    Eyes,
+}
+
+impl ReactionKind {
+    pub const ALL: [ReactionKind; 8] = [
+        ReactionKind::ThumbsUp,
+        ReactionKind::ThumbsDown,
+        ReactionKind::Laugh,
+        ReactionKind::Hooray,
+        ReactionKind::Confused,
+        ReactionKind::Heart,
+        ReactionKind::Rocket,
+        ReactionKind::Eyes,
+    ];
+
+    /// The emoji, as GitHub draws it.
+    pub fn emoji(self) -> &'static str {
+        match self {
+            ReactionKind::ThumbsUp => "👍",
+            ReactionKind::ThumbsDown => "👎",
+            ReactionKind::Laugh => "😄",
+            ReactionKind::Hooray => "🎉",
+            ReactionKind::Confused => "😕",
+            ReactionKind::Heart => "❤️",
+            ReactionKind::Rocket => "🚀",
+            ReactionKind::Eyes => "👀",
+        }
+    }
+
+    /// The name beside the emoji in the picker, and in a pill's tip.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReactionKind::ThumbsUp => "Thumbs up",
+            ReactionKind::ThumbsDown => "Thumbs down",
+            ReactionKind::Laugh => "Laugh",
+            ReactionKind::Hooray => "Hooray",
+            ReactionKind::Confused => "Confused",
+            ReactionKind::Heart => "Heart",
+            ReactionKind::Rocket => "Rocket",
+            ReactionKind::Eyes => "Eyes",
+        }
+    }
+
+    /// GraphQL's `ReactionContent` value.
+    pub fn graphql(self) -> &'static str {
+        match self {
+            ReactionKind::ThumbsUp => "THUMBS_UP",
+            ReactionKind::ThumbsDown => "THUMBS_DOWN",
+            ReactionKind::Laugh => "LAUGH",
+            ReactionKind::Hooray => "HOORAY",
+            ReactionKind::Confused => "CONFUSED",
+            ReactionKind::Heart => "HEART",
+            ReactionKind::Rocket => "ROCKET",
+            ReactionKind::Eyes => "EYES",
+        }
+    }
+
+    fn from_graphql(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.graphql() == value)
+    }
+}
+
+/// One reaction on a subject: how many left it, and whether the reader is
+/// among them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReactionGroup {
+    pub kind: ReactionKind,
+    pub count: u32,
+    pub viewer_reacted: bool,
+}
+
+/// The reactions on one subject: only the kinds anyone left, in picker
+/// order. Empty on a payload an older build kept, which had none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Reactions {
+    pub groups: Vec<ReactionGroup>,
+}
+
+impl Reactions {
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
+    pub fn count(&self, kind: ReactionKind) -> u32 {
+        self.groups
+            .iter()
+            .find(|g| g.kind == kind)
+            .map_or(0, |g| g.count)
+    }
+
+    pub fn viewer_reacted(&self, kind: ReactionKind) -> bool {
+        self.groups
+            .iter()
+            .any(|g| g.kind == kind && g.viewer_reacted)
+    }
+
+    /// The reader's reaction added or taken back, as the row shows it
+    /// before GitHub answers. Adding one already there, or taking back one
+    /// that is not, changes nothing.
+    pub fn toggle(&mut self, kind: ReactionKind, add: bool) {
+        if self.viewer_reacted(kind) == add {
+            return;
+        }
+        match self.groups.iter_mut().find(|g| g.kind == kind) {
+            Some(group) if add => {
+                group.count += 1;
+                group.viewer_reacted = true;
+            }
+            Some(group) => {
+                group.count = group.count.saturating_sub(1);
+                group.viewer_reacted = false;
+            }
+            None if add => {
+                self.groups.push(ReactionGroup {
+                    kind,
+                    count: 1,
+                    viewer_reacted: true,
+                });
+                self.groups.sort_by_key(|g| g.kind);
+            }
+            None => {}
+        }
+        self.groups.retain(|g| g.count > 0);
+    }
+
+    /// GitHub's groups, one per kind whether anyone left it or not, kept
+    /// to the ones somebody did. GitHub sends them in picker order.
+    fn from_groups(groups: Vec<ReactionGroupPayload>) -> Self {
+        let mut groups: Vec<ReactionGroup> = groups
+            .into_iter()
+            .filter(|g| g.reactors.total_count > 0)
+            .filter_map(|g| {
+                Some(ReactionGroup {
+                    kind: ReactionKind::from_graphql(&g.content)?,
+                    count: g.reactors.total_count,
+                    viewer_reacted: g.viewer_has_reacted,
+                })
+            })
+            .collect();
+        groups.sort_by_key(|g| g.kind);
+        Reactions { groups }
+    }
+}
+
+// ---------------------------------------------------------------------
+// The wire
+// ---------------------------------------------------------------------
+
+/// `reactionGroups` on any `Reactable`, as every query here asks for it.
+const REACTION_GROUPS: &str = "reactionGroups { content viewerHasReacted reactors { totalCount } }";
+
+/// The reactions on up to a hundred nodes at once.
+pub(crate) fn reactions_query() -> String {
+    format!(
+        "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on Reactable {{ {REACTION_GROUPS} }} }} }}"
+    )
+}
+
+/// Add the reader's reaction to a subject, or take it back, and read the
+/// subject's reactions as they stand after.
+pub(crate) fn reaction_mutation(add: bool) -> String {
+    let field = if add { "addReaction" } else { "removeReaction" };
+    format!(
+        "mutation($subject: ID!, $content: ReactionContent!) {{ {field}(input: {{subjectId: $subject, content: $content}}) {{ subject {{ {REACTION_GROUPS} }} }} }}"
+    )
+}
+
+/// The most ids one `nodes(ids:)` query may name.
+pub(crate) const NODES_PER_QUERY: usize = 100;
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReactionGroupPayload {
+    #[serde(default)]
+    content: String,
+    #[serde(default, rename = "viewerHasReacted")]
+    viewer_has_reacted: bool,
+    #[serde(default)]
+    reactors: ReactorsPayload,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReactorsPayload {
+    #[serde(default, rename = "totalCount")]
+    total_count: u32,
+}
+
+/// One node's answer. A node that is not reactable, or that GitHub could
+/// not find, has no groups.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ReactableNode {
+    #[serde(default, rename = "reactionGroups")]
+    reaction_groups: Vec<ReactionGroupPayload>,
+}
+
+impl ReactableNode {
+    pub(crate) fn into_reactions(self) -> Reactions {
+        Reactions::from_groups(self.reaction_groups)
+    }
+}
+
+/// The `nodes` answer, one entry per id asked for, in order; `null` for a
+/// node GitHub could not resolve.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReactionsData {
+    #[serde(default)]
+    nodes: Vec<Option<ReactableNode>>,
+}
+
+impl ReactionsData {
+    /// The reactions by node id, for the ids the query named. A node
+    /// GitHub did not answer for is left out.
+    pub(crate) fn by_id(self, ids: &[String]) -> HashMap<String, Reactions> {
+        ids.iter()
+            .zip(self.nodes)
+            .filter_map(|(id, node)| Some((id.clone(), node?.into_reactions())))
+            .collect()
+    }
+}
+
+/// A mutation's answer: the subject with its reactions after the change.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReactionMutationData {
+    #[serde(default, rename = "addReaction", alias = "removeReaction")]
+    payload: Option<ReactionMutationPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReactionMutationPayload {
+    #[serde(default)]
+    subject: Option<ReactableNode>,
+}
+
+impl ReactionMutationData {
+    pub(crate) fn into_reactions(self) -> Option<Reactions> {
+        Some(self.payload?.subject?.into_reactions())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(content: &str, count: u32, mine: bool) -> ReactionGroupPayload {
+        ReactionGroupPayload {
+            content: content.into(),
+            viewer_has_reacted: mine,
+            reactors: ReactorsPayload { total_count: count },
+        }
+    }
+
+    #[test]
+    fn only_the_reactions_somebody_left_are_kept_in_picker_order() {
+        let reactions = Reactions::from_groups(vec![
+            group("EYES", 2, true),
+            group("THUMBS_UP", 3, false),
+            group("LAUGH", 0, false),
+            group("SHRUG", 4, false),
+        ]);
+        assert_eq!(
+            reactions.groups,
+            vec![
+                ReactionGroup {
+                    kind: ReactionKind::ThumbsUp,
+                    count: 3,
+                    viewer_reacted: false
+                },
+                ReactionGroup {
+                    kind: ReactionKind::Eyes,
+                    count: 2,
+                    viewer_reacted: true
+                },
+            ]
+        );
+        assert_eq!(reactions.count(ReactionKind::ThumbsUp), 3);
+        assert_eq!(reactions.count(ReactionKind::Laugh), 0);
+        assert!(reactions.viewer_reacted(ReactionKind::Eyes));
+        assert!(!reactions.viewer_reacted(ReactionKind::ThumbsUp));
+    }
+
+    #[test]
+    fn toggling_adds_and_takes_back_the_readers_own_reaction() {
+        let mut reactions = Reactions::from_groups(vec![group("HEART", 1, false)]);
+        reactions.toggle(ReactionKind::ThumbsUp, true);
+        assert_eq!(reactions.count(ReactionKind::ThumbsUp), 1);
+        assert!(reactions.viewer_reacted(ReactionKind::ThumbsUp));
+        assert_eq!(
+            reactions.groups.iter().map(|g| g.kind).collect::<Vec<_>>(),
+            vec![ReactionKind::ThumbsUp, ReactionKind::Heart],
+            "a new kind takes its place in picker order"
+        );
+        // Adding what is there already is nothing.
+        reactions.toggle(ReactionKind::ThumbsUp, true);
+        assert_eq!(reactions.count(ReactionKind::ThumbsUp), 1);
+
+        reactions.toggle(ReactionKind::Heart, true);
+        assert_eq!(reactions.count(ReactionKind::Heart), 2);
+        reactions.toggle(ReactionKind::Heart, false);
+        assert_eq!(reactions.count(ReactionKind::Heart), 1);
+        assert!(!reactions.viewer_reacted(ReactionKind::Heart));
+        // Taking back what is not there is nothing either.
+        reactions.toggle(ReactionKind::Heart, false);
+        assert_eq!(reactions.count(ReactionKind::Heart), 1);
+
+        reactions.toggle(ReactionKind::ThumbsUp, false);
+        assert_eq!(reactions.count(ReactionKind::ThumbsUp), 0);
+        assert_eq!(
+            reactions.groups.len(),
+            1,
+            "a kind nobody left any more goes"
+        );
+    }
+
+    #[test]
+    fn a_missing_node_is_left_out_of_the_answer() {
+        let data: ReactionsData = serde_json::from_str(
+            r#"{"nodes":[{"reactionGroups":[{"content":"ROCKET","viewerHasReacted":true,"reactors":{"totalCount":1}}]},null,{}]}"#,
+        )
+        .unwrap();
+        let by_id = data.by_id(&["a".into(), "b".into(), "c".into()]);
+        assert_eq!(by_id.len(), 2);
+        assert!(by_id["a"].viewer_reacted(ReactionKind::Rocket));
+        assert!(
+            by_id["c"].is_empty(),
+            "a node that is not reactable has none"
+        );
+        assert!(!by_id.contains_key("b"));
+    }
+
+    #[test]
+    fn either_mutation_answers_with_the_subjects_reactions() {
+        let added: ReactionMutationData = serde_json::from_str(
+            r#"{"addReaction":{"subject":{"reactionGroups":[{"content":"HOORAY","viewerHasReacted":true,"reactors":{"totalCount":2}}]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            added.into_reactions().unwrap().count(ReactionKind::Hooray),
+            2
+        );
+        let removed: ReactionMutationData =
+            serde_json::from_str(r#"{"removeReaction":{"subject":{"reactionGroups":[]}}}"#)
+                .unwrap();
+        assert!(removed.into_reactions().unwrap().is_empty());
+        let nothing: ReactionMutationData =
+            serde_json::from_str(r#"{"addReaction":null}"#).unwrap();
+        assert!(nothing.into_reactions().is_none());
+    }
+
+    #[test]
+    fn kinds_serialize_by_name_and_round_trip_through_graphql() {
+        assert_eq!(
+            serde_json::to_string(&ReactionKind::ThumbsUp).unwrap(),
+            r#""thumbs_up""#
+        );
+        for kind in ReactionKind::ALL {
+            assert_eq!(ReactionKind::from_graphql(kind.graphql()), Some(kind));
+            assert!(!kind.emoji().is_empty());
+            assert!(!kind.label().is_empty());
+        }
+        assert_eq!(ReactionKind::from_graphql("SHRUG"), None);
+    }
+
+    #[test]
+    fn the_queries_ask_for_the_groups_on_a_reactable() {
+        assert!(reactions_query().contains("nodes(ids: $ids)"));
+        assert!(reactions_query().contains("... on Reactable"));
+        assert!(reaction_mutation(true).starts_with("mutation("));
+        assert!(reaction_mutation(true)
+            .contains("addReaction(input: {subjectId: $subject, content: $content})"));
+        assert!(reaction_mutation(false).contains("removeReaction(input:"));
+    }
+}

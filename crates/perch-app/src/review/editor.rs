@@ -3733,6 +3733,8 @@ mod window {
         body: &str,
     ) -> perch_github::ReviewComment {
         perch_github::ReviewComment {
+            node_id: String::new(),
+            reactions: Default::default(),
             id,
             pull_request_review_id: None,
             in_reply_to_id: reply_to,
@@ -3754,6 +3756,8 @@ mod window {
         review_comments: Vec<perch_github::ReviewComment>,
     ) -> perch_github::Discussion {
         perch_github::Discussion {
+            node_id: String::new(),
+            reactions: Default::default(),
             opened_at: None,
             body: String::new(),
             comments: Vec::new(),

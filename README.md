@@ -44,6 +44,19 @@ issue is fetched when a notification is opened or when the user opens it by
 repository and number. Its current data and discussion may be cached locally;
 closed history is never backfilled.
 
+## Reactions
+
+Each GitHub entry on Conversation shows the reactions on it under its text:
+the description, every comment, and every review summary and line comment. A
+pill is one reaction and its count, blue when yours is among them. Clicking a
+pill adds or removes yours, and the face at the right of an entry's byline
+opens a picker with all eight. A reaction is shown as soon as it is clicked
+and put back if GitHub refuses it.
+
+Reactions are read with the discussion through GitHub's GraphQL API, a
+hundred entries to a request, and left the same way. An entry cached by an
+older build of Perch has no reactions until it is fetched again.
+
 ## Authentication
 
 Perch calls GitHub's API directly. It resolves credentials in this order:
@@ -58,7 +71,8 @@ launch does not normally inherit shell environment variables. The credential
 must be allowed to read and update notifications and to read the repositories
 you open. Merging a pull request also requires `Contents: write` permission on
 its repository. Commenting on, approving, or requesting changes on a pull
-request requires `Pull requests: write` permission.
+request requires `Pull requests: write` permission, as does reacting to a pull
+request or anything said on it; reacting on an issue requires `Issues: write`.
 
 ## Configuration
 

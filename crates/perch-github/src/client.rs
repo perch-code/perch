@@ -25,6 +25,10 @@ use crate::pulls::{
     MergeMethod, MergeRequest, MergeResult, PullPayload, PullRequest, PullRequestOverview,
     PullRequestOverviewAccumulator, PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
 };
+use crate::reactions::{
+    reaction_mutation, reactions_query, ReactionKind, ReactionMutationData, Reactions,
+    ReactionsData, NODES_PER_QUERY,
+};
 use crate::subjects::{SubjectLook, SubjectLookData};
 use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunsPayload};
 
@@ -486,8 +490,11 @@ impl GitHub {
     }
 
     /// Everything said on a pull request: description, conversation,
-    /// reviews, and line comments. Three lists, each read to the end, and
-    /// the events the pull request's own payload carries.
+    /// reviews, and line comments. Three lists, each read to the end, the
+    /// events the pull request's own payload carries, and the reactions on
+    /// all of it. The reactions are the one part that may be missing: a
+    /// discussion whose lists came is returned without them rather than
+    /// not at all.
     pub async fn fetch_discussion(
         &self,
         repo_full_name: &str,
@@ -508,17 +515,76 @@ impl GitHub {
             .list_all(&format!("{base}/pulls/{number}/comments"))
             .await?;
 
-        Ok(Discussion {
-            opened_at: pull.created_at,
+        let mut discussion = Discussion {
             events: pull.events(),
+            node_id: pull.node_id,
+            opened_at: pull.created_at,
             body: pull.body.unwrap_or_default(),
+            reactions: Reactions::default(),
             comments: comments.into_iter().map(IssueComment::from).collect(),
             reviews: reviews.into_iter().map(Review::from).collect(),
             review_comments: review_comments
                 .into_iter()
                 .map(ReviewComment::from)
                 .collect(),
-        })
+        };
+        if let Err(e) = self.fill_reactions(&mut discussion).await {
+            tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the reactions");
+        }
+        Ok(discussion)
+    }
+
+    /// The reactions on everything in a discussion, as the reader sees
+    /// them: how many of each, and which are the reader's own. The lists
+    /// count reactions without saying whose they are, and count none on a
+    /// review or the body, so GraphQL is asked about every node at once.
+    pub async fn fill_reactions(&self, discussion: &mut Discussion) -> Result<(), Error> {
+        let ids = discussion.reactable_ids();
+        for (id, reactions) in self.fetch_reactions(&ids).await? {
+            discussion.set_reactions(&id, &reactions);
+        }
+        Ok(())
+    }
+
+    /// The reactions on each of the nodes named, by id, a hundred to a
+    /// query. A node GitHub cannot resolve, or that cannot be reacted to,
+    /// is left out of the answer.
+    pub async fn fetch_reactions(
+        &self,
+        node_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Reactions>, Error> {
+        let mut all = std::collections::HashMap::new();
+        for ids in node_ids.chunks(NODES_PER_QUERY) {
+            let payload = serde_json::json!({
+                "query": reactions_query(),
+                "variables": { "ids": ids },
+            });
+            let data: ReactionsData = self.graphql(&payload).await?;
+            all.extend(data.by_id(ids));
+        }
+        Ok(all)
+    }
+
+    /// Add the reader's reaction to a subject, or take it back, and read
+    /// the subject's reactions as they stand after. Adding one the reader
+    /// already left, or taking back one they did not, is not an error:
+    /// GitHub answers with the reactions as they are.
+    pub async fn set_reaction(
+        &self,
+        node_id: &str,
+        kind: ReactionKind,
+        add: bool,
+    ) -> Result<Reactions, Error> {
+        if node_id.is_empty() {
+            return Err(Error::Decode("the subject has no node id".into()));
+        }
+        let payload = serde_json::json!({
+            "query": reaction_mutation(add),
+            "variables": { "subject": node_id, "content": kind.graphql() },
+        });
+        let data: ReactionMutationData = self.graphql(&payload).await?;
+        data.into_reactions()
+            .ok_or_else(|| Error::Decode("GitHub answered the reaction without its subject".into()))
     }
 
     /// Fetch an issue by number.

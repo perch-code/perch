@@ -283,8 +283,10 @@ fn card_view(
             avatar_url,
             at,
             body,
-        } => cards::description_card(app, author, avatar_url, at, body).into_any(),
-        Card::Comment(comment) => cards::comment_card(app, state, comment).into_any(),
+            node_id,
+        } => cards::description_card(app, state, backend, author, avatar_url, at, body, node_id)
+            .into_any(),
+        Card::Comment(comment) => cards::comment_card(app, state, backend, comment).into_any(),
         Card::Review { review, comments } => {
             cards::review_card(app, state, backend, open_file, review, comments).into_any()
         }
@@ -391,6 +393,8 @@ mod tests {
     /// and the merge.
     fn discussion() -> Discussion {
         let line = |id: u64, reply_to: Option<u64>, when: &str, body: &str| ReviewComment {
+            node_id: String::new(),
+            reactions: Default::default(),
             id,
             pull_request_review_id: Some(9),
             in_reply_to_id: reply_to,
@@ -406,9 +410,13 @@ mod tests {
             html_url: format!("https://github.com/criccomini/perch/pull/57#discussion_r{id}"),
         };
         Discussion {
+            node_id: String::new(),
+            reactions: Default::default(),
             opened_at: Some(at("2026-09-14T14:02:00Z")),
             body: "The description.".into(),
             comments: vec![IssueComment {
+                node_id: String::new(),
+                reactions: Default::default(),
                 id: 1,
                 user: "chris".into(),
                 user_avatar_url: String::new(),
@@ -418,6 +426,8 @@ mod tests {
                 html_url: "https://github.com/criccomini/perch/pull/57#issuecomment-1".into(),
             }],
             reviews: vec![Review {
+                node_id: String::new(),
+                reactions: Default::default(),
                 id: 9,
                 user: "chris".into(),
                 body: "Looks right.".into(),
@@ -517,6 +527,15 @@ mod tests {
     }
 
     fn app_harness() -> (HeadlessHarness, AppState, ReviewState) {
+        app_harness_on(crate::backend::Backend::detached(), discussion())
+    }
+
+    /// The window with the pull request open on Conversation, with this
+    /// discussion, and the backend the window's asks go to.
+    fn app_harness_on(
+        backend: crate::backend::Backend,
+        discussion: Discussion,
+    ) -> (HeadlessHarness, AppState, ReviewState) {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = ReviewState::new();
@@ -539,16 +558,114 @@ mod tests {
         state.ready.set(true);
         state.set_phase(crate::review::model::Phase::Ready);
         state.pull_request.set(Some(Arc::new(pr)));
-        state.discussion.set(Some(Arc::new(discussion())));
+        state.install_reactions(discussion.reactions_by_id());
+        state.discussion.set(Some(Arc::new(discussion)));
         state.comment_threads.set(Arc::new(vec![thread()]));
         // See the field: a focused editor cannot be driven headlessly.
         state.composer_autofocus.set(false);
-        let backend = crate::backend::Backend::detached();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
         harness.rebuild();
         harness.paint();
         (harness, app, state)
+    }
+
+    /// The reactions on a comment are pills under it, one a kind, and a
+    /// click on one toggles it where it is and asks the backend; a second
+    /// click waits for the answer. An entry nobody reacted to has no row,
+    /// and one an older build kept without a node id has no picker.
+    #[test]
+    fn a_reaction_pill_toggles_where_it_is_and_asks_the_backend() {
+        use perch_github::{ReactionGroup, ReactionKind, Reactions};
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let mut discussion = discussion();
+        discussion.node_id = "PR_57".into();
+        discussion.comments[0].node_id = "IC_1".into();
+        discussion.comments[0].reactions = Reactions {
+            groups: vec![
+                ReactionGroup { kind: ReactionKind::ThumbsUp, count: 2, viewer_reacted: false },
+                ReactionGroup { kind: ReactionKind::Rocket, count: 1, viewer_reacted: true },
+            ],
+        };
+        let (mut harness, app, state) = app_harness_on(backend, discussion);
+        let root = harness.root_id();
+        let comment = find(root, "card:comment").unwrap();
+        let description = find(root, "card:description").unwrap();
+        let review = find(root, "card:review").unwrap();
+
+        // The pills, and the picker at their end; the description, with
+        // nothing on it, has the row hidden; the review, kept without a
+        // node id, has no picker at all.
+        let pill = |harness: &HeadlessHarness, kind: &str| {
+            let id = find(comment, &format!("reaction:{kind}")).unwrap_or_else(|| panic!("no {kind} pill"));
+            let mut all = Vec::new();
+            names(id, &mut all);
+            (id, all.join(" "), harness.get_layout_rect(id).height())
+        };
+        let (thumbs, text, height) = pill(&harness, "THUMBS_UP");
+        assert!(text.contains("\"2\""), "{text}");
+        assert_eq!(height, crate::theme::REACTION_PILL_HEIGHT);
+        assert!(pill(&harness, "ROCKET").1.contains("\"1\""));
+        assert!(find(comment, "reaction:EYES").is_none(), "nobody left one");
+        assert!(find(comment, "react-button").is_some());
+        let row = find(description, "reactions").unwrap();
+        assert_eq!(harness.get_layout_rect(row).height(), 0.0, "nothing to show");
+        assert!(find(description, "react-button").is_some(), "the picker is the way in");
+        assert!(find(review, "react-button").is_none());
+        assert!(find(review, "reactions").is_none());
+
+        // A click: the pill counts the reader in before GitHub is asked.
+        let c = thumbs.get_visual_rect_no_clip().center();
+        assert_eq!(
+            harness.element_id_at(c.x, c.y).map(|e| e.owning_id()),
+            Some(thumbs),
+            "the pill is not under the pointer"
+        );
+        // Whatever the window asked for on its way up is not the click's.
+        while commands.try_recv().is_ok() {}
+        harness.click(c.x, c.y);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::backend::Command::SetReaction { item_id, node_id, kind: ReactionKind::ThumbsUp, add: true })
+                if item_id == "wt" && node_id == "IC_1"
+        ));
+        assert!(state.reactions_of("IC_1").viewer_reacted(ReactionKind::ThumbsUp));
+        harness.rebuild();
+        harness.paint();
+        let (thumbs, text, _) = pill(&harness, "THUMBS_UP");
+        assert!(text.contains("\"3\""), "{text}");
+
+        // A second click on the same pill waits for GitHub.
+        let c = thumbs.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        assert!(commands.try_recv().is_err(), "asked twice");
+        assert_eq!(state.reactions_of("IC_1").count(ReactionKind::ThumbsUp), 3);
+
+        // GitHub's answer is what the row shows then, and the pill is a
+        // pill again.
+        app.apply_with_review(
+            crate::backend::Event::ReactionsUpdated {
+                item_id: "wt".into(),
+                node_id: "IC_1".into(),
+                kind: ReactionKind::ThumbsUp,
+                reactions: Reactions {
+                    groups: vec![ReactionGroup { kind: ReactionKind::ThumbsUp, count: 4, viewer_reacted: true }],
+                },
+            },
+            state,
+        );
+        harness.rebuild();
+        harness.paint();
+        let (thumbs, text, _) = pill(&harness, "THUMBS_UP");
+        assert!(text.contains("\"4\""), "{text}");
+        assert!(find(comment, "reaction:ROCKET").is_none(), "GitHub says nobody's");
+        let c = thumbs.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::backend::Command::SetReaction { kind: ReactionKind::ThumbsUp, add: false, .. })
+        ));
+        assert_eq!(state.reactions_of("IC_1").count(ReactionKind::ThumbsUp), 3);
     }
 
     /// Every view's debug names, in tree order.
@@ -611,6 +728,8 @@ mod tests {
         let mut discussion = discussion();
         for i in 0..3 {
             discussion.comments.push(IssueComment {
+                node_id: String::new(),
+                reactions: Default::default(),
                 id: 100 + i,
                 user: "chris".into(),
                 user_avatar_url: String::new(),
@@ -1051,12 +1170,14 @@ mod tests {
         let mut discussion = discussion();
         discussion.comments.push(IssueComment {
             id: 2,
+            node_id: String::new(),
             user: "rohan".into(),
             user_avatar_url: String::new(),
             body: "One more thing.".into(),
             created_at: at("2026-09-18T09:00:00Z"),
             updated_at: None,
             html_url: "https://github.com/criccomini/perch/pull/57#issuecomment-2".into(),
+            reactions: Default::default(),
         });
         app.apply_with_review(
             Event::DiscussionReady {

@@ -71,6 +71,10 @@ pub const ALERT_WARNING: Color = Color::from_rgb8(0x9a, 0x67, 0x00);
 pub const ALERT_CAUTION: Color = Color::from_rgb8(0xcf, 0x22, 0x2e);
 
 pub const BADGE_BG: Color = Color::from_rgb8(0xed, 0xed, 0xea);
+/// A reaction pill the reader is among: the blue wash and rule GitHub
+/// draws its own with, so it reads as the same mark here.
+pub const REACTED_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
+pub const REACTED_BORDER: Color = Color::from_rgb8(0x54, 0xae, 0xff);
 pub const SHADOW: Color = Color::from_rgba8(0x20, 0x20, 0x1e, 0x12);
 
 /// Avatar placeholders, cycled by name so a row is stable between launches.
@@ -305,6 +309,9 @@ pub const CARD_GAP: f64 = 12.0;
 pub const EVENT_GAP: f64 = 4.0;
 /// The compact byline at the top of a Conversation entry.
 pub const BYLINE_HEIGHT: f64 = 32.0;
+/// A reaction pill under a comment, and the room above the row of them.
+pub const REACTION_PILL_HEIGHT: f64 = 26.0;
+pub const REACTIONS_GAP: f64 = 10.0;
 /// A card's byline avatar, and the smaller one on a line comment nested
 /// inside a review.
 pub const CARD_AVATAR: f64 = 22.0;

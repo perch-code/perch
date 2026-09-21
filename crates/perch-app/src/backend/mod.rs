@@ -18,7 +18,8 @@ use perch_github::{
     resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentThread,
     Config, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, MergeMethod, MergeState,
     MergeableState, NewRunEvent, PullRequest, PullRequestOverview, PullReviewEvent,
-    RepositoryPermission, Review, RevisionContext, RunEvent as StoredRunEvent, RunEventRecord,
+    ReactionKind, Reactions, RepositoryPermission, Review, RevisionContext,
+    RunEvent as StoredRunEvent, RunEventRecord,
     RunHistoryFilter, RunLabels, RunOwner, RunPurpose, RunRecord, RunStatus, RunSummary,
     SubjectKind, TerminalReason, Thread, ThreadOrigin,
 };
@@ -121,6 +122,15 @@ pub enum Command {
         expected_head_sha: String,
         body: String,
         event: PullReviewEvent,
+    },
+    /// Leave the reader's reaction on a comment, a review, or the item's
+    /// own description, or take it back. `node_id` is the subject's
+    /// GraphQL id, which is how GitHub names a reactable thing.
+    SetReaction {
+        item_id: String,
+        node_id: String,
+        kind: ReactionKind,
+        add: bool,
     },
     /// Read, diff, and highlight one file of the open checkout, over the
     /// scope that is set.
@@ -538,10 +548,29 @@ pub enum Event {
         item_id: String,
         discussion: Arc<perch_github::Discussion>,
     },
-    /// An issue's comments, fetched again after a notification about it.
+    /// An issue's comments, fetched again after a notification about it,
+    /// and the reactions on the issue's own body, read with them.
     IssueComments {
         item_id: String,
         comments: Arc<Vec<perch_github::IssueComment>>,
+        body_reactions: Reactions,
+    },
+    /// GitHub took the reader's reaction: the subject's reactions as they
+    /// stand now.
+    ReactionsUpdated {
+        item_id: String,
+        node_id: String,
+        kind: ReactionKind,
+        reactions: Reactions,
+    },
+    /// GitHub did not take the reader's reaction. `add` is what was asked,
+    /// so the view can put back what it showed before asking; why is a
+    /// notice of its own.
+    ReactionFailed {
+        item_id: String,
+        node_id: String,
+        kind: ReactionKind,
+        add: bool,
     },
     /// The workflow runs' verdict for the item's head.
     ChecksReady {
@@ -1655,6 +1684,18 @@ impl Backend {
         Some(attempt_id)
     }
 
+    /// Leave a reaction on a subject of the open item, or take it back.
+    /// The view has already toggled what it shows; `ReactionsUpdated` or
+    /// `ReactionFailed` settles it.
+    pub fn set_reaction(&self, item_id: &str, node_id: &str, kind: ReactionKind, add: bool) {
+        let _ = self.commands.send(Command::SetReaction {
+            item_id: item_id.to_string(),
+            node_id: node_id.to_string(),
+            kind,
+            add,
+        });
+    }
+
     pub fn open_item(&self, id: &str) -> u64 {
         let navigation_id = self.navigation_requests.begin_item(id);
         self.scope_requests.clear();
@@ -2638,6 +2679,17 @@ async fn run(
                         refresh_open_item_inner(&ctx, &item_id),
                     )
                     .await;
+                });
+            }
+            Command::SetReaction {
+                item_id,
+                node_id,
+                kind,
+                add,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    set_reaction(&ctx, &item_id, &node_id, kind, add).await;
                 });
             }
             Command::OpenItem { id, navigation_id }
@@ -6127,6 +6179,67 @@ fn validate_pull_request_review_attempt(
     Ok(())
 }
 
+/// Leave the reader's reaction or take it back, and show the subject's
+/// reactions as GitHub has them after. The view toggled its pill before
+/// asking; a refusal puts it back. GitHub's answer goes into the kept
+/// discussion under the same fence a review submission uses, so a read
+/// that began before the reaction cannot write the older counts over it.
+async fn set_reaction(ctx: &Ctx, item_id: &str, node_id: &str, kind: ReactionKind, add: bool) {
+    let refuse = |message: String| {
+        tracing::info!(item = item_id, node_id, %message, "reaction not taken");
+        if ctx.is_open(item_id) {
+            let _ = ctx.events.send(Event::ReactionFailed {
+                item_id: item_id.to_string(),
+                node_id: node_id.to_string(),
+                kind,
+                add,
+            });
+        }
+        ctx.notice(message);
+    };
+    let Some(github) = ctx.github() else {
+        refuse("GitHub is unavailable while Perch is offline".into());
+        return;
+    };
+    let reactions = match github.set_reaction(node_id, kind, add).await {
+        Ok(reactions) => reactions,
+        Err(error) => {
+            let verb = if add { "leave" } else { "take back" };
+            refuse(format!("GitHub could not {verb} the reaction: {error}"));
+            return;
+        }
+    };
+    let _ = ctx
+        .discussion_requests
+        .fence_with(item_id, || upsert_cached_reactions(ctx, item_id, node_id, &reactions));
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::ReactionsUpdated {
+            item_id: item_id.to_string(),
+            node_id: node_id.to_string(),
+            kind,
+            reactions,
+        });
+    }
+}
+
+/// Put the reactions GitHub answered with on the kept discussion's copy
+/// of the subject, so the next open paints them before the network does.
+fn upsert_cached_reactions(ctx: &Ctx, item_id: &str, node_id: &str, reactions: &Reactions) {
+    let cached = ctx
+        .with_cache(|cache| cache.load_discussion(item_id))
+        .and_then(Result::ok)
+        .flatten();
+    let Some((_, mut discussion)) = cached else {
+        return;
+    };
+    if !discussion.set_reactions(node_id, reactions) {
+        return;
+    }
+    if let Some(Err(error)) = ctx.with_cache(|cache| cache.store_discussion(item_id, &discussion)) {
+        tracing::warn!(item = item_id, %error, "could not cache the reaction");
+    }
+}
+
 /// Add or replace the review returned by GitHub in the durable conversation.
 /// No row is manufactured when discussion has never loaded: the Submitted
 /// event still updates the live UI, and the follow-up fetch will create the
@@ -7170,6 +7283,12 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
             .await
         {
             Ok(comments) => {
+                let mut read = issue_discussion(issue, &comments);
+                if let Err(e) = github.fill_reactions(&mut read).await {
+                    tracing::info!(item = item_id, error = %e, "could not read the reactions again");
+                }
+                let body_reactions = read.reactions;
+                let comments = read.comments;
                 keep_issue_comments(ctx, item_id, issue, &comments);
                 // A question asked next is prompted with these.
                 if let Ok(mut guard) = ctx.slot.lock() {
@@ -7182,6 +7301,7 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
                     let _ = ctx.events.send(Event::IssueComments {
                         item_id: item_id.to_string(),
                         comments: Arc::new(comments),
+                        body_reactions,
                     });
                 }
             }
@@ -7211,8 +7331,10 @@ pub(super) fn issue_discussion(
     comments: &[perch_github::IssueComment],
 ) -> perch_github::Discussion {
     perch_github::Discussion {
+        node_id: issue.node_id.clone(),
         opened_at: issue.created_at,
         body: issue.body.clone(),
+        reactions: issue.reactions.clone(),
         comments: comments.to_vec(),
         reviews: Vec::new(),
         review_comments: Vec::new(),
@@ -7703,9 +7825,18 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
         .unwrap_or_default();
     let (issue, comments, offline) = if let Some(github) = ctx.github() {
         match github.fetch_issue(&repo_full_name, number).await {
-            Ok(issue) => {
+            Ok(mut issue) => {
+                // The reactions are read onto the shape the table keeps,
+                // and the issue's own come back off it.
                 let comments = match github.fetch_issue_comments(&repo_full_name, number).await {
-                    Ok(c) => c,
+                    Ok(comments) => {
+                        let mut read = issue_discussion(&issue, &comments);
+                        if let Err(e) = github.fill_reactions(&mut read).await {
+                            tracing::warn!(repo = %repo_full_name, number, error = %e, "could not read the reactions");
+                        }
+                        issue.reactions = read.reactions;
+                        read.comments
+                    }
                     Err(e) => {
                         tracing::warn!(repo = %repo_full_name, number, error = %e, "could not fetch the comments");
                         kept.clone()
@@ -11455,6 +11586,8 @@ mod tests {
         .unwrap()
         .unwrap();
         let mut review = Review {
+            node_id: String::new(),
+            reactions: Default::default(),
             id: 9,
             user: "reviewer".into(),
             body: "first".into(),
@@ -11472,6 +11605,155 @@ mod tests {
             .with_cache(|cache| cache.load_discussion(&item.id).unwrap().unwrap().1)
             .unwrap();
         assert_eq!(discussion.reviews, vec![review]);
+    }
+
+    /// Make an item the open one, as a finished open does, so what
+    /// happens to it is told to the window.
+    fn open_in_slot(ctx: &Ctx, item: &Item) {
+        *ctx.slot.lock().unwrap() = Some(ReviewContext {
+            checkout: perch_git::Checkout {
+                worktree: "/x".into(),
+                bare: "/x".into(),
+                branch: "b".into(),
+                head_sha: "h".into(),
+                stale: None,
+                merge_base: "m".into(),
+            },
+            files: Arc::new(Vec::new()),
+            scope: perch_git::Scope::Branch,
+            since: None,
+            scope_gen: 0,
+            navigation_id: 0,
+            item_id: item.id.clone(),
+            pull_request: item.pull_request().map(|p| Arc::new(p.clone())),
+            body: None,
+            issue: None,
+            review_snapshot_id: None,
+            review_group_id: None,
+            review_request_id: None,
+        });
+    }
+
+    /// A kept discussion with one conversation comment, `IC_1`.
+    fn store_commented_discussion(ctx: &Ctx, item: &Item) {
+        let discussion = perch_github::Discussion {
+            comments: vec![perch_github::IssueComment {
+                id: 1,
+                node_id: "IC_1".into(),
+                user: "chris".into(),
+                user_avatar_url: String::new(),
+                body: "q".into(),
+                created_at: "2026-09-15T09:14:00Z".parse().unwrap(),
+                updated_at: None,
+                html_url: String::new(),
+                reactions: Default::default(),
+            }],
+            ..Default::default()
+        };
+        ctx.with_cache(|c| c.store_discussion(&item.id, &discussion))
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_reaction_github_takes_is_shown_kept_and_fences_older_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = r#"{"data":{"addReaction":{"subject":{"reactionGroups":[
+            {"content":"THUMBS_UP","viewerHasReacted":true,"reactors":{"totalCount":2}},
+            {"content":"EYES","viewerHasReacted":false,"reactors":{"totalCount":0}}]}}}}"#;
+        let (base, paths) = serve_by_path(move |path| match path {
+            "/graphql" => ("200 OK", answer.to_string()),
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_commented_discussion(&ctx, &item);
+        open_in_slot(&ctx, &item);
+        let older_read = ctx.discussion_requests.begin(&item.id);
+
+        set_reaction(&ctx, &item.id, "IC_1", ReactionKind::ThumbsUp, true).await;
+
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/graphql"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [Event::ReactionsUpdated { item_id, node_id, kind: ReactionKind::ThumbsUp, reactions }]
+                    if item_id == &item.id
+                        && node_id == "IC_1"
+                        && reactions.count(ReactionKind::ThumbsUp) == 2
+                        && reactions.viewer_reacted(ReactionKind::ThumbsUp)
+                        && reactions.groups.len() == 1
+            ),
+            "{events:?}"
+        );
+        // Kept, so the next open paints it before GitHub answers again.
+        let kept = ctx
+            .with_cache(|c| c.load_discussion(&item.id).unwrap().unwrap().1)
+            .unwrap();
+        assert_eq!(kept.comments[0].reactions.count(ReactionKind::ThumbsUp), 2);
+        // A read that began before the reaction can no longer write its
+        // older counts over it.
+        assert!(!ctx.discussion_requests.is_current(&item.id, older_read));
+    }
+
+    #[tokio::test]
+    async fn a_reaction_github_refuses_is_put_back_and_explained() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _) = serve(
+            "200 OK",
+            r#"{"data":null,"errors":[{"message":"Resource not accessible by personal access token"}]}"#,
+        );
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_commented_discussion(&ctx, &item);
+        open_in_slot(&ctx, &item);
+
+        set_reaction(&ctx, &item.id, "IC_1", ReactionKind::Heart, false).await;
+
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [Event::ReactionFailed { item_id, node_id, kind: ReactionKind::Heart, add: false }, Event::Notice(message)]
+                    if item_id == &item.id
+                        && node_id == "IC_1"
+                        && message.contains("take back")
+                        && message.contains("not accessible")
+            ),
+            "{events:?}"
+        );
+        let kept = ctx
+            .with_cache(|c| c.load_discussion(&item.id).unwrap().unwrap().1)
+            .unwrap();
+        assert!(kept.comments[0].reactions.is_empty(), "nothing was kept");
+    }
+
+    #[tokio::test]
+    async fn a_reaction_on_an_item_no_longer_open_is_kept_and_not_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _) = serve(
+            "200 OK",
+            r#"{"data":{"removeReaction":{"subject":{"reactionGroups":[]}}}}"#,
+        );
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_commented_discussion(&ctx, &item);
+        ctx.with_cache(|c| {
+            let mut kept = c.load_discussion(&item.id).unwrap().unwrap().1;
+            kept.comments[0].reactions.toggle(ReactionKind::Rocket, true);
+            c.store_discussion(&item.id, &kept)
+        })
+        .unwrap()
+        .unwrap();
+
+        set_reaction(&ctx, &item.id, "IC_1", ReactionKind::Rocket, false).await;
+
+        assert!(received.try_iter().next().is_none(), "nobody is looking");
+        let kept = ctx
+            .with_cache(|c| c.load_discussion(&item.id).unwrap().unwrap().1)
+            .unwrap();
+        assert!(kept.comments[0].reactions.is_empty());
     }
 
     fn with_reason(mut t: Thread, reason: Reason) -> Thread {
@@ -11492,6 +11774,8 @@ mod tests {
         let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
         let item = store_pull(&ctx, 7);
         let discussion = perch_github::Discussion {
+            node_id: String::new(),
+            reactions: Default::default(),
             opened_at: None,
             body: "kept locally".into(),
             comments: Vec::new(),

@@ -926,6 +926,8 @@ fn reviewers_view(
                 match verdict {
                     Some(state) => {
                         let review = perch_github::Review {
+                            node_id: String::new(),
+                            reactions: Default::default(),
                             id: 0,
                             user: String::new(),
                             body: String::new(),

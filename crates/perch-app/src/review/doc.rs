@@ -1168,6 +1168,8 @@ mod tests {
         use perch_github::{ReviewComment, Side};
         let at = "2026-09-18T09:59:00Z".parse().unwrap();
         let comment = |i: usize, body: &str| ReviewComment {
+            node_id: String::new(),
+            reactions: Default::default(),
             id: 100 + i as u64,
             pull_request_review_id: None,
             in_reply_to_id: (i > 0).then_some(100),
