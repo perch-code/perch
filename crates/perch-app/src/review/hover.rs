@@ -14,6 +14,9 @@
 //! font and the doc comment under it, cut so the tip stays a glance.
 
 use floem::prelude::*;
+use floem::style::{
+    BorderBottomLeftRadius, BorderBottomRightRadius, BorderTopLeftRadius, BorderTopRightRadius,
+};
 use floem::text::FontWeight;
 use floem::views::{Decorators, Empty, Label, Stack};
 
@@ -159,9 +162,10 @@ pub fn cut(markdown: &str, max_lines: usize) -> String {
         }
     }
 
-    // The doc comment, its lines of text counted; a blank line between
-    // paragraphs is kept but is not one of the twelve. The ellipsis goes
-    // on only when a line of text was left out.
+    // The doc comment, cut at `max_lines` of it, blank lines between
+    // paragraphs counted with the rest, since they take the same room.
+    // The ellipsis goes on only when a line of text was left out, and
+    // never after a blank line.
     let rest: Vec<&str> = lines.collect();
     let mut kept = 0usize;
     let mut blank_run = 0usize;
@@ -170,20 +174,29 @@ pub fn cut(markdown: &str, max_lines: usize) -> String {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             blank_run += 1;
-            if blank_run == 1 && kept > 0 {
-                out.push(line);
+            if blank_run > 1 || kept == 0 {
+                continue;
             }
-            continue;
-        }
-        blank_run = 0;
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
+        } else {
+            blank_run = 0;
+            if trimmed.starts_with("```") {
+                in_fence = !in_fence;
+            }
         }
         out.push(line);
         kept += 1;
         if kept >= max_lines && rest[i + 1..].iter().any(|l| !l.trim().is_empty()) {
             if in_fence {
-                out.push("```");
+                // A fence with nothing in it yet is dropped rather than
+                // closed empty.
+                if out.last().is_some_and(|l| l.trim().starts_with("```")) {
+                    out.pop();
+                } else {
+                    out.push("```");
+                }
+            }
+            while out.last().is_some_and(|l| l.trim().is_empty()) {
+                out.pop();
             }
             out.push("\u{2026}");
             break;
@@ -218,8 +231,9 @@ pub fn card(markdown: &str, fit: Fit) -> impl IntoView {
         .collect();
     let doc = doc.to_vec();
 
+    let alone = doc.is_empty();
     Stack::vertical((
-        signature_view(signature),
+        signature_view(signature, alone),
         if doc.is_empty() {
             Empty::new().into_any()
         } else {
@@ -250,8 +264,10 @@ pub fn card(markdown: &str, fit: Fit) -> impl IntoView {
 
 /// The signature area: the symbol's path, muted and small, over its
 /// signature in the code font. Whatever rust-analyzer put in the leading
-/// fenced blocks, in order; a lone block is the signature.
-fn signature_view(blocks: Vec<String>) -> impl IntoView {
+/// fenced blocks, in order; a lone block is the signature. Its corners
+/// follow the card's at the top, and at the bottom only when nothing
+/// follows it; over the doc comment's rule they are square.
+fn signature_view(blocks: Vec<String>, alone: bool) -> impl IntoView {
     let count = blocks.len();
     let children: Vec<_> = blocks
         .into_iter()
@@ -279,13 +295,18 @@ fn signature_view(blocks: Vec<String>) -> impl IntoView {
                 .into_any()
         })
         .collect();
-    Stack::vertical_from_iter(children).style(|s| {
+    Stack::vertical_from_iter(children).style(move |s| {
+        // Inside the card's border, so a point less than its radius.
+        let radius = theme::RADIUS_LG - 1.0;
         s.flex_col()
             .width_full()
             .padding_horiz(12.0)
             .padding_vert(9.0)
             .background(theme::CANVAS_SUBTLE)
-            .border_radius(theme::RADIUS_LG)
+            .set(BorderTopLeftRadius, radius)
+            .set(BorderTopRightRadius, radius)
+            .set(BorderBottomLeftRadius, if alone { radius } else { 0.0 })
+            .set(BorderBottomRightRadius, if alone { radius } else { 0.0 })
     })
 }
 
@@ -392,14 +413,17 @@ mod tests {
         // Room for it all, or exactly enough: nothing is cut, and there is
         // no ellipsis.
         assert!(!cut(HOVER, 20).contains('\u{2026}'));
-        assert!(!cut(HOVER, 2).contains('\u{2026}'));
+        assert!(!cut(HOVER, 3).contains('\u{2026}'));
     }
 
     #[test]
     fn a_cut_inside_a_fence_closes_the_fence_first() {
         let text = "```rust\nfn x()\n```\n\nDocs.\n\n```rust\nlet a = 1;\nlet b = 2;\nlet c = 3;\n```\n";
-        let short = cut(text, 3);
+        let short = cut(text, 4);
         assert!(short.ends_with("let a = 1;\n```\n\u{2026}"), "{short}");
+        // A cut on the fence's opening line drops the fence rather than
+        // closing an empty one.
+        assert!(cut(text, 3).ends_with("Docs.\n\u{2026}"), "{}", cut(text, 3));
         let blocks = markdown::parse(&short);
         assert!(
             matches!(blocks.last(), Some(Block::Paragraph(_))),
@@ -408,11 +432,23 @@ mod tests {
     }
 
     #[test]
-    fn blank_runs_in_the_doc_comment_are_collapsed_and_not_counted() {
+    fn blank_runs_in_the_doc_comment_are_collapsed_and_count_once() {
         let text = "```rust\nfn x()\n```\n\na\n\n\n\nb\n";
         assert_eq!(cut(text, 20), "```rust\nfn x()\n```\n\na\n\nb");
-        assert_eq!(cut(text, 2), "```rust\nfn x()\n```\n\na\n\nb", "two lines of text fit");
+        assert_eq!(cut(text, 3), "```rust\nfn x()\n```\n\na\n\nb", "a, the blank, and b fit");
+        // Cut after the blank: the ellipsis follows `a`, not the blank.
+        assert_eq!(cut(text, 2), "```rust\nfn x()\n```\n\na\n\u{2026}");
         assert_eq!(cut(text, 1), "```rust\nfn x()\n```\n\na\n\u{2026}");
+    }
+
+    #[test]
+    fn the_doc_comment_is_at_most_the_cap_tall_whatever_its_blanks() {
+        let paragraphs = (1..=20).map(|i| format!("Paragraph {i}.")).collect::<Vec<_>>().join("\n\n");
+        let text = format!("```rust\nfn x()\n```\n\n{paragraphs}\n");
+        let short = cut(&text, DOC_LINES);
+        let doc_lines = short.lines().skip(4).count();
+        assert!(doc_lines <= DOC_LINES + 1, "{doc_lines} lines, the ellipsis among them");
+        assert!(short.ends_with('\u{2026}'));
     }
 
     #[test]
