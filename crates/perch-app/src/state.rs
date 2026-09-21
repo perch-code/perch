@@ -2005,6 +2005,7 @@ mod tests {
                 full_name: "org/repo".into(),
                 owner_avatar_url: String::new(),
             },
+            subject_snapshot: None,
         }
     }
 

@@ -562,7 +562,10 @@ pub fn resize_cursor_sheet(state: AppState) -> impl IntoView {
 mod tests {
     use super::*;
     use floem::headless::{HeadlessHarness, TestRoot};
-    use perch_github::{Issue, ItemSubject, Reason, Repository, Subject, SubjectKind, Thread};
+    use perch_github::{
+        Issue, ItemSubject, Reason, Repository, Subject, SubjectKind, SubjectSnapshot, SubjectState,
+        Thread,
+    };
 
     fn issue(id: &str, repo: &str, author: &str) -> Item {
         let now = "2026-09-19T12:00:00Z".parse().unwrap();
@@ -650,6 +653,7 @@ mod tests {
                 latest_comment_url: None,
             },
             repository: Repository { full_name: repo.into(), owner_avatar_url: String::new() },
+            subject_snapshot: None,
         }
     }
 
@@ -666,9 +670,17 @@ mod tests {
             issue("elsewhere", "org/two", "me"),
             pull_request("pr", "org/one", "me"),
         ]);
+        // The pull request has been looked at: someone opened it.
+        let mut looked = notification("11", "org/one", "Unread pull request", SubjectKind::PullRequest, true);
+        looked.subject_snapshot = Some(SubjectSnapshot {
+            author_login: "someone".into(),
+            author_avatar_url: String::new(),
+            state: SubjectState::PrMerged,
+            at: looked.updated_at,
+        });
         state.notifications.set(vec![
             notification("12", "org/one", "Read discussion", SubjectKind::Discussion, false),
-            notification("11", "org/one", "Unread pull request", SubjectKind::PullRequest, true),
+            looked,
             notification("10", "org/two", "Other repository", SubjectKind::Issue, true),
         ]);
         state.item_filters.update(|f| f.repository = Some("org/one".into()));
@@ -847,6 +859,21 @@ mod tests {
         assert_eq!(find(thread, "row figures").unwrap().get_visual_rect_no_clip().x1, age.x1);
         assert!(find(thread, "#11").is_some(), "the number where the branch goes");
         assert!(find(thread, "mention").is_some(), "the reason where the churn goes");
+    }
+
+    #[test]
+    fn a_notifications_face_is_whoever_opened_it_and_the_repositorys_until_known() {
+        let (mut harness, _) = harness();
+        click_scope(&mut harness, ItemScope::Notifications);
+
+        // No picture has arrived, so each face is its seed's initial.
+        let looked = find(harness.root_id(), "notification row:11").unwrap();
+        let avatar = find(looked, "row avatar").unwrap();
+        assert!(find(avatar, "S").is_some(), "someone's, who opened the pull request");
+
+        let unlooked = find(harness.root_id(), "notification row:12").unwrap();
+        let avatar = find(unlooked, "row avatar").unwrap();
+        assert!(find(avatar, "O").is_some(), "org's, which nobody opened");
     }
 
     /// The whole window, so the drawer sits where it does in the app: at

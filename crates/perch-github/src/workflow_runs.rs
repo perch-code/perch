@@ -32,7 +32,7 @@ impl WorkflowRunQuery {
     /// `, Attempt #2` after `run` when it was re-run. A title in any other
     /// shape names nothing we can look up.
     pub fn from_thread(thread: &Thread) -> Option<Self> {
-        let (workflow, branch) = parse_title(&thread.subject.title)?;
+        let (workflow, _, branch) = parse_title(&thread.subject.title)?;
         Some(Self {
             repo_full_name: thread.repository.full_name.clone(),
             workflow,
@@ -42,22 +42,37 @@ impl WorkflowRunQuery {
     }
 }
 
-/// `("Hourly DST", "main")` from `Hourly DST workflow run failed for main
-/// branch`.
-fn parse_title(title: &str) -> Option<(String, String)> {
+/// The verdict a `CheckSuite` notification's title announces: the
+/// `failed`, `succeeded` or `cancelled` GitHub writes before `for <branch>
+/// branch`. `None` for a title in any other shape, or with a word there
+/// this does not know.
+pub fn announced_verdict(title: &str) -> Option<CheckRunState> {
+    let (_, verdict, _) = parse_title(title)?;
+    match verdict.as_str() {
+        "failed" => Some(CheckRunState::Failure),
+        "succeeded" => Some(CheckRunState::Success),
+        "cancelled" => Some(CheckRunState::Cancelled),
+        _ => None,
+    }
+}
+
+/// `("Hourly DST", "failed", "main")` from `Hourly DST workflow run failed
+/// for main branch`.
+fn parse_title(title: &str) -> Option<(String, String, String)> {
     let (workflow, rest) = title.split_once(" workflow run")?;
     // `run` may be followed by ` failed` or by `, Attempt #2 failed`.
     if !rest.starts_with(' ') && !rest.starts_with(',') {
         return None;
     }
     let rest = rest.strip_suffix(" branch").unwrap_or(rest);
-    let (_, branch) = rest.rsplit_once(" for ")?;
+    let (verdict, branch) = rest.rsplit_once(" for ")?;
     let workflow = workflow.trim();
+    let verdict = verdict.rsplit(' ').next().unwrap_or_default().trim();
     let branch = branch.trim();
     if workflow.is_empty() || branch.is_empty() {
         return None;
     }
-    Some((workflow.to_string(), branch.to_string()))
+    Some((workflow.to_string(), verdict.to_string(), branch.to_string()))
 }
 
 /// The checks pill: the worst of one commit's runs.
@@ -312,24 +327,54 @@ mod tests {
     }
 
     #[test]
-    fn titles_name_the_workflow_and_the_branch() {
+    fn titles_name_the_workflow_the_verdict_and_the_branch() {
         assert_eq!(
             parse_title("Hourly DST workflow run failed for main branch"),
-            Some(("Hourly DST".into(), "main".into()))
+            Some(("Hourly DST".into(), "failed".into(), "main".into()))
         );
         assert_eq!(
             parse_title("PR Checks workflow run succeeded for feature/foo-bar branch"),
-            Some(("PR Checks".into(), "feature/foo-bar".into()))
+            Some(("PR Checks".into(), "succeeded".into(), "feature/foo-bar".into()))
         );
         assert_eq!(
             parse_title("CI workflow run, Attempt #2 failed for main branch"),
-            Some(("CI".into(), "main".into()))
+            Some(("CI".into(), "failed".into(), "main".into()))
         );
         // A workflow with " for " in its name is read from the right.
         assert_eq!(
             parse_title("Build for release workflow run failed for main branch"),
-            Some(("Build for release".into(), "main".into()))
+            Some(("Build for release".into(), "failed".into(), "main".into()))
         );
+    }
+
+    #[test]
+    fn the_verdict_is_the_word_github_wrote_and_nothing_is_guessed() {
+        assert_eq!(
+            announced_verdict("CI workflow run failed for main branch"),
+            Some(CheckRunState::Failure)
+        );
+        assert_eq!(
+            announced_verdict("CI workflow run, Attempt #2 failed for main branch"),
+            Some(CheckRunState::Failure)
+        );
+        assert_eq!(
+            announced_verdict("CI workflow run succeeded for main branch"),
+            Some(CheckRunState::Success)
+        );
+        assert_eq!(
+            announced_verdict("CI workflow run cancelled for main branch"),
+            Some(CheckRunState::Cancelled)
+        );
+        // "failed" in the workflow's own name says nothing of this run.
+        assert_eq!(
+            announced_verdict("Retry failed jobs workflow run succeeded for main branch"),
+            Some(CheckRunState::Success)
+        );
+        assert_eq!(
+            announced_verdict("CI workflow run timed out for main branch"),
+            None
+        );
+        assert_eq!(announced_verdict("Non-repeatable reads within DbSnapshot"), None);
     }
 
     #[test]

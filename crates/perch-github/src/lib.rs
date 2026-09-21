@@ -13,6 +13,7 @@ pub mod items;
 pub mod model;
 pub mod pulls;
 pub mod reviews;
+mod subjects;
 pub mod workflow_runs;
 
 pub use auth::{resolve_token, Token, TokenSource};
@@ -36,7 +37,7 @@ pub use discussion::{
 pub use items::{
     Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind,
 };
-pub use model::{Reason, Repository, Subject, SubjectKind, SubjectState, Thread};
+pub use model::{Reason, Repository, Subject, SubjectKind, SubjectSnapshot, SubjectState, Thread};
 pub use pulls::{
     CheckStatus, MergeMethod, MergeMethods, MergeResult, MergeState, MergeableState, PullRequest,
     PullRequestOverview, RepositoryPermission, ReviewDecision, Reviewer,
@@ -52,6 +53,6 @@ pub use reviews::{
     StoredReviewerOutput, MAX_REVIEW_VERIFICATION_FINDINGS,
 };
 pub use workflow_runs::{
-    worst, Check, CheckKind, CheckRunState, CheckState, Checks, WorkflowRunPayload,
-    WorkflowRunQuery,
+    announced_verdict, worst, Check, CheckKind, CheckRunState, CheckState, Checks,
+    WorkflowRunPayload, WorkflowRunQuery,
 };

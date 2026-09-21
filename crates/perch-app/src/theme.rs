@@ -41,6 +41,9 @@ pub const FG_SUBTLE: Color = Color::from_rgb8(0x98, 0x98, 0x92);
 
 /// Accents.
 pub const ACCENT: Color = Color::from_rgb8(0x32, 0x32, 0x2f);
+/// The dot on an unread notification: the blue GitHub's own inbox marks
+/// one with, so it reads as the same mark here.
+pub const UNREAD: Color = Color::from_rgb8(0x09, 0x69, 0xda);
 pub const ACCENT_SUBTLE: Color = Color::from_rgb8(0xe9, 0xe9, 0xe6);
 pub const ACCENT_RING: Color = Color::from_rgba8(0x32, 0x32, 0x2f, 0x4d);
 pub const ACTION_HOVER: Color = Color::from_rgb8(0x43, 0x43, 0x3f);

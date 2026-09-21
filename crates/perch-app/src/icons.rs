@@ -250,6 +250,12 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M8 4.8 V8.4" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
                <circle cx="8" cy="10.9" r="0.95" fill="{c}"/>"#
         ),
+        // A circle with a slash through it: a run that was called off, as
+        // GitHub draws a skipped check.
+        SidebarIcon::Skip => format!(
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>
+               <path d="M3.9 12.1 L12.1 3.9" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>"#
+        ),
         // Two links of a chain, on the diagonal: a permalink.
         SidebarIcon::Link => format!(
             r#"<path d="M6.3 5.5 L8.4 3.4 a3 3 0 0 1 4.2 4.2 L10.5 9.7" fill="none" stroke="{c}"
@@ -420,13 +426,16 @@ pub enum SidebarIcon {
     Important,
     /// An octagon with a mark in it: a caution alert.
     Caution,
+    /// A circle with a slash through it: a run that was cancelled.
+    Skip,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 43] = [
+    pub const ALL: [SidebarIcon; 44] = [
+        SidebarIcon::Skip,
         SidebarIcon::Person,
         SidebarIcon::Tag,
         SidebarIcon::PullRequest,

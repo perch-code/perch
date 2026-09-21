@@ -6,6 +6,7 @@ use floem::prelude::*;
 use floem::style::Style;
 use floem::text::FontWeight;
 use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
+use perch_github::SubjectState;
 
 use crate::icons::{self, SidebarIcon};
 use crate::state::{AppState, Checked};
@@ -211,6 +212,12 @@ pub fn icon_in(source: impl Fn() -> String + 'static, color: impl Fn() -> Color 
 
 pub fn sidebar_glyph(name: SidebarIcon, color: Color) -> impl IntoView {
     icon_in(move || icons::sidebar_icon(name, color), move || color)
+}
+
+/// The pull request or issue state glyph GitHub draws, in `color`: the
+/// state's own colour on a live row, or a grey on an archived one.
+pub fn state_glyph(state: SubjectState, color: Color) -> impl IntoView {
+    icon_in(move || icons::state_icon(state), move || color)
 }
 
 /// A checkbox.

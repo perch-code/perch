@@ -3086,6 +3086,7 @@ mod tests {
                 full_name: "acme/widgets".into(),
                 owner_avatar_url: "https://avatars/1".into(),
             },
+            subject_snapshot: None,
         }
     }
 

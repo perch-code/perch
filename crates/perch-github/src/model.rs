@@ -24,6 +24,11 @@ pub struct Thread {
     pub last_read_at: Option<Timestamp>,
     pub subject: Subject,
     pub repository: Repository,
+    /// What a look at the pull request or the issue found, once one has
+    /// been taken: who opened it, and the state it is in. `None` until
+    /// then, and for every other kind of subject.
+    #[serde(default)]
+    pub subject_snapshot: Option<SubjectSnapshot>,
 }
 
 impl Thread {
@@ -33,6 +38,39 @@ impl Thread {
         let url = self.subject.url.as_deref()?;
         url.rsplit('/').next()?.parse().ok()
     }
+
+    /// Whether the subject wants looking at: a pull request or an issue
+    /// with a number, whose snapshot is missing or was taken before the
+    /// thread's latest activity.
+    pub fn wants_snapshot(&self) -> bool {
+        matches!(
+            self.subject.kind,
+            SubjectKind::PullRequest | SubjectKind::Issue
+        ) && self.number_hint().is_some()
+            && self
+                .subject_snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.at < self.updated_at)
+    }
+}
+
+/// What one look at a notification's pull request or issue found: who
+/// opened it, and the state it was in.
+///
+/// The notifications API says the subject's title and kind and nothing
+/// else. This is asked for after the thread arrives, and kept on the
+/// thread so its row has a face and a state before the next look.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SubjectSnapshot {
+    /// Empty when the account that opened it is gone.
+    pub author_login: String,
+    pub author_avatar_url: String,
+    pub state: SubjectState,
+    /// The thread's `updated_at` when the look was taken. Activity since
+    /// can have changed the state, so a thread newer than this is looked
+    /// at again.
+    #[serde(with = "ts")]
+    pub at: Timestamp,
 }
 
 /// Why GitHub sent this notification.
@@ -313,6 +351,52 @@ mod tests {
     }
 
     #[test]
+    fn a_subject_wants_a_look_until_one_is_taken_after_its_latest_activity() {
+        let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/issues/9"));
+        assert!(t.wants_snapshot());
+
+        // A look taken for this revision of the thread settles it.
+        t.subject_snapshot = Some(SubjectSnapshot {
+            author_login: "someone".into(),
+            author_avatar_url: "https://avatars/2".into(),
+            state: SubjectState::IssueOpen,
+            at: t.updated_at,
+        });
+        assert!(!t.wants_snapshot());
+
+        // Activity since the look may have closed it.
+        t.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        assert!(t.wants_snapshot());
+
+        // Only a pull request or an issue has anyone who opened it.
+        t.subject.kind = SubjectKind::CheckSuite;
+        assert!(!t.wants_snapshot());
+        t.subject.kind = SubjectKind::PullRequest;
+        t.subject.url = None;
+        assert!(!t.wants_snapshot());
+    }
+
+    #[test]
+    fn a_snapshot_round_trips_through_the_cache_and_is_absent_from_the_wire() {
+        let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/pulls/9"));
+        t.subject_snapshot = Some(SubjectSnapshot {
+            author_login: "someone".into(),
+            author_avatar_url: "https://avatars/2".into(),
+            state: SubjectState::PrMerged,
+            at: t.updated_at,
+        });
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Thread = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
+
+        // GitHub's payload has no such field, and is not refused for it.
+        let mut from_wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        from_wire.as_object_mut().unwrap().remove("subject_snapshot");
+        let bare: Thread = serde_json::from_value(from_wire).unwrap();
+        assert_eq!(bare.subject_snapshot, None);
+    }
+
+    #[test]
     fn a_workflow_run_notification_names_the_run_to_look_up() {
         let mut t = thread_with_url(None);
         t.subject.kind = SubjectKind::CheckSuite;
@@ -426,6 +510,7 @@ mod tests {
                 full_name: "a/b".into(),
                 owner_avatar_url: String::new(),
             },
+            subject_snapshot: None,
         }
     }
 }

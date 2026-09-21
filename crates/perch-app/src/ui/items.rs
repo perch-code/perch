@@ -28,7 +28,7 @@ use crate::theme;
 use crate::ui::nav_row;
 use crate::ui::widgets::{
     copy_to_clipboard, icon_button, open_in_browser, open_in_terminal, reveal_in_finder, sidebar_glyph,
-    text_button,
+    state_glyph, text_button,
 };
 
 /// Opening an item. Shared by every row.
@@ -134,12 +134,10 @@ fn glyph(item: &Item) -> impl IntoView {
     let state = state_of(item);
     let muted = item.is_archived();
     match state {
-        Some(state) => floem::views::svg(move || icons::state_icon(state))
-            .style(move |s| {
-                s.size(16.0, 16.0)
-                    .color(if muted { theme::NAV_SUBTLE } else { icons::state_color(state) })
-            })
-            .into_any(),
+        Some(state) => {
+            state_glyph(state, if muted { theme::NAV_SUBTLE } else { icons::state_color(state) })
+                .into_any()
+        }
         None => sidebar_glyph(SidebarIcon::Branch, if muted { theme::NAV_SUBTLE } else { theme::NAV_MUTED })
             .into_any(),
     }

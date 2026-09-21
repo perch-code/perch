@@ -20,11 +20,12 @@ use crate::discussion::{
     ReviewComment, ReviewCommentPayload, ReviewPayload,
 };
 use crate::items::{Issue, IssuePayload};
-use crate::model::Thread;
+use crate::model::{SubjectSnapshot, Thread};
 use crate::pulls::{
     MergeMethod, MergeRequest, MergeResult, PullPayload, PullRequest, PullRequestOverview,
     PullRequestOverviewAccumulator, PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
 };
+use crate::subjects::{SubjectLook, SubjectLookData};
 use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunsPayload};
 
 /// Page size for the notifications list. GitHub caps `per_page` at 50 here.
@@ -534,6 +535,37 @@ impl GitHub {
         Ok(comments.into_iter().map(IssueComment::from).collect())
     }
 
+    /// Who opened each thread's pull request or issue, and the state it is
+    /// in, asked for in one GraphQL query and answered by thread id.
+    ///
+    /// Threads of any other kind, and those without a number, are passed
+    /// over, as is a subject GitHub cannot resolve: one that was deleted,
+    /// or whose repository the token cannot see. GitHub reports those as
+    /// errors beside the rest of the answer, which is still read. The
+    /// caller picks the batch: fifty or so is one query GitHub answers at
+    /// once.
+    pub async fn look_at_subjects(
+        &self,
+        threads: &[Thread],
+    ) -> Result<Vec<(String, SubjectSnapshot)>, Error> {
+        let Some(look) = SubjectLook::new(threads) else {
+            return Ok(Vec::new());
+        };
+        let payload = serde_json::json!({ "query": look.query() });
+        let (data, problems) = self.graphql_partial::<SubjectLookData>(&payload).await?;
+        let Some(data) = data else {
+            return Err(if problems.is_empty() {
+                Error::Decode("GitHub's GraphQL response had no data".into())
+            } else {
+                Error::Graphql(problems.join("; "))
+            });
+        };
+        for problem in problems {
+            tracing::debug!(problem, "a notification's subject could not be looked at");
+        }
+        Ok(look.read(data))
+    }
+
     /// The pull request whose head is `owner:branch` on `repo_full_name`,
     /// open or closed, with a conditional request: an unchanged answer
     /// costs a 304 and returns `Unchanged`.
@@ -643,11 +675,27 @@ impl GitHub {
     }
 
     /// One GraphQL request with the same shared rate gate and HTTP error
-    /// classification as the REST client.
+    /// classification as the REST client. An answer with errors in it is
+    /// an error, whatever data came beside them.
     async fn graphql<T: serde::de::DeserializeOwned>(
         &self,
         payload: &serde_json::Value,
     ) -> Result<T, Error> {
+        let (data, problems) = self.graphql_partial(payload).await?;
+        if !problems.is_empty() {
+            return Err(Error::Graphql(problems.join("; ")));
+        }
+        data.ok_or_else(|| Error::Decode("GitHub's GraphQL response had no data".into()))
+    }
+
+    /// One GraphQL request whose answer may be partial: the data that
+    /// came, and the errors GitHub reported beside it, for a query whose
+    /// parts can fail one at a time. Rate limits and HTTP failures are
+    /// errors as everywhere.
+    async fn graphql_partial<T: serde::de::DeserializeOwned>(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<(Option<T>, Vec<String>), Error> {
         let _request_guard = self.api_request_lock.lock().await;
         self.check_rate_limit()?;
         let response = self
@@ -658,19 +706,14 @@ impl GitHub {
         let body = self.finish_response(response, &[StatusCode::OK]).await?;
         let envelope: GraphqlEnvelope<T> =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
-        if !envelope.errors.is_empty() {
-            return Err(Error::Graphql(
-                envelope
-                    .errors
-                    .into_iter()
-                    .map(|error| error.message)
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            ));
-        }
-        envelope
-            .data
-            .ok_or_else(|| Error::Decode("GitHub's GraphQL response had no data".into()))
+        Ok((
+            envelope.data,
+            envelope
+                .errors
+                .into_iter()
+                .map(|error| error.message)
+                .collect(),
+        ))
     }
 
     /// Classify a mutation response with the same error behavior as GETs.

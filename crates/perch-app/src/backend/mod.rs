@@ -2304,12 +2304,14 @@ async fn run(
         avatars,
         seen_notifications: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        notifications: Arc::new(std::sync::Mutex::new(initial_notifications)),
+        notifications: Arc::new(std::sync::Mutex::new(initial_notifications.clone())),
+        asked_subjects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     };
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
     // The faces on the cached rows, from disk where they are there.
     ctx.want_avatars(author_avatars(&initial_items));
+    ctx.want_avatars(notification_avatars(&initial_notifications));
 
     // Who the reader is on GitHub, for their own byline: once per launch,
     // kept in meta so the next launch has it before the network does.
@@ -3419,6 +3421,10 @@ struct Ctx {
     /// from durable items and remains usable when the SQLite cache cannot
     /// be opened.
     notifications: Arc<std::sync::Mutex<Vec<Thread>>>,
+    /// Notifications whose subject GitHub has been asked about, by id and
+    /// time, so one it could not resolve is not asked about again at
+    /// every poll until the thread moves on.
+    asked_subjects: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
 }
 
 /// The GitHub client and the token it was built on.
@@ -3715,21 +3721,38 @@ impl Ctx {
         // A local mark-unread reminder belongs to this exact notification
         // revision. Carry it across a full GitHub snapshot, but let newer
         // activity (a changed updated_at) replace it with GitHub's state.
-        let local_unread = self
+        // What a look found of the subject is carried whatever the
+        // revision: the face is the same, and a state gone stale is looked
+        // at again, which the snapshot's own timestamp says.
+        let (local_unread, snapshots) = self
             .notifications
             .lock()
             .map(|current| {
-                current
-                    .iter()
-                    .filter(|thread| thread.local_unread)
-                    .map(|thread| (thread.id.clone(), thread.updated_at))
-                    .collect::<std::collections::HashSet<_>>()
+                (
+                    current
+                        .iter()
+                        .filter(|thread| thread.local_unread)
+                        .map(|thread| (thread.id.clone(), thread.updated_at))
+                        .collect::<std::collections::HashSet<_>>(),
+                    current
+                        .iter()
+                        .filter_map(|thread| {
+                            thread
+                                .subject_snapshot
+                                .clone()
+                                .map(|snapshot| (thread.id.clone(), snapshot))
+                        })
+                        .collect::<std::collections::HashMap<_, _>>(),
+                )
             })
             .unwrap_or_default();
         for thread in &mut threads {
             if !thread.unread && local_unread.contains(&(thread.id.clone(), thread.updated_at)) {
                 thread.unread = true;
                 thread.local_unread = true;
+            }
+            if thread.subject_snapshot.is_none() {
+                thread.subject_snapshot = snapshots.get(&thread.id).cloned();
             }
         }
         if let Some(result) = self.with_cache(|c| c.store_threads(&threads, last_modified)) {
@@ -3745,14 +3768,13 @@ impl Ctx {
         if let Ok(mut seen) = self.seen_notifications.lock() {
             seen.retain(|key| current_keys.contains(key));
         }
+        if let Ok(mut asked) = self.asked_subjects.lock() {
+            asked.retain(|key| current_keys.contains(key));
+        }
         if let Ok(mut current) = self.notifications.lock() {
             *current = threads.clone();
         }
-        self.want_avatars(
-            threads
-                .iter()
-                .map(|t| t.repository.owner_avatar_url.clone()),
-        );
+        self.want_avatars(notification_avatars(&threads));
         let _ = self.events.send(Event::Notifications(threads.clone()));
         threads
     }
@@ -3909,6 +3931,20 @@ fn author_avatars(items: &[Item]) -> impl Iterator<Item = String> + '_ {
         Some(ItemSubject::PullRequest(pr)) => Some(pr.author_avatar_url.clone()),
         Some(ItemSubject::Issue(issue)) => Some(issue.author_avatar_url.clone()),
         None => None,
+    })
+}
+
+/// The faces the notification rows carry: whoever opened the subject
+/// where a look has found them, and the repository's, which stands in
+/// until then and on a subject nobody opened.
+fn notification_avatars(threads: &[Thread]) -> impl Iterator<Item = String> + '_ {
+    threads.iter().flat_map(|thread| {
+        thread
+            .subject_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.author_avatar_url.clone())
+            .into_iter()
+            .chain(std::iter::once(thread.repository.owner_avatar_url.clone()))
     })
 }
 
@@ -6786,6 +6822,13 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
                     ctx.replace_notifications(result.threads, result.last_modified.as_deref());
                 attend(ctx, &visible).await;
             }
+            // Off the poll, which the command loop waits on: the rows
+            // without a face or a state yet, unchanged inbox or not, since
+            // the cached rows may predate the look.
+            {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { look_at_subjects(&ctx).await });
+            }
 
             let _ = events.send(Event::Status(Status::Idle {
                 at: Timestamp::now(),
@@ -6862,6 +6905,70 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
                 tokio::spawn(async move { refresh_open_item(&ctx, &item_id).await });
             }
         }
+    }
+}
+
+/// How many subjects one look asks GitHub about: a query it answers at
+/// once, and a wave of faces on a big inbox rather than one long wait.
+const SUBJECTS_PER_LOOK: usize = 50;
+
+/// Ask GitHub who opened each pull request and issue in the inbox and the
+/// state it is in, for the rows whose snapshot is missing or older than
+/// the thread, and keep the answers on the threads, a batch at a time.
+///
+/// Each thread revision is asked about once: a subject GitHub cannot
+/// resolve is not asked about again until the thread moves on. A failed
+/// batch is left for the next poll.
+async fn look_at_subjects(ctx: &Ctx) {
+    let Some(github) = ctx.github() else {
+        return;
+    };
+    let wanting: Vec<Thread> = {
+        let asked = ctx
+            .asked_subjects
+            .lock()
+            .map(|asked| asked.clone())
+            .unwrap_or_default();
+        ctx.notifications
+            .lock()
+            .map(|threads| {
+                threads
+                    .iter()
+                    .filter(|thread| {
+                        thread.wants_snapshot()
+                            && !asked.contains(&(thread.id.clone(), thread.updated_at))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for batch in wanting.chunks(SUBJECTS_PER_LOOK) {
+        let found = match github.look_at_subjects(batch).await {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::info!(error = %e, "could not look at the notifications' subjects");
+                return;
+            }
+        };
+        if let Ok(mut asked) = ctx.asked_subjects.lock() {
+            asked.extend(batch.iter().map(|thread| (thread.id.clone(), thread.updated_at)));
+        }
+        if found.is_empty() {
+            continue;
+        }
+        ctx.want_avatars(
+            found
+                .iter()
+                .map(|(_, snapshot)| snapshot.author_avatar_url.clone()),
+        );
+        ctx.edit_notifications(|threads| {
+            for (id, snapshot) in found {
+                if let Some(thread) = threads.iter_mut().find(|thread| thread.id == id) {
+                    thread.subject_snapshot = Some(snapshot);
+                }
+            }
+        });
     }
 }
 
@@ -10392,6 +10499,7 @@ mod tests {
                 full_name: "a/b".into(),
                 owner_avatar_url: String::new(),
             },
+            subject_snapshot: None,
         }
     }
 
@@ -10538,6 +10646,7 @@ mod tests {
             seen_notifications: Default::default(),
             refreshing: Default::default(),
             notifications: Default::default(),
+            asked_subjects: Default::default(),
         };
         (ctx, received)
     }
@@ -11350,6 +11459,103 @@ mod tests {
 
         refresh(&ctx, NotificationPollMode::Reconcile).await;
         assert_eq!(*ctx.notifications.lock().unwrap(), vec![incoming]);
+    }
+
+    #[tokio::test]
+    async fn a_look_gives_the_rows_their_faces_and_states_once_per_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        // Thread 8 is a subject GitHub no longer has: null, with an error
+        // beside the rest of the answer.
+        let answer = r#"{
+          "data": { "r0": {
+            "n7": {
+              "__typename": "PullRequest",
+              "author": { "login": "someone", "avatar_url": "" },
+              "pull_state": "MERGED",
+              "is_draft": false
+            },
+            "n8": null
+          } },
+          "errors": [{ "message": "Could not resolve to an issue or pull request with the number of 8." }]
+        }"#;
+        let (base, paths) = serve_by_path(move |path| match path {
+            "/graphql" => ("200 OK", answer.to_string()),
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        ctx.replace_notifications(
+            vec![thread("7", "seven"), thread("8", "eight")],
+            Some("first"),
+        );
+
+        look_at_subjects(&ctx).await;
+
+        let threads = ctx.notifications.lock().unwrap().clone();
+        assert_eq!(
+            threads[0].subject_snapshot,
+            Some(perch_github::SubjectSnapshot {
+                author_login: "someone".into(),
+                author_avatar_url: String::new(),
+                state: perch_github::SubjectState::PrMerged,
+                at: threads[0].updated_at,
+            })
+        );
+        assert_eq!(threads[1].subject_snapshot, None);
+        // Kept, so the next launch paints the face before the network
+        // answers, and told to the sidebar.
+        assert_eq!(
+            ctx.with_cache(|c| c.load_threads().unwrap()).unwrap(),
+            threads
+        );
+        let told = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Notifications(threads) => Some(threads),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        assert_eq!(told, threads);
+
+        // Nothing left to ask: 7 has its snapshot, and 8 was asked about.
+        look_at_subjects(&ctx).await;
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/graphql"]);
+
+        // Activity on 7 keeps its face across the poll and asks again,
+        // since the state may have moved with it.
+        let mut newer = thread("7", "seven");
+        newer.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        ctx.replace_notifications(vec![newer], Some("second"));
+        let carried = ctx.notifications.lock().unwrap()[0].clone();
+        assert_eq!(
+            carried.subject_snapshot.as_ref().map(|s| s.author_login.as_str()),
+            Some("someone")
+        );
+        assert!(carried.wants_snapshot());
+        look_at_subjects(&ctx).await;
+        assert_eq!(paths.lock().unwrap().len(), 2);
+        assert_eq!(
+            ctx.notifications.lock().unwrap()[0]
+                .subject_snapshot
+                .as_ref()
+                .map(|s| s.at),
+            Some(carried.updated_at)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_look_that_fails_leaves_the_rows_for_the_next_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("403 Forbidden", r#"{"message":"Forbidden"}"#);
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        ctx.replace_notifications(vec![thread("7", "seven")], Some("first"));
+
+        look_at_subjects(&ctx).await;
+        assert_eq!(ctx.notifications.lock().unwrap()[0].subject_snapshot, None);
+
+        // Not written down as asked: the next look tries again.
+        look_at_subjects(&ctx).await;
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/graphql", "/graphql"]);
     }
 
     /// A GitHub that refuses every token but `accepted`, and answers the

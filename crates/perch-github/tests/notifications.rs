@@ -356,3 +356,73 @@ async fn a_non_numeric_thread_id_is_rejected_before_a_request() {
         Err(Error::Decode(message)) if message.contains("not numeric")
     ));
 }
+
+#[tokio::test]
+async fn a_look_at_the_subjects_is_one_graphql_query_read_past_what_github_could_not_resolve() {
+    // Thread 2 is a subject GitHub no longer has: it answers null with an
+    // error beside the rest, which is still read.
+    let answer = r#"{
+      "data": {
+        "r0": {
+          "n1": {
+            "__typename": "PullRequest",
+            "author": { "login": "someone", "avatar_url": "https://avatars/2" },
+            "pull_state": "OPEN",
+            "is_draft": false
+          },
+          "n2": null
+        }
+      },
+      "errors": [{ "type": "NOT_FOUND", "message": "Could not resolve to an issue or pull request with the number of 2." }]
+    }"#;
+    let (base, requests) = spawn(vec![Response::new("200 OK", answer)]);
+    let gh = GitHub::with_base_uri("token", &base).expect("client");
+    let threads: Vec<perch_github::Thread> = serde_json::from_str(&list_json(1..=2)).unwrap();
+
+    let found = gh.look_at_subjects(&threads).await.expect("look at subjects");
+
+    assert_eq!(found.len(), 1);
+    let (id, snapshot) = &found[0];
+    assert_eq!(id, "1");
+    assert_eq!(snapshot.author_login, "someone");
+    assert_eq!(snapshot.author_avatar_url, "https://avatars/2");
+    assert_eq!(snapshot.state, perch_github::SubjectState::PrOpen);
+    assert_eq!(snapshot.at, threads[0].updated_at);
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/graphql");
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    let query = body["query"].as_str().unwrap();
+    assert!(query.contains(r#"r0: repository(owner: "a", name: "b")"#), "{query}");
+    assert!(query.contains("n1: issueOrPullRequest(number: 1)"), "{query}");
+    assert!(query.contains("n2: issueOrPullRequest(number: 2)"), "{query}");
+}
+
+#[tokio::test]
+async fn a_look_with_nothing_to_ask_after_sends_nothing() {
+    let (base, requests) = spawn(vec![]);
+    let gh = GitHub::with_base_uri("token", &base).expect("client");
+    let mut threads: Vec<perch_github::Thread> = serde_json::from_str(&list_json(1..=1)).unwrap();
+    threads[0].subject.kind = perch_github::SubjectKind::CheckSuite;
+    threads[0].subject.url = None;
+
+    let found = gh.look_at_subjects(&threads).await.expect("look at subjects");
+
+    assert!(found.is_empty());
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_look_github_answers_with_errors_and_no_data_is_an_error() {
+    let answer = r#"{ "data": null, "errors": [{ "message": "Something went wrong" }] }"#;
+    let (base, _requests) = spawn(vec![Response::new("200 OK", answer)]);
+    let gh = GitHub::with_base_uri("token", &base).expect("client");
+    let threads: Vec<perch_github::Thread> = serde_json::from_str(&list_json(1..=1)).unwrap();
+
+    assert!(matches!(
+        gh.look_at_subjects(&threads).await,
+        Err(Error::Graphql(message)) if message == "Something went wrong"
+    ));
+}

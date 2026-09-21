@@ -11,14 +11,14 @@ use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
-use perch_github::{SubjectKind, Thread};
+use perch_github::{CheckRunState, SubjectKind, SubjectState, Thread};
 
 use crate::backend::Backend;
-use crate::icons::SidebarIcon;
+use crate::icons::{self, SidebarIcon};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::nav_row;
-use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph};
+use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph, state_glyph};
 
 /// The notification list under the current search, repository, and reason
 /// filters. GitHub's ordering is retained.
@@ -47,6 +47,8 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
                     thread.id.clone(),
                     thread.unread,
                     thread.updated_at.to_string(),
+                    // The face and the state arrive after the row does.
+                    thread.subject_snapshot.clone(),
                 )
             },
             move |thread| notification_row(state, backend.clone(), thread),
@@ -181,21 +183,43 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> im
     Container::new(row).style(nav_row::row_gutter)
 }
 
+/// The glyph GitHub's inbox draws for the subject: a pull request or an
+/// issue in the state a look found it in, and open until one has, since
+/// that is what most of an inbox is; a workflow run by the verdict its
+/// title announces; and a muted mark for the rest.
 fn notification_glyph(thread: &Thread) -> impl IntoView {
-    let glyph = match &thread.subject.kind {
-        SubjectKind::PullRequest | SubjectKind::Commit => SidebarIcon::Branch,
-        SubjectKind::Issue => SidebarIcon::Comment,
-        SubjectKind::Discussion => SidebarIcon::ThreadHollow,
-        SubjectKind::CheckSuite => SidebarIcon::Check,
-        SubjectKind::RepositoryVulnerabilityAlert => SidebarIcon::Warning,
-        SubjectKind::Release => SidebarIcon::Bookmark,
-        SubjectKind::Other(_) => SidebarIcon::Comment,
+    let (glyph, color) = match &thread.subject.kind {
+        SubjectKind::PullRequest | SubjectKind::Issue => {
+            let open = if thread.subject.kind == SubjectKind::PullRequest {
+                SubjectState::PrOpen
+            } else {
+                SubjectState::IssueOpen
+            };
+            let state = thread
+                .subject_snapshot
+                .as_ref()
+                .map_or(open, |snapshot| snapshot.state);
+            return state_glyph(state, icons::state_color(state)).into_any();
+        }
+        SubjectKind::CheckSuite => match perch_github::announced_verdict(&thread.subject.title) {
+            Some(CheckRunState::Failure) => (SidebarIcon::Close, theme::CLOSED),
+            Some(CheckRunState::Success) => (SidebarIcon::Check, theme::OPEN),
+            Some(CheckRunState::Cancelled) => (SidebarIcon::Skip, theme::NAV_MUTED),
+            _ => (SidebarIcon::Check, theme::NAV_MUTED),
+        },
+        SubjectKind::Commit => (SidebarIcon::Branch, theme::NAV_MUTED),
+        SubjectKind::Discussion => (SidebarIcon::ThreadHollow, theme::NAV_MUTED),
+        SubjectKind::RepositoryVulnerabilityAlert => (SidebarIcon::Warning, theme::NAV_MUTED),
+        SubjectKind::Release => (SidebarIcon::Bookmark, theme::NAV_MUTED),
+        SubjectKind::Other(_) => (SidebarIcon::Comment, theme::NAV_MUTED),
     };
-    sidebar_glyph(glyph, theme::NAV_MUTED)
+    sidebar_glyph(glyph, color).into_any()
 }
 
-/// The repository's face, the repository, the number, and why GitHub sent
-/// it at the right end.
+/// The face of whoever opened the subject, the repository, the number,
+/// and why GitHub sent it at the right end. The repository's face stands
+/// in until a look has found the person, and on a subject nobody opened:
+/// a workflow run, a release.
 fn byline(state: AppState, thread: &Thread) -> impl IntoView {
     let owner = thread
         .repository
@@ -204,11 +228,18 @@ fn byline(state: AppState, thread: &Thread) -> impl IntoView {
         .next()
         .unwrap_or_default()
         .to_string();
-    let avatar_url = thread.repository.owner_avatar_url.clone();
+    let (avatar_url, seed) = match thread
+        .subject_snapshot
+        .as_ref()
+        .filter(|snapshot| !snapshot.author_login.is_empty())
+    {
+        Some(snapshot) => (snapshot.author_avatar_url.clone(), snapshot.author_login.clone()),
+        None => (thread.repository.owner_avatar_url.clone(), owner),
+    };
     nav_row::byline(
         state,
         move || avatar_url.clone(),
-        owner,
+        seed,
         thread.repository.full_name.clone(),
         reference(thread),
         Empty::new(),
@@ -280,14 +311,14 @@ fn notification_menu(backend: Rc<Backend>, thread: &Thread) -> Menu {
         })
 }
 
-/// The unread reminder, before the age.
+/// The unread reminder, before the age, in GitHub's blue.
 fn unread_dot(unread: bool) -> impl IntoView {
     if unread {
         Empty::new()
             .style(|s| {
                 s.size(7.0, 7.0)
                     .border_radius(4.0)
-                    .background(theme::ACCENT)
+                    .background(theme::UNREAD)
                     .flex_shrink(0.0_f32)
                     .margin_left(6.0)
             })
@@ -377,6 +408,7 @@ mod tests {
                 full_name: repo.into(),
                 owner_avatar_url: String::new(),
             },
+            subject_snapshot: None,
         }
     }
 
