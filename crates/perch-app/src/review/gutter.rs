@@ -74,7 +74,7 @@ pub(crate) fn visible_lines(
 }
 
 /// How far the column slides to line up with a part-scrolled first row.
-fn column_offset(scroll_top: f64, line_height: f64) -> f64 {
+pub(crate) fn column_offset(scroll_top: f64, line_height: f64) -> f64 {
     if line_height <= 0.0 {
         return 0.0;
     }

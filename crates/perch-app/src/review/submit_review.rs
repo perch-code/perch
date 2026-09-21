@@ -279,7 +279,7 @@ fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
 
     let editor = text_editor(state.submit_review_draft.get_untracked())
         .placeholder("Leave a review…".to_string())
-        .editor_style(|s| s.hide_gutter(true));
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
     let styling_doc = editor.editor().doc();
     let styling_id = state.next_token();
     let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(

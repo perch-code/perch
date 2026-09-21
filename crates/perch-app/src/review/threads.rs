@@ -160,7 +160,7 @@ pub fn composer_view(
     let draft = state.composer_draft.get_untracked();
     let editor = text_editor(draft.clone())
         .placeholder(placeholder)
-        .editor_style(|s| s.hide_gutter(true));
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
     // Markdown as it is typed: bold, italics, code and links take their
     // styles in the box, the way they will in the thread.
     let styling_doc = editor.editor().doc();

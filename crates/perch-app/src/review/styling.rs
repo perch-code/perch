@@ -1,17 +1,20 @@
 //! Telling the editor how to draw a file.
 //!
 //! Two hooks do all the work. `apply_attr_styles` colours the text from
-//! tree-sitter spans, and `apply_layout_styles` paints the diff background
-//! behind a whole line, and the tint behind every other use of the symbol
-//! the caret rests on, on the range rather than the line. Both are handed
-//! a row of the editor, so anything that needs a real file position goes
-//! through the document's rows first, and from there through the buffer's
-//! row table.
+//! tree-sitter spans, and `apply_layout_styles` paints the tint behind
+//! every other use of the symbol the caret rests on, on the range rather
+//! than the line. Both are handed a row of the editor, so anything that
+//! needs a real file position goes through the document's rows first, and
+//! from there through the buffer's row table.
+//!
+//! The diff tint behind a whole line is not painted here. The editor
+//! paints a line's extra styles after the selection, so a tint among them
+//! would cover the selection on every changed line; the tint is a layer
+//! under the editor instead, in `editor`.
 
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use floem::peniko::Color;
 use floem::reactive::{RwSignal, SignalWith};
 use floem::text::{Affinity, Attrs, AttrsList, FamilyOwned, FontWeight};
 use floem::views::editor::id::EditorId;
@@ -113,21 +116,6 @@ impl PerchStyling {
         }
     }
 
-    fn background_for(&self, row: usize) -> Option<Color> {
-        match self.row(row)? {
-            DocRow::Line { tint, .. } => match tint {
-                Tint::Plain => None,
-                Tint::Added => Some(theme::DIFF_ADDED_BG),
-                Tint::Modified => Some(theme::DIFF_MODIFIED_BG),
-                Tint::Deleted => Some(theme::DIFF_DELETED_BG),
-            },
-            DocRow::Filler => Some(theme::DIFF_FILLER_BG),
-            DocRow::Divider { .. } => Some(theme::DIFF_DIVIDER_BG),
-            // The card is drawn over its rows, so they carry nothing.
-            DocRow::Spacer { .. } => None,
-        }
-    }
-
     /// Whether a row is a ghost of the stacked view: a removed line spliced
     /// in among the head's. A split's left is the old file whole, and reads
     /// in full colour.
@@ -203,22 +191,8 @@ impl Styling for PerchStyling {
         line: usize,
         layout_line: &mut TextLayoutLine,
     ) {
-        if let Some(bg) = self.background_for(line) {
-            layout_line.extra_style.push(LineExtraStyle {
-                x: 0.0,
-                y: 0.0,
-                // None means the full viewport width, so the tint runs to
-                // the right edge rather than stopping at the end of the
-                // text.
-                width: None,
-                height: theme::CODE_LINE_HEIGHT as f64,
-                bg_color: Some(bg),
-                under_line: None,
-                wave_line: None,
-            });
-        }
-        // The symbol's uses, over the diff tint: the range's columns as
-        // the layout places them.
+        // The symbol's uses: the range's columns as the layout places
+        // them.
         for (start, end) in self.highlights_for(line) {
             let x0 = layout_line.text.cursor_point(start, Affinity::Downstream).x;
             let x1 = layout_line.text.cursor_point(end, Affinity::Upstream).x;

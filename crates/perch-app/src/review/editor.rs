@@ -24,6 +24,10 @@
 //! The rows are an estimate until the card has been laid out; then the
 //! card says how tall it is, and when that is not the rows it has, the
 //! rows are set and the document is edited like any other change to it.
+//!
+//! The rows' diff tints are a layer under the editor, placed the same
+//! way, so that a selection is painted over a changed line's tint and not
+//! under it.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -31,6 +35,7 @@ use std::sync::Arc;
 use floem::context::LayoutChanged;
 use floem::event::PointerScrollEventExt;
 use floem::kurbo::{Rect, Size, Vec2};
+use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use floem::style::Position;
@@ -47,8 +52,8 @@ use perch_github::CommentThread;
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::cards;
-use crate::review::doc::{self, Card, CardId, Doc, Reveals, Run};
-use crate::review::gutter::{diff_gutter, plain_gutter, side_gutter, visible_lines};
+use crate::review::doc::{self, Card, CardId, Doc, DocRow, Reveals, Run, Tint};
+use crate::review::gutter::{column_offset, diff_gutter, plain_gutter, side_gutter, visible_lines};
 use crate::review::hierarchy;
 use crate::review::hover;
 use crate::review::model::{
@@ -307,7 +312,7 @@ fn stacked_view(
         // relative position; the editor fills it. The cards are over the
         // dividers, since a card is never in a divider.
         Stack::vertical((
-            editor,
+            over_tints(editor, doc, viewport),
             divider_layer(state, doc, viewport, scroll_delta, Bars::Editor),
             card_layer(
                 app,
@@ -530,6 +535,87 @@ fn shift_cursor(cursor: &mut Cursor, start: usize, delta: isize) {
     }
 }
 
+/// The colour behind a row: a line's diff tint, grey for a split's
+/// filler, the accent's wash for a divider. A plain line has none, and a
+/// spacer none, since the card is drawn over its rows.
+fn row_tint(row: &DocRow) -> Option<Color> {
+    match row {
+        DocRow::Line { tint, .. } => match tint {
+            Tint::Plain => None,
+            Tint::Added => Some(theme::DIFF_ADDED_BG),
+            Tint::Modified => Some(theme::DIFF_MODIFIED_BG),
+            Tint::Deleted => Some(theme::DIFF_DELETED_BG),
+        },
+        DocRow::Filler => Some(theme::DIFF_FILLER_BG),
+        DocRow::Divider { .. } => Some(theme::DIFF_DIVIDER_BG),
+        DocRow::Spacer { .. } => None,
+    }
+}
+
+/// The rows' tints, under the editor: each row's colour across the box
+/// the editor fills, placed from the viewport the way the gutter's column
+/// is. Under, and not among the editor's own line styles, because the
+/// editor paints those after the selection, and a tint there covered the
+/// selection on every changed line; here the selection is over the tint,
+/// as the text is. The tint runs from the gutter's edge, across the gap
+/// before the text, which a line style left bare.
+fn tint_layer(doc: RwSignal<Arc<Doc>>, viewport: RwSignal<Rect>) -> impl IntoView {
+    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let visible = move || {
+        let vp = viewport.get();
+        doc.with(|d| {
+            visible_lines(vp.y0, vp.height(), line_height, d.len())
+                .into_iter()
+                .map(|row| (row, d.rows[row].clone()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let column = dyn_stack(
+        visible,
+        |(row, entry)| (*row, entry.clone()),
+        move |(row, entry)| {
+            let tint = row_tint(&entry);
+            Empty::new()
+                .debug_name(format!("tint:{row}"))
+                .style(move |s| {
+                    s.width_full()
+                        .height(line_height)
+                        .flex_shrink(0.0_f32)
+                        .apply_opt(tint, |s, bg| s.background(bg))
+                })
+        },
+    )
+    .style(move |s| {
+        // Slid by the sub-line remainder of the scroll, read live here
+        // as the gutter reads it.
+        let offset = column_offset(viewport.get().y0, line_height);
+        s.absolute().inset_top(offset).width_full().flex_col()
+    });
+
+    Container::new(column)
+        .style(|s| s.size_full().position(Position::Relative))
+        .clip()
+        .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none())
+}
+
+/// An editor over its rows' tints: a box with the code's background, the
+/// tint layer over that, and the editor over both, painting no background
+/// of its own.
+fn over_tints(
+    editor: impl IntoView + 'static,
+    doc: RwSignal<Arc<Doc>>,
+    viewport: RwSignal<Rect>,
+) -> impl IntoView {
+    Stack::vertical((tint_layer(doc, viewport), editor))
+        .debug_name("tinted editor")
+        .style(|s| {
+            s.size_full()
+                .min_width(0.0)
+                .position(Position::Relative)
+                .background(theme::CODE_BG)
+        })
+}
+
 /// Where a divider layer's bars sit in the box the layer covers.
 #[derive(Clone, Copy)]
 enum Bars {
@@ -627,17 +713,14 @@ fn divider_bar(
         let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
         scroll_delta.set(Vec2::new(-delta.x, -delta.y));
     })
-    // The container carries the bar's colour as well as the row under it:
-    // the editor's text starts a gutter gap in from its box, and the row's
-    // own tint starts with the text, so without this a white notch the
-    // width of that gap would cut the bar off from the gutter's.
+    // The bar's colour is the row's own, from the tint layer under the
+    // editor; the container only centres the label and takes the pointer.
     .style(|s| {
         s.flex_grow(1.0_f32)
             .min_width(0.0)
             .height_full()
             .items_center()
             .justify_center()
-            .background(theme::DIFF_DIVIDER_BG)
     });
     let label = records_hover(state, row, label);
 
@@ -647,19 +730,15 @@ fn divider_bar(
         // right one beginning with its gutter.
         Bars::HeadSide { base_delta } => {
             // The base half has the head half's shape, its gutter left bare
-            // so the gutter's own edge shows, and the rest tinted for the
-            // same reason the label's container is.
+            // so the gutter's own edge shows, and the rest over the base
+            // side's row, which its own tint layer colours.
             let base = Stack::horizontal((
                 Empty::new().style(|s| {
                     s.width(theme::GUTTER_WIDTH)
                         .height_full()
                         .flex_shrink(0.0_f32)
                 }),
-                Empty::new().style(|s| {
-                    s.flex_grow(1.0_f32)
-                        .height_full()
-                        .background(theme::DIFF_DIVIDER_BG)
-                }),
+                Empty::new().style(|s| s.flex_grow(1.0_f32).height_full()),
             ))
             .on_event_stop(el::PointerWheel, move |_, wheel| {
                 let size = viewport.get_untracked().size();
@@ -1138,7 +1217,7 @@ fn split_view(
             left_viewport,
             right_delta,
         ),
-        Container::new(left)
+        Container::new(over_tints(left, left_doc, left_viewport))
             .on_event_stop(el::PointerWheel, move |_, wheel| {
                 let size = left_viewport.get_untracked().size();
                 let delta =
@@ -1167,7 +1246,7 @@ fn split_view(
             right_viewport,
             right_delta,
         ),
-        right,
+        over_tints(right, right_doc, right_viewport),
     ))
     .style(|s| {
         s.flex_basis(0.0)
@@ -1239,14 +1318,16 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
             // hard to follow. Long lines scroll sideways instead.
             s.hide_gutter(true)
                 .wrap_method(floem::views::editor::text::WrapMethod::None)
+                .selection_color(theme::SELECTION_BG)
         })
+        // No background: the box the editor sits in paints the code's,
+        // and the rows' tints over it, under the editor. See `over_tints`.
         .style(|s| {
             s.size_full()
                 .min_width(0.0)
                 // Breathing room between the change bars and the first
                 // character, so a bar never reads as part of the code.
                 .padding_left(theme::CODE_GUTTER_GAP)
-                .background(theme::CODE_BG)
         })
 }
 
@@ -1666,6 +1747,7 @@ mod window {
     use std::sync::Arc;
 
     use floem::headless::{HeadlessHarness, TestRoot};
+    use floem::peniko::Brush;
     use floem::reactive::{SignalGet, SignalUpdate};
     use floem::views::editor::core::cursor::CursorAffinity;
     use perch_github::{Item, ItemCheckout};
@@ -1871,6 +1953,130 @@ mod window {
         harness.paint();
         assert_eq!(state.selection.get(), selection);
         assert_eq!(state.cursor_line.get(), line);
+    }
+
+    /// Every view under `id`, itself included, with `text` in its debug
+    /// name, in tree order.
+    fn find_all(id: floem::ViewId, text: &str, out: &mut Vec<floem::ViewId>) {
+        if id.debug_name().contains(text) {
+            out.push(id);
+        }
+        for child in id.children() {
+            find_all(child, text, out);
+        }
+    }
+
+    /// A row's tint in the layer under an editor, by the editor's box and
+    /// the row: its box in the window and its colour.
+    fn tint(
+        harness: &HeadlessHarness,
+        editor_box: floem::ViewId,
+        row: usize,
+    ) -> (floem::ViewId, floem::kurbo::Rect, Option<Brush>) {
+        let id = find(editor_box, &format!("tint:{row}")).expect("the row is in view");
+        (
+            id,
+            id.get_visual_rect_no_clip(),
+            harness.get_computed_style(id).get(floem::style::Background),
+        )
+    }
+
+    /// The editor paints a line's own styles after the selection, so a
+    /// diff tint among them hid the selection on every changed line. The
+    /// tint is a layer under the editor instead: on the row, across the
+    /// editor's box from the gutter's edge, moving with the scroll, and
+    /// painted before the editor's content, which paints the selection.
+    #[test]
+    fn a_changed_lines_tint_is_under_the_editor_so_the_selection_shows_over_it() {
+        use crate::review::doc::{DocRow, Tint};
+        use crate::theme::{CODE_LINE_HEIGHT, DIFF_DELETED_BG, DIFF_MODIFIED_BG};
+        let line = |display, tint| DocRow::Line { display, tint };
+
+        let (mut harness, state) = harness();
+        let live = stacked(state);
+        let line_height = CODE_LINE_HEIGHT as f64;
+        // Rows: fn a, the ghost of fn old, fn b in its place, fn c, and
+        // so on every three.
+        let doc = live.doc.get();
+        assert_eq!(doc.rows[1], line(1, Tint::Deleted));
+        assert_eq!(doc.rows[2], line(2, Tint::Modified));
+        assert_eq!(doc.rows[3], line(3, Tint::Plain));
+
+        let root = harness.root_id();
+        let editor = find(root, "tinted editor").expect("the code editor's box");
+        let content = find(editor, "Editor View").expect("the editor's content");
+        let editor_box = editor.get_visual_rect_no_clip();
+        let (left_edge, top) = pane_origin();
+        assert_eq!(
+            (editor_box.x0, editor_box.x1, editor_box.y0),
+            (left_edge + crate::theme::GUTTER_WIDTH, 1400.0, top),
+            "the box is the pane past the gutter, under the tabs"
+        );
+
+        let (ghost, rect, bg) = tint(&harness, editor, 1);
+        assert_eq!(
+            (rect.x0, rect.x1),
+            (editor_box.x0, editor_box.x1),
+            "the tint runs across the editor's box, gap included"
+        );
+        assert_eq!((rect.y0, rect.height()), (top + line_height, line_height));
+        assert_eq!(bg, Some(Brush::Solid(DIFF_DELETED_BG)));
+        let (changed, rect, bg) = tint(&harness, editor, 2);
+        assert_eq!(rect.y0, top + 2.0 * line_height);
+        assert_eq!(bg, Some(Brush::Solid(DIFF_MODIFIED_BG)));
+        let (_, _, bg) = tint(&harness, editor, 3);
+        assert_eq!(bg, None, "a plain line has no tint");
+
+        let order = harness.paint_and_get_order();
+        let painted = |id: floem::ViewId| {
+            order
+                .iter()
+                .position(|p| *p == id)
+                .unwrap_or_else(|| panic!("{} was painted", id.debug_name()))
+        };
+        assert!(
+            painted(ghost) < painted(content) && painted(changed) < painted(content),
+            "the tints are painted before the editor's content"
+        );
+
+        // Scrolled, a row's tint is where its line is.
+        let (x, y) = (editor_box.center().x, editor_box.center().y);
+        harness.scroll_down(x, y, 100.0);
+        harness.rebuild();
+        harness.paint();
+        let scrolled = super::STACKED_VIEWPORT
+            .with(|v| v.get())
+            .expect("a stacked editor was built")
+            .get()
+            .y0;
+        assert!(scrolled > 0.0, "the editor did not scroll");
+        let (_, rect, bg) = tint(&harness, editor, 10);
+        assert_eq!(rect.y0, top + 10.0 * line_height - scrolled);
+        assert_eq!(bg, Some(Brush::Solid(DIFF_MODIFIED_BG)));
+
+        // A split has a layer under each side, over that side's rows: the
+        // deleted line on the left, the changed one on the right.
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let mut editors = Vec::new();
+        find_all(root, "tinted editor", &mut editors);
+        let [left, right] = editors[..] else {
+            panic!("a split has two editors, not {}", editors.len())
+        };
+        let (left_box, right_box) = (
+            left.get_visual_rect_no_clip(),
+            right.get_visual_rect_no_clip(),
+        );
+        assert_eq!(left_box.x0, left_edge + crate::theme::GUTTER_WIDTH);
+        assert!(left_box.x1 < right_box.x0, "the sides are side by side");
+        assert_eq!(right_box.x1, 1400.0);
+        let (_, rect, bg) = tint(&harness, left, 1);
+        assert_eq!((rect.x0, rect.x1, rect.y0), (left_box.x0, left_box.x1, top + line_height));
+        assert_eq!(bg, Some(Brush::Solid(DIFF_DELETED_BG)));
+        let (_, rect, bg) = tint(&harness, right, 1);
+        assert_eq!((rect.x0, rect.x1, rect.y0), (right_box.x0, right_box.x1, top + line_height));
+        assert_eq!(bg, Some(Brush::Solid(DIFF_MODIFIED_BG)));
     }
 
     /// The tiles sit at the strip's right end: 8 of padding, then Split
