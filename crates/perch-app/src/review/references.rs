@@ -207,7 +207,7 @@ enum Row {
     File { path: String, outside: Option<String>, count: usize, first: bool },
     /// A line of a file. Carries the symbol, so asking about another
     /// symbol on the same line draws the row again with the new emphasis.
-    Location { path: String, line: usize, text: String, symbol: String },
+    Location { path: String, line: usize, character: usize, text: String, symbol: String },
 }
 
 fn rows(references: &References) -> Vec<Row> {
@@ -227,6 +227,7 @@ fn rows(references: &References) -> Vec<Row> {
         out.extend(lines.into_iter().map(|r| Row::Location {
             path: r.path,
             line: r.line,
+            character: r.character,
             text: r.text,
             symbol: references.symbol.clone(),
         }));
@@ -348,8 +349,8 @@ fn list(state: ReviewState, open_file: OpenFile) -> impl IntoView {
             Row::File { path, outside, count, first } => {
                 file_row(state, open_file.clone(), path, outside, count, first).into_any()
             }
-            Row::Location { path, line, text, symbol } => {
-                location_row(state, open_file.clone(), path, line, text, symbol).into_any()
+            Row::Location { path, line, character, text, symbol } => {
+                location_row(state, path, line, character, text, symbol).into_any()
             }
         },
     )
@@ -463,12 +464,13 @@ fn status_letter(status: ChangeStatus) -> impl IntoView {
 }
 
 /// One line: its number, right-aligned in a column of its own, then its
-/// text with the symbol emphasised. Click opens the file there.
+/// text with the symbol emphasised. Click opens the file there, as a jump
+/// the history remembers.
 fn location_row(
     state: ReviewState,
-    open_file: OpenFile,
     path: String,
     line: usize,
+    character: usize,
     text: String,
     symbol: String,
 ) -> impl IntoView {
@@ -485,12 +487,7 @@ fn location_row(
         line_text(text, symbol),
     ))
     .on_event_stop(el::Click, move |_, _| {
-        // Opening the active file again would rebuild its editor for
-        // nothing; the jump alone moves it.
-        if state.active.with(|a| a.as_deref() != Some(path.as_str())) {
-            open_file(&path);
-        }
-        state.jump_to_line.set(Some(line.saturating_sub(1)));
+        state.navigate_to(&path, line.saturating_sub(1), character);
     })
     .style(|s| {
         clickable(s)

@@ -17,7 +17,7 @@ use floem::views::{
 
 use crate::icons::SidebarIcon;
 use crate::review::cards::tip_with;
-use crate::review::model::{folded_meta_key, folded_meta_value, Layout, ReviewState};
+use crate::review::model::{folded_meta_key, folded_meta_value, Layout, Origin, ReviewState};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::icon_in;
@@ -51,7 +51,7 @@ fn open_tabs(state: ReviewState) -> impl IntoView {
     dyn_stack(
         move || state.tabs.get(),
         |tab| tab.path.clone(),
-        move |tab| tab_view(state, tab.path),
+        move |tab| tab_view(state, tab.path, tab.origin),
     )
     .style(|s| s.items_center().height_full())
     .scroll()
@@ -62,7 +62,7 @@ fn open_tabs(state: ReviewState) -> impl IntoView {
     .style(|s| s.height_full().width_full())
 }
 
-fn tab_view(state: ReviewState, path: String) -> impl IntoView {
+fn tab_view(state: ReviewState, path: String, origin: Origin) -> impl IntoView {
     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
 
     let (active_box, active_text) = (path.clone(), path.clone());
@@ -84,6 +84,13 @@ fn tab_view(state: ReviewState, path: String) -> impl IntoView {
                 .min_width(0.0)
                 .margin_right(6.0)
         }),
+        // Where a file outside the worktree is from, beside its name.
+        match origin.label() {
+            Some(label) => origin_chip(label.to_string())
+                .style(|s| s.margin_right(6.0))
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
         change_count(state, count_path),
         close_button(state, close_path),
     ))

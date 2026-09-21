@@ -48,7 +48,7 @@ use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::cards;
 use crate::review::doc::{self, Card, CardId, Doc, Reveals, Run};
-use crate::review::gutter::{diff_gutter, side_gutter, visible_lines};
+use crate::review::gutter::{diff_gutter, plain_gutter, side_gutter, visible_lines};
 use crate::review::hover;
 use crate::review::model::{
     Composer, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState,
@@ -291,8 +291,15 @@ fn stacked_view(
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
     let path = file.path.clone();
+    // A file outside the worktree is a place to read: numbers beside it,
+    // and no diff gutter, since there is no diff.
+    let gutter = if file.origin.is_outside() {
+        plain_gutter(state, app, file, doc, viewport, scroll_delta).into_any()
+    } else {
+        diff_gutter(state, app, file, doc, viewport, scroll_delta).into_any()
+    };
     Stack::horizontal((
-        diff_gutter(state, app, file, doc, viewport, scroll_delta),
+        gutter,
         // The layers are placed against this box, so it takes the
         // relative position; the editor fills it. The cards are over the
         // dividers, since a card is never in a divider.

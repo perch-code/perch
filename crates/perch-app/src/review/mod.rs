@@ -54,13 +54,21 @@ pub fn review_view(
     let open_file: OpenFile = Rc::new({
         let backend = backend.clone();
         move |path: &str| {
+            // A file outside the worktree has no place in the tree, and is
+            // read from where it is; the loader's limits still apply.
+            if state.open_tab(path) {
+                if std::path::Path::new(path).is_absolute() {
+                    backend.open_outside_file(path);
+                } else {
+                    backend.open_file(path);
+                }
+            }
             // Open the path to it in the tree, so a file reached from the
             // changed list or from a definition can be found there too.
-            state
-                .expanded
-                .update(|expanded| tree::reveal(expanded, path));
-            if state.open_tab(path) {
-                backend.open_file(path);
+            if !std::path::Path::new(path).is_absolute() {
+                state
+                    .expanded
+                    .update(|expanded| tree::reveal(expanded, path));
             }
         }
     });
@@ -206,18 +214,28 @@ fn status_line(state: ReviewState, hidden: usize) -> StatusLine {
         let n = state.changed_files.with(|f| f.len());
         return whole(format!("{n} changed files"));
     };
+    // A file outside the worktree is named by its file name and where it
+    // is from; its absolute path is nothing the reader wants to read.
+    let name = match file.origin.label() {
+        Some(label) => {
+            let name = file.path.rsplit('/').next().unwrap_or(&file.path);
+            format!("{name}{STATUS_SEPARATOR}{label}")
+        }
+        None => file.path.clone(),
+    };
     if file.truncated {
-        return whole(format!("{}{STATUS_SEPARATOR}not shown as text", file.path));
+        return whole(format!("{name}{STATUS_SEPARATOR}not shown as text"));
     }
     let language = file.language.map(|l| l.name()).unwrap_or("Plain text");
     let lines = counted(file.line_count(), "line");
-    let changes = counted(file.change_count(), "change");
+    let changes = if file.origin.is_outside() {
+        String::new()
+    } else {
+        format!("{STATUS_SEPARATOR}{}", counted(file.change_count(), "change"))
+    };
     let line = state.cursor_line.get() + 1;
     StatusLine {
-        before: format!(
-            "{}{STATUS_SEPARATOR}{language}{STATUS_SEPARATOR}{lines}{STATUS_SEPARATOR}{changes}",
-            file.path
-        ),
+        before: format!("{name}{STATUS_SEPARATOR}{language}{STATUS_SEPARATOR}{lines}{changes}"),
         hidden: (hidden > 0).then(|| hidden_lines_label(hidden)),
         after: format!("{STATUS_SEPARATOR}ln {line}{server}"),
     }
@@ -425,6 +443,28 @@ mod tests {
             status_line(state, 1).hidden.as_deref(),
             Some("1 line hidden")
         );
+
+        // A file outside the worktree is named by its name and where it is
+        // from, and has no changes to count.
+        let outside = crate::backend::build_loaded_file(
+            "/Users/me/.cargo/registry/src/index/tokio-1.40.0/src/lib.rs".into(),
+            "fn a() {}\n".into(),
+            String::new(),
+            None,
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        state.open_tab("/Users/me/.cargo/registry/src/index/tokio-1.40.0/src/lib.rs");
+        state.finish_load(
+            "/Users/me/.cargo/registry/src/index/tokio-1.40.0/src/lib.rs",
+            std::sync::Arc::new(outside),
+        );
+        assert_eq!(
+            status_line(state, 0).before,
+            format!("lib.rs{STATUS_SEPARATOR}tokio 1.40.0{STATUS_SEPARATOR}Rust{STATUS_SEPARATOR}1 line")
+        );
+        state.close_tab("/Users/me/.cargo/registry/src/index/tokio-1.40.0/src/lib.rs");
 
         // A line that is not about a file has no count, whatever it is
         // given: there is no document to have folds.

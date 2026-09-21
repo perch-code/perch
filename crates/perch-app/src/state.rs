@@ -2136,6 +2136,7 @@ mod tests {
         let review = review_of("old");
         review.tabs.set(vec![crate::review::model::Tab {
             path: "src/old.rs".into(),
+            origin: crate::review::model::Origin::Worktree,
         }]);
         review
             .loading

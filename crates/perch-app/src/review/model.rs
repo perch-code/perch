@@ -17,10 +17,52 @@ use perch_syntax::{Language, LineSpans};
 
 use crate::review::doc::{self, Card, CardId, Doc, Reveals};
 
+/// Where a file is from: the worktree, which is what the review is of, or
+/// outside it, a dependency or the standard library reached from a
+/// definition, which is a place to read and no part of the review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    Worktree,
+    Outside {
+        /// What the tab's chip says: `tokio 1.40.0`, `std`, `git: floem`.
+        label: String,
+    },
+}
+
+impl Origin {
+    /// The origin a path says: a worktree file's path is relative to the
+    /// worktree, and an outside file's is absolute. The two cannot
+    /// collide, which is why `files` and the tabs are keyed by the path
+    /// alone.
+    pub fn of_path(path: &str) -> Origin {
+        let path = std::path::Path::new(path);
+        if path.is_absolute() {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            Origin::Outside {
+                label: outside_label(path, home.as_deref()),
+            }
+        } else {
+            Origin::Worktree
+        }
+    }
+
+    pub fn is_outside(&self) -> bool {
+        matches!(self, Origin::Outside { .. })
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Origin::Worktree => None,
+            Origin::Outside { label } => Some(label),
+        }
+    }
+}
+
 /// A file prepared for the editor: text to render, and everything needed to
 /// colour it and map a rendered line back to a real one.
 pub struct LoadedFile {
     pub path: String,
+    pub origin: Origin,
     pub language: Option<Language>,
     /// Head text with the removed lines spliced in.
     pub buffer: DisplayBuffer,
@@ -436,10 +478,12 @@ pub struct Composer {
     pub opening: u64,
 }
 
-/// One open editor tab.
+/// One open editor tab. The origin is here as well as on the loaded
+/// file, so the strip can draw the chip before the file has loaded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tab {
     pub path: String,
+    pub origin: Origin,
 }
 
 /// One editor's document, live: the handle the editor lays out from, which
@@ -1329,6 +1373,7 @@ impl ReviewState {
             self.tabs.update(|tabs| {
                 tabs.push(Tab {
                     path: path.to_string(),
+                    origin: Origin::of_path(path),
                 });
                 // Oldest first, so the cap drops the least recently opened.
                 if tabs.len() > MAX_TABS {
@@ -1877,6 +1922,11 @@ impl ReviewState {
     pub fn anchor_from_selection(&self) -> Option<Anchor> {
         let (first, last) = self.selection.get()?;
         let file = self.active_file()?;
+        // A file outside the worktree is a place to read, not part of the
+        // review: nothing is anchored in it.
+        if file.origin.is_outside() {
+            return None;
+        }
         self.anchor_for_display_range(&file, first, last)
     }
 
@@ -3705,5 +3755,22 @@ mod tests {
         state.goto.set(Some(GotoAsk { token: 9, symbol: "x".into(), kind: Locations::Definitions }));
         state.finish_goto(9, vec![]);
         assert_eq!(state.pending_jump.get(), None, "none does nothing");
+    }
+
+    #[test]
+    fn an_origin_is_read_off_the_path() {
+        assert_eq!(Origin::of_path("src/lib.rs"), Origin::Worktree);
+        let outside = Origin::of_path("/opt/vendor/src/lib.rs");
+        assert_eq!(outside.label(), Some("/opt/vendor/src/lib.rs"));
+        assert!(outside.is_outside());
+        assert!(!Origin::Worktree.is_outside());
+
+        let state = ReviewState::new();
+        state.open_tab("/opt/vendor/src/lib.rs");
+        assert_eq!(
+            state.tabs.get()[0].origin,
+            Origin::Outside { label: "/opt/vendor/src/lib.rs".into() },
+            "the tab carries the origin before the file has loaded"
+        );
     }
 }

@@ -128,6 +128,13 @@ pub enum Command {
         path: String,
         navigation_id: u64,
     },
+    /// Read and highlight a file outside the checkout, reached from a
+    /// definition: a dependency's, or the standard library's. Whole, with
+    /// no diff, and told to the language server as a worktree file is.
+    OpenOutsideFile {
+        path: String,
+        navigation_id: u64,
+    },
     /// What the diff is over: the branch, a commit, the uncommitted work.
     /// The changed list is recomputed and every open file reloads.
     SetScope {
@@ -1624,6 +1631,14 @@ impl Backend {
         });
     }
 
+    pub fn open_outside_file(&self, path: &str) {
+        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
+        let _ = self.commands.send(Command::OpenOutsideFile {
+            path: path.to_string(),
+            navigation_id,
+        });
+    }
+
     pub fn set_scope(&self, item_id: &str, scope: perch_git::Scope) {
         let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
         let request_id = self.scope_requests.begin(item_id);
@@ -2766,6 +2781,35 @@ async fn run(
                 tokio::spawn(async move {
                     if open_file(
                         preparer,
+                        checkout.clone(),
+                        events,
+                        navigation_requests.clone(),
+                        path.clone(),
+                        navigation_id,
+                    )
+                    .await
+                    {
+                        announce_file(
+                            checkout,
+                            language_server,
+                            navigation_requests,
+                            path,
+                            navigation_id,
+                        )
+                        .await;
+                    }
+                });
+            }
+            Command::OpenOutsideFile {
+                path,
+                navigation_id,
+            } => {
+                let checkout = checkout.clone();
+                let events = events.clone();
+                let language_server = language_server.clone();
+                let navigation_requests = ctx.navigation_requests.clone();
+                tokio::spawn(async move {
+                    if open_outside_file(
                         checkout.clone(),
                         events,
                         navigation_requests.clone(),
@@ -9223,6 +9267,90 @@ async fn open_file(
     }
 }
 
+/// A file outside the checkout, whole: no base side, no status, no blob.
+/// The loader's limits apply, and a file past them opens as the truncated
+/// view a worktree file does, saying why.
+async fn open_outside_file(
+    slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    events: EventSender<Event>,
+    navigation_requests: Arc<NavigationRequests>,
+    path: String,
+    navigation_id: u64,
+) -> bool {
+    let Some((scope, item_id, scope_gen)) = navigation_requests
+        .with_current(navigation_id, || {
+            slot.lock().ok().and_then(|guard| {
+                guard
+                    .as_ref()
+                    .filter(|context| context.navigation_id == navigation_id)
+                    .map(|context| (context.scope.clone(), context.item_id.clone(), context.scope_gen))
+            })
+        })
+        .flatten()
+    else {
+        return false;
+    };
+
+    let (text, truncated) = match tokio::fs::read(&path).await {
+        Ok(bytes) if bytes.len() > MAX_FILE_BYTES => {
+            ("This file is too large to show.".to_string(), true)
+        }
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => (text, false),
+            Err(_) => ("This file is not text.".to_string(), true),
+        },
+        Err(e) => (format!("This file could not be read: {e}."), true),
+    };
+
+    let loaded = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || {
+            let mut file = build_loaded_file(
+                path,
+                text,
+                String::new(),
+                None,
+                false,
+                scope,
+                String::new(),
+            );
+            if truncated {
+                file.truncated = true;
+                file.language = None;
+                file.head_spans = perch_syntax::LineSpans::default();
+            }
+            file
+        }
+    })
+    .await;
+
+    match loaded {
+        Ok(file) => {
+            tracing::info!(path = %file.path, lines = file.buffer.len(), "outside file loaded");
+            let loaded = send_file_event_if_current(
+                &navigation_requests,
+                &slot,
+                &events,
+                navigation_id,
+                &item_id,
+                scope_gen,
+                Event::FileLoaded {
+                    navigation_id,
+                    scope_gen,
+                    item_id: item_id.clone(),
+                    path: file.path.clone(),
+                    file: Arc::new(file),
+                },
+            );
+            loaded && !truncated
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "outside file load panicked");
+            false
+        }
+    }
+}
+
 fn send_file_event_if_current(
     navigation_requests: &NavigationRequests,
     slot: &std::sync::Mutex<Option<ReviewContext>>,
@@ -9509,9 +9637,11 @@ pub(crate) fn build_loaded_file(
 
     let language = perch_syntax::Language::from_path(&path);
 
+    let origin = crate::review::model::Origin::of_path(&path);
     if binary {
         return crate::review::model::LoadedFile {
             path,
+            origin,
             language: None,
             buffer: DisplayBuffer::plain("This file is binary and has no text to show."),
             head_spans: LineSpans::default(),
@@ -9552,6 +9682,7 @@ pub(crate) fn build_loaded_file(
         head_spans: spans_for(&head, language),
         base_spans: spans_for(&base, language),
         path,
+        origin,
         language,
         buffer,
         status,

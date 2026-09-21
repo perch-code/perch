@@ -96,6 +96,26 @@ pub fn diff_gutter(
     })
 }
 
+/// The gutter of a file outside the worktree: line numbers and nothing
+/// else. No change bar, since there is no diff; no `+` and no marker,
+/// since nothing is anchored in a file that is no part of the review.
+pub fn plain_gutter(
+    state: ReviewState,
+    app: AppState,
+    file: Arc<LoadedFile>,
+    doc: RwSignal<Arc<Doc>>,
+    viewport: RwSignal<Rect>,
+    scroll_delta: RwSignal<Vec2>,
+) -> impl IntoView {
+    column(viewport, scroll_delta, doc, move |row, entry| {
+        let number = match entry {
+            DocRow::Line { display, .. } => Some(display + 1),
+            _ => None,
+        };
+        row_view(state, app, file.clone(), row, number, false, None, Slot::Blank)
+    })
+}
+
 /// One side of a split. `scroll_delta` is the editor a wheel over the
 /// gutter should move, which for the left is the right's: one scroll.
 pub fn side_gutter(
