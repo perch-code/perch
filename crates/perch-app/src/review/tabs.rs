@@ -210,9 +210,16 @@ fn close_button(state: ReviewState, path: String) -> impl IntoView {
 /// Jump between the changed regions of the open file.
 ///
 /// The count is the point as much as the buttons: it says at a glance how
-/// much of this file the pull request actually touched.
+/// much of this file the pull request actually touched. A file drawn as a
+/// picture has no lines on the screen to jump between, so it has none of
+/// this until it is shown as markup; its tab still carries the count.
 fn change_nav(state: ReviewState) -> impl IntoView {
-    let count = move || state.active_file().map(|f| f.change_count()).unwrap_or(0);
+    let count = move || {
+        if state.drawn_picture().is_some() {
+            return 0;
+        }
+        state.active_file().map(|f| f.change_count()).unwrap_or(0)
+    };
 
     dyn_container(count, move |n| {
         if n == 0 {
@@ -251,8 +258,13 @@ fn change_nav(state: ReviewState) -> impl IntoView {
 /// Scroll to the next or previous change after the cursor's line, as the
 /// strip's chevrons and the `]` and `[` keys both do. A change is never
 /// folded, so the jump reveals nothing; it goes the one way every jump
-/// goes so that there is one.
+/// goes so that there is one. Nothing for a file drawn as a picture: a
+/// jump left waiting would land in the next editor built, on some other
+/// file.
 pub fn jump_to_change(state: ReviewState, forward: bool) {
+    if state.drawn_picture().is_some() {
+        return;
+    }
     let Some(file) = state.active_file() else { return };
     let from = state.cursor_line.get();
     let target = if forward { file.buffer.next_change(from) } else { file.buffer.previous_change(from) };
@@ -281,26 +293,23 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
         })
 }
 
-/// The tiles at the strip's right end: Show whole, then a rule, then
-/// Stacked and Split. A chosen tile is filled; the others are only a glyph
-/// until the pointer is over one.
+/// The tiles at the strip's right end: Source, while the open file is a
+/// picture, then Show whole, then Stacked and Split, with a rule between
+/// each group. A chosen tile is filled; the others are only a glyph until
+/// the pointer is over one.
 ///
-/// The rule is there because the two groups are two kinds of preference.
-/// The layout outlives the item: it is a way of reading, not a fact about
-/// a file, so it goes to `meta` under one key and comes back at the next
+/// The rules are there because the groups are kinds of preference. The
+/// layout outlives the item: it is a way of reading, not a fact about a
+/// file, so it goes to `meta` under one key and comes back at the next
 /// launch. Show whole is the item's: a reader folds one review and not
 /// another, so it goes to `meta` under the item's key and comes back when
-/// the item opens.
+/// the item opens. Source is the file's, for the app's life: a reader
+/// wants the markup of this SVG, not of SVGs.
 fn layout_toggle(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
+        source_group(state),
         fold_tile(app, state),
-        Empty::new().style(|s| {
-            s.width(1.0)
-                .height(theme::TILE_RULE_HEIGHT)
-                .margin_horiz(theme::TILE_RULE_GAP)
-                .flex_shrink(0.0_f32)
-                .background(theme::BORDER_MUTED)
-        }),
+        tile_rule(),
         Stack::horizontal((
             layout_tile(app, state, Layout::Stacked, SidebarIcon::Stacked),
             layout_tile(app, state, Layout::Split, SidebarIcon::Split),
@@ -315,6 +324,63 @@ fn layout_toggle(app: AppState, state: ReviewState) -> impl IntoView {
             .border_bottom(1.0)
             .border_color(theme::BORDER)
     })
+}
+
+/// The rule between two groups of tiles.
+fn tile_rule() -> impl IntoView {
+    Empty::new().style(|s| {
+        s.width(1.0)
+            .height(theme::TILE_RULE_HEIGHT)
+            .margin_horiz(theme::TILE_RULE_GAP)
+            .flex_shrink(0.0_f32)
+            .background(theme::BORDER_MUTED)
+    })
+}
+
+/// The Source tile and its rule, while the open file has a picture, and
+/// nothing while it does not: the tile means nothing for a file that is
+/// only ever its text.
+fn source_group(state: ReviewState) -> impl IntoView {
+    // A memo, so the group is rebuilt when the answer changes and not on
+    // every file that loads.
+    let has_picture = floem::reactive::Memo::new(move |_| {
+        state.active_file().is_some_and(|f| f.picture.is_some())
+    });
+    dyn_container(
+        move || has_picture.get(),
+        move |picture| {
+            if picture {
+                Stack::horizontal((source_tile(state), tile_rule()))
+                    .debug_name("source group")
+                    .style(|s| s.items_center())
+                    .into_any()
+            } else {
+                Empty::new().into_any()
+            }
+        },
+    )
+    .style(|s| s.items_center().flex_shrink(0.0_f32))
+}
+
+/// The markup of a picture, filled while it is what shows; the picture
+/// is the default and is only the glyph.
+fn source_tile(state: ReviewState) -> impl IntoView {
+    let shows_source = move || {
+        state
+            .active
+            .with(|a| a.as_deref().is_some_and(|path| state.shows_source(path)))
+    };
+    tip_with(
+        tile(SidebarIcon::Source, shows_source, move || state.toggle_source())
+            .debug_name("source tile"),
+        move || {
+            if shows_source() {
+                "Shown as markup. Click to draw the picture.".to_string()
+            } else {
+                "Drawn as a picture. Click to show the markup.".to_string()
+            }
+        },
+    )
 }
 
 fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: SidebarIcon) -> impl IntoView {

@@ -16,6 +16,7 @@ use perch_github::{
 use perch_syntax::{Language, LineSpans};
 
 use crate::review::doc::{self, Card, CardId, Doc, Reveals};
+use crate::review::picture::Picture;
 
 /// Where a file is from: the worktree, which is what the review is of, or
 /// outside it, a dependency or the standard library reached from a
@@ -91,6 +92,10 @@ pub struct LoadedFile {
     /// tree file git has not hashed. Such a file's reveals are kept for
     /// the window's life and never stored.
     pub blob: String,
+    /// The file as it draws, when it is an SVG: its sides parsed into the
+    /// trees the renderer takes, shown in place of the markup unless the
+    /// reader asks for the markup. `None` for every other file.
+    pub picture: Option<Picture>,
 }
 
 impl std::fmt::Debug for LoadedFile {
@@ -101,6 +106,7 @@ impl std::fmt::Debug for LoadedFile {
             .field("language", &self.language.map(|l| l.name()))
             .field("lines", &self.buffer.len())
             .field("status", &self.status)
+            .field("picture", &self.picture.is_some())
             .finish()
     }
 }
@@ -838,6 +844,10 @@ pub struct ReviewState {
     pub tabs_by_item: RwSignal<HashMap<String, ItemTab>>,
     /// Stacked or Split, remembered across items in `meta`.
     pub layout: RwSignal<Layout>,
+    /// The files with a picture that the reader asked to see as markup,
+    /// by path. A picture is drawn until they ask, and the strip's Source
+    /// tile asks and unasks; the choice lives as long as the app.
+    pub as_source: RwSignal<HashSet<String>>,
     /// What the diff is over. Per item; Branch when the item opens.
     pub scope: RwSignal<Scope>,
     /// Identity of the backend file context currently rendered. File and
@@ -1080,6 +1090,7 @@ impl ReviewState {
             tab: RwSignal::new(ItemTab::Conversation),
             tabs_by_item: RwSignal::new(HashMap::new()),
             layout: RwSignal::new(Layout::Stacked),
+            as_source: RwSignal::new(HashSet::new()),
             scope: RwSignal::new(Scope::Branch),
             scope_gen: RwSignal::new(None),
             commits: RwSignal::new(Arc::new(Vec::new())),
@@ -1817,6 +1828,35 @@ impl ReviewState {
     pub fn active_file(&self) -> Option<Arc<LoadedFile>> {
         let path = self.active.get()?;
         self.file(&path)
+    }
+
+    /// Whether the file at `path` is shown as its markup rather than
+    /// drawn, which only means anything for a file with a picture.
+    pub fn shows_source(&self, path: &str) -> bool {
+        self.as_source.with(|paths| paths.contains(path))
+    }
+
+    /// The active file's picture, when it has one and is drawn: what the
+    /// pane shows in place of the editor, and what the status line and
+    /// the strip's tile describe.
+    pub fn drawn_picture(&self) -> Option<Picture> {
+        let file = self.active_file()?;
+        if self.shows_source(&file.path) {
+            return None;
+        }
+        file.picture.clone()
+    }
+
+    /// Flip the active file between its picture and its markup.
+    pub fn toggle_source(&self) {
+        let Some(path) = self.active.get_untracked() else {
+            return;
+        };
+        self.as_source.update(|paths| {
+            if !paths.remove(&path) {
+                paths.insert(path);
+            }
+        });
     }
 
     pub fn is_loading(&self, path: &str) -> bool {

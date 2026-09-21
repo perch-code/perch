@@ -3672,6 +3672,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "floem",
+ "floem_renderer",
  "image",
  "jiff",
  "objc2 0.6.4",

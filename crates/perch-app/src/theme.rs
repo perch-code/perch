@@ -422,13 +422,18 @@ pub const DIFF_DIVIDER_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
 /// The divider's count, muted like the gutter's numbers so the bar reads
 /// as a seam in the file and not as a line of it.
 pub const DIFF_DIVIDER_FG: Color = FG_MUTED;
-/// The Show whole, Stacked and Split tiles at the right end of the file
-/// tab bar.
+/// The Source, Show whole, Stacked and Split tiles at the right end of
+/// the file tab bar.
 pub const LAYOUT_TILE: f64 = 22.0;
-/// The rule between Show whole and the layout tiles, which are two kinds
-/// of preference: its height, and the room on each side of it.
+/// The rule between the tile groups, which are kinds of preference: its
+/// height, and the room on each side of it.
 pub const TILE_RULE_HEIGHT: f64 = 14.0;
 pub const TILE_RULE_GAP: f64 = 6.0;
+/// A picture, an SVG drawn in place of its markup: the wash under it, so
+/// its canvas shows and so does a shape in the pane's own white, and the
+/// room between the picture and the edges of its pane.
+pub const PICTURE_CANVAS: Color = CANVAS_SUBTLE;
+pub const PICTURE_INSET: f64 = 24.0;
 /// The references panel under the editor: its header, a file's heading
 /// row, the rows under it, and the line number column at their left.
 pub const REFERENCES_HEADER_HEIGHT: f64 = 30.0;

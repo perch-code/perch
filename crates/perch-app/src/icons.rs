@@ -291,6 +291,12 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                      stroke="{c}" stroke-width="1.4"/>
                <path d="M8 2.7 V13.3" stroke="{c}" stroke-width="1.4"/>"#
         ),
+        // Two angle brackets, as github.com's code glyph: the markup
+        // behind a picture.
+        SidebarIcon::Source => format!(
+            r#"<path d="M5.6 4.4 L2.2 8 L5.6 11.6 M10.4 4.4 L13.8 8 L10.4 11.6" fill="none"
+                     stroke="{c}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
         // A rule with a chevron pointing at it from each side: the diff
         // folded to its changes, the shape github.com folds with.
         SidebarIcon::Fold => format!(
@@ -438,13 +444,17 @@ pub enum SidebarIcon {
     Skip,
     /// A face: leave a reaction.
     Smiley,
+    /// Two angle brackets: a file's markup, for the tile that shows a
+    /// picture's source.
+    Source,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 45] = [
+    pub const ALL: [SidebarIcon; 46] = [
+        SidebarIcon::Source,
         SidebarIcon::Smiley,
         SidebarIcon::Skip,
         SidebarIcon::Person,

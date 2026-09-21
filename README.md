@@ -264,6 +264,13 @@ identifier tints its other uses in the file. All of it is read-only, and all
 of it is rust-analyzer: while the server is absent or failed, the status line
 says so and nothing else happens.
 
+An SVG opens as the picture it draws rather than as its markup, fitted to the
+pane. A changed one shows before and after side by side, both at one scale,
+so a change of size shows as one; an added or deleted one says which it is.
+The status line gives the picture's size. The Source tile at the right end
+of the tab strip shows that file's markup instead, with its diff, gutter and
+threads, and the picture is back at the next click.
+
 ## Development
 
 ```sh

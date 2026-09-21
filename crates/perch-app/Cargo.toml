@@ -37,6 +37,9 @@ floem = { git = "https://github.com/lapce/floem", branch = "main", default-featu
     "default-image-formats",
 ] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# floem's renderer, for its usvg: an SVG file is parsed into the tree the
+# renderer's `draw_svg` takes, so the two are the one crate.
+floem_renderer = { git = "https://github.com/lapce/floem", branch = "main" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

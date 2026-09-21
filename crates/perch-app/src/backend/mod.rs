@@ -10072,6 +10072,7 @@ async fn open_outside_file(
                 file.truncated = true;
                 file.language = None;
                 file.head_spans = perch_syntax::LineSpans::default();
+                file.picture = None;
             }
             file
         }
@@ -10406,8 +10407,18 @@ pub(crate) fn build_loaded_file(
             base_buffer: None,
             alignment: Vec::new(),
             blob,
+            picture: None,
         };
     }
+
+    // An SVG is parsed into what it draws as well, each side that is
+    // there: a deletion has no head, and an added file or one outside the
+    // changed list no base.
+    let picture = {
+        let head_side = (status != Some(perch_git::ChangeStatus::Deleted)).then_some(head.as_str());
+        let base_side = (status.is_some() && !base.is_empty()).then_some(base.as_str());
+        crate::review::picture::Picture::parse(&path, head_side, base_side)
+    };
 
     // A changed file is diffed for the stacked view, and the same diff
     // gives the split view its base side and its row pairing. A file
@@ -10445,6 +10456,7 @@ pub(crate) fn build_loaded_file(
         base_buffer,
         alignment,
         blob,
+        picture,
     }
 }
 

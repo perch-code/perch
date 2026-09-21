@@ -15,6 +15,7 @@ pub mod markdown;
 pub mod merge;
 pub mod model;
 pub mod navigation;
+pub mod picture;
 pub mod rail;
 pub mod references;
 pub mod review_launch;
@@ -230,13 +231,23 @@ fn status_line(state: ReviewState, hidden: usize) -> StatusLine {
     if file.truncated {
         return whole(format!("{name}{STATUS_SEPARATOR}not shown as text"));
     }
-    let language = file.language.map(|l| l.name()).unwrap_or("Plain text");
-    let lines = counted(file.line_count(), "line");
     let changes = if file.origin.is_outside() {
         String::new()
     } else {
         format!("{STATUS_SEPARATOR}{}", counted(file.change_count(), "change"))
     };
+    // A picture is described as one: what it is and how big, then its
+    // changes, which are the markup's and are counted all the same. No
+    // line count and no cursor, since neither is on the screen.
+    if let Some(picture) = state.drawn_picture() {
+        let size = match picture.current() {
+            Some(Ok(drawing)) => picture::dims(drawing.size()),
+            _ => "not drawn".to_string(),
+        };
+        return whole(format!("{name}{STATUS_SEPARATOR}SVG{STATUS_SEPARATOR}{size}{changes}"));
+    }
+    let language = file.language.map(|l| l.name()).unwrap_or("Plain text");
+    let lines = counted(file.line_count(), "line");
     let line = state.cursor_line.get() + 1;
     StatusLine {
         before: format!("{name}{STATUS_SEPARATOR}{language}{STATUS_SEPARATOR}{lines}{changes}"),

@@ -60,6 +60,7 @@ use crate::review::model::{
     Composer, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState,
 };
 use crate::review::navigation;
+use crate::review::picture;
 use crate::review::references;
 use crate::review::styling::PerchStyling;
 use crate::review::threads::{self, ThreadFace};
@@ -105,14 +106,16 @@ pub fn editor_pane(
             // the layout caches cleanly, and nothing of the old is worth
             // keeping. What changes under the one file is for editing the
             // document in place, through the live documents held below.
+            // A picture flipped to its markup, or back, is another view
+            // of the file the same way.
             move || {
-                (
-                    state.active.get(),
-                    state.editor_epoch.get(),
-                    state.layout.get(),
-                )
+                let path = state.active.get();
+                let source = path
+                    .as_deref()
+                    .is_some_and(|path| state.shows_source(path));
+                (path, state.editor_epoch.get(), state.layout.get(), source)
             },
-            move |(path, epoch, layout)| {
+            move |(path, epoch, layout, source)| {
                 // Whatever editor stood here is going with its documents;
                 // the one built below registers its own.
                 state.docs.set(None);
@@ -124,16 +127,30 @@ pub fn editor_pane(
                     )
                     .into_any(),
                     Some(path) => match state.file(&path) {
-                        Some(file) => code_view(
-                            app,
-                            state,
-                            file,
-                            epoch,
-                            layout,
-                            code_backend.clone(),
-                            code_open.clone(),
-                        )
-                        .into_any(),
+                        Some(file) => {
+                            // A file that draws is drawn, unless the reader
+                            // asked for its markup.
+                            let drawn = if source { None } else { file.picture.clone() };
+                            match drawn {
+                                Some(picture) => {
+                                    // No editor, no selection: `a` would
+                                    // otherwise anchor a question on the
+                                    // lines the last editor had selected.
+                                    state.selection.set(None);
+                                    picture::pane(&file, &picture).into_any()
+                                }
+                                None => code_view(
+                                    app,
+                                    state,
+                                    file,
+                                    epoch,
+                                    layout,
+                                    code_backend.clone(),
+                                    code_open.clone(),
+                                )
+                                .into_any(),
+                            }
+                        }
                         None => loading_view(path).into_any(),
                     },
                 }
