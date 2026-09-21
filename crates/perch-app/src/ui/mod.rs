@@ -372,13 +372,20 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 }
 
-                // `v` checks the open file as viewed, `]` and `[` go to the next
-                // and previous change, `}` and `{` open the next and previous
-                // unviewed file. Files only. The braces are shifted brackets:
-                // the physical codes with Shift alone, so Cmd-[ stays back.
+                // Cmd-W closes the open file, as in any editor; `v` checks it
+                // as viewed, `]` and `[` go to the next and previous change,
+                // `}` and `{` open the next and previous unviewed file. Files
+                // only. The braces are shifted brackets: the physical codes
+                // with Shift alone, so Cmd-[ stays back.
                 if review.tab.get() == crate::review::model::ItemTab::Files {
                     let shifted = key.modifiers == Modifiers::SHIFT;
                     match key.code {
+                        Code::KeyW if key.modifiers == OS_MOD => {
+                            if let Some(path) = review.active.get() {
+                                review.close_tab(&path);
+                                return EventPropagation::Stop;
+                            }
+                        }
                         Code::BracketRight | Code::BracketLeft if key.modifiers.is_empty() => {
                             crate::review::tabs::jump_to_change(
                                 review,
@@ -464,14 +471,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
             // Physical key codes, so the shortcuts hold on any keyboard layout.
             match key.code {
-                // Close the open file, as in any editor.
-                Code::KeyW => {
-                    if let Some(path) = review.active.get() {
-                        review.close_tab(&path);
-                        return EventPropagation::Stop;
-                    }
-                    EventPropagation::Continue
-                }
                 // Show or hide the sidebar drawer.
                 Code::Backslash => {
                     if !key.modifiers.contains(Modifiers::SHIFT) {
@@ -707,5 +706,111 @@ mod tests {
             harness.get_computed_style(label).get(SelectionColor),
             Brush::Solid(theme::SELECTION_BG)
         );
+    }
+
+    /// The window on Files with one changed file open in the editor.
+    fn window_with_a_file_open() -> (HeadlessHarness, ReviewState) {
+        use crate::review::model::{ItemTab, Phase};
+        use perch_github::{Item, ItemCheckout};
+        use std::sync::Arc;
+
+        let root = TestRoot::new();
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let now = "2026-09-18T09:59:00Z".parse().unwrap();
+        let mut item = Item::new("slatedb/slatedb", now);
+        item.id = "wt".into();
+        item.checkout = Some(ItemCheckout {
+            branch: "perch/pr-812".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: std::path::PathBuf::from("/tmp/wt"),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+        });
+        review.item.set(Some(Arc::new(item)));
+        review.ready.set(true);
+        review.set_phase(Phase::Ready);
+        review.tab.set(ItemTab::Files);
+        review.composer_autofocus.set(false);
+        let file = Arc::new(crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "fn alpha() {}\nfn beta() {\n    alpha();\n}\n".into(),
+            "fn alpha() {}\nfn old() {\n    alpha();\n}\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        ));
+        review.open_tab("src/x.rs");
+        review.finish_load("src/x.rs", file);
+
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        (harness, review)
+    }
+
+    /// Cmd-W as the window receives it.
+    fn cmd_w() -> floem::event::Event {
+        floem::event::Event::Key(KeyboardEvent {
+            state: KeyState::Down,
+            key: Key::Character("w".into()),
+            code: Code::KeyW,
+            location: Default::default(),
+            modifiers: OS_MOD,
+            repeat: false,
+            is_composing: false,
+        })
+    }
+
+    /// Cmd-W closes the open file from the code too. The editor keeps
+    /// every key once a click in it has given it the keyboard, so the
+    /// shortcut is caught on the way down, not on the way back up.
+    #[test]
+    fn cmd_w_closes_the_open_file_while_the_editor_has_the_keyboard() {
+        let (mut harness, review) = window_with_a_file_open();
+        let code = named(harness.root_id(), "tinted editor").expect("no editor in the window");
+        let rect = code.get_visual_rect_no_clip();
+        // A click on the code, as one placing the caret before reading.
+        let (x, y) = (rect.x0 + 200.0, rect.y0 + 40.0);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        let code = harness.element_id_at(x, y).expect("nothing under the click");
+        assert!(
+            harness.is_focused(code.owning_id()),
+            "the press did not give the editor the keyboard"
+        );
+        assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
+
+        harness.dispatch_event(cmd_w());
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(review.active.get(), None, "the file is still open");
+        assert!(review.tabs.with(Vec::is_empty), "the tab is still there");
+
+        // With nothing open, the key is left for whoever else wants it.
+        harness.dispatch_event(cmd_w());
+        harness.rebuild();
+        assert_eq!(review.active.get(), None);
+    }
+
+    /// On Conversation the file's tab is out of sight, and Cmd-W leaves
+    /// it be.
+    #[test]
+    fn cmd_w_on_conversation_leaves_the_files_tab_alone() {
+        let (mut harness, review) = window_with_a_file_open();
+        review.show_tab(crate::review::model::ItemTab::Conversation);
+        harness.rebuild();
+        harness.paint();
+
+        harness.dispatch_event(cmd_w());
+        harness.rebuild();
+        assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
+        assert_eq!(review.tabs.with(Vec::len), 1);
     }
 }
