@@ -1244,12 +1244,8 @@ impl AppState {
                     }
                 });
             }
-            Event::LspDefinition { token, path, line } => {
-                if review.request_token.get() == token {
-                    if let Some(path) = path {
-                        review.pending_jump.set(Some((path, line as usize)));
-                    }
-                }
+            Event::LspDefinition { token, locations } => {
+                review.finish_goto(token, locations);
             }
             // A load for the last item, still on its way when the next one
             // opened, is nobody's now.
@@ -1658,18 +1654,13 @@ impl AppState {
                     }
                 }
             }
-            Event::LspReferences {
-                token,
-                references,
-                elsewhere,
-            } => {
+            Event::LspReferences { token, locations } => {
                 // Matched against the panel's own token: the shared counter
                 // moves on with every hover while the answer is on its way.
                 review.references.update(|r| {
                     if let Some(r) = r.as_mut().filter(|r| r.token == token) {
                         let mut open = (**r).clone();
-                        open.locations = references;
-                        open.elsewhere = elsewhere;
+                        open.locations = locations;
                         open.pending = false;
                         *r = Arc::new(open);
                     }

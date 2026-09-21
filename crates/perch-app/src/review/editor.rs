@@ -69,14 +69,20 @@ pub fn editor_pane(
     backend: Rc<Backend>,
     open_file: OpenFile,
 ) -> impl IntoView {
-    // A go-to-definition answer arrives asynchronously; opening the tab has
-    // to happen on the UI thread, so the view picks it up from a signal.
+    // A jump, to a definition or back along the history, is a signal: its
+    // answer arrives asynchronously, and opening the tab has to happen on
+    // the UI thread, with the closure that opens files. Opening the active
+    // file again would rebuild its editor for nothing; the jump alone
+    // moves it.
     {
         let open_file = open_file.clone();
         Effect::new(move |_| {
-            if let Some((path, line)) = state.pending_jump.get() {
+            if let Some((path, line, column)) = state.pending_jump.get() {
                 state.pending_jump.set(None);
-                open_file(&path);
+                if state.active.with_untracked(|a| a.as_deref() != Some(path.as_str())) {
+                    open_file(&path);
+                }
+                state.jump_caret.set(Some((line, column)));
                 state.jump_to_line.set(Some(line));
             }
         });
@@ -281,7 +287,7 @@ fn stacked_view(
         }
     });
     wire_cursor(state, file.clone(), doc, cursor, shifted);
-    wire_jump(state, file.clone(), doc, scroll_to, epoch);
+    wire_jump(state, file.clone(), doc, scroll_to, cursor, epoch);
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
     let path = file.path.clone();
@@ -1095,7 +1101,7 @@ fn split_view(
         }
     });
     wire_cursor(state, file.clone(), right_doc, right_cursor, right_shifted);
-    wire_jump(state, file.clone(), right_doc, right_scroll_to, epoch);
+    wire_jump(state, file.clone(), right_doc, right_scroll_to, right_cursor, epoch);
     let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
     // The left follows the right down the file. Sideways it keeps its own
@@ -1297,17 +1303,19 @@ fn wire_cursor(
     });
 }
 
-/// A definition inside the worktree opens its file, then asks to be
-/// scrolled to. The head line has to be translated through the row table
-/// first, because the spliced diff shifts everything below a removal, and a
-/// split's fillers do the same. A line inside a fold is on no row: the
-/// fold is revealed around it first, like any other reveal, and Reset
-/// undoes it like any other.
+/// A jump opens its file, then asks to be scrolled to. The head line has
+/// to be translated through the row table first, because the spliced diff
+/// shifts everything below a removal, and a split's fillers do the same.
+/// A line inside a fold is on no row: the fold is revealed around it
+/// first, like any other reveal, and Reset undoes it like any other. A
+/// navigation's jump also lands the caret on the line, so the next jump
+/// remembers leaving from there.
 fn wire_jump(
     state: ReviewState,
     file: Arc<LoadedFile>,
     doc: RwSignal<Arc<Doc>>,
     scroll_to: RwSignal<Option<Vec2>>,
+    cursor: RwSignal<Cursor>,
     epoch: u64,
 ) {
     Effect::new(move |_| {
@@ -1346,6 +1354,17 @@ fn wire_jump(
             0.0,
             target * theme::CODE_LINE_HEIGHT as f64,
         )));
+        let caret = state
+            .jump_caret
+            .try_update(|c| c.take_if(|(line, _)| *line == head_line))
+            .flatten();
+        if let Some((_, column)) = caret {
+            let offset = doc.with_untracked(|d| {
+                let line_len = d.line(row).len();
+                d.offset_of_row(row) + column.min(line_len)
+            });
+            cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
+        }
     });
 }
 

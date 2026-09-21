@@ -132,11 +132,15 @@ pub struct HoverAnswer {
     pub token: u64,
 }
 
-/// One place a symbol is used, as rust-analyzer lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reference {
-    /// Relative to the worktree.
+/// One place rust-analyzer named: a use of a symbol, a definition, an
+/// impl. `path` is relative to the worktree for a file in it and absolute
+/// for one outside, in a dependency or the standard library, which then
+/// carries the label its tab's chip shows.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Located {
     pub path: String,
+    /// The chip's label when `path` is outside the worktree.
+    pub outside: Option<String>,
     /// 1-based.
     pub line: usize,
     /// 0-based column of the symbol on that line.
@@ -145,20 +149,153 @@ pub struct Reference {
     pub text: String,
 }
 
-/// The answer to Find references: what was asked about and where it is.
+/// What a list of locations is a list of: the panel's heading and its
+/// summary read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Locations {
+    References,
+    Definitions,
+}
+
+impl Locations {
+    /// "References to", "Definitions of": what the heading says before the
+    /// symbol.
+    pub fn heading(self) -> &'static str {
+        match self {
+            Locations::References => "References to",
+            Locations::Definitions => "Definitions of",
+        }
+    }
+}
+
+/// The answer to a question with a list for an answer: what was asked
+/// about and where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct References {
+    pub kind: Locations,
     pub symbol: String,
-    pub locations: Vec<Reference>,
-    /// How many locations were outside the worktree, in a dependency, and
-    /// are not listed.
-    pub elsewhere: usize,
+    /// Every location, those outside the worktree among them.
+    pub locations: Vec<Located>,
     /// True until the answer lands, so an empty answer can say so rather
     /// than look like one still on its way.
     pub pending: bool,
     /// The request's token. The answer is matched against this, not the
     /// shared counter, which every hover moves on.
     pub token: u64,
+}
+
+/// What the chip on an outside file's tab says about where the file is
+/// from, read off its path. A crate under cargo's registry is its name and
+/// version, `tokio 1.40.0`; a checkout under cargo's git directory is
+/// `git:` and the repository, `git: floem`; a file of the toolchain's
+/// `rust-src` is its library crate, `std`, `core` or `alloc`. Anywhere
+/// else under the home directory reads as its path relative to the home
+/// directory, and anywhere else as the path.
+pub fn outside_label(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    let parts: Vec<&str> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+    let after = |marker: &[&str]| -> Option<&str> {
+        let at = parts.windows(marker.len()).position(|w| w == marker)?;
+        parts.get(at + marker.len()).copied()
+    };
+
+    // ~/.cargo/registry/src/<index>/<name>-<version>/...
+    if let Some(at) = parts.windows(3).position(|w| w == [".cargo", "registry", "src"]) {
+        if let Some(dir) = parts.get(at + 4) {
+            return match crate_name_and_version(dir) {
+                Some((name, version)) => format!("{name} {version}"),
+                None => dir.to_string(),
+            };
+        }
+    }
+    // ~/.cargo/git/checkouts/<repo>-<hash>/<rev>/...
+    if let Some(dir) = after(&[".cargo", "git", "checkouts"]) {
+        let repo = dir.rsplit_once('-').map(|(repo, _)| repo).unwrap_or(dir);
+        return format!("git: {repo}");
+    }
+    // <toolchain>/lib/rustlib/src/rust/library/<crate>/...
+    if let Some(krate) = after(&["lib", "rustlib", "src", "rust", "library"]) {
+        return krate.to_string();
+    }
+    if let Some(relative) = home.and_then(|home| path.strip_prefix(home).ok()) {
+        return relative.display().to_string();
+    }
+    path.display().to_string()
+}
+
+/// `tokio-util-0.7.12` as `tokio-util` and `0.7.12`: the version starts
+/// at the last dash a digit follows.
+fn crate_name_and_version(dir: &str) -> Option<(&str, &str)> {
+    let at = dir
+        .char_indices()
+        .filter(|(i, c)| *c == '-' && dir[i + 1..].starts_with(|c: char| c.is_ascii_digit()))
+        .map(|(i, _)| i)
+        .next_back()?;
+    Some((&dir[..at], &dir[at + 1..]))
+}
+
+/// A goto in flight: a definition, a type definition or an implementation
+/// asked for and not yet answered. One answer opens; several list under
+/// `kind`; none does nothing visible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GotoAsk {
+    pub token: u64,
+    pub symbol: String,
+    pub kind: Locations,
+}
+
+/// Somewhere the reader was: a file and a head line, for the jump keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub path: String,
+    pub line: usize,
+}
+
+/// How many places the jump keys remember.
+pub const HISTORY_CAP: usize = 50;
+
+/// Where the jumps came from and went. A jump pushes the place it left
+/// onto `back` and clears `forward`; back pops one and pushes the current
+/// place onto `forward`, and forward the other way. The oldest of `back`
+/// goes when there are more than the cap.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct History {
+    back: Vec<Place>,
+    forward: Vec<Place>,
+}
+
+impl History {
+    /// A jump is about to leave `from`.
+    pub fn push(&mut self, from: Place) {
+        // Jumping from where the last jump left is one place, not two.
+        if self.back.last() != Some(&from) {
+            self.back.push(from);
+        }
+        if self.back.len() > HISTORY_CAP {
+            self.back.remove(0);
+        }
+        self.forward.clear();
+    }
+
+    /// The place before this one, with `current` kept for forward.
+    pub fn back(&mut self, current: Place) -> Option<Place> {
+        let place = self.back.pop()?;
+        self.forward.push(current);
+        Some(place)
+    }
+
+    /// The place after this one, with `current` kept for back.
+    pub fn forward(&mut self, current: Place) -> Option<Place> {
+        let place = self.forward.pop()?;
+        self.back.push(current);
+        Some(place)
+    }
+
 }
 
 /// What the review view has on screen. One signal, written once per
@@ -516,6 +653,11 @@ pub struct ReviewState {
     pub pending_reveals: RwSignal<Vec<RevealWrite>>,
     /// The references panel's content, when it is open.
     pub references: RwSignal<Option<Arc<References>>>,
+    /// A goto asked for and not yet answered.
+    pub goto: RwSignal<Option<GotoAsk>>,
+    /// Where the jumps came from, for `Ctrl--` and `Ctrl-Shift--`. Lives
+    /// as long as the item is open.
+    pub history: RwSignal<History>,
     /// The panel's height. Dragged.
     pub references_height: RwSignal<f64>,
     pub changed_files: RwSignal<Arc<Vec<ChangedFile>>>,
@@ -616,10 +758,16 @@ pub struct ReviewState {
     pub pointer_symbol: RwSignal<Option<Symbol>>,
     /// The last hover asked for, and its answer once it lands.
     pub hover: RwSignal<Option<HoverAnswer>>,
-    /// A go-to-definition result waiting to be opened, as (path, head line).
-    pub pending_jump: RwSignal<Option<(String, usize)>>,
+    /// A jump waiting to be made, as the file, the head line and the column
+    /// the caret lands on. The view with the file-opening closure takes it.
+    pub pending_jump: RwSignal<Option<(String, usize, usize)>>,
     /// A head line to scroll to once the file it belongs to is loaded.
     pub jump_to_line: RwSignal<Option<usize>>,
+    /// Where the caret lands after `jump_to_line`, as the head line and a
+    /// column, when the jump is a navigation and not a scroll: a jump to a
+    /// definition puts the caret on it, so the next jump remembers leaving
+    /// from there. Read by the jump, and cleared by it.
+    pub jump_caret: RwSignal<Option<(usize, usize)>>,
     /// The head position the last request was made about, so the definition
     /// button asks about the same symbol the panel is describing.
     pub last_position: RwSignal<Option<(usize, usize)>>,
@@ -688,6 +836,8 @@ impl ReviewState {
             reveals: RwSignal::new(HashMap::new()),
             pending_reveals: RwSignal::new(Vec::new()),
             references: RwSignal::new(None),
+            goto: RwSignal::new(None),
+            history: RwSignal::new(History::default()),
             references_height: RwSignal::new(crate::theme::REFERENCES_HEIGHT),
             changed_files: RwSignal::new(Arc::new(Vec::new())),
             tree: RwSignal::new(Arc::new(Vec::new())),
@@ -725,6 +875,7 @@ impl ReviewState {
             hover: RwSignal::new(None),
             pending_jump: RwSignal::new(None),
             jump_to_line: RwSignal::new(None),
+            jump_caret: RwSignal::new(None),
             last_position: RwSignal::new(None),
             expanded: RwSignal::new(std::collections::HashSet::new()),
         }
@@ -808,6 +959,9 @@ impl ReviewState {
         }
         self.pending_reveals.set(Vec::new());
         self.references.set(None);
+        self.goto.set(None);
+        self.history.set(History::default());
+        self.pending_jump.set(None);
         self.changed_files.set(Arc::new(Vec::new()));
         self.tree.set(Arc::new(Vec::new()));
         self.tabs.set(Vec::new());
@@ -1083,6 +1237,74 @@ impl ReviewState {
                 .filter(|h| h.symbol == pointer && !h.markdown.is_empty())
                 .map(|h| h.markdown.clone())
         })
+    }
+
+    /// Where the reader is: the active file and the caret's head line,
+    /// which the jump keys remember. `None` with no file open.
+    pub fn current_place(&self) -> Option<Place> {
+        let file = self.active_file()?;
+        let line = self
+            .last_position
+            .get_untracked()
+            .map(|(line, _)| line)
+            .or_else(|| file.buffer.head_line(self.cursor_line.get_untracked()))
+            .unwrap_or(0);
+        Some(Place {
+            path: file.path.clone(),
+            line,
+        })
+    }
+
+    /// Jump to a head line of a file, remembering where the jump left. The
+    /// caret lands at `column` on the line.
+    pub fn navigate_to(&self, path: &str, line: usize, column: usize) {
+        if let Some(from) = self.current_place() {
+            self.history.update(|h| h.push(from));
+        }
+        self.pending_jump.set(Some((path.to_string(), line, column)));
+    }
+
+    /// `Ctrl--`: back to where the last jump left.
+    pub fn go_back(&self) {
+        let Some(current) = self.current_place() else { return };
+        let place = self.history.try_update(|h| h.back(current)).flatten();
+        if let Some(place) = place {
+            self.pending_jump.set(Some((place.path, place.line, 0)));
+        }
+    }
+
+    /// `Ctrl-Shift--`: forward again.
+    pub fn go_forward(&self) {
+        let Some(current) = self.current_place() else { return };
+        let place = self.history.try_update(|h| h.forward(current)).flatten();
+        if let Some(place) = place {
+            self.pending_jump.set(Some((place.path, place.line, 0)));
+        }
+    }
+
+    /// Open a location rust-analyzer named: the file, at the line, with
+    /// the caret on the symbol.
+    pub fn open_located(&self, located: &Located) {
+        self.navigate_to(&located.path, located.line.saturating_sub(1), located.character);
+    }
+
+    /// A goto's answer landed. One location opens; several open the panel
+    /// under the ask's kind, and the reader picks; none does nothing, since
+    /// a symbol without a definition is an ordinary thing to click on.
+    pub fn finish_goto(&self, token: u64, locations: Vec<Located>) {
+        let ask = self.goto.try_update(|g| g.take_if(|g| g.token == token)).flatten();
+        let Some(ask) = ask else { return };
+        match locations.as_slice() {
+            [] => {}
+            [one] => self.open_located(one),
+            _ => self.references.set(Some(Arc::new(References {
+                kind: ask.kind,
+                symbol: ask.symbol,
+                locations,
+                pending: false,
+                token,
+            }))),
+        }
     }
 
     pub fn file(&self, path: &str) -> Option<Arc<LoadedFile>> {
@@ -3334,5 +3556,154 @@ mod tests {
         state.changed_files.set(Arc::new(Vec::new()));
         assert_eq!(state.next_unviewed(None, true), None);
         assert_eq!(state.viewed_count(), (0, 0));
+    }
+
+    #[test]
+    fn an_outside_path_is_labelled_by_where_it_is_from() {
+        use std::path::Path;
+        let home = Path::new("/Users/me");
+        let label = |p: &str| outside_label(Path::new(p), Some(home));
+        assert_eq!(
+            label("/Users/me/.cargo/registry/src/index.crates.io-6f17d22bba15001f/tokio-1.40.0/src/io/mod.rs"),
+            "tokio 1.40.0"
+        );
+        assert_eq!(
+            label("/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-util-0.7.12/src/lib.rs"),
+            "tokio-util 0.7.12"
+        );
+        assert_eq!(
+            label("/Users/me/.cargo/git/checkouts/floem-785aa715ca28b34b/d1184f2/src/views/tooltip.rs"),
+            "git: floem"
+        );
+        assert_eq!(
+            label("/Users/me/.rustup/toolchains/1.91.1-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs"),
+            "core"
+        );
+        assert_eq!(
+            label("/Users/me/.rustup/toolchains/stable/lib/rustlib/src/rust/library/std/src/io/mod.rs"),
+            "std"
+        );
+        assert_eq!(label("/Users/me/Code/other/src/lib.rs"), "Code/other/src/lib.rs");
+        assert_eq!(label("/opt/vendor/src/lib.rs"), "/opt/vendor/src/lib.rs");
+        assert_eq!(
+            outside_label(Path::new("/Users/me/Code/other/src/lib.rs"), None),
+            "/Users/me/Code/other/src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn the_history_goes_back_and_forward_and_drops_the_oldest() {
+        let place = |line: usize| Place { path: "src/a.rs".into(), line };
+        let mut history = History::default();
+        assert_eq!(history.back(place(0)), None);
+        assert_eq!(history.forward(place(0)), None);
+
+        // Two jumps: from 1 to 5, then from 5 to 9.
+        history.push(place(1));
+        history.push(place(5));
+
+        // Back lands on 5 with 9 kept ahead, then on 1 with 5 ahead.
+        assert_eq!(history.back(place(9)), Some(place(5)));
+        assert_eq!(history.back(place(5)), Some(place(1)));
+        assert_eq!(history.back(place(1)), None, "nothing before the first");
+        assert_eq!(history.forward(place(1)), Some(place(5)));
+        assert_eq!(history.forward(place(5)), Some(place(9)));
+        assert_eq!(history.forward(place(9)), None);
+
+        // A jump from the middle of the history clears what was ahead.
+        assert_eq!(history.back(place(9)), Some(place(5)));
+        history.push(place(5));
+        assert_eq!(history.forward(place(20)), None);
+        // And jumping twice from one place is one place, not two.
+        history.push(place(5));
+        assert_eq!(history.back(place(20)), Some(place(5)));
+        assert_eq!(history.back(place(5)), Some(place(1)));
+
+        let mut long = History::default();
+        for line in 0..(HISTORY_CAP + 10) {
+            long.push(place(line));
+        }
+        let mut back = 0;
+        while long.back(place(999)).is_some() {
+            back += 1;
+        }
+        assert_eq!(back, HISTORY_CAP, "the oldest were dropped");
+    }
+
+    #[test]
+    fn a_jump_remembers_where_it_left_and_the_keys_walk_the_history() {
+        let state = ReviewState::new();
+        let file = |path: &str| {
+            Arc::new(crate::backend::build_loaded_file(
+                path.into(),
+                "fn a() {}\nfn b() {}\nfn c() {}\n".into(),
+                String::new(),
+                None,
+                false,
+                Scope::Branch,
+                String::new(),
+            ))
+        };
+        state.open_tab("src/a.rs");
+        state.finish_load("src/a.rs", file("src/a.rs"));
+        state.last_position.set(Some((1, 3)));
+
+        // A jump to another file: the place left is a.rs line 1.
+        state.navigate_to("src/b.rs", 2, 3);
+        assert_eq!(state.pending_jump.get(), Some(("src/b.rs".into(), 2, 3)));
+
+        // The view opened b.rs and the caret landed on line 2.
+        state.pending_jump.set(None);
+        state.open_tab("src/b.rs");
+        state.finish_load("src/b.rs", file("src/b.rs"));
+        state.last_position.set(Some((2, 3)));
+
+        state.go_back();
+        assert_eq!(state.pending_jump.get(), Some(("src/a.rs".into(), 1, 0)));
+        state.pending_jump.set(None);
+        state.open_tab("src/a.rs");
+        state.last_position.set(Some((1, 0)));
+
+        state.go_forward();
+        assert_eq!(state.pending_jump.get(), Some(("src/b.rs".into(), 2, 0)));
+        state.pending_jump.set(None);
+        state.go_forward();
+        assert_eq!(state.pending_jump.get(), None, "nothing ahead");
+    }
+
+    #[test]
+    fn a_gotos_answer_opens_one_location_lists_several_and_drops_a_stale_one() {
+        let state = ReviewState::new();
+        let located = |path: &str, line: usize| Located {
+            path: path.into(),
+            outside: None,
+            line,
+            character: 4,
+            text: "x".into(),
+        };
+        state.goto.set(Some(GotoAsk { token: 7, symbol: "x".into(), kind: Locations::Definitions }));
+
+        // A stale token answers nothing and leaves the ask waiting.
+        state.finish_goto(6, vec![located("src/a.rs", 3)]);
+        assert_eq!(state.pending_jump.get(), None);
+        assert!(state.goto.get().is_some());
+
+        state.finish_goto(7, vec![located("src/a.rs", 3)]);
+        assert_eq!(state.pending_jump.get(), Some(("src/a.rs".into(), 2, 4)));
+        assert!(state.goto.get().is_none(), "the ask is answered");
+
+        state.pending_jump.set(None);
+        state.goto.set(Some(GotoAsk { token: 8, symbol: "x".into(), kind: Locations::Definitions }));
+        state.finish_goto(8, vec![located("src/a.rs", 3), located("src/b.rs", 9)]);
+        assert_eq!(state.pending_jump.get(), None, "several open the panel, not a file");
+        let panel = state.references.get().expect("the panel opened");
+        assert_eq!(panel.kind, Locations::Definitions);
+        assert_eq!(panel.symbol, "x");
+        assert_eq!(panel.locations.len(), 2);
+        assert!(!panel.pending);
+
+        state.goto.set(Some(GotoAsk { token: 9, symbol: "x".into(), kind: Locations::Definitions }));
+        state.finish_goto(9, vec![]);
+        assert_eq!(state.pending_jump.get(), None, "none does nothing");
     }
 }

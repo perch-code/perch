@@ -366,3 +366,6 @@ pub const REFERENCES_HEADER_HEIGHT: f64 = 30.0;
 pub const REFERENCES_GROUP_HEIGHT: f64 = 28.0;
 pub const REFERENCES_ROW_HEIGHT: f64 = 22.0;
 pub const REFERENCES_LINE_WIDTH: f64 = 48.0;
+/// The chip on a tab, and on a panel's file row, naming where a file
+/// outside the worktree is from.
+pub const ORIGIN_CHIP_HEIGHT: f64 = 16.0;

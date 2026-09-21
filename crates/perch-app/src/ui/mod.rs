@@ -259,9 +259,24 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         _ => {}
                     }
                 }
-                // Shift-F12 asks for references to the cursor's symbol.
+                // The navigation keys, VS Code's: F12 goes to the definition
+                // of the caret's symbol and Shift-F12 asks for its
+                // references; Ctrl-- and Ctrl-Shift-- walk the jumps back
+                // and forward.
+                if key.code == Code::F12 && key.modifiers.is_empty() {
+                    crate::review::navigation::definition_at_cursor(review, &references_backend);
+                    return EventPropagation::Stop;
+                }
                 if key.code == Code::F12 && key.modifiers == Modifiers::SHIFT {
                     crate::review::references::find_at_cursor(review, &references_backend);
+                    return EventPropagation::Stop;
+                }
+                if key.code == Code::Minus && key.modifiers == Modifiers::CONTROL {
+                    review.go_back();
+                    return EventPropagation::Stop;
+                }
+                if key.code == Code::Minus && key.modifiers == Modifiers::CONTROL | Modifiers::SHIFT {
+                    review.go_forward();
                     return EventPropagation::Stop;
                 }
                 // Escape backs out of a thread's Delete first.

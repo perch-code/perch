@@ -1,11 +1,13 @@
-//! Find references: the panel under the editor that lists where a symbol
-//! is used, and the asking that opens it.
+//! The panel under the editor that lists where a symbol is: its
+//! references, its implementations, or its definitions when there are
+//! several. One panel with a kind; the kind picks the words.
 //!
 //! The answer comes from rust-analyzer through the backend, which reads
 //! each location's line on the way so the panel needs no file loads. The
 //! rows are the changed list's rows with the line's text beside the line
 //! number, grouped by file, and a file the scope changed carries the same
-//! status letter here as in the rail.
+//! status letter here as in the rail. A file outside the worktree, in a
+//! dependency, is grouped under the label its tab's chip would show.
 
 use std::sync::Arc;
 
@@ -20,7 +22,7 @@ use perch_git::ChangeStatus;
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::model::{Reference, References, ReviewState};
+use crate::review::model::{Located, Locations, References, ReviewState, Symbol};
 use crate::review::OpenFile;
 use crate::theme;
 use crate::ui::widgets::{clickable, sidebar_glyph};
@@ -29,45 +31,65 @@ use crate::ui::widgets::{clickable, sidebar_glyph};
 // Asking
 // ---------------------------------------------------------------------
 
-/// Ask about the symbol on a head line of the active file: the one at
-/// `column` when given, else the first on the line. The panel opens at
-/// once, empty, and fills when the answer comes back with the same token.
-/// A column on nothing, such as a space or a bracket, asks nothing.
-pub fn find(state: ReviewState, backend: &Backend, head_line: usize, column: Option<usize>) {
-    let Some(file) = state.active_file() else { return };
-    let Some(display_line) = file.buffer.display_line(head_line) else { return };
-    let Some(text) = file.buffer.text.lines().nth(display_line) else { return };
-    let found = match column {
+/// The symbol on a head line of the active file: the one at `column` when
+/// given, else the first on the line. A column on nothing, such as a space
+/// or a bracket, is no symbol.
+pub fn symbol_on(state: ReviewState, head_line: usize, column: Option<usize>) -> Option<Symbol> {
+    let file = state.active_file()?;
+    let display_line = file.buffer.display_line(head_line)?;
+    let text = file.buffer.text.lines().nth(display_line)?;
+    let (start, symbol) = match column {
         Some(column) => identifier_at(text, column),
         None => first_identifier(text),
-    };
-    let Some((start, symbol)) = found else { return };
-
-    let token = state.next_token();
-    state.references.set(Some(Arc::new(References {
-        symbol: symbol.to_string(),
-        locations: Vec::new(),
-        elsewhere: 0,
-        pending: true,
-        token,
-    })));
-    backend.references(token, &file.path, head_line as u32, start as u32);
+    }?;
+    Some(Symbol {
+        path: file.path.clone(),
+        line: head_line,
+        column: start,
+        end: start + symbol.len(),
+        text: symbol.to_string(),
+    })
 }
 
-/// Find references from the keyboard. The symbol is the one under the
-/// last click when that click was on the cursor's line, else the first on
-/// the line: the editor's own cursor column is not reachable from the
-/// window's key handler, and the change nav moves the line without a
-/// click. A removed line has no place in the head file and asks nothing.
-pub fn find_at_cursor(state: ReviewState, backend: &Backend) {
-    let Some(file) = state.active_file() else { return };
-    let Some(head_line) = file.buffer.head_line(state.cursor_line.get()) else { return };
+/// The symbol the keys act on. It is the one under the last click when
+/// that click was on the cursor's line, else the first on the line: the
+/// editor's own cursor column is not reachable from the window's key
+/// handler, and the change nav moves the line without a click. A removed
+/// line has no place in the head file and is no symbol.
+pub fn symbol_at_cursor(state: ReviewState) -> Option<Symbol> {
+    let file = state.active_file()?;
+    let head_line = file.buffer.head_line(state.cursor_line.get())?;
     let column = state
         .last_position
         .get()
         .filter(|(line, _)| *line == head_line)
         .map(|(_, column)| column);
-    find(state, backend, head_line, column);
+    symbol_on(state, head_line, column)
+}
+
+/// Ask where a symbol is used. The panel opens at once, empty under its
+/// heading, and fills when the answer comes back with the same token.
+/// Nothing while the server is not there: the status line already says so.
+pub fn find(state: ReviewState, backend: &Backend, symbol: &Symbol) {
+    if !state.lsp_status.with(|s| s.is_usable()) {
+        return;
+    }
+    let token = state.next_token();
+    state.references.set(Some(Arc::new(References {
+        kind: Locations::References,
+        symbol: symbol.text.clone(),
+        locations: Vec::new(),
+        pending: true,
+        token,
+    })));
+    backend.references(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+}
+
+/// `Shift-F12`: the references to the symbol at the caret.
+pub fn find_at_cursor(state: ReviewState, backend: &Backend) {
+    if let Some(symbol) = symbol_at_cursor(state) {
+        find(state, backend, &symbol);
+    }
 }
 
 pub fn is_identifier_char(c: char) -> bool {
@@ -113,35 +135,40 @@ pub fn first_identifier(line: &str) -> Option<(usize, &str)> {
 // ---------------------------------------------------------------------
 
 /// The locations by file, files in the order they first appear. The
-/// backend sorts them by path and line, so that is path order with each
-/// file's lines ascending. Two references on one line are one entry: the
-/// row shows the line once, with both occurrences emphasised.
-pub fn group_by_file(locations: &[Reference]) -> Vec<(String, Vec<Reference>)> {
-    let mut groups: Vec<(String, Vec<Reference>)> = Vec::new();
-    for reference in locations {
-        match groups.iter_mut().find(|(path, _)| *path == reference.path) {
+/// backend sorts them by path and line, the worktree's files first, so
+/// that is path order with each file's lines ascending. Two references on
+/// one line are one entry: the row shows the line once, with both
+/// occurrences emphasised.
+pub fn group_by_file(locations: &[Located]) -> Vec<(String, Vec<Located>)> {
+    let mut groups: Vec<(String, Vec<Located>)> = Vec::new();
+    for located in locations {
+        match groups.iter_mut().find(|(path, _)| *path == located.path) {
             Some((_, lines)) => {
-                if !lines.iter().any(|r| r.line == reference.line) {
-                    lines.push(reference.clone());
+                if !lines.iter().any(|r| r.line == located.line) {
+                    lines.push(located.clone());
                 }
             }
-            None => groups.push((reference.path.clone(), vec![reference.clone()])),
+            None => groups.push((located.path.clone(), vec![located.clone()])),
         }
     }
     groups
 }
 
 /// "12 in 4 files", and "and 3 elsewhere" when some were in a dependency
-/// the panel cannot open. Empty while the answer is still on its way.
+/// or the standard library. Empty while the answer is still on its way.
 pub fn summary(references: &References) -> String {
     let groups = group_by_file(&references.locations);
-    let lines: usize = groups.iter().map(|(_, lines)| lines.len()).sum();
-    let here = match (lines, groups.len()) {
+    let (inside, outside): (Vec<_>, Vec<_>) = groups
+        .iter()
+        .partition(|(_, lines)| lines.first().is_some_and(|l| l.outside.is_none()));
+    let lines: usize = inside.iter().map(|(_, lines)| lines.len()).sum();
+    let here = match (lines, inside.len()) {
         (0, _) => String::new(),
         (n, 1) => format!("{n} in 1 file"),
         (n, files) => format!("{n} in {files} files"),
     };
-    match (here.is_empty(), references.elsewhere) {
+    let elsewhere: usize = outside.iter().map(|(_, lines)| lines.len()).sum();
+    match (here.is_empty(), elsewhere) {
         (_, 0) => here,
         (true, n) => format!("{n} elsewhere"),
         (false, n) => format!("{here} and {n} elsewhere"),
@@ -175,8 +202,9 @@ enum Row {
     /// One line while the answer is on its way, or when nothing here was
     /// found.
     Notice(String),
-    /// A file's heading: the path and how many lines under it.
-    File { path: String, count: usize, first: bool },
+    /// A file's heading: the path and how many lines under it, with the
+    /// chip's label for a file outside the worktree.
+    File { path: String, outside: Option<String>, count: usize, first: bool },
     /// A line of a file. Carries the symbol, so asking about another
     /// symbol on the same line draws the row again with the new emphasis.
     Location { path: String, line: usize, text: String, symbol: String },
@@ -185,16 +213,17 @@ enum Row {
 fn rows(references: &References) -> Vec<Row> {
     let groups = group_by_file(&references.locations);
     if groups.is_empty() {
-        let text = match references.elsewhere {
-            _ if references.pending => "Looking\u{2026}".to_string(),
-            0 => "None found.".to_string(),
-            n => format!("None in this worktree; {n} elsewhere."),
+        let text = if references.pending {
+            "Looking\u{2026}".to_string()
+        } else {
+            "None found.".to_string()
         };
         return vec![Row::Notice(text)];
     }
     let mut out = Vec::new();
     for (i, (path, lines)) in groups.into_iter().enumerate() {
-        out.push(Row::File { path, count: lines.len(), first: i == 0 });
+        let outside = lines.first().and_then(|l| l.outside.clone());
+        out.push(Row::File { path, outside, count: lines.len(), first: i == 0 });
         out.extend(lines.into_iter().map(|r| Row::Location {
             path: r.path,
             line: r.line,
@@ -249,13 +278,19 @@ fn body(state: ReviewState, open_file: OpenFile) -> impl IntoView {
     })
 }
 
-/// "References to `symbol`", the count, and the close glyph.
+/// "References to `symbol`", or the kind's words, the count, and the
+/// close glyph.
 fn header(state: ReviewState) -> impl IntoView {
+    let heading = move || {
+        state
+            .references
+            .with(|r| r.as_ref().map(|r| r.kind.heading().to_string()).unwrap_or_default())
+    };
     let symbol = move || state.references.with(|r| r.as_ref().map(|r| r.symbol.clone()).unwrap_or_default());
     let count = move || state.references.with(|r| r.as_ref().map(|r| summary(r)).unwrap_or_default());
 
     Stack::horizontal((
-        Label::derived(|| "References to".to_string()).style(|s| {
+        Label::derived(heading).style(|s| {
             s.font_size(theme::TEXT_META).color(theme::FG_MUTED).selectable(false).flex_shrink(0.0_f32)
         }),
         Label::derived(symbol).style(|s| {
@@ -310,7 +345,9 @@ fn list(state: ReviewState, open_file: OpenFile) -> impl IntoView {
         |row| row.clone(),
         move |row| match row {
             Row::Notice(text) => notice(text).into_any(),
-            Row::File { path, count, first } => file_row(state, open_file.clone(), path, count, first).into_any(),
+            Row::File { path, outside, count, first } => {
+                file_row(state, open_file.clone(), path, outside, count, first).into_any()
+            }
             Row::Location { path, line, text, symbol } => {
                 location_row(state, open_file.clone(), path, line, text, symbol).into_any()
             }
@@ -332,11 +369,21 @@ fn notice(text: String) -> impl IntoView {
 }
 
 /// A file's heading: the rail's marker and path, with the count of lines
-/// under it. Click opens the file at the top.
-fn file_row(state: ReviewState, open_file: OpenFile, path: String, count: usize, first: bool) -> impl IntoView {
-    let (directory, name) = match path.rfind('/') {
-        Some(i) => (path[..=i].to_string(), path[i + 1..].to_string()),
-        None => (String::new(), path.clone()),
+/// under it. A file outside the worktree shows its chip's label where the
+/// directory would be, since the directory is nowhere the reader knows.
+/// Click opens the file at the top.
+fn file_row(
+    state: ReviewState,
+    open_file: OpenFile,
+    path: String,
+    outside: Option<String>,
+    count: usize,
+    first: bool,
+) -> impl IntoView {
+    let (directory, name) = match (&outside, path.rfind('/')) {
+        (Some(_), i) => (String::new(), path[i.map_or(0, |i| i + 1)..].to_string()),
+        (None, Some(i)) => (path[..=i].to_string(), path[i + 1..].to_string()),
+        (None, None) => (String::new(), path.clone()),
     };
     let status_path = path.clone();
     let status = move || state.status_of(&status_path);
@@ -350,6 +397,12 @@ fn file_row(state: ReviewState, open_file: OpenFile, path: String, count: usize,
                 .style(|s| s.width(14.0).margin_right(6.0).flex_shrink(0.0_f32))
                 .into_any(),
         }),
+        match outside {
+            Some(label) => crate::review::tabs::origin_chip(label)
+                .style(|s| s.margin_right(6.0))
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
         Label::derived(move || directory.clone()).style(|s| {
             s.font_size(theme::TEXT_META)
                 .color(theme::FG_SUBTLE)
@@ -563,8 +616,16 @@ fn resize_cursor_sheet(resizing: RwSignal<bool>) -> impl IntoView {
 mod tests {
     use super::*;
 
-    fn reference(path: &str, line: usize, character: usize, text: &str) -> Reference {
-        Reference { path: path.into(), line, character, text: text.into() }
+    fn reference(path: &str, line: usize, character: usize, text: &str) -> Located {
+        Located { path: path.into(), outside: None, line, character, text: text.into() }
+    }
+
+    fn outside(path: &str, label: &str, line: usize, text: &str) -> Located {
+        Located { path: path.into(), outside: Some(label.into()), line, character: 0, text: text.into() }
+    }
+
+    fn references(symbol: &str, locations: Vec<Located>, pending: bool) -> References {
+        References { kind: Locations::References, symbol: symbol.into(), locations, pending, token: 0 }
     }
 
     #[test]
@@ -622,38 +683,68 @@ mod tests {
         let locations = vec![reference("a.rs", 3, 4, "foo(foo)"), reference("a.rs", 3, 8, "foo(foo)")];
         let groups = group_by_file(&locations);
         assert_eq!(groups[0].1.len(), 1);
-        let rows = rows(&References { symbol: "foo".into(), locations, elsewhere: 0, pending: false, token: 0 });
+        let rows = rows(&references("foo", locations, false));
         assert_eq!(rows.len(), 2, "a heading and one line");
-        assert_eq!(rows[0], Row::File { path: "a.rs".into(), count: 1, first: true });
+        assert_eq!(rows[0], Row::File { path: "a.rs".into(), outside: None, count: 1, first: true });
     }
 
     #[test]
     fn the_summary_counts_lines_files_and_the_rest() {
-        let one = References { symbol: "s".into(), locations: vec![reference("a.rs", 1, 0, "")], elsewhere: 0, pending: false, token: 0 };
+        let one = references("s", vec![reference("a.rs", 1, 0, "")], false);
         assert_eq!(summary(&one), "1 in 1 file");
 
-        let many = References {
-            symbol: "s".into(),
-            locations: vec![
+        let many = references(
+            "s",
+            vec![
                 reference("a.rs", 1, 0, ""),
                 reference("a.rs", 2, 0, ""),
                 reference("b.rs", 1, 0, ""),
+                outside("/r/tokio-1.40.0/src/lib.rs", "tokio 1.40.0", 3, ""),
+                outside("/r/tokio-1.40.0/src/lib.rs", "tokio 1.40.0", 9, ""),
+                outside("/r/serde-1.0.0/src/de.rs", "serde 1.0.0", 1, ""),
             ],
-            elsewhere: 3,
-            pending: false,
-            token: 0,
-        };
+            false,
+        );
         assert_eq!(summary(&many), "3 in 2 files and 3 elsewhere");
 
-        let looking = References { symbol: "s".into(), locations: vec![], elsewhere: 0, pending: true, token: 0 };
+        let looking = references("s", vec![], true);
         assert_eq!(summary(&looking), "");
         assert_eq!(rows(&looking), vec![Row::Notice("Looking\u{2026}".into())]);
 
-        let none = References { symbol: "s".into(), locations: vec![], elsewhere: 0, pending: false, token: 0 };
+        let none = references("s", vec![], false);
         assert_eq!(rows(&none), vec![Row::Notice("None found.".into())]);
 
-        let away = References { symbol: "s".into(), locations: vec![], elsewhere: 2, pending: false, token: 0 };
+        let away = references("s", vec![outside("/r/x-1.0.0/src/lib.rs", "x 1.0.0", 1, ""), outside("/r/x-1.0.0/src/lib.rs", "x 1.0.0", 2, "")], false);
         assert_eq!(summary(&away), "2 elsewhere");
+    }
+
+    #[test]
+    fn an_outside_file_is_grouped_under_its_chips_label() {
+        let listed = references(
+            "Read",
+            vec![
+                reference("src/a.rs", 4, 0, "impl Read for A"),
+                outside("/r/tokio-1.40.0/src/io.rs", "tokio 1.40.0", 7, "impl Read for B"),
+            ],
+            false,
+        );
+        let rows = rows(&listed);
+        assert_eq!(rows[0], Row::File { path: "src/a.rs".into(), outside: None, count: 1, first: true });
+        assert_eq!(
+            rows[2],
+            Row::File {
+                path: "/r/tokio-1.40.0/src/io.rs".into(),
+                outside: Some("tokio 1.40.0".into()),
+                count: 1,
+                first: false
+            }
+        );
+    }
+
+    #[test]
+    fn the_heading_reads_the_kind() {
+        assert_eq!(Locations::References.heading(), "References to");
+        assert_eq!(Locations::Definitions.heading(), "Definitions of");
     }
 
     #[test]
@@ -667,8 +758,8 @@ mod tests {
     #[test]
     fn rows_carry_the_symbol_so_a_new_question_redraws_them() {
         let locations = vec![reference("a.rs", 1, 0, "a b")];
-        let a = rows(&References { symbol: "a".into(), locations: locations.clone(), elsewhere: 0, pending: false, token: 0 });
-        let b = rows(&References { symbol: "b".into(), locations, elsewhere: 0, pending: false, token: 0 });
+        let a = rows(&references("a", locations.clone(), false));
+        let b = rows(&references("b", locations, false));
         assert_ne!(a[1], b[1]);
     }
 }
@@ -746,6 +837,7 @@ mod window {
         state.tab.set(crate::review::model::ItemTab::Files);
         state.pull_request.set(Some(Arc::new(pr)));
         state.composer_autofocus.set(false);
+        state.lsp_status.set(perch_lsp::Status::Ready);
         let backend = crate::backend::Backend::detached();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, HEIGHT);
@@ -791,20 +883,28 @@ mod window {
     }
 
     fn answered(symbol: &str) -> Arc<References> {
-        let reference = |path: &str, line: usize, text: &str| Reference {
+        let reference = |path: &str, line: usize, text: &str| Located {
             path: path.into(),
+            outside: None,
             line,
             character: 0,
             text: text.into(),
         };
         Arc::new(References {
+            kind: Locations::References,
             symbol: symbol.into(),
             locations: vec![
                 reference("src/x.rs", 1, "fn alpha() {}"),
                 reference("src/x.rs", 3, "alpha();"),
                 reference("src/y.rs", 7, "let a = alpha();"),
+                Located {
+                    path: "/deps/tokio-1.40.0/src/lib.rs".into(),
+                    outside: Some("tokio 1.40.0".into()),
+                    line: 2,
+                    character: 0,
+                    text: "alpha".into(),
+                },
             ],
-            elsewhere: 1,
             pending: false,
             token: 0,
         })

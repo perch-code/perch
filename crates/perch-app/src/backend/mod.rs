@@ -621,18 +621,17 @@ pub enum Event {
         token: u64,
         markdown: String,
     },
-    /// A definition inside the worktree, or `None` when it lands outside it.
+    /// Every location a definition names, with each line's text. The app
+    /// opens one and lists several; the backend does not decide.
     LspDefinition {
         token: u64,
-        path: Option<String>,
-        line: u32,
+        locations: Vec<crate::review::model::Located>,
     },
-    /// Every use of a symbol inside the worktree, with the line's text, and
-    /// how many uses lie outside it.
+    /// Every use of a symbol, with the line's text, those outside the
+    /// worktree among them.
     LspReferences {
         token: u64,
-        references: Vec<crate::review::model::Reference>,
-        elsewhere: usize,
+        locations: Vec<crate::review::model::Located>,
     },
 }
 
@@ -1919,14 +1918,22 @@ impl Backend {
     /// to GitHub.
     #[cfg(test)]
     pub fn detached() -> Self {
-        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
-        Backend {
+        Self::recording().0
+    }
+
+    /// A handle whose commands go nowhere but a channel the test holds, so
+    /// a test can see what the window asked for.
+    #[cfg(test)]
+    pub fn recording() -> (Self, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+        let (commands, received) = tokio::sync::mpsc::unbounded_channel();
+        let backend = Backend {
             commands,
             navigation_requests: Arc::default(),
             scope_requests: Arc::default(),
             merge_attempts: Arc::default(),
             pull_request_review_attempts: Arc::default(),
-        }
+        };
+        (backend, received)
     }
 }
 
@@ -2882,12 +2889,8 @@ async fn run(
                         .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
                     let Some(worktree) = worktree else { return };
                     let locations = client.references(&full, line, character).await;
-                    let (references, elsewhere) = read_references(&worktree, &locations).await;
-                    let _ = events.send(Event::LspReferences {
-                        token,
-                        references,
-                        elsewhere,
-                    });
+                    let locations = read_locations(&worktree, &locations).await;
+                    let _ = events.send(Event::LspReferences { token, locations });
                 });
             }
             Command::Definition {
@@ -2909,21 +2912,9 @@ async fn run(
                         .ok()
                         .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
                     let Some(worktree) = worktree else { return };
-
-                    if let Some(location) = client.definition(&full, line, character).await.first()
-                    {
-                        // A definition inside the worktree opens as a tab; one
-                        // in a dependency has no path the rail can show.
-                        let target = perch_lsp::client::uri_to_path(&location.uri.to_string());
-                        let relative = target
-                            .and_then(|p| p.strip_prefix(&worktree).ok().map(|r| r.to_path_buf()))
-                            .map(|r| r.to_string_lossy().into_owned());
-                        let _ = events.send(Event::LspDefinition {
-                            token,
-                            path: relative,
-                            line: location.range.start.line,
-                        });
-                    }
+                    let locations = client.definition(&full, line, character).await;
+                    let locations = read_locations(&worktree, &locations).await;
+                    let _ = events.send(Event::LspDefinition { token, locations });
                 });
             }
             Command::CloseReview { navigation_id } => {
@@ -9426,49 +9417,61 @@ async fn resolve(
     Some((client, worktree.join(path)))
 }
 
-/// Each location inside the worktree with its line's text, read here so
-/// the panel needs no file loads, and a count of those outside it, in a
-/// dependency, which the rail could not open. Files are read once each.
-async fn read_references(
+/// Each location with its line's text, read here so the panel needs no
+/// file loads. A location inside the worktree is relative to it; one
+/// outside, in a dependency or the standard library, keeps its absolute
+/// path and carries the label its tab's chip shows. Files are read once
+/// each. Sorted by path and line, the worktree's files first, and a
+/// location named twice is listed once.
+async fn read_locations(
     worktree: &Path,
     locations: &[perch_lsp::lsp_types::Location],
-) -> (Vec<crate::review::model::Reference>, usize) {
-    let mut texts: std::collections::HashMap<String, Vec<String>> =
+) -> Vec<crate::review::model::Located> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut texts: std::collections::HashMap<std::path::PathBuf, Vec<String>> =
         std::collections::HashMap::new();
     let mut out = Vec::new();
-    let mut elsewhere = 0;
     for location in locations {
-        let target = perch_lsp::client::uri_to_path(&location.uri.to_string());
-        let Some(relative) = target.and_then(|p| {
-            p.strip_prefix(worktree)
-                .ok()
-                .map(|r| r.to_string_lossy().into_owned())
-        }) else {
-            elsewhere += 1;
+        let Some(target) = perch_lsp::client::uri_to_path(&location.uri.to_string()) else {
             continue;
         };
-        if !texts.contains_key(&relative) {
-            let lines = tokio::fs::read_to_string(worktree.join(&relative))
+        let (path, outside) = match target.strip_prefix(worktree) {
+            Ok(relative) => (relative.to_string_lossy().into_owned(), None),
+            Err(_) => (
+                target.to_string_lossy().into_owned(),
+                Some(crate::review::model::outside_label(&target, home.as_deref())),
+            ),
+        };
+        if !texts.contains_key(&target) {
+            let lines = tokio::fs::read_to_string(&target)
                 .await
                 .map(|t| t.lines().map(str::to_string).collect())
                 .unwrap_or_default();
-            texts.insert(relative.clone(), lines);
+            texts.insert(target.clone(), lines);
         }
         let line = location.range.start.line as usize;
-        let text = texts[&relative]
+        let text = texts[&target]
             .get(line)
             .map(|l| l.trim().to_string())
             .unwrap_or_default();
-        out.push(crate::review::model::Reference {
-            path: relative,
+        out.push(crate::review::model::Located {
+            path,
+            outside,
             line: line + 1,
             character: location.range.start.character as usize,
             text,
         });
     }
-    out.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+    out.sort_by(|a, b| {
+        a.outside
+            .is_some()
+            .cmp(&b.outside.is_some())
+            .then_with(|| a.path.cmp(&b.path))
+            .then(a.line.cmp(&b.line))
+            .then(a.character.cmp(&b.character))
+    });
     out.dedup();
-    (out, elsewhere)
+    out
 }
 
 /// Flatten a hover reply into the markdown the tooltip renders.

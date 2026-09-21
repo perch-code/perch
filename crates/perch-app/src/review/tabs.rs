@@ -119,6 +119,23 @@ fn tab_view(state: ReviewState, path: String) -> impl IntoView {
     })
 }
 
+/// The chip naming where a file outside the worktree is from: `tokio
+/// 1.40.0`, `std`, `git: floem`. In the muted colour, so it reads as a
+/// note on the name and not as a badge.
+pub fn origin_chip(label: String) -> impl IntoView {
+    Label::derived(move || label.clone()).style(|s| {
+        s.font_size(theme::TEXT_SECTION)
+            .color(theme::FG_MUTED)
+            .height(theme::ORIGIN_CHIP_HEIGHT)
+            .padding_horiz(5.0)
+            .items_center()
+            .border_radius(4.0)
+            .background(theme::BADGE_BG)
+            .flex_shrink(0.0_f32)
+            .selectable(false)
+    })
+}
+
 /// A dot coloured by language, standing in for a file-type icon.
 fn language_dot(state: ReviewState, path: String) -> impl IntoView {
     let color = move || theme::language_color(state.file(&path).and_then(|f| f.language));
