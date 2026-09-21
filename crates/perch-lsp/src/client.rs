@@ -11,12 +11,12 @@ use lsp_types::{
     CallHierarchyClientCapabilities, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, ClientCapabilities, DocumentHighlight,
-    DocumentHighlightClientCapabilities, DocumentHighlightParams, GotoCapability,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverClientCapabilities, HoverParams,
-    InitializeParams, InitializedParams, Location, MarkupKind, Position,
-    PublishDiagnosticsParams, ReferenceContext, ReferenceParams, TextDocumentClientCapabilities,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Uri,
-    WindowClientCapabilities, WorkDoneProgressParams,
+    DocumentHighlightClientCapabilities, DocumentHighlightParams, GeneralClientCapabilities,
+    GotoCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverClientCapabilities,
+    HoverParams, InitializeParams, InitializeResult, InitializedParams, Location, MarkupKind,
+    Position, PositionEncodingKind, PublishDiagnosticsParams, ReferenceContext, ReferenceParams,
+    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, Uri, WindowClientCapabilities, WorkDoneProgressParams,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -155,17 +155,40 @@ impl Client {
                     work_done_progress: Some(true),
                     ..Default::default()
                 }),
+                // Columns are byte offsets on both sides here: the caller
+                // counts bytes, and so does what it reads back. The protocol
+                // defaults to UTF-16 code units, which agree only on ASCII,
+                // so UTF-8 is asked for first. rust-analyzer grants it.
+                general: Some(GeneralClientCapabilities {
+                    position_encodings: Some(vec![
+                        PositionEncodingKind::UTF8,
+                        PositionEncodingKind::UTF16,
+                    ]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
         };
 
-        self.request(
-            "initialize",
-            serde_json::to_value(params).unwrap_or(Value::Null),
-            LIFECYCLE_TIMEOUT,
-        )
-        .await?;
+        let result = self
+            .request(
+                "initialize",
+                serde_json::to_value(params).unwrap_or(Value::Null),
+                LIFECYCLE_TIMEOUT,
+            )
+            .await?;
+        let encoding = decode_result::<InitializeResult>(result)
+            .and_then(|r| r.capabilities.position_encoding)
+            .unwrap_or(PositionEncodingKind::UTF16);
+        if encoding != PositionEncodingKind::UTF8 {
+            // Nothing here converts: a column on a line with a multi-byte
+            // character before it will be off by the difference.
+            tracing::warn!(
+                encoding = encoding.as_str(),
+                "the language server counts positions in an encoding other than UTF-8"
+            );
+        }
         self.notify(
             "initialized",
             serde_json::to_value(InitializedParams {}).unwrap_or(Value::Null),
@@ -572,23 +595,30 @@ pub fn path_to_uri(path: &Path) -> Option<Uri> {
 }
 
 /// The path behind a `file://` URI, for a definition that lands in a file.
+///
+/// Percent-escapes decode to bytes, and the bytes are read as UTF-8 once
+/// they are all in: a character encoded as several escapes is one
+/// character again, not one per escape.
 pub fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
     let rest = uri.strip_prefix("file://")?;
-    let mut out = String::with_capacity(rest.len());
+    let mut out = Vec::with_capacity(rest.len());
     let bytes = rest.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
-                out.push(byte as char);
+            if let Some(byte) = rest
+                .get(i + 1..i + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            {
+                out.push(byte);
                 i += 3;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    Some(std::path::PathBuf::from(out))
+    Some(std::path::PathBuf::from(String::from_utf8_lossy(&out).into_owned()))
 }
 
 #[cfg(test)]
@@ -611,6 +641,21 @@ mod tests {
         let uri = path_to_uri(path).unwrap();
         assert!(uri.to_string().contains("%20"), "{uri:?}");
         assert_eq!(uri_to_path(&uri.to_string()).as_deref(), Some(path));
+    }
+
+    #[test]
+    fn a_path_with_a_multi_byte_character_survives_the_round_trip() {
+        // "é" is two bytes, so two escapes; decoded one at a time they
+        // would read as two Latin-1 characters.
+        let path = Path::new("/Users/rené/code/src/main.rs");
+        let uri = path_to_uri(path).unwrap();
+        assert!(uri.to_string().contains("ren%C3%A9"), "{uri:?}");
+        assert_eq!(uri_to_path(&uri.to_string()).as_deref(), Some(path));
+        // An escape cut off by the end of the string is left as it is.
+        assert_eq!(
+            uri_to_path("file:///a/b%4").as_deref(),
+            Some(Path::new("/a/b%4"))
+        );
     }
 
     #[test]
