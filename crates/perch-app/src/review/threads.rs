@@ -42,6 +42,21 @@ pub fn model_label(model: &str) -> String {
     }
 }
 
+/// Whether the command a box's keymap resolved a key to is Cmd-Enter,
+/// which sends. floem binds Cmd-Enter to `NewLineBelow`, a command of its
+/// own, not to Enter's `InsertNewLine` with the modifier held; a box for
+/// a question has no use for a line opened under the caret, so either
+/// command with Cmd held is Send.
+pub fn cmd_enter(cmd: &floem::views::editor::text_document::PreCommand<'_>) -> bool {
+    use floem::views::editor::command::Command;
+    use floem::views::editor::core::command::EditCommand;
+
+    matches!(
+        cmd.cmd,
+        Command::Edit(EditCommand::InsertNewLine | EditCommand::NewLineBelow)
+    ) && cmd.mods.contains(Modifiers::META)
+}
+
 /// What a fresh composer starts on: the last thing sent, else config.
 pub fn defaults(app: AppState) -> AgentChoice {
     app.agent.with(default_choice)
@@ -111,8 +126,7 @@ pub fn composer_view(
     composer: Composer,
     face: ThreadFace,
 ) -> impl IntoView {
-    use floem::views::editor::command::{Command, CommandExecuted};
-    use floem::views::editor::core::command::EditCommand;
+    use floem::views::editor::command::CommandExecuted;
     use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
     use floem::views::editor::core::selection::Selection;
 
@@ -203,12 +217,9 @@ pub fn composer_view(
     let escape_text = read_text.clone();
 
     let editor = editor
-        // Cmd-Enter sends. The editor would otherwise take Enter for a new
-        // line whatever the modifiers.
+        // Cmd-Enter sends, before the editor can take it for a line.
         .pre_command(move |cmd| {
-            if matches!(cmd.cmd, Command::Edit(EditCommand::InsertNewLine))
-                && cmd.mods.contains(Modifiers::META)
-            {
+            if cmd_enter(&cmd) {
                 key_send();
                 return CommandExecuted::Yes;
             }
@@ -1454,7 +1465,11 @@ pub fn reply_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::Command;
+    use floem::headless::{HeadlessHarness, TestRoot};
+    use floem::prelude::{Code, Key, KeyState, KeyboardEvent, NamedKey};
     use perch_github::RunStep;
+    use std::sync::Arc;
 
     fn step(summary: &str, ok: bool) -> RunStep {
         RunStep {
@@ -1484,6 +1499,64 @@ mod tests {
         assert_eq!(model_label("sonnet"), "Sonnet");
         assert_eq!(model_label("fable"), "Fable");
         assert_eq!(model_label("claude-sonnet-5"), "claude-sonnet-5");
+    }
+
+    fn enter(modifiers: Modifiers) -> floem::event::Event {
+        floem::event::Event::Key(KeyboardEvent {
+            state: KeyState::Down,
+            key: Key::Named(NamedKey::Enter),
+            code: Code::Enter,
+            location: Default::default(),
+            modifiers,
+            repeat: false,
+            is_composing: false,
+        })
+    }
+
+    /// Enter breaks the line and Cmd-Enter sends. The keys go through the
+    /// box rather than to the handler: floem's own keymap decides what a
+    /// key is a command for, and Cmd-Enter is not Enter with a modifier
+    /// to it.
+    #[test]
+    fn enter_breaks_the_line_and_cmd_enter_sends() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut item =
+            perch_github::Item::new("acme/repo", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "item-1".into();
+        state.item.set(Some(Arc::new(item)));
+        state.open_composer(
+            None,
+            None,
+            "why?".into(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let text_box = state.composer_box.get().expect("the box registered itself");
+        assert!(harness.is_focused(text_box), "the box took the keyboard");
+
+        harness.dispatch_event(enter(Modifiers::empty()));
+        harness.rebuild();
+        assert_eq!(state.composer_draft.get(), "why?\n");
+        assert!(commands.try_recv().is_err(), "Enter sent the question");
+
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        match commands.try_recv() {
+            Ok(Command::Ask { question, .. }) => assert_eq!(question, "why?"),
+            other => panic!("Cmd-Enter did not send: {other:?}"),
+        }
+        assert!(state.composer.get().is_none(), "sending closes the composer");
     }
 
     #[test]

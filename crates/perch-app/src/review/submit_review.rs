@@ -273,8 +273,9 @@ fn popover(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
 }
 
 fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
-    use floem::views::editor::command::{Command, CommandExecuted};
-    use floem::views::editor::core::command::EditCommand;
+    use floem::views::editor::command::CommandExecuted;
+
+    use crate::review::threads::cmd_enter;
 
     let editor = text_editor(state.submit_review_draft.get_untracked())
         .placeholder("Leave a review…".to_string())
@@ -287,10 +288,9 @@ fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
     ));
     let key_submit = submit.clone();
     let editor = editor
+        // Cmd-Enter submits, before the editor can take it for a line.
         .pre_command(move |cmd| {
-            if matches!(cmd.cmd, Command::Edit(EditCommand::InsertNewLine))
-                && cmd.mods.contains(Modifiers::META)
-            {
+            if cmd_enter(&cmd) {
                 key_submit();
                 return CommandExecuted::Yes;
             }
@@ -742,6 +742,7 @@ fn event_slug(event: PullReviewEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::Command;
     use crate::state::AppState;
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::prelude::{Key, KeyState, Modifiers, NamedKey};
@@ -773,6 +774,18 @@ mod tests {
             code,
             location: Default::default(),
             modifiers: Modifiers::empty(),
+            repeat: false,
+            is_composing: false,
+        })
+    }
+
+    fn enter(modifiers: Modifiers) -> floem::event::Event {
+        floem::event::Event::Key(KeyboardEvent {
+            state: KeyState::Down,
+            key: Key::Named(NamedKey::Enter),
+            code: Code::Enter,
+            location: Default::default(),
+            modifiers,
             repeat: false,
             is_composing: false,
         })
@@ -883,6 +896,42 @@ mod tests {
         crate::review::review_launch::open_launcher(AppState::new(), state, &backend, None);
         assert!(!state.submit_review_open.get_untracked());
         assert!(state.review_launcher_open.get_untracked());
+    }
+
+    /// Enter breaks the line and Cmd-Enter submits, through the box's
+    /// own keymap, which has a command of its own for Cmd-Enter.
+    #[test]
+    fn enter_breaks_the_line_and_cmd_enter_submits() {
+        let root = TestRoot::new();
+        let state = review_state();
+        state.submit_review_autofocus.set(true);
+        state.submit_review_draft.set("Looks good".into());
+        open(state, None);
+        let (backend, mut commands) = Backend::recording();
+        let view = control(state, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+
+        harness.dispatch_event(enter(Modifiers::empty()));
+        harness.rebuild();
+        assert_eq!(
+            state.submit_review_draft.get(),
+            "\nLooks good",
+            "Enter is a new line at the caret, which starts at the top"
+        );
+        assert!(commands.try_recv().is_err(), "Enter submitted the review");
+
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        match commands.try_recv() {
+            Ok(Command::SubmitPullRequestReview { body, event, .. }) => {
+                assert_eq!(body, "Looks good");
+                assert_eq!(event, PullReviewEvent::Comment);
+            }
+            other => panic!("Cmd-Enter did not submit: {other:?}"),
+        }
+        assert!(state.submit_review_pending.get().is_some());
     }
 
     #[test]
