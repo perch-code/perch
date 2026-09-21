@@ -1558,6 +1558,96 @@ mod tests {
         assert!(state.composer.get().is_none(), "sending closes the composer");
     }
 
+    fn key(key: Key, code: Code, modifiers: Modifiers) -> floem::event::Event {
+        floem::event::Event::Key(KeyboardEvent {
+            state: KeyState::Down,
+            key,
+            code,
+            location: Default::default(),
+            modifiers,
+            repeat: false,
+            is_composing: false,
+        })
+    }
+
+    /// Option-Left and Option-Right move the caret a word at a time, as in
+    /// any native box, and the box keeps the keyboard through them. Alt
+    /// with an arrow is also the key floem walks the focus with, and a
+    /// button beside the box used to take it, with the next keystroke.
+    #[test]
+    fn option_arrows_move_the_caret_by_a_word_and_keep_the_keyboard() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut item =
+            perch_github::Item::new("acme/repo", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "item-1".into();
+        state.item.set(Some(Arc::new(item)));
+        state.open_composer(
+            None,
+            None,
+            "why not now".into(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
+        let composer = state.composer.get().unwrap();
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let composer = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        // Somewhere for the focus to go on either side, as the window has.
+        let button = |label: &'static str| {
+            floem::views::Button::new(label).style(|s| s.keyboard_navigable().width(80.0))
+        };
+        let view =
+            Stack::horizontal((button("left"), composer, button("right"))).style(|s| s.size_full());
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let text_box = state.composer_box.get().expect("the box registered itself");
+        assert!(harness.is_focused(text_box), "the box took the keyboard");
+
+        let alt = |code: Code, name: NamedKey| key(Key::Named(name), code, Modifiers::ALT);
+        let typed = |ch: &str, code: Code| key(Key::Character(ch.into()), code, Modifiers::empty());
+
+        // The draft is typed under, so the caret starts at its end.
+        harness.dispatch_event(alt(Code::ArrowLeft, NamedKey::ArrowLeft));
+        harness.dispatch_event(typed("X", Code::KeyX));
+        harness.rebuild();
+        assert_eq!(
+            state.composer_draft.get(),
+            "why not Xnow",
+            "back to the start of the word"
+        );
+        assert!(
+            harness.is_focused(text_box),
+            "and the box kept the keyboard"
+        );
+
+        harness.dispatch_event(alt(Code::ArrowRight, NamedKey::ArrowRight));
+        harness.dispatch_event(typed("Y", Code::KeyY));
+        harness.rebuild();
+        assert_eq!(
+            state.composer_draft.get(),
+            "why not XnowY",
+            "forward to the end of the word"
+        );
+        assert!(harness.is_focused(text_box));
+
+        // Three words back is the front, and one more has nowhere to go.
+        for _ in 0..4 {
+            harness.dispatch_event(alt(Code::ArrowLeft, NamedKey::ArrowLeft));
+        }
+        harness.dispatch_event(typed("A", Code::KeyA));
+        harness.rebuild();
+        assert_eq!(state.composer_draft.get(), "Awhy not XnowY");
+        assert!(
+            harness.is_focused(text_box),
+            "the box keeps the keyboard at its front too"
+        );
+    }
+
     #[test]
     fn a_fresh_composer_starts_on_a_model_that_is_offered() {
         use perch_agent::{Backend, Effort};

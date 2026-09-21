@@ -46,10 +46,12 @@ codegen-units = 4
 # that keeps the word a double click selects, which the pointer move
 # macOS sends before the release used to cut off at the pointer (a drag
 # after a double or triple click now grows the selection by words or lines),
-# and one that keys vger's glyph atlas on the face and the variation
+# one that keys vger's glyph atlas on the face and the variation
 # coordinates as well as the file, without which Regular and Bold from one
-# .ttc share a bitmap. Drop a patch from the branch once upstream merges
-# it; `cargo update -p floem`
+# .ttc share a bitmap, and one that keeps the focus in a text box through
+# Alt with an arrow, which moves the cursor by a word there and would
+# otherwise also walk the focus off to a neighbour. Drop a patch from the
+# branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
 # and there is one `usvg::Tree` for a picture to be parsed into and drawn.
