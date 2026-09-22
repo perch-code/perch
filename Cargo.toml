@@ -48,9 +48,13 @@ codegen-units = 4
 # after a double or triple click now grows the selection by words or lines),
 # one that keys vger's glyph atlas on the face and the variation
 # coordinates as well as the file, without which Regular and Bold from one
-# .ttc share a bitmap, and one that keeps the focus in a text box through
+# .ttc share a bitmap, one that keeps the focus in a text box through
 # Alt with an arrow, which moves the cursor by a word there and would
-# otherwise also walk the focus off to a neighbour. Drop a patch from the
+# otherwise also walk the focus off to a neighbour, and one that moves
+# floem from taffy 0.9 to 0.13, whose grid no longer runs `auto` tracks
+# past their container (https://github.com/DioxusLabs/taffy/pull/1001):
+# a markdown table at its own width drew its last column over its border
+# and its last row under it. Drop a patch from the
 # branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,

@@ -1273,7 +1273,7 @@ fn table_view(align: Vec<Align>, head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>>
         .style(move |s| {
             s.grid()
                 .grid_template_columns(template.clone())
-                .align_self(floem::taffy::AlignItems::FlexStart)
+                .align_self(floem::taffy::AlignItems::FLEX_START)
                 .max_width_full()
                 .border(1.0)
                 .border_color(theme::BORDER)
@@ -1984,9 +1984,14 @@ mod tests {
 
         /// The markdown laid out in a column `WIDTH` wide.
         fn harness(markdown: &str) -> HeadlessHarness {
+            harness_at(markdown, WIDTH)
+        }
+
+        /// The markdown laid out in a column `width` wide.
+        fn harness_at(markdown: &str, width: f64) -> HeadlessHarness {
             let root = TestRoot::new();
-            let view = Container::new(render(markdown)).style(|s| s.width(WIDTH).padding(0.0));
-            let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 2000.0);
+            let view = Container::new(render(markdown)).style(move |s| s.width(width).padding(0.0));
+            let mut harness = HeadlessHarness::new_with_size(root, view, width, 2000.0);
             harness.rebuild();
             harness.paint();
             harness
@@ -2053,6 +2058,43 @@ mod tests {
             let short = rect(&h, "cell:0:0");
             let tall = rect(&h, "cell:1:0");
             assert!(tall.height() > short.height() * 3.0, "the long cell wraps: {short:?} {tall:?}");
+        }
+
+        /// A table with room to spare is as wide as its words and holds
+        /// them all. taffy 0.9's grid, sharing that width out between
+        /// columns that reached theirs at different times, gave some more
+        /// than their words and others less: the last column ran over the
+        /// border, and a header that had room wrapped, pushing the last
+        /// row out under it.
+        #[test]
+        fn a_table_that_fits_keeps_its_cells_inside_its_border() {
+            let h = harness_at(
+                "| Rows | L0/runs/SSTs | Reader | p50 | p99 | keys/s | GETs | Rounds |\n\
+                 |---|---|---|---|---|---|---|---|\n\
+                 | 1M | 2/0/2 | seq | 0.870 ms | 1.104 ms | 110k | 0.0 | |\n\
+                 | | | concurrent | 1.088 ms | 1.327 ms | 90k | 0.0 | |\n\
+                 | | | multi-get | 0.360 ms | 0.432 ms | 269k | 0.0 | 1.41 |",
+                700.0,
+            );
+            let mut all = Vec::new();
+            find_all(h.root_id(), "table", &mut all);
+            assert_eq!(all.len(), 1);
+            let table = all[0].get_visual_rect_no_clip();
+            assert!(table.width() < 650.0, "content-wide: {table:?}");
+            let mut cells = Vec::new();
+            find_all(h.root_id(), "cell:", &mut cells);
+            assert_eq!(cells.len(), 32);
+            for cell in cells {
+                let rect = cell.get_visual_rect_no_clip();
+                assert!(
+                    rect.x1 <= table.x1 + 0.5 && rect.y1 <= table.y1 + 0.5,
+                    "{} runs out of {table:?}: {rect:?}",
+                    cell.debug_name()
+                );
+            }
+            let head = rect(&h, "cell:0:1");
+            let body = rect(&h, "cell:1:1");
+            assert_eq!(head.height(), body.height(), "the header keeps to one line");
         }
 
         #[test]
