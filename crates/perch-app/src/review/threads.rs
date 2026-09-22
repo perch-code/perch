@@ -462,9 +462,10 @@ pub fn composer_view(
             }),
         ))
         .style(|s| s.items_center().width_full().margin_bottom(8.0)),
-        editor_box(editor, 72.0, face == ThreadFace::Inline),
+        composer_editor_box(state, editor, face == ThreadFace::Inline),
         composer_error_line(state),
         composer_footer(app, state, send, posting_here),
+        resize_cursor_sheet(state),
     ))
     .debug_name("composer-box")
     .style(move |s| {
@@ -481,6 +482,154 @@ pub fn composer_view(
                 .border_color(theme::ACCENT_RING),
         }
     })
+}
+
+/// The box the question is typed into, with the grip along the inside
+/// of its bottom edge that drags it taller or shorter.
+///
+/// Until it is dragged the box opens at `COMPOSER_HEIGHT` and grows with
+/// what is typed, as GitHub's does. A drag fixes it at a height of the
+/// reader's, which it keeps whatever is typed into it, and which the
+/// next composer opens at.
+fn composer_editor_box(
+    state: ReviewState,
+    editor: impl IntoView + 'static,
+    bordered: bool,
+) -> impl IntoView {
+    let boxed = editor_box(
+        editor,
+        move || match state.composer_height.get() {
+            Some(height) => (height, height),
+            None => (theme::COMPOSER_HEIGHT, theme::COMPOSER_GROWN_HEIGHT),
+        },
+        bordered,
+    );
+    let box_id = floem::View::id(&boxed);
+    Stack::vertical((boxed, resize_handle(state, box_id)))
+        .debug_name("composer editor box")
+        .style(|s| s.width_full())
+}
+
+/// The band along the inside of the box's bottom edge that drags it
+/// taller or shorter, with the grip that says so drawn in the middle of
+/// it. It lies in the room under the last line, so it takes nothing
+/// from the lines and no room of its own.
+///
+/// The band sits inside the box rather than over its bottom edge: the
+/// error line and the footer are drawn after the box and take the
+/// pointer from anything of the box's that hangs below it.
+///
+/// The height the drag sets is the box's at the grab plus how far the
+/// pointer has gone since, measured from the grab rather than from the
+/// last move, so a fast drag cannot drift. A box that has not been
+/// dragged is grabbed at whatever height it has grown to.
+fn resize_handle(state: ReviewState, box_id: floem::ViewId) -> impl IntoView {
+    use floem::event::DragConfig;
+    use floem::style::Position;
+
+    let grab = RwSignal::new(theme::COMPOSER_HEIGHT);
+    let hovered = RwSignal::new(false);
+
+    // The grip is drawn by a child of the band and takes no pointer
+    // events of its own: capture goes to whatever the pointer went down
+    // on, and a drag from the middle of the band must be the band's like
+    // one from either end.
+    Container::new(
+        Empty::new().style(move |s| {
+            s.width(theme::COMPOSER_GRIP_WIDTH)
+                .height(theme::COMPOSER_GRIP_MARK)
+                .border_radius(theme::COMPOSER_GRIP_MARK / 2.0)
+                .pointer_events_none()
+                .background(match (state.composer_resizing.get(), hovered.get()) {
+                    (true, _) => theme::ACCENT,
+                    (false, true) => theme::FG_SUBTLE,
+                    (false, false) => theme::BORDER,
+                })
+        }),
+    )
+    .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
+    .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
+    .on_event_stop(el::PointerDown, move |cx, e: &PointerButtonEvent| {
+        grab.set(
+            state
+                .composer_height
+                .get_untracked()
+                .or_else(|| box_id.get_size().map(|size| size.height))
+                .unwrap_or(theme::COMPOSER_HEIGHT),
+        );
+        if let Some(pointer) = e.pointer.pointer_id {
+            if pointer.is_primary_pointer() {
+                cx.request_pointer_capture(pointer);
+            }
+        }
+    })
+    .on_event_stop(el::GainedPointerCapture, |cx, token| {
+        // No ghost and no snap-back animation: this is an edge being
+        // moved, not a card being carried somewhere.
+        cx.start_drag(
+            *token,
+            DragConfig {
+                threshold: 1.0,
+                animation_duration: std::time::Duration::ZERO,
+                easing: Rc::new(floem::easing::Linear),
+                custom_data: None,
+                track_targets: false,
+            },
+            false,
+        );
+    })
+    .on_event_stop(el::DragStart, move |_, _: &floem::event::DragStartEvent| {
+        state.composer_resizing.set(true);
+    })
+    .on_event_stop(el::DragMove, move |_, e: &floem::event::DragMoveEvent| {
+        let dy = e.current_state.logical_point().y - e.start_state.logical_point().y;
+        let height = (grab.get_untracked() + dy)
+            .clamp(theme::COMPOSER_MIN_HEIGHT, theme::COMPOSER_MAX_HEIGHT);
+        state.composer_height.set(Some(height));
+    })
+    .on_event_stop(el::DragEnd, move |_, _: &floem::event::DragEndEvent| {
+        state.composer_resizing.set(false);
+    })
+    .on_event_stop(el::DragCancel, move |_, _: &floem::event::DragCancelEvent| {
+        state.composer_resizing.set(false);
+    })
+    .debug_name("composer resize handle")
+    .style(|s| {
+        s.position(Position::Absolute)
+            .inset_left(0.0)
+            .inset_right(0.0)
+            .inset_bottom(0.0)
+            .height(theme::COMPOSER_GRIP)
+            .items_center()
+            .justify_center()
+            .z_index(10)
+            .hover(|s| s.cursor(CursorStyle::RowResize))
+    })
+}
+
+/// A sheet over the card while the grip is being dragged, so the cursor
+/// stays the row-resize one. The cursor belongs to whatever is under the
+/// pointer, and the grip is only there once layout has caught up with
+/// the last move; on a fast drag, or past either limit, the pointer is
+/// over the lines being typed or the footer instead. The sheet reaches
+/// as far above and below the box as the drag can take the pointer.
+/// Pointer events still go to the grip, which holds capture; the sheet
+/// only takes the hover.
+fn resize_cursor_sheet(state: ReviewState) -> impl IntoView {
+    use floem::style::Position;
+
+    Empty::new()
+        .debug_name("composer resize cursor sheet")
+        .style(move |s| {
+            s.position(Position::Absolute)
+                .inset_left(0.0)
+                .inset_right(0.0)
+                .inset_top(-theme::COMPOSER_MAX_HEIGHT)
+                .inset_bottom(-theme::COMPOSER_MAX_HEIGHT)
+                .z_index(100)
+                .cursor(CursorStyle::RowResize)
+                .apply_if(!state.composer_resizing.get(), |s| s.hide())
+        })
 }
 
 /// Whether the command a box's keymap resolved a key to is Enter on its
@@ -3907,6 +4056,65 @@ mod tests {
                 .get(floem::style::BorderLeftColor),
             Some(theme::ACCENT.into()),
             "the border follows the keyboard into the box"
+        );
+    }
+
+    /// The box opens five lines tall, and the grip along the inside of
+    /// its bottom edge drags it taller and shorter, between the two
+    /// limits. What the drag sets stays set.
+    #[test]
+    fn the_grip_drags_the_box_taller_and_shorter() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        let composer = state.composer.get().unwrap();
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Inline);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+
+        let text_box = find(harness.root_id(), "editor-box").expect("the box");
+        let height = move || text_box.get_size().expect("the box is laid out").height;
+        assert_eq!(height(), theme::COMPOSER_HEIGHT);
+        assert_eq!(state.composer_height.get(), None, "undragged");
+
+        // Grab the grip and take it down sixty pixels: the box follows,
+        // and keeps the height when the pointer lets go.
+        let grip = find(harness.root_id(), "composer resize handle").expect("the grip");
+        let (x, y) = {
+            let rect = grip.get_visual_rect_no_clip();
+            (rect.center().x, rect.center().y)
+        };
+        harness.pointer_down(x, y);
+        harness.pointer_move(x, y + 60.0);
+        assert!(state.composer_resizing.get());
+        assert_eq!(state.composer_height.get(), Some(theme::COMPOSER_HEIGHT + 60.0));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(height(), theme::COMPOSER_HEIGHT + 60.0);
+
+        // The height is the pointer's distance from the grab, not the
+        // last move's, so a drag back up shortens it and cannot drift.
+        harness.pointer_move(x, y - 20.0);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(height(), theme::COMPOSER_HEIGHT - 20.0);
+
+        // Neither limit is passed.
+        harness.pointer_move(x, y - 400.0);
+        assert_eq!(state.composer_height.get(), Some(theme::COMPOSER_MIN_HEIGHT));
+        harness.pointer_move(x, y + 900.0);
+        assert_eq!(state.composer_height.get(), Some(theme::COMPOSER_MAX_HEIGHT));
+
+        harness.pointer_move(x, y + 100.0);
+        harness.pointer_up(x, y + 100.0);
+        assert!(!state.composer_resizing.get(), "the drag is over");
+        assert_eq!(
+            state.composer_height.get(),
+            Some(theme::COMPOSER_HEIGHT + 100.0),
+            "the box stays where it was left"
         );
     }
 }

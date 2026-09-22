@@ -1260,6 +1260,17 @@ pub struct ReviewState {
     /// The text box of a composer laid in place on Conversation, while one
     /// is open, so `a` can focus it and scroll to it.
     pub composer_box: RwSignal<Option<floem::ViewId>>,
+    /// How tall the reader has dragged the composer's box by its grip, or
+    /// None while it is the height it opens at and grows with what is
+    /// typed. Once dragged it is that tall and stays there, and the next
+    /// composer opens at the height the last one was left: the size is
+    /// the reader's, not this question's.
+    pub composer_height: RwSignal<Option<f64>>,
+    /// Whether the box's bottom edge is being dragged. The cursor follows
+    /// what is under the pointer, and the drag runs over the code and the
+    /// footer, which each want their own, so the card keeps the resize
+    /// cursor up itself for the duration.
+    pub composer_resizing: RwSignal<bool>,
     /// The composer's Comment was clicked once and the footer is asking
     /// whether to post to the pull request; the next Enter or Post does.
     pub composer_confirming: RwSignal<bool>,
@@ -1445,6 +1456,8 @@ impl ReviewState {
             composer_draft: RwSignal::new(String::new()),
             composer_autofocus: RwSignal::new(true),
             composer_box: RwSignal::new(None),
+            composer_height: RwSignal::new(None),
+            composer_resizing: RwSignal::new(false),
             composer_confirming: RwSignal::new(false),
             posting: RwSignal::new(None),
             composer_error: RwSignal::new(None),

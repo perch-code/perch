@@ -191,6 +191,8 @@ pub const AGENT_ROW_MIN_HEIGHT: f64 = 88.0;
 pub const TITLEBAR_HEIGHT: f64 = 56.0;
 pub const RADIUS: f64 = 6.0;
 pub const RADIUS_LG: f64 = 10.0;
+/// The room inside a text box, between its border and its lines.
+pub const EDITOR_BOX_PADDING: f64 = 10.0;
 pub const NAV_ROW_RADIUS: f64 = 14.0;
 pub const NAV_CONTROL_HEIGHT: f64 = 36.0;
 pub const NAV_CONTROL_RADIUS: f64 = NAV_CONTROL_HEIGHT / 2.0;
@@ -470,6 +472,34 @@ pub const THREAD_DASH: [f64; 2] = [4.0, 3.0];
 /// it sits beside or among the code.
 pub const THREAD_PADDING: f64 = 12.0;
 pub const THREAD_GAP: f64 = 10.0;
+/// A line of a comment being typed, which the composer's styling gives
+/// the editor and the box's heights are counted in.
+pub const COMPOSER_LINE_HEIGHT: f32 = TEXT_BODY * 1.5;
+/// How tall the comment box is before it is dragged: five lines of body
+/// text and the room around them, which is the size GitHub gives a
+/// comment. It grows with what is typed as far as
+/// `COMPOSER_GROWN_HEIGHT`, and once dragged it is exactly as tall as
+/// the reader left it.
+pub const COMPOSER_HEIGHT: f64 = composer_lines(5.0);
+/// How tall an undragged box grows before its lines scroll instead.
+pub const COMPOSER_GROWN_HEIGHT: f64 = 220.0;
+/// The heights the grip along the bottom edge drags between. The
+/// shortest is two lines: the one being typed and the one above it.
+pub const COMPOSER_MIN_HEIGHT: f64 = composer_lines(2.0);
+pub const COMPOSER_MAX_HEIGHT: f64 = 520.0;
+/// The band along the inside of the box's bottom edge that the drag
+/// happens in, which is the room under the last line, and the grip
+/// drawn in the middle of it.
+pub const COMPOSER_GRIP: f64 = EDITOR_BOX_PADDING;
+pub const COMPOSER_GRIP_WIDTH: f64 = 28.0;
+pub const COMPOSER_GRIP_MARK: f64 = 3.0;
+
+/// How tall a comment box is that holds this many lines: the lines, the
+/// room around them and the border either side.
+const fn composer_lines(lines: f64) -> f64 {
+    lines * COMPOSER_LINE_HEIGHT as f64 + 2.0 * EDITOR_BOX_PADDING + 2.0
+}
+
 /// The `...` at the end of a thread's first row, and the smaller one on
 /// a collapsed card, whose one row a 22px button would not fit.
 pub const THREAD_MENU: f64 = 22.0;

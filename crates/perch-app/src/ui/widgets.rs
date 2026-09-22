@@ -213,19 +213,29 @@ pub fn worktree_menu(
 /// on the canvas, a border that takes the accent while the lines have the
 /// keyboard. A box on a card's subtle surface has no border.
 ///
+/// `height` gives the shortest and the tallest the box is: it starts at
+/// the first, grows with what is typed, and scrolls its lines once it
+/// reaches the second. It is asked on every style pass, so a box the
+/// reader drags to a height of their own follows the drag.
+///
 /// The room is padding on a container around the editor, not on the
 /// editor: floem lays the lines out in a layer that fills the editor's
 /// padding box, so padding on the editor itself would put the wrap edge,
 /// and the last word of a line, in the padding. The keyboard is the inner
 /// editor view's, not the box's, so the border follows `focus_within`.
-pub fn editor_box(editor: impl IntoView + 'static, min_height: f64, bordered: bool) -> Container {
+pub fn editor_box(
+    editor: impl IntoView + 'static,
+    height: impl Fn() -> (f64, f64) + 'static,
+    bordered: bool,
+) -> Container {
     Container::new(editor)
         .style(move |s| {
+            let (shortest, tallest) = height();
             let s = s
                 .width_full()
-                .min_height(min_height)
-                .max_height(220.0)
-                .padding(10.0)
+                .min_height(shortest)
+                .max_height(tallest)
+                .padding(theme::EDITOR_BOX_PADDING)
                 .background(theme::CANVAS)
                 .border_radius(theme::RADIUS_LG);
             if bordered {

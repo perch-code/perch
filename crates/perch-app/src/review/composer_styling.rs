@@ -56,7 +56,7 @@ impl Styling for ComposerStyling {
     }
 
     fn line_height(&self, _edid: EditorId, _line: usize) -> f32 {
-        theme::TEXT_BODY * 1.5
+        theme::COMPOSER_LINE_HEIGHT
     }
 
     fn font_family(&self, _edid: EditorId, _line: usize) -> Cow<'_, [FamilyOwned]> {

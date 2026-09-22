@@ -66,6 +66,12 @@ older build of Perch has no reactions until it is fetched again.
 
 ## Posting
 
+A composer's box opens five lines tall, the size GitHub gives a comment, and
+grows with what is typed. The grip at the foot of the box drags it taller or
+shorter, between two lines and about twenty-four; a box that has been dragged
+keeps that height whatever is typed into it, and every composer opens at it
+until Perch is restarted.
+
 Every composer in Perch has a destination: Claude, Codex, or GitHub, picked
 from the same menu as the model. What goes to an agent stays in Perch. What
 goes to GitHub goes one of two ways.

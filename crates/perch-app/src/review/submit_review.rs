@@ -632,7 +632,7 @@ fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
             }
         }
     });
-    editor_box(editor, 96.0, true).style(move |s| {
+    editor_box(editor, || (96.0, theme::COMPOSER_GROWN_HEIGHT), true).style(move |s| {
         s.apply_if(state.submit_review_pending.with(Option::is_some), |s| {
             s.opacity(0.6_f32)
         })
