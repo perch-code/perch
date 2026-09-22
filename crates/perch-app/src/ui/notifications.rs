@@ -295,7 +295,8 @@ fn notification_trailing(
 }
 
 /// Mark the thread Done. The reader is finished with it, so if the main
-/// pane has its pull request or issue open, that closes as Cmd-[ would.
+/// pane has its pull request or issue open, that closes, as going back
+/// to the sidebar would.
 fn done(state: AppState, backend: &Backend, thread: &Thread) {
     backend.done_notification(&thread.id);
     if !state.is_viewing_thread(thread) {

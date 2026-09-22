@@ -200,16 +200,71 @@ fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Orig
     // rebuild of the pane rather than one for each write. Its content is
     // asked for when it is not here, as for a tab an item opened on again
     // whose load has failed.
-    .on_event_stop(el::Click, move |_, _| {
-        let load = floem::reactive::Effect::batch(|| {
-            state.show_tab(ItemTab::Files);
-            state.open_tab(&select_path)
-        });
-        if load {
-            crate::review::load_file(&backend, &select_path);
-        }
-    })
+    .on_event_stop(el::Click, move |_, _| show_file(state, &backend, &select_path))
     .style(move |s| tab_style(s, is_active_box()))
+}
+
+/// Show a file's tab, from Conversation too, in one rebuild of the pane
+/// rather than one for each write. Its content is asked for when it is
+/// not here.
+fn show_file(state: ReviewState, backend: &Backend, path: &str) {
+    let load = floem::reactive::Effect::batch(|| {
+        state.show_tab(ItemTab::Files);
+        state.open_tab(path)
+    });
+    if load {
+        crate::review::load_file(backend, path);
+    }
+}
+
+/// Whether Conversation's tab is in the strip, and the files' tabs.
+fn strip(state: ReviewState) -> (bool, Vec<String>) {
+    let conversation = state.conversation_open.get_untracked();
+    let files = if state.has_files() {
+        state.tabs.with_untracked(|t| t.iter().map(|t| t.path.clone()).collect())
+    } else {
+        Vec::new()
+    };
+    (conversation, files)
+}
+
+/// Whether the strip has a tab for Cmd-] and Cmd-[ to step to.
+pub fn has_tabs(state: ReviewState) -> bool {
+    let (conversation, files) = strip(state);
+    conversation || !files.is_empty()
+}
+
+/// Show the tab after the one showing, or before it, wrapping at the
+/// ends, as VS Code's Cmd-] and Cmd-[ do across its editors'. The order
+/// is the strip's: Conversation's, then the files'. False when there is
+/// no tab to go to.
+pub fn step_tab(state: ReviewState, backend: &Backend, forward: bool) -> bool {
+    let (conversation, files) = strip(state);
+    let count = usize::from(conversation) + files.len();
+    if count == 0 {
+        return false;
+    }
+    let current = match state.tab.get_untracked() {
+        ItemTab::Conversation if conversation => Some(0),
+        ItemTab::Files => state.active.with_untracked(|active| {
+            active
+                .as_deref()
+                .and_then(|a| files.iter().position(|p| p == a))
+                .map(|i| i + usize::from(conversation))
+        }),
+        _ => None,
+    };
+    let next = match current {
+        Some(i) if forward => (i + 1) % count,
+        Some(i) => (i + count - 1) % count,
+        None if forward => 0,
+        None => count - 1,
+    };
+    match next.checked_sub(usize::from(conversation)) {
+        None => state.show_tab(ItemTab::Conversation),
+        Some(i) => show_file(state, backend, &files[i]),
+    }
+    true
 }
 
 /// Room in the strip with nothing in it, ruled along its bottom as the
