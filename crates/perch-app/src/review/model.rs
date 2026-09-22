@@ -571,6 +571,143 @@ pub enum Preparing {
 /// it thinks.
 pub type AgentChoice = (perch_agent::Backend, String, perch_agent::Effort);
 
+/// Where what is typed in the composer goes: to an agent, which runs
+/// and answers, or to GitHub, where it waits as a draft until the review
+/// is submitted.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Destination {
+    Agent {
+        backend: perch_agent::Backend,
+        model: String,
+        effort: perch_agent::Effort,
+    },
+    GitHub,
+}
+
+impl Destination {
+    pub fn agent(choice: AgentChoice) -> Self {
+        let (backend, model, effort) = choice;
+        Destination::Agent {
+            backend,
+            model,
+            effort,
+        }
+    }
+
+    /// The agent choice, when the destination is one.
+    pub fn agent_choice(&self) -> Option<AgentChoice> {
+        match self {
+            Destination::Agent {
+                backend,
+                model,
+                effort,
+            } => Some((*backend, model.clone(), *effort)),
+            Destination::GitHub => None,
+        }
+    }
+
+    pub fn is_github(&self) -> bool {
+        matches!(self, Destination::GitHub)
+    }
+}
+
+/// A message to GitHub that has not been posted: what the review form
+/// lists, the button counts and the gutter marks. `in_reply_to` is the
+/// thread's root comment on GitHub, when it has one; `commit_sha` is the
+/// anchor's, the head the lines were read at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Draft {
+    pub thread_id: String,
+    pub message_id: String,
+    pub anchor: Option<Anchor>,
+    pub in_reply_to: Option<u64>,
+    pub body: String,
+    pub commit_sha: String,
+}
+
+/// Where a composer opens on, by the rules of the follow-up. Editing a
+/// draft is GitHub. A follow-up follows the last message in its thread:
+/// under a GitHub user, or under a draft or a posted comment of the
+/// reader's, GitHub; under an agent, that agent at the effort its run
+/// took, or the nearest the model takes now, and the last agent used
+/// when config no longer offers the model at all; under a question of
+/// the reader's still with an agent, whatever agent was last used. A new
+/// composer on lines is what the reader last sent from that face, else
+/// the last agent; one about the item as a whole is always an agent.
+pub fn default_destination(
+    thread: Option<&CommentThread>,
+    anchor: Option<&Anchor>,
+    last: Option<Destination>,
+    agent_last: Option<AgentChoice>,
+    defaults: AgentChoice,
+    editing: bool,
+    agent: &perch_github::AgentConfig,
+) -> Destination {
+    use perch_github::{Author, ThreadOrigin};
+
+    let last_agent = || Destination::agent(agent_last.clone().unwrap_or(defaults.clone()));
+    if editing {
+        return Destination::GitHub;
+    }
+    if let Some(thread) = thread {
+        let Some(message) = thread.messages.last() else {
+            return last_agent();
+        };
+        return match (&message.author, message.origin) {
+            (Author::GitHubUser(_), _) => Destination::GitHub,
+            (Author::User, ThreadOrigin::GitHub) => Destination::GitHub,
+            (Author::Agent { backend, model }, _) => {
+                let offered = agent
+                    .models
+                    .iter()
+                    .chain(agent.codex_models())
+                    .any(|m| m == model);
+                let Some(backend) = perch_agent::Backend::parse(backend).filter(|_| offered)
+                else {
+                    return last_agent();
+                };
+                let effort = message
+                    .run
+                    .as_ref()
+                    .and_then(|r| perch_agent::Effort::parse(&r.effort))
+                    .unwrap_or(defaults.2);
+                Destination::Agent {
+                    backend,
+                    model: model.clone(),
+                    effort: crate::review::threads::nearest_effort(agent, model, effort),
+                }
+            }
+            (Author::User, ThreadOrigin::Local) => last_agent(),
+        };
+    }
+    match (anchor, last) {
+        (Some(_), Some(last)) => last,
+        _ => last_agent(),
+    }
+}
+
+/// The drafts among `threads`, each with its thread's anchor and root
+/// comment on GitHub.
+pub fn drafts_of(threads: &[CommentThread]) -> Vec<Draft> {
+    threads
+        .iter()
+        .flat_map(|t| {
+            t.messages.iter().filter(|m| m.is_draft()).map(move |m| Draft {
+                thread_id: t.id.clone(),
+                message_id: m.id.clone(),
+                anchor: t.anchor.clone(),
+                in_reply_to: t.github_id,
+                body: m.body.clone(),
+                commit_sha: t
+                    .anchor
+                    .as_ref()
+                    .map(|a| a.commit_sha.clone())
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
 /// One effective reviewer captured by a launch. A disabled (`None`) row is
 /// omitted from `ReviewLaunchRequest::reviewers`; it is a UI preference, not
 /// an effort understood by the native CLI.
@@ -665,13 +802,15 @@ pub struct Composer {
     /// `None` starts a thread; `Some` is a follow-up in that thread.
     pub thread_id: Option<String>,
     pub anchor: Option<Anchor>,
-    /// Which agent the model belongs to. Set with the model, never on
-    /// its own: the picker lists models, and config says whose each is.
-    pub backend: perch_agent::Backend,
-    pub model: String,
-    pub effort: perch_agent::Effort,
+    /// Where the text goes: an agent, its model and effort together,
+    /// since the picker lists models and config says whose each is, or
+    /// GitHub.
+    pub destination: Destination,
     /// A question to start with, when a failed run is retried.
     pub draft: String,
+    /// The draft message this composer replaces, when one is being
+    /// edited in place; sending writes its body rather than a new one.
+    pub editing: Option<String>,
     /// Which opening this is, so a view keyed on what the composer is
     /// about still starts afresh when it is opened again about the same
     /// thing with a new draft. In the composer rather than beside it so
@@ -984,6 +1123,14 @@ pub struct ReviewState {
     /// The backend, model and effort last sent, which the next composer
     /// starts on.
     pub agent_last: RwSignal<Option<AgentChoice>>,
+    /// The destination last sent from each face, by `ThreadFace::index`:
+    /// inline in the code, and on Conversation. A new composer on lines
+    /// starts on its face's. Kept for the app's life, as `agent_last` is.
+    pub last_destination: [RwSignal<Option<Destination>>; 2],
+    /// The agent section of config, `AppState::agent`'s own signal once
+    /// the app has wired it, so a follow-up under an agent's answer opens
+    /// on a model config offers, at an effort it takes.
+    pub agent: RwSignal<perch_github::AgentConfig>,
     /// The display line the pointer is over in the gutter, for the `+`,
     /// or the row of a divider, for its controls.
     pub hovered_line: RwSignal<Option<usize>>,
@@ -1172,6 +1319,8 @@ impl ReviewState {
             opened_cards: RwSignal::new(HashSet::new()),
             known_cards: RwSignal::new(HashSet::new()),
             agent_last: RwSignal::new(None),
+            last_destination: [RwSignal::new(None), RwSignal::new(None)],
+            agent: RwSignal::new(perch_github::AgentConfig::default()),
             hovered_line: RwSignal::new(None),
             hovered_by: RwSignal::new(None),
             composer_focused: RwSignal::new(false),
@@ -2678,7 +2827,64 @@ impl ReviewState {
         draft: String,
         defaults: AgentChoice,
     ) {
-        let (backend, model, effort) = self.agent_last.get().unwrap_or(defaults);
+        let thread = thread_id.as_ref().and_then(|id| {
+            self.comment_threads
+                .with_untracked(|t| t.iter().find(|t| &t.id == id).cloned())
+        });
+        let face = floem::reactive::Effect::untrack(|| {
+            self.face_for(thread_id.as_deref(), anchor.as_ref())
+        });
+        let destination = self.agent.with_untracked(|agent| {
+            default_destination(
+                thread.as_ref(),
+                anchor.as_ref(),
+                self.last_destination[face.index()].get_untracked(),
+                self.agent_last.get_untracked(),
+                defaults,
+                false,
+                agent,
+            )
+        });
+        self.open_composer_with(thread_id, anchor, draft, destination, None);
+    }
+
+    /// The face a composer about `thread_id` or `anchor` would take: inline
+    /// when Files is showing and it has a card in the code, else a card on
+    /// Conversation. Tracked, as the placement checks are.
+    fn face_for(
+        &self,
+        thread_id: Option<&str>,
+        anchor: Option<&Anchor>,
+    ) -> crate::review::threads::ThreadFace {
+        use crate::review::threads::ThreadFace;
+        if self.tab.get() == ItemTab::Conversation {
+            return ThreadFace::Card;
+        }
+        let in_code = match thread_id {
+            Some(id) => self.follow_up_is_inline(id),
+            None => match (self.active_file(), anchor) {
+                (Some(file), Some(a)) => a.path == file.path && card_line(&file, a).is_some(),
+                _ => false,
+            },
+        };
+        if in_code {
+            ThreadFace::Inline
+        } else {
+            ThreadFace::Card
+        }
+    }
+
+    /// Open a composer on a destination the caller chose: Ask about this
+    /// goes to an agent whatever the thread's last message was, and a
+    /// draft's edit goes back to GitHub with `editing` set to it.
+    pub fn open_composer_with(
+        &self,
+        thread_id: Option<String>,
+        anchor: Option<Anchor>,
+        draft: String,
+        destination: Destination,
+        editing: Option<String>,
+    ) {
         self.composer_draft.set(draft.clone());
         let opening = self.composer_opened.get_untracked() + 1;
         self.composer_opened.set(opening);
@@ -2690,11 +2896,10 @@ impl ReviewState {
             self.composer.set(Some(Composer {
                 thread_id,
                 anchor,
-                backend,
-                model,
-                effort,
+                destination,
                 draft,
                 opening,
+                editing,
             }));
         });
         let in_code = self.composer_in_code_untracked();
@@ -2755,6 +2960,28 @@ impl ReviewState {
             self.sent_composer.set(None);
             self.forget_composer_rows();
         });
+    }
+
+    /// Whether GitHub is a destination for `composer`: it has lines to
+    /// land on, or its thread is on GitHub. A question about the item as
+    /// a whole has nowhere to go there yet. Untracked.
+    pub fn github_offered(&self, composer: &Composer) -> bool {
+        if composer.anchor.is_some() {
+            return true;
+        }
+        composer.thread_id.as_ref().is_some_and(|id| {
+            self.comment_threads.with_untracked(|t| {
+                t.iter()
+                    .any(|t| &t.id == id && t.github_id.is_some())
+            })
+        })
+    }
+
+    /// Every draft in the open item, in thread order and time order within
+    /// a thread: what the review form lists and the gutter marks. A
+    /// tracked read over the threads.
+    pub fn drafts(&self) -> Vec<Draft> {
+        self.comment_threads.with(|threads| drafts_of(threads))
     }
 
     /// The thread whose anchor starts on a display line of the open file.
@@ -4545,5 +4772,309 @@ mod tests {
             Origin::Outside { label: "/opt/vendor/src/lib.rs".into() },
             "the tab carries the origin before the file has loaded"
         );
+    }
+
+    /// `anchored("t1", ..)` with its last message replaced by one from
+    /// `author`, of `origin`, on GitHub as `github_id`, with `run`.
+    fn thread_ending_in(
+        author: perch_github::Author,
+        origin: perch_github::ThreadOrigin,
+        github_id: Option<u64>,
+        run: Option<perch_github::RunRecord>,
+    ) -> CommentThread {
+        let mut thread = anchored("t1", 3, 3, "2026-09-18T10:00:00Z", false);
+        let mut last = thread.messages[0].clone();
+        last.id = "t1-last".into();
+        last.author = author;
+        last.origin = origin;
+        last.github_id = github_id;
+        last.run = run;
+        thread.messages.push(last);
+        thread
+    }
+
+    fn agent_run(model: &str, effort: &str) -> perch_github::RunRecord {
+        perch_github::RunRecord {
+            id: "r1".into(),
+            backend: "claude-code".into(),
+            model: model.into(),
+            effort: effort.into(),
+            status: perch_github::RunStatus::Completed,
+            ..Default::default()
+        }
+    }
+
+    fn sonnet_medium() -> AgentChoice {
+        (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".into(),
+            perch_agent::Effort::Medium,
+        )
+    }
+
+    fn opus_high() -> AgentChoice {
+        (
+            perch_agent::Backend::ClaudeCode,
+            "opus".into(),
+            perch_agent::Effort::High,
+        )
+    }
+
+    #[test]
+    fn editing_a_draft_opens_on_github_whatever_else_is_true() {
+        use perch_github::{Author, ThreadOrigin};
+        let thread = thread_ending_in(Author::User, ThreadOrigin::Local, None, None);
+        let agent = perch_github::AgentConfig::default();
+        let d = default_destination(
+            Some(&thread),
+            thread.anchor.as_ref(),
+            Some(Destination::agent(opus_high())),
+            Some(opus_high()),
+            sonnet_medium(),
+            true,
+            &agent,
+        );
+        assert_eq!(d, Destination::GitHub);
+    }
+
+    #[test]
+    fn a_follow_up_under_a_github_user_or_the_readers_own_comment_opens_on_github() {
+        use perch_github::{Author, ThreadOrigin};
+        let agent = perch_github::AgentConfig::default();
+        let under = |thread: CommentThread| {
+            default_destination(
+                Some(&thread),
+                thread.anchor.as_ref(),
+                None,
+                Some(opus_high()),
+                sonnet_medium(),
+                false,
+                &agent,
+            )
+        };
+        let theirs = thread_ending_in(
+            Author::GitHubUser("octocat".into()),
+            ThreadOrigin::GitHub,
+            Some(31),
+            None,
+        );
+        assert_eq!(under(theirs), Destination::GitHub);
+        let draft = thread_ending_in(Author::User, ThreadOrigin::GitHub, None, None);
+        assert_eq!(under(draft), Destination::GitHub, "a draft of the reader's");
+        let posted = thread_ending_in(Author::User, ThreadOrigin::GitHub, Some(32), None);
+        assert_eq!(under(posted), Destination::GitHub, "a comment the reader posted");
+    }
+
+    #[test]
+    fn a_follow_up_under_an_agent_opens_on_that_agent_at_its_runs_effort() {
+        use perch_github::{Author, ThreadOrigin};
+        let agent = perch_github::AgentConfig::default();
+        let answered = |run: Option<perch_github::RunRecord>| {
+            thread_ending_in(
+                Author::Agent {
+                    backend: "claude-code".into(),
+                    model: "opus".into(),
+                },
+                ThreadOrigin::Local,
+                None,
+                run,
+            )
+        };
+        let thread = answered(Some(agent_run("opus", "high")));
+        let d = default_destination(
+            Some(&thread),
+            thread.anchor.as_ref(),
+            Some(Destination::GitHub),
+            None,
+            sonnet_medium(),
+            false,
+            &agent,
+        );
+        assert_eq!(d, Destination::agent(opus_high()));
+
+        // Without a run, the defaults' effort.
+        let thread = answered(None);
+        let d = default_destination(
+            Some(&thread),
+            thread.anchor.as_ref(),
+            None,
+            None,
+            sonnet_medium(),
+            false,
+            &agent,
+        );
+        assert_eq!(
+            d,
+            Destination::Agent {
+                backend: perch_agent::Backend::ClaudeCode,
+                model: "opus".into(),
+                effort: perch_agent::Effort::Medium,
+            }
+        );
+    }
+
+    #[test]
+    fn a_follow_up_under_an_agent_keeps_to_what_config_offers() {
+        use perch_github::{Author, ThreadOrigin};
+        // Codex's gpt-5 takes low to high; the run went at xhigh, which
+        // the catalog has since dropped.
+        let mut agent = perch_github::AgentConfig::default();
+        agent.codex.models = vec!["gpt-5".into()];
+        agent.codex.efforts.insert(
+            "gpt-5".into(),
+            vec!["low".into(), "medium".into(), "high".into()],
+        );
+        let mut run = agent_run("gpt-5", "xhigh");
+        run.backend = "codex".into();
+        let thread = thread_ending_in(
+            Author::Agent {
+                backend: "codex".into(),
+                model: "gpt-5".into(),
+            },
+            ThreadOrigin::Local,
+            None,
+            Some(run),
+        );
+        let d = default_destination(
+            Some(&thread),
+            thread.anchor.as_ref(),
+            None,
+            None,
+            sonnet_medium(),
+            false,
+            &agent,
+        );
+        assert_eq!(
+            d,
+            Destination::Agent {
+                backend: perch_agent::Backend::Codex,
+                model: "gpt-5".into(),
+                effort: perch_agent::Effort::High,
+            },
+            "the nearest effort the model takes"
+        );
+
+        // A model config no longer lists at all: the last agent used.
+        agent.codex.models.clear();
+        let d = default_destination(
+            Some(&thread),
+            thread.anchor.as_ref(),
+            None,
+            Some(opus_high()),
+            sonnet_medium(),
+            false,
+            &agent,
+        );
+        assert_eq!(d, Destination::agent(opus_high()));
+    }
+
+    #[test]
+    fn a_follow_up_under_the_readers_own_question_opens_on_the_last_agent() {
+        use perch_github::{Author, ThreadOrigin};
+        let agent = perch_github::AgentConfig::default();
+        let thread = thread_ending_in(Author::User, ThreadOrigin::Local, None, None);
+        let d = default_destination(
+            Some(&thread),
+            thread.anchor.as_ref(),
+            Some(Destination::GitHub),
+            Some(opus_high()),
+            sonnet_medium(),
+            false,
+            &agent,
+        );
+        assert_eq!(d, Destination::agent(opus_high()));
+        let d = default_destination(
+            Some(&thread),
+            thread.anchor.as_ref(),
+            Some(Destination::GitHub),
+            None,
+            sonnet_medium(),
+            false,
+            &agent,
+        );
+        assert_eq!(d, Destination::agent(sonnet_medium()), "else the defaults");
+
+        // An empty thread has no last message to follow.
+        let mut empty = thread.clone();
+        empty.messages.clear();
+        let d = default_destination(
+            Some(&empty),
+            empty.anchor.as_ref(),
+            Some(Destination::GitHub),
+            Some(opus_high()),
+            sonnet_medium(),
+            false,
+            &agent,
+        );
+        assert_eq!(d, Destination::agent(opus_high()));
+    }
+
+    #[test]
+    fn a_new_composer_on_lines_opens_where_its_face_last_sent_and_one_on_the_item_on_an_agent() {
+        let agent = perch_github::AgentConfig::default();
+        let anchor = anchored("t1", 3, 3, "2026-09-18T10:00:00Z", false).anchor;
+        let d = default_destination(
+            None,
+            anchor.as_ref(),
+            Some(Destination::GitHub),
+            Some(opus_high()),
+            sonnet_medium(),
+            false,
+            &agent,
+        );
+        assert_eq!(d, Destination::GitHub);
+        let d = default_destination(
+            None,
+            anchor.as_ref(),
+            None,
+            Some(opus_high()),
+            sonnet_medium(),
+            false,
+            &agent,
+        );
+        assert_eq!(d, Destination::agent(opus_high()), "nothing sent from this face yet");
+        let d = default_destination(
+            None,
+            None,
+            Some(Destination::GitHub),
+            Some(opus_high()),
+            sonnet_medium(),
+            false,
+            &agent,
+        );
+        assert_eq!(d, Destination::agent(opus_high()), "no anchor: an agent, whatever was last");
+        let d = default_destination(None, None, None, None, sonnet_medium(), false, &agent);
+        assert_eq!(d, Destination::agent(sonnet_medium()));
+    }
+
+    #[test]
+    fn the_drafts_are_listed_with_their_threads_root_on_github_and_the_anchors_head() {
+        use perch_github::{Author, Side, ThreadOrigin};
+        // A draft replying under one of GitHub's, and a new thread of one.
+        let mut reply = github_thread(31, 3, Side::Right, "2026-09-18T10:00:00Z", 0);
+        let mut draft = reply.messages[0].clone();
+        draft.id = "d1".into();
+        draft.author = Author::User;
+        draft.github_id = None;
+        draft.body = "I will fix it".into();
+        reply.messages.push(draft);
+        let mut fresh = anchored("t2", 5, 6, "2026-09-18T10:01:00Z", false);
+        fresh.origin = ThreadOrigin::GitHub;
+        fresh.messages[0].origin = ThreadOrigin::GitHub;
+        fresh.messages[0].body = "and this".into();
+        let mine = anchored("t3", 7, 7, "2026-09-18T10:02:00Z", false);
+
+        let state = ReviewState::new();
+        state.comment_threads.set(Arc::new(vec![reply, fresh, mine]));
+        let drafts = state.drafts();
+        assert_eq!(drafts.len(), 2);
+        assert_eq!(drafts[0].thread_id, "gh-31");
+        assert_eq!(drafts[0].message_id, "d1");
+        assert_eq!(drafts[0].in_reply_to, Some(31));
+        assert_eq!(drafts[0].commit_sha, "h");
+        assert_eq!(drafts[0].body, "I will fix it");
+        assert_eq!(drafts[1].thread_id, "t2");
+        assert_eq!(drafts[1].in_reply_to, None, "a new thread has no root there yet");
+        assert_eq!(drafts[1].anchor.as_ref().map(|a| (a.start_line, a.line)), Some((5, 6)));
     }
 }

@@ -101,7 +101,8 @@ fn main() {
             move |_| {
                 app_icon::install();
                 let state = AppState::new();
-                let review = review::model::ReviewState::new();
+                let mut review = review::model::ReviewState::new();
+                review.agent = state.agent;
                 state.review.set(Some(review));
 
                 // Backend events arrive on a std channel. floem drains it on

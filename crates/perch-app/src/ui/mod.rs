@@ -409,12 +409,15 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                             );
                             return EventPropagation::Stop;
                         }
-                        // Close an empty composer. One with a question in it stays,
-                        // so an Escape meant for the selection cannot throw the
-                        // question away; the composer's own close button does that.
+                        // Close an empty composer, or one editing a draft, whose
+                        // words are safe in the cache. One with a question in it
+                        // stays, so an Escape meant for the selection cannot throw
+                        // the question away; the composer's own close button does that.
                         Code::Escape
-                            if review.composer.with(Option::is_some)
-                                && review.composer_draft.with(|d| d.trim().is_empty()) =>
+                            if review.composer.with(|c| {
+                                c.as_ref().is_some_and(|c| c.editing.is_some())
+                            }) || (review.composer.with(Option::is_some)
+                                && review.composer_draft.with(|d| d.trim().is_empty())) =>
                         {
                             review.close_composer();
                             return EventPropagation::Stop;

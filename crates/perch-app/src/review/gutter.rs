@@ -549,6 +549,23 @@ fn row_view(
     }
 }
 
+/// The mark on a line with a thread: solid in GitHub's blue when the
+/// thread holds a draft on its way there, whatever else it is; hollow
+/// and muted for one of GitHub's; solid for the reader's own, faded
+/// when it is outdated.
+pub(crate) fn thread_mark(
+    origin: ThreadOrigin,
+    outdated: bool,
+    draft: bool,
+) -> (SidebarIcon, Color) {
+    match origin {
+        _ if draft => (SidebarIcon::Thread, theme::GITHUB),
+        ThreadOrigin::GitHub => (SidebarIcon::ThreadHollow, theme::FG_MUTED),
+        ThreadOrigin::Local if outdated => (SidebarIcon::Thread, theme::FG_SUBTLE),
+        ThreadOrigin::Local => (SidebarIcon::Thread, theme::ACCENT),
+    }
+}
+
 /// The marker for a thread starting on this row, or the `+` that starts one
 /// on a stacked/head row while the pointer is there. Base rows are marker-only.
 fn anchor_slot(
@@ -577,20 +594,20 @@ fn anchor_slot(
                     state.thread_starting_on(&marker_file, AnchorSide::Right, head)
                 }
             }
-            .map(|t| (t.id, t.origin, t.outdated));
+            .map(|t| {
+                let draft = t.messages.iter().any(|m| m.is_draft());
+                (t.id, t.origin, t.outdated, draft)
+            });
             let hovered = state.hovered_line.get() == Some(key);
             (thread, hovered)
         },
         move |(thread, hovered)| match (thread, hovered.then_some(plus_display).flatten()) {
-            // A thread on this line: solid for the reader's own, hollow and
-            // muted for one of GitHub's. Click scrolls the editor to its
-            // card and flashes it.
-            (Some((id, origin, outdated)), _) => {
-                let (icon, color) = match origin {
-                    ThreadOrigin::GitHub => (SidebarIcon::ThreadHollow, theme::FG_MUTED),
-                    ThreadOrigin::Local if outdated => (SidebarIcon::Thread, theme::FG_SUBTLE),
-                    ThreadOrigin::Local => (SidebarIcon::Thread, theme::ACCENT),
-                };
+            // A thread on this line: solid in GitHub's blue when it holds
+            // a draft on its way there, solid for the reader's own, hollow
+            // and muted for one of GitHub's. Click scrolls the editor to
+            // its card and flashes it.
+            (Some((id, origin, outdated, draft)), _) => {
+                let (icon, color) = thread_mark(origin, outdated, draft);
                 Container::new(sidebar_glyph(icon, color).style(|s| s.size(12.0, 12.0)))
                     .on_event_stop(el::Click, move |_, _| {
                         state.focus_card.set(Some(CardId::Thread(id.clone())))
@@ -653,6 +670,31 @@ mod tests {
     use super::*;
 
     const H: f64 = 19.0;
+
+    #[test]
+    fn a_draft_marks_its_line_in_githubs_blue_ahead_of_whose_thread_it_is() {
+        assert_eq!(
+            thread_mark(ThreadOrigin::GitHub, false, true),
+            (SidebarIcon::Thread, theme::GITHUB)
+        );
+        assert_eq!(
+            thread_mark(ThreadOrigin::GitHub, true, true),
+            (SidebarIcon::Thread, theme::GITHUB),
+            "a new draft thread has no id on GitHub yet, and is still on its way"
+        );
+        assert_eq!(
+            thread_mark(ThreadOrigin::GitHub, false, false),
+            (SidebarIcon::ThreadHollow, theme::FG_MUTED)
+        );
+        assert_eq!(
+            thread_mark(ThreadOrigin::Local, false, false),
+            (SidebarIcon::Thread, theme::ACCENT)
+        );
+        assert_eq!(
+            thread_mark(ThreadOrigin::Local, true, false),
+            (SidebarIcon::Thread, theme::FG_SUBTLE)
+        );
+    }
 
     #[test]
     fn an_unscrolled_viewport_starts_at_the_first_line() {

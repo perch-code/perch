@@ -34,7 +34,7 @@ use perch_github::{
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::markdown;
-use crate::review::model::{ItemTab, LoadedFile, ReviewState};
+use crate::review::model::{Destination, ItemTab, LoadedFile, ReviewState};
 use crate::review::threads::{self, ThreadFace};
 use crate::review::timeline::{event_name, verdict, Card};
 use crate::review::OpenFile;
@@ -565,7 +565,13 @@ fn ask_about(
     body: &str,
 ) {
     let quote = crate::ask::quote_for(author, url, body);
-    state.open_composer(None, anchor, quote, threads::defaults(app));
+    // To an agent, whatever was last sent from here: a quoted comment is
+    // a question about it, not a reply to it.
+    let agent = state
+        .agent_last
+        .get_untracked()
+        .unwrap_or_else(|| threads::defaults(app));
+    state.open_composer_with(None, anchor, quote, Destination::agent(agent), None);
 }
 
 // ---------------------------------------------------------------------
@@ -1104,8 +1110,9 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
 /// A thread. One of the reader's own opens with "You asked" and keeps a
 /// quiet inset rule and the Local chip, so it is distinct from GitHub
 /// without breaking the transcript into another framed card. One of
-/// GitHub's opens with where it was left: each comment carries its own
-/// byline, and the thread's menu sits at the end of that row.
+/// GitHub's, or one that starts with a draft on its way there, opens
+/// with where it was left: each comment carries its own byline, and the
+/// thread's menu sits at the end of that row.
 pub fn thread_card(
     app: AppState,
     state: ReviewState,
@@ -1114,11 +1121,10 @@ pub fn thread_card(
     thread: CommentThread,
 ) -> impl IntoView {
     let id = thread.id.clone();
-    let from_github = thread.messages.first().is_some_and(|m| m.from_github());
-    let hunk = thread
-        .messages
-        .first()
-        .filter(|_| from_github)
+    let first = thread.messages.first();
+    let from_github = first.is_some_and(|m| m.from_github() || m.is_draft());
+    let hunk = first
+        .filter(|m| m.from_github())
         .and_then(|m| m.diff_hunk.clone());
     let menu = if from_github {
         threads::thread_menu(state, &thread, theme::THREAD_MENU).into_any()
@@ -1413,7 +1419,9 @@ fn short_finding(value: &str) -> String {
 }
 
 /// "You asked Sonnet · High", the time, Local, and the thread's menu.
+/// Local is left off a thread on its way to GitHub with a draft.
 fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> impl IntoView {
+    let local = !thread.is_github_bound();
     let question = thread.messages.first();
     // The run sits on the question while it goes and on the answer once
     // it is done; whichever message has one names the model.
@@ -1465,7 +1473,11 @@ fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> i
                 .text_ellipsis()
                 .min_width(0.0)
         }),
-        local_chip(),
+        if local {
+            local_chip().into_any()
+        } else {
+            Empty::new().into_any()
+        },
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         threads::thread_menu(state, thread, theme::THREAD_MENU),
     ))

@@ -14,7 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use crate::comments::{
     self, Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,
     RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunHistoryPage, RunLabels, RunOwner,
-    RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, TerminalReason,
+    RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, TerminalReason, ThreadOrigin,
 };
 use crate::discussion::Discussion;
 use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
@@ -1770,6 +1770,17 @@ fn sync_legacy_steps(conn: &Connection, run: &RunRecord) -> Result<(), CacheErro
     Ok(())
 }
 
+/// Insert a message on `conn`, and the run it carries when that is new.
+fn insert_comment_message_on(conn: &Connection, m: &CommentMessage) -> Result<(), CacheError> {
+    if let Some(run) = &m.run {
+        if load_run_on(conn, &run.id)?.is_none() {
+            insert_run_row(conn, run)?;
+            sync_legacy_steps(conn, run)?;
+        }
+    }
+    insert_comment_message_row(conn, m)
+}
+
 fn insert_comment_message_row(
     conn: &Connection,
     message: &CommentMessage,
@@ -2263,8 +2274,11 @@ impl Cache {
         load_run_on(&self.conn, id)
     }
 
+    /// Insert a thread with its messages, in one transaction: a failure
+    /// part way leaves no thread with nothing under it.
     pub fn insert_comment_thread(&self, t: &CommentThread) -> Result<(), CacheError> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO comment_threads
              (id, worktree_id, origin, github_id, path, start_line, line, side, commit_sha,
               outdated, resolved, created_at)
@@ -2285,21 +2299,120 @@ impl Cache {
             ],
         )?;
         for m in &t.messages {
-            self.insert_comment_message(m)?;
+            insert_comment_message_on(&tx, m)?;
         }
+        tx.commit()?;
         Ok(())
     }
 
     /// Insert a message. A run it carries is inserted too if it is new.
     pub fn insert_comment_message(&self, m: &CommentMessage) -> Result<(), CacheError> {
         let tx = self.conn.unchecked_transaction()?;
-        if let Some(run) = &m.run {
-            if load_run_on(&tx, &run.id)?.is_none() {
-                insert_run_row(&tx, run)?;
-                sync_legacy_steps(&tx, run)?;
-            }
+        insert_comment_message_on(&tx, m)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Keep a draft under its thread. A thread of Perch's own turns
+    /// towards GitHub with it, since the draft will be a new review
+    /// thread there at its anchor; one transaction, so a thread is never
+    /// turned with no draft under it.
+    pub fn insert_draft(&self, m: &CommentMessage) -> Result<(), CacheError> {
+        if !m.is_draft() {
+            return Err(CacheError::Corrupt(format!(
+                "comment message {} is not a draft",
+                m.id
+            )));
         }
-        insert_comment_message_row(&tx, m)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE comment_threads SET origin = 'github' WHERE id = ?1 AND origin = 'local'",
+            params![m.thread_id],
+        )?;
+        insert_comment_message_on(&tx, m)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Rewrite a draft's body, its time unchanged. The only body Perch
+    /// rewrites is a draft's: an agent's answer and GitHub's comments
+    /// are what they are, and asking for one is refused.
+    pub fn update_comment_message_body(&self, id: &str, body: &str) -> Result<(), CacheError> {
+        let changed = self.conn.execute(
+            "UPDATE comment_messages SET body = ?2
+             WHERE id = ?1 AND origin = 'github' AND github_id IS NULL AND author_kind = 'user'",
+            params![id, body],
+        )?;
+        if changed == 0 {
+            return Err(CacheError::Corrupt(format!("no draft {id}")));
+        }
+        Ok(())
+    }
+
+    /// Turn a thread towards GitHub, or back into one of Perch's own.
+    pub fn set_thread_origin(&self, id: &str, origin: ThreadOrigin) -> Result<(), CacheError> {
+        let changed = self.conn.execute(
+            "UPDATE comment_threads SET origin = ?2 WHERE id = ?1",
+            params![id, origin.name()],
+        )?;
+        if changed == 0 {
+            return Err(CacheError::Corrupt(format!("no comment thread {id}")));
+        }
+        Ok(())
+    }
+
+    /// Throw a draft away, in one transaction with what follows from it.
+    /// A thread that was only on its way to GitHub for the draft, with
+    /// nothing else under it, goes too, unless a review finding owns it,
+    /// when it turns back into Perch's own instead; one with only Perch's
+    /// messages left turns back as well. A thread that is on GitHub is
+    /// left as it is. A message that is not a draft is not touched.
+    pub fn delete_draft(&self, message_id: &str) -> Result<(), CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let thread_id: Option<String> = tx
+            .query_row(
+                "SELECT thread_id FROM comment_messages
+                 WHERE id = ?1 AND origin = 'github' AND github_id IS NULL AND author_kind = 'user'",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(thread_id) = thread_id else {
+            return Err(CacheError::Corrupt(format!("no draft {message_id}")));
+        };
+        tx.execute(
+            "DELETE FROM comment_messages WHERE id = ?1",
+            params![message_id],
+        )?;
+        let on_its_way: bool = tx.query_row(
+            "SELECT origin = 'github' AND github_id IS NULL FROM comment_threads WHERE id = ?1",
+            params![thread_id],
+            |row| row.get(0),
+        )?;
+        if !on_its_way {
+            tx.commit()?;
+            return Ok(());
+        }
+        let (left, github_left, finding): (i64, i64, bool) = tx.query_row(
+            "SELECT COUNT(*), COUNT(CASE WHEN origin = 'github' THEN 1 END),
+                    EXISTS(SELECT 1 FROM review_findings WHERE thread_id = ?1)
+             FROM comment_messages WHERE thread_id = ?1",
+            params![thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if left == 0 && !finding {
+            tx.execute(
+                "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE owner_thread_id=?1)",
+                params![thread_id],
+            )?;
+            tx.execute("DELETE FROM runs WHERE owner_thread_id = ?1", params![thread_id])?;
+            tx.execute("DELETE FROM comment_threads WHERE id = ?1", params![thread_id])?;
+        } else if github_left == 0 {
+            tx.execute(
+                "UPDATE comment_threads SET origin = 'local' WHERE id = ?1",
+                params![thread_id],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -5277,6 +5390,121 @@ mod tests {
             c.load_comment_threads("item-pr-7").unwrap().is_empty(),
             "nothing was left under it"
         );
+    }
+
+    /// A draft of the reader's under `thread_id`, dated `at`.
+    fn draft(id: &str, thread_id: &str, at: &str) -> CommentMessage {
+        CommentMessage {
+            id: id.into(),
+            thread_id: thread_id.into(),
+            origin: ThreadOrigin::GitHub,
+            author: Author::User,
+            body: "I will fix it".into(),
+            created_at: stamp_of(at),
+            run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
+        }
+    }
+
+    #[test]
+    fn a_drafts_body_is_rewritten_and_an_answers_is_not() {
+        let c = Cache::open_in_memory().unwrap();
+        let t = comment_thread("t1", "w");
+        c.insert_comment_thread(&t).unwrap();
+        c.insert_draft(&draft("d1", "t1", "2026-09-18T10:01:00Z")).unwrap();
+
+        c.update_comment_message_body("d1", "I fixed it").unwrap();
+        let t = c.load_comment_threads("w").unwrap().pop().unwrap();
+        let d = t.messages.iter().find(|m| m.id == "d1").unwrap();
+        assert_eq!(d.body, "I fixed it");
+        assert_eq!(d.created_at, stamp_of("2026-09-18T10:01:00Z"), "its time stays");
+
+        assert!(matches!(
+            c.update_comment_message_body("t1-m2", "no"),
+            Err(CacheError::Corrupt(_))
+        ));
+        assert!(matches!(
+            c.update_comment_message_body("nowhere", "no"),
+            Err(CacheError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn a_thread_turns_towards_github_and_back() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_comment_thread(&comment_thread("t1", "w")).unwrap();
+        c.set_thread_origin("t1", ThreadOrigin::GitHub).unwrap();
+        let t = c.load_comment_threads("w").unwrap().pop().unwrap();
+        assert_eq!(t.origin, ThreadOrigin::GitHub);
+        assert_eq!(t.github_id, None, "not on GitHub yet");
+        c.set_thread_origin("t1", ThreadOrigin::Local).unwrap();
+        assert_eq!(c.load_comment_threads("w").unwrap()[0].origin, ThreadOrigin::Local);
+        assert!(matches!(
+            c.set_thread_origin("nowhere", ThreadOrigin::Local),
+            Err(CacheError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn a_draft_under_perchs_thread_turns_it_towards_github() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_comment_thread(&comment_thread("t1", "w")).unwrap();
+        c.insert_draft(&draft("d1", "t1", "2026-09-18T10:01:00Z")).unwrap();
+        let t = c.load_comment_threads("w").unwrap().pop().unwrap();
+        assert_eq!(t.origin, ThreadOrigin::GitHub);
+        assert_eq!(t.github_id, None);
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["t1-m1", "t1-m2", "d1"]);
+
+        // A message that is not a draft is not what this is for.
+        let mut answer = draft("d2", "t1", "2026-09-18T10:02:00Z");
+        answer.origin = ThreadOrigin::Local;
+        assert!(matches!(c.insert_draft(&answer), Err(CacheError::Corrupt(_))));
+        assert_eq!(c.load_comment_threads("w").unwrap()[0].messages.len(), 3);
+    }
+
+    #[test]
+    fn deleting_a_draft_turns_its_thread_back_or_takes_it() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_comment_thread(&comment_thread("t1", "w")).unwrap();
+        c.insert_draft(&draft("d1", "t1", "2026-09-18T10:01:00Z")).unwrap();
+        c.delete_draft("d1").unwrap();
+        let t = c.load_comment_threads("w").unwrap().pop().unwrap();
+        assert_eq!(t.origin, ThreadOrigin::Local, "only Perch's messages are left");
+        assert_eq!(t.messages.len(), 2);
+
+        // A thread that was only made for its draft goes with it.
+        let mut fresh = comment_thread("t2", "w");
+        fresh.origin = ThreadOrigin::GitHub;
+        fresh.messages = vec![draft("d2", "t2", "2026-09-18T10:03:00Z")];
+        c.insert_comment_thread(&fresh).unwrap();
+        assert_eq!(c.load_comment_threads("w").unwrap().len(), 2);
+        c.delete_draft("d2").unwrap();
+        let threads = c.load_comment_threads("w").unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "t1");
+
+        // Not a draft: nothing happens.
+        assert!(matches!(c.delete_draft("t1-m1"), Err(CacheError::Corrupt(_))));
+        assert_eq!(c.load_comment_threads("w").unwrap()[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn deleting_a_draft_under_githubs_thread_leaves_the_thread_as_it_is() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z")).unwrap();
+        c.delete_draft("d1").unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        assert_eq!(t.origin, ThreadOrigin::GitHub);
+        assert_eq!(t.github_id, Some(3));
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-3"]);
     }
 
     #[test]

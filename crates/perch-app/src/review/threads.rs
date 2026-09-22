@@ -24,7 +24,7 @@ use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::cards;
 use crate::review::doc::CardId;
-use crate::review::model::{AgentChoice, Composer, ReviewState};
+use crate::review::model::{AgentChoice, Composer, Destination, ReviewState};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
@@ -102,6 +102,14 @@ pub enum ThreadFace {
 }
 
 impl ThreadFace {
+    /// The face's slot in `ReviewState::last_destination`.
+    pub fn index(self) -> usize {
+        match self {
+            ThreadFace::Inline => 0,
+            ThreadFace::Card => 1,
+        }
+    }
+
     /// Room between a thread's messages.
     fn message_gap(self) -> f64 {
         match self {
@@ -198,20 +206,36 @@ pub fn composer_view(
             let Some(item_id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
                 return;
             };
-            backend.ask(
-                &item_id,
-                composer.thread_id.clone(),
-                composer.anchor.clone(),
-                question.trim(),
-                composer.backend,
-                &composer.model,
-                composer.effort,
-            );
-            state.agent_last.set(Some((
-                composer.backend,
-                composer.model.clone(),
-                composer.effort,
-            )));
+            match &composer.destination {
+                Destination::Agent {
+                    backend: agent,
+                    model,
+                    effort,
+                } => {
+                    backend.ask(
+                        &item_id,
+                        composer.thread_id.clone(),
+                        composer.anchor.clone(),
+                        question.trim(),
+                        *agent,
+                        model,
+                        *effort,
+                    );
+                    state
+                        .agent_last
+                        .set(Some((*agent, model.clone(), *effort)));
+                }
+                // A draft: written and shown, and nothing asked. The
+                // review form posts it.
+                Destination::GitHub => backend.save_draft(
+                    &item_id,
+                    composer.thread_id.clone(),
+                    composer.anchor.clone(),
+                    question.trim(),
+                    composer.editing.clone(),
+                ),
+            }
+            state.last_destination[face.index()].set(Some(composer.destination.clone()));
             state.composer_sent();
         })
     };
@@ -238,9 +262,10 @@ pub fn composer_view(
             state.composer_focused.set(true)
         })
         .on_event_cont(el::FocusLost, move |_, _| state.composer_focused.set(false))
-        // Escape closes an empty composer. In the capture phase, because
-        // the editor stops every key once it has focus and this has to
-        // run first.
+        // Escape closes an empty composer, or one editing a draft, whose
+        // words are still in the cache and come back as the message row.
+        // In the capture phase, because the editor stops every key once
+        // it has focus and this has to run first.
         .on_event_with_config(
             el::KeyDown,
             floem::context::EventCallbackConfig {
@@ -248,7 +273,10 @@ pub fn composer_view(
             },
             move |_, key: &KeyboardEvent| {
                 if key.code == Code::Escape && key.modifiers.is_empty() {
-                    if escape_text().trim().is_empty() {
+                    let editing = state
+                        .composer
+                        .with_untracked(|c| c.as_ref().is_some_and(|c| c.editing.is_some()));
+                    if editing || escape_text().trim().is_empty() {
                         state.close_composer();
                     }
                     return floem::event::EventPropagation::Stop;
@@ -273,7 +301,10 @@ pub fn composer_view(
     // A composer laid in place on Conversation also leaves its box where
     // `a` can find it and scrolls the page to itself: it sits at the end of
     // the conversation, or under a thread, and may have opened off screen.
+    // One editing a draft inside an inline card sits among the messages,
+    // in the card's own scroll, so it scrolls that to itself too.
     let inner = editor.editor().editor_view_id;
+    let editing = composer.editing.is_some();
     let asked = std::rc::Rc::new(std::cell::Cell::new(false));
     let registered = std::rc::Rc::new(std::cell::Cell::new(None));
     let unregister = registered.clone();
@@ -291,6 +322,8 @@ pub fn composer_view(
             if face == ThreadFace::Card {
                 registered.set(Some(id));
                 state.composer_box.set(Some(id));
+                id.scroll_to(None);
+            } else if editing {
                 id.scroll_to(None);
             }
             if state.composer_autofocus.get_untracked() {
@@ -332,10 +365,30 @@ pub fn composer_view(
         .style(|s| s.items_center().width_full().margin_bottom(8.0)),
         editor_box(editor, 72.0, face == ThreadFace::Inline),
         Stack::horizontal((
-            model_picker(app, state),
-            effort_picker(app, state),
+            destination_picker(app, state),
+            // No effort to pick for GitHub.
+            dyn_container(
+                move || state.composer.with(|c| c.as_ref().is_some_and(|c| c.destination.is_github())),
+                move |github| {
+                    if github {
+                        Empty::new().into_any()
+                    } else {
+                        effort_picker(app, state).into_any()
+                    }
+                },
+            ),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
-            send_button(send.clone()),
+            send_button(
+                move || {
+                    state.composer.with(|c| {
+                        match c.as_ref().map(|c| c.destination.is_github()) {
+                            Some(true) => "Add to review".to_string(),
+                            _ => "Send".to_string(),
+                        }
+                    })
+                },
+                send.clone(),
+            ),
         ))
         .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0)),
     ))
@@ -358,10 +411,11 @@ pub fn composer_view(
 
 /// The one high-contrast action in the composer, matching Codex's dark
 /// primary controls while the model and effort remain quiet selectors.
-fn send_button(on_click: Rc<dyn Fn()>) -> impl IntoView {
+/// `Send` to an agent; `Add to review` when the text is bound for GitHub.
+fn send_button(label: impl Fn() -> String + 'static, on_click: Rc<dyn Fn()>) -> impl IntoView {
     Container::new(
         Stack::horizontal((
-            Label::derived(|| "Send".to_string()).style(|s| {
+            Label::derived(label).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .font_weight(theme::weight_emphasis())
                     .color(theme::CANVAS)
@@ -397,25 +451,29 @@ pub fn subject_word(state: ReviewState) -> &'static str {
     }
 }
 
-/// The model to run with, from what config offers: Claude Code's models,
-/// then Codex's under a line when there are any. A model carries its
-/// backend, so picking one sets both.
-fn model_picker(app: AppState, state: ReviewState) -> impl IntoView {
+/// Where the text goes, from what config offers: Claude Code's models,
+/// then Codex's under a line when there are any, then GitHub under
+/// another. A model carries its backend, so picking one sets both, and
+/// keeps the effort where the model takes it. GitHub can be picked only
+/// where a draft has somewhere to land: a composer on lines, or under a
+/// thread that is on GitHub. A draft being edited stays a draft: the
+/// models are greyed out, since sending would replace its body, not ask.
+fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
     use floem::menu::Menu;
 
     let current = move || {
         state.composer.with(|c| {
             c.as_ref()
-                .map(|c| model_label(&c.model))
+                .map(|c| destination_label(&c.destination))
                 .unwrap_or_default()
         })
     };
     menu_button(current, move || {
-        let selected = state
-            .composer
-            .get_untracked()
-            .map(|c| c.model)
-            .unwrap_or_default();
+        let Some(composer) = state.composer.get_untracked() else {
+            return Menu::new();
+        };
+        let selected = composer.destination.agent_choice().map(|(_, m, _)| m);
+        let models_offered = composer.editing.is_none();
         let mut menu = Menu::new();
         for (i, group) in model_groups(&app.agent.get_untracked())
             .into_iter()
@@ -427,24 +485,59 @@ fn model_picker(app: AppState, state: ReviewState) -> impl IntoView {
             for (backend, model) in group {
                 let label = model_label(&model);
                 let pick = model.clone();
-                let checked = model == selected;
+                let checked = selected.as_deref() == Some(model.as_str());
                 menu = menu.item(label, move |item| {
                     let pick = pick.clone();
-                    item.checked(checked).action(move || {
+                    item.checked(checked).enabled(models_offered).action(move || {
                         let agent = app.agent.get_untracked();
+                        // The effort stays where it was, or where it was
+                        // last for an agent when coming back from GitHub.
+                        let effort = state
+                            .composer
+                            .with_untracked(|c| c.as_ref().and_then(|c| c.destination.agent_choice()))
+                            .map(|(_, _, e)| e)
+                            .or_else(|| state.agent_last.get_untracked().map(|(_, _, e)| e))
+                            .unwrap_or_else(|| defaults(app).2);
                         state.composer.update(|c| {
                             if let Some(c) = c {
-                                c.backend = backend;
-                                c.model = pick.clone();
-                                c.effort = nearest_effort(&agent, &pick, c.effort);
+                                c.destination = Destination::Agent {
+                                    backend,
+                                    model: pick.clone(),
+                                    effort: nearest_effort(&agent, &pick, effort),
+                                };
                             }
                         })
                     })
                 });
             }
         }
-        menu
+        let github_offered = state.github_offered(&composer);
+        menu.separator().item("GitHub", move |item| {
+            item.checked(composer.destination.is_github())
+                .enabled(github_offered)
+                .action(move || {
+                    state.composer.update(|c| {
+                        if let Some(c) = c {
+                            c.destination = Destination::GitHub;
+                        }
+                    })
+                })
+        })
     })
+}
+
+/// The picker's face: `Claude · Opus`, `Codex · gpt-5.5`, or `GitHub`.
+pub fn destination_label(destination: &Destination) -> String {
+    match destination {
+        Destination::Agent { backend, model, .. } => {
+            let agent = match backend {
+                perch_agent::Backend::ClaudeCode => "Claude",
+                perch_agent::Backend::Codex => "Codex",
+            };
+            format!("{agent} \u{00b7} {}", model_label(model))
+        }
+        Destination::GitHub => "GitHub".to_string(),
+    }
 }
 
 /// The picker's sections: one per backend that has models, Claude Code
@@ -465,7 +558,7 @@ fn model_groups(agent: &perch_github::AgentConfig) -> Vec<Vec<(perch_agent::Back
 /// takes: the highest it does take, so a reader who asked for Ultra of a
 /// model without it gets Max and sees so, rather than Codex quietly
 /// running Max under the name Ultra.
-fn nearest_effort(
+pub(crate) fn nearest_effort(
     agent: &perch_github::AgentConfig,
     model: &str,
     wanted: perch_agent::Effort,
@@ -485,19 +578,21 @@ fn nearest_effort(
 fn effort_picker(app: AppState, state: ReviewState) -> impl IntoView {
     use floem::menu::Menu;
 
+    let choice = move || {
+        state
+            .composer
+            .with(|c| c.as_ref().and_then(|c| c.destination.agent_choice()))
+    };
     let current = move || {
-        state.composer.with(|c| {
-            c.as_ref()
-                .map(|c| c.effort.label().to_string())
-                .unwrap_or_default()
-        })
+        choice()
+            .map(|(_, _, e)| e.label().to_string())
+            .unwrap_or_default()
     };
     menu_button(current, move || {
-        let (selected, model) = state
-            .composer
-            .get_untracked()
-            .map(|c| (c.effort, c.model))
-            .unwrap_or_default();
+        // Only drawn for an agent; nothing to list otherwise.
+        let Some((_, model, selected)) = floem::reactive::Effect::untrack(choice) else {
+            return Menu::new();
+        };
         let agent = app.agent.get_untracked();
         let mut menu = Menu::new();
         for effort in perch_agent::Effort::ALL {
@@ -507,8 +602,12 @@ fn effort_picker(app: AppState, state: ReviewState) -> impl IntoView {
                     .enabled(takes)
                     .action(move || {
                         state.composer.update(|c| {
-                            if let Some(c) = c {
-                                c.effort = effort;
+                            if let Some(Composer {
+                                destination: Destination::Agent { effort: e, .. },
+                                ..
+                            }) = c
+                            {
+                                *e = effort;
                             }
                         })
                     })
@@ -1039,18 +1138,40 @@ pub fn messages_view(
     face: ThreadFace,
 ) -> impl IntoView {
     let list_id = thread_id.clone();
+    // Which draft the composer is editing, if any: that message's row
+    // holds the composer instead of the message. On the opening as well,
+    // so an edit opened again after Escape gets a fresh box.
+    let editing = Memo::new(move |_| {
+        state.composer.with(|c| {
+            c.as_ref()
+                .and_then(|c| c.editing.clone().map(|id| (id, c.opening)))
+        })
+    });
     dyn_stack(
         move || {
+            let editing = editing.get();
             state.comment_threads.with(|t| {
                 t.iter()
                     .find(|t| t.id == list_id)
-                    .map(|t| t.messages.clone())
+                    .map(|t| {
+                        t.messages
+                            .iter()
+                            .map(|m| {
+                                let opening = editing
+                                    .as_ref()
+                                    .filter(|(id, _)| *id == m.id)
+                                    .map(|(_, opening)| *opening);
+                                (m.clone(), opening)
+                            })
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default()
             })
         },
         // The key follows what the row shows: an edit on GitHub changes
-        // the body, and a draft posted gains its id.
-        |m| {
+        // the body, a draft posted gains its id, and a draft being edited
+        // is the composer.
+        |(m, editing)| {
             (
                 m.id.clone(),
                 m.origin.name(),
@@ -1059,17 +1180,24 @@ pub fn messages_view(
                 m.run
                     .as_ref()
                     .map(|r| (r.status.name(), r.steps.len(), r.error.clone())),
+                *editing,
             )
         },
-        move |m| {
+        move |(m, editing)| {
             let thread = state
                 .comment_threads
                 .with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
-            match thread {
-                Some(thread) => {
+            match (thread, editing) {
+                (Some(_), Some(_)) => match state.composer.get_untracked() {
+                    Some(c) => composer_view(app, state, backend.clone(), c, face)
+                        .style(|s| s.width_full())
+                        .into_any(),
+                    None => Empty::new().into_any(),
+                },
+                (Some(thread), None) => {
                     message_view(app, state, backend.clone(), thread, m, face).into_any()
                 }
-                None => Empty::new().into_any(),
+                (None, _) => Empty::new().into_any(),
             }
         },
     )
@@ -1101,25 +1229,36 @@ pub fn follow_up(
                 .is_some_and(|t| t.running_run().is_some())
         })
     });
+    // Keyed on what the composer is about and which opening it is, not on
+    // the composer: picking a destination writes the composer, and a
+    // rebuild on that would throw the typed text away and drop the box's
+    // focus.
+    let composer = Memo::new(move |_| {
+        let composer = state.composer.with(|c| {
+            c.as_ref()
+                .filter(|c| c.thread_id.as_deref() == Some(composer_thread.as_str()))
+                .map(|c| (c.anchor.clone(), c.opening, c.editing.clone()))
+        });
+        let drawn_here = match face {
+            ThreadFace::Inline => state.follow_up_is_inline(&composer_thread),
+            ThreadFace::Card => true,
+        };
+        composer.filter(|_| drawn_here)
+    });
     dyn_container(
-        move || {
-            let composer = state.composer.with(|c| {
-                c.as_ref()
-                    .filter(|c| c.thread_id.as_deref() == Some(composer_thread.as_str()))
-                    .cloned()
-            });
-            let drawn_here = match face {
-                ThreadFace::Inline => state.follow_up_is_inline(&composer_thread),
-                ThreadFace::Card => true,
-            };
-            (composer.filter(|_| drawn_here), running.get())
-        },
+        move || (composer.get(), running.get()),
         move |(composer, _)| match composer {
+            // A draft being edited has the composer in its own row, up
+            // among the messages; nothing goes here.
+            Some((_, _, Some(_))) => Empty::new().into_any(),
             // Under a thread the composer is a child of this container,
             // not a card placed by its edges, and takes the width here.
-            Some(c) => composer_view(app, state, backend.clone(), c, face)
-                .style(|s| s.width_full())
-                .into_any(),
+            Some(_) => match state.composer.get_untracked() {
+                Some(c) => composer_view(app, state, backend.clone(), c, face)
+                    .style(|s| s.width_full())
+                    .into_any(),
+                None => Empty::new().into_any(),
+            },
             None => {
                 let thread = state
                     .comment_threads
@@ -1149,6 +1288,9 @@ pub fn message_view(
     if let (ThreadOrigin::GitHub, Author::GitHubUser(login)) = (message.origin, &message.author) {
         return github_message_view(app, state, backend, &thread, &message, login.clone())
             .into_any();
+    }
+    if message.is_draft() {
+        return draft_message_view(app, state, backend, &thread, &message).into_any();
     }
     let is_agent = matches!(message.author, Author::Agent { .. });
     let body = message.body.clone();
@@ -1217,12 +1359,15 @@ fn github_message_view(
         when: Some(message.created_at),
     };
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
+    // To an agent, whatever the thread's last message was: the point is
+    // to ask about the comment, not to answer it.
     let ask: Rc<dyn Fn()> = Rc::new(move || {
-        state.open_composer(
+        state.open_composer_with(
             Some(thread_id.clone()),
             anchor.clone(),
             String::new(),
-            defaults(app),
+            Destination::agent(state.agent_last.get_untracked().unwrap_or_else(|| defaults(app))),
+            None,
         );
     });
     let react = message.node_id.as_deref().and_then(cards::reactable);
@@ -1250,6 +1395,121 @@ fn github_message_view(
         }),
         hovered,
     )
+}
+
+/// The reader's message on its way to GitHub: their own byline with the
+/// Draft mark after the name and no time, since it has not gone
+/// anywhere yet; edit and delete on hover, and the body. Flush with the
+/// comments it answers, whether it is the thread's first or a reply,
+/// since it is theirs and not a rule under someone else's. Edit opens
+/// the composer in this row with the text; delete asks nothing, a draft
+/// being Perch's alone.
+fn draft_message_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread: &CommentThread,
+    message: &CommentMessage,
+) -> impl IntoView {
+    let hovered = RwSignal::new(false);
+    let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
+    let (edit_id, edit_body) = (message.id.clone(), message.body.clone());
+    let edit: Rc<dyn Fn()> = Rc::new(move || {
+        state.open_composer_with(
+            Some(thread_id.clone()),
+            anchor.clone(),
+            edit_body.clone(),
+            Destination::GitHub,
+            Some(edit_id.clone()),
+        );
+    });
+    let delete_id = message.id.clone();
+    let delete: Rc<dyn Fn()> = Rc::new(move || {
+        let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
+            return;
+        };
+        backend.delete_draft(&item_id, &delete_id);
+    });
+    let actions = Stack::horizontal((
+        hover_icon(hovered, SidebarIcon::Pencil, "edit-draft", edit),
+        hover_icon(hovered, SidebarIcon::Trash, "delete-draft", delete),
+    ))
+    .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
+    .into_any();
+    cards::track_hover(
+        Stack::vertical((
+            draft_byline(app, actions),
+            crate::review::markdown::render(&message.body),
+        ))
+        .style(|s| s.flex_col().width_full().gap(6.0)),
+        hovered,
+    )
+}
+
+/// The reader's face and name, as the thread byline draws them, with
+/// `Draft` after the name and whatever the caller puts at the right.
+fn draft_byline(app: AppState, trailing: floem::AnyView) -> impl IntoView {
+    let viewer = move || app.viewer.get().filter(|(l, _)| !l.is_empty());
+    let seed = viewer().map(|(l, _)| l).unwrap_or_else(|| "you".into());
+    Stack::horizontal((
+        crate::ui::widgets::avatar(
+            app,
+            move || viewer().map(|(_, a)| a).unwrap_or_default(),
+            theme::NESTED_AVATAR,
+            seed,
+        )
+        .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
+        name_label(
+            move || match viewer() {
+                Some((login, _)) => Name::Login(login),
+                None => Name::Plain("You".into()),
+            },
+            |s| {
+                s.font_size(theme::TEXT_META)
+                    .font_weight(theme::weight_emphasis())
+                    .color(theme::FG)
+            },
+        ),
+        draft_pill(),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        trailing,
+    ))
+    .style(|s| s.items_center().width_full().min_width(0.0))
+}
+
+/// The Draft mark after a draft's author, in GitHub's colour: this is
+/// going there.
+pub fn draft_pill() -> impl IntoView {
+    Label::derived(|| "Draft".to_string())
+        .debug_name("draft-pill")
+        .style(|s| {
+            s.font_size(theme::TEXT_SECTION)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::GITHUB)
+                .background(theme::GITHUB_BG)
+                .border(1.0)
+                .border_color(theme::GITHUB_BG)
+                .border_radius(9.0)
+                .padding_horiz(6.0)
+                .margin_left(8.0)
+                .selectable(false)
+        })
+}
+
+/// A small action drawn only while its message is under the pointer,
+/// hidden rather than absent so the byline keeps its shape.
+fn hover_icon(
+    hovered: RwSignal<bool>,
+    icon: SidebarIcon,
+    name: &'static str,
+    action: Rc<dyn Fn()>,
+) -> impl IntoView {
+    icon_button(move || icon, || theme::FG_SUBTLE, move || action())
+        .debug_name(name)
+        .style(move |s| {
+            s.size(24.0, 24.0)
+                .apply_if(!hovered.get(), |s| s.hide())
+        })
 }
 
 /// What the agent did, under its answer or under the question while it
@@ -1972,6 +2232,250 @@ mod tests {
             vec![(Backend::ClaudeCode, "shared".to_string())],
             "config decides, not the section"
         );
+    }
+
+    fn sonnet_medium() -> AgentChoice {
+        (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".into(),
+            perch_agent::Effort::Medium,
+        )
+    }
+
+    /// The reader's question under the pull request, as `a` opens it.
+    fn state_with_item() -> ReviewState {
+        let state = ReviewState::new();
+        let mut item =
+            perch_github::Item::new("acme/repo", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "item-1".into();
+        state.item.set(Some(Arc::new(item)));
+        state
+    }
+
+    /// `a` on a selection opens the composer on the lines, on an agent.
+    /// Picking GitHub turns the send into Add to review, takes the effort
+    /// picker away, and sending asks the backend to keep a draft on those
+    /// lines with no thread; the face remembers, so the next composer on
+    /// lines opens on GitHub.
+    #[test]
+    fn a_composer_on_lines_sent_to_github_keeps_a_draft_with_the_anchor_and_no_thread() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let anchor = perch_github::Anchor {
+            path: "src/x.rs".into(),
+            start_line: 7,
+            line: 8,
+            side: perch_github::Side::Right,
+            commit_sha: "h".into(),
+        };
+        state.open_composer(None, Some(anchor.clone()), "please".into(), sonnet_medium());
+        let composer = state.composer.get().unwrap();
+        assert_eq!(composer.destination, Destination::agent(sonnet_medium()));
+        assert!(state.github_offered(&composer));
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find(root_id, "Label: \"Send\"").is_some());
+        assert!(find(root_id, "Label: \"Medium\"").is_some(), "the effort picker");
+
+        // As the picker's GitHub entry does.
+        state.composer.update(|c| {
+            if let Some(c) = c {
+                c.destination = Destination::GitHub;
+            }
+        });
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find(root_id, "Label: \"Add to review\"").is_some());
+        assert!(find(root_id, "Label: \"GitHub\"").is_some());
+        assert!(find(root_id, "Label: \"Medium\"").is_none(), "no effort for GitHub");
+        let text_box = state.composer_box.get().expect("the box registered itself");
+        assert!(harness.is_focused(text_box), "the flip kept the keyboard");
+
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        match commands.try_recv() {
+            Ok(Command::SaveDraft {
+                item_id,
+                thread_id,
+                anchor: on,
+                body,
+                editing,
+            }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(thread_id, None);
+                assert_eq!(on, Some(anchor.clone()));
+                assert_eq!(body, "please");
+                assert_eq!(editing, None);
+            }
+            other => panic!("Cmd-Enter did not keep a draft: {other:?}"),
+        }
+        assert!(state.composer.get().is_none(), "sending closes the composer");
+        assert_eq!(
+            state.last_destination[ThreadFace::Card.index()].get(),
+            Some(Destination::GitHub)
+        );
+        assert_eq!(state.agent_last.get(), None, "no agent was sent to");
+
+        state.open_composer(None, Some(anchor), String::new(), sonnet_medium());
+        assert_eq!(state.composer.get().unwrap().destination, Destination::GitHub);
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        assert_eq!(
+            state.composer.get().unwrap().destination,
+            Destination::agent(sonnet_medium()),
+            "about the item as a whole, an agent"
+        );
+    }
+
+    /// A draft under GitHub's thread: the reader's byline with the Draft
+    /// mark, edit and delete under the pointer and no Ask about this;
+    /// delete asks the backend straight away, edit opens the composer in
+    /// its row with the text, bound for GitHub.
+    #[test]
+    fn a_draft_draws_with_the_draft_mark_and_edit_and_delete_under_the_pointer() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let mut thread = github_thread_with_private_messages();
+        thread.messages.truncate(1);
+        let mut draft = thread.messages[0].clone();
+        draft.id = "d1".into();
+        draft.author = Author::User;
+        draft.github_id = None;
+        draft.body = "I will fix it".into();
+        thread.messages.push(draft);
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        let pill = find(root_id, "draft-pill").expect("the Draft mark");
+        assert!(harness.get_layout_rect(pill).width() > 0.0);
+        let edit = find(root_id, "edit-draft").expect("edit");
+        let delete = find(root_id, "delete-draft").expect("delete");
+        assert_eq!(harness.get_layout_rect(edit).width(), 0.0, "hidden until hovered");
+
+        // Under the pointer, the actions show.
+        let body = find(root_id, "draft-pill").unwrap().get_visual_rect_no_clip();
+        harness.pointer_move(body.center().x, body.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(harness.get_layout_rect(edit).width(), 24.0);
+        assert_eq!(harness.get_layout_rect(delete).width(), 24.0);
+
+        let c = delete.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        match commands.try_recv() {
+            Ok(Command::DeleteDraft { item_id, message_id }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(message_id, "d1");
+            }
+            other => panic!("delete did not ask for the draft: {other:?}"),
+        }
+
+        let c = edit.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        let composer = state.composer.get().expect("edit opened the composer");
+        assert_eq!(composer.editing.as_deref(), Some("d1"));
+        assert_eq!(composer.destination, Destination::GitHub);
+        assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
+        assert_eq!(composer.anchor, thread.anchor);
+        assert_eq!(state.composer_draft.get(), "I will fix it");
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find(root_id, "draft-pill").is_none(), "the composer took the draft's row");
+        assert!(find(root_id, "Label: \"Add to review\"").is_some());
+
+        // Escape, with the text still in the box, gives the row back: the
+        // words are safe in the cache.
+        let text_box = state.composer_box.get().expect("the box registered itself");
+        assert!(harness.is_focused(text_box));
+        harness.dispatch_event(key(Key::Named(NamedKey::Escape), Code::Escape, Modifiers::empty()));
+        harness.rebuild();
+        harness.paint();
+        assert!(state.composer.get().is_none(), "Escape closed the edit");
+        assert!(find(harness.root_id(), "draft-pill").is_some(), "the draft is back");
+    }
+
+    /// A follow-up follows the thread's last message: under rohan's
+    /// comment it is bound for GitHub, under the agent's answer for that
+    /// agent at its run's effort. Ask about this on rohan's comment goes
+    /// to an agent whatever the thread ends in.
+    #[test]
+    fn a_follow_up_follows_the_last_message_and_ask_about_this_goes_to_an_agent() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let thread = github_thread_with_private_messages();
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+
+        // Under the agent's answer, which ends the thread: Opus at the
+        // run's high, neither of which the defaults would give.
+        let mut answered = thread.clone();
+        let answer = answered.messages.last_mut().unwrap();
+        answer.author = Author::Agent { backend: "claude-code".into(), model: "opus".into() };
+        answer.run = Some(perch_github::RunRecord {
+            id: "r1".into(),
+            backend: "claude-code".into(),
+            model: "opus".into(),
+            effort: "high".into(),
+            status: perch_github::RunStatus::Completed,
+            ..Default::default()
+        });
+        state.comment_threads.set(Arc::new(vec![answered.clone()]));
+        state.open_composer(Some(answered.id.clone()), answered.anchor.clone(), String::new(), sonnet_medium());
+        assert_eq!(
+            state.composer.get().unwrap().destination,
+            Destination::Agent {
+                backend: perch_agent::Backend::ClaudeCode,
+                model: "opus".into(),
+                effort: perch_agent::Effort::High,
+            }
+        );
+        state.close_composer();
+
+        // Under rohan's comment alone.
+        let mut theirs = thread.clone();
+        theirs.messages.truncate(1);
+        state.comment_threads.set(Arc::new(vec![theirs.clone()]));
+        state.open_composer(Some(theirs.id.clone()), theirs.anchor.clone(), String::new(), sonnet_medium());
+        assert_eq!(state.composer.get().unwrap().destination, Destination::GitHub);
+        state.close_composer();
+
+        // Ask about this on rohan's comment.
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = message_view(
+            app,
+            state,
+            Rc::new(backend),
+            theirs.clone(),
+            theirs.messages[0].clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let ask = find(harness.root_id(), "Label: \"Ask about this\"").expect("Ask about this");
+        let at = harness.get_layout_rect(harness.root_id()).center();
+        harness.pointer_move(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        let c = ask.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        let composer = state.composer.get().expect("Ask about this opened the composer");
+        assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
+        assert_eq!(composer.destination, Destination::agent(sonnet_medium()));
+        assert_eq!(composer.editing, None);
     }
 
     /// The lines wrap inside the box's padding, and the box's border takes

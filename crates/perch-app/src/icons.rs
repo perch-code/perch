@@ -164,6 +164,11 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M11.5 6.7 C11.5 9.6 4.5 8.3 4.5 10.8" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linecap="round"/>"#
         ),
+        SidebarIcon::Pencil => format!(
+            r#"<path d="M3 13 l0.9 -3.4 l7.2 -7.2 a1.2 1.2 0 0 1 1.7 0 l0.8 0.8 a1.2 1.2 0 0 1 0 1.7 l-7.2 7.2 z"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M9.9 3.6 l2.5 2.5" fill="none" stroke="{c}" stroke-width="1.4"/>"#
+        ),
         SidebarIcon::Trash => format!(
             r#"<path d="M2.8 4.3 H13.2" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>
                <path d="M6.2 4.3 V2.9 a0.7 0.7 0 0 1 0.7 -0.7 H9.1 a0.7 0.7 0 0 1 0.7 0.7 V4.3"
@@ -447,13 +452,16 @@ pub enum SidebarIcon {
     /// Two angle brackets: a file's markup, for the tile that shows a
     /// picture's source.
     Source,
+    /// A pencil at a slant: edit.
+    Pencil,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 46] = [
+    pub const ALL: [SidebarIcon; 47] = [
+        SidebarIcon::Pencil,
         SidebarIcon::Source,
         SidebarIcon::Smiley,
         SidebarIcon::Skip,

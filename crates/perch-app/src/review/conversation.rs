@@ -1073,12 +1073,16 @@ mod tests {
             "the box did not register itself for `a`"
         );
 
-        // Picking a model keeps the box: the container is keyed on what
-        // the composer is about, not on the composer.
+        // Picking a destination keeps the box: the container is keyed on
+        // what the composer is about, not on the composer.
         let before = state.composer_box.get();
         state.composer.update(|c| {
             if let Some(c) = c {
-                c.model = "opus".into();
+                c.destination = crate::review::model::Destination::Agent {
+                    backend: perch_agent::Backend::ClaudeCode,
+                    model: "opus".into(),
+                    effort: perch_agent::Effort::Medium,
+                };
             }
         });
         harness.rebuild();

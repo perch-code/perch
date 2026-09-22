@@ -363,6 +363,21 @@ pub enum Command {
     DeletePrivateMessages {
         thread_id: String,
     },
+    /// Keep a message for GitHub: a reply under `thread_id`, or with none
+    /// a new thread on `anchor`; with `editing`, the new body of that
+    /// draft. Nothing is posted until the review is submitted.
+    SaveDraft {
+        item_id: String,
+        thread_id: Option<String>,
+        anchor: Option<Anchor>,
+        body: String,
+        editing: Option<String>,
+    },
+    /// Throw a draft away, and its thread when nothing else was in it.
+    DeleteDraft {
+        item_id: String,
+        message_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -2051,6 +2066,30 @@ impl Backend {
         });
     }
 
+    pub fn save_draft(
+        &self,
+        item_id: &str,
+        thread_id: Option<String>,
+        anchor: Option<Anchor>,
+        body: &str,
+        editing: Option<String>,
+    ) {
+        let _ = self.commands.send(Command::SaveDraft {
+            item_id: item_id.to_string(),
+            thread_id,
+            anchor,
+            body: body.to_string(),
+            editing,
+        });
+    }
+
+    pub fn delete_draft(&self, item_id: &str, message_id: &str) {
+        let _ = self.commands.send(Command::DeleteDraft {
+            item_id: item_id.to_string(),
+            message_id: message_id.to_string(),
+        });
+    }
+
     pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
         let _ = self.commands.send(Command::Hover {
             token,
@@ -2940,6 +2979,21 @@ async fn run(
             Command::DeletePrivateMessages { thread_id } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { delete_private_messages(&ctx, &thread_id).await });
+            }
+            Command::SaveDraft {
+                item_id,
+                thread_id,
+                anchor,
+                body,
+                editing,
+            } => {
+                save_draft(&ctx, &item_id, thread_id, anchor, body, editing);
+            }
+            Command::DeleteDraft {
+                item_id,
+                message_id,
+            } => {
+                delete_draft(&ctx, &item_id, &message_id);
             }
             Command::OpenFile {
                 path,
@@ -8570,14 +8624,15 @@ fn discussion_avatars(discussion: &perch_github::Discussion) -> Vec<String> {
 /// A thread whose file changed since its anchor was made may have moved.
 ///
 /// `git diff --quiet <sha> <head> -- <path>` per thread whose sha differs
-/// from the head; the common case, same sha, costs nothing. GitHub's own
-/// threads are left alone: GitHub says when those are outdated.
+/// from the head; the common case, same sha, costs nothing. Threads that
+/// are on GitHub are left alone: GitHub says when those are outdated. One
+/// merely on its way there, a draft's, is Perch's to check like its own.
 async fn mark_outdated_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &Path) {
     let Some(Ok(threads)) = ctx.with_cache(|c| c.load_comment_threads(item_id)) else {
         return;
     };
     for thread in threads {
-        if thread.origin == ThreadOrigin::GitHub {
+        if thread.github_id.is_some() {
             continue;
         }
         let Some(anchor) = &thread.anchor else {
@@ -9884,6 +9939,103 @@ async fn delete_private_messages(ctx: &Ctx, thread_id: &str) {
     }
     drop(deletion);
     ctx.send_threads(&item_id);
+}
+
+/// Keep a message for GitHub. With `editing`, the draft's body is
+/// replaced and nothing else moves. Otherwise the message goes under
+/// `thread_id`, and a thread of Perch's own is turned towards GitHub with
+/// it, since a reply to it will be a new review thread there; with no
+/// thread, a new one is made on `anchor`, already GitHub's though not yet
+/// on it. A draft with nowhere to land is refused, which the composer
+/// never offers.
+fn save_draft(
+    ctx: &Ctx,
+    item_id: &str,
+    thread_id: Option<String>,
+    anchor: Option<Anchor>,
+    body: String,
+    editing: Option<String>,
+) {
+    if let Some(message_id) = editing {
+        if let Some(Err(e)) = ctx.with_cache(|c| c.update_comment_message_body(&message_id, &body))
+        {
+            ctx.notice(format!("Could not save the draft: {e}"));
+            return;
+        }
+        ctx.send_threads(item_id);
+        return;
+    }
+    let now = Timestamp::now();
+    let draft = |thread_id: String| CommentMessage {
+        id: perch_github::comments::new_id(),
+        thread_id,
+        origin: ThreadOrigin::GitHub,
+        author: Author::User,
+        body,
+        created_at: now,
+        run: None,
+        github_id: None,
+        node_id: None,
+        html_url: None,
+        diff_hunk: None,
+        reactions: Default::default(),
+    };
+    // Each is one transaction in the cache: a new thread lands with its
+    // draft, and a thread of Perch's own is turned only with one under it.
+    let written = match thread_id {
+        Some(id) => {
+            let Some(thread) = ctx
+                .with_cache(|c| c.load_comment_threads(item_id))
+                .and_then(Result::ok)
+                .and_then(|all| all.into_iter().find(|t| t.id == id))
+            else {
+                ctx.notice("That thread is gone");
+                return;
+            };
+            if thread.anchor.is_none() && thread.github_id.is_none() {
+                ctx.notice("That thread has no lines for GitHub to put a comment on");
+                return;
+            }
+            let draft = draft(id);
+            ctx.with_cache(|c| c.insert_draft(&draft))
+        }
+        None => {
+            let Some(anchor) = anchor else {
+                ctx.notice("A comment for GitHub needs lines to go on");
+                return;
+            };
+            let id = perch_github::comments::new_id();
+            let thread = CommentThread {
+                id: id.clone(),
+                worktree_id: item_id.to_string(),
+                origin: ThreadOrigin::GitHub,
+                github_id: None,
+                anchor: Some(anchor),
+                outdated: false,
+                resolved: false,
+                created_at: now,
+                messages: vec![draft(id)],
+            };
+            ctx.with_cache(|c| c.insert_comment_thread(&thread))
+        }
+    };
+    if let Some(Err(e)) = written {
+        ctx.notice(format!("Could not save the draft: {e}"));
+        return;
+    }
+    ctx.send_threads(item_id);
+}
+
+/// Throw a draft away. A thread that was only on its way to GitHub for
+/// this draft goes with it when nothing else is under it, and turns back
+/// into one of Perch's own when only Perch's messages are left; the
+/// cache does that in one go. The threads are sent whichever way it went,
+/// so the view shows what the cache holds.
+fn delete_draft(ctx: &Ctx, item_id: &str, message_id: &str) {
+    if let Some(Err(e)) = ctx.with_cache(|c| c.delete_draft(message_id)) {
+        ctx.notice(format!("Could not delete the draft: {e}"));
+    }
+    ctx.send_threads(item_id);
 }
 
 /// A checkout for a worktree already on disk, without touching the network.
@@ -11979,6 +12131,199 @@ mod tests {
         // A thread that is not there is nothing to do, and nothing said.
         delete_private_messages(&ctx, "nowhere").await;
         assert!(received.try_iter().next().is_none());
+    }
+
+    /// The item's threads as the cache holds them.
+    fn threads_of(ctx: &Ctx, item: &Item) -> Vec<CommentThread> {
+        ctx.with_cache(|c| c.load_comment_threads(&item.id)).unwrap().unwrap()
+    }
+
+    /// The threads sent since the last look, one event's worth.
+    fn threads_sent(received: &Receiver<Event>) -> Vec<Vec<CommentThread>> {
+        received
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::CommentThreads { threads, .. } => Some(threads),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn lines(start: u32, line: u32) -> Anchor {
+        Anchor {
+            path: "src/x.rs".into(),
+            start_line: start,
+            line,
+            side: perch_github::Side::Right,
+            commit_sha: "h".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_draft_on_lines_makes_a_thread_of_githubs_that_is_not_there_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        open_in_slot(&ctx, &item);
+
+        save_draft(&ctx, &item.id, None, Some(lines(3, 4)), "please".into(), None);
+
+        let threads = threads_of(&ctx, &item);
+        assert_eq!(threads.len(), 1);
+        let t = &threads[0];
+        assert_eq!(t.origin, ThreadOrigin::GitHub);
+        assert_eq!(t.github_id, None);
+        assert_eq!(t.anchor, Some(lines(3, 4)));
+        assert_eq!(t.messages.len(), 1);
+        assert!(t.messages[0].is_draft());
+        assert_eq!(t.messages[0].body, "please");
+        assert_eq!(threads_sent(&received).len(), 1, "the threads went to the view");
+
+        // Nowhere to land: refused, and said.
+        save_draft(&ctx, &item.id, None, None, "where?".into(), None);
+        assert_eq!(threads_of(&ctx, &item).len(), 1);
+        assert_eq!(notices(&received), vec!["A comment for GitHub needs lines to go on"]);
+    }
+
+    #[tokio::test]
+    async fn a_draft_under_githubs_thread_is_a_reply_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        store_line_commented_discussion(&ctx, &item);
+        open_in_slot(&ctx, &item);
+
+        save_draft(&ctx, &item.id, Some("gh-31".into()), None, "will do".into(), None);
+
+        let threads = threads_of(&ctx, &item);
+        assert_eq!(threads.len(), 1);
+        let t = &threads[0];
+        assert_eq!(t.github_id, Some(31), "still the thread it was");
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], "gh-31");
+        assert!(t.messages[1].is_draft());
+        assert_eq!(threads_sent(&received).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_draft_under_perchs_thread_turns_it_towards_github() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        open_in_slot(&ctx, &item);
+        let mine = CommentThread {
+            id: "t1".into(),
+            worktree_id: item.id.clone(),
+            origin: ThreadOrigin::Local,
+            github_id: None,
+            anchor: Some(lines(3, 3)),
+            outdated: false,
+            resolved: false,
+            created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
+            messages: vec![CommentMessage {
+                id: "q1".into(),
+                thread_id: "t1".into(),
+                origin: ThreadOrigin::Local,
+                author: Author::User,
+                body: "why?".into(),
+                created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
+                run: None,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
+            }],
+        };
+        ctx.with_cache(|c| c.insert_comment_thread(&mine)).unwrap().unwrap();
+
+        save_draft(&ctx, &item.id, Some("t1".into()), None, "fix this".into(), None);
+
+        let t = threads_of(&ctx, &item).pop().unwrap();
+        assert_eq!(t.origin, ThreadOrigin::GitHub);
+        assert_eq!(t.github_id, None);
+        assert_eq!(t.messages.len(), 2);
+        assert!(t.messages[0].is_private(), "the question stays Perch's");
+        assert!(t.messages[1].is_draft());
+        assert_eq!(threads_sent(&received).len(), 1);
+
+        // Deleting the draft turns the thread back.
+        delete_draft(&ctx, &item.id, &t.messages[1].id);
+        let t = threads_of(&ctx, &item).pop().unwrap();
+        assert_eq!(t.origin, ThreadOrigin::Local);
+        assert_eq!(t.messages.len(), 1);
+        assert_eq!(threads_sent(&received).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn editing_a_draft_rewrites_its_body_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        open_in_slot(&ctx, &item);
+        save_draft(&ctx, &item.id, None, Some(lines(3, 4)), "please".into(), None);
+        let before = threads_of(&ctx, &item).pop().unwrap();
+        let draft = before.messages[0].clone();
+        let _ = threads_sent(&received);
+
+        save_draft(
+            &ctx,
+            &item.id,
+            Some(before.id.clone()),
+            None,
+            "please, soon".into(),
+            Some(draft.id.clone()),
+        );
+
+        let after = threads_of(&ctx, &item).pop().unwrap();
+        assert_eq!(after.messages.len(), 1, "no new message");
+        assert_eq!(after.messages[0].id, draft.id);
+        assert_eq!(after.messages[0].body, "please, soon");
+        assert_eq!(after.messages[0].created_at, draft.created_at);
+        assert_eq!(threads_sent(&received).len(), 1);
+
+        // Only a draft's body is rewritten.
+        save_draft(&ctx, &item.id, None, None, "no".into(), Some("gh-31".into()));
+        assert_eq!(notices(&received).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_last_draft_takes_its_thread_and_one_under_githubs_leaves_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        store_line_commented_discussion(&ctx, &item);
+        open_in_slot(&ctx, &item);
+        save_draft(&ctx, &item.id, None, Some(lines(3, 4)), "please".into(), None);
+        save_draft(&ctx, &item.id, Some("gh-31".into()), None, "will do".into(), None);
+        let threads = threads_of(&ctx, &item);
+        assert_eq!(threads.len(), 2);
+        let fresh = threads.iter().find(|t| t.github_id.is_none()).unwrap().clone();
+        let reply = threads.iter().find(|t| t.id == "gh-31").unwrap().clone();
+        let _ = threads_sent(&received);
+
+        delete_draft(&ctx, &item.id, &fresh.messages[0].id);
+        let threads = threads_of(&ctx, &item);
+        assert_eq!(threads.len(), 1, "the thread went with its only draft");
+        assert_eq!(threads[0].id, "gh-31");
+
+        delete_draft(&ctx, &item.id, &reply.messages[1].id);
+        let threads = threads_of(&ctx, &item);
+        assert_eq!(threads.len(), 1, "GitHub's thread stays");
+        assert_eq!(threads[0].github_id, Some(31));
+        assert_eq!(threads[0].messages.len(), 1);
+        assert_eq!(threads_sent(&received).len(), 2);
+
+        // Not a draft: nothing deleted, the threads sent all the same so
+        // the view matches the cache.
+        delete_draft(&ctx, &item.id, "gh-31");
+        assert_eq!(threads_of(&ctx, &item)[0].messages.len(), 1);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(&events[..], [Event::Notice(_), Event::CommentThreads { .. }]),
+            "{events:?}"
+        );
     }
 
     #[tokio::test]

@@ -3,8 +3,10 @@
 //! Renders a file exactly as the review view would, as text: the document
 //! the editor draws, with gutter numbers, change bars, the highlight
 //! capture under each token, a divider where a run of unchanged lines is
-//! folded away, and a spacer for each row a thread's card takes. Lets the
-//! data path be checked without a window. The folds are around the
+//! folded away, and a spacer for each row a thread's card takes, with the
+//! card's messages under its first spacer, one line each: the author, a
+//! `[draft]` mark on a message that is on its way to GitHub, and the
+//! body's first line. Lets the data path be checked without a window. The folds are around the
 //! changes and the anchors of the item's threads, less the reveals stored
 //! for the file's blob; the cards are the item's threads anchored in the
 //! file, the reader's own and GitHub's review threads alike, at their
@@ -20,7 +22,7 @@
 use std::sync::Arc;
 
 use perch_git::{ChangeStatus, Preparer, RepoId, Row, Scope, Store};
-use perch_github::{resolve_token, Cache, GitHub, ItemKind};
+use perch_github::{resolve_token, Author, Cache, CommentMessage, CommentThread, GitHub, ItemKind};
 
 use crate::review::doc::{self, Card, Doc, DocRow, Reveals, Tint};
 use crate::review::editor::{self, Side};
@@ -124,7 +126,7 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     // The documents as the window would build them, from what the cache
     // holds for the item. A file with no base side is stacked in the
     // window whatever the layout, and here too.
-    let Kept { anchors, reveals, cards } = if whole { Kept::none() } else { kept_for(full_name, number, &file) };
+    let Kept { anchors, reveals, cards, threads } = if whole { Kept::none() } else { kept_for(full_name, number, &file) };
     let folded = !whole;
     let sides = if split {
         let sides = editor::split_doc(&file, folded, &anchors, &reveals, &cards);
@@ -156,15 +158,15 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     match rendered {
         Rendered::Stacked(doc) => {
             println!();
-            print_rows(&file, &doc, None);
+            print_rows(&file, &doc, None, &threads);
         }
         Rendered::Split(left, right) => {
             println!();
             println!("base");
-            print_rows(&file, &left, Some(Side::Base));
+            print_rows(&file, &left, Some(Side::Base), &threads);
             println!();
             println!("head");
-            print_rows(&file, &right, Some(Side::Head));
+            print_rows(&file, &right, Some(Side::Head), &threads);
             println!();
             println!("rows:     {} base, {} head", left.len(), right.len());
         }
@@ -191,11 +193,12 @@ impl Rendered {
 
 /// The rows of one document, one per line: the gutter number, the
 /// change bar, the text and how many highlight spans it carries; a
-/// divider as its label, a spacer as its card, a filler blank. The base
-/// side's document is over the base file, whose lines are its own; the
-/// stacked document and the head side are over the unified buffer, which
-/// says which file each line is from.
-fn print_rows(file: &LoadedFile, doc: &Doc, side: Option<Side>) {
+/// divider as its label, a spacer as its card, with the thread's
+/// messages under its first, a filler blank. The base side's document
+/// is over the base file, whose lines are its own; the stacked document
+/// and the head side are over the unified buffer, which says which file
+/// each line is from.
+fn print_rows(file: &LoadedFile, doc: &Doc, side: Option<Side>, threads: &[CommentThread]) {
     println!("  gut  bar  text");
     println!("  ---  ---  ----");
     for (index, entry) in doc.rows.iter().enumerate() {
@@ -209,6 +212,12 @@ fn print_rows(file: &LoadedFile, doc: &Doc, side: Option<Side>) {
             DocRow::Spacer { card, row } => {
                 let total = doc.rows.iter().filter(|r| matches!(r, DocRow::Spacer { card: c, .. } if c == card));
                 println!("  [{}, row {} of {}]", card_name(card), row + 1, total.count());
+                if let (doc::CardId::Thread(id), 0) = (card, row) {
+                    let messages = threads.iter().find(|t| &t.id == id).map(|t| t.messages.as_slice());
+                    for message in messages.unwrap_or_default() {
+                        println!("{}", message_line(message));
+                    }
+                }
                 continue;
             }
             DocRow::Filler => {
@@ -252,6 +261,21 @@ fn card_name(card: &doc::CardId) -> String {
     }
 }
 
+/// A message under its card's spacer: `    you [draft]: I will fix it`,
+/// `    sonnet: because`, `    rohan: epoch`. The author as the byline
+/// names them, `[draft]` after one that has not gone to GitHub yet, and
+/// the body's first line.
+fn message_line(message: &CommentMessage) -> String {
+    let author = match &message.author {
+        Author::User => "you",
+        Author::Agent { model, .. } => model.as_str(),
+        Author::GitHubUser(login) => login.as_str(),
+    };
+    let mark = if message.is_draft() { " [draft]" } else { "" };
+    let body = message.body.lines().next().unwrap_or_default();
+    format!("    {author}{mark}: {body}")
+}
+
 /// The reveals as the gutter numbers them: `5-24, 44-63`, or `none`.
 fn reveals_line(reveals: &Reveals) -> String {
     if reveals.is_empty() {
@@ -265,18 +289,20 @@ fn reveals_line(reveals: &Reveals) -> String {
 /// review comments, as the window counts them; the reveals stored for the
 /// file's blob; and the reader's threads anchored in the file and GitHub's
 /// review threads on it as cards, each at its estimate, open, since
-/// nothing has been collapsed or laid out here. No composer: nothing is
-/// being written.
+/// nothing has been collapsed or laid out here; and the threads
+/// themselves, for the messages printed under each card. No composer:
+/// nothing is being written.
 struct Kept {
     anchors: Vec<(usize, usize)>,
     reveals: Reveals,
     cards: Vec<Card>,
+    threads: Vec<CommentThread>,
 }
 
 impl Kept {
     /// Nothing kept: folded around the changes alone, as a new item is.
     fn none() -> Self {
-        Self { anchors: Vec::new(), reveals: Reveals::default(), cards: Vec::new() }
+        Self { anchors: Vec::new(), reveals: Reveals::default(), cards: Vec::new(), threads: Vec::new() }
     }
 }
 
@@ -329,5 +355,42 @@ fn kept_in(db: &std::path::Path, full_name: &str, number: u64, file: &LoadedFile
             .collect()
     };
     let cards = crate::review::model::cards_of(&threads, None, file, &Default::default(), &Default::default());
-    Ok(Some(Kept { anchors, reveals, cards }))
+    Ok(Some(Kept { anchors, reveals, cards, threads }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use perch_github::ThreadOrigin;
+
+    fn message(author: Author, origin: ThreadOrigin, github_id: Option<u64>) -> CommentMessage {
+        CommentMessage {
+            id: "m".into(),
+            thread_id: "t".into(),
+            origin,
+            author,
+            body: "I will fix it\nlater".into(),
+            created_at: "2026-09-18T10:00:00Z".parse().unwrap(),
+            run: None,
+            github_id,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_draft_is_marked_after_its_author_and_a_posted_comment_is_not() {
+        let draft = message(Author::User, ThreadOrigin::GitHub, None);
+        assert_eq!(message_line(&draft), "    you [draft]: I will fix it");
+        let posted = message(Author::GitHubUser("rohan".into()), ThreadOrigin::GitHub, Some(31));
+        assert_eq!(message_line(&posted), "    rohan: I will fix it");
+        let answer = message(
+            Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+            ThreadOrigin::Local,
+            None,
+        );
+        assert_eq!(message_line(&answer), "    sonnet: I will fix it");
+    }
 }

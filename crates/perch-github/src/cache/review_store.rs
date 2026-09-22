@@ -3722,6 +3722,54 @@ mod tests {
     }
 
     #[test]
+    fn deleting_the_last_draft_under_a_findings_thread_turns_it_back_rather_than_taking_it() {
+        let cache = Cache::open_in_memory().unwrap();
+        insert_item(&cache, "item");
+        cache
+            .admit_review_group(&admission(
+                "g1",
+                "s1",
+                "item",
+                vec![attempt("a1", "codex", 1)],
+                1,
+            ))
+            .unwrap();
+        save_output(&cache, "a1", "output", 2);
+        cache
+            .ingest_review_output(&ReviewIngestion {
+                attempt_id: "a1".into(),
+                output_id: "output".into(),
+                result_kind: ReviewResultKind::Findings,
+                observations: vec![new_report("f1", "one", "t1", "o1", "source", "s1", 3)],
+                anchor_mappings: vec![],
+                completed_at: stamp(3),
+            })
+            .unwrap();
+        let draft = crate::comments::CommentMessage {
+            id: "d1".into(),
+            thread_id: "t1".into(),
+            origin: crate::comments::ThreadOrigin::GitHub,
+            author: crate::comments::Author::User,
+            body: "please".into(),
+            created_at: stamp(4),
+            run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Default::default(),
+        };
+        cache.insert_draft(&draft).unwrap();
+        cache.delete_private_messages("t1").unwrap();
+        cache.delete_draft("d1").unwrap();
+        let threads = cache.load_comment_threads("item").unwrap();
+        let t = threads.iter().find(|t| t.id == "t1").expect("the finding keeps its thread");
+        assert_eq!(t.origin, crate::comments::ThreadOrigin::Local);
+        assert!(t.messages.is_empty());
+        assert!(cache.load_finding("f1").unwrap().is_some());
+    }
+
+    #[test]
     fn version_18_to_19_adds_verification_input_without_losing_saved_output() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache-v18.db");
