@@ -551,6 +551,42 @@ impl GitHub {
         Ok(ReviewComment::from(comment))
     }
 
+    /// Say something in the conversation on a pull request or issue: an
+    /// issue comment, `POST /issues/{number}/comments`, which answers
+    /// `201 Created` with the comment it made. GitHub has no threads
+    /// there, so a reply is a new comment like any other.
+    pub async fn create_issue_comment(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        body: &str,
+    ) -> Result<IssueComment, Error> {
+        if body.trim().is_empty() {
+            return Err(Error::Decode("a comment requires a body".into()));
+        }
+        let (owner, name) = repo_parts(repo_full_name)?;
+
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            body: &'a str,
+        }
+
+        let path = format!("/repos/{owner}/{name}/issues/{number}/comments");
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._post(&path, Some(&Request { body }))
+            .await
+            .map_err(map_octocrab_error)?;
+        let body = self
+            .finish_response(response, &[StatusCode::CREATED])
+            .await?;
+        let comment: IssueCommentPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(IssueComment::from(comment))
+    }
+
     /// The workflow runs for one commit, newest first. What the checks
     /// pill is set from. One page: a head with more than a hundred runs is
     /// not a head anyone is reviewing.

@@ -628,6 +628,18 @@ pub struct Draft {
     pub commit_sha: String,
 }
 
+/// An issue comment the backend is posting: the text, so the composer
+/// can be shown still while it goes; the token the answer names, so an
+/// answer to an older send is not taken for this one's; and which
+/// opening of the composer sent it, so the answer settles that composer
+/// and not one opened since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Posting {
+    pub token: u64,
+    pub opening: u64,
+    pub body: String,
+}
+
 /// Where a composer opens on, by the rules of the follow-up. Editing a
 /// draft is GitHub. A follow-up follows the last message in its thread:
 /// under a GitHub user, or under a draft or a posted comment of the
@@ -1248,6 +1260,15 @@ pub struct ReviewState {
     /// The text box of a composer laid in place on Conversation, while one
     /// is open, so `a` can focus it and scroll to it.
     pub composer_box: RwSignal<Option<floem::ViewId>>,
+    /// The composer's Comment was clicked once and the footer is asking
+    /// whether to post to the pull request; the next Enter or Post does.
+    pub composer_confirming: RwSignal<bool>,
+    /// An issue comment in flight, with the token its answer carries. The
+    /// composer stays open and still until the answer comes.
+    pub posting: RwSignal<Option<Posting>>,
+    /// Why the last issue comment did not post, under the composer's
+    /// box until the text changes or the composer closes.
+    pub composer_error: RwSignal<Option<String>>,
     pub lsp_status: RwSignal<perch_lsp::Status>,
     /// Rises with every hover and jump request. An answer carrying an older
     /// token is stale, because the pointer has moved on since it was asked.
@@ -1424,6 +1445,9 @@ impl ReviewState {
             composer_draft: RwSignal::new(String::new()),
             composer_autofocus: RwSignal::new(true),
             composer_box: RwSignal::new(None),
+            composer_confirming: RwSignal::new(false),
+            posting: RwSignal::new(None),
+            composer_error: RwSignal::new(None),
             lsp_status: RwSignal::new(perch_lsp::Status::Absent),
             request_token: RwSignal::new(0),
             pointer_symbol: RwSignal::new(None),
@@ -1558,6 +1582,9 @@ impl ReviewState {
         self.hovered_by.set(None);
         self.composer_focused.set(false);
         self.composer_draft.set(String::new());
+        self.composer_confirming.set(false);
+        self.posting.set(None);
+        self.composer_error.set(None);
         self.expanded.set(std::collections::HashSet::new());
         self.scroll_to_row.set(None);
         self.editor_epoch.update(|e| *e += 1);
@@ -3009,6 +3036,9 @@ impl ReviewState {
         editing: Option<String>,
     ) {
         self.composer_draft.set(draft.clone());
+        // A confirm or a refusal was about the composer this replaces.
+        self.composer_confirming.set(false);
+        self.composer_error.set(None);
         let opening = self.composer_opened.get_untracked() + 1;
         self.composer_opened.set(opening);
         floem::reactive::Effect::batch(|| {
@@ -3044,6 +3074,8 @@ impl ReviewState {
             self.forget_composer_rows();
         });
         self.composer_draft.set(String::new());
+        self.composer_confirming.set(false);
+        self.composer_error.set(None);
         // The box goes with the composer and is never told it lost focus,
         // so the flag that stands the keys down is cleared here.
         self.composer_focused.set(false);
@@ -3068,7 +3100,91 @@ impl ReviewState {
             }
         });
         self.composer_draft.set(String::new());
+        self.composer_confirming.set(false);
+        self.composer_error.set(None);
         self.composer_focused.set(false);
+    }
+
+    /// Change where the composer's text goes. The confirm, if one was up,
+    /// was about the old destination and goes.
+    pub fn set_destination(&self, destination: Destination) {
+        self.composer.update(|c| {
+            if let Some(c) = c {
+                c.destination = destination;
+            }
+        });
+        self.composer_confirming.set(false);
+    }
+
+    /// The open composer's text is on its way to the pull request's
+    /// conversation as an issue comment. That composer stays open and
+    /// still until `settle_issue_comment` says how it went.
+    pub fn start_posting(&self, token: u64, body: String) {
+        let opening = self
+            .composer
+            .with_untracked(|c| c.as_ref().map(|c| c.opening))
+            .unwrap_or_default();
+        self.composer_confirming.set(false);
+        self.composer_error.set(None);
+        self.posting.set(Some(Posting {
+            token,
+            opening,
+            body,
+        }));
+    }
+
+    /// Whether the composer opened as `opening` has an issue comment in
+    /// flight, and so is still. Tracked.
+    pub fn posting_from(&self, opening: u64) -> bool {
+        self.posting
+            .with(|p| p.as_ref().is_some_and(|p| p.opening == opening))
+    }
+
+    /// The backend answered the issue comment in flight. Posted, the
+    /// composer that sent it closes and the comment is in the timeline
+    /// through the discussion the backend already sent; refused, the
+    /// text stays in its box with the reason under it. An answer to a
+    /// send that is not the one in flight is ignored, and one whose
+    /// composer was put away since only clears the flight.
+    pub fn settle_issue_comment(&self, token: u64, result: Result<(), String>) {
+        let sent_from = self.posting.with_untracked(|p| {
+            p.as_ref()
+                .filter(|p| p.token == token)
+                .map(|p| p.opening)
+        });
+        let Some(sent_from) = sent_from else {
+            return;
+        };
+        self.posting.set(None);
+        let still_open = self
+            .composer
+            .with_untracked(|c| c.as_ref().is_some_and(|c| c.opening == sent_from));
+        if !still_open {
+            return;
+        }
+        match result {
+            Ok(()) => self.composer_sent(),
+            Err(message) => self.composer_error.set(Some(message)),
+        }
+    }
+
+    /// Whether the composer's text, sent to GitHub, posts at once as an
+    /// issue comment: it is about the item as a whole, at the foot of the
+    /// conversation or under a thread that has neither lines nor a place
+    /// on GitHub, so there is nothing to reply under and nothing to draft
+    /// for the review. Untracked.
+    pub fn posts_issue_comment(&self, composer: &Composer) -> bool {
+        if composer.anchor.is_some() {
+            return false;
+        }
+        match &composer.thread_id {
+            None => true,
+            Some(id) => self.comment_threads.with_untracked(|t| {
+                t.iter()
+                    .find(|t| &t.id == id)
+                    .is_some_and(|t| t.anchor.is_none() && t.github_id.is_none())
+            }),
+        }
     }
 
     /// The backend complained about something, which may be the send
@@ -3086,18 +3202,22 @@ impl ReviewState {
     }
 
     /// Whether GitHub is a destination for `composer`: it has lines to
-    /// land on, or its thread is on GitHub. A question about the item as
-    /// a whole has nowhere to go there yet. Untracked.
+    /// land on, its thread is on GitHub, or it is about a pull request as
+    /// a whole, where it posts as an issue comment. About an issue there
+    /// is nowhere to go yet. Untracked.
     pub fn github_offered(&self, composer: &Composer) -> bool {
         if composer.anchor.is_some() {
             return true;
         }
-        composer.thread_id.as_ref().is_some_and(|id| {
+        let on_github = composer.thread_id.as_ref().is_some_and(|id| {
             self.comment_threads.with_untracked(|t| {
                 t.iter()
                     .any(|t| &t.id == id && t.github_id.is_some())
             })
-        })
+        });
+        on_github
+            || (self.pull_request.with_untracked(Option::is_some)
+                && self.posts_issue_comment(composer))
     }
 
     /// Every draft in the open item, in thread order and time order within

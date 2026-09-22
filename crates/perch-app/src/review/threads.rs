@@ -228,10 +228,21 @@ pub fn composer_view(
         ));
     }
 
+    // Whether this composer's issue comment is on its way: the box and
+    // the buttons are still until the answer. Another composer's comment
+    // in flight is not this one's concern.
+    let opening = composer.opening;
+    let posting_here = move || state.posting_from(opening);
+    let posting_here_now = move || floem::reactive::Effect::untrack(posting_here);
+
     let send: Rc<dyn Fn()> = {
         let read_text = read_text.clone();
         let backend = backend.clone();
         Rc::new(move || {
+            // Nothing sends twice: the box is still until the answer.
+            if posting_here_now() {
+                return;
+            }
             let question = read_text();
             if question.trim().is_empty() {
                 return;
@@ -242,6 +253,19 @@ pub fn composer_view(
             let Some(item_id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
                 return;
             };
+            // An issue comment posts at once, so it is asked about first:
+            // the footer names the pull request, and the next send goes.
+            if composer.destination.is_github() && state.posts_issue_comment(&composer) {
+                if !state.composer_confirming.get_untracked() {
+                    state.composer_confirming.set(true);
+                    return;
+                }
+                let body = question.trim().to_string();
+                let token = backend.post_issue_comment(&item_id, &body);
+                state.last_destination[face.index()].set(Some(composer.destination.clone()));
+                state.start_posting(token, body);
+                return;
+            }
             match &composer.destination {
                 Destination::Agent {
                     backend: agent,
@@ -278,20 +302,40 @@ pub fn composer_view(
     let key_send = send.clone();
     let escape_text = read_text.clone();
 
+    // The box is still while an issue comment is posting; the text stays
+    // for the answer to keep or give back.
+    let still = editor.editor().read_only;
+    Effect::new(move |_| still.set(posting_here()));
     let editor = editor
-        // Cmd-Enter sends, before the editor can take it for a line.
+        // Cmd-Enter sends, before the editor can take it for a line. While
+        // the footer is asking whether to post, Enter alone is the yes;
+        // while the comment goes, the box is read-only and neither sends.
         .pre_command(move |cmd| {
-            if cmd_enter(&cmd) {
+            if posting_here_now() {
+                return CommandExecuted::No;
+            }
+            if cmd_enter(&cmd) || (plain_enter(&cmd) && state.composer_confirming.get_untracked())
+            {
                 key_send();
                 return CommandExecuted::Yes;
             }
             CommandExecuted::No
         })
         // The draft, for Escape and for the root key handler, neither of
-        // which can reach into the document.
+        // which can reach into the document. A change to the text is a
+        // new try, so a refusal under it goes; and there is nothing to
+        // ask about posting once the text is gone.
         .update(move |update| {
             if let Some(editor) = update.editor {
-                state.composer_draft.set(editor.doc().text().to_string());
+                let text = editor.doc().text().to_string();
+                let empty = text.trim().is_empty();
+                state.composer_draft.set(text);
+                if state.composer_error.with_untracked(Option::is_some) {
+                    state.composer_error.set(None);
+                }
+                if empty && state.composer_confirming.get_untracked() {
+                    state.composer_confirming.set(false);
+                }
             }
         })
         .on_event_cont(el::FocusGained, move |_, _| {
@@ -309,6 +353,15 @@ pub fn composer_view(
             },
             move |_, key: &KeyboardEvent| {
                 if key.code == Code::Escape && key.modifiers.is_empty() {
+                    // Escape takes the question back first, with the
+                    // text intact; while posting there is nothing to do.
+                    if posting_here_now() {
+                        return floem::event::EventPropagation::Stop;
+                    }
+                    if state.composer_confirming.get_untracked() {
+                        state.composer_confirming.set(false);
+                        return floem::event::EventPropagation::Stop;
+                    }
                     let editing = state
                         .composer
                         .with_untracked(|c| c.as_ref().is_some_and(|c| c.editing.is_some()));
@@ -390,43 +443,27 @@ pub fn composer_view(
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
             // Put the box away. Nothing typed into it is kept. The button
             // is the size of the thread's `...` and sits where it sits,
-            // since the thread's card takes the composer's place.
+            // since the thread's card takes the composer's place. While
+            // the comment goes there is no putting it away.
             icon_button(
                 || SidebarIcon::Close,
                 || theme::FG_SUBTLE,
-                move || state.close_composer(),
+                move || {
+                    if !posting_here_now() {
+                        state.close_composer();
+                    }
+                },
             )
-            .style(|s| s.size(theme::THREAD_MENU, theme::THREAD_MENU)),
+            .debug_name("composer-close")
+            .style(move |s| {
+                s.size(theme::THREAD_MENU, theme::THREAD_MENU)
+                    .apply_if(posting_here(), |s| s.hide())
+            }),
         ))
         .style(|s| s.items_center().width_full().margin_bottom(8.0)),
         editor_box(editor, 72.0, face == ThreadFace::Inline),
-        Stack::horizontal((
-            destination_picker(app, state),
-            // No effort to pick for GitHub.
-            dyn_container(
-                move || state.composer.with(|c| c.as_ref().is_some_and(|c| c.destination.is_github())),
-                move |github| {
-                    if github {
-                        Empty::new().into_any()
-                    } else {
-                        effort_picker(app, state).into_any()
-                    }
-                },
-            ),
-            Empty::new().style(|s| s.flex_grow(1.0_f32)),
-            send_button(
-                move || {
-                    state.composer.with(|c| {
-                        match c.as_ref().map(|c| c.destination.is_github()) {
-                            Some(true) => "Add to review".to_string(),
-                            _ => "Send".to_string(),
-                        }
-                    })
-                },
-                send.clone(),
-            ),
-        ))
-        .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0)),
+        composer_error_line(state),
+        composer_footer(app, state, send, posting_here),
     ))
     .debug_name("composer-box")
     .style(move |s| {
@@ -445,9 +482,151 @@ pub fn composer_view(
     })
 }
 
+/// Whether the command a box's keymap resolved a key to is Enter on its
+/// own, which the confirm under the box takes for a yes.
+fn plain_enter(cmd: &floem::views::editor::text_document::PreCommand<'_>) -> bool {
+    use floem::views::editor::command::Command;
+    use floem::views::editor::core::command::EditCommand;
+
+    matches!(cmd.cmd, Command::Edit(EditCommand::InsertNewLine)) && cmd.mods.is_empty()
+}
+
+/// Why the last issue comment did not post, under the box. Nothing
+/// while there is nothing to say.
+fn composer_error_line(state: ReviewState) -> impl IntoView {
+    dyn_container(
+        move || state.composer_error.get(),
+        |error| match error {
+            Some(error) => Label::derived(move || error.clone())
+                .style(|s| {
+                    s.width_full()
+                        .font_size(theme::TEXT_BADGE)
+                        .color(theme::CLOSED)
+                        .text_wrap()
+                        .margin_top(6.0)
+                })
+                .debug_name("composer-error")
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
+    )
+}
+
+/// What the composer is in the middle of, for its footer: taking text,
+/// asking whether to post an issue comment, or posting one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FooterMode {
+    Ready,
+    Confirming,
+    Posting,
+}
+
+/// The line under the box: the destination, the effort and Send. When
+/// Comment was clicked once, the same line asks `Post to
+/// github.com/owner/repo/pull/12?` with Post and Cancel; while this
+/// composer's comment goes, it says so and offers nothing.
+fn composer_footer(
+    app: AppState,
+    state: ReviewState,
+    send: Rc<dyn Fn()>,
+    posting: impl Fn() -> bool + Copy + 'static,
+) -> impl IntoView {
+    let mode = move || {
+        if posting() {
+            FooterMode::Posting
+        } else if state.composer_confirming.get() {
+            FooterMode::Confirming
+        } else {
+            FooterMode::Ready
+        }
+    };
+    dyn_container(mode, move |mode| match mode {
+        FooterMode::Ready => Stack::horizontal((
+            destination_picker(app, state),
+            // No effort to pick for GitHub.
+            dyn_container(
+                move || {
+                    state
+                        .composer
+                        .with(|c| c.as_ref().is_some_and(|c| c.destination.is_github()))
+                },
+                move |github| {
+                    if github {
+                        Empty::new().into_any()
+                    } else {
+                        effort_picker(app, state).into_any()
+                    }
+                },
+            ),
+            Empty::new().style(|s| s.flex_grow(1.0_f32)),
+            send_button(move || send_label(state), send.clone()).debug_name("composer-send"),
+        ))
+        .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
+        .into_any(),
+        FooterMode::Confirming => Stack::horizontal((
+            Label::derived(move || {
+                let target = state.pull_request.with(|pull| {
+                    pull.as_ref()
+                        .map(|pull| {
+                            format!("github.com/{}/pull/{}", pull.repo_full_name, pull.number)
+                        })
+                        .unwrap_or_else(|| "GitHub".to_string())
+                });
+                format!("Post to {target}?")
+            })
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .font_weight(theme::weight_emphasis())
+                    .color(theme::FG)
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .selectable(false)
+            })
+            .debug_name("composer-confirm"),
+            Empty::new().style(|s| s.flex_grow(1.0_f32)),
+            text_button(|| "Cancel".to_string(), SidebarIcon::Close, move || {
+                state.composer_confirming.set(false)
+            })
+            .debug_name("composer-cancel-post"),
+            send_button(|| "Post".to_string(), send.clone()).debug_name("composer-post"),
+        ))
+        .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
+        .into_any(),
+        FooterMode::Posting => Stack::horizontal((
+            Label::derived(|| "Posting\u{2026}".to_string())
+                .style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::FG_MUTED)
+                        .selectable(false)
+                })
+                .debug_name("composer-posting"),
+            Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        ))
+        .style(|s| s.items_center().width_full().height(30.0).margin_top(8.0))
+        .into_any(),
+    })
+}
+
+/// What the send does, on its button: `Send` to an agent, `Add to
+/// review` for a draft, `Comment` for an issue comment that posts at
+/// once. Tracked over the composer.
+fn send_label(state: ReviewState) -> String {
+    state.composer.with(|c| match c.as_ref() {
+        Some(c) if c.destination.is_github() => {
+            if state.posts_issue_comment(c) {
+                "Comment".to_string()
+            } else {
+                "Add to review".to_string()
+            }
+        }
+        _ => "Send".to_string(),
+    })
+}
+
 /// The one high-contrast action in the composer, matching Codex's dark
 /// primary controls while the model and effort remain quiet selectors.
-/// `Send` to an agent; `Add to review` when the text is bound for GitHub.
+/// `Send` to an agent; `Add to review` when the text is bound for GitHub;
+/// `Comment`, then `Post`, for an issue comment.
 fn send_button(label: impl Fn() -> String + 'static, on_click: Rc<dyn Fn()>) -> impl IntoView {
     Container::new(
         Stack::horizontal((
@@ -490,10 +669,13 @@ pub fn subject_word(state: ReviewState) -> &'static str {
 /// Where the text goes, from what config offers: Claude Code's models,
 /// then Codex's under a line when there are any, then GitHub under
 /// another. A model carries its backend, so picking one sets both, and
-/// keeps the effort where the model takes it. GitHub can be picked only
-/// where a draft has somewhere to land: a composer on lines, or under a
-/// thread that is on GitHub. A draft being edited stays a draft: the
-/// models are greyed out, since sending would replace its body, not ask.
+/// keeps the effort where the model takes it. GitHub can be picked where
+/// a draft has somewhere to land, a composer on lines or under a thread
+/// that is on GitHub, and where the text posts at once as an issue
+/// comment: the foot of a pull request's conversation, or under a thread
+/// with neither lines nor a place on GitHub. A draft being edited stays a
+/// draft: the models are greyed out, since sending would replace its
+/// body, not ask.
 fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
     use floem::menu::Menu;
 
@@ -534,14 +716,10 @@ fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
                             .map(|(_, _, e)| e)
                             .or_else(|| state.agent_last.get_untracked().map(|(_, _, e)| e))
                             .unwrap_or_else(|| defaults(app).2);
-                        state.composer.update(|c| {
-                            if let Some(c) = c {
-                                c.destination = Destination::Agent {
-                                    backend,
-                                    model: pick.clone(),
-                                    effort: nearest_effort(&agent, &pick, effort),
-                                };
-                            }
+                        state.set_destination(Destination::Agent {
+                            backend,
+                            model: pick.clone(),
+                            effort: nearest_effort(&agent, &pick, effort),
                         })
                     })
                 });
@@ -551,13 +729,7 @@ fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
         menu.separator().item("GitHub", move |item| {
             item.checked(composer.destination.is_github())
                 .enabled(github_offered)
-                .action(move || {
-                    state.composer.update(|c| {
-                        if let Some(c) = c {
-                            c.destination = Destination::GitHub;
-                        }
-                    })
-                })
+                .action(move || state.set_destination(Destination::GitHub))
         })
     })
 }
@@ -2709,6 +2881,366 @@ mod tests {
         assert_eq!(find_all(root_id, "private-lane").len(), 2, "the question and the answer moved into the lane");
         assert_eq!(find_all(root_id, "perch-only").len(), 1);
         assert!(find(root_id, "draft-pill").is_some());
+    }
+
+    fn pull() -> perch_github::PullRequest {
+        perch_github::PullRequest {
+            number: 42,
+            title: "Review support".into(),
+            html_url: "https://github.com/acme/repo/pull/42".into(),
+            author_login: "octocat".into(),
+            author_avatar_url: String::new(),
+            head_sha: "head-42".into(),
+            head_ref: "feature".into(),
+            base_sha: "base".into(),
+            base_ref: "main".into(),
+            draft: false,
+            merged: false,
+            state: "open".into(),
+            additions: 1,
+            deletions: 0,
+            changed_files: 1,
+            repo_full_name: "acme/repo".into(),
+            head_repo_full_name: Some("acme/repo".into()),
+            updated_at: None,
+            review_requested: true,
+            checks: None,
+            review_decision: None,
+            merged_at: None,
+            merged_by: None,
+            closed_at: None,
+            requested_reviewers: Vec::new(),
+            milestone: None,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+        }
+    }
+
+    /// The item as a pull request, whose conversation takes a comment.
+    fn state_with_pull_request() -> ReviewState {
+        let state = state_with_item();
+        state.pull_request.set(Some(Arc::new(pull())));
+        state
+    }
+
+    fn escape() -> floem::event::Event {
+        key(Key::Named(NamedKey::Escape), Code::Escape, Modifiers::empty())
+    }
+
+    /// Whether a view is laid out at all: a hidden one has no size.
+    fn shown(harness: &HeadlessHarness, text: &str) -> bool {
+        find(harness.root_id(), text).is_some_and(|id| harness.get_layout_rect(id).height() > 0.0)
+    }
+
+    fn click(harness: &mut HeadlessHarness, name: &str) {
+        let id = find(harness.root_id(), name).unwrap_or_else(|| panic!("no view {name}"));
+        let center = id.get_visual_rect_no_clip().center();
+        harness.click(center.x, center.y);
+        harness.rebuild();
+        harness.paint();
+    }
+
+    /// At the foot of a pull request's conversation GitHub is offered
+    /// and posts an issue comment: under a thread that is on GitHub it is
+    /// a reply for the review, under one of Perch's own with no lines it
+    /// is an issue comment too, and on an issue it is not offered.
+    #[test]
+    fn github_is_offered_at_the_foot_of_a_pull_request_and_posts_at_once() {
+        let state = state_with_pull_request();
+        let mut theirs = github_thread_with_private_messages();
+        theirs.id = "theirs".into();
+        let mut ours = github_thread_with_private_messages();
+        ours.id = "ours".into();
+        ours.anchor = None;
+        ours.github_id = None;
+        ours.origin = ThreadOrigin::Local;
+        state.comment_threads.set(Arc::new(vec![theirs, ours]));
+
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        let foot = state.composer.get().unwrap();
+        assert_eq!(foot.destination, Destination::agent(sonnet_medium()), "an agent first");
+        assert!(state.github_offered(&foot));
+        assert!(state.posts_issue_comment(&foot));
+
+        state.open_composer(Some("theirs".into()), None, String::new(), sonnet_medium());
+        let reply = state.composer.get().unwrap();
+        assert!(state.github_offered(&reply));
+        assert!(!state.posts_issue_comment(&reply), "a reply on GitHub's thread is a draft");
+
+        state.open_composer(Some("ours".into()), None, String::new(), sonnet_medium());
+        let follow_up = state.composer.get().unwrap();
+        assert!(state.github_offered(&follow_up));
+        assert!(state.posts_issue_comment(&follow_up), "nowhere on GitHub to reply");
+
+        state.pull_request.set(None);
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        let issue = state.composer.get().unwrap();
+        assert!(!state.github_offered(&issue), "an issue takes no comment yet");
+    }
+
+    /// With GitHub picked at the foot the button reads Comment. The first
+    /// send asks, naming the pull request, and Escape takes the question
+    /// back with the text intact; the next send, Enter alone, posts. The
+    /// box is still while the comment goes, a refusal gives the text back
+    /// with the reason under it, and a comment that posted closes the
+    /// composer. The next composer at the foot is an agent's again.
+    #[test]
+    fn an_issue_comment_asks_once_posts_on_enter_and_keeps_the_text_when_refused() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        state.open_composer(None, None, "Looks good".into(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find(root_id, "Label: \"Comment\"").is_some());
+        assert!(find(root_id, "Label: \"Medium\"").is_none(), "no effort for GitHub");
+        let text_box = state.composer_box.get().expect("the box registered itself");
+        assert!(harness.is_focused(text_box));
+
+        // The first send asks.
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        harness.paint();
+        assert!(commands.try_recv().is_err(), "nothing posted before the yes");
+        assert!(state.composer_confirming.get());
+        let root_id = harness.root_id();
+        assert!(find(root_id, "Post to github.com/acme/repo/pull/42?").is_some());
+        assert!(find(root_id, "composer-post").is_some());
+        assert!(find(root_id, "Label: \"Comment\"").is_none(), "the send gave way to the ask");
+
+        // Escape takes it back, text and all.
+        harness.dispatch_event(escape());
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.composer_confirming.get());
+        assert!(state.composer.get().is_some(), "the composer stays");
+        assert_eq!(state.composer_draft.get(), "Looks good");
+        assert!(find(harness.root_id(), "Label: \"Comment\"").is_some());
+
+        // Enter alone is the yes.
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        assert!(state.composer_confirming.get());
+        harness.dispatch_event(enter(Modifiers::empty()));
+        harness.rebuild();
+        harness.paint();
+        let token = match commands.try_recv() {
+            Ok(Command::PostIssueComment {
+                item_id,
+                token,
+                body,
+            }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(body, "Looks good");
+                token
+            }
+            other => panic!("Enter did not post: {other:?}"),
+        };
+        assert_eq!(state.composer_draft.get(), "Looks good", "Enter did not break the line");
+        assert!(!state.composer_confirming.get());
+        let posting = state.posting.get().expect("the comment is in flight");
+        assert_eq!(posting.token, token);
+        assert_eq!(posting.body, "Looks good");
+        assert!(state.composer.get().is_some(), "the composer stays open while posting");
+        let root_id = harness.root_id();
+        assert!(find(root_id, "composer-posting").is_some());
+        assert!(find(root_id, "Label: \"Comment\"").is_none(), "nothing to click while posting");
+        assert_eq!(
+            state.last_destination[ThreadFace::Card.index()].get(),
+            Some(Destination::GitHub)
+        );
+
+        // Nothing sends twice, and the keys do nothing to the text.
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(Modifiers::empty()));
+        harness.rebuild();
+        assert!(commands.try_recv().is_err());
+        assert_eq!(state.composer_draft.get(), "Looks good");
+        // Nor can the box be put away from under the comment.
+        assert!(!shown(&harness, "composer-close"), "no closing while posting");
+
+        // An answer to some other send is not this one's.
+        state.settle_issue_comment(token + 100, Err("stale".into()));
+        assert!(state.posting.get().is_some());
+        assert!(state.composer_error.get().is_none());
+
+        // Refused: the text is back with the reason under it.
+        state.settle_issue_comment(token, Err("GitHub could not post the comment: 403".into()));
+        harness.rebuild();
+        harness.paint();
+        assert!(state.posting.get().is_none());
+        assert!(state.composer.get().is_some(), "the composer stays with its text");
+        assert_eq!(state.composer_draft.get(), "Looks good");
+        let root_id = harness.root_id();
+        assert!(find(root_id, "composer-error").is_some());
+        assert!(find(root_id, "GitHub could not post the comment: 403").is_some());
+        assert!(find(root_id, "Label: \"Comment\"").is_some(), "the send is back");
+        assert!(shown(&harness, "composer-close"), "and so is the close");
+
+        // Clicking Comment asks, clicking Post posts, and this time it lands.
+        click(&mut harness, "composer-send");
+        assert!(state.composer_confirming.get());
+        assert!(commands.try_recv().is_err());
+        click(&mut harness, "composer-post");
+        let token = match commands.try_recv() {
+            Ok(Command::PostIssueComment { token, body, .. }) => {
+                assert_eq!(body, "Looks good");
+                token
+            }
+            other => panic!("Post did not post: {other:?}"),
+        };
+        assert!(state.composer_error.get().is_none(), "a new try clears the old reason");
+        state.settle_issue_comment(token, Ok(()));
+        assert!(state.posting.get().is_none());
+        assert!(state.composer.get().is_none(), "posted, the composer closes");
+        assert_eq!(state.composer_draft.get(), "");
+
+        // The foot still opens on an agent; GitHub is a click away.
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        assert_eq!(
+            state.composer.get().unwrap().destination,
+            Destination::agent(sonnet_medium())
+        );
+    }
+
+    /// Cancel under the ask gives the footer back, and picking a
+    /// destination while asking drops the ask, since it was about the
+    /// old one.
+    #[test]
+    fn cancel_and_a_new_destination_take_the_ask_back() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        state.open_composer(None, None, "Looks good".into(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+
+        click(&mut harness, "composer-send");
+        assert!(state.composer_confirming.get());
+        click(&mut harness, "composer-cancel-post");
+        assert!(!state.composer_confirming.get());
+        assert_eq!(state.composer_draft.get(), "Looks good");
+        assert!(find(harness.root_id(), "Label: \"Comment\"").is_some());
+
+        click(&mut harness, "composer-send");
+        assert!(state.composer_confirming.get());
+        state.set_destination(Destination::agent(sonnet_medium()));
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.composer_confirming.get());
+        assert!(find(harness.root_id(), "Label: \"Send\"").is_some());
+        assert!(commands.try_recv().is_err(), "nothing was posted");
+    }
+
+    /// A composer opened over another, as Ask about this and Reply do,
+    /// starts without the ask or the refusal that were about the old
+    /// one: an Enter in the new box is a line, not a yes.
+    #[test]
+    fn a_composer_opened_over_another_starts_without_its_ask_or_refusal() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        state.open_composer(None, None, "Looks good".into(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        state.composer_confirming.set(true);
+        state.composer_error.set(Some("GitHub could not post the comment: 403".into()));
+
+        state.open_composer_with(
+            None,
+            None,
+            "> quoted".into(),
+            Destination::agent(sonnet_medium()),
+            None,
+        );
+        assert!(!state.composer_confirming.get());
+        assert!(state.composer_error.get().is_none());
+
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find(root_id, "Label: \"Send\"").is_some());
+        assert!(find(root_id, "composer-post").is_none());
+        assert!(find(root_id, "composer-error").is_none());
+        harness.dispatch_event(enter(Modifiers::empty()));
+        harness.rebuild();
+        assert!(commands.try_recv().is_err(), "Enter was a line");
+        assert_eq!(state.composer_draft.get(), "> quoted\n");
+    }
+
+    /// An issue comment in flight belongs to the composer that sent it.
+    /// One opened since is not still, and the answer, come late, does not
+    /// close it or put a refusal under it; the flight is over either way.
+    #[test]
+    fn an_answer_to_a_composer_put_away_settles_nothing_but_the_flight() {
+        let state = state_with_pull_request();
+        state.open_composer(None, None, "Looks good".into(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        let sent = state.composer.get().unwrap().opening;
+        state.start_posting(3, "Looks good".into());
+        assert!(state.posting_from(sent));
+
+        state.open_composer(None, None, "Another".into(), sonnet_medium());
+        let next = state.composer.get().unwrap().opening;
+        assert!(!state.posting_from(next), "nothing of this composer's is in flight");
+        assert!(state.posting.get().is_some());
+
+        state.settle_issue_comment(3, Err("GitHub could not post the comment: 403".into()));
+        assert!(state.posting.get().is_none());
+        assert!(state.composer_error.get().is_none(), "the refusal was not this composer's");
+        assert_eq!(state.composer_draft.get(), "Another");
+
+        state.start_posting(4, "Another".into());
+        state.open_composer(None, None, "A third".into(), sonnet_medium());
+        state.settle_issue_comment(4, Ok(()));
+        assert!(state.posting.get().is_none());
+        assert!(state.composer.get().is_some(), "the third composer is not the one that posted");
+        assert_eq!(state.composer_draft.get(), "A third");
+    }
+
+    /// With the ask up, emptying the box takes the ask down: there is no
+    /// comment left to post.
+    #[test]
+    fn emptying_the_box_takes_the_ask_back() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        state.open_composer(None, None, "x".into(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        let composer = state.composer.get().unwrap();
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        assert!(state.composer_confirming.get());
+        harness.dispatch_event(key(
+            Key::Named(NamedKey::Backspace),
+            Code::Backspace,
+            Modifiers::empty(),
+        ));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.composer_draft.get(), "");
+        assert!(!state.composer_confirming.get());
+        assert!(find(harness.root_id(), "Label: \"Comment\"").is_some());
     }
 
     /// The lines wrap inside the box's padding, and the box's border takes

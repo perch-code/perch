@@ -409,6 +409,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                             );
                             return EventPropagation::Stop;
                         }
+                        // Take back the question under the composer's box, the
+                        // text staying where it is.
+                        Code::Escape if review.composer_confirming.get() => {
+                            review.composer_confirming.set(false);
+                            return EventPropagation::Stop;
+                        }
                         // Close an empty composer, or one editing a draft, whose
                         // words are safe in the cache. One with a question in it
                         // stays, so an Escape meant for the selection cannot throw

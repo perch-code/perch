@@ -371,3 +371,53 @@ async fn a_comment_on_its_own_names_the_commit_it_was_written_against() {
         Err(Error::Status { status: 422, body }) if body.contains("could not be resolved")
     ));
 }
+
+#[tokio::test]
+async fn an_issue_comment_posts_to_the_conversation_and_decodes_the_comment() {
+    let (base, requests) = spawn(vec![Response::new(
+        "201 Created",
+        serde_json::json!({
+            "id": 910,
+            "node_id": "IC_910",
+            "user": { "login": "reader", "avatar_url": "https://avatars/reader" },
+            "body": "Looks good from here.",
+            "created_at": "2026-09-21T18:00:00Z",
+            "updated_at": "2026-09-21T18:00:00Z",
+            "html_url": "https://github.com/a/b/pull/42#issuecomment-910",
+        })
+        .to_string(),
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let posted = github
+        .create_issue_comment("a/b", 42, "Looks good from here.")
+        .await
+        .unwrap();
+    assert_eq!(posted.id, 910);
+    assert_eq!(posted.node_id, "IC_910");
+    assert_eq!(posted.user, "reader");
+    assert_eq!(posted.user_avatar_url, "https://avatars/reader");
+    assert_eq!(posted.body, "Looks good from here.");
+    assert_eq!(
+        posted.html_url,
+        "https://github.com/a/b/pull/42#issuecomment-910"
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/repos/a/b/issues/42/comments");
+    let json: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(json, serde_json::json!({ "body": "Looks good from here." }));
+}
+
+#[tokio::test]
+async fn an_empty_issue_comment_is_refused_before_the_request() {
+    let (base, requests) = spawn(vec![]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+    assert!(matches!(
+        github.create_issue_comment("a/b", 42, "  \n").await,
+        Err(Error::Decode(_))
+    ));
+    assert!(requests.lock().unwrap().is_empty());
+}

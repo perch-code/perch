@@ -223,7 +223,10 @@ In `review::model`:
   Option<Anchor>, in_reply_to: Option<u64>, body, commit_sha }`. The
   form, the button and the gutter read it.
 - `last_destination: [RwSignal<Destination>; 2]`, one per face.
-- `posting: RwSignal<Option<String>>`, the issue comment in flight.
+- `posting: RwSignal<Option<Posting>>`, the issue comment in flight:
+  its body, the token its answer carries, and the opening of the
+  composer that sent it, so a late answer settles that composer and not
+  one opened since.
 - `LineThread`, `CardItem::GitHub`, `CardId::GitHub` go.
 
 In `review::timeline` a GitHub thread on a line is a `Card::Thread` like

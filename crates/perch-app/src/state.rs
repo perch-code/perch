@@ -1636,6 +1636,16 @@ impl AppState {
                     review.fail_submit_review(attempt_id, message);
                 }
             }
+            // The comment itself came in a `DiscussionReady` before this.
+            Event::IssueCommentPosted {
+                item_id,
+                token,
+                result,
+            } => {
+                if review.is_item(&item_id) {
+                    review.settle_issue_comment(token, result.map(|_| ()));
+                }
+            }
             Event::CommitsReady {
                 navigation_id,
                 scope_gen,
@@ -1820,6 +1830,7 @@ impl AppState {
             | Event::PullRequestReviewStarted { .. }
             | Event::PullRequestReviewSubmitted { .. }
             | Event::PullRequestReviewFailed { .. }
+            | Event::IssueCommentPosted { .. }
             | Event::CommitsReady { .. }
             | Event::ScopeReady { .. }
             | Event::ViewedReady { .. }
@@ -3063,6 +3074,61 @@ mod tests {
         );
         assert_eq!(review.submit_review_outcome.get(), None);
         assert_eq!(app.notice.get().as_deref(), Some("1 comment did not post: offline."));
+    }
+
+    /// The answer to an issue comment lands on the composer that sent it:
+    /// a refusal leaves the text with the reason, a comment that posted
+    /// closes the composer. Another item's answer, and one to a send that
+    /// is not the one in flight, are not this composer's.
+    #[test]
+    fn an_issue_comments_answer_settles_only_the_send_in_flight() {
+        use crate::review::model::Destination;
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        review.open_composer(None, None, "Looks good".into(), choice);
+        review.set_destination(Destination::GitHub);
+        review.start_posting(3, "Looks good".into());
+        let posted = |item_id: &str, token: u64, result: Result<(), String>| {
+            Event::IssueCommentPosted {
+                item_id: item_id.into(),
+                token,
+                result: result.map(|()| {
+                    Arc::new(perch_github::IssueComment {
+                        id: 910,
+                        node_id: "IC_910".into(),
+                        user: "reader".into(),
+                        user_avatar_url: String::new(),
+                        body: "Looks good".into(),
+                        created_at: "2026-09-21T18:00:00Z".parse().unwrap(),
+                        updated_at: None,
+                        html_url: String::new(),
+                        reactions: Default::default(),
+                    })
+                }),
+            }
+        };
+
+        app.apply_with_review(posted("other", 3, Err("no".into())), review);
+        assert!(review.posting.get().is_some(), "another item's answer");
+        app.apply_with_review(posted("wt", 2, Err("no".into())), review);
+        assert!(review.posting.get().is_some(), "an older send's answer");
+
+        app.apply_with_review(posted("wt", 3, Err("GitHub said no".into())), review);
+        assert!(review.posting.get().is_none());
+        assert!(review.composer.get().is_some(), "the text stays");
+        assert_eq!(review.composer_draft.get(), "Looks good");
+        assert_eq!(review.composer_error.get().as_deref(), Some("GitHub said no"));
+
+        review.start_posting(4, "Looks good".into());
+        assert!(review.composer_error.get().is_none());
+        app.apply_with_review(posted("wt", 4, Ok(())), review);
+        assert!(review.posting.get().is_none());
+        assert!(review.composer.get().is_none(), "posted, the composer closes");
     }
 
     #[test]
