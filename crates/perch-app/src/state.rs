@@ -1898,6 +1898,22 @@ impl AppState {
             .with(|all| all.iter().find(|i| i.id == id).cloned())
     }
 
+    /// Whether the inbox has an unread notification about the pull
+    /// request or the issue: what bolds its row and draws its dot, in
+    /// whichever scope the row is.
+    pub fn subject_unread(
+        &self,
+        repo_full_name: &str,
+        kind: perch_github::ItemKind,
+        number: u64,
+    ) -> bool {
+        self.notifications.with(|threads| {
+            threads
+                .iter()
+                .any(|thread| thread.unread && thread.is_about(repo_full_name, kind, number))
+        })
+    }
+
     /// The flat sidebar under the current scope, filters and search.
     pub fn visible_items(&self) -> Vec<Item> {
         let mut filters = self.item_filters.get();
@@ -2022,6 +2038,7 @@ mod tests {
             id: id.into(),
             unread,
             local_unread: false,
+            local_read: false,
             reason: Reason::Mention,
             updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
             last_read_at: (!unread).then(|| "2026-09-19T11:00:00Z".parse().unwrap()),

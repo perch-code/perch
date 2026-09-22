@@ -54,6 +54,7 @@ pub fn item_row(
         move || state.open_item.with(|o| o.as_deref() == Some(id.as_str()))
     };
     let archived = item.is_archived();
+    let unread = unread(state, &item);
 
     let menu_item = item.clone();
     let menu_backend = backend.clone();
@@ -73,11 +74,15 @@ pub fn item_row(
             let id = item.id.clone();
             move || state.renaming.with(|r| r.as_deref() == Some(id.as_str()))
         },
-        move |renaming| {
-            if renaming {
-                rename_box(state, backend.clone(), title_item.clone()).into_any()
-            } else {
-                nav_row::title_label(title_item.title().to_string(), archived, false).into_any()
+        {
+            let unread = unread.clone();
+            move |renaming| {
+                if renaming {
+                    rename_box(state, backend.clone(), title_item.clone()).into_any()
+                } else {
+                    nav_row::title_label(title_item.title().to_string(), archived, unread.clone())
+                        .into_any()
+                }
             }
         },
     )
@@ -86,7 +91,8 @@ pub fn item_row(
         nav_row::glyph_box(glyph(&item)),
         nav_row::lines(
             title,
-            row_trailing(state, actions_backend, row_item).style(|s| s.pointer_events_auto()),
+            row_trailing(state, actions_backend, row_item, unread)
+                .style(|s| s.pointer_events_auto()),
             byline(state, &item),
         ),
     ))
@@ -127,6 +133,43 @@ pub fn item_row(
         .style(|s| s.width_full()),
     ))
     .style(|s| s.flex_col().width_full())
+}
+
+/// Whether the inbox has an unread notification about the item's pull
+/// request or issue: what bolds the title and draws the dot, as the
+/// Notifications scope's row for the same thread has them. Read from
+/// the inbox each time, so viewing the item, which reads the thread,
+/// clears both without the row being rebuilt. A branch with no subject
+/// has nothing to be unread.
+fn unread(state: AppState, item: &Item) -> impl Fn() -> bool + Clone + 'static {
+    let about = item
+        .subject
+        .as_ref()
+        .map(|subject| (subject.repo_full_name().to_string(), subject.kind(), subject.number()));
+    move || {
+        about
+            .as_ref()
+            .is_some_and(|(repo, kind, number)| state.subject_unread(repo, *kind, *number))
+    }
+}
+
+/// The notifications about the item's subject that GitHub has as read:
+/// what Mark Unread puts the reminder back on. None on a branch, or on a
+/// subject the inbox has nothing about.
+fn read_threads(state: AppState, item: &Item) -> Vec<String> {
+    let Some(subject) = item.subject.as_ref() else {
+        return Vec::new();
+    };
+    state.notifications.with_untracked(|threads| {
+        threads
+            .iter()
+            .filter(|thread| {
+                !thread.unread
+                    && thread.is_about(subject.repo_full_name(), subject.kind(), subject.number())
+            })
+            .map(|thread| thread.id.clone())
+            .collect()
+    })
 }
 
 fn glyph(item: &Item) -> impl IntoView {
@@ -195,9 +238,15 @@ fn byline(state: AppState, item: &Item) -> impl IntoView {
     )
 }
 
-/// The title's right end: the pin, the bookmark and the age, or, while
-/// the pointer is over the row, Save and the menu in their place.
-fn row_trailing(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoView {
+/// The title's right end: the pin, the bookmark, the unread dot and the
+/// age, or, while the pointer is over the row, Save and the menu in
+/// their place.
+fn row_trailing(
+    state: AppState,
+    backend: Rc<Backend>,
+    item: Item,
+    unread: impl Fn() -> bool + Clone + 'static,
+) -> impl IntoView {
     let id = item.id.clone();
     let hovering = move || state.hovered_item.with(|h| h.as_deref() == Some(id.as_str()));
     let saved = item.saved;
@@ -217,6 +266,7 @@ fn row_trailing(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoV
                 } else {
                     Empty::new().into_any()
                 },
+                nav_row::unread_dot(unread.clone()),
                 nav_row::age(state, at),
             ))
             .style(|s| s.items_center().flex_shrink(0.0_f32))
@@ -321,6 +371,22 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         menu = menu.item(if pinned { "Unpin" } else { "Pin" }, move |m| {
             let (b, i) = (b.clone(), i.clone());
             m.accelerator(key(KeyCode::KeyP)).action(move || b.pin_item(&i, !pinned))
+        });
+    }
+    {
+        // Put the unread reminder back on the subject's notification,
+        // the way the Notifications scope's row does. Greyed while there
+        // is none to put it on: a branch, a subject the inbox has nothing
+        // about, or one still unread.
+        let read = read_threads(state, &item);
+        let b = backend.clone();
+        menu = menu.item("Mark Unread", move |m| {
+            let (b, read) = (b.clone(), read.clone());
+            m.enabled(!read.is_empty()).accelerator(key(KeyCode::KeyU)).action(move || {
+                for thread_id in &read {
+                    b.mark_notification_unread(thread_id);
+                }
+            })
         });
     }
     {

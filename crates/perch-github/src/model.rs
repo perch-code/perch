@@ -7,6 +7,7 @@
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::items::SubjectKind as ItemKind;
 use crate::workflow_runs::WorkflowRunQuery;
 
 /// A notification thread, as returned by `GET /notifications`.
@@ -19,6 +20,13 @@ pub struct Thread {
     /// the reminder survives restarts and unrelated inbox refreshes.
     #[serde(default)]
     pub local_unread: bool,
+    /// Perch marked this revision of the thread read, and GitHub took the
+    /// request. GitHub's list can go on reporting the revision unread for
+    /// a while after, and a snapshot taken then must not undo what it
+    /// accepted: the bit is carried while the revision stands, and goes
+    /// with newer activity or Mark Unread.
+    #[serde(default)]
+    pub local_read: bool,
     pub reason: Reason,
     #[serde(with = "ts")]
     pub updated_at: Timestamp,
@@ -43,6 +51,19 @@ impl Thread {
     pub fn number_hint(&self) -> Option<u64> {
         let url = self.subject.url.as_deref()?;
         url.rsplit('/').next()?.parse().ok()
+    }
+
+    /// Whether the thread is the notification about the given pull
+    /// request or issue: the one viewing it reads, whichever row it was
+    /// opened from, and whose unread state that row shows.
+    pub fn is_about(&self, repo_full_name: &str, kind: ItemKind, number: u64) -> bool {
+        let same_kind = match kind {
+            ItemKind::PullRequest => self.subject.kind == SubjectKind::PullRequest,
+            ItemKind::Issue => self.subject.kind == SubjectKind::Issue,
+        };
+        same_kind
+            && self.repository.full_name.eq_ignore_ascii_case(repo_full_name)
+            && self.number_hint() == Some(number)
     }
 
     /// Whether the subject wants looking at: a pull request or an issue
@@ -531,6 +552,29 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_is_about_its_subject_by_repository_kind_and_number() {
+        let issue = thread_with_url(Some("https://api.github.com/repos/a/b/issues/42"));
+        assert!(issue.is_about("a/b", ItemKind::Issue, 42));
+        assert!(issue.is_about("A/B", ItemKind::Issue, 42), "as GitHub spells it, or not");
+        assert!(
+            !issue.is_about("a/b", ItemKind::PullRequest, 42),
+            "a pull request is not the issue"
+        );
+        assert!(!issue.is_about("a/b", ItemKind::Issue, 43));
+        assert!(!issue.is_about("a/c", ItemKind::Issue, 42));
+
+        let mut pull = thread_with_url(Some("https://api.github.com/repos/a/b/pulls/42"));
+        pull.subject.kind = SubjectKind::PullRequest;
+        assert!(pull.is_about("a/b", ItemKind::PullRequest, 42));
+        assert!(!pull.is_about("a/b", ItemKind::Issue, 42));
+
+        // A subject with no number is about nothing an item can be.
+        let mut run = thread_with_url(None);
+        run.subject.kind = SubjectKind::CheckSuite;
+        assert!(!run.is_about("a/b", ItemKind::PullRequest, 42));
+    }
+
+    #[test]
     fn a_workflow_run_notification_names_the_run_to_look_up() {
         let mut t = thread_with_url(None);
         t.subject.kind = SubjectKind::CheckSuite;
@@ -631,6 +675,7 @@ mod tests {
             id: "1".into(),
             unread: true,
             local_unread: false,
+            local_read: false,
             reason: Reason::Subscribed,
             updated_at: "2026-09-17T18:00:00Z".parse().unwrap(),
             last_read_at: None,

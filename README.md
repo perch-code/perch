@@ -18,11 +18,18 @@ and on the first scheduled poll after 15 minutes; polls between reconciliations
 use `Last-Modified`. The full fetch repairs the sidebar when GitHub's validator
 does not change with the notification list.
 
-- Opening a notification marks its GitHub thread read. Read threads remain in
-  the inbox.
-- **Mark Unread** restores the unread reminder in Perch for the current update.
-  Opening it clears the reminder; later GitHub state takes precedence. GitHub's
-  public API has no mark-unread operation, so this does not change github.com.
+- Viewing a pull request or an issue marks its GitHub thread read, from
+  whichever row it was opened: the notification's, or the item's in All or
+  Authored. Read threads remain in the inbox. While the thread is unread, the
+  item's row is bold with the unread dot, as the notification's row is.
+  GitHub's list can go on reporting a thread unread for a while after it has
+  taken the request, so a read made in Perch holds for that revision of the
+  thread until newer activity arrives or it is marked unread; a thread marked
+  unread on github.com for the same revision is not seen.
+- **Mark Unread**, on the notification's row or the item's, restores the
+  unread reminder in Perch for the current update. Viewing it clears the
+  reminder; later GitHub state takes precedence. GitHub's public API has no
+  mark-unread operation, so this does not change github.com.
 - **Done** marks the thread done on GitHub and remembers that exact update in
   Perch, so GitHub's `all=true` history cannot put it back. Newer activity
   clears the local mark and lets the thread return.

@@ -645,6 +645,7 @@ mod tests {
             id: id.into(),
             unread,
             local_unread: false,
+            local_read: false,
             reason: Reason::Mention,
             updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
             last_read_at: (!unread).then(|| "2026-09-19T11:00:00Z".parse().unwrap()),
@@ -880,6 +881,102 @@ mod tests {
         let figures = find(discussion, "row figures").unwrap().get_visual_rect_no_clip();
         assert_eq!(figures.width(), 0.0, "nothing at the right end");
         assert!(find(discussion, "mention").is_none());
+    }
+
+    /// An item row is bold with the dot while the inbox has an unread
+    /// notification about its pull request or issue, as the Notifications
+    /// row for the same thread is, and goes back to the body weight the
+    /// moment the thread is read, without being rebuilt; Mark Unread puts
+    /// both back. A row with nothing in the inbox about it is never bold.
+    #[test]
+    fn an_item_row_is_bold_and_dotted_while_its_notification_is_unread() {
+        use floem::style::FontWeight;
+
+        let (mut harness, state) = harness();
+        let mut about_pr =
+            notification("57", "ORG/ONE", "About the pull", SubjectKind::PullRequest, true);
+        about_pr.subject.url = Some("https://api.github.com/repos/org/one/pulls/57".into());
+        state.notifications.update(|threads| threads.push(about_pr.clone()));
+        harness.rebuild();
+        harness.paint();
+
+        let row = find(harness.root_id(), "item row:pr").unwrap();
+        let title = find(row, "Pull pr").unwrap();
+        let dot = find(row, "unread dot").unwrap();
+        assert_eq!(
+            harness.get_computed_style(title).get(FontWeight),
+            Some(theme::weight_emphasis()),
+            "bold while unread"
+        );
+        let dot_rect = dot.get_visual_rect_no_clip();
+        assert_eq!(dot_rect.width(), 7.0, "the dot is drawn");
+        let age = find(row, "row age").unwrap().get_visual_rect_no_clip();
+        assert!(dot_rect.x1 <= age.x0, "before the age");
+
+        let other = find(harness.root_id(), "item row:mine").unwrap();
+        let other_title = find(other, "Issue mine").unwrap();
+        assert_eq!(
+            harness.get_computed_style(other_title).get(FontWeight),
+            Some(theme::weight_body()),
+            "nothing in the inbox about it"
+        );
+        assert_eq!(find(other, "unread dot").unwrap().get_visual_rect_no_clip().width(), 0.0);
+
+        // Viewing the pull request reads the thread; the row follows.
+        state.notifications.update(|threads| {
+            threads.iter_mut().find(|thread| thread.id == "57").unwrap().unread = false;
+        });
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(
+            find(harness.root_id(), "item row:pr").unwrap(),
+            row,
+            "the same row, restyled rather than rebuilt"
+        );
+        assert_eq!(
+            harness.get_computed_style(title).get(FontWeight),
+            Some(theme::weight_body()),
+            "the body weight once read"
+        );
+        assert_eq!(dot.get_visual_rect_no_clip().width(), 0.0, "the dot is gone");
+
+        // Mark Unread puts the reminder back, and the row with it.
+        state.notifications.update(|threads| {
+            let thread = threads.iter_mut().find(|thread| thread.id == "57").unwrap();
+            thread.unread = true;
+            thread.local_unread = true;
+        });
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(
+            harness.get_computed_style(title).get(FontWeight),
+            Some(theme::weight_emphasis())
+        );
+        assert_eq!(dot.get_visual_rect_no_clip().width(), 7.0);
+    }
+
+    /// A notification row is bold with the dot while GitHub has it unread,
+    /// and at the body weight once the thread is read.
+    #[test]
+    fn a_notification_row_unbolds_once_its_thread_is_read() {
+        use floem::style::FontWeight;
+
+        let (mut harness, state) = harness();
+        click_scope(&mut harness, ItemScope::Notifications);
+        let row = find(harness.root_id(), "notification row:11").unwrap();
+        let title = find(row, "Unread pull request").unwrap();
+        assert_eq!(harness.get_computed_style(title).get(FontWeight), Some(theme::weight_emphasis()));
+        assert_eq!(find(row, "unread dot").unwrap().get_visual_rect_no_clip().width(), 7.0);
+
+        state.notifications.update(|threads| {
+            threads.iter_mut().find(|thread| thread.id == "11").unwrap().unread = false;
+        });
+        harness.rebuild();
+        harness.paint();
+        let row = find(harness.root_id(), "notification row:11").unwrap();
+        let title = find(row, "Unread pull request").unwrap();
+        assert_eq!(harness.get_computed_style(title).get(FontWeight), Some(theme::weight_body()));
+        assert_eq!(find(row, "unread dot").unwrap().get_visual_rect_no_clip().width(), 0.0);
     }
 
     #[test]

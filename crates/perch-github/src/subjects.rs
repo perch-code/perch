@@ -246,6 +246,7 @@ mod tests {
             id: id.into(),
             unread: true,
             local_unread: false,
+            local_read: false,
             reason: Reason::Subscribed,
             updated_at: "2026-09-17T18:00:00Z".parse().unwrap(),
             last_read_at: None,

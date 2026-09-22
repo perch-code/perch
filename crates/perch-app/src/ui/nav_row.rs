@@ -106,11 +106,13 @@ pub fn lines(
 }
 
 /// The title, in one style, so a renamed branch and an unread
-/// notification differ only where they mean to.
-pub fn title_label(text: String, muted: bool, bold: bool) -> impl IntoView {
+/// notification differ only where they mean to. `bold` is read with the
+/// style, so a row whose notification is read while it is on screen
+/// goes to the body weight without being rebuilt.
+pub fn title_label(text: String, muted: bool, bold: impl Fn() -> bool + 'static) -> impl IntoView {
     Label::derived(move || text.clone()).style(move |s| {
         s.font_size(theme::TEXT_TITLE)
-            .font_weight(if bold {
+            .font_weight(if bold() {
                 theme::weight_emphasis()
             } else {
                 theme::weight_body()
@@ -186,6 +188,20 @@ pub fn age(state: AppState, at: Timestamp) -> impl IntoView {
 /// A small glyph beside the age: the pin, the bookmark.
 pub fn mark(glyph: SidebarIcon, color: floem::peniko::Color) -> impl IntoView {
     sidebar_glyph(glyph, color).style(|s| s.size(11.0, 11.0).flex_shrink(0.0_f32).margin_left(6.0))
+}
+
+/// The unread reminder, before the age, in GitHub's blue. Out of the
+/// layout, not just invisible, while `unread` says there is none, and
+/// read with the style as the title's weight is.
+pub fn unread_dot(unread: impl Fn() -> bool + 'static) -> impl IntoView {
+    Empty::new().debug_name("unread dot").style(move |s| {
+        s.size(7.0, 7.0)
+            .border_radius(4.0)
+            .background(theme::UNREAD)
+            .flex_shrink(0.0_f32)
+            .margin_left(6.0)
+            .apply_if(!unread(), |s| s.hide())
+    })
 }
 
 /// "#2085", or nothing: the reference a byline carries is the number

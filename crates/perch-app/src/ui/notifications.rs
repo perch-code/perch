@@ -149,7 +149,7 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> im
     let content = Stack::horizontal((
         nav_row::glyph_box(notification_glyph(&thread)),
         nav_row::lines(
-            nav_row::title_label(title, false, unread),
+            nav_row::title_label(title, false, move || unread),
             notification_trailing(state, hovered, action_backend, action_thread)
                 .style(|s| s.pointer_events_auto()),
             byline(state, &thread),
@@ -266,9 +266,12 @@ fn notification_trailing(
         move || hovered.get(),
         move |hovered| {
             if !hovered {
-                return Stack::horizontal((unread_dot(unread), nav_row::age(state, at)))
-                    .style(|s| s.items_center().flex_shrink(0.0_f32))
-                    .into_any();
+                return Stack::horizontal((
+                    nav_row::unread_dot(move || unread),
+                    nav_row::age(state, at),
+                ))
+                .style(|s| s.items_center().flex_shrink(0.0_f32))
+                .into_any();
             }
             let done_backend = backend.clone();
             let done_id = thread.id.clone();
@@ -314,23 +317,6 @@ fn notification_menu(backend: Rc<Backend>, thread: &Thread) -> Menu {
             let id = unsubscribe_id.clone();
             item.action(move || backend.unsubscribe_notification(&id))
         })
-}
-
-/// The unread reminder, before the age, in GitHub's blue.
-fn unread_dot(unread: bool) -> impl IntoView {
-    if unread {
-        Empty::new()
-            .style(|s| {
-                s.size(7.0, 7.0)
-                    .border_radius(4.0)
-                    .background(theme::UNREAD)
-                    .flex_shrink(0.0_f32)
-                    .margin_left(6.0)
-            })
-            .into_any()
-    } else {
-        Empty::new().into_any()
-    }
 }
 
 /// The number GitHub shows for the subject: a pull request's, an issue's
@@ -408,6 +394,7 @@ mod tests {
             id: id.into(),
             unread,
             local_unread: false,
+            local_read: false,
             reason,
             updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
             last_read_at: (!unread).then(|| "2026-09-19T11:00:00Z".parse().unwrap()),

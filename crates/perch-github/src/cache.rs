@@ -3071,6 +3071,7 @@ mod tests {
             id: id.into(),
             unread: true,
             local_unread: false,
+            local_read: false,
             reason: Reason::Subscribed,
             updated_at: stamp(updated_at),
             last_read_at: None,

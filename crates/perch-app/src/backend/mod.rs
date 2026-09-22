@@ -2519,16 +2519,7 @@ async fn run(
                 if ctx.prepare_notification_open(&thread) {
                     if let Some(github) = ctx.github() {
                         match github.mark_thread_read(&thread.id).await {
-                            Ok(()) => {
-                                let id = thread.id.clone();
-                                ctx.edit_notifications(|threads| {
-                                    if let Some(thread) = threads.iter_mut().find(|t| t.id == id) {
-                                        thread.unread = false;
-                                        thread.local_unread = false;
-                                        thread.last_read_at = Some(Timestamp::now());
-                                    }
-                                });
-                            }
+                            Ok(()) => ctx.notification_read(&thread.id),
                             Err(e) => {
                                 defer_polls_for_error(
                                     &e,
@@ -3769,12 +3760,16 @@ impl Ctx {
         // A local mark-unread reminder belongs to this exact notification
         // revision. Carry it across a full GitHub snapshot, but let newer
         // activity (a changed updated_at) replace it with GitHub's state.
+        // A read Perch made of the revision is carried the same way, with
+        // when it was made: GitHub's list can still say unread for a
+        // while after taking the request, and a snapshot from then would
+        // otherwise put the bold back on a row the reader has opened.
         // What a look found of the subject is carried whatever the
         // revision: the face is the same, and a state gone stale is looked
         // at again, which the snapshot's own timestamp says. The run a
         // workflow run notification is about is carried the same way, and
         // looked for again when a re-run moves the thread on.
-        let (local_unread, snapshots, runs) = self
+        let (local_unread, local_read, snapshots, runs) = self
             .notifications
             .lock()
             .map(|current| {
@@ -3784,6 +3779,11 @@ impl Ctx {
                         .filter(|thread| thread.local_unread)
                         .map(|thread| (thread.id.clone(), thread.updated_at))
                         .collect::<std::collections::HashSet<_>>(),
+                    current
+                        .iter()
+                        .filter(|thread| thread.local_read)
+                        .map(|thread| ((thread.id.clone(), thread.updated_at), thread.last_read_at))
+                        .collect::<std::collections::HashMap<_, _>>(),
                     current
                         .iter()
                         .filter_map(|thread| {
@@ -3809,6 +3809,11 @@ impl Ctx {
             if !thread.unread && local_unread.contains(&(thread.id.clone(), thread.updated_at)) {
                 thread.unread = true;
                 thread.local_unread = true;
+            }
+            if let Some(read_at) = local_read.get(&(thread.id.clone(), thread.updated_at)) {
+                thread.unread = false;
+                thread.local_read = true;
+                thread.last_read_at = thread.last_read_at.or(*read_at);
             }
             if thread.subject_snapshot.is_none() {
                 thread.subject_snapshot = snapshots.get(&thread.id).cloned();
@@ -3860,6 +3865,19 @@ impl Ctx {
         let _ = self.events.send(Event::Notifications(threads));
     }
 
+    /// GitHub has taken the thread as read: its row follows, and stays
+    /// read through a snapshot that has not caught up with the request.
+    fn notification_read(&self, thread_id: &str) {
+        self.edit_notifications(|threads| {
+            if let Some(thread) = threads.iter_mut().find(|thread| thread.id == thread_id) {
+                thread.unread = false;
+                thread.local_unread = false;
+                thread.local_read = true;
+                thread.last_read_at = Some(Timestamp::now());
+            }
+        });
+    }
+
     fn mark_notification_unread(&self, thread_id: &str) {
         self.edit_notifications(|threads| {
             if let Some(thread) = threads
@@ -3868,6 +3886,7 @@ impl Ctx {
             {
                 thread.unread = true;
                 thread.local_unread = true;
+                thread.local_read = false;
             }
         });
     }
@@ -7763,11 +7782,54 @@ async fn open_subject(
         );
         return false;
     }
+    read_subject_notifications(ctx, &repo_full_name, kind, number).await;
     match kind {
         ItemKind::PullRequest => {
             open_pull_request(ctx, repo_full_name, number, navigation_id).await
         }
         ItemKind::Issue => open_issue(ctx, repo_full_name, number, navigation_id).await,
+    }
+}
+
+/// Viewing a pull request or an issue reads the notification about it,
+/// as opening its page on github.com does, whichever row it was opened
+/// from: a row in the Notifications scope has done this itself by now,
+/// and a row in All or Authored is the same subject. A Perch-only unread
+/// reminder is cleared without a request; a thread GitHub has unread is
+/// marked read there, and its row follows once GitHub agrees.
+async fn read_subject_notifications(
+    ctx: &Ctx,
+    repo_full_name: &str,
+    kind: ItemKind,
+    number: u64,
+) {
+    let unread: Vec<Thread> = ctx
+        .notifications
+        .lock()
+        .map(|threads| {
+            threads
+                .iter()
+                .filter(|thread| thread.unread && thread.is_about(repo_full_name, kind, number))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    for thread in unread {
+        if !ctx.prepare_notification_open(&thread) {
+            continue;
+        }
+        // Without a token there is no inbox to keep in step; the open
+        // itself says so.
+        let Some(github) = ctx.github() else {
+            continue;
+        };
+        match github.mark_thread_read(&thread.id).await {
+            Ok(()) => ctx.notification_read(&thread.id),
+            Err(e) => {
+                tracing::warn!(thread = %thread.id, error = %e, "could not mark notification read");
+                ctx.notice(format!("Could not mark the notification read: {e}"));
+            }
+        }
     }
 }
 
@@ -10732,6 +10794,7 @@ mod tests {
             id: id.into(),
             unread: true,
             local_unread: false,
+            local_read: false,
             reason: Reason::Subscribed,
             updated_at: "2026-09-17T18:00:00Z".parse().unwrap(),
             last_read_at: None,
@@ -11103,6 +11166,111 @@ mod tests {
         assert!(!opened.unread);
         assert!(!opened.local_unread);
         assert_eq!(opened.last_read_at, Some(last_read_at));
+    }
+
+    /// Opening a pull request from All or Authored reads the notification
+    /// about it, as opening it from Notifications does: GitHub is asked
+    /// once for a thread it has unread, a Perch-only reminder is cleared
+    /// without asking, and every other thread is left as it was.
+    #[tokio::test]
+    async fn viewing_a_subject_reads_its_notification_from_any_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, asked) = serve("205 Reset Content", "");
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let mut reminded = thread("8", "eight");
+        reminded.unread = false;
+        ctx.replace_notifications(
+            vec![thread("7", "seven"), reminded, thread("9", "nine")],
+            Some("first"),
+        );
+        ctx.mark_notification_unread("8");
+        let _ = received.try_iter().count();
+
+        read_subject_notifications(&ctx, "A/B", ItemKind::PullRequest, 7).await;
+        read_subject_notifications(&ctx, "a/b", ItemKind::PullRequest, 8).await;
+        // An issue numbered as the pull request is, and a pull request
+        // of another repository, are not it.
+        read_subject_notifications(&ctx, "a/b", ItemKind::Issue, 9).await;
+        read_subject_notifications(&ctx, "a/c", ItemKind::PullRequest, 9).await;
+
+        assert_eq!(asked.lock().unwrap().as_slice(), ["/notifications/threads/7"]);
+        let threads = ctx.notifications.lock().unwrap().clone();
+        assert!(!threads[0].unread && !threads[0].local_unread);
+        assert!(threads[0].last_read_at.is_some(), "read now");
+        assert!(
+            !threads[1].unread && !threads[1].local_unread,
+            "the reminder went without a request"
+        );
+        assert!(threads[2].unread, "another subject's notification is left alone");
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_threads().unwrap()).unwrap(),
+            threads,
+            "the read state survives a restart"
+        );
+        let published = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Notifications(threads) => Some(threads),
+                _ => None,
+            })
+            .last()
+            .expect("the sidebar was told");
+        assert_eq!(published, threads);
+
+        // Nothing unread about the subject asks GitHub for anything.
+        read_subject_notifications(&ctx, "a/b", ItemKind::PullRequest, 7).await;
+        assert_eq!(asked.lock().unwrap().len(), 1);
+    }
+
+    /// GitHub's list can still say unread for a while after it has taken
+    /// a read. A snapshot from then does not put the bold back: the read
+    /// holds for the revision Perch made it on, and goes with newer
+    /// activity or Mark Unread.
+    #[tokio::test]
+    async fn a_read_made_in_perch_survives_a_snapshot_that_has_not_caught_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let stale = thread("7", "seven");
+        ctx.replace_notifications(vec![stale.clone()], Some("first"));
+        ctx.notification_read("7");
+        let read = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(!read.unread && read.local_read);
+        let read_at = read.last_read_at.expect("read now");
+
+        ctx.replace_notifications(vec![stale.clone()], Some("second"));
+        let held = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(!held.unread, "GitHub's stale unread does not undo the read");
+        assert!(held.local_read);
+        assert_eq!(held.last_read_at, Some(read_at), "and when it was read is kept");
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_threads().unwrap()).unwrap(),
+            vec![held],
+            "across a restart too"
+        );
+
+        // Once GitHub has caught up its own reading time is the one kept.
+        let mut agreed = stale.clone();
+        agreed.unread = false;
+        agreed.last_read_at = Some("2026-09-17T18:30:00Z".parse().unwrap());
+        ctx.replace_notifications(vec![agreed.clone()], Some("third"));
+        let caught_up = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(!caught_up.unread);
+        assert_eq!(caught_up.last_read_at, agreed.last_read_at);
+
+        // Mark Unread ends it: the reminder goes on, and a snapshot that
+        // says unread is taken at its word.
+        ctx.mark_notification_unread("7");
+        assert!(!ctx.notifications.lock().unwrap()[0].local_read);
+        ctx.replace_notifications(vec![stale.clone()], Some("fourth"));
+        assert!(ctx.notifications.lock().unwrap()[0].unread);
+
+        // Newer activity is a new revision, unread as GitHub says.
+        ctx.notification_read("7");
+        let mut newer = stale;
+        newer.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        ctx.replace_notifications(vec![newer], Some("fifth"));
+        let moved_on = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(moved_on.unread && !moved_on.local_read);
     }
 
     #[tokio::test]
