@@ -19,7 +19,8 @@ pub mod workflow_runs;
 
 pub use auth::{resolve_token, Token, TokenSource};
 pub use cache::{
-    Cache, CacheError, CacheOpen, RunEventAppend, StoredReveals, NOTIFICATIONS_LAST_MODIFIED_KEY,
+    Cache, CacheError, CacheOpen, DraftRow, Reconciled, RunEventAppend, StoredReveals,
+    NOTIFICATIONS_LAST_MODIFIED_KEY,
 };
 pub use client::{Error, GitHub, ListResult, PullLookup};
 pub use comments::{
@@ -34,7 +35,7 @@ pub use config::{
 };
 pub use discussion::{
     Discussion, IssueComment, PullEvent, PullEventKind, PullReviewEvent, Review, ReviewComment,
-    ReviewThreadState,
+    ReviewCommentDraft, ReviewThreadState,
 };
 pub use items::{
     Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind,

@@ -16,9 +16,9 @@ use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, ReviewSnapshotStore, Store};
 use perch_github::{
     resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentThread,
-    Config, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, MergeMethod, MergeState,
+    Config, DraftRow, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, MergeMethod, MergeState,
     MergeableState, NewRunEvent, PullRequest, PullRequestOverview, PullReviewEvent,
-    ReactionKind, Reactions, RepositoryPermission, Review, RevisionContext,
+    ReactionKind, Reactions, RepositoryPermission, Review, ReviewCommentDraft, RevisionContext,
     RunEvent as StoredRunEvent, RunEventRecord,
     RunHistoryFilter, RunLabels, RunOwner, RunPurpose, RunRecord, RunStatus, RunSummary,
     SubjectKind, TerminalReason, Thread, ThreadOrigin,
@@ -112,7 +112,9 @@ pub enum Command {
         method: MergeMethod,
         bypass_requirements: bool,
     },
-    /// Submit a final review of the exact pull request head the reader saw.
+    /// Submit a final review of the exact pull request head the reader saw,
+    /// with the drafts in the cache: the backend reads them itself, so a
+    /// stale view cannot post one the reader deleted.
     SubmitPullRequestReview {
         attempt_id: u64,
         item_id: String,
@@ -377,6 +379,10 @@ pub enum Command {
     DeleteDraft {
         item_id: String,
         message_id: String,
+    },
+    /// Throw every draft in the item away: Discard all on the review form.
+    DiscardDrafts {
+        item_id: String,
     },
 }
 
@@ -655,13 +661,22 @@ pub enum Event {
         expected_head_sha: String,
         attempt_id: u64,
     },
+    /// The review is on GitHub, and so are `posted` of the drafts. The
+    /// `unmatched` drafts rode in the review but were not found in what
+    /// GitHub listed after, and are drafts still; the `failed` ones were
+    /// refused after the review landed, each with GitHub's reason, and
+    /// are drafts still. `review` is `None` when there was none to post:
+    /// a comment with no summary whose drafts all went on their own.
     PullRequestReviewSubmitted {
         item_id: String,
         repo_full_name: String,
         number: u64,
         expected_head_sha: String,
         attempt_id: u64,
-        review: Arc<Review>,
+        review: Option<Arc<Review>>,
+        posted: usize,
+        unmatched: Vec<String>,
+        failed: Vec<(String, String)>,
     },
     PullRequestReviewFailed {
         item_id: String,
@@ -1464,10 +1479,20 @@ impl PullRequestStatusRequests {
 /// Monotonic generations for full pull-request discussion reads. A review
 /// submission invalidates any fetch that began before the mutation, so an
 /// older response cannot erase the newly returned review from the cache or
-/// the open conversation.
+/// the open conversation. While a submission is posting, the item is
+/// `held`: no read commits at all until it lets go, since one that began
+/// after the review landed and committed before the drafts were matched
+/// would list a comment the cache still holds as a draft, and make a
+/// second thread of it.
 #[derive(Debug, Default)]
 struct DiscussionRequests {
-    latest: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    latest: std::sync::Mutex<Generations>,
+}
+
+#[derive(Debug, Default)]
+struct Generations {
+    latest: std::collections::HashMap<String, u64>,
+    held: std::collections::HashSet<String>,
 }
 
 impl DiscussionRequests {
@@ -1476,11 +1501,12 @@ impl DiscussionRequests {
             return 0;
         };
         let generation = latest
+            .latest
             .get(item_id)
             .copied()
             .unwrap_or_default()
             .saturating_add(1);
-        latest.insert(item_id.to_string(), generation);
+        latest.latest.insert(item_id.to_string(), generation);
         generation
     }
 
@@ -1488,14 +1514,15 @@ impl DiscussionRequests {
         self.latest
             .lock()
             .ok()
-            .and_then(|latest| latest.get(item_id).copied())
+            .and_then(|latest| latest.latest.get(item_id).copied())
             == Some(generation)
     }
 
     /// Commit a fetched discussion while holding the same lock used to
     /// register a newer read or mutation fence. A submission therefore sees
     /// either the cache before this whole commit or the cache after it, never
-    /// a successful generation check followed by a late stale write.
+    /// a successful generation check followed by a late stale write. Nothing
+    /// commits while the item is held by a submission.
     fn with_current<T>(
         &self,
         item_id: &str,
@@ -1503,7 +1530,8 @@ impl DiscussionRequests {
         commit: impl FnOnce() -> T,
     ) -> Option<T> {
         let latest = self.latest.lock().ok()?;
-        if latest.get(item_id).copied() != Some(generation) {
+        if latest.held.contains(item_id) || latest.latest.get(item_id).copied() != Some(generation)
+        {
             return None;
         }
         let result = commit();
@@ -1518,14 +1546,49 @@ impl DiscussionRequests {
     fn fence_with<T>(&self, item_id: &str, commit: impl FnOnce() -> T) -> Option<T> {
         let mut latest = self.latest.lock().ok()?;
         let generation = latest
+            .latest
             .get(item_id)
             .copied()
             .unwrap_or_default()
             .saturating_add(1);
-        latest.insert(item_id.to_string(), generation);
+        latest.latest.insert(item_id.to_string(), generation);
         let result = commit();
         drop(latest);
         Some(result)
+    }
+
+    /// Keep every read of the item from committing until the hold is
+    /// dropped. A submission holds the item from its first request to its
+    /// last cache write, so what it posts is matched to its drafts before
+    /// any read can list it.
+    fn hold(&self, item_id: &str) -> DiscussionHold<'_> {
+        if let Ok(mut latest) = self.latest.lock() {
+            latest.held.insert(item_id.to_string());
+        }
+        DiscussionHold {
+            requests: self,
+            item_id: item_id.to_string(),
+        }
+    }
+
+    fn is_held(&self, item_id: &str) -> bool {
+        self.latest
+            .lock()
+            .is_ok_and(|latest| latest.held.contains(item_id))
+    }
+}
+
+/// An item held by a submission; see `DiscussionRequests::hold`.
+struct DiscussionHold<'a> {
+    requests: &'a DiscussionRequests,
+    item_id: String,
+}
+
+impl Drop for DiscussionHold<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut latest) = self.requests.latest.lock() {
+            latest.held.remove(&self.item_id);
+        }
     }
 }
 
@@ -2087,6 +2150,12 @@ impl Backend {
         let _ = self.commands.send(Command::DeleteDraft {
             item_id: item_id.to_string(),
             message_id: message_id.to_string(),
+        });
+    }
+
+    pub fn discard_drafts(&self, item_id: &str) {
+        let _ = self.commands.send(Command::DiscardDrafts {
+            item_id: item_id.to_string(),
         });
     }
 
@@ -2994,6 +3063,9 @@ async fn run(
                 message_id,
             } => {
                 delete_draft(&ctx, &item_id, &message_id);
+            }
+            Command::DiscardDrafts { item_id } => {
+                discard_drafts(&ctx, &item_id);
             }
             Command::OpenFile {
                 path,
@@ -6049,10 +6121,23 @@ async fn merge_open_pull_request(
 }
 
 /// Submit a final review only for the live checkout and exact pull-request
-/// head shown when the reader confirmed it. GitHub records `commit_id` on the
-/// review but does not offer an atomic compare-and-submit operation, so a
-/// fresh REST read narrows the race and the explicit commit identity makes
-/// any later head movement honest rather than approving unseen changes.
+/// head shown when the reader confirmed it, with the drafts in the cache.
+/// GitHub records `commit_id` on the review but does not offer an atomic
+/// compare-and-submit operation, so a fresh REST read narrows the race and
+/// the explicit commit identity makes any later head movement honest
+/// rather than approving unseen changes.
+///
+/// The drafts go three ways. One that opens a thread at the head rides in
+/// the review. One that opens a thread at an older commit, and a reply
+/// under a thread on GitHub, post one request each once the review has
+/// landed, since the review's comments cannot carry either. Then GitHub's
+/// copy of the discussion is read back and the drafts that rode in the
+/// review are found in it and marked posted; a draft under a thread
+/// another draft opened is replied then, under the root that is known by
+/// then. A failure after the review landed leaves that draft a draft and
+/// the review up, and is told with the rest. A comment with no summary
+/// and no draft to carry posts no review at all: the replies and older
+/// comments go on their own, which is all the reader asked for.
 #[allow(
     clippy::too_many_arguments,
     reason = "the remote mutation carries every item and revision fence explicitly"
@@ -6134,6 +6219,11 @@ async fn submit_open_pull_request_review(
             return false;
         }
     };
+    let drafts = ctx
+        .with_cache(|cache| cache.load_drafts(item_id))
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let drafts = split_drafts(drafts, expected_head_sha);
     if let Err(message) = validate_pull_request_review_attempt(
         &pull_request,
         &checkout_head_sha,
@@ -6142,6 +6232,7 @@ async fn submit_open_pull_request_review(
         expected_head_sha,
         body,
         event,
+        !drafts.is_empty(),
     ) {
         send_pull_request_review_failure(
             ctx,
@@ -6155,50 +6246,294 @@ async fn submit_open_pull_request_review(
         return false;
     }
 
-    let review = match github
-        .submit_pull_request_review(
-            repo_full_name,
-            number,
-            expected_head_sha,
-            body,
-            event,
-        )
-        .await
-    {
-        Ok(review) => review,
-        Err(error) => {
-            send_pull_request_review_failure(
-                ctx,
-                attempt_id,
-                item_id,
+    // Nothing else commits to the item's discussion until the drafts are
+    // matched to what posted: a read landing in between would list a
+    // comment the cache still calls a draft, and make a thread of its own
+    // for it.
+    let hold = ctx.discussion_requests.hold(item_id);
+
+    // A comment review with no summary and nothing to carry is no review:
+    // the replies and the comments on older commits post on their own,
+    // which is what the reader asked for.
+    let review_needed = event != PullReviewEvent::Comment
+        || !body.trim().is_empty()
+        || !drafts.in_review.is_empty();
+    let in_review: Vec<ReviewCommentDraft> =
+        drafts.in_review.iter().map(review_comment_draft).collect();
+    let review = if review_needed {
+        match github
+            .submit_pull_request_review(
                 repo_full_name,
                 number,
                 expected_head_sha,
-                format!("GitHub could not submit this review: {error}"),
-            );
-            return false;
+                body,
+                event,
+                &in_review,
+            )
+            .await
+        {
+            Ok(review) => Some(review),
+            Err(error) => {
+                send_pull_request_review_failure(
+                    ctx,
+                    attempt_id,
+                    item_id,
+                    repo_full_name,
+                    number,
+                    expected_head_sha,
+                    format!("GitHub could not submit this review: {error}"),
+                );
+                return false;
+            }
         }
+    } else {
+        None
     };
 
     // Fence any discussion read that began before the mutation, then retain
     // GitHub's successful response before doing best-effort refreshes. A
     // transient follow-up failure must not turn a submitted review into a
     // failed one or let an older response erase it from the cache.
-    let _ = ctx.discussion_requests.fence_with(item_id, || {
-        upsert_cached_review(ctx, item_id, repo_full_name, number, &review)
-    });
+    if let Some(review) = &review {
+        let _ = ctx.discussion_requests.fence_with(item_id, || {
+            upsert_cached_review(ctx, item_id, repo_full_name, number, review)
+        });
+    }
+
+    // The review is up. From here every draft that does not post is told
+    // and kept, and nothing stops the rest.
+    let mut posted = 0;
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for draft in &drafts.stranded {
+        failed.push((
+            draft.message_id.clone(),
+            "it has no lines to go on and no comment to reply to".into(),
+        ));
+    }
+    for draft in &drafts.after_review {
+        let result = match (draft.thread_github_id, &draft.anchor) {
+            (Some(root), _) => {
+                github
+                    .reply_to_review_comment(repo_full_name, number, root, &draft.body)
+                    .await
+            }
+            (None, Some(anchor)) => {
+                let comment = review_comment_draft(draft);
+                github
+                    .create_review_comment(repo_full_name, number, &anchor.commit_sha, &comment)
+                    .await
+            }
+            (None, None) => continue,
+        };
+        match result {
+            Ok(comment) => {
+                let opens_thread = draft.thread_github_id.is_none();
+                record_posted(ctx, item_id, &draft.message_id, &comment, opens_thread);
+                posted += 1;
+            }
+            Err(error) => failed.push((draft.message_id.clone(), error.to_string())),
+        }
+    }
+
+    // What GitHub lists now, with the drafts that rode in the review found
+    // in it. Read under the discussion fence so an older read cannot write
+    // over it, and ingested so the threads follow.
+    let in_review_ids: Vec<String> = drafts
+        .in_review
+        .iter()
+        .map(|d| d.message_id.clone())
+        .collect();
+    let unmatched = match github.fetch_discussion(repo_full_name, number).await {
+        Ok(discussion) => {
+            let reconciled = ctx.discussion_requests.fence_with(item_id, || {
+                let reconciled = match &review {
+                    Some(review) if !in_review_ids.is_empty() => ctx.with_cache(|c| {
+                        c.reconcile_review_drafts(item_id, review.id, &discussion, &in_review_ids)
+                    }),
+                    _ => None,
+                };
+                if let Some(Err(e)) =
+                    ctx.with_cache(|c| c.store_discussion(item_id, &discussion))
+                {
+                    tracing::warn!(
+                        item = item_id, %e,
+                        "could not cache the discussion after the review"
+                    );
+                }
+                reconciled
+            });
+            let unmatched = match reconciled.flatten() {
+                Some(Ok(reconciled)) => reconciled.unmatched,
+                Some(Err(e)) => {
+                    tracing::warn!(
+                        item = item_id, %e,
+                        "could not match the review's comments to their drafts"
+                    );
+                    in_review_ids.clone()
+                }
+                None => in_review_ids.clone(),
+            };
+            publish_discussion(ctx, item_id, discussion);
+            unmatched
+        }
+        Err(error) => {
+            tracing::warn!(
+                item = item_id, %error,
+                "could not read the discussion back after the review"
+            );
+            in_review_ids.clone()
+        }
+    };
+    posted += in_review_ids.len().saturating_sub(unmatched.len());
+
+    // A draft under a thread another draft opened replies under the root
+    // that draft became, if it did.
+    if !drafts.follow_ups.is_empty() {
+        let roots: std::collections::HashMap<String, Option<u64>> = ctx
+            .with_cache(|c| c.load_drafts(item_id))
+            .and_then(Result::ok)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| (d.message_id, d.thread_github_id))
+            .collect();
+        for draft in &drafts.follow_ups {
+            let Some(Some(root)) = roots.get(&draft.message_id) else {
+                failed.push((
+                    draft.message_id.clone(),
+                    "the comment that opens its thread did not post".into(),
+                ));
+                continue;
+            };
+            match github
+                .reply_to_review_comment(repo_full_name, number, *root, &draft.body)
+                .await
+            {
+                Ok(comment) => {
+                    record_posted(ctx, item_id, &draft.message_id, &comment, false);
+                    posted += 1;
+                }
+                Err(error) => failed.push((draft.message_id.clone(), error.to_string())),
+            }
+        }
+    }
+    drop(hold);
+    let kept = unmatched.len() + failed.len();
     if ctx.is_open(item_id) {
+        ctx.send_threads(item_id);
         let _ = ctx.events.send(Event::PullRequestReviewSubmitted {
             item_id: item_id.to_string(),
             repo_full_name: repo_full_name.to_string(),
             number,
             expected_head_sha: expected_head_sha.to_string(),
             attempt_id,
-            review: Arc::new(review),
+            review: review.map(Arc::new),
+            posted,
+            unmatched,
+            failed,
         });
     }
-    ctx.notice("Review submitted");
+    let mut notice = if review_needed {
+        "Review submitted".to_string()
+    } else {
+        format!("Posted {}", count_of(posted, "comment", "comments"))
+    };
+    if kept > 0 {
+        notice.push_str(&format!(
+            ", {} still {}",
+            count_of(kept, "draft", "drafts"),
+            if kept == 1 { "a draft" } else { "drafts" }
+        ));
+    }
+    ctx.notice(notice);
     true
+}
+
+fn count_of(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// A draft is on GitHub as `comment`; the cache says so. A cache that
+/// cannot is a warning: the comment is up, and the next refresh lists it
+/// beside the draft rather than losing either.
+fn record_posted(
+    ctx: &Ctx,
+    item_id: &str,
+    message_id: &str,
+    comment: &perch_github::ReviewComment,
+    set_thread_github_id: bool,
+) {
+    if let Some(Err(e)) =
+        ctx.with_cache(|c| c.mark_draft_posted(message_id, comment, set_thread_github_id))
+    {
+        tracing::warn!(
+            item = item_id, message = message_id, %e,
+            "posted a comment but could not mark its draft posted"
+        );
+    }
+}
+
+/// The drafts of a submission, each by how it goes to GitHub.
+#[derive(Debug, Default, PartialEq)]
+struct SplitDrafts {
+    /// Opens a thread at the head: rides in the review's comments.
+    in_review: Vec<DraftRow>,
+    /// Posted one request each after the review, in the order the cache
+    /// lists them: a reply under a thread that is on GitHub (`thread_github_id`
+    /// set), or one that opens a thread at a commit the head has moved
+    /// past, on its own against that commit.
+    after_review: Vec<DraftRow>,
+    /// Under a thread another draft opens: a reply once that root is on
+    /// GitHub.
+    follow_ups: Vec<DraftRow>,
+    /// Neither lines to go on nor a comment to reply to. The composer
+    /// never makes one; the cache is trusted anyway.
+    stranded: Vec<DraftRow>,
+}
+
+impl SplitDrafts {
+    fn is_empty(&self) -> bool {
+        self.in_review.is_empty() && self.after_review.is_empty() && self.follow_ups.is_empty()
+    }
+}
+
+/// Sort the drafts of an item, as the cache lists them, by how each goes.
+/// The first draft of a thread not yet on GitHub opens it, at the head or
+/// against its own commit; the rest of that thread follow it.
+fn split_drafts(drafts: Vec<DraftRow>, head_sha: &str) -> SplitDrafts {
+    let mut split = SplitDrafts::default();
+    let mut opened: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for draft in drafts {
+        if draft.thread_github_id.is_some() {
+            split.after_review.push(draft);
+        } else if opened.contains(&draft.thread_id) {
+            split.follow_ups.push(draft);
+        } else if let Some(anchor) = &draft.anchor {
+            opened.insert(draft.thread_id.clone());
+            if anchor.commit_sha == head_sha {
+                split.in_review.push(draft);
+            } else {
+                split.after_review.push(draft);
+            }
+        } else {
+            split.stranded.push(draft);
+        }
+    }
+    split
+}
+
+/// A draft as the review, or a comment on its own, carries it. A draft's
+/// anchor is checked before this is asked.
+fn review_comment_draft(draft: &DraftRow) -> ReviewCommentDraft {
+    let anchor = draft.anchor.as_ref().expect("a draft that opens a thread has an anchor");
+    let ranged = anchor.start_line != anchor.line;
+    ReviewCommentDraft {
+        path: anchor.path.clone(),
+        line: u64::from(anchor.line),
+        side: anchor.side,
+        start_line: ranged.then_some(u64::from(anchor.start_line)),
+        start_side: ranged.then_some(anchor.side),
+        body: draft.body.clone(),
+    }
 }
 
 /// Release the mutation gate before waiting on the best-effort refresh. The
@@ -6217,6 +6552,8 @@ async fn settle_pull_request_review_attempt(
     }
 }
 
+/// A comment review with drafts on lines needs no summary; the other
+/// two need what they need without them.
 #[allow(clippy::too_many_arguments)]
 fn validate_pull_request_review_attempt(
     pull_request: &PullRequest,
@@ -6226,6 +6563,7 @@ fn validate_pull_request_review_attempt(
     expected_head_sha: &str,
     body: &str,
     event: PullReviewEvent,
+    has_drafts: bool,
 ) -> Result<(), String> {
     if historical {
         return Err("Return to the current review before submitting".into());
@@ -6243,7 +6581,8 @@ fn validate_pull_request_review_attempt(
             "The pull request moved; refresh and review the new head before submitting".into(),
         );
     }
-    if event.requires_body() && body.trim().is_empty() {
+    let summary_optional = event == PullReviewEvent::Comment && has_drafts;
+    if event.requires_body() && body.trim().is_empty() && !summary_optional {
         return Err("Comment and request-changes reviews need a summary".into());
     }
     Ok(())
@@ -8583,14 +8922,18 @@ async fn fetch_discussion(
     if committed.is_none() {
         return;
     }
-    // The review threads are comment threads now; the cards follow them.
+    publish_discussion(ctx, item_id, discussion);
+}
+
+/// Show a discussion just cached, if the item is still the one open: the
+/// threads, since GitHub's review threads are comment threads; the body,
+/// which a question is prompted with; and the discussion itself. The
+/// state layer also retains an accepted review if navigation changes
+/// after the cache commit but before this event is handled.
+fn publish_discussion(ctx: &Ctx, item_id: &str, discussion: perch_github::Discussion) {
     if ctx.is_open(item_id) {
         ctx.send_threads(item_id);
     }
-
-    // Shown now if the item is still the one open. The state layer also
-    // retains an accepted review if navigation changes after the cache
-    // commit but before this event is handled.
     if let Ok(mut guard) = ctx.slot.lock() {
         if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
             open.body = Some(discussion.body.clone());
@@ -8600,7 +8943,7 @@ async fn fetch_discussion(
         ctx.want_avatars(discussion_avatars(&discussion));
         let _ = ctx.events.send(Event::DiscussionReady {
             item_id: item_id.to_string(),
-            discussion: Arc::new(discussion.clone()),
+            discussion: Arc::new(discussion),
         });
     }
 }
@@ -10038,6 +10381,15 @@ fn delete_draft(ctx: &Ctx, item_id: &str, message_id: &str) {
     ctx.send_threads(item_id);
 }
 
+/// Throw every draft in the item away, each as `delete_draft` does, in
+/// one go.
+fn discard_drafts(ctx: &Ctx, item_id: &str) {
+    if let Some(Err(e)) = ctx.with_cache(|c| c.delete_all_drafts(item_id)) {
+        ctx.notice(format!("Could not discard the drafts: {e}"));
+    }
+    ctx.send_threads(item_id);
+}
+
 /// A checkout for a worktree already on disk, without touching the network.
 ///
 /// The head is whatever the worktree is at, and the merge base comes from
@@ -11077,6 +11429,14 @@ mod tests {
     fn serve_by_request(
         answer: impl Fn(&str, &[String]) -> (&'static str, String) + Send + 'static,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
+        serve_by_method(move |_method, path, headers| answer(path, headers))
+    }
+
+    /// A GitHub that answers each request by its method and path, and
+    /// writes down the paths.
+    fn serve_by_method(
+        answer: impl Fn(&str, &str, &[String]) -> (&'static str, String) + Send + 'static,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let paths = Arc::new(Mutex::new(Vec::new()));
@@ -11084,10 +11444,10 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
-                let Some((path, headers)) = request(&mut stream) else {
+                let Some((method, path, headers)) = request(&mut stream) else {
                     continue;
                 };
-                let (status, body) = answer(&path, &headers);
+                let (status, body) = answer(&method, &path, &headers);
                 seen.lock().unwrap().push(path);
                 let _ = write!(
                     stream,
@@ -11099,13 +11459,15 @@ mod tests {
         (base, paths)
     }
 
-    /// The path of one GET, read past its headers so the client sees the
-    /// answer as the answer to it.
-    fn request(stream: &mut TcpStream) -> Option<(String, Vec<String>)> {
+    /// The method and path of one request, read past its headers so the
+    /// client sees the answer as the answer to it.
+    fn request(stream: &mut TcpStream) -> Option<(String, String, Vec<String>)> {
         let mut reader = BufReader::new(stream.try_clone().ok()?);
         let mut start = String::new();
         reader.read_line(&mut start).ok()?;
-        let path = start.split_whitespace().nth(1)?.to_string();
+        let mut words = start.split_whitespace();
+        let method = words.next()?.to_string();
+        let path = words.next()?.to_string();
         let mut headers = Vec::new();
         loop {
             let mut line = String::new();
@@ -11114,7 +11476,7 @@ mod tests {
             }
             headers.push(line.trim_end().to_string());
         }
-        Some((path, headers))
+        Some((method, path, headers))
     }
 
     /// A base nothing listens on, so a request the code should not make
@@ -11896,6 +12258,7 @@ mod tests {
                 "h7",
                 "",
                 PullReviewEvent::Approve,
+            false,
             ),
             Ok(())
         );
@@ -11911,6 +12274,7 @@ mod tests {
                 "h7",
                 "Looks good",
                 PullReviewEvent::Approve,
+            false,
             ),
             Ok(()),
             "draft pull requests may still be reviewed"
@@ -11924,6 +12288,7 @@ mod tests {
             "h7",
             "Looks good",
             PullReviewEvent::Approve,
+        false,
         )
         .unwrap_err()
         .contains("current review"));
@@ -11938,6 +12303,7 @@ mod tests {
             "h7",
             "Looks good",
             PullReviewEvent::Approve,
+        false,
         )
         .unwrap_err()
         .contains("moved"));
@@ -11950,6 +12316,7 @@ mod tests {
             "h7",
             " \n ",
             PullReviewEvent::RequestChanges,
+        false,
         )
         .unwrap_err()
         .contains("summary"));
@@ -11964,9 +12331,101 @@ mod tests {
             "h7",
             "A comment",
             PullReviewEvent::Comment,
+        false,
         )
         .unwrap_err()
         .contains("no longer open"));
+        // Drafts on lines are a comment review's content; a request for
+        // changes still says what to change.
+        assert_eq!(
+            validate_pull_request_review_attempt(
+                &pull,
+                "h7",
+                false,
+                &pull,
+                "h7",
+                "",
+                PullReviewEvent::Comment,
+                true,
+            ),
+            Ok(())
+        );
+        assert!(validate_pull_request_review_attempt(
+            &pull,
+            "h7",
+            false,
+            &pull,
+            "h7",
+            "",
+            PullReviewEvent::RequestChanges,
+            true,
+        )
+        .unwrap_err()
+        .contains("summary"));
+    }
+
+    /// A draft row at `src/x.rs:41` of `commit`, under `thread` with
+    /// `root` on GitHub, made at `minute` past ten.
+    fn draft_row(id: &str, thread: &str, commit: &str, root: Option<u64>, minute: u8) -> DraftRow {
+        DraftRow {
+            message_id: id.into(),
+            thread_id: thread.into(),
+            thread_github_id: root,
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: 41,
+                line: 41,
+                side: perch_github::Side::Right,
+                commit_sha: commit.into(),
+            }),
+            body: format!("draft {id}"),
+            thread_created_at: "2026-09-20T10:00:00Z".parse().unwrap(),
+            created_at: format!("2026-09-20T10:{minute:02}:00Z").parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn the_drafts_are_split_by_how_each_goes_to_github() {
+        let drafts = vec![
+            draft_row("reply", "gh-31", "h7", Some(31), 0),
+            draft_row("opens", "t1", "h7", None, 1),
+            draft_row("follows", "t1", "h7", None, 2),
+            draft_row("older", "t2", "0ld", None, 3),
+            draft_row("follows-older", "t2", "0ld", None, 4),
+            DraftRow {
+                anchor: None,
+                ..draft_row("stranded", "t3", "h7", None, 5)
+            },
+        ];
+        let split = split_drafts(drafts, "h7");
+        let ids = |rows: &[DraftRow]| {
+            rows.iter().map(|d| d.message_id.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&split.in_review), ["opens"]);
+        assert_eq!(
+            ids(&split.after_review),
+            ["reply", "older"],
+            "replies and older-commit comments post in the order they were made"
+        );
+        assert_eq!(ids(&split.follow_ups), ["follows", "follows-older"]);
+        assert_eq!(ids(&split.stranded), ["stranded"]);
+        assert!(!split.is_empty());
+        assert!(split_drafts(Vec::new(), "h7").is_empty());
+
+        // As the review carries one: a range names its start, one line does not.
+        let one = review_comment_draft(&split.in_review[0]);
+        assert_eq!(
+            (one.path.as_str(), one.line, one.start_line, one.start_side),
+            ("src/x.rs", 41, None, None)
+        );
+        assert_eq!(one.body, "draft opens");
+        let mut ranged = split.after_review[1].clone();
+        ranged.anchor.as_mut().unwrap().start_line = 39;
+        let ranged = review_comment_draft(&ranged);
+        assert_eq!(
+            (ranged.start_line, ranged.start_side),
+            (Some(39), Some(perch_github::Side::Right))
+        );
     }
 
     /// A durable row for `a/b#<number>`, as an on-demand open makes it.
@@ -12012,12 +12471,17 @@ mod tests {
     /// Make an item the open one, as a finished open does, so what
     /// happens to it is told to the window.
     fn open_in_slot(ctx: &Ctx, item: &Item) {
+        open_in_slot_at(ctx, item, "h");
+    }
+
+    /// `open_in_slot` with the checkout at `head_sha`.
+    fn open_in_slot_at(ctx: &Ctx, item: &Item, head_sha: &str) {
         *ctx.slot.lock().unwrap() = Some(ReviewContext {
             checkout: perch_git::Checkout {
                 worktree: "/x".into(),
                 bare: "/x".into(),
                 branch: "b".into(),
-                head_sha: "h".into(),
+                head_sha: head_sha.into(),
                 stale: None,
                 merge_base: "m".into(),
             },
@@ -12404,6 +12868,134 @@ mod tests {
         // A read that began before the reaction can no longer write its
         // older counts over it.
         assert!(!ctx.discussion_requests.is_current(&item.id, older_read));
+    }
+
+    #[test]
+    fn a_held_item_takes_no_read_until_the_hold_is_dropped() {
+        let requests = DiscussionRequests::default();
+        let read = requests.begin("wt");
+        {
+            let _hold = requests.hold("wt");
+            assert!(requests.is_held("wt"));
+            assert!(
+                requests.with_current("wt", read, || ()).is_none(),
+                "a read that would land while a submission posts is dropped"
+            );
+            let later = requests.begin("wt");
+            assert!(requests.with_current("wt", later, || ()).is_none());
+            assert!(requests.fence_with("wt", || ()).is_some(), "the submission's own writes go");
+        }
+        assert!(!requests.is_held("wt"));
+        let fresh = requests.begin("wt");
+        assert!(requests.with_current("wt", fresh, || ()).is_some());
+        assert!(requests.with_current("wt", read, || ()).is_none(), "and the old read is old");
+    }
+
+    /// GitHub's comment `id` on `src/x.rs:41`, replying under `root`.
+    fn review_comment_json(id: u64, root: Option<u64>, user: &str, body: &str) -> String {
+        serde_json::json!({
+            "id": id,
+            "node_id": format!("PRRC_{id}"),
+            "pull_request_review_id": 9,
+            "in_reply_to_id": root,
+            "user": { "login": user, "avatar_url": "" },
+            "body": body,
+            "path": "src/x.rs",
+            "line": 41,
+            "side": "RIGHT",
+            "diff_hunk": "@@ -40,3 +40,3 @@",
+            "commit_id": "h7",
+            "original_commit_id": "h7",
+            "created_at": "2026-09-20T18:00:00Z",
+            "html_url": format!("https://github.com/a/b/pull/7#discussion_r{id}"),
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_comment_with_no_summary_and_only_a_reply_posts_the_reply_and_no_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = review_comment_json(31, None, "rohan", "epoch");
+        let reply = review_comment_json(602, Some(31), "chris", "I will fix it");
+        let listed = format!("[{root},{reply}]");
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = asked.clone();
+        let (base, _) = serve_by_method(move |method, path, _| {
+            let path = path.split('?').next().unwrap_or(path);
+            seen.lock().unwrap().push(format!("{method} {path}"));
+            match (method, path) {
+                ("GET", "/repos/a/b/pulls/7") => ("200 OK", PULL_7.to_string()),
+                ("POST", "/repos/a/b/pulls/7/comments") => ("201 Created", reply.clone()),
+                ("GET", "/repos/a/b/pulls/7/comments") => ("200 OK", listed.clone()),
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_line_commented_discussion(&ctx, &item);
+        open_in_slot_at(&ctx, &item, "h7");
+        let draft = CommentMessage {
+            id: "d1".into(),
+            thread_id: "gh-31".into(),
+            origin: ThreadOrigin::GitHub,
+            author: Author::User,
+            body: "I will fix it".into(),
+            created_at: "2026-09-20T12:00:00Z".parse().unwrap(),
+            run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Default::default(),
+        };
+        ctx.with_cache(|c| c.insert_draft(&draft)).unwrap().unwrap();
+
+        let submitted = submit_open_pull_request_review(
+            &ctx,
+            1,
+            &item.id,
+            "a/b",
+            7,
+            "h7",
+            "",
+            PullReviewEvent::Comment,
+        )
+        .await;
+        assert!(submitted);
+
+        // The reply went on its own; no review was made of nothing.
+        let asked = asked.lock().unwrap().clone();
+        assert!(
+            asked.iter().any(|r| r == "POST /repos/a/b/pulls/7/comments"),
+            "{asked:?}"
+        );
+        assert!(
+            !asked.iter().any(|r| r.contains("/reviews") && r.starts_with("POST")),
+            "{asked:?}"
+        );
+        let events: Vec<Event> = received.try_iter().collect();
+        let outcome = events.iter().find_map(|e| match e {
+            Event::PullRequestReviewSubmitted {
+                review,
+                posted,
+                unmatched,
+                failed,
+                ..
+            } => Some((review.is_none(), *posted, unmatched.len(), failed.len())),
+            _ => None,
+        });
+        assert_eq!(outcome, Some((true, 1, 0, 0)), "{events:?}");
+        assert!(!events.iter().any(|e| matches!(e, Event::PullRequestReviewFailed { .. })));
+        assert!(!ctx.discussion_requests.is_held(&item.id));
+
+        // The draft is the reader's comment now, under the same thread.
+        assert!(ctx.with_cache(|c| c.load_drafts(&item.id)).unwrap().unwrap().is_empty());
+        let threads = threads_of(&ctx, &item);
+        assert_eq!(threads.len(), 1);
+        let posted = threads[0].messages.iter().find(|m| m.id == "d1").expect("kept its id");
+        assert_eq!(posted.github_id, Some(602));
+        assert_eq!(posted.author, Author::User);
     }
 
     #[tokio::test]

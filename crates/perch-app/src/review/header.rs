@@ -176,7 +176,7 @@ fn github_button(state: ReviewState) -> impl IntoView {
 
 /// Submit review for a pull request, Start work for an issue. A branch of
 /// the reader's own has neither, and neither does a pull request that is
-/// no longer open.
+/// no longer open. Submit review stays while drafts are kept for it.
 fn primary_action(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let is_issue = move || state.phase.get() == Phase::Issue;
     dyn_container(is_issue, move |is_issue| {
@@ -187,7 +187,7 @@ fn primary_action(app: AppState, state: ReviewState, backend: Rc<Backend>) -> im
         }
     })
     .style(move |s| {
-        let present = is_issue() || crate::review::submit_review::is_available(state);
+        let present = is_issue() || crate::review::submit_review::is_shown(state);
         control(s).apply_if(!present, |s| s.hide())
     })
 }

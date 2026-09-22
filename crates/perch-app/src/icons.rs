@@ -164,6 +164,13 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M11.5 6.7 C11.5 9.6 4.5 8.3 4.5 10.8" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linecap="round"/>"#
         ),
+        // An arrow curling back to the left: a reply under someone's comment.
+        SidebarIcon::Reply => format!(
+            r#"<path d="M6.6 3.4 L2.6 7.2 L6.6 11" fill="none" stroke="{c}" stroke-width="1.5"
+                     stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M2.8 7.2 H9.2 a4 4 0 0 1 4 4 V13" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round"/>"#
+        ),
         SidebarIcon::Pencil => format!(
             r#"<path d="M3 13 l0.9 -3.4 l7.2 -7.2 a1.2 1.2 0 0 1 1.7 0 l0.8 0.8 a1.2 1.2 0 0 1 0 1.7 l-7.2 7.2 z"
                      fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
@@ -454,13 +461,16 @@ pub enum SidebarIcon {
     Source,
     /// A pencil at a slant: edit.
     Pencil,
+    /// An arrow curling back: a reply.
+    Reply,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 47] = [
+    pub const ALL: [SidebarIcon; 48] = [
+        SidebarIcon::Reply,
         SidebarIcon::Pencil,
         SidebarIcon::Source,
         SidebarIcon::Smiley,

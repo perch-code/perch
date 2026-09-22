@@ -1565,6 +1565,9 @@ impl AppState {
                 expected_head_sha,
                 attempt_id,
                 review: submitted,
+                posted,
+                unmatched,
+                failed,
             } => {
                 // The review is already durable on GitHub. Accept it for the
                 // same pull request even if a follow-up refresh has meanwhile
@@ -1588,7 +1591,21 @@ impl AppState {
                             "installed a submitted review after the pull request head moved"
                         );
                     }
-                    review.finish_submit_review(attempt_id, (*submitted).clone());
+                    let outcome = crate::review::model::submit_review_outcome(
+                        submitted.is_some(),
+                        posted,
+                        &unmatched,
+                        &failed,
+                        &review.drafts(),
+                    );
+                    let review_of = submitted.as_deref().cloned();
+                    if !review.finish_submit_review(attempt_id, review_of, outcome.clone()) {
+                        // The form that sent it is gone; what did not
+                        // post is still said, in the status bar.
+                        if let Some(outcome) = outcome {
+                            self.notice.set(Some(outcome));
+                        }
+                    }
                 }
             }
             Event::PullRequestReviewFailed {
@@ -2898,7 +2915,10 @@ mod tests {
                 number: 7,
                 expected_head_sha: "head".into(),
                 attempt_id: 9,
-                review: Arc::new(accepted.clone()),
+                review: Some(Arc::new(accepted.clone())),
+                posted: 0,
+                unmatched: Vec::new(),
+                failed: Vec::new(),
             },
             review,
         );
@@ -2917,7 +2937,10 @@ mod tests {
                 number: 7,
                 expected_head_sha: "head".into(),
                 attempt_id: 10,
-                review: Arc::new(accepted.clone()),
+                review: Some(Arc::new(accepted.clone())),
+                posted: 0,
+                unmatched: Vec::new(),
+                failed: Vec::new(),
             },
             review,
         );
@@ -2940,6 +2963,106 @@ mod tests {
         );
         let discussion = review.discussion.get().unwrap();
         assert_eq!(discussion.reviews, vec![accepted]);
+    }
+
+    #[test]
+    fn a_review_whose_drafts_did_not_all_post_keeps_the_form_open_to_say_so() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        review.submit_review_open.set(true);
+        review.submit_review_draft.set("Some thoughts".into());
+        review.submit_review_event.set(PullReviewEvent::Approve);
+        review.begin_submit_review(5);
+
+        let accepted = Review {
+            node_id: String::new(),
+            reactions: Default::default(),
+            id: 55,
+            user: "reviewer".into(),
+            body: "Some thoughts".into(),
+            state: "APPROVED".into(),
+            submitted_at: Some("2026-09-20T18:00:00Z".parse().unwrap()),
+            html_url: String::new(),
+        };
+        app.apply_with_review(
+            Event::PullRequestReviewSubmitted {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 5,
+                review: Some(Arc::new(accepted.clone())),
+                posted: 1,
+                unmatched: vec!["d2".into()],
+                failed: vec![("d3".into(), "GitHub returned 422: no".into())],
+            },
+            review,
+        );
+        assert!(review.submit_review_pending.with(Option::is_none));
+        assert!(review.submit_review_open.get(), "stays open to say what did not post");
+        assert!(review.submit_review_draft.get().is_empty(), "the summary posted");
+        assert_eq!(review.submit_review_event.get(), PullReviewEvent::Comment);
+        assert_eq!(review.submit_review_error.get(), None);
+        assert_eq!(
+            review.submit_review_outcome.get().as_deref(),
+            Some(
+                "Posted the review and 1 comment. 1 comment did not post: GitHub returned 422: no. \
+                 1 comment could not be matched to what GitHub returned and is still a draft."
+            )
+        );
+        assert_eq!(review.submit_review_generation.get(), 1, "the form is built anew");
+        assert_eq!(*review.submitted_reviews.get(), vec![accepted]);
+    }
+
+    #[test]
+    fn a_submission_with_no_review_settles_the_form_and_adds_no_review() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        review
+            .discussion
+            .set(Some(Arc::new(perch_github::Discussion::default())));
+        review.submit_review_open.set(true);
+        review.begin_submit_review(6);
+
+        app.apply_with_review(
+            Event::PullRequestReviewSubmitted {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 6,
+                review: None,
+                posted: 1,
+                unmatched: Vec::new(),
+                failed: Vec::new(),
+            },
+            review,
+        );
+        assert!(review.submit_review_pending.with(Option::is_none));
+        assert!(!review.submit_review_open.get(), "the reply posted; nothing to say");
+        assert!(review.submitted_reviews.get().is_empty());
+        assert!(review.discussion.get().unwrap().reviews.is_empty());
+
+        // The form that sent it is gone: what did not post goes to the
+        // status bar instead.
+        review.begin_submit_review(7);
+        review.submit_review_pending.set(None);
+        app.apply_with_review(
+            Event::PullRequestReviewSubmitted {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                expected_head_sha: "head".into(),
+                attempt_id: 7,
+                review: None,
+                posted: 0,
+                unmatched: Vec::new(),
+                failed: vec![("r1".into(), "offline".into())],
+            },
+            review,
+        );
+        assert_eq!(review.submit_review_outcome.get(), None);
+        assert_eq!(app.notice.get().as_deref(), Some("1 comment did not post: offline."));
     }
 
     #[test]
@@ -3026,7 +3149,7 @@ mod tests {
                 number: 7,
                 expected_head_sha: "head".into(),
                 attempt_id: 12,
-                review: Arc::new(Review {
+                review: Some(Arc::new(Review {
                     node_id: String::new(),
                     reactions: Default::default(),
                     id: 101,
@@ -3036,7 +3159,10 @@ mod tests {
                     submitted_at: Some("2026-09-20T18:05:00Z".parse().unwrap()),
                     html_url:
                         "https://github.com/slatedb/slatedb/pull/7#pullrequestreview-101".into(),
-                }),
+                })),
+                posted: 0,
+                unmatched: Vec::new(),
+                failed: Vec::new(),
             },
             review,
         );

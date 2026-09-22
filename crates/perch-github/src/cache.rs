@@ -80,6 +80,31 @@ pub enum RunEventAppend {
     Duplicate(RunEventRecord),
 }
 
+/// A draft as the review submission reads it: the message, its thread's
+/// root comment on GitHub when the thread has one, and the anchor it
+/// posts at when it does not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftRow {
+    pub message_id: String,
+    pub thread_id: String,
+    /// The root comment on GitHub the draft replies to. `None` for a
+    /// thread the draft opens.
+    pub thread_github_id: Option<u64>,
+    pub anchor: Option<Anchor>,
+    pub body: String,
+    pub thread_created_at: Timestamp,
+    pub created_at: Timestamp,
+}
+
+/// What became of the drafts that rode in a review once GitHub's copy of
+/// the discussion was read back: the ones found there, now posted, and the
+/// ones not found, still drafts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reconciled {
+    pub matched: Vec<String>,
+    pub unmatched: Vec<String>,
+}
+
 pub struct Cache {
     conn: Connection,
     avatar_dir: Option<PathBuf>,
@@ -488,6 +513,12 @@ fn item_head_sha_on(conn: &Connection, item_id: &str) -> Result<String, CacheErr
 /// else is under it, and goes when nothing is. The one that stays has no
 /// comment on GitHub to point at any more, so it loses its `github_id`
 /// and is a thread on its way there, as a draft's is.
+///
+/// A row already pointing at a comment by `github_id` is the row that
+/// comment updates, whatever its id: a thread the reader opened here and
+/// posted keeps its Perch id, and so its runs and private messages, and a
+/// posted comment of the reader's keeps its id and stays the reader's
+/// rather than becoming a GitHub user's.
 pub(crate) fn ingest_review_threads(
     conn: &Connection,
     item_id: &str,
@@ -495,6 +526,17 @@ pub(crate) fn ingest_review_threads(
 ) -> Result<(), CacheError> {
     for thread in incoming {
         let anchor = thread.anchor.as_ref();
+        let thread_id = match thread.github_id {
+            Some(github_id) => conn
+                .query_row(
+                    "SELECT id FROM comment_threads WHERE worktree_id = ?1 AND github_id = ?2",
+                    params![item_id, github_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .unwrap_or_else(|| thread.id.clone()),
+            None => thread.id.clone(),
+        };
         conn.execute(
             "INSERT INTO comment_threads
              (id, worktree_id, origin, github_id, path, start_line, line, side, commit_sha,
@@ -507,7 +549,7 @@ pub(crate) fn ingest_review_threads(
                 commit_sha=excluded.commit_sha, outdated=excluded.outdated,
                 resolved=excluded.resolved, created_at=excluded.created_at",
             params![
-                thread.id,
+                thread_id,
                 item_id,
                 thread.origin.name(),
                 thread.github_id.map(|id| id.to_string()),
@@ -522,6 +564,33 @@ pub(crate) fn ingest_review_threads(
             ],
         )?;
         for message in &thread.messages {
+            let posted: Option<String> = match message.github_id {
+                Some(github_id) => conn
+                    .query_row(
+                        "SELECT id FROM comment_messages WHERE thread_id = ?1 AND github_id = ?2",
+                        params![thread_id, github_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+                None => None,
+            };
+            if let Some(id) = posted {
+                conn.execute(
+                    "UPDATE comment_messages
+                     SET body = ?2, node_id = ?3, html_url = ?4, diff_hunk = ?5,
+                         reactions_json = ?6
+                     WHERE id = ?1",
+                    params![
+                        id,
+                        message.body,
+                        message.node_id,
+                        message.html_url,
+                        message.diff_hunk,
+                        reactions_json(&message.reactions),
+                    ],
+                )?;
+                continue;
+            }
             let (kind, author) = comments::sql::author_columns(&message.author);
             conn.execute(
                 "INSERT INTO comment_messages
@@ -536,7 +605,7 @@ pub(crate) fn ingest_review_threads(
                     diff_hunk=excluded.diff_hunk, reactions_json=excluded.reactions_json",
                 params![
                     message.id,
-                    thread.id,
+                    thread_id,
                     message.origin.name(),
                     message.github_id.map(|id| id.to_string()),
                     kind,
@@ -552,23 +621,12 @@ pub(crate) fn ingest_review_threads(
         }
     }
 
-    let keep: HashSet<&str> = incoming
+    // What is on GitHub is known by its id there, not by its row's.
+    let keep: HashSet<u64> = incoming
         .iter()
-        .flat_map(|t| t.messages.iter().map(|m| m.id.as_str()))
+        .flat_map(|t| t.messages.iter().filter_map(|m| m.github_id))
         .collect();
-    let stale = {
-        let mut stmt = conn.prepare(
-            "SELECT m.id FROM comment_messages m
-             JOIN comment_threads t ON t.id = m.thread_id
-             WHERE t.worktree_id = ?1 AND m.origin = 'github' AND m.github_id IS NOT NULL",
-        )?;
-        let rows = stmt.query_map(params![item_id], |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter(|id| !keep.contains(id.as_str()))
-            .collect::<Vec<_>>()
-    };
-    for id in stale {
+    for id in stale_message_rows(conn, item_id, &keep)? {
         conn.execute("DELETE FROM comment_messages WHERE id = ?1", params![id])?;
     }
     conn.execute(
@@ -578,25 +636,64 @@ pub(crate) fn ingest_review_threads(
         params![item_id],
     )?;
 
-    let keep: HashSet<&str> = incoming.iter().map(|t| t.id.as_str()).collect();
-    let orphaned = {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM comment_threads
-             WHERE worktree_id = ?1 AND origin = 'github' AND github_id IS NOT NULL",
-        )?;
-        let rows = stmt.query_map(params![item_id], |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter(|id| !keep.contains(id.as_str()))
-            .collect::<Vec<_>>()
-    };
-    for id in orphaned {
+    let keep: HashSet<u64> = incoming.iter().filter_map(|t| t.github_id).collect();
+    for id in stale_thread_rows(conn, item_id, &keep)? {
         conn.execute(
             "UPDATE comment_threads SET github_id = NULL WHERE id = ?1",
             params![id],
         )?;
     }
     Ok(())
+}
+
+/// Whether a `github_id` column names a comment among `keep`.
+fn is_kept(column: &Option<String>, keep: &HashSet<u64>) -> bool {
+    github_id_of(column.clone()).is_some_and(|id| keep.contains(&id))
+}
+
+/// The rows of comments on GitHub under `item_id` whose comment is not
+/// among `keep`, the ids GitHub still lists: what a refresh deletes.
+fn stale_message_rows(
+    conn: &Connection,
+    item_id: &str,
+    keep: &HashSet<u64>,
+) -> Result<Vec<String>, CacheError> {
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.github_id FROM comment_messages m
+         JOIN comment_threads t ON t.id = m.thread_id
+         WHERE t.worktree_id = ?1 AND m.origin = 'github' AND m.github_id IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(params![item_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    Ok(rows
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|(_, github_id)| !is_kept(github_id, keep))
+        .map(|(id, _)| id)
+        .collect())
+}
+
+/// The rows of threads under `item_id` pointing at a root comment not
+/// among `keep`, the roots GitHub still lists: what a refresh unpoints.
+fn stale_thread_rows(
+    conn: &Connection,
+    item_id: &str,
+    keep: &HashSet<u64>,
+) -> Result<Vec<String>, CacheError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, github_id FROM comment_threads
+         WHERE worktree_id = ?1 AND origin = 'github' AND github_id IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(params![item_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    Ok(rows
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|(_, github_id)| !is_kept(github_id, keep))
+        .map(|(id, _)| id)
+        .collect())
 }
 
 /// The reactions column: the groups as JSON, or nothing when there are
@@ -1770,6 +1867,106 @@ fn sync_legacy_steps(conn: &Connection, run: &RunRecord) -> Result<(), CacheErro
     Ok(())
 }
 
+/// `delete_draft` on `conn`; see there.
+fn delete_draft_on(conn: &Connection, message_id: &str) -> Result<(), CacheError> {
+    let thread_id: Option<String> = conn
+        .query_row(
+            "SELECT thread_id FROM comment_messages
+             WHERE id = ?1 AND origin = 'github' AND github_id IS NULL AND author_kind = 'user'",
+            params![message_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(thread_id) = thread_id else {
+        return Err(CacheError::Corrupt(format!("no draft {message_id}")));
+    };
+    conn.execute(
+        "DELETE FROM comment_messages WHERE id = ?1",
+        params![message_id],
+    )?;
+    let on_its_way: bool = conn.query_row(
+        "SELECT origin = 'github' AND github_id IS NULL FROM comment_threads WHERE id = ?1",
+        params![thread_id],
+        |row| row.get(0),
+    )?;
+    if !on_its_way {
+        return Ok(());
+    }
+    let (left, github_left, finding): (i64, i64, bool) = conn.query_row(
+        "SELECT COUNT(*), COUNT(CASE WHEN origin = 'github' THEN 1 END),
+                EXISTS(SELECT 1 FROM review_findings WHERE thread_id = ?1)
+         FROM comment_messages WHERE thread_id = ?1",
+        params![thread_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if left == 0 && !finding {
+        conn.execute(
+            "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE owner_thread_id=?1)",
+            params![thread_id],
+        )?;
+        conn.execute("DELETE FROM runs WHERE owner_thread_id = ?1", params![thread_id])?;
+        conn.execute("DELETE FROM comment_threads WHERE id = ?1", params![thread_id])?;
+    } else if github_left == 0 {
+        conn.execute(
+            "UPDATE comment_threads SET origin = 'local' WHERE id = ?1",
+            params![thread_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// `mark_draft_posted` on `conn`; see there.
+fn mark_draft_posted_on(
+    conn: &Connection,
+    message_id: &str,
+    comment: &crate::discussion::ReviewComment,
+    set_thread_github_id: bool,
+) -> Result<(), CacheError> {
+    let thread_id: Option<String> = conn
+        .query_row(
+            "SELECT thread_id FROM comment_messages
+             WHERE id = ?1 AND origin = 'github' AND github_id IS NULL AND author_kind = 'user'",
+            params![message_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(thread_id) = thread_id else {
+        return Err(CacheError::Corrupt(format!("no draft {message_id}")));
+    };
+    conn.execute(
+        "UPDATE comment_messages
+         SET github_id = ?2, node_id = ?3, html_url = ?4, diff_hunk = ?5
+         WHERE id = ?1",
+        params![
+            message_id,
+            comment.id.to_string(),
+            Some(comment.node_id.as_str()).filter(|id| !id.is_empty()),
+            Some(comment.html_url.as_str()).filter(|url| !url.is_empty()),
+            Some(comment.diff_hunk.as_str()).filter(|hunk| !hunk.is_empty()),
+        ],
+    )?;
+    if set_thread_github_id {
+        conn.execute(
+            "UPDATE comment_threads SET origin = 'github', github_id = ?2
+             WHERE id = ?1 AND github_id IS NULL",
+            params![thread_id, comment.id.to_string()],
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether a comment GitHub lists is at `anchor`: the same file, side and
+/// lines. GitHub names no start line for a comment on one line.
+fn comment_at(comment: &crate::discussion::ReviewComment, anchor: &Anchor) -> bool {
+    let Some(line) = comment.line else {
+        return false;
+    };
+    comment.path == anchor.path
+        && comment.side == anchor.side
+        && line == u64::from(anchor.line)
+        && comment.start_line.unwrap_or(line) == u64::from(anchor.start_line)
+}
+
 /// Insert a message on `conn`, and the run it carries when that is new.
 fn insert_comment_message_on(conn: &Connection, m: &CommentMessage) -> Result<(), CacheError> {
     if let Some(run) = &m.run {
@@ -2369,52 +2566,179 @@ impl Cache {
     /// left as it is. A message that is not a draft is not touched.
     pub fn delete_draft(&self, message_id: &str) -> Result<(), CacheError> {
         let tx = self.conn.unchecked_transaction()?;
-        let thread_id: Option<String> = tx
-            .query_row(
-                "SELECT thread_id FROM comment_messages
-                 WHERE id = ?1 AND origin = 'github' AND github_id IS NULL AND author_kind = 'user'",
-                params![message_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(thread_id) = thread_id else {
-            return Err(CacheError::Corrupt(format!("no draft {message_id}")));
-        };
-        tx.execute(
-            "DELETE FROM comment_messages WHERE id = ?1",
-            params![message_id],
-        )?;
-        let on_its_way: bool = tx.query_row(
-            "SELECT origin = 'github' AND github_id IS NULL FROM comment_threads WHERE id = ?1",
-            params![thread_id],
-            |row| row.get(0),
-        )?;
-        if !on_its_way {
-            tx.commit()?;
-            return Ok(());
-        }
-        let (left, github_left, finding): (i64, i64, bool) = tx.query_row(
-            "SELECT COUNT(*), COUNT(CASE WHEN origin = 'github' THEN 1 END),
-                    EXISTS(SELECT 1 FROM review_findings WHERE thread_id = ?1)
-             FROM comment_messages WHERE thread_id = ?1",
-            params![thread_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        if left == 0 && !finding {
-            tx.execute(
-                "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE owner_thread_id=?1)",
-                params![thread_id],
-            )?;
-            tx.execute("DELETE FROM runs WHERE owner_thread_id = ?1", params![thread_id])?;
-            tx.execute("DELETE FROM comment_threads WHERE id = ?1", params![thread_id])?;
-        } else if github_left == 0 {
-            tx.execute(
-                "UPDATE comment_threads SET origin = 'local' WHERE id = ?1",
-                params![thread_id],
-            )?;
-        }
+        delete_draft_on(&tx, message_id)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Throw every draft in the item away, each as `delete_draft` would,
+    /// in one transaction: Discard all leaves none or all of them.
+    pub fn delete_all_drafts(&self, item_id: &str) -> Result<usize, CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let drafts: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT m.id FROM comment_messages m
+                 JOIN comment_threads t ON t.id = m.thread_id
+                 WHERE t.worktree_id = ?1 AND m.origin = 'github' AND m.github_id IS NULL
+                   AND m.author_kind = 'user'",
+            )?;
+            let rows = stmt.query_map(params![item_id], |row| row.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for id in &drafts {
+            delete_draft_on(&tx, id)?;
+        }
+        tx.commit()?;
+        Ok(drafts.len())
+    }
+
+    /// The drafts in an item, threads in the order they were made and a
+    /// thread's drafts in the order they were written: the order they
+    /// post in.
+    pub fn load_drafts(&self, item_id: &str) -> Result<Vec<DraftRow>, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, t.id, t.github_id, t.path, t.start_line, t.line, t.side, t.commit_sha,
+                    m.body, t.created_at, m.created_at
+             FROM comment_messages m
+             JOIN comment_threads t ON t.id = m.thread_id
+             WHERE t.worktree_id = ?1 AND m.origin = 'github' AND m.github_id IS NULL
+               AND m.author_kind = 'user'
+             ORDER BY t.created_at, t.id, m.created_at, m.rowid",
+        )?;
+        let rows = stmt.query_map(params![item_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+                r.get::<_, String>(10)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (
+                message_id,
+                thread_id,
+                github_id,
+                path,
+                start,
+                line,
+                side,
+                sha,
+                body,
+                thread_created,
+                created,
+            ) = row?;
+            let (Ok(thread_created_at), Ok(created_at)) = (
+                thread_created.parse::<Timestamp>(),
+                created.parse::<Timestamp>(),
+            ) else {
+                continue;
+            };
+            let anchor = match (path, start, line) {
+                (Some(path), Some(start), Some(line)) => Some(Anchor {
+                    path,
+                    start_line: start as u32,
+                    line: line as u32,
+                    side: comments::sql::side(side.as_deref().unwrap_or("right")),
+                    commit_sha: sha.unwrap_or_default(),
+                }),
+                _ => None,
+            };
+            out.push(DraftRow {
+                message_id,
+                thread_id,
+                thread_github_id: github_id_of(github_id),
+                anchor,
+                body,
+                thread_created_at,
+                created_at,
+            });
+        }
+        Ok(out)
+    }
+
+    /// A draft is on GitHub as `comment`: it keeps its id and its author,
+    /// the reader, and gains the comment's ids and place. A draft that
+    /// opened its thread makes the thread point at the comment as its
+    /// root, `set_thread_github_id`, so a refresh finds the same row; a
+    /// thread already pointing at a root keeps it. One transaction, so a
+    /// thread never points at a comment its draft does not.
+    pub fn mark_draft_posted(
+        &self,
+        message_id: &str,
+        comment: &crate::discussion::ReviewComment,
+        set_thread_github_id: bool,
+    ) -> Result<(), CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        mark_draft_posted_on(&tx, message_id, comment, set_thread_github_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Find the drafts that rode in review `review_id` among the comments
+    /// GitHub lists for it, and mark each found one posted. A draft matches
+    /// a comment of the review that opens a thread at its anchor: same
+    /// path, side, line and start line; with more than one there, the one
+    /// with the same text, and none when no text is the same, since a
+    /// guess would put another comment's ids on the draft; and a comment
+    /// is claimed once. A draft with no comment to claim stays a draft and
+    /// is reported, never dropped. Only `message_ids` are looked for: the
+    /// drafts the review carried.
+    pub fn reconcile_review_drafts(
+        &self,
+        item_id: &str,
+        review_id: u64,
+        discussion: &Discussion,
+        message_ids: &[String],
+    ) -> Result<Reconciled, CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let drafts: Vec<DraftRow> = self
+            .load_drafts(item_id)?
+            .into_iter()
+            .filter(|d| message_ids.contains(&d.message_id))
+            .collect();
+        let candidates: Vec<&crate::discussion::ReviewComment> = discussion
+            .review_comments
+            .iter()
+            .filter(|c| c.pull_request_review_id == Some(review_id) && c.in_reply_to_id.is_none())
+            .collect();
+        let mut claimed: HashSet<u64> = HashSet::new();
+        let mut reconciled = Reconciled::default();
+        for draft in drafts {
+            let Some(anchor) = &draft.anchor else {
+                reconciled.unmatched.push(draft.message_id);
+                continue;
+            };
+            let at_anchor: Vec<&&crate::discussion::ReviewComment> = candidates
+                .iter()
+                .filter(|c| !claimed.contains(&c.id) && comment_at(c, anchor))
+                .collect();
+            let found = if at_anchor.len() > 1 {
+                at_anchor
+                    .iter()
+                    .find(|c| c.body.trim() == draft.body.trim())
+                    .copied()
+            } else {
+                at_anchor.first().copied()
+            };
+            match found {
+                Some(comment) => {
+                    claimed.insert(comment.id);
+                    mark_draft_posted_on(&tx, &draft.message_id, comment, true)?;
+                    reconciled.matched.push(draft.message_id);
+                }
+                None => reconciled.unmatched.push(draft.message_id),
+            }
+        }
+        tx.commit()?;
+        Ok(reconciled)
     }
 
     /// Publish a completed discussion answer and detach its run from the
@@ -5602,6 +5926,215 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored, None, "no reactions is no column value");
+    }
+
+    /// A thread of the reader's own on `item-pr-7`, on its way to GitHub
+    /// with one draft, `d1`, at `src/x.rs:41–58` of `abc`.
+    fn draft_thread(id: &str, at: &str) -> CommentThread {
+        let mut t = comment_thread(id, "item-pr-7");
+        t.origin = ThreadOrigin::GitHub;
+        t.created_at = stamp_of(at);
+        t.messages = vec![draft(&format!("{id}-d1"), id, at)];
+        t
+    }
+
+    /// A comment GitHub made of a draft at `comment_thread`'s anchor, in
+    /// review `review`.
+    fn posted_comment(id: u64, review: Option<u64>, body: &str) -> crate::discussion::ReviewComment {
+        crate::discussion::ReviewComment {
+            pull_request_review_id: review,
+            user: "chris".into(),
+            body: body.into(),
+            path: "src/x.rs".into(),
+            line: Some(58),
+            start_line: Some(41),
+            start_side: Some(Side::Right),
+            commit_id: "abc123".into(),
+            reactions: Reactions::default(),
+            ..review_comment(id, None, "2026-09-19T09:00:00Z")
+        }
+    }
+
+    #[test]
+    fn a_posted_draft_keeps_its_ids_and_author_when_github_lists_it() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        c.insert_comment_thread(&draft_thread("t1", "2026-09-19T08:00:00Z")).unwrap();
+        c.insert_comment_message(&CommentMessage {
+            id: "q1".into(),
+            origin: ThreadOrigin::Local,
+            body: "is this right?".into(),
+            created_at: stamp_of("2026-09-19T08:01:00Z"),
+            ..draft("q1", "t1", "2026-09-19T08:01:00Z")
+        })
+        .unwrap();
+        let comment = posted_comment(500, Some(9), "I will fix it");
+        c.mark_draft_posted("t1-d1", &comment, true).unwrap();
+
+        let mut d = discussion();
+        d.review_comments = vec![comment.clone()];
+        c.store_discussion("item-pr-7", &d).unwrap();
+        let threads = c.load_comment_threads("item-pr-7").unwrap();
+        assert_eq!(threads.len(), 1, "GitHub's copy is the same thread");
+        let t = &threads[0];
+        assert_eq!((t.id.as_str(), t.github_id), ("t1", Some(500)));
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["t1-d1", "q1"], "the question asked here stays under it");
+        let posted = &t.messages[0];
+        assert_eq!(posted.author, Author::User, "the reader's, not a GitHub user's");
+        assert_eq!(posted.github_id, Some(500));
+        assert!(!posted.is_draft());
+        assert_eq!(posted.reactions, comment.reactions);
+
+        // An edit on github.com reaches the same row, and a reply lands
+        // under the same thread.
+        d.review_comments[0].body = "I fixed it".into();
+        d.review_comments.push(crate::discussion::ReviewComment {
+            in_reply_to_id: Some(500),
+            ..posted_comment(501, None, "thanks")
+        });
+        c.store_discussion("item-pr-7", &d).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        assert_eq!(t.id, "t1");
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["t1-d1", "q1", "gh-501"]);
+        assert_eq!(t.messages[0].body, "I fixed it");
+        assert_eq!(t.messages[0].author, Author::User);
+
+        // Gone from GitHub, the posted comment goes as any of GitHub's
+        // does, by the id it had there.
+        d.review_comments.clear();
+        c.store_discussion("item-pr-7", &d).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["q1"]);
+        assert_eq!(t.github_id, None);
+    }
+
+    #[test]
+    fn a_posted_reply_is_updated_in_place_under_githubs_thread() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z")).unwrap();
+        let reply = crate::discussion::ReviewComment {
+            in_reply_to_id: Some(3),
+            user: "chris".into(),
+            body: "I will fix it".into(),
+            ..review_comment(88, Some(3), "2026-09-16T12:03:00Z")
+        };
+        c.mark_draft_posted("d1", &reply, false).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        assert_eq!(t.github_id, Some(3), "the thread's root is still GitHub's");
+        assert_eq!(t.messages[1].github_id, Some(88));
+        assert_eq!(t.messages[1].node_id.as_deref(), Some("PRRC_88"));
+
+        let mut d = discussion();
+        d.review_comments.push(reply);
+        c.store_discussion("item-pr-7", &d).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-3", "d1"], "not a second row, gh-88");
+        assert_eq!(t.messages[1].author, Author::User);
+        assert_eq!(t.messages[1].reactions, d.review_comments[1].reactions);
+
+        // Not a draft any more: nothing marks or deletes it as one.
+        assert!(matches!(
+            c.mark_draft_posted("d1", &d.review_comments[1], false),
+            Err(CacheError::Corrupt(_))
+        ));
+        assert!(matches!(c.delete_draft("d1"), Err(CacheError::Corrupt(_))));
+    }
+
+    #[test]
+    fn the_drafts_load_in_posting_order_with_their_threads_roots() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        c.insert_comment_thread(&draft_thread("t2", "2026-09-19T08:00:00Z")).unwrap();
+        c.insert_draft(&draft("d-reply", "gh-3", "2026-09-19T09:00:00Z")).unwrap();
+        c.insert_draft(&draft("t2-d2", "t2", "2026-09-19T08:30:00Z")).unwrap();
+
+        let drafts = c.load_drafts("item-pr-7").unwrap();
+        let ids: Vec<_> = drafts.iter().map(|d| d.message_id.as_str()).collect();
+        assert_eq!(ids, vec!["d-reply", "t2-d1", "t2-d2"], "GitHub's thread came first");
+        assert_eq!(drafts[0].thread_github_id, Some(3));
+        assert_eq!(drafts[0].thread_id, "gh-3");
+        assert_eq!(drafts[1].thread_github_id, None);
+        assert_eq!(drafts[1].anchor.as_ref().map(|a| (a.start_line, a.line)), Some((41, 58)));
+        assert_eq!(drafts[1].thread_created_at, stamp_of("2026-09-19T08:00:00Z"));
+        assert_eq!(drafts[2].created_at, stamp_of("2026-09-19T08:30:00Z"));
+        assert!(c.load_drafts("item-pr-8").unwrap().is_empty());
+
+        assert_eq!(c.delete_all_drafts("item-pr-7").unwrap(), 3);
+        assert!(c.load_drafts("item-pr-7").unwrap().is_empty());
+        let threads = c.load_comment_threads("item-pr-7").unwrap();
+        assert_eq!(threads.len(), 1, "the thread made for its drafts went with them");
+        assert_eq!(threads[0].id, "gh-3");
+        assert_eq!(c.delete_all_drafts("item-pr-7").unwrap(), 0);
+    }
+
+    #[test]
+    fn reconciling_matches_a_draft_by_anchor_then_text_and_keeps_the_rest() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        // Two threads at one anchor, one at another, one nowhere in the review.
+        c.insert_comment_thread(&draft_thread("t1", "2026-09-19T08:00:00Z")).unwrap();
+        let mut twin = draft_thread("t1b", "2026-09-19T08:05:00Z");
+        twin.messages[0].body = "and also this".into();
+        c.insert_comment_thread(&twin).unwrap();
+        let mut elsewhere = draft_thread("t2", "2026-09-19T08:10:00Z");
+        elsewhere.anchor.as_mut().unwrap().path = "src/y.rs".into();
+        elsewhere.anchor.as_mut().unwrap().start_line = 7;
+        elsewhere.anchor.as_mut().unwrap().line = 7;
+        c.insert_comment_thread(&elsewhere).unwrap();
+        let mut lost = draft_thread("t3", "2026-09-19T08:20:00Z");
+        lost.anchor.as_mut().unwrap().line = 60;
+        c.insert_comment_thread(&lost).unwrap();
+
+        let mut d = discussion();
+        d.review_comments = vec![
+            // Same anchor as t1's two drafts: the text tells them apart.
+            posted_comment(600, Some(77), "and also this"),
+            posted_comment(601, Some(77), "I will fix it"),
+            // t2's anchor, one line.
+            crate::discussion::ReviewComment {
+                path: "src/y.rs".into(),
+                line: Some(7),
+                start_line: None,
+                start_side: None,
+                ..posted_comment(602, Some(77), "I will fix it")
+            },
+            // Someone else's review at t3's anchor: not this review's.
+            crate::discussion::ReviewComment {
+                line: Some(60),
+                ..posted_comment(603, Some(9), "I will fix it")
+            },
+        ];
+        let ids = ["t1-d1", "t1b-d1", "t2-d1", "t3-d1"].map(String::from);
+        let reconciled = c.reconcile_review_drafts("item-pr-7", 77, &d, &ids).unwrap();
+        assert_eq!(reconciled.matched, ["t1-d1", "t1b-d1", "t2-d1"].map(String::from));
+        assert_eq!(reconciled.unmatched, vec!["t3-d1".to_string()]);
+
+        let threads = c.load_comment_threads("item-pr-7").unwrap();
+        let by_id = |id: &str| threads.iter().find(|t| t.id == id).unwrap().clone();
+        assert_eq!(by_id("t1").github_id, Some(601), "matched by its text");
+        assert_eq!(by_id("t1").messages[0].github_id, Some(601));
+        assert_eq!(by_id("t1b").github_id, Some(600));
+        assert_eq!(by_id("t2").github_id, Some(602));
+        assert_eq!(by_id("t3").github_id, None);
+        assert!(by_id("t3").messages[0].is_draft(), "kept, never dropped");
+
+        // Only the drafts named are looked for.
+        let again = c.reconcile_review_drafts("item-pr-7", 77, &d, &[]).unwrap();
+        assert_eq!(again, Reconciled::default());
+
+        // Ingesting what GitHub said afterwards changes no ids.
+        c.store_discussion("item-pr-7", &d).unwrap();
+        let threads = c.load_comment_threads("item-pr-7").unwrap();
+        let mut ids: Vec<_> = threads.iter().map(|t| t.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["gh-603", "t1", "t1b", "t2", "t3"]);
     }
 
     #[test]

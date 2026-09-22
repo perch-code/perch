@@ -17,8 +17,8 @@ use octocrab::Octocrab;
 
 use crate::discussion::{
     Discussion, IssueComment, IssueCommentPayload, PullReviewEvent, PullSummary, Review,
-    ReviewComment, ReviewCommentPayload, ReviewPayload, ReviewThreadState, ReviewThreadsData,
-    REVIEW_THREADS_MAX_PAGES, REVIEW_THREADS_QUERY,
+    ReviewComment, ReviewCommentDraft, ReviewCommentPayload, ReviewPayload, ReviewThreadState,
+    ReviewThreadsData, REVIEW_THREADS_MAX_PAGES, REVIEW_THREADS_QUERY,
 };
 use crate::items::{Issue, IssuePayload};
 use crate::model::{SubjectSnapshot, Thread};
@@ -399,13 +399,17 @@ impl GitHub {
         serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))
     }
 
-    /// Submit a final review of exactly the pull-request head the reader saw.
+    /// Submit a final review of exactly the pull-request head the reader saw,
+    /// with `comments` opening threads on its lines.
     ///
     /// GitHub accepts reviews of an older commit, so `commit_id` is carried
     /// explicitly rather than allowing the endpoint to default to whatever
     /// head is newest when the request arrives. The app performs its own
     /// fresh-head check immediately before calling this method; the explicit
-    /// commit remains the final race-safe identity recorded by GitHub.
+    /// commit remains the final race-safe identity recorded by GitHub. A
+    /// comment review with comments on lines and no summary is a review
+    /// GitHub takes; with neither it is refused here, as a request for
+    /// changes without a summary is.
     pub async fn submit_pull_request_review(
         &self,
         repo_full_name: &str,
@@ -413,6 +417,7 @@ impl GitHub {
         commit_id: &str,
         body: &str,
         event: PullReviewEvent,
+        comments: &[ReviewCommentDraft],
     ) -> Result<Review, Error> {
         let (owner, name) = repo_parts(repo_full_name)?;
         if commit_id.is_empty() || commit_id.trim() != commit_id {
@@ -420,7 +425,8 @@ impl GitHub {
                 "pull request review commit SHA is empty or invalid".into(),
             ));
         }
-        if event.requires_body() && body.trim().is_empty() {
+        let summary_optional = event == PullReviewEvent::Comment && !comments.is_empty();
+        if event.requires_body() && body.trim().is_empty() && !summary_optional {
             return Err(Error::Decode(format!(
                 "a {event:?} pull request review requires a body"
             )));
@@ -431,10 +437,17 @@ impl GitHub {
             commit_id: &'a str,
             body: &'a str,
             event: PullReviewEvent,
+            #[serde(skip_serializing_if = "<[ReviewCommentDraft]>::is_empty")]
+            comments: &'a [ReviewCommentDraft],
         }
 
         let path = format!("/repos/{owner}/{name}/pulls/{number}/reviews");
-        let request = Request { commit_id, body, event };
+        let request = Request {
+            commit_id,
+            body,
+            event,
+            comments,
+        };
         let _request_guard = self.api_request_lock.lock().await;
         self.check_rate_limit()?;
         let response = self
@@ -446,6 +459,96 @@ impl GitHub {
         let review: ReviewPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
         Ok(Review::from(review))
+    }
+
+    /// Open a review thread on a line outside any review, against
+    /// `commit_id`: what a comment written against a commit the pull
+    /// request has moved past posts as. GitHub places it on that commit's
+    /// diff.
+    pub async fn create_review_comment(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        commit_id: &str,
+        comment: &ReviewCommentDraft,
+    ) -> Result<ReviewComment, Error> {
+        if commit_id.is_empty() || commit_id.trim() != commit_id {
+            return Err(Error::Decode(
+                "pull request comment commit SHA is empty or invalid".into(),
+            ));
+        }
+
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            commit_id: &'a str,
+            #[serde(flatten)]
+            comment: &'a ReviewCommentDraft,
+        }
+
+        self.post_review_comment(
+            repo_full_name,
+            number,
+            &Request {
+                commit_id,
+                comment,
+            },
+        )
+        .await
+    }
+
+    /// Reply under a review thread. GitHub takes the thread's root comment
+    /// as `in_reply_to`, and the reply is not part of any review.
+    pub async fn reply_to_review_comment(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<ReviewComment, Error> {
+        if body.trim().is_empty() {
+            return Err(Error::Decode("a reply requires a body".into()));
+        }
+
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            body: &'a str,
+            in_reply_to: u64,
+        }
+
+        self.post_review_comment(
+            repo_full_name,
+            number,
+            &Request {
+                body,
+                in_reply_to: comment_id,
+            },
+        )
+        .await
+    }
+
+    /// `POST /pulls/{number}/comments`, which answers `201 Created` with
+    /// the comment it made.
+    async fn post_review_comment<R: serde::Serialize>(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        request: &R,
+    ) -> Result<ReviewComment, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        let path = format!("/repos/{owner}/{name}/pulls/{number}/comments");
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._post(&path, Some(request))
+            .await
+            .map_err(map_octocrab_error)?;
+        let body = self
+            .finish_response(response, &[StatusCode::CREATED])
+            .await?;
+        let comment: ReviewCommentPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(ReviewComment::from(comment))
     }
 
     /// The workflow runs for one commit, newest first. What the checks

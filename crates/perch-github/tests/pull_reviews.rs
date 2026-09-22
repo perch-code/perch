@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
-use perch_github::{Error, GitHub, PullReviewEvent};
+use perch_github::{Error, GitHub, PullReviewEvent, ReviewCommentDraft, Side};
 
 #[derive(Debug)]
 struct Request {
@@ -120,7 +120,7 @@ async fn all_final_review_events_post_the_exact_commit_and_decode_the_review() {
     ];
     for (event, body, state) in cases {
         let submitted = github
-            .submit_pull_request_review("a/b", 42, "abc123", body, event)
+            .submit_pull_request_review("a/b", 42, "abc123", body, event, &[])
             .await
             .unwrap();
         assert_eq!(submitted.user, "reviewer");
@@ -142,6 +142,10 @@ async fn all_final_review_events_post_the_exact_commit_and_decode_the_review() {
         assert_eq!(json["commit_id"], "abc123");
         assert_eq!(json["body"], body);
         assert_eq!(json["event"], event);
+        assert!(
+            json.get("comments").is_none(),
+            "a review with no comments on lines sends none"
+        );
     }
 }
 
@@ -154,7 +158,7 @@ async fn required_bodies_and_commit_ids_are_validated_before_the_request() {
 
     assert!(matches!(
         github
-            .submit_pull_request_review("a/b", 42, "abc123", "  ", PullReviewEvent::Comment)
+            .submit_pull_request_review("a/b", 42, "abc123", "  ", PullReviewEvent::Comment, &[])
             .await,
         Err(Error::Decode(message)) if message.contains("requires a body")
     ));
@@ -166,19 +170,20 @@ async fn required_bodies_and_commit_ids_are_validated_before_the_request() {
                 "abc123",
                 "\n",
                 PullReviewEvent::RequestChanges,
+                &[],
             )
             .await,
         Err(Error::Decode(message)) if message.contains("requires a body")
     ));
     assert!(matches!(
         github
-            .submit_pull_request_review("a/b", 42, " bad ", "", PullReviewEvent::Approve)
+            .submit_pull_request_review("a/b", 42, " bad ", "", PullReviewEvent::Approve, &[])
             .await,
         Err(Error::Decode(message)) if message.contains("commit SHA")
     ));
 
     github
-        .submit_pull_request_review("a/b", 42, "abc123", "", PullReviewEvent::Approve)
+        .submit_pull_request_review("a/b", 42, "abc123", "", PullReviewEvent::Approve, &[])
         .await
         .unwrap();
     assert_eq!(requests.lock().unwrap().len(), 1);
@@ -194,9 +199,175 @@ async fn github_validation_failures_keep_their_status_and_body() {
 
     assert!(matches!(
         github
-            .submit_pull_request_review("a/b", 42, "abc123", "", PullReviewEvent::Approve)
+            .submit_pull_request_review("a/b", 42, "abc123", "", PullReviewEvent::Approve, &[])
             .await,
         Err(Error::Status { status: 422, body })
             if body.contains("Can not approve your own pull request")
+    ));
+}
+
+fn review_comment(id: u64, reply_to: Option<u64>, body: &str) -> String {
+    serde_json::json!({
+        "id": id,
+        "node_id": format!("PRRC_{id}"),
+        "pull_request_review_id": null,
+        "in_reply_to_id": reply_to,
+        "user": { "login": "reviewer" },
+        "body": body,
+        "path": "src/x.rs",
+        "line": 41,
+        "side": "RIGHT",
+        "diff_hunk": "@@ -40,3 +40,3 @@",
+        "commit_id": "abc123",
+        "original_commit_id": "abc123",
+        "created_at": "2026-09-20T18:00:00Z",
+        "html_url": format!("https://github.com/a/b/pull/42#discussion_r{id}"),
+    })
+    .to_string()
+}
+
+fn draft(path: &str, start_line: Option<u64>, line: u64, body: &str) -> ReviewCommentDraft {
+    ReviewCommentDraft {
+        path: path.into(),
+        line,
+        side: Side::Right,
+        start_line,
+        start_side: start_line.map(|_| Side::Right),
+        body: body.into(),
+    }
+}
+
+#[tokio::test]
+async fn a_review_carries_its_comments_on_lines_and_needs_no_summary_with_them() {
+    let (base, requests) = spawn(vec![Response::new(
+        "200 OK",
+        review(4, "COMMENTED", ""),
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let comments = [
+        draft("src/x.rs", None, 41, "One line"),
+        draft("src/y.rs", Some(7), 9, "Three lines"),
+    ];
+    let submitted = github
+        .submit_pull_request_review("a/b", 42, "abc123", "", PullReviewEvent::Comment, &comments)
+        .await
+        .unwrap();
+    assert_eq!(submitted.id, 4);
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let json: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(json["event"], "COMMENT");
+    assert_eq!(json["body"], "");
+    let sent = json["comments"].as_array().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0]["path"], "src/x.rs");
+    assert_eq!(sent[0]["line"], 41);
+    assert_eq!(sent[0]["side"], "RIGHT");
+    assert_eq!(sent[0]["body"], "One line");
+    assert!(
+        sent[0].get("start_line").is_none() && sent[0].get("start_side").is_none(),
+        "a comment on one line names no start"
+    );
+    assert_eq!(sent[1]["start_line"], 7);
+    assert_eq!(sent[1]["start_side"], "RIGHT");
+    assert_eq!(sent[1]["line"], 9);
+}
+
+#[tokio::test]
+async fn a_request_for_changes_needs_a_summary_even_with_comments() {
+    let (base, requests) = spawn(vec![]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+    let comments = [draft("src/x.rs", None, 41, "One line")];
+    assert!(matches!(
+        github
+            .submit_pull_request_review(
+                "a/b",
+                42,
+                "abc123",
+                "",
+                PullReviewEvent::RequestChanges,
+                &comments,
+            )
+            .await,
+        Err(Error::Decode(message)) if message.contains("requires a body")
+    ));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_reply_posts_under_the_threads_root_and_decodes_the_comment() {
+    let (base, requests) = spawn(vec![Response::new(
+        "201 Created",
+        review_comment(77, Some(31), "I will fix it"),
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let posted = github
+        .reply_to_review_comment("a/b", 42, 31, "I will fix it")
+        .await
+        .unwrap();
+    assert_eq!(posted.id, 77);
+    assert_eq!(posted.in_reply_to_id, Some(31));
+    assert_eq!(posted.node_id, "PRRC_77");
+    assert_eq!(posted.html_url, "https://github.com/a/b/pull/42#discussion_r77");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/repos/a/b/pulls/42/comments");
+    let json: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(json["in_reply_to"], 31);
+    assert_eq!(json["body"], "I will fix it");
+    assert!(json.get("commit_id").is_none());
+}
+
+#[tokio::test]
+async fn a_comment_on_its_own_names_the_commit_it_was_written_against() {
+    let (base, requests) = spawn(vec![Response::new(
+        "201 Created",
+        review_comment(78, None, "Older"),
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let posted = github
+        .create_review_comment(
+            "a/b",
+            42,
+            "0ld5ha",
+            &draft("src/x.rs", Some(40), 41, "Older"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(posted.id, 78);
+    assert_eq!(posted.in_reply_to_id, None);
+
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/repos/a/b/pulls/42/comments");
+        let json: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(json["commit_id"], "0ld5ha");
+        assert_eq!(json["path"], "src/x.rs");
+        assert_eq!(json["line"], 41);
+        assert_eq!(json["start_line"], 40);
+        assert_eq!(json["side"], "RIGHT");
+        assert_eq!(json["start_side"], "RIGHT");
+        assert_eq!(json["body"], "Older");
+        assert!(json.get("in_reply_to").is_none());
+    }
+
+    // GitHub answers a comment it made with 201; anything else is a refusal.
+    let (base, _) = spawn(vec![Response::new(
+        "422 Unprocessable Entity",
+        r#"{"message":"Line could not be resolved"}"#,
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+    assert!(matches!(
+        github
+            .create_review_comment("a/b", 42, "0ld5ha", &draft("src/x.rs", None, 41, "x"))
+            .await,
+        Err(Error::Status { status: 422, body }) if body.contains("could not be resolved")
     ));
 }

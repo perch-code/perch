@@ -195,6 +195,43 @@ pub struct Review {
     pub reactions: Reactions,
 }
 
+/// A comment that opens a thread on a line, as the review it is submitted
+/// with carries it. `start_line` and `start_side` are sent only when the
+/// comment is on more than one line, as GitHub expects, and the sides go
+/// as `LEFT` and `RIGHT`, its spelling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReviewCommentDraft {
+    pub path: String,
+    pub line: u64,
+    #[serde(serialize_with = "side_upper")]
+    pub side: Side,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "optional_side_upper"
+    )]
+    pub start_side: Option<Side>,
+    pub body: String,
+}
+
+fn side_upper<S: serde::Serializer>(side: &Side, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(match side {
+        Side::Left => "LEFT",
+        Side::Right => "RIGHT",
+    })
+}
+
+fn optional_side_upper<S: serde::Serializer>(
+    side: &Option<Side>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match side {
+        Some(side) => side_upper(side, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReviewComment {
     pub id: u64,

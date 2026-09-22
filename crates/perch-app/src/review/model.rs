@@ -613,14 +613,17 @@ impl Destination {
 
 /// A message to GitHub that has not been posted: what the review form
 /// lists, the button counts and the gutter marks. `in_reply_to` is the
-/// thread's root comment on GitHub, when it has one; `commit_sha` is the
-/// anchor's, the head the lines were read at.
+/// thread's root comment on GitHub, when it has one; `reply` says the
+/// draft posts as a reply, under that root or under the draft that opens
+/// its thread; `commit_sha` is the anchor's, the head the lines were read
+/// at, which only a draft that opens a thread posts against.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Draft {
     pub thread_id: String,
     pub message_id: String,
     pub anchor: Option<Anchor>,
     pub in_reply_to: Option<u64>,
+    pub reply: bool,
     pub body: String,
     pub commit_sha: String,
 }
@@ -692,20 +695,102 @@ pub fn drafts_of(threads: &[CommentThread]) -> Vec<Draft> {
     threads
         .iter()
         .flat_map(|t| {
-            t.messages.iter().filter(|m| m.is_draft()).map(move |m| Draft {
-                thread_id: t.id.clone(),
-                message_id: m.id.clone(),
-                anchor: t.anchor.clone(),
-                in_reply_to: t.github_id,
-                body: m.body.clone(),
-                commit_sha: t
-                    .anchor
-                    .as_ref()
-                    .map(|a| a.commit_sha.clone())
-                    .unwrap_or_default(),
-            })
+            t.messages
+                .iter()
+                .filter(|m| m.is_draft())
+                .enumerate()
+                .map(move |(nth, m)| Draft {
+                    thread_id: t.id.clone(),
+                    message_id: m.id.clone(),
+                    anchor: t.anchor.clone(),
+                    in_reply_to: t.github_id,
+                    reply: t.github_id.is_some() || nth > 0,
+                    body: m.body.clone(),
+                    commit_sha: t
+                        .anchor
+                        .as_ref()
+                        .map(|a| a.commit_sha.clone())
+                        .unwrap_or_default(),
+                })
         })
         .collect()
+}
+
+/// `3 comments`, `1 reply, 2 comments`, `1 comment`: what the review form
+/// says of its drafts. A reply is a draft under a thread on GitHub, or
+/// after the draft that opens its thread. Nothing for none.
+pub fn drafts_summary(drafts: &[Draft]) -> String {
+    let replies = drafts.iter().filter(|d| d.reply).count();
+    let comments = drafts.len() - replies;
+    let mut parts = Vec::new();
+    if replies > 0 {
+        parts.push(count_of(replies, "reply", "replies"));
+    }
+    if comments > 0 {
+        parts.push(count_of(comments, "comment", "comments"));
+    }
+    parts.join(", ")
+}
+
+fn count_of(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// What the review form says once the submission is done and not every
+/// draft posted, from the counts the backend answered with: nothing when
+/// they all did. `review` says a review posted; `posted` counts the
+/// drafts confirmed on GitHub. `drafts` are the drafts still kept, which
+/// say whether a failed one was a reply or a comment.
+pub fn submit_review_outcome(
+    review: bool,
+    posted: usize,
+    unmatched: &[String],
+    failed: &[(String, String)],
+    drafts: &[Draft],
+) -> Option<String> {
+    if unmatched.is_empty() && failed.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    if review {
+        text.push_str("Posted the review");
+        if posted > 0 {
+            text.push_str(&format!(" and {}", count_of(posted, "comment", "comments")));
+        }
+        text.push('.');
+    } else if posted > 0 {
+        text.push_str(&format!("Posted {}.", count_of(posted, "comment", "comments")));
+    }
+    if !failed.is_empty() {
+        let is_reply = |id: &str| drafts.iter().any(|d| d.message_id == id && d.reply);
+        let replies = failed.iter().filter(|(id, _)| is_reply(id)).count();
+        let comments = failed.len() - replies;
+        let mut parts = Vec::new();
+        if replies > 0 {
+            parts.push(count_of(replies, "reply", "replies"));
+        }
+        if comments > 0 {
+            parts.push(count_of(comments, "comment", "comments"));
+        }
+        let error = failed[0].1.trim_end_matches('.');
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(&format!("{} did not post: {error}.", parts.join(" and ")));
+    }
+    if !unmatched.is_empty() {
+        let n = unmatched.len();
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(&format!(
+            "{} could not be matched to what GitHub returned and {} still {}.",
+            count_of(n, "comment", "comments"),
+            if n == 1 { "is" } else { "are" },
+            if n == 1 { "a draft" } else { "drafts" },
+        ));
+    }
+    Some(text)
 }
 
 /// One effective reviewer captured by a launch. A disabled (`None`) row is
@@ -948,6 +1033,15 @@ pub struct ReviewState {
     /// The backend-assigned attempt currently in flight, if any.
     pub submit_review_pending: RwSignal<Option<u64>>,
     pub submit_review_error: RwSignal<Option<String>>,
+    /// What the last submission left undone, once it is over: a line the
+    /// form keeps until the next submission or a close, through edits.
+    pub submit_review_outcome: RwSignal<Option<String>>,
+    /// Counts the submissions that came back with an outcome. The form's
+    /// summary box is built anew on each, so a summary that posted is
+    /// gone from it.
+    pub submit_review_generation: RwSignal<u64>,
+    /// Discard all was pressed and is being asked about.
+    pub submit_review_confirm_discard: RwSignal<bool>,
     /// Reviews accepted by GitHub in this session. They are merged into
     /// later discussion snapshots so an older in-flight GET cannot briefly
     /// erase a review that the POST already confirmed.
@@ -1258,6 +1352,9 @@ impl ReviewState {
             submit_review_autofocus: RwSignal::new(true),
             submit_review_pending: RwSignal::new(None),
             submit_review_error: RwSignal::new(None),
+            submit_review_outcome: RwSignal::new(None),
+            submit_review_generation: RwSignal::new(0),
+            submit_review_confirm_discard: RwSignal::new(false),
             submitted_reviews: RwSignal::new(Arc::new(Vec::new())),
             historical_review: RwSignal::new(None),
             historical_review_request: RwSignal::new(None),
@@ -1400,6 +1497,8 @@ impl ReviewState {
         self.submit_review_focused.set(false);
         self.submit_review_pending.set(None);
         self.submit_review_error.set(None);
+        self.submit_review_outcome.set(None);
+        self.submit_review_confirm_discard.set(false);
         self.submitted_reviews.set(Arc::new(Vec::new()));
         self.clear_historical_review();
         self.tab.set(ItemTab::Conversation);
@@ -1591,12 +1690,24 @@ impl ReviewState {
     pub fn begin_submit_review(&self, attempt_id: u64) {
         self.submit_review_pending.set(Some(attempt_id));
         self.submit_review_error.set(None);
+        self.submit_review_outcome.set(None);
+        self.submit_review_confirm_discard.set(false);
     }
 
     /// Install a review GitHub accepted before the follow-up discussion GET
     /// completes. Keeping it in `submitted_reviews` also protects the UI from
-    /// an older discussion request that was already in flight.
-    pub fn finish_submit_review(&self, attempt_id: u64, review: Review) -> bool {
+    /// an older discussion request that was already in flight. `None` is a
+    /// submission that needed no review: only replies and comments on
+    /// their own. With `outcome`, what did not post: the form stays open
+    /// to say so, its summary cleared and built anew since that posted,
+    /// and the drafts that stayed drafts listed as before. Answers whether
+    /// the form that sent the attempt was still there to be told.
+    pub fn finish_submit_review(
+        &self,
+        attempt_id: u64,
+        review: Option<Review>,
+        outcome: Option<String>,
+    ) -> bool {
         let pending = self.submit_review_pending.get_untracked();
         let owns_surface = pending == Some(attempt_id);
         // `None` means the item was left and reopened while the backend kept
@@ -1605,39 +1716,51 @@ impl ReviewState {
         // the timeline, without disturbing that fresh draft or attempt.
         if owns_surface {
             self.submit_review_pending.set(None);
-            self.submit_review_error.set(None);
-            self.submit_review_open.set(false);
             self.submit_review_draft.set(String::new());
             self.submit_review_event.set(PullReviewEvent::Comment);
-            self.submit_review_focused.set(false);
+            self.submit_review_confirm_discard.set(false);
+            self.submit_review_error.set(None);
+            match outcome {
+                Some(message) => {
+                    self.submit_review_outcome.set(Some(message));
+                    self.submit_review_generation.update(|n| *n += 1);
+                }
+                None => {
+                    self.submit_review_outcome.set(None);
+                    self.submit_review_open.set(false);
+                    self.submit_review_focused.set(false);
+                }
+            }
         }
 
-        self.submitted_reviews.update(|reviews| {
-            let reviews = Arc::make_mut(reviews);
-            match reviews.iter_mut().find(|known| known.id == review.id) {
-                Some(known) => *known = review.clone(),
-                None => reviews.push(review.clone()),
-            }
-        });
-        self.discussion.update(|discussion| {
-            let Some(current) = discussion.as_ref() else {
-                return;
-            };
-            let mut current = (**current).clone();
-            match current.reviews.iter_mut().find(|known| known.id == review.id) {
-                Some(known) => *known = review.clone(),
-                None => current.reviews.push(review.clone()),
-            }
-            *discussion = Some(Arc::new(current));
-        });
+        if let Some(review) = review {
+            self.submitted_reviews.update(|reviews| {
+                let reviews = Arc::make_mut(reviews);
+                match reviews.iter_mut().find(|known| known.id == review.id) {
+                    Some(known) => *known = review.clone(),
+                    None => reviews.push(review.clone()),
+                }
+            });
+            self.discussion.update(|discussion| {
+                let Some(current) = discussion.as_ref() else {
+                    return;
+                };
+                let mut current = (**current).clone();
+                match current.reviews.iter_mut().find(|known| known.id == review.id) {
+                    Some(known) => *known = review.clone(),
+                    None => current.reviews.push(review.clone()),
+                }
+                *discussion = Some(Arc::new(current));
+            });
+        }
 
-        if owns_surface {
+        if owns_surface && !self.submit_review_open.get_untracked() {
             if let Some(opener) = self.submit_review_opener.get_untracked() {
                 opener.request_focus();
             }
             self.submit_review_opener.set(None);
         }
-        true
+        owns_surface
     }
 
     pub fn fail_submit_review(&self, attempt_id: u64, message: String) -> bool {
@@ -5076,5 +5199,109 @@ mod tests {
         assert_eq!(drafts[1].thread_id, "t2");
         assert_eq!(drafts[1].in_reply_to, None, "a new thread has no root there yet");
         assert_eq!(drafts[1].anchor.as_ref().map(|a| (a.start_line, a.line)), Some((5, 6)));
+        assert!(drafts[0].reply);
+        assert!(!drafts[1].reply);
+    }
+
+    #[test]
+    fn a_second_draft_in_a_thread_not_yet_on_github_is_a_reply() {
+        use perch_github::ThreadOrigin;
+        let mut fresh = anchored("t2", 5, 6, "2026-09-18T10:01:00Z", false);
+        fresh.origin = ThreadOrigin::GitHub;
+        fresh.messages[0].origin = ThreadOrigin::GitHub;
+        let mut second = fresh.messages[0].clone();
+        second.id = "d2".into();
+        fresh.messages.push(second);
+
+        let drafts = drafts_of(&[fresh]);
+        assert_eq!(drafts.len(), 2);
+        assert!(!drafts[0].reply, "the first opens the thread");
+        assert!(drafts[1].reply, "the second posts under it");
+        assert_eq!(drafts_summary(&drafts), "1 reply, 1 comment");
+    }
+
+    fn a_draft(id: &str, in_reply_to: Option<u64>) -> Draft {
+        Draft {
+            thread_id: format!("t-{id}"),
+            message_id: id.into(),
+            anchor: None,
+            in_reply_to,
+            reply: in_reply_to.is_some(),
+            body: "x".into(),
+            commit_sha: "h".into(),
+        }
+    }
+
+    #[test]
+    fn the_drafts_are_summed_up_as_replies_and_comments() {
+        assert_eq!(drafts_summary(&[]), "");
+        assert_eq!(drafts_summary(&[a_draft("a", None)]), "1 comment");
+        assert_eq!(
+            drafts_summary(&[a_draft("a", None), a_draft("b", None), a_draft("c", None)]),
+            "3 comments"
+        );
+        assert_eq!(
+            drafts_summary(&[a_draft("a", Some(1)), a_draft("b", None), a_draft("c", None)]),
+            "1 reply, 2 comments"
+        );
+        assert_eq!(
+            drafts_summary(&[a_draft("a", Some(1)), a_draft("b", Some(2))]),
+            "2 replies"
+        );
+    }
+
+    #[test]
+    fn the_outcome_says_what_did_not_post_and_nothing_when_all_did() {
+        assert_eq!(submit_review_outcome(true, 3, &[], &[], &[]), None);
+        assert_eq!(submit_review_outcome(false, 1, &[], &[], &[]), None);
+        let kept = [a_draft("r1", Some(31)), a_draft("c1", None), a_draft("c2", None)];
+        assert_eq!(
+            submit_review_outcome(
+                true,
+                2,
+                &["c1".into()],
+                &[("r1".into(), "GitHub returned 422: nope.".into())],
+                &kept,
+            )
+            .as_deref(),
+            Some(
+                "Posted the review and 2 comments. 1 reply did not post: GitHub returned 422: nope. \
+                 1 comment could not be matched to what GitHub returned and is still a draft."
+            )
+        );
+        assert_eq!(
+            submit_review_outcome(true, 0, &["c1".into(), "c2".into()], &[], &kept).as_deref(),
+            Some(
+                "Posted the review. 2 comments could not be matched to what GitHub returned and \
+                 are still drafts."
+            )
+        );
+        // No review went: a reply on its own that did not post, or one
+        // that did beside one that did not.
+        assert_eq!(
+            submit_review_outcome(false, 0, &[], &[("r1".into(), "offline".into())], &kept)
+                .as_deref(),
+            Some("1 reply did not post: offline.")
+        );
+        assert_eq!(
+            submit_review_outcome(false, 1, &[], &[("r1".into(), "offline".into())], &kept)
+                .as_deref(),
+            Some("Posted 1 comment. 1 reply did not post: offline.")
+        );
+        assert_eq!(
+            submit_review_outcome(
+                true,
+                1,
+                &[],
+                &[
+                    ("r1".into(), "offline".into()),
+                    ("c1".into(), "offline".into()),
+                    ("c2".into(), "offline".into()),
+                ],
+                &kept,
+            )
+            .as_deref(),
+            Some("Posted the review and 1 comment. 1 reply and 2 comments did not post: offline.")
+        );
     }
 }
