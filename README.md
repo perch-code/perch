@@ -86,8 +86,10 @@ posts at once, after one confirmation naming the pull request.
 
 GitHub's review threads are drawn beside Perch's own with the same cards, in
 both Files and Conversation, so one thread can hold a reviewer's comment, your
-reply to them, and an agent's private take on both. In such a thread, what an
-agent said and what you asked it are inset behind a rule marked `PERCH ONLY`.
+reply to them, and an agent's private take on both. A reviewer's comment
+offers **Reply** and **Ask about this** under the pointer. In such a thread,
+what an agent said and what you asked it are inset behind a rule marked
+`PERCH ONLY`.
 An agent's answer never posts on its own: **Post to GitHub** under the pointer
 puts its text in a composer for you to edit and send, and nothing records
 where the draft came from.
