@@ -193,6 +193,8 @@ pub const RADIUS: f64 = 6.0;
 pub const RADIUS_LG: f64 = 10.0;
 /// The room inside a text box, between its border and its lines.
 pub const EDITOR_BOX_PADDING: f64 = 10.0;
+/// The space between the drawer's edges and its search row and rows.
+pub const NAV_GUTTER: f64 = 12.0;
 pub const NAV_ROW_RADIUS: f64 = 14.0;
 pub const NAV_CONTROL_HEIGHT: f64 = 36.0;
 pub const NAV_CONTROL_RADIUS: f64 = NAV_CONTROL_HEIGHT / 2.0;

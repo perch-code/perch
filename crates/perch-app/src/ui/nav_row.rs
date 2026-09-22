@@ -53,7 +53,7 @@ pub fn row_style(s: Style, selected: bool) -> Style {
 
 /// The gutter either side of a row, between it and the drawer's edges.
 pub fn row_gutter(s: Style) -> Style {
-    s.width_full().padding_horiz(24.0)
+    s.width_full().padding_horiz(theme::NAV_GUTTER)
 }
 
 /// The list the rows sit in: the padding above the first and below the

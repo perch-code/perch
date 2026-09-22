@@ -187,7 +187,7 @@ fn search_row(state: AppState) -> impl IntoView {
         Stack::horizontal((input, glyph)).style(|s| s.items_center().flex_grow(1.0_f32).min_width(0.0));
 
     Stack::horizontal((search_box, filter_button(state)))
-        .style(|s| s.items_center().width_full().gap(8.0).padding_horiz(24.0).padding_top(16.0))
+        .style(|s| s.items_center().width_full().gap(8.0).padding_horiz(theme::NAV_GUTTER).padding_top(16.0))
 }
 
 /// The filter menu, in the shape of a settings menu: one row per setting,
@@ -787,20 +787,20 @@ mod tests {
             .unwrap()
             .get_visual_rect_no_clip();
         assert_eq!(search.height(), theme::NAV_CONTROL_HEIGHT);
-        assert_eq!(search.x0, 24.0);
+        assert_eq!(search.x0, theme::NAV_GUTTER);
 
         let filter = find(harness.root_id(), "sidebar filter")
             .unwrap()
             .get_visual_rect_no_clip();
         assert_eq!((filter.width(), filter.height()), (32.0, 32.0));
-        assert!(filter.x1 <= theme::SIDEBAR_MIN_WIDTH - 24.0);
+        assert!(filter.x1 <= theme::SIDEBAR_MIN_WIDTH - theme::NAV_GUTTER);
 
         let row = find(harness.root_id(), "item row:mine")
             .unwrap()
             .get_visual_rect_no_clip();
         assert_eq!(row.height(), theme::ROW_HEIGHT);
         assert!(
-            row.x0 >= 24.0 && row.x1 <= theme::SIDEBAR_MIN_WIDTH - 24.0,
+            row.x0 >= theme::NAV_GUTTER && row.x1 <= theme::SIDEBAR_MIN_WIDTH - theme::NAV_GUTTER,
             "row leaves gutter: {row:?}"
         );
 
