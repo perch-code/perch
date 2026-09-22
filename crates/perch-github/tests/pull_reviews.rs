@@ -421,3 +421,60 @@ async fn an_empty_issue_comment_is_refused_before_the_request() {
     ));
     assert!(requests.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn resolving_a_thread_names_it_and_reads_back_whether_it_is_resolved() {
+    let (base, requests) = spawn(vec![
+        Response::new(
+            "200 OK",
+            r#"{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"unresolveReviewThread":{"thread":{"isResolved":false}}}}"#,
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    assert!(github.set_review_thread_resolved("PRRT_1", true).await.unwrap());
+    assert!(!github.set_review_thread_resolved("PRRT_1", false).await.unwrap());
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!((requests[0].method.as_str(), requests[0].path.as_str()), ("POST", "/graphql"));
+    let asked = |i: usize| -> serde_json::Value { serde_json::from_str(&requests[i].body).unwrap() };
+    let resolve = asked(0);
+    let query = resolve["query"].as_str().unwrap();
+    assert!(query.starts_with("mutation("), "{query}");
+    assert!(query.contains("resolveReviewThread(input: {threadId: $thread})"), "{query}");
+    assert!(!query.contains("unresolve"), "{query}");
+    assert_eq!(resolve["variables"]["thread"], "PRRT_1");
+    let unresolve = asked(1);
+    assert!(unresolve["query"].as_str().unwrap().contains("unresolveReviewThread("));
+    assert_eq!(unresolve["variables"]["thread"], "PRRT_1");
+}
+
+#[tokio::test]
+async fn a_thread_github_will_not_resolve_is_an_error_and_no_id_asks_nothing() {
+    let (base, requests) = spawn(vec![
+        Response::new(
+            "200 OK",
+            r#"{"data":{"resolveReviewThread":null},"errors":[{"message":"Resource not accessible by personal access token"}]}"#,
+        ),
+        Response::new("200 OK", r#"{"data":{"resolveReviewThread":null}}"#),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let refused = github.set_review_thread_resolved("PRRT_1", true).await.unwrap_err();
+    assert!(
+        matches!(&refused, Error::Graphql(message) if message.contains("not accessible")),
+        "{refused:?}"
+    );
+    let empty = github.set_review_thread_resolved("PRRT_1", true).await.unwrap_err();
+    assert!(matches!(empty, Error::Decode(_)), "{empty:?}");
+    assert_eq!(requests.lock().unwrap().len(), 2);
+
+    let none = github.set_review_thread_resolved("", false).await.unwrap_err();
+    assert!(matches!(none, Error::Decode(_)), "{none:?}");
+    assert_eq!(requests.lock().unwrap().len(), 2, "no id, no request");
+}

@@ -514,6 +514,8 @@ mod tests {
             }),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: at("2026-09-16T13:00:00Z"),
             messages: vec![
                 message("m1", Author::User, "why the fence?", "2026-09-16T13:00:00Z"),

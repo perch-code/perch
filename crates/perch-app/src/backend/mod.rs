@@ -134,6 +134,14 @@ pub enum Command {
         kind: ReactionKind,
         add: bool,
     },
+    /// Resolve a thread on the item, or unresolve it: on GitHub for one
+    /// that is there, by the id the backend reads from the cache, and in
+    /// Perch for any other.
+    ResolveThread {
+        item_id: String,
+        thread_id: String,
+        resolve: bool,
+    },
     /// Read, diff, and highlight one file of the open checkout, over the
     /// scope that is set.
     OpenFile {
@@ -615,6 +623,13 @@ pub enum Event {
         node_id: String,
         kind: ReactionKind,
         add: bool,
+    },
+    /// The reader's resolve or unresolve of a thread was kept, on GitHub
+    /// or in Perch, or it did not go. The threads sent before it say how
+    /// the thread stands; why one did not go is a notice of its own.
+    ThreadResolveSettled {
+        item_id: String,
+        thread_id: String,
     },
     /// The workflow runs' verdict for the item's head.
     ChecksReady {
@@ -1809,6 +1824,17 @@ impl Backend {
         });
     }
 
+    /// Resolve a thread of the open item, or unresolve it, on GitHub or in
+    /// Perch as the thread is. The view already shows it as asked;
+    /// `ThreadResolveSettled` lets it go back to the threads.
+    pub fn resolve_thread(&self, item_id: &str, thread_id: &str, resolve: bool) {
+        let _ = self.commands.send(Command::ResolveThread {
+            item_id: item_id.to_string(),
+            thread_id: thread_id.to_string(),
+            resolve,
+        });
+    }
+
     pub fn open_item(&self, id: &str) -> u64 {
         let navigation_id = self.navigation_requests.begin_item(id);
         self.scope_requests.clear();
@@ -2848,6 +2874,16 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     set_reaction(&ctx, &item_id, &node_id, kind, add).await;
+                });
+            }
+            Command::ResolveThread {
+                item_id,
+                thread_id,
+                resolve,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    resolve_thread(&ctx, &item_id, &thread_id, resolve).await;
                 });
             }
             Command::OpenItem { id, navigation_id }
@@ -6750,6 +6786,111 @@ async fn set_reaction(ctx: &Ctx, item_id: &str, node_id: &str, kind: ReactionKin
     }
 }
 
+/// Resolve a thread, or unresolve it, where `resolved_in` says. One not
+/// on GitHub is written on its row and sent. One on GitHub is asked of
+/// GitHub and its answer kept, under the fence a reaction uses, so a read
+/// that began before the change cannot put the thread back. The view showed
+/// the thread as asked before asking; `ThreadResolveSettled` lets it go
+/// back to the threads, which a refusal leaves as they were.
+async fn resolve_thread(ctx: &Ctx, item_id: &str, thread_id: &str, resolve: bool) {
+    let settle = || {
+        if ctx.is_open(item_id) {
+            let _ = ctx.events.send(Event::ThreadResolveSettled {
+                item_id: item_id.to_string(),
+                thread_id: thread_id.to_string(),
+            });
+        }
+    };
+    let verb = if resolve { "resolve" } else { "unresolve" };
+    let refuse = |message: String| {
+        tracing::info!(item = item_id, thread = thread_id, resolve, %message, "resolution not taken");
+        settle();
+        ctx.notice(message);
+    };
+    let kept = ctx.with_cache(|cache| -> Result<_, CacheError> {
+        let thread = cache
+            .load_comment_threads(item_id)?
+            .into_iter()
+            .find(|t| t.id == thread_id);
+        let finding = cache
+            .list_findings(item_id, None)?
+            .iter()
+            .any(|f| f.thread_id == thread_id);
+        Ok((thread, finding))
+    });
+    let Some(Ok((Some(thread), finding))) = kept else {
+        refuse(format!("There is no thread here to {verb}"));
+        return;
+    };
+    let node_id = match resolved_in(&thread, finding, verb) {
+        Err(message) => {
+            refuse(message);
+            return;
+        }
+        Ok(ResolvedIn::Perch) => {
+            if let Some(Err(error)) =
+                ctx.with_cache(|cache| cache.set_thread_resolved(thread_id, resolve))
+            {
+                refuse(format!("Could not {verb} the thread: {error}"));
+                return;
+            }
+            if ctx.is_open(item_id) {
+                ctx.send_threads(item_id);
+            }
+            settle();
+            return;
+        }
+        Ok(ResolvedIn::GitHub { node_id }) => node_id,
+    };
+    let Some(github) = ctx.github() else {
+        refuse("GitHub is unavailable while Perch is offline".into());
+        return;
+    };
+    let resolved = match github.set_review_thread_resolved(&node_id, resolve).await {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            refuse(format!("GitHub could not {verb} the thread: {error}"));
+            return;
+        }
+    };
+    let kept = ctx.discussion_requests.fence_with(item_id, || {
+        ctx.with_cache(|cache| cache.set_thread_resolved(thread_id, resolved))
+    });
+    if let Some(Some(Err(error))) = kept {
+        tracing::warn!(item = item_id, %error, "could not keep the thread's resolution");
+    }
+    if ctx.is_open(item_id) {
+        ctx.send_threads(item_id);
+    }
+    settle();
+}
+
+/// Where resolving a thread is kept.
+#[derive(Debug, PartialEq)]
+enum ResolvedIn {
+    /// On the thread's row alone: Perch's own, or one on its way to
+    /// GitHub with a draft.
+    Perch,
+    /// On GitHub, asked by the thread's id there.
+    GitHub { node_id: String },
+}
+
+/// Where a thread's resolution goes, or why it cannot be resolved: one on
+/// GitHub that GitHub does not let the reader resolve, and a `finding`'s,
+/// which is dismissed and reopened instead.
+fn resolved_in(thread: &CommentThread, finding: bool, verb: &str) -> Result<ResolvedIn, String> {
+    if thread.on_github() {
+        return match (thread.can_resolve, thread.node_id.clone()) {
+            (true, Some(node_id)) => Ok(ResolvedIn::GitHub { node_id }),
+            _ => Err(format!("GitHub does not let you {verb} this thread")),
+        };
+    }
+    if finding {
+        return Err("A finding is dismissed or reopened, not resolved".into());
+    }
+    Ok(ResolvedIn::Perch)
+}
+
 /// Post an issue comment on the item's pull request and put what GitHub
 /// answered with in the kept discussion, so the conversation shows it
 /// the way it shows anyone else's. The comment goes on the cached
@@ -9611,6 +9752,8 @@ async fn ask(
             anchor: anchor.clone(),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: now,
             messages: Vec::new(),
         },
@@ -10580,6 +10723,8 @@ fn save_draft(
                 anchor: Some(anchor),
                 outdated: false,
                 resolved: false,
+                node_id: None,
+                can_resolve: false,
                 created_at: now,
                 messages: vec![draft(id)],
             };
@@ -11490,6 +11635,8 @@ mod tests {
             anchor: None,
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: Timestamp::now(),
             messages: Vec::new(),
         };
@@ -12935,6 +13082,8 @@ mod tests {
             anchor: Some(lines(3, 3)),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
             messages: vec![CommentMessage {
                 id: "q1".into(),
@@ -13119,6 +13268,201 @@ mod tests {
         // A read that began before the reaction can no longer write its
         // older counts over it.
         assert!(!ctx.discussion_requests.is_current(&item.id, older_read));
+    }
+
+    /// rohan's thread on `src/x.rs:41`, and what GitHub says of it: its
+    /// id there, whether it is resolved, and whether the reader may.
+    fn store_github_thread_state(ctx: &Ctx, item: &Item, resolved: bool, can_resolve: bool) {
+        store_line_commented_discussion(ctx, item);
+        ctx.with_cache(|c| {
+            let mut kept = c.load_discussion(&item.id).unwrap().unwrap().1;
+            kept.review_threads = vec![perch_github::ReviewThreadState {
+                node_id: "PRRT_31".into(),
+                root_comment_id: 31,
+                resolved,
+                outdated: false,
+                can_resolve,
+            }];
+            c.store_discussion(&item.id, &kept)
+        })
+        .unwrap()
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_thread_github_resolves_is_kept_sent_and_fences_older_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_path(|path| match path {
+            "/graphql" => (
+                "200 OK",
+                r#"{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}"#.to_string(),
+            ),
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_github_thread_state(&ctx, &item, false, true);
+        open_in_slot(&ctx, &item);
+        let older_read = ctx.discussion_requests.begin(&item.id);
+
+        resolve_thread(&ctx, &item.id, "gh-31", true).await;
+
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/graphql"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        // The threads go first, so the view lets go of what it showed
+        // only once the thread list says the same.
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    Event::CommentThreads { item_id: threads_item, threads, .. },
+                    Event::ThreadResolveSettled { item_id, thread_id },
+                ]
+                    if threads_item == &item.id
+                        && threads.iter().any(|t| t.id == "gh-31" && t.resolved)
+                        && item_id == &item.id
+                        && thread_id == "gh-31"
+            ),
+            "{events:?}"
+        );
+        assert!(threads_of(&ctx, &item)[0].resolved, "kept for the next open");
+        // A read that began before the change cannot put the thread back.
+        assert!(!ctx.discussion_requests.is_current(&item.id, older_read));
+    }
+
+    #[tokio::test]
+    async fn a_resolve_github_refuses_is_settled_explained_and_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _) = serve(
+            "200 OK",
+            r#"{"data":{"unresolveReviewThread":null},"errors":[{"message":"Resource not accessible by personal access token"}]}"#,
+        );
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_github_thread_state(&ctx, &item, true, true);
+        open_in_slot(&ctx, &item);
+
+        resolve_thread(&ctx, &item.id, "gh-31", false).await;
+
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [Event::ThreadResolveSettled { thread_id, .. }, Event::Notice(message)]
+                    if thread_id == "gh-31"
+                        && message.contains("unresolve")
+                        && message.contains("not accessible")
+            ),
+            "{events:?}"
+        );
+        assert!(threads_of(&ctx, &item)[0].resolved, "still as GitHub has it");
+    }
+
+    #[tokio::test]
+    async fn a_thread_github_does_not_let_the_reader_resolve_asks_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("200 OK", "{}");
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_github_thread_state(&ctx, &item, false, false);
+        open_in_slot(&ctx, &item);
+
+        resolve_thread(&ctx, &item.id, "gh-31", true).await;
+        // Nor a thread of another item, or none at all.
+        resolve_thread(&ctx, &item.id, "gh-99", true).await;
+
+        assert!(paths.lock().unwrap().is_empty());
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    Event::ThreadResolveSettled { .. },
+                    Event::Notice(first),
+                    Event::ThreadResolveSettled { .. },
+                    Event::Notice(_),
+                ] if first.contains("resolve this thread")
+            ),
+            "{events:?}"
+        );
+        assert!(!threads_of(&ctx, &item)[0].resolved);
+    }
+
+    #[tokio::test]
+    async fn a_thread_of_perchs_own_resolves_in_perch_and_asks_github_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("200 OK", "{}");
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        let own = CommentThread {
+            id: "t1".into(),
+            worktree_id: item.id.clone(),
+            origin: ThreadOrigin::Local,
+            github_id: None,
+            anchor: Some(lines(3, 4)),
+            outdated: false,
+            resolved: false,
+            node_id: None,
+            can_resolve: false,
+            created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
+            messages: Vec::new(),
+        };
+        ctx.with_cache(|c| c.insert_comment_thread(&own)).unwrap().unwrap();
+        open_in_slot(&ctx, &item);
+
+        resolve_thread(&ctx, &item.id, "t1", true).await;
+        assert!(threads_of(&ctx, &item)[0].resolved);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    Event::CommentThreads { threads, .. },
+                    Event::ThreadResolveSettled { thread_id, .. },
+                ] if threads.iter().any(|t| t.id == "t1" && t.resolved) && thread_id == "t1"
+            ),
+            "{events:?}"
+        );
+
+        resolve_thread(&ctx, &item.id, "t1", false).await;
+        assert!(!threads_of(&ctx, &item)[0].resolved);
+        assert!(paths.lock().unwrap().is_empty(), "nothing is asked of GitHub");
+        assert!(notices(&received).is_empty());
+    }
+
+    #[test]
+    fn a_thread_resolves_on_github_where_it_is_there_and_in_perch_where_it_is_not() {
+        let thread = |github_id: Option<u64>, node_id: Option<&str>, can_resolve: bool| {
+            CommentThread {
+                id: "t".into(),
+                worktree_id: "w".into(),
+                origin: if github_id.is_some() { ThreadOrigin::GitHub } else { ThreadOrigin::Local },
+                github_id,
+                anchor: None,
+                outdated: false,
+                resolved: false,
+                node_id: node_id.map(str::to_string),
+                can_resolve,
+                created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
+                messages: Vec::new(),
+            }
+        };
+        assert_eq!(resolved_in(&thread(None, None, false), false, "resolve"), Ok(ResolvedIn::Perch));
+        let mut draft = thread(None, None, false);
+        draft.origin = ThreadOrigin::GitHub;
+        assert_eq!(resolved_in(&draft, false, "resolve"), Ok(ResolvedIn::Perch), "not on GitHub yet");
+        assert_eq!(
+            resolved_in(&thread(Some(31), Some("PRRT_31"), true), false, "resolve"),
+            Ok(ResolvedIn::GitHub { node_id: "PRRT_31".into() })
+        );
+
+        // A finding's is dismissed, and GitHub's is GitHub's to allow.
+        let finding = resolved_in(&thread(None, None, false), true, "resolve").unwrap_err();
+        assert!(finding.contains("finding"), "{finding}");
+        let refused = resolved_in(&thread(Some(31), Some("PRRT_31"), false), false, "unresolve");
+        assert_eq!(refused, Err("GitHub does not let you unresolve this thread".into()));
+        let unnamed = resolved_in(&thread(Some(31), None, true), false, "resolve");
+        assert!(unnamed.is_err(), "no id to ask GitHub by");
     }
 
     #[test]

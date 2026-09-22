@@ -120,6 +120,16 @@ where it came from. It goes the same two ways as anything else: a draft under
 a thread with lines or a place on GitHub, an issue comment under one of
 Perch's own, such as a question asked at the foot of Conversation.
 
+A thread ends in **Resolve**, or **Unresolve** once it is resolved. On a
+thread that is on GitHub the button is there wherever GitHub says you may
+use it, and the click changes github.com at once, with no confirmation, as
+the button there does. The thread shows the change before GitHub answers
+and goes back if GitHub refuses. On a thread of Perch's own, a question to
+an agent and its answers, the button is always there and the change stays
+in Perch. A review finding has **Dismiss** and **Reopen** instead.
+Resolved, a thread folds to one row in Files, as one resolved on
+github.com arrives; Conversation leaves it open.
+
 ## Authentication
 
 Perch calls GitHub's API directly. It resolves credentials in this order:
@@ -134,8 +144,9 @@ launch does not normally inherit shell environment variables. The credential
 must be allowed to read and update notifications and to read the repositories
 you open. Merging a pull request also requires `Contents: write` permission on
 its repository. Commenting on, approving, or requesting changes on a pull
-request requires `Pull requests: write` permission, as does reacting to a pull
-request or anything said on it; reacting on an issue requires `Issues: write`.
+request requires `Pull requests: write` permission, as do resolving a thread
+and reacting to a pull request or anything said on it; reacting on an issue
+requires `Issues: write`.
 
 ## Configuration
 

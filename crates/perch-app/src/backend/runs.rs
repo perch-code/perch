@@ -772,6 +772,8 @@ mod tests {
                     anchor: None,
                     outdated: false,
                     resolved: false,
+                    node_id: None,
+                    can_resolve: false,
                     created_at: Timestamp::now(),
                     messages: Vec::new(),
                 })

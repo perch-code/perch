@@ -1569,7 +1569,7 @@ pub fn messages_view(
 }
 
 /// The follow-up composer under a thread when one is open for it, else the
-/// line that opens one.
+/// line that opens one, with Resolve at its end.
 ///
 /// The composer is drawn in one place on the visible surface. A thread with
 /// a card in the open file takes it inside that card; Conversation's card
@@ -1583,6 +1583,7 @@ pub fn follow_up(
 ) -> impl IntoView {
     let composer_thread = thread_id.clone();
     let running_thread = thread_id.clone();
+    let resolve = resolve_button(app, state, backend.clone(), thread_id.clone());
     // Keyed on whether a run is going as well as on the composer: the line
     // is absent while the agent works and has to appear when it is done,
     // which only the thread list says.
@@ -1609,7 +1610,10 @@ pub fn follow_up(
         };
         composer.filter(|_| drawn_here)
     });
-    dyn_container(
+    // The composer's box takes the row; a draft edited up among the
+    // messages leaves the line here, and Resolve beside it.
+    let composing = Memo::new(move |_| matches!(composer.get(), Some((_, _, None))));
+    let foot = dyn_container(
         move || (composer.get(), running.get()),
         move |(composer, _)| match composer {
             // A draft being edited has the composer in its own row, up
@@ -1634,7 +1638,74 @@ pub fn follow_up(
             }
         },
     )
-    .style(|s| s.width_full())
+    .style(|s| s.flex_grow(1.0_f32).min_width(0.0));
+    Stack::horizontal((
+        foot,
+        resolve.style(move |s| s.apply_if(composing.get(), |s| s.hide())),
+    ))
+    .style(|s| s.items_center().width_full())
+}
+
+/// Resolve at the end of a thread's foot, or Unresolve on one that is
+/// resolved. On one of GitHub's it is there where GitHub lets the reader
+/// do either, and changes github.com at once, as the button there does;
+/// on any other it is always there and changes only Perch. A finding's
+/// thread has Dismiss and Reopen instead. The thread shows the click
+/// before the answer, and resolved, it folds in the code as one resolved
+/// on GitHub does. While the ask is out it is dimmed and takes no click.
+fn resolve_button(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread_id: String,
+) -> impl IntoView {
+    let offered_id = thread_id.clone();
+    let offered = Memo::new(move |_| {
+        let resolvable = state.comment_threads.with(|threads| {
+            threads
+                .iter()
+                .find(|t| t.id == offered_id)
+                .is_some_and(CommentThread::resolvable)
+        });
+        resolvable && cards::finding_of(app, state, &offered_id).is_none()
+    });
+    let resolved_id = thread_id.clone();
+    let resolved = Memo::new(move |_| state.is_resolved(&resolved_id));
+    dyn_container(
+        move || offered.get().then(|| resolved.get()),
+        move |shown| {
+            let Some(resolved) = shown else {
+                return Empty::new().into_any();
+            };
+            let (label, name) = if resolved {
+                ("Unresolve", "thread-unresolve")
+            } else {
+                ("Resolve", "thread-resolve")
+            };
+            let backend = backend.clone();
+            let id = thread_id.clone();
+            let busy_id = thread_id.clone();
+            cards::thread_action(label, move || {
+                let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+                else {
+                    return;
+                };
+                if state.begin_resolve(&id, !resolved) {
+                    backend.resolve_thread(&item_id, &id, !resolved);
+                }
+            })
+            .debug_name(name)
+            .style(move |s| {
+                s.margin_left(8.0)
+                    .flex_shrink(0.0_f32)
+                    .apply_if(state.is_resolving(&busy_id), |s| {
+                        s.color(theme::FG_SUBTLE).cursor(CursorStyle::Default)
+                    })
+            })
+            .into_any()
+        },
+    )
+    .style(move |s| s.apply_if(!offered.get(), |s| s.hide()))
 }
 
 /// One message: the text as markdown, and under an answer the run that
@@ -2573,6 +2644,8 @@ mod tests {
             }),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: at,
             messages: vec![
                 message("gh-31", ThreadOrigin::GitHub, Author::GitHubUser("rohan".into()), "epoch"),
@@ -3429,6 +3502,8 @@ mod tests {
             }),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: at,
             messages: vec![CommentMessage {
                 id: "f1".into(),
@@ -3727,6 +3802,191 @@ mod tests {
         harness.click(center.x, center.y);
         harness.rebuild();
         harness.paint();
+    }
+
+    /// rohan's thread alone, `resolved` or not, which GitHub lets the
+    /// reader resolve.
+    fn resolvable_thread(resolved: bool) -> CommentThread {
+        let mut thread = github_thread_with_private_messages();
+        thread.messages.truncate(1);
+        thread.resolved = resolved;
+        thread.node_id = Some("PRRT_31".into());
+        thread.can_resolve = true;
+        thread
+    }
+
+    /// Resolve at the foot of the card in the code asks GitHub and shows
+    /// the thread resolved before it answers: folded, as a thread
+    /// resolved on GitHub arrives.
+    #[test]
+    fn resolve_at_the_foot_of_a_github_thread_asks_github_and_folds_the_card() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let thread = resolvable_thread(false);
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = thread_card(app, state, Rc::new(backend), thread).style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "thread-resolve"));
+        assert!(find(harness.root_id(), "thread-unresolve").is_none());
+
+        click(&mut harness, "thread-resolve");
+        match commands.try_recv() {
+            Ok(Command::ResolveThread { item_id, thread_id, resolve }) => {
+                assert_eq!((item_id.as_str(), thread_id.as_str(), resolve), ("item-1", "gh-31", true));
+            }
+            other => panic!("Resolve asked nothing: {other:?}"),
+        }
+        assert!(state.is_resolved("gh-31"));
+        assert!(state.is_collapsed(&CardId::Thread("gh-31".into())));
+        assert!(!shown(&harness, "thread-resolve"), "folded away with the card");
+    }
+
+    /// A resolved thread offers Unresolve. The thread shows the click at
+    /// once, and a second click waits for GitHub; a refusal puts the
+    /// thread back as the threads have it.
+    #[test]
+    fn a_resolved_thread_offers_unresolve_and_takes_one_click_until_github_answers() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let thread = resolvable_thread(true);
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = follow_up(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "thread-unresolve"));
+
+        click(&mut harness, "thread-unresolve");
+        assert!(
+            matches!(commands.try_recv(), Ok(Command::ResolveThread { resolve: false, .. })),
+            "Unresolve asks to unresolve"
+        );
+        assert!(shown(&harness, "thread-resolve"), "shown unresolved before GitHub answers");
+        assert!(!shown(&harness, "thread-unresolve"));
+        click(&mut harness, "thread-resolve");
+        assert!(commands.try_recv().is_err(), "the first ask is unanswered");
+
+        state.settle_resolution("gh-31");
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "thread-unresolve"), "refused, it is as GitHub has it");
+        assert!(!shown(&harness, "thread-resolve"));
+    }
+
+    /// Only where GitHub lets the reader, and not while the composer has
+    /// the row.
+    #[test]
+    fn resolve_is_absent_where_github_does_not_let_the_reader_and_while_composing() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let mut thread = resolvable_thread(false);
+        thread.can_resolve = false;
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = follow_up(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(!shown(&harness, "thread-resolve"));
+        assert!(shown(&harness, "Follow up"), "the line is there all the same");
+
+        thread.can_resolve = true;
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "thread-resolve"));
+        let line = find(harness.root_id(), "Follow up").unwrap().get_visual_rect_no_clip();
+        let button = find(harness.root_id(), "thread-resolve").unwrap().get_visual_rect_no_clip();
+        assert!(button.x0 > line.x1 && button.x1 <= 600.0, "at the end of the line: {line:?} {button:?}");
+        assert!((button.center().y - line.center().y).abs() < 1.0, "on its row: {line:?} {button:?}");
+
+        state.open_composer(Some(thread.id.clone()), thread.anchor.clone(), String::new(), sonnet_medium());
+        harness.rebuild();
+        harness.paint();
+        assert!(!shown(&harness, "thread-resolve"));
+        let composer = find(harness.root_id(), "composer-box").expect("the composer is under the thread");
+        assert_eq!(harness.get_layout_rect(composer).width(), 600.0, "and has the row to itself");
+        state.close_composer();
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "thread-resolve"));
+    }
+
+    /// A thread of Perch's own, the reader's question and an agent's
+    /// answer, resolves too, in Perch. A finding's has Dismiss and Reopen
+    /// instead, and no Resolve.
+    #[test]
+    fn a_thread_of_perchs_own_resolves_in_perch_and_a_findings_does_not() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let thread = finding_thread("because");
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = follow_up(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "thread-resolve"), "the reader's own, whatever GitHub allows");
+
+        click(&mut harness, "thread-resolve");
+        assert!(
+            matches!(
+                commands.try_recv(),
+                Ok(Command::ResolveThread { thread_id, resolve: true, .. }) if thread_id == "finding-1"
+            ),
+            "Resolve asks the backend, which keeps it in Perch"
+        );
+        assert!(state.is_resolved("finding-1"));
+        assert!(shown(&harness, "thread-unresolve"));
+        state.settle_resolution("finding-1");
+
+        // Once the thread is a finding's, the finding's controls say what
+        // becomes of it.
+        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
+        app.update_review_finding(
+            "item-1".into(),
+            crate::review::model::ReviewFindingSummary {
+                finding: perch_github::Finding {
+                    id: "f-1".into(),
+                    item_id: "item-1".into(),
+                    stable_key: "lock".into(),
+                    thread_id: "finding-1".into(),
+                    created_group_id: None,
+                    disposition: perch_github::FindingDisposition::Open,
+                    verification: perch_github::FindingVerification::Unverified,
+                    dismissal_reason: None,
+                    possible_duplicate_of: None,
+                    duplicate_of: None,
+                    last_verified_snapshot_id: None,
+                    last_verified_head_sha: None,
+                    last_checked_snapshot_id: None,
+                    last_checked_head_sha: None,
+                    created_at: at,
+                    updated_at: at,
+                },
+                severity: perch_github::FindingSeverity::High,
+                attributions: Vec::new(),
+                seen_in_reviews: Vec::new(),
+                backend: None,
+                model: None,
+                original_review_number: None,
+            },
+        );
+        harness.rebuild();
+        harness.paint();
+        assert!(!shown(&harness, "thread-resolve"));
+        assert!(!shown(&harness, "thread-unresolve"));
     }
 
     /// At the foot of a pull request's conversation GitHub is offered

@@ -117,6 +117,8 @@ mod tests {
                 anchor: Some(Anchor { path: "src/manifest.rs".into(), start_line: 41, line: 41, side: Side::Right, commit_sha: "h".into() }),
                 outdated: false,
                 resolved: false,
+                node_id: None,
+                can_resolve: false,
                 created_at: at("2026-09-16T11:38:00Z"),
                 messages: vec![
                     message(31, "2026-09-16T11:38:00Z", "epoch\nsecond line"),

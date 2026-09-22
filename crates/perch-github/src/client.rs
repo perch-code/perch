@@ -16,9 +16,10 @@ use jiff::Timestamp;
 use octocrab::Octocrab;
 
 use crate::discussion::{
-    Discussion, IssueComment, IssueCommentPayload, PullReviewEvent, PullSummary, Review,
-    ReviewComment, ReviewCommentDraft, ReviewCommentPayload, ReviewPayload, ReviewThreadState,
-    ReviewThreadsData, REVIEW_THREADS_MAX_PAGES, REVIEW_THREADS_QUERY,
+    resolve_thread_mutation, Discussion, IssueComment, IssueCommentPayload, PullReviewEvent,
+    PullSummary, ResolveThreadData, Review, ReviewComment, ReviewCommentDraft,
+    ReviewCommentPayload, ReviewPayload, ReviewThreadState, ReviewThreadsData,
+    REVIEW_THREADS_MAX_PAGES, REVIEW_THREADS_QUERY,
 };
 use crate::items::{Issue, IssuePayload};
 use crate::model::{SubjectSnapshot, Thread};
@@ -806,6 +807,26 @@ impl GitHub {
             "more review threads than {REVIEW_THREADS_MAX_PAGES} pages hold; the rest go unread"
         );
         Ok(states)
+    }
+
+    /// Resolve a review thread, or unresolve it, by the thread's GraphQL
+    /// id, and read back whether it is resolved after. Asking for what the
+    /// thread already is is not an error: GitHub answers with it as it is.
+    pub async fn set_review_thread_resolved(
+        &self,
+        node_id: &str,
+        resolve: bool,
+    ) -> Result<bool, Error> {
+        if node_id.is_empty() {
+            return Err(Error::Decode("the thread has no node id".into()));
+        }
+        let payload = serde_json::json!({
+            "query": resolve_thread_mutation(resolve),
+            "variables": { "thread": node_id },
+        });
+        let data: ResolveThreadData = self.graphql(&payload).await?;
+        data.into_resolved()
+            .ok_or_else(|| Error::Decode("GitHub answered without the thread".into()))
     }
 
     /// The reactions on everything in a discussion, as the reader sees

@@ -1201,6 +1201,8 @@ mod tests {
             }),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: at,
             messages: vec![CommentMessage {
                 id: format!("{id}-d1"),

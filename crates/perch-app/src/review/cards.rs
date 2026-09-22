@@ -1524,6 +1524,26 @@ pub fn thread_card(
     })
 }
 
+/// The review finding a thread is the discussion of: from the historical
+/// review being read, or else from the item's. `None` for an ordinary
+/// thread. Tracked.
+pub(crate) fn finding_of(
+    app: AppState,
+    state: ReviewState,
+    thread_id: &str,
+) -> Option<crate::review::model::ReviewFindingSummary> {
+    let item_id = state
+        .item
+        .with(|item| item.as_ref().map(|item| item.id.clone()))?;
+    match state.historical_findings.get() {
+        Some(findings) => findings
+            .iter()
+            .find(|summary| summary.finding.thread_id == thread_id)
+            .cloned(),
+        None => app.review_finding_for_thread(&item_id, thread_id),
+    }
+}
+
 /// Provenance and explicit lifecycle controls for a durable review finding.
 /// Ordinary user-created threads have no finding record and render no row.
 pub(crate) fn finding_controls(
@@ -1537,13 +1557,7 @@ pub(crate) fn finding_controls(
             let item_id = state
                 .item
                 .with(|item| item.as_ref().map(|item| item.id.clone()))?;
-            let summary = match state.historical_findings.get() {
-                Some(findings) => findings
-                    .iter()
-                    .find(|summary| summary.finding.thread_id == thread_id)
-                    .cloned(),
-                None => app.review_finding_for_thread(&item_id, &thread_id),
-            }?;
+            let summary = finding_of(app, state, &thread_id)?;
             let original_group = summary
                 .finding
                 .created_group_id
@@ -1631,7 +1645,7 @@ pub(crate) fn finding_controls(
                     && finding.duplicate_of.is_none()
                     && !historical
                 {
-                    finding_action("Dismiss", move || {
+                    thread_action("Dismiss", move || {
                         dismiss_backend
                             .dismiss_review_finding(&finding_id, "Dismissed by the user in Perch");
                     })
@@ -1645,7 +1659,7 @@ pub(crate) fn finding_controls(
                 let reopen = if finding.disposition == perch_github::FindingDisposition::Dismissed
                     && !historical
                 {
-                    finding_action("Reopen", move || {
+                    thread_action("Reopen", move || {
                         reopen_backend.reopen_review_finding(&finding_id);
                     })
                     .into_any()
@@ -1661,7 +1675,7 @@ pub(crate) fn finding_controls(
                 ) {
                     (None, Some(candidate)) if !historical => {
                         let candidate = candidate.clone();
-                        finding_action("Link duplicate", move || {
+                        thread_action("Link duplicate", move || {
                             duplicate_backend.link_review_duplicate(&finding_id, &candidate);
                         })
                         .into_any()
@@ -1672,7 +1686,7 @@ pub(crate) fn finding_controls(
                 let finding_id = finding.id.clone();
                 let unlink_backend = backend.clone();
                 let unlink = if finding.duplicate_of.is_some() && !historical {
-                    finding_action("Unlink", move || {
+                    thread_action("Unlink", move || {
                         unlink_backend.unlink_review_duplicate(&finding_id);
                     })
                     .into_any()
@@ -1685,7 +1699,7 @@ pub(crate) fn finding_controls(
                     Some(group) if !historical => {
                         let group_id = group.group.id.clone();
                         let item_id = group.group.item_id.clone();
-                        finding_action("View original", move || {
+                        thread_action("View original", move || {
                             let request_id =
                                 original_backend.open_review_snapshot(&item_id, &group_id);
                             app.begin_historical_review(state, group.clone(), request_id);
@@ -1729,7 +1743,9 @@ pub(crate) fn finding_controls(
     )
 }
 
-fn finding_action(label: &'static str, action: impl Fn() + 'static) -> impl IntoView {
+/// A small bordered button for what can be done to a thread: a finding's
+/// Dismiss and Reopen, and any other's Resolve.
+pub(crate) fn thread_action(label: &'static str, action: impl Fn() + 'static) -> Label {
     Label::derived(move || label.to_string())
         .on_event_stop(el::Click, move |_, _| action())
         .style(|s| {

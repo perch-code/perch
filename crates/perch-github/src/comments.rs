@@ -107,6 +107,12 @@ pub struct CommentThread {
     /// The file changed after the anchor was made; the lines may have moved.
     pub outdated: bool,
     pub resolved: bool,
+    /// The thread's GraphQL id on GitHub, which resolving it goes by.
+    /// `None` for Perch's own, for one on its way, and for one whose
+    /// state GitHub did not say.
+    pub node_id: Option<String>,
+    /// Whether GitHub lets the reader resolve the thread and unresolve it.
+    pub can_resolve: bool,
     pub created_at: Timestamp,
     pub messages: Vec<CommentMessage>,
 }
@@ -144,6 +150,19 @@ impl CommentThread {
     /// Whether anything in the thread went to GitHub, or is going.
     pub fn has_github_message(&self) -> bool {
         self.messages.iter().any(|m| m.origin == ThreadOrigin::GitHub)
+    }
+
+    /// Whether the thread is on GitHub, so that resolving it is GitHub's.
+    /// One on its way there with a draft is not yet.
+    pub fn on_github(&self) -> bool {
+        self.github_id.is_some()
+    }
+
+    /// Whether the reader can resolve the thread, or unresolve it. One on
+    /// GitHub resolves there, where GitHub said they may and named the
+    /// thread to ask it by; any other resolves in Perch.
+    pub fn resolvable(&self) -> bool {
+        !self.on_github() || (self.can_resolve && self.node_id.is_some())
     }
 }
 
@@ -278,6 +297,8 @@ pub fn review_threads_of(
                 anchor,
                 outdated: state.map_or(!at_head, |s| s.outdated),
                 resolved: state.is_some_and(|s| s.resolved),
+                node_id: state.map(|s| s.node_id.clone()).filter(|id| !id.is_empty()),
+                can_resolve: state.is_some_and(|s| s.can_resolve),
                 created_at: root.created_at,
                 messages: vec![github_message(root, root.id)],
             }
@@ -958,6 +979,8 @@ mod tests {
             anchor: None,
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: Timestamp::UNIX_EPOCH,
             messages,
         }
@@ -1136,12 +1159,36 @@ mod tests {
         root.line = None;
         let mut d = discussion(vec![root, comment(2, None, "2026-09-16T11:39:00Z")]);
         d.review_threads = vec![
-            crate::discussion::ReviewThreadState { node_id: "PRRT_1".into(), root_comment_id: 1, resolved: true, outdated: false },
-            crate::discussion::ReviewThreadState { node_id: "PRRT_2".into(), root_comment_id: 2, resolved: false, outdated: true },
+            crate::discussion::ReviewThreadState { node_id: "PRRT_1".into(), root_comment_id: 1, resolved: true, outdated: false, can_resolve: true },
+            crate::discussion::ReviewThreadState { node_id: "PRRT_2".into(), root_comment_id: 2, resolved: false, outdated: true, can_resolve: false },
         ];
         let threads = review_threads_of(&d, "w", "");
         assert!((threads[0].resolved, threads[0].outdated) == (true, false), "GitHub's word wins over the missing line");
         assert!((threads[1].resolved, threads[1].outdated) == (false, true));
+        // Resolving goes by the thread's own id, where GitHub allows it.
+        assert_eq!(threads[0].node_id.as_deref(), Some("PRRT_1"));
+        assert!(threads[0].resolvable());
+        assert_eq!(threads[1].node_id.as_deref(), Some("PRRT_2"));
+        assert!(!threads[1].resolvable(), "GitHub does not let the reader");
+    }
+
+    #[test]
+    fn a_thread_github_said_nothing_about_cannot_be_resolved() {
+        let threads = review_threads_of(&discussion(vec![comment(1, None, "2026-09-16T11:38:00Z")]), "w", "");
+        assert_eq!(threads[0].node_id, None);
+        assert!(!threads[0].can_resolve);
+        assert!(!threads[0].resolvable());
+    }
+
+    #[test]
+    fn a_thread_not_on_github_resolves_in_perch() {
+        let mut t = thread_of(Vec::new());
+        assert!(!t.on_github());
+        assert!(t.resolvable(), "Perch's own");
+        t.origin = ThreadOrigin::GitHub;
+        assert!(t.resolvable(), "on its way with a draft, and not there yet");
+        t.github_id = Some(3);
+        assert!(!t.resolvable(), "on GitHub, and GitHub has not said the reader may");
     }
 
     #[test]

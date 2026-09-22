@@ -32,9 +32,10 @@ mod review_store;
 /// node id, link, hunk and reactions of each comment, and fills them from
 /// the discussions already kept. Version 22 moves who did a thing off the
 /// merge event and onto every event, for the rest of what GitHub's
-/// timeline lists. Schemas 13 through 21 migrate in place so local
-/// conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 22;
+/// timeline lists. Version 23 keeps each GitHub thread's own id and
+/// whether the reader may resolve it. Schemas 13 through 22 migrate in
+/// place so local conversations and agent history are never discarded.
+pub const SCHEMA_VERSION: u32 = 23;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -168,7 +169,9 @@ CREATE TABLE comment_threads (
     commit_sha     TEXT,
     outdated       INTEGER NOT NULL DEFAULT 0,
     resolved       INTEGER NOT NULL DEFAULT 0,
-    created_at     TEXT NOT NULL
+    created_at     TEXT NOT NULL,
+    node_id        TEXT,
+    can_resolve    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX comment_threads_worktree ON comment_threads(worktree_id);
 CREATE TABLE discussions (
@@ -308,6 +311,13 @@ CREATE INDEX comment_messages_thread ON comment_messages(thread_id);
 /// GitHub carries besides its text.
 const GITHUB_MESSAGE_COLUMNS: [&str; 4] = ["node_id", "html_url", "diff_hunk", "reactions_json"];
 
+/// The columns schema 23 adds to a comment thread, with their types: what
+/// resolving a thread from GitHub needs.
+const GITHUB_THREAD_COLUMNS: [(&str, &str); 2] = [
+    ("node_id", "TEXT"),
+    ("can_resolve", "INTEGER NOT NULL DEFAULT 0"),
+];
+
 fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
     let objects: i64 = conn.query_row(
         "SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
@@ -371,6 +381,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             19 => tx.execute_batch(NOTIFICATION_DISMISSAL_SCHEMA)?,
             20 => migrate_20_to_21(&tx)?,
             21 => migrate_21_to_22(&tx)?,
+            22 => add_github_thread_columns(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -460,6 +471,9 @@ fn migrate_16_to_17(tx: &Transaction<'_>) -> Result<(), CacheError> {
 /// ingested so an upgraded install shows its threads before its first
 /// fetch. A discussion row that no longer reads is passed over.
 fn migrate_20_to_21(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    // Ingesting writes a thread's columns as they are now, schema 23's
+    // among them.
+    add_github_thread_columns(tx)?;
     for column in GITHUB_MESSAGE_COLUMNS {
         let present: bool = tx.query_row(
             "SELECT EXISTS(
@@ -490,6 +504,28 @@ fn migrate_20_to_21(tx: &Transaction<'_>) -> Result<(), CacheError> {
         let head_sha = item_head_sha_on(tx, &item_id)?;
         let threads = comments::review_threads_of(&discussion, &item_id, &head_sha);
         ingest_review_threads(tx, &item_id, &threads)?;
+    }
+    Ok(())
+}
+
+/// A comment thread gains its id on GitHub and whether the reader may
+/// resolve it, each left empty until the next fetch says. Also run ahead
+/// of schema 21's ingestion, which writes them.
+fn add_github_thread_columns(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    for (column, kind) in GITHUB_THREAD_COLUMNS {
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM pragma_table_info('comment_threads') WHERE name=?1
+             )",
+            params![column],
+            |row| row.get(0),
+        )?;
+        if !present {
+            tx.execute(
+                &format!("ALTER TABLE comment_threads ADD COLUMN {column} {kind}"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }
@@ -590,15 +626,16 @@ pub(crate) fn ingest_review_threads(
         conn.execute(
             "INSERT INTO comment_threads
              (id, worktree_id, origin, github_id, path, start_line, line, side, commit_sha,
-              outdated, resolved, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+              outdated, resolved, created_at, node_id, can_resolve)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                 worktree_id=excluded.worktree_id, origin=excluded.origin,
                 github_id=excluded.github_id, path=excluded.path,
                 start_line=excluded.start_line, line=excluded.line, side=excluded.side,
                 commit_sha=excluded.commit_sha, outdated=excluded.outdated,
                 resolved=excluded.resolved,
-                created_at=min(created_at, excluded.created_at)",
+                created_at=min(created_at, excluded.created_at),
+                node_id=excluded.node_id, can_resolve=excluded.can_resolve",
             params![
                 thread_id,
                 item_id,
@@ -612,6 +649,8 @@ pub(crate) fn ingest_review_threads(
                 thread.outdated as i64,
                 thread.resolved as i64,
                 thread.created_at.to_string(),
+                thread.node_id,
+                thread.can_resolve as i64,
             ],
         )?;
         for message in &thread.messages {
@@ -692,7 +731,8 @@ pub(crate) fn ingest_review_threads(
 
     for id in stale_thread_rows(conn, item_id, &roots)? {
         conn.execute(
-            "UPDATE comment_threads SET github_id = NULL WHERE id = ?1",
+            "UPDATE comment_threads SET github_id = NULL, node_id = NULL, can_resolve = 0
+             WHERE id = ?1",
             params![id],
         )?;
     }
@@ -2447,7 +2487,7 @@ impl Cache {
     ) -> Result<Vec<CommentThread>, CacheError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, origin, path, start_line, line, side, commit_sha, outdated, resolved,
-                    created_at, github_id
+                    created_at, github_id, node_id, can_resolve
              FROM comment_threads WHERE worktree_id = ?1 ORDER BY created_at",
         )?;
         let rows = stmt.query_map(params![worktree_id], |r| {
@@ -2463,13 +2503,28 @@ impl Cache {
                 r.get::<_, i64>(8)?,
                 r.get::<_, String>(9)?,
                 r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, i64>(12)?,
             ))
         })?;
 
         let mut threads = Vec::new();
         for row in rows {
-            let (id, origin, path, start, line, side, sha, outdated, resolved, created, github_id) =
-                row?;
+            let (
+                id,
+                origin,
+                path,
+                start,
+                line,
+                side,
+                sha,
+                outdated,
+                resolved,
+                created,
+                github_id,
+                node_id,
+                can_resolve,
+            ) = row?;
             let Ok(created_at) = created.parse::<Timestamp>() else {
                 continue;
             };
@@ -2492,6 +2547,8 @@ impl Cache {
                 anchor,
                 outdated: outdated != 0,
                 resolved: resolved != 0,
+                node_id,
+                can_resolve: can_resolve != 0,
                 created_at,
                 messages,
             });
@@ -2575,8 +2632,8 @@ impl Cache {
         tx.execute(
             "INSERT INTO comment_threads
              (id, worktree_id, origin, github_id, path, start_line, line, side, commit_sha,
-              outdated, resolved, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              outdated, resolved, created_at, node_id, can_resolve)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 t.id,
                 t.worktree_id,
@@ -2590,6 +2647,8 @@ impl Cache {
                 t.outdated as i64,
                 t.resolved as i64,
                 t.created_at.to_string(),
+                t.node_id,
+                t.can_resolve as i64,
             ],
         )?;
         for m in &t.messages {
@@ -3208,6 +3267,16 @@ impl Cache {
         self.conn.execute(
             "UPDATE comment_threads SET outdated = ?2 WHERE id = ?1",
             params![id, outdated as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Keep what GitHub answered when the reader resolved a thread or
+    /// unresolved it, until the next fetch says the same.
+    pub fn set_thread_resolved(&self, id: &str, resolved: bool) -> Result<(), CacheError> {
+        self.conn.execute(
+            "UPDATE comment_threads SET resolved = ?2 WHERE id = ?1",
+            params![id, resolved as i64],
         )?;
         Ok(())
     }
@@ -3998,6 +4067,8 @@ mod tests {
             }),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: stamp("2026-09-18T09:59:00Z"),
             messages: vec![
                 CommentMessage {
@@ -5740,6 +5811,60 @@ mod tests {
     }
 
     #[test]
+    fn a_github_thread_keeps_its_id_there_and_whether_the_reader_may_resolve_it() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        let mut d = discussion();
+        d.review_threads = vec![crate::discussion::ReviewThreadState {
+            node_id: "PRRT_3".into(),
+            root_comment_id: 3,
+            resolved: false,
+            outdated: false,
+            can_resolve: true,
+        }];
+        c.store_discussion("item-pr-7", &d).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        assert_eq!(t.node_id.as_deref(), Some("PRRT_3"));
+        assert!(t.can_resolve && t.resolvable());
+        assert!(!t.resolved);
+
+        // Resolved from Perch, and kept so until a fetch says otherwise.
+        c.set_thread_resolved("gh-3", true).unwrap();
+        assert!(c.load_comment_threads("item-pr-7").unwrap()[0].resolved);
+        d.review_threads[0].resolved = true;
+        c.store_discussion("item-pr-7", &d).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        assert!(t.resolved && t.resolvable());
+
+        // Gone from GitHub and kept for Perch's message under it, it is
+        // resolved in Perch from here on.
+        let question = CommentMessage {
+            id: "q1".into(),
+            thread_id: "gh-3".into(),
+            origin: ThreadOrigin::Local,
+            author: Author::User,
+            body: "what does this mean?".into(),
+            created_at: stamp_of("2026-09-16T12:00:00Z"),
+            run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
+        };
+        c.insert_comment_message(&question).unwrap();
+        let mut gone = d.clone();
+        gone.review_comments.clear();
+        gone.review_threads.clear();
+        c.store_discussion("item-pr-7", &gone).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        assert_eq!((t.id.as_str(), t.github_id, t.node_id.as_deref()), ("gh-3", None, None));
+        assert!(!t.can_resolve);
+        assert!(t.resolved, "as GitHub last had it");
+        assert!(t.resolvable(), "Perch's now, and resolved in Perch");
+    }
+
+    #[test]
     fn deleting_perchs_messages_under_a_github_thread_leaves_the_thread_and_githubs() {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
@@ -6325,6 +6450,14 @@ mod tests {
         let path = dir.path().join("perch.db");
         let item = pr_item(20);
         let local = comment_thread("local-20", &item.id);
+        let mut kept = discussion();
+        kept.review_threads = vec![crate::discussion::ReviewThreadState {
+            node_id: "PRRT_3".into(),
+            root_comment_id: 3,
+            resolved: true,
+            outdated: false,
+            can_resolve: false,
+        }];
         {
             let cache = Cache::open(&path, None).unwrap();
             cache.insert_item(&item).unwrap();
@@ -6335,6 +6468,13 @@ mod tests {
                     .execute(&format!("ALTER TABLE comment_messages DROP COLUMN {column}"), [])
                     .unwrap();
             }
+            // Schema 23's, which the ingestion here writes.
+            for (column, _) in GITHUB_THREAD_COLUMNS {
+                cache
+                    .conn
+                    .execute(&format!("ALTER TABLE comment_threads DROP COLUMN {column}"), [])
+                    .unwrap();
+            }
             cache
                 .conn
                 .execute(
@@ -6342,7 +6482,7 @@ mod tests {
                     params![
                         item.id,
                         "2026-09-18T09:00:00Z",
-                        serde_json::to_string(&discussion()).unwrap()
+                        serde_json::to_string(&kept).unwrap()
                     ],
                 )
                 .unwrap();
@@ -6368,6 +6508,8 @@ mod tests {
         let ids: Vec<_> = threads.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, vec!["gh-3", "local-20"]);
         assert_eq!(threads[0].messages[0].node_id.as_deref(), Some("PRRC_3"));
+        assert!(threads[0].resolved);
+        assert_eq!(threads[0].node_id.as_deref(), Some("PRRT_3"));
         assert_eq!(
             threads[0].anchor.as_ref().map(|a| a.commit_sha.as_str()),
             Some("abc123")
@@ -6421,6 +6563,35 @@ mod tests {
             ]
         );
         assert!(cache.load_discussion("broken").unwrap().is_none());
+    }
+
+    #[test]
+    fn schema_22_gains_each_threads_id_on_github_and_leaves_the_rest_to_the_next_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let item = pr_item(22);
+        let local = comment_thread("local-22", &item.id);
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&item).unwrap();
+            cache.insert_comment_thread(&local).unwrap();
+            for (column, _) in GITHUB_THREAD_COLUMNS {
+                cache
+                    .conn
+                    .execute(&format!("ALTER TABLE comment_threads DROP COLUMN {column}"), [])
+                    .unwrap();
+            }
+            cache.set_meta("schema_version", "22").unwrap();
+        }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 22, to: SCHEMA_VERSION });
+        let threads = cache.load_comment_threads(&item.id).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!((threads[0].node_id.as_deref(), threads[0].can_resolve), (None, false));
+        assert_eq!(threads[0].messages.len(), local.messages.len(), "nothing under it lost");
+        cache.set_thread_resolved("local-22", true).unwrap();
+        assert!(cache.load_comment_threads(&item.id).unwrap()[0].resolved);
     }
 
     #[test]

@@ -1107,6 +1107,11 @@ pub struct ReviewState {
     /// kind. A pill in flight takes no second click, and a discussion that
     /// lands meanwhile does not put its older count over the toggle.
     pub reacting: RwSignal<HashSet<(String, ReactionKind)>>,
+    /// The threads whose resolve or unresolve is not yet answered, by
+    /// thread id, and whether resolved is what was asked. The thread shows
+    /// as asked until the answer, whatever thread lists land meanwhile,
+    /// and takes no second click.
+    pub resolving: RwSignal<HashMap<String, bool>>,
     /// The workflow runs' verdict for the head, once fetched. `None` means
     /// unknown, and the summary has no Checks row.
     pub checks: RwSignal<Option<Arc<Checks>>>,
@@ -1429,6 +1434,7 @@ impl ReviewState {
             discussion: RwSignal::new(None),
             reactions: RwSignal::new(HashMap::new()),
             reacting: RwSignal::new(HashSet::new()),
+            resolving: RwSignal::new(HashMap::new()),
             checks: RwSignal::new(None),
             pull_request_overview: RwSignal::new(None),
             pull_request_overview_loading: RwSignal::new(false),
@@ -1578,6 +1584,7 @@ impl ReviewState {
         self.discussion.set(None);
         self.reactions.set(HashMap::new());
         self.reacting.set(HashSet::new());
+        self.resolving.set(HashMap::new());
         self.checks.set(None);
         self.pull_request_overview.set(None);
         self.pull_request_overview_loading.set(false);
@@ -2843,14 +2850,62 @@ impl ReviewState {
         self.collapsed_cards.with(|c| c.contains(card))
     }
 
-    /// Whether the card is a thread's that GitHub says is resolved.
-    /// Tracked on the threads.
+    /// Whether the card is a resolved thread's, or one the reader has just
+    /// asked to resolve. Tracked.
     fn thread_resolved(&self, card: &CardId) -> bool {
         let CardId::Thread(id) = card else {
             return false;
         };
+        self.is_resolved(id)
+    }
+
+    /// Whether a thread is resolved: as asked while the ask is out, else
+    /// as the threads say. Tracked on both.
+    pub fn is_resolved(&self, thread_id: &str) -> bool {
+        if let Some(asked) = self.resolving.with(|r| r.get(thread_id).copied()) {
+            return asked;
+        }
         self.comment_threads
-            .with(|threads| threads.iter().any(|t| &t.id == id && t.resolved))
+            .with(|threads| threads.iter().any(|t| t.id == thread_id && t.resolved))
+    }
+
+    /// Whether a resolve or unresolve of the thread is not yet answered.
+    /// Tracked.
+    pub fn is_resolving(&self, thread_id: &str) -> bool {
+        self.resolving.with(|r| r.contains_key(thread_id))
+    }
+
+    /// The reader resolves a thread, or unresolves it: the thread shows
+    /// it before the backend is asked. A thread resolved here folds in
+    /// the code, as one resolved on GitHub arrives folded, whatever the
+    /// reader opened before. Whether to ask: not while an earlier ask
+    /// about the thread is unanswered.
+    pub fn begin_resolve(&self, thread_id: &str, resolve: bool) -> bool {
+        if self.resolving.with_untracked(|r| r.contains_key(thread_id)) {
+            return false;
+        }
+        let card = CardId::Thread(thread_id.to_string());
+        floem::reactive::Effect::batch(|| {
+            if resolve && self.opened_cards.with_untracked(|c| c.contains(&card)) {
+                self.opened_cards.update(|c| {
+                    c.remove(&card);
+                });
+            }
+            self.resolving.update(|r| {
+                r.insert(thread_id.to_string(), resolve);
+            });
+        });
+        true
+    }
+
+    /// The ask about a thread was answered, or did not go: the thread
+    /// shows as the thread list says, which the answer came after.
+    pub fn settle_resolution(&self, thread_id: &str) {
+        if self.resolving.with_untracked(|r| r.contains_key(thread_id)) {
+            self.resolving.update(|r| {
+                r.remove(thread_id);
+            });
+        }
     }
 
     /// A card has been laid out, and its height takes `rows`: what the
@@ -3907,6 +3962,8 @@ mod tests {
             }),
             outdated,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: at,
             messages: Vec::new(),
         };
@@ -3952,6 +4009,8 @@ mod tests {
             }),
             outdated,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: at,
             messages: vec![CommentMessage {
                 id: format!("{id}-m1"),
@@ -4261,6 +4320,8 @@ mod tests {
             }),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: at,
             messages: (0..=replies)
                 .map(|i| CommentMessage {

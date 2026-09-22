@@ -437,6 +437,8 @@ pub(crate) mod tests {
             anchor: Some(Anchor { path: "src/x.rs".into(), start_line: 41, line: 58, side: Side::Right, commit_sha: "h".into() }),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: at(created),
             messages: vec![CommentMessage {
                 id: format!("{id}-q"),

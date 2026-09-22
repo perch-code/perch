@@ -1380,6 +1380,11 @@ impl AppState {
                     review.revert_reaction(&node_id, kind, add);
                 }
             }
+            Event::ThreadResolveSettled { item_id, thread_id } => {
+                if review.is_item(&item_id) {
+                    review.settle_resolution(&thread_id);
+                }
+            }
             Event::FileFailed {
                 navigation_id,
                 scope_gen,
@@ -1887,6 +1892,7 @@ impl AppState {
             | Event::IssueComments { .. }
             | Event::ReactionsUpdated { .. }
             | Event::ReactionFailed { .. }
+            | Event::ThreadResolveSettled { .. }
             | Event::ChecksReady { .. }
             | Event::PullRequestOverviewLoading { .. }
             | Event::PullRequestOverviewReady { .. }
@@ -2948,6 +2954,71 @@ mod tests {
         assert!(!review.is_reacting("IC_1", ReactionKind::Heart));
     }
 
+    /// One of GitHub's threads on the item, `resolved` or not, which the
+    /// reader may resolve.
+    fn github_thread(resolved: bool) -> perch_github::CommentThread {
+        perch_github::CommentThread {
+            id: "gh-31".into(),
+            worktree_id: "wt".into(),
+            origin: perch_github::ThreadOrigin::GitHub,
+            github_id: Some(31),
+            anchor: None,
+            outdated: false,
+            resolved,
+            node_id: Some("PRRT_31".into()),
+            can_resolve: true,
+            created_at: "2026-09-19T12:00:00Z".parse().unwrap(),
+            messages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_resolve_shows_before_github_answers_and_the_threads_say_after() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        let threads = |resolved: bool| Event::CommentThreads {
+            item_id: "wt".into(),
+            threads: vec![github_thread(resolved)],
+            review_group_id: None,
+            review_request_id: None,
+        };
+        app.apply_with_review(threads(false), review);
+        assert!(!review.is_resolved("gh-31"));
+
+        // Shown resolved before GitHub is asked, and asked once.
+        assert!(review.begin_resolve("gh-31", true));
+        assert!(review.is_resolved("gh-31"));
+        assert!(review.is_resolving("gh-31"));
+        assert!(!review.begin_resolve("gh-31", false), "the first ask is unanswered");
+        // A thread list read before the answer does not undo it.
+        app.apply_with_review(threads(false), review);
+        assert!(review.is_resolved("gh-31"));
+
+        // GitHub took it: the threads come first, then the settling.
+        app.apply_with_review(threads(true), review);
+        let settled = |item: &str| Event::ThreadResolveSettled {
+            item_id: item.into(),
+            thread_id: "gh-31".into(),
+        };
+        app.apply_with_review(settled("other"), review);
+        assert!(review.is_resolving("gh-31"), "another item's answer is not this one's");
+        app.apply_with_review(settled("wt"), review);
+        assert!(!review.is_resolving("gh-31"));
+        assert!(review.is_resolved("gh-31"));
+
+        // Refused: the threads never changed, and the thread is back as
+        // they have it.
+        assert!(review.begin_resolve("gh-31", false));
+        assert!(!review.is_resolved("gh-31"));
+        app.apply_with_review(settled("wt"), review);
+        assert!(review.is_resolved("gh-31"));
+
+        // Leaving the item forgets an ask in flight.
+        assert!(review.begin_resolve("gh-31", false));
+        review.close();
+        assert!(!review.is_resolving("gh-31"));
+    }
+
     #[test]
     fn an_issue_lands_with_the_reactions_on_its_body_and_comments() {
         use perch_github::{ReactionKind, Reactions};
@@ -3513,6 +3584,8 @@ mod tests {
             anchor: None,
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at: "2026-09-19T12:00:00Z".parse().unwrap(),
             messages: Vec::new(),
         }]));

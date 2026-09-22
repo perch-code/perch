@@ -3169,6 +3169,8 @@ mod window {
             }),
             outdated,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at,
             messages: vec![
                 message("m1", Author::User, "why?", None),
@@ -3210,6 +3212,8 @@ mod window {
             }),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at,
             messages: bodies
                 .iter()
@@ -4000,6 +4004,8 @@ mod window {
             }),
             outdated: false,
             resolved: false,
+            node_id: None,
+            can_resolve: false,
             created_at,
             messages: bodies
                 .iter()

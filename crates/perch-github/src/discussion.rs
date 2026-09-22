@@ -132,10 +132,15 @@ impl Discussion {
 /// thread's first comment, which is the only id the REST list shares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewThreadState {
+    /// The thread's GraphQL id, which it is resolved by.
     pub node_id: String,
     pub root_comment_id: u64,
     pub resolved: bool,
     pub outdated: bool,
+    /// Whether GitHub lets the reader resolve the thread and unresolve
+    /// it. False on a row an older build kept, which did not ask.
+    #[serde(default)]
+    pub can_resolve: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -433,6 +438,8 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: Str
           id
           is_resolved: isResolved
           is_outdated: isOutdated
+          viewer_can_resolve: viewerCanResolve
+          viewer_can_unresolve: viewerCanUnresolve
           comments(first: 1) {
             nodes {
               database_id: databaseId
@@ -491,6 +498,10 @@ struct ReviewThreadPayload {
     #[serde(default)]
     is_outdated: bool,
     #[serde(default)]
+    viewer_can_resolve: bool,
+    #[serde(default)]
+    viewer_can_unresolve: bool,
+    #[serde(default)]
     comments: ReviewThreadCommentsPayload,
 }
 
@@ -524,6 +535,10 @@ impl ReviewThreadsData {
                     root_comment_id,
                     resolved: t.is_resolved,
                     outdated: t.is_outdated,
+                    // GitHub may answer only for the way the thread can
+                    // go from where it is; whoever may take it one way
+                    // may take it back.
+                    can_resolve: t.viewer_can_resolve || t.viewer_can_unresolve,
                 })
             })
             .collect();
@@ -532,6 +547,46 @@ impl ReviewThreadsData {
             .end_cursor
             .filter(|_| connection.page_info.has_next_page);
         Some((threads, next))
+    }
+}
+
+/// Resolve a review thread, or unresolve it, and read back whether it is
+/// resolved after.
+pub(crate) fn resolve_thread_mutation(resolve: bool) -> String {
+    let field = if resolve {
+        "resolveReviewThread"
+    } else {
+        "unresolveReviewThread"
+    };
+    format!(
+        "mutation($thread: ID!) {{ {field}(input: {{threadId: $thread}}) {{ thread {{ isResolved }} }} }}"
+    )
+}
+
+/// The mutation's answer: the thread as it stands after.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResolveThreadData {
+    #[serde(default, rename = "resolveReviewThread", alias = "unresolveReviewThread")]
+    payload: Option<ResolveThreadPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveThreadPayload {
+    #[serde(default)]
+    thread: Option<ResolvedThreadPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolvedThreadPayload {
+    #[serde(rename = "isResolved")]
+    is_resolved: bool,
+}
+
+impl ResolveThreadData {
+    /// Whether the thread is resolved now. `None` when GitHub answered
+    /// without the thread.
+    pub(crate) fn into_resolved(self) -> Option<bool> {
+        Some(self.payload?.thread?.is_resolved)
     }
 }
 
@@ -742,7 +797,13 @@ mod tests {
         let (threads, next) = data.into_page().unwrap();
         assert_eq!(
             threads,
-            vec![ReviewThreadState { node_id: "PRRT_1".into(), root_comment_id: 3, resolved: true, outdated: false }]
+            vec![ReviewThreadState {
+                node_id: "PRRT_1".into(),
+                root_comment_id: 3,
+                resolved: true,
+                outdated: false,
+                can_resolve: false,
+            }]
         );
         assert_eq!(next.as_deref(), Some("c2"));
 
@@ -754,6 +815,64 @@ mod tests {
         assert_eq!(last.into_page().unwrap(), (vec![], None));
         let gone: ReviewThreadsData = serde_json::from_str(r#"{"repository":null}"#).unwrap();
         assert!(gone.into_page().is_none());
+    }
+
+    /// GitHub says whether the reader may resolve a thread that is open
+    /// and whether they may unresolve one that is resolved; either is
+    /// leave to do both.
+    #[test]
+    fn a_thread_the_reader_may_resolve_or_unresolve_can_be_resolved() {
+        let data: ReviewThreadsData = serde_json::from_str(
+            r#"{"repository":{"pull_request":{"review_threads":{
+                "page_info":{"has_next_page":false,"end_cursor":null},
+                "nodes":[
+                  {"id":"PRRT_1","is_resolved":false,"is_outdated":false,
+                   "viewer_can_resolve":true,"viewer_can_unresolve":false,
+                   "comments":{"nodes":[{"database_id":1}]}},
+                  {"id":"PRRT_2","is_resolved":true,"is_outdated":false,
+                   "viewer_can_resolve":false,"viewer_can_unresolve":true,
+                   "comments":{"nodes":[{"database_id":2}]}},
+                  {"id":"PRRT_3","is_resolved":false,"is_outdated":false,
+                   "viewer_can_resolve":false,"viewer_can_unresolve":false,
+                   "comments":{"nodes":[{"database_id":3}]}}
+                ]}}}}"#,
+        )
+        .unwrap();
+        let (threads, _) = data.into_page().unwrap();
+        let can: Vec<bool> = threads.iter().map(|t| t.can_resolve).collect();
+        assert_eq!(can, vec![true, true, false]);
+        // The names read are the ones the query asks for.
+        assert!(REVIEW_THREADS_QUERY.contains("viewer_can_resolve: viewerCanResolve"));
+        assert!(REVIEW_THREADS_QUERY.contains("viewer_can_unresolve: viewerCanUnresolve"));
+
+        // A state kept by a build that did not ask reads as not allowed.
+        let kept: ReviewThreadState = serde_json::from_str(
+            r#"{"node_id":"PRRT_1","root_comment_id":1,"resolved":false,"outdated":false}"#,
+        )
+        .unwrap();
+        assert!(!kept.can_resolve);
+    }
+
+    #[test]
+    fn resolving_and_unresolving_are_two_mutations_that_answer_with_the_thread() {
+        let resolve = resolve_thread_mutation(true);
+        assert!(resolve.contains("resolveReviewThread(input: {threadId: $thread})"), "{resolve}");
+        assert!(!resolve.contains("unresolve"), "{resolve}");
+        assert!(resolve_thread_mutation(false).contains("unresolveReviewThread("));
+
+        let resolved: ResolveThreadData = serde_json::from_str(
+            r#"{"resolveReviewThread":{"thread":{"isResolved":true}}}"#,
+        )
+        .unwrap();
+        assert_eq!(resolved.into_resolved(), Some(true));
+        let unresolved: ResolveThreadData = serde_json::from_str(
+            r#"{"unresolveReviewThread":{"thread":{"isResolved":false}}}"#,
+        )
+        .unwrap();
+        assert_eq!(unresolved.into_resolved(), Some(false));
+        let empty: ResolveThreadData =
+            serde_json::from_str(r#"{"resolveReviewThread":null}"#).unwrap();
+        assert_eq!(empty.into_resolved(), None);
     }
 
     #[test]
@@ -819,6 +938,7 @@ mod tests {
                 root_comment_id: 3,
                 resolved: true,
                 outdated: false,
+                can_resolve: true,
             }],
         };
         let json = serde_json::to_string(&d).unwrap();
