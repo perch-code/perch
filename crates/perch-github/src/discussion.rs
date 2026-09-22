@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::comments::Side;
 use crate::pulls::UserRef;
 use crate::reactions::Reactions;
+use crate::timeline::{PullEvent, PullEventKind};
 
 /// The verdict attached to a submitted pull-request review.
 ///
@@ -59,7 +60,8 @@ pub struct Discussion {
     pub reviews: Vec<Review>,
     /// Comments on lines of the diff, each belonging to a review.
     pub review_comments: Vec<ReviewComment>,
-    /// What the pull request did, from its own payload.
+    /// What was done to the pull request or issue, as GitHub's timeline
+    /// lists it, with the opening the timeline has no line for.
     pub events: Vec<PullEvent>,
     /// What GitHub says of each review thread: resolved or not, outdated or
     /// not. Read by a query of its own, so a discussion whose lists came
@@ -123,28 +125,6 @@ impl Discussion {
             .chain(self.review_comments.iter().map(|c| (c.node_id.as_str(), &c.reactions)))
             .filter(|(id, _)| !id.is_empty())
     }
-}
-
-/// One line in the timeline: the pull request was opened, merged, closed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PullEvent {
-    pub kind: PullEventKind,
-    pub at: Timestamp,
-}
-
-/// What happened. `Reopened`, `Draft` and `Ready` have no source in the
-/// pull request payload, which carries only the current state; they exist
-/// so the timeline has a shape for them, and none is produced until the
-/// timeline endpoint is read.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PullEventKind {
-    Opened,
-    Merged { by: Option<String> },
-    Closed,
-    Reopened,
-    Draft,
-    Ready,
 }
 
 /// A review thread as GitHub keeps it: whether someone resolved it, and
@@ -564,6 +544,8 @@ pub(crate) struct PullSummary {
     #[serde(default)]
     pub body: Option<String>,
     #[serde(default)]
+    pub user: Option<UserRef>,
+    #[serde(default)]
     pub created_at: Option<Timestamp>,
     #[serde(default)]
     pub merged: bool,
@@ -579,18 +561,28 @@ impl PullSummary {
     /// The events the payload carries, in time order: opened, then merged
     /// or closed. A merged pull request has a `closed_at` too, and that is
     /// the same moment, so it is not a second event.
+    ///
+    /// GitHub's timeline has no line for the opening, so that one is only
+    /// ever from here; the other two are here as well so a pull request
+    /// whose timeline could not be read still says how it ended.
     pub(crate) fn events(&self) -> Vec<PullEvent> {
+        let login = |user: &Option<UserRef>| {
+            user.as_ref().map(|u| u.login.clone()).unwrap_or_default()
+        };
         let mut events = Vec::new();
         if let Some(at) = self.created_at {
-            events.push(PullEvent { kind: PullEventKind::Opened, at });
+            events.push(PullEvent::new(PullEventKind::Opened, at, login(&self.user)));
         }
         if self.merged {
             if let Some(at) = self.merged_at {
-                let by = self.merged_by.as_ref().map(|u| u.login.clone());
-                events.push(PullEvent { kind: PullEventKind::Merged { by }, at });
+                events.push(PullEvent::new(
+                    PullEventKind::Merged,
+                    at,
+                    login(&self.merged_by),
+                ));
             }
         } else if let Some(at) = self.closed_at {
-            events.push(PullEvent { kind: PullEventKind::Closed, at });
+            events.push(PullEvent::new(PullEventKind::Closed, at, String::new()));
         }
         events
     }
@@ -705,13 +697,13 @@ mod tests {
     #[test]
     fn an_open_pull_request_has_only_been_opened() {
         let events = summary(r#"{"created_at":"2026-09-14T14:02:00Z","merged":false}"#).events();
-        assert_eq!(events, vec![PullEvent { kind: PullEventKind::Opened, at: at("2026-09-14T14:02:00Z") }]);
+        assert_eq!(events, vec![PullEvent::new(PullEventKind::Opened, at("2026-09-14T14:02:00Z"), "")]);
     }
 
     #[test]
     fn a_merged_pull_request_was_merged_by_someone_and_not_also_closed() {
         let events = summary(
-            r#"{"created_at":"2026-09-14T14:02:00Z","merged":true,
+            r#"{"created_at":"2026-09-14T14:02:00Z","user":{"login":"chris"},"merged":true,
                 "merged_at":"2026-09-17T15:00:00Z","merged_by":{"login":"rohan"},
                 "closed_at":"2026-09-17T15:00:00Z"}"#,
         )
@@ -719,8 +711,8 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                PullEvent { kind: PullEventKind::Opened, at: at("2026-09-14T14:02:00Z") },
-                PullEvent { kind: PullEventKind::Merged { by: Some("rohan".into()) }, at: at("2026-09-17T15:00:00Z") },
+                PullEvent::new(PullEventKind::Opened, at("2026-09-14T14:02:00Z"), "chris"),
+                PullEvent::new(PullEventKind::Merged, at("2026-09-17T15:00:00Z"), "rohan"),
             ]
         );
     }
@@ -732,7 +724,7 @@ mod tests {
                 "closed_at":"2026-09-17T15:00:00Z","merged_by":null}"#,
         )
         .events();
-        assert_eq!(events[1], PullEvent { kind: PullEventKind::Closed, at: at("2026-09-17T15:00:00Z") });
+        assert_eq!(events[1], PullEvent::new(PullEventKind::Closed, at("2026-09-17T15:00:00Z"), ""));
     }
 
     #[test]
@@ -818,9 +810,9 @@ mod tests {
                 reactions: Reactions::default(),
             }],
             events: vec![
-                PullEvent { kind: PullEventKind::Opened, at: at("2026-09-14T14:02:00Z") },
-                PullEvent { kind: PullEventKind::Merged { by: None }, at: at("2026-09-17T15:00:00Z") },
-                PullEvent { kind: PullEventKind::Ready, at: at("2026-09-15T15:00:00Z") },
+                PullEvent::new(PullEventKind::Opened, at("2026-09-14T14:02:00Z"), "rohan"),
+                PullEvent::new(PullEventKind::Merged, at("2026-09-17T15:00:00Z"), ""),
+                PullEvent::new(PullEventKind::Ready, at("2026-09-15T15:00:00Z"), ""),
             ],
             review_threads: vec![ReviewThreadState {
                 node_id: "PRRT_1".into(),

@@ -15,6 +15,7 @@ pub mod pulls;
 pub mod reactions;
 pub mod reviews;
 mod subjects;
+pub mod timeline;
 pub mod workflow_runs;
 
 pub use auth::{resolve_token, Token, TokenSource};
@@ -34,8 +35,8 @@ pub use config::{
     LOCAL_OWNER,
 };
 pub use discussion::{
-    Discussion, IssueComment, PullEvent, PullEventKind, PullReviewEvent, Review, ReviewComment,
-    ReviewCommentDraft, ReviewThreadState,
+    Discussion, IssueComment, PullReviewEvent, Review, ReviewComment, ReviewCommentDraft,
+    ReviewThreadState,
 };
 pub use items::{
     Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind,
@@ -58,6 +59,7 @@ pub use reviews::{
     ReviewVerificationInput, ReviewerAttempt, ReviewerOutputSave, ReviewerPhase,
     StoredReviewerOutput, MAX_REVIEW_VERIFICATION_FINDINGS,
 };
+pub use timeline::{PullEvent, PullEventKind, Reference};
 pub use workflow_runs::{
     announced_verdict, worst, Check, CheckKind, CheckRunState, CheckState, Checks,
     WorkflowRunPayload, WorkflowRunQuery,

@@ -31,6 +31,7 @@ use crate::reactions::{
     ReactionsData, NODES_PER_QUERY,
 };
 use crate::subjects::{SubjectLook, SubjectLookData};
+use crate::timeline::{tidy, PullEvent, TimelineEventPayload, TIMELINE_MAX_PAGES};
 use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunsPayload};
 
 /// Page size for the notifications list. GitHub caps `per_page` at 50 here.
@@ -630,11 +631,13 @@ impl GitHub {
     }
 
     /// Everything said on a pull request: description, conversation,
-    /// reviews, and line comments. Three lists, each read to the end, the
-    /// events the pull request's own payload carries, the state of each
-    /// review thread, and the reactions on all of it. The thread states
-    /// and the reactions are the parts that may be missing: a discussion
-    /// whose lists came is returned without them rather than not at all.
+    /// reviews, and line comments. Three lists, each read to the end,
+    /// what GitHub's timeline says was done to it, the state of each
+    /// review thread, and the reactions on all of it. The timeline, the
+    /// thread states and the reactions are the parts that may be missing:
+    /// a discussion whose lists came is returned without them rather than
+    /// not at all, and a missing timeline leaves the opening and ending
+    /// the pull request's own payload carries.
     pub async fn fetch_discussion(
         &self,
         repo_full_name: &str,
@@ -669,6 +672,22 @@ impl GitHub {
                 .collect(),
             review_threads: Vec::new(),
         };
+        match self.fetch_timeline(repo_full_name, number, &discussion.reviews).await {
+            // The timeline has no line for the opening, so that one stays.
+            // It does carry the ending, so the payload's merge or close is
+            // dropped where the timeline said the same thing, and kept
+            // where it did not.
+            Ok(events) => {
+                discussion
+                    .events
+                    .retain(|own| !events.iter().any(|e| e.kind == own.kind && e.at == own.at));
+                discussion.events.extend(events);
+                discussion.events = tidy(std::mem::take(&mut discussion.events));
+            }
+            Err(e) => {
+                tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the timeline");
+            }
+        }
         if !discussion.review_comments.is_empty() {
             match self.fetch_review_thread_states(repo_full_name, number).await {
                 Ok(states) => discussion.review_threads = states,
@@ -681,6 +700,51 @@ impl GitHub {
             tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the reactions");
         }
         Ok(discussion)
+    }
+
+    /// What was done to a pull request or an issue, in time order: the
+    /// commits, the labels, the assignments, the review requests, the
+    /// references and the changes of state, as GitHub's timeline lists
+    /// them. One endpoint answers for both, since the two are numbered
+    /// together.
+    ///
+    /// Everything Perch draws as a card of its own is left out, as is a
+    /// kind this build has no line for. `reviews` is what a dismissal's
+    /// review id is looked up in, since the event itself names no author;
+    /// an issue has none and passes an empty slice.
+    ///
+    /// The list is heterogeneous, so each element is read on its own: one
+    /// shape that does not fit costs its own line and not the page.
+    pub async fn fetch_timeline(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        reviews: &[Review],
+    ) -> Result<Vec<PullEvent>, Error> {
+        let raw: Vec<serde_json::Value> = self
+            .list_pages(
+                &format!("/repos/{repo_full_name}/issues/{number}/timeline"),
+                TIMELINE_MAX_PAGES,
+            )
+            .await?;
+        let reviewer = |id: u64| {
+            reviews
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| r.user.clone())
+                .filter(|user| !user.is_empty())
+        };
+        let events = raw
+            .into_iter()
+            .filter_map(|value| match serde_json::from_value::<TimelineEventPayload>(value) {
+                Ok(payload) => payload.into_event(&reviewer),
+                Err(e) => {
+                    tracing::debug!(repo = repo_full_name, number, error = %e, "skipping a timeline event that did not read");
+                    None
+                }
+            })
+            .collect();
+        Ok(tidy(events))
     }
 
     /// Whether each review thread on a pull request is resolved, and
@@ -910,8 +974,18 @@ impl GitHub {
     /// which is what `list_threads` does too. A hundred a page and a
     /// hundred pages is more discussion than any pull request has.
     async fn list_all<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, Error> {
+        self.list_pages(path, LIST_MAX_PAGES).await
+    }
+
+    /// The same, stopping after `max_pages`. For a list whose tail nobody
+    /// reads.
+    async fn list_pages<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        max_pages: usize,
+    ) -> Result<Vec<T>, Error> {
         let mut all = Vec::new();
-        for page in 1..=LIST_MAX_PAGES {
+        for page in 1..=max_pages {
             let joiner = if path.contains('?') { '&' } else { '?' };
             let body = self
                 .get_text(&format!(

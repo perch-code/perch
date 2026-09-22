@@ -36,7 +36,7 @@ use crate::icons::SidebarIcon;
 use crate::review::markdown;
 use crate::review::model::{Destination, ItemTab, LoadedFile, ReviewState};
 use crate::review::threads::{self, ThreadFace};
-use crate::review::timeline::{event_name, verdict, Card};
+use crate::review::timeline::{event_name, event_pieces, short_sha, verdict, Card, Piece};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
@@ -62,7 +62,7 @@ pub fn key(card: &Card) -> String {
         Card::Review { review } => {
             format!("review:{}:{:?}:{:x}", review.id, review.submitted_at, body_hash(&review.body))
         }
-        Card::Event(e) => format!("event:{}:{}", event_name(&e.kind), e.at),
+        Card::Event(e) => format!("event:{}:{}", event_name(e), e.at),
         Card::Thread(t) => format!(
             "thread:{}:{}:{}:{}",
             t.id,
@@ -1054,25 +1054,32 @@ fn more_row(more: usize) -> impl IntoView {
 // Events
 // ---------------------------------------------------------------------
 
-/// One line, no card chrome: what the pull request did. The dot sits
-/// where the cards' avatars do, and the text where their logins do.
-/// `author` is who opened the pull request, for the Opened line.
+/// One line, no card chrome: what was done to the pull request or the
+/// issue. The dot sits where the cards' avatars do, and the text where
+/// their logins do. `author` is who opened the pull request, for the
+/// Opened line, which GitHub's timeline sends without an actor.
+///
+/// Everything after the name is the event's own pieces: words, a label
+/// in its colours, a commit in the code face, or a reference to open. The
+/// line ends with when it happened.
 pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> impl IntoView {
-    let (actor, name) = match &event.kind {
-        PullEventKind::Merged { by: Some(by) } => (
-            Some(by.clone()),
-            event_name(&PullEventKind::Merged { by: None }),
-        ),
-        PullEventKind::Opened => (author, event_name(&event.kind)),
-        kind => (None, event_name(kind)),
+    let who = match &event.kind {
+        // A commit is signed by a name out of git, which is nobody's
+        // profile.
+        PullEventKind::Committed { author, .. } if event.actor.is_empty() => {
+            (!author.is_empty()).then(|| Name::Plain(author.clone()))
+        }
+        PullEventKind::Opened if event.actor.is_empty() => author.map(Name::Login),
+        _ => (!event.actor.is_empty()).then(|| Name::Login(event.actor.clone())),
     };
     let color = match &event.kind {
         PullEventKind::Opened | PullEventKind::Reopened => theme::OPEN,
-        PullEventKind::Merged { .. } => theme::MERGED,
+        PullEventKind::Merged => theme::MERGED,
         PullEventKind::Closed => theme::CLOSED,
-        PullEventKind::Draft | PullEventKind::Ready => theme::FG_SUBTLE,
+        _ => theme::FG_SUBTLE,
     };
     let at = event.at;
+    let pieces = event_pieces(&event);
     // Half an avatar puts the dot under the byline avatars; the text then
     // starts where their logins do.
     let dot_left = theme::CARD_AVATAR / 2.0 - theme::EVENT_DOT / 2.0;
@@ -1085,9 +1092,9 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
                 .flex_shrink(0.0_f32)
                 .margin_right(text_gap)
         }),
-        match actor {
-            Some(actor) => name_label(
-                move || Name::Login(actor.clone()),
+        match who {
+            Some(who) => name_label(
+                move || who.clone(),
                 |s| {
                     s.font_size(theme::TEXT_META)
                         .font_weight(theme::weight_emphasis())
@@ -1098,14 +1105,18 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
             .into_any(),
             None => Empty::new().into_any(),
         },
-        Label::derived(move || format!("{name} {}", timefmt::relative(at, app.now.get()))).style(
-            |s| {
-                s.font_size(theme::TEXT_META)
-                    .color(theme::FG_MUTED)
-                    .text_ellipsis()
-                    .min_width(0.0)
-            },
-        ),
+        dyn_stack(
+            move || pieces.clone().into_iter().enumerate(),
+            |(i, piece)| format!("{i}:{}", piece.text()),
+            |(_, piece)| event_piece(piece),
+        )
+        .style(|s| s.items_center().gap(4.0).min_width(0.0)),
+        Label::derived(move || timefmt::relative(at, app.now.get())).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::FG_MUTED)
+                .margin_left(4.0)
+                .flex_shrink(0.0_f32)
+        }),
     ))
     .style(move |s| {
         s.items_center()
@@ -1115,6 +1126,69 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
             .border_bottom(1.0)
             .border_color(theme::BORDER_MUTED)
     })
+}
+
+/// One piece of an event's line.
+fn event_piece(piece: Piece) -> floem::AnyView {
+    if piece.text().is_empty() {
+        return Empty::new().into_any();
+    }
+    match piece {
+        Piece::Text(text) => Label::derived(move || text.clone())
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG_MUTED)
+                    .text_ellipsis()
+                    .min_width(0.0)
+            })
+            .into_any(),
+        Piece::Label(label) => crate::review::summary::label_chip(label.name, label.color)
+            .style(|s| s.flex_shrink(0.0_f32))
+            .into_any(),
+        Piece::Sha(sha) => {
+            let short = short_sha(&sha);
+            Label::derived(move || short.clone())
+                .style(|s| {
+                    s.font_family(theme::CODE_FONT_STACK.to_string())
+                        .font_size(theme::CODE_FONT_SIZE)
+                        .color(theme::FG_MUTED)
+                        .flex_shrink(0.0_f32)
+                })
+                .into_any()
+        }
+        Piece::Reference(reference) => {
+            let url = reference.html_url.clone();
+            // A reference GitHub sent without a link is still a line; it
+            // just does not promise to open.
+            let opens = !url.is_empty();
+            let slug = reference.slug();
+            let title = reference.title.clone();
+            Stack::horizontal((
+                Label::derived(move || slug.clone()).style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::FG)
+                        .font_weight(theme::weight_emphasis())
+                        .flex_shrink(0.0_f32)
+                }),
+                Label::derived(move || title.clone()).style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::FG_MUTED)
+                        .text_ellipsis()
+                        .min_width(0.0)
+                }),
+            ))
+            .on_event_stop(el::Click, move |_, _| open_in_browser(&url))
+            .style(move |s| {
+                let s = s.items_center().gap(4.0).min_width(0.0);
+                if opens {
+                    clickable(s)
+                } else {
+                    s
+                }
+            })
+            .into_any()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1788,10 +1862,7 @@ mod tests {
             key(&comment(Some("2026-09-16T09:14:00Z")))
         );
         let event = |kind| {
-            Card::Event(PullEvent {
-                kind,
-                at: at("2026-09-15T09:14:00Z"),
-            })
+            Card::Event(PullEvent::new(kind, at("2026-09-15T09:14:00Z"), "rohan"))
         };
         assert_ne!(
             key(&event(PullEventKind::Opened)),

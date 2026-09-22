@@ -51,6 +51,23 @@ issue is fetched when a notification is opened or when the user opens it by
 repository and number. Its current data and discussion may be cached locally;
 closed history is never backfilled.
 
+## Timeline
+
+Conversation is the item's description, what was said about it, and what was
+done to it, in one column in time order. The doing comes from GitHub's own
+timeline: commits, labels added and removed, assignments, review requests and
+dismissals, renames, milestones, force pushes, references from other issues
+and pull requests, and the opening, merge or close. Each is one line saying
+who did it and when, with a label in its own colours, a commit by its short
+sha and subject, and a reference by where it points. A commit is signed with
+the name git recorded, since it has no account behind it.
+
+What Perch already draws as a card — a comment, a review, a line comment — is
+not repeated as a line, and what GitHub sends but does not itself show, such
+as `mentioned` and `subscribed`, is left out. A kind Perch has no words for is
+dropped rather than guessed at. Ten pages are read for one item, a hundred
+lines to a page.
+
 ## Reactions
 
 Each GitHub entry on Conversation shows the reactions on it under its text:

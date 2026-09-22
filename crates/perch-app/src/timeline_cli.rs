@@ -47,11 +47,14 @@ fn print(id: &str) -> Result<bool, String> {
     if discussion.is_none() && item.subject.is_some() {
         eprintln!("note: nothing is cached for this item yet; open it in the app once");
     }
-    let comments: Vec<perch_github::IssueComment> = match (&item.issue(), &discussion) {
-        (Some(_), Some(d)) => d.comments.clone(),
-        _ => Vec::new(),
-    };
-    let issue = item.issue().map(|i| (i, comments.as_slice()));
+    let (comments, events): (Vec<perch_github::IssueComment>, Vec<perch_github::PullEvent>) =
+        match (&item.issue(), &discussion) {
+            (Some(_), Some(d)) => (d.comments.clone(), d.events.clone()),
+            _ => Default::default(),
+        };
+    let issue = item
+        .issue()
+        .map(|i| (i, comments.as_slice(), events.as_slice()));
     let pull = item.pull_request();
     let cards = timeline(pull, if pull.is_some() { discussion.as_ref() } else { None }, issue, &threads);
     let mut out = String::new();

@@ -896,6 +896,7 @@ impl AppState {
                 review.pull_request_overview_loading.set(overview_loading);
                 review.issue.set(None);
                 review.issue_comments.set(Arc::new(Vec::new()));
+                review.issue_events.set(Arc::new(Vec::new()));
                 // The threads follow on their own event; whatever is here
                 // is the last item's.
                 review.comment_threads.set(Arc::new(Vec::new()));
@@ -909,6 +910,7 @@ impl AppState {
                 item,
                 issue,
                 comments,
+                events,
                 offline,
             } => {
                 if !self.accepts_open_item(navigation_id, &item.id) {
@@ -931,6 +933,7 @@ impl AppState {
                 review.install_issue_reactions(&issue, &comments);
                 review.issue.set(Some(issue));
                 review.issue_comments.set(comments);
+                review.issue_events.set(events);
                 review.comment_threads.set(Arc::new(Vec::new()));
                 review.tab.set(ItemTab::Conversation);
                 review.ready.set(true);
@@ -1327,6 +1330,7 @@ impl AppState {
             Event::IssueComments {
                 item_id,
                 comments,
+                events,
                 body_reactions,
             } => {
                 if review.is_item(&item_id) {
@@ -1339,6 +1343,7 @@ impl AppState {
                             .chain(comments.iter().map(|c| (c.node_id.as_str(), &c.reactions))),
                     );
                     review.issue_comments.set(comments);
+                    review.issue_events.set(events);
                 }
             }
             Event::ReactionsUpdated {
@@ -2905,6 +2910,7 @@ mod tests {
                 item,
                 issue: Arc::new(issue),
                 comments: Arc::new(comments),
+                events: Arc::new(Vec::new()),
                 offline: false,
             },
             review,
@@ -2918,6 +2924,7 @@ mod tests {
             Event::IssueComments {
                 item_id: "wt".into(),
                 comments: Arc::new(discussion_with_reactions(hooray.clone()).comments),
+                events: Arc::new(Vec::new()),
                 body_reactions: Reactions::default(),
             },
             review,

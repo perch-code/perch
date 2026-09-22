@@ -1037,7 +1037,8 @@ fn chip(
 }
 
 /// A label as GitHub draws it: its colour as a tint behind darker text.
-fn label_chip(name: String, color: String) -> impl IntoView {
+/// Shared with the timeline's label lines, which draw the same pill.
+pub(crate) fn label_chip(name: String, color: String) -> impl IntoView {
     let (tint, ink) = label_colors(&color);
     chip(name, tint, ink, None)
 }

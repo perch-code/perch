@@ -422,6 +422,8 @@ pub enum Event {
         item: Arc<Item>,
         issue: Arc<perch_github::Issue>,
         comments: Arc<Vec<perch_github::IssueComment>>,
+        /// What GitHub's timeline says was done to the issue.
+        events: Arc<Vec<perch_github::PullEvent>>,
         /// True when the fetch failed and this is the snapshot alone.
         offline: bool,
     },
@@ -587,6 +589,7 @@ pub enum Event {
     IssueComments {
         item_id: String,
         comments: Arc<Vec<perch_github::IssueComment>>,
+        events: Arc<Vec<perch_github::PullEvent>>,
         body_reactions: Reactions,
     },
     /// GitHub took the reader's reaction: the subject's reactions as they
@@ -7814,13 +7817,14 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
             .await
         {
             Ok(comments) => {
-                let mut read = issue_discussion(issue, &comments);
+                let events = issue_timeline(&github, issue).await;
+                let mut read = issue_discussion(issue, &comments, &events);
                 if let Err(e) = github.fill_reactions(&mut read).await {
                     tracing::info!(item = item_id, error = %e, "could not read the reactions again");
                 }
                 let body_reactions = read.reactions;
                 let comments = read.comments;
-                keep_issue_comments(ctx, item_id, issue, &comments);
+                keep_issue_comments(ctx, item_id, issue, &comments, &events);
                 // A question asked next is prompted with these.
                 if let Ok(mut guard) = ctx.slot.lock() {
                     if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
@@ -7832,6 +7836,7 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
                     let _ = ctx.events.send(Event::IssueComments {
                         item_id: item_id.to_string(),
                         comments: Arc::new(comments),
+                        events: Arc::new(events),
                         body_reactions,
                     });
                 }
@@ -7839,6 +7844,25 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
             Err(e) => {
                 tracing::info!(item = item_id, error = %e, "could not fetch the comments again")
             }
+        }
+    }
+}
+
+/// What was done to an issue, as GitHub's timeline lists it. A timeline
+/// that could not be read is no events rather than no issue: the rest of
+/// what was fetched still opens.
+async fn issue_timeline(
+    github: &perch_github::GitHub,
+    issue: &perch_github::Issue,
+) -> Vec<perch_github::PullEvent> {
+    match github
+        .fetch_timeline(&issue.repo_full_name, issue.number, &[])
+        .await
+    {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::info!(repo = %issue.repo_full_name, number = issue.number, error = %e, "could not read the timeline");
+            Vec::new()
         }
     }
 }
@@ -7851,18 +7875,20 @@ fn keep_issue_comments(
     item_id: &str,
     issue: &perch_github::Issue,
     comments: &[perch_github::IssueComment],
+    events: &[perch_github::PullEvent],
 ) {
-    ctx.with_cache(|c| c.store_discussion(item_id, &issue_discussion(issue, comments)));
+    ctx.with_cache(|c| c.store_discussion(item_id, &issue_discussion(issue, comments, events)));
     if ctx.is_open(item_id) {
         ctx.send_threads(item_id);
     }
 }
 
-/// An issue and its comments in the shape a pull request's discussion
-/// has, which is the one shape the table keeps.
+/// An issue, its comments and its timeline in the shape a pull request's
+/// discussion has, which is the one shape the table keeps.
 pub(super) fn issue_discussion(
     issue: &perch_github::Issue,
     comments: &[perch_github::IssueComment],
+    events: &[perch_github::PullEvent],
 ) -> perch_github::Discussion {
     perch_github::Discussion {
         node_id: issue.node_id.clone(),
@@ -7872,7 +7898,7 @@ pub(super) fn issue_discussion(
         comments: comments.to_vec(),
         reviews: Vec::new(),
         review_comments: Vec::new(),
-        events: Vec::new(),
+        events: events.to_vec(),
         review_threads: Vec::new(),
     }
 }
@@ -8391,42 +8417,47 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
         })
         .flatten();
 
-    // The comments as they were last kept, for offline and for a first
+    // The conversation as it was last kept, for offline and for a first
     // paint that does not wait on the network.
-    let kept: Vec<perch_github::IssueComment> = existing
-        .as_ref()
-        .and_then(|i| {
-            ctx.with_cache(|c| c.load_discussion(&i.id).ok().flatten())
-                .flatten()
-        })
-        .map(|(_, d)| d.comments)
-        .unwrap_or_default();
-    let (issue, comments, offline) = if let Some(github) = ctx.github() {
+    let (kept, kept_events): (Vec<perch_github::IssueComment>, Vec<perch_github::PullEvent>) =
+        existing
+            .as_ref()
+            .and_then(|i| {
+                ctx.with_cache(|c| c.load_discussion(&i.id).ok().flatten())
+                    .flatten()
+            })
+            .map(|(_, d)| (d.comments, d.events))
+            .unwrap_or_default();
+    let (issue, comments, timeline, offline) = if let Some(github) = ctx.github() {
         match github.fetch_issue(&repo_full_name, number).await {
             Ok(mut issue) => {
                 // The reactions are read onto the shape the table keeps,
                 // and the issue's own come back off it.
-                let comments = match github.fetch_issue_comments(&repo_full_name, number).await {
+                let (comments, timeline) = match github
+                    .fetch_issue_comments(&repo_full_name, number)
+                    .await
+                {
                     Ok(comments) => {
-                        let mut read = issue_discussion(&issue, &comments);
+                        let timeline = issue_timeline(&github, &issue).await;
+                        let mut read = issue_discussion(&issue, &comments, &timeline);
                         if let Err(e) = github.fill_reactions(&mut read).await {
                             tracing::warn!(repo = %repo_full_name, number, error = %e, "could not read the reactions");
                         }
                         issue.reactions = read.reactions;
-                        read.comments
+                        (read.comments, timeline)
                     }
                     Err(e) => {
                         tracing::warn!(repo = %repo_full_name, number, error = %e, "could not fetch the comments");
-                        kept.clone()
+                        (kept.clone(), kept_events.clone())
                     }
                 };
-                (issue, comments, false)
+                (issue, comments, timeline, false)
             }
             Err(e) => match existing.as_ref().and_then(|i| i.issue().cloned()) {
                 Some(snapshot) => {
                     tracing::info!(repo = %repo_full_name, number, error = %e, "showing the issue from its snapshot");
                     ctx.notice("Offline; showing the issue as it was last fetched");
-                    (snapshot, kept.clone(), true)
+                    (snapshot, kept.clone(), kept_events.clone(), true)
                 }
                 None => {
                     ctx.send_navigation_event(
@@ -8444,7 +8475,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
         match existing.as_ref().and_then(|item| item.issue().cloned()) {
             Some(snapshot) => {
                 ctx.notice("Offline; showing the issue as it was last fetched");
-                (snapshot, kept.clone(), true)
+                (snapshot, kept.clone(), kept_events.clone(), true)
             }
             None => {
                 ctx.send_navigation_event(
@@ -8571,10 +8602,11 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
     let item = Arc::new(item);
     let issue = Arc::new(issue);
     let comments = Arc::new(comments);
+    let timeline = Arc::new(timeline);
     let scope_gen = next_scope_gen();
     tracing::info!(repo = %issue.repo_full_name, number, comments = comments.len(), offline, "issue ready");
     if !offline {
-        keep_issue_comments(ctx, &item.id, &issue, &comments);
+        keep_issue_comments(ctx, &item.id, &issue, &comments, &timeline);
     }
     let installed = ctx
         .navigation_requests
@@ -8603,6 +8635,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
                 item: item.clone(),
                 issue: issue.clone(),
                 comments: comments.clone(),
+                events: timeline.clone(),
                 offline,
             });
             true
@@ -12952,10 +12985,10 @@ mod tests {
             updated_at: "2026-09-16T11:40:00Z".parse().unwrap(),
             repo_full_name: "a/b".into(),
         };
-        keep_issue_comments(&ctx, &item.id, &issue, &[]);
+        keep_issue_comments(&ctx, &item.id, &issue, &[], &[]);
         assert!(received.try_iter().next().is_none(), "nobody is looking");
         open_in_slot(&ctx, &item);
-        keep_issue_comments(&ctx, &item.id, &issue, &[]);
+        keep_issue_comments(&ctx, &item.id, &issue, &[], &[]);
         assert!(matches!(
             received.try_iter().next(),
             Some(Event::CommentThreads { item_id, .. }) if item_id == item.id

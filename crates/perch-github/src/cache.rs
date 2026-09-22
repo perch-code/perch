@@ -30,9 +30,11 @@ mod review_store;
 /// remembers notifications marked Done in Perch until their next revision.
 /// Version 21 keeps GitHub's review threads as comment threads, with the
 /// node id, link, hunk and reactions of each comment, and fills them from
-/// the discussions already kept. Schemas 13 through 20 migrate in place so
-/// local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 21;
+/// the discussions already kept. Version 22 moves who did a thing off the
+/// merge event and onto every event, for the rest of what GitHub's
+/// timeline lists. Schemas 13 through 21 migrate in place so local
+/// conversations and agent history are never discarded.
+pub const SCHEMA_VERSION: u32 = 22;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -368,6 +370,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             18 => review_store::migrate_18_to_19(&tx)?,
             19 => tx.execute_batch(NOTIFICATION_DISMISSAL_SCHEMA)?,
             20 => migrate_20_to_21(&tx)?,
+            21 => migrate_21_to_22(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -487,6 +490,50 @@ fn migrate_20_to_21(tx: &Transaction<'_>) -> Result<(), CacheError> {
         let head_sha = item_head_sha_on(tx, &item_id)?;
         let threads = comments::review_threads_of(&discussion, &item_id, &head_sha);
         ingest_review_threads(tx, &item_id, &threads)?;
+    }
+    Ok(())
+}
+
+/// Every event gains an actor, and the merge gives up its own `by`.
+/// Rewritten in place rather than dropped, so a pull request read offline
+/// still says how it ended before the next fetch. A row that no longer
+/// reads is passed over, as the fetch replaces it whole.
+fn migrate_21_to_22(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    let discussions = {
+        let mut stmt = tx.prepare("SELECT item_id, json FROM discussions")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (item_id, json) in discussions {
+        let Ok(mut row) = serde_json::from_str::<serde_json::Value>(&json) else {
+            tracing::warn!(item_id, "skipping an unreadable cached discussion");
+            continue;
+        };
+        let Some(events) = row.get_mut("events").and_then(|e| e.as_array_mut()) else {
+            continue;
+        };
+        for event in events {
+            // `{"kind":{"merged":{"by":"rohan"}}}` becomes
+            // `{"kind":"merged","actor":"rohan"}`; every other kind was a
+            // bare name already and only wants the empty actor.
+            let by = event
+                .get("kind")
+                .and_then(|k| k.get("merged"))
+                .and_then(|m| m.get("by"))
+                .and_then(|by| by.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if event.get("kind").is_some_and(|k| k.get("merged").is_some()) {
+                event["kind"] = serde_json::Value::String("merged".into());
+            }
+            event["actor"] = serde_json::Value::String(by);
+        }
+        tx.execute(
+            "UPDATE discussions SET json=?2 WHERE item_id=?1",
+            params![item_id, serde_json::to_string(&row)?],
+        )?;
     }
     Ok(())
 }
@@ -5507,7 +5554,8 @@ mod tests {
     }
 
     fn discussion() -> Discussion {
-        use crate::discussion::{IssueComment, PullEvent, PullEventKind, Review};
+        use crate::discussion::{IssueComment, Review};
+        use crate::timeline::{PullEvent, PullEventKind};
         Discussion {
             node_id: "PR_7".into(),
             opened_at: Some(stamp_of("2026-09-14T14:02:00Z")),
@@ -5536,16 +5584,8 @@ mod tests {
             }],
             review_comments: vec![review_comment(3, None, "2026-09-16T11:38:00Z")],
             events: vec![
-                PullEvent {
-                    kind: PullEventKind::Opened,
-                    at: stamp_of("2026-09-14T14:02:00Z"),
-                },
-                PullEvent {
-                    kind: PullEventKind::Merged {
-                        by: Some("rohan".into()),
-                    },
-                    at: stamp_of("2026-09-17T15:00:00Z"),
-                },
+                PullEvent::new(PullEventKind::Opened, stamp_of("2026-09-14T14:02:00Z"), "chris"),
+                PullEvent::new(PullEventKind::Merged, stamp_of("2026-09-17T15:00:00Z"), "rohan"),
             ],
             review_threads: Vec::new(),
         }
@@ -6334,6 +6374,53 @@ mod tests {
         );
         assert_eq!(threads[1].messages.len(), 2);
         assert!(cache.load_comment_threads("broken").unwrap().is_empty());
+    }
+
+    #[test]
+    fn schema_21_moves_the_merges_actor_onto_the_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let item = pr_item(21);
+        // The shape schema 21 kept: the merge named who, and nothing else
+        // named anyone.
+        let kept = r#"{"node_id":"PR_1","opened_at":"2026-09-14T14:02:00Z","body":"b",
+            "comments":[],"reviews":[],"review_comments":[],"events":[
+              {"kind":"opened","at":"2026-09-14T14:02:00Z"},
+              {"kind":{"merged":{"by":"rohan"}},"at":"2026-09-17T15:00:00Z"}]}"#;
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&item).unwrap();
+            for (id, json) in [(item.id.as_str(), kept), ("broken", "{")] {
+                cache
+                    .conn
+                    .execute(
+                        "INSERT INTO discussions (item_id, fetched_at, json) VALUES (?1, ?2, ?3)",
+                        params![id, "2026-09-18T09:00:00Z", json],
+                    )
+                    .unwrap();
+            }
+            cache.set_meta("schema_version", "21").unwrap();
+        }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 21, to: SCHEMA_VERSION });
+        let (_, d) = cache.load_discussion(&item.id).unwrap().unwrap();
+        assert_eq!(
+            d.events,
+            vec![
+                crate::timeline::PullEvent::new(
+                    crate::timeline::PullEventKind::Opened,
+                    stamp_of("2026-09-14T14:02:00Z"),
+                    "",
+                ),
+                crate::timeline::PullEvent::new(
+                    crate::timeline::PullEventKind::Merged,
+                    stamp_of("2026-09-17T15:00:00Z"),
+                    "rohan",
+                ),
+            ]
+        );
+        assert!(cache.load_discussion("broken").unwrap().is_none());
     }
 
     #[test]

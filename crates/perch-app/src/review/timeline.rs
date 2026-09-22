@@ -10,7 +10,10 @@
 //! with no body, and that empty review is the noise that gets dropped.
 
 use jiff::Timestamp;
-use perch_github::{CommentThread, Discussion, Issue, IssueComment, PullEvent, PullEventKind, PullRequest, Review};
+use perch_github::{
+    CommentThread, Discussion, Issue, IssueComment, Label, PullEvent, PullEventKind, PullRequest,
+    Reference, Review,
+};
 
 /// One card on Conversation.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,7 +73,7 @@ impl Card {
                     None => verdict.into(),
                 }
             }
-            Card::Event(e) => event_name(&e.kind),
+            Card::Event(e) => cut(&event_name(e)),
             Card::Thread(t) => t.messages.first().map(|m| first_line(&m.body)).unwrap_or_default(),
         }
     }
@@ -99,17 +102,126 @@ pub fn verdict(review: &Review) -> &'static str {
     }
 }
 
-/// The event's one line.
-pub fn event_name(kind: &PullEventKind) -> String {
-    match kind {
-        PullEventKind::Opened => "opened".into(),
-        PullEventKind::Merged { by: Some(by) } => format!("merged by {by}"),
-        PullEventKind::Merged { by: None } => "merged".into(),
-        PullEventKind::Closed => "closed".into(),
-        PullEventKind::Reopened => "reopened".into(),
-        PullEventKind::Draft => "converted to draft".into(),
-        PullEventKind::Ready => "ready for review".into(),
+/// A piece of an event's line. Every piece has words, which is what the
+/// harness prints; the view draws a label in its own colours, a commit in
+/// the code face, and a reference as somewhere to go.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Piece {
+    Text(String),
+    Label(Label),
+    /// A commit, by the seven characters everyone reads it as.
+    Sha(String),
+    Reference(Reference),
+}
+
+impl Piece {
+    fn words(text: impl Into<String>) -> Self {
+        Piece::Text(text.into())
     }
+
+    /// What the piece says. A sha is cut to the length git shows, and a
+    /// reference reads as it is drawn: where it points, then its title.
+    pub fn text(&self) -> String {
+        match self {
+            Piece::Text(text) => text.clone(),
+            Piece::Label(label) => label.name.clone(),
+            Piece::Sha(sha) => short_sha(sha),
+            Piece::Reference(reference) => {
+                format!("{} {}", reference.slug(), reference.title).trim_end().into()
+            }
+        }
+    }
+}
+
+/// The seven characters a commit is read by.
+pub fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+/// The event's one line, in the order its pieces are drawn. Who did it is
+/// drawn before these and is not among them, so a line that names the
+/// same person twice says "self" instead.
+pub fn event_pieces(event: &PullEvent) -> Vec<Piece> {
+    let same = |who: &str| !who.is_empty() && who == event.actor;
+    match &event.kind {
+        PullEventKind::Opened => vec![Piece::words("opened")],
+        PullEventKind::Merged => vec![Piece::words("merged")],
+        PullEventKind::Closed => vec![Piece::words("closed")],
+        PullEventKind::Reopened => vec![Piece::words("reopened")],
+        PullEventKind::Draft => vec![Piece::words("converted this to draft")],
+        PullEventKind::Ready => vec![Piece::words("marked this ready for review")],
+        PullEventKind::Committed { sha, subject, .. } => vec![
+            Piece::words("committed"),
+            Piece::Sha(sha.clone()),
+            Piece::words(subject.clone()),
+        ],
+        PullEventKind::ForcePushed { sha } => {
+            vec![Piece::words("force-pushed to"), Piece::Sha(sha.clone())]
+        }
+        PullEventKind::HeadDeleted => vec![Piece::words("deleted the head branch")],
+        PullEventKind::HeadRestored => vec![Piece::words("restored the head branch")],
+        PullEventKind::Labeled { label } => {
+            vec![Piece::words("added"), Piece::Label(label.clone())]
+        }
+        PullEventKind::Unlabeled { label } => {
+            vec![Piece::words("removed"), Piece::Label(label.clone())]
+        }
+        PullEventKind::Assigned { who } if same(who) => vec![Piece::words("self-assigned this")],
+        PullEventKind::Assigned { who } => vec![Piece::words(format!("assigned this to {who}"))],
+        PullEventKind::Unassigned { who } if same(who) => {
+            vec![Piece::words("removed their assignment")]
+        }
+        PullEventKind::Unassigned { who } => vec![Piece::words(format!("unassigned {who}"))],
+        PullEventKind::ReviewRequested { who } if same(who) => {
+            vec![Piece::words("self-requested a review")]
+        }
+        PullEventKind::ReviewRequested { who } => {
+            vec![Piece::words(format!("requested a review from {who}"))]
+        }
+        PullEventKind::ReviewRequestRemoved { who } => {
+            vec![Piece::words(format!("removed the review request for {who}"))]
+        }
+        PullEventKind::ReviewDismissed { who } if who.is_empty() => {
+            vec![Piece::words("dismissed a review")]
+        }
+        PullEventKind::ReviewDismissed { who } => {
+            vec![Piece::words(format!("dismissed {who}'s review"))]
+        }
+        PullEventKind::Renamed { from, to } => {
+            vec![Piece::words(format!("changed the title from \u{201c}{from}\u{201d} to \u{201c}{to}\u{201d}"))]
+        }
+        PullEventKind::Milestoned { title } => {
+            vec![Piece::words(format!("added this to the {title} milestone"))]
+        }
+        PullEventKind::Demilestoned { title } => {
+            vec![Piece::words(format!("removed this from the {title} milestone"))]
+        }
+        PullEventKind::Referenced { sha } => {
+            vec![Piece::words("referenced this in"), Piece::Sha(sha.clone())]
+        }
+        PullEventKind::CrossReferenced { reference } => vec![
+            Piece::words("mentioned this in"),
+            Piece::Reference(reference.clone()),
+        ],
+        PullEventKind::Pinned => vec![Piece::words("pinned this")],
+        PullEventKind::Unpinned => vec![Piece::words("unpinned this")],
+        PullEventKind::Locked => vec![Piece::words("locked the conversation")],
+        PullEventKind::Unlocked => vec![Piece::words("unlocked the conversation")],
+        PullEventKind::AutoMergeEnabled => vec![Piece::words("enabled auto-merge")],
+        PullEventKind::AutoMergeDisabled => vec![Piece::words("disabled auto-merge")],
+        PullEventKind::MergeQueued => vec![Piece::words("added this to the merge queue")],
+        PullEventKind::MergeDequeued => vec![Piece::words("removed this from the merge queue")],
+    }
+}
+
+/// The event's line as words, for the harness and for keying.
+pub fn event_name(event: &PullEvent) -> String {
+    event_pieces(event)
+        .iter()
+        .map(Piece::text)
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The first non-empty line, trimmed and cut to the harness's width.
@@ -123,12 +235,13 @@ fn cut(line: &str) -> String {
 
 /// The cards for one item, sorted. A pull request's description comes
 /// from the discussion when there is one, else from the pull request alone
-/// with no body; an issue's from the issue. A bare branch has neither and
-/// its timeline is its threads.
+/// with no body; an issue's from the issue, with its comments and the
+/// events GitHub's timeline gave it. A bare branch has neither and its
+/// timeline is its threads.
 pub fn timeline(
     pull: Option<&PullRequest>,
     discussion: Option<&Discussion>,
-    issue: Option<(&Issue, &[IssueComment])>,
+    issue: Option<(&Issue, &[IssueComment], &[PullEvent])>,
     threads: &[CommentThread],
 ) -> Vec<Card> {
     let mut cards = Vec::new();
@@ -141,7 +254,7 @@ pub fn timeline(
             body: discussion.map(|d| d.body.clone()).unwrap_or_default(),
             node_id: discussion.map(|d| d.node_id.clone()).unwrap_or_default(),
         }),
-        (None, Some((issue, _))) => cards.push(Card::Description {
+        (None, Some((issue, _, _))) => cards.push(Card::Description {
             author: issue.author_login.clone(),
             avatar_url: issue.author_avatar_url.clone(),
             at: issue.created_at,
@@ -156,8 +269,9 @@ pub fn timeline(
         cards.extend(d.events.iter().cloned().map(Card::Event));
         cards.extend(review_cards(&d.reviews));
     }
-    if let Some((_, comments)) = issue {
+    if let Some((_, comments, events)) = issue {
         cards.extend(comments.iter().cloned().map(Card::Comment));
+        cards.extend(events.iter().cloned().map(Card::Event));
     }
     cards.extend(threads.iter().cloned().map(Card::Thread));
 
@@ -310,7 +424,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn event(kind: PullEventKind, when: &str) -> PullEvent {
-        PullEvent { kind, at: at(when) }
+        PullEvent::new(kind, at(when), "rohan")
     }
 
     /// A thread made at `created`, whose question was asked at `asked`.
@@ -402,20 +516,33 @@ pub(crate) mod tests {
         d.comments.push(comment(2, "2026-09-17T15:00:00Z", "at the same moment as the merge"));
         d.events = vec![
             event(PullEventKind::Opened, "2026-09-14T14:02:00Z"),
-            event(PullEventKind::Merged { by: Some("rohan".into()) }, "2026-09-17T15:00:00Z"),
+            event(PullEventKind::Merged, "2026-09-17T15:00:00Z"),
         ];
         let cards = timeline(Some(&pull()), Some(&d), None, &[]);
         assert_eq!(kinds(&cards), ["description", "event", "comment", "event", "comment"]);
         assert_eq!(lines(&cards)[1], "opened");
-        assert_eq!(lines(&cards)[3], "merged by rohan", "an event wins a tie");
+        assert_eq!(lines(&cards)[3], "merged", "an event wins a tie");
     }
 
     #[test]
-    fn an_issue_has_a_description_comments_and_threads_and_no_events() {
+    fn an_issue_has_a_description_comments_threads_and_its_own_events() {
         let issue = issue();
         let comments = vec![comment(1, "2026-09-15T10:00:00Z", "Seen it too.")];
         let t = thread("t1", "2026-09-16T09:00:00Z", "2026-09-16T09:00:00Z", "where?");
-        let cards = timeline(None, None, Some((&issue, &comments)), &[t]);
+        let labelled = event(
+            PullEventKind::Labeled { label: Label { name: "bug".into(), color: "d73a4a".into() } },
+            "2026-09-15T09:00:00Z",
+        );
+        let cards = timeline(
+            None,
+            None,
+            Some((&issue, &comments, &[labelled])),
+            std::slice::from_ref(&t),
+        );
+        assert_eq!(kinds(&cards), ["description", "event", "comment", "thread"]);
+        assert_eq!(lines(&cards)[1], "added bug");
+
+        let cards = timeline(None, None, Some((&issue, &comments, &[])), &[t]);
         assert_eq!(kinds(&cards), ["description", "comment", "thread"]);
         let Card::Description { author, avatar_url, at: opened, body, .. } = &cards[0] else { panic!("{cards:?}") };
         assert_eq!(author, "rohan");
@@ -481,6 +608,92 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_events_line_names_what_was_done_and_not_who_did_it_twice() {
+        let name = |kind| event_name(&event(kind, "2026-09-16T11:00:00Z"));
+        // `event` is rohan's, so what rohan did to rohan is "self".
+        assert_eq!(name(PullEventKind::Merged), "merged");
+        assert_eq!(
+            name(PullEventKind::Labeled {
+                label: Label { name: "needs work".into(), color: String::new() }
+            }),
+            "added needs work"
+        );
+        assert_eq!(
+            name(PullEventKind::Committed {
+                sha: "abc1234def5678".into(),
+                author: "Chris".into(),
+                subject: "Fence the manifest".into(),
+            }),
+            "committed abc1234 Fence the manifest",
+            "seven characters of the sha"
+        );
+        assert_eq!(
+            name(PullEventKind::ReviewRequested { who: "chris".into() }),
+            "requested a review from chris"
+        );
+        assert_eq!(
+            name(PullEventKind::ReviewRequested { who: "rohan".into() }),
+            "self-requested a review"
+        );
+        assert_eq!(
+            name(PullEventKind::Assigned { who: "rohan".into() }),
+            "self-assigned this"
+        );
+        assert_eq!(
+            name(PullEventKind::Assigned { who: "chris".into() }),
+            "assigned this to chris"
+        );
+        assert_eq!(
+            name(PullEventKind::ReviewDismissed { who: String::new() }),
+            "dismissed a review"
+        );
+        assert_eq!(
+            name(PullEventKind::ForcePushed { sha: "abc1234def".into() }),
+            "force-pushed to abc1234"
+        );
+        assert_eq!(
+            name(PullEventKind::CrossReferenced {
+                reference: Reference {
+                    repo_full_name: "slatedb/slatedb".into(),
+                    number: 2098,
+                    title: "Use remote_seq".into(),
+                    pull: true,
+                    html_url: String::new(),
+                }
+            }),
+            "mentioned this in slatedb/slatedb#2098 Use remote_seq"
+        );
+    }
+
+    #[test]
+    fn the_pieces_of_a_line_are_what_the_view_draws_apart() {
+        let commit = event(
+            PullEventKind::Committed {
+                sha: "abc1234def".into(),
+                author: "Chris".into(),
+                subject: "Fence the manifest".into(),
+            },
+            "2026-09-16T11:00:00Z",
+        );
+        assert_eq!(
+            event_pieces(&commit),
+            vec![
+                Piece::Text("committed".into()),
+                Piece::Sha("abc1234def".into()),
+                Piece::Text("Fence the manifest".into()),
+            ]
+        );
+        let label = Label { name: "bug".into(), color: "d73a4a".into() };
+        assert_eq!(
+            event_pieces(&event(
+                PullEventKind::Unlabeled { label: label.clone() },
+                "2026-09-16T11:00:00Z"
+            )),
+            vec![Piece::Text("removed".into()), Piece::Label(label)]
+        );
+    }
+
+    #[test]
     fn first_lines_skip_blanks_and_are_cut_to_width() {
         let long = "x".repeat(100);
         let c = Card::Comment(comment(1, "2026-09-16T11:00:00Z", &format!("\n   \n  first  \nsecond\n{long}")));
@@ -489,7 +702,7 @@ pub(crate) mod tests {
         assert_eq!(c.first_line().chars().count(), 80);
         let c = Card::Comment(comment(1, "2026-09-16T11:00:00Z", " \n\t"));
         assert_eq!(c.first_line(), "");
-        assert_eq!(Card::Event(event(PullEventKind::Draft, "2026-09-16T11:00:00Z")).first_line(), "converted to draft");
+        assert_eq!(Card::Event(event(PullEventKind::Draft, "2026-09-16T11:00:00Z")).first_line(), "converted this to draft");
         assert_eq!(verdict(&review(1, "CHANGES_REQUESTED", "", None)), "requested changes");
         assert_eq!(verdict(&review(1, "SOMETHING_NEW", "", None)), "commented");
     }

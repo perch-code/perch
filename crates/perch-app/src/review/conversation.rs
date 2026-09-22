@@ -45,6 +45,7 @@ pub fn view(
         let discussion = state.discussion.get();
         let issue = state.issue.get();
         let comments = state.issue_comments.get();
+        let issue_events = state.issue_events.get();
         let threads = state.comment_threads.with(|threads| {
             threads
                 .iter()
@@ -55,7 +56,8 @@ pub fn view(
         let cards = timeline(
             pull.as_deref(),
             discussion.as_deref(),
-            issue.as_deref().map(|i| (i, comments.as_slice())),
+            issue.as_deref()
+                .map(|i| (i, comments.as_slice(), issue_events.as_slice())),
             &threads,
         );
         let mut rows = Vec::with_capacity(cards.len());
@@ -443,16 +445,8 @@ mod tests {
                 line(32, Some(31), "2026-09-16T12:00:00Z", "the reply"),
             ],
             events: vec![
-                PullEvent {
-                    kind: PullEventKind::Opened,
-                    at: at("2026-09-14T14:02:00Z"),
-                },
-                PullEvent {
-                    kind: PullEventKind::Merged {
-                        by: Some("rohan".into()),
-                    },
-                    at: at("2026-09-17T15:00:00Z"),
-                },
+                PullEvent::new(PullEventKind::Opened, at("2026-09-14T14:02:00Z"), "rohan"),
+                PullEvent::new(PullEventKind::Merged, at("2026-09-17T15:00:00Z"), "rohan"),
             ],
             review_threads: Vec::new(),
         }
@@ -825,6 +819,114 @@ mod tests {
             assert!(text.contains(expected), "no {expected:?} on screen");
         }
         assert!(!shown(&harness, "Nothing here yet"));
+    }
+
+    /// What GitHub's timeline says was done is a line each, with the
+    /// pieces the line is made of: a label in its own pill, a commit by
+    /// its sha and subject, a review request by who it is of, and a
+    /// reference by where it points. A commit is signed by the name git
+    /// recorded, since it has no account behind it.
+    ///
+    /// Nothing on a line spills past it: the time at the end stays on
+    /// screen however long the commit's subject is.
+    #[test]
+    fn what_github_says_was_done_is_a_line_each_with_its_own_pieces() {
+        let mut discussion = discussion();
+        let event = |kind, when: &str| PullEvent::new(kind, at(when), "rohan");
+        discussion.events.extend([
+            event(
+                PullEventKind::Labeled {
+                    label: perch_github::Label { name: "needs work".into(), color: "d73a4a".into() },
+                },
+                "2026-09-15T08:00:00Z",
+            ),
+            PullEvent::new(
+                PullEventKind::Committed {
+                    sha: "abc1234def5678".into(),
+                    author: "Chris Riccomini".into(),
+                    subject: "Fence the manifest ".repeat(12),
+                },
+                at("2026-09-15T09:00:00Z"),
+                "",
+            ),
+            event(
+                PullEventKind::ReviewRequested { who: "chris".into() },
+                "2026-09-15T10:00:00Z",
+            ),
+            event(
+                PullEventKind::CrossReferenced {
+                    reference: perch_github::Reference {
+                        repo_full_name: "slatedb/slatedb".into(),
+                        number: 2098,
+                        title: "Use remote_seq".into(),
+                        pull: true,
+                        html_url: "https://github.com/slatedb/slatedb/pull/2098".into(),
+                    },
+                },
+                "2026-09-15T10:30:00Z",
+            ),
+        ]);
+        let (mut harness, _, _) =
+            app_harness_on(crate::backend::Backend::detached(), discussion);
+
+        let mut all = Vec::new();
+        names(harness.root_id(), &mut all);
+        let text = all.join("\n");
+        for expected in [
+            "needs work",
+            "abc1234",
+            "Chris Riccomini",
+            "requested a review from chris",
+            "slatedb/slatedb#2098",
+            "Use remote_seq",
+        ] {
+            assert!(text.contains(expected), "no {expected:?} on screen");
+        }
+        assert!(!text.contains("abc1234def5678"), "a sha is shown short");
+
+        // The reference opens what it points at.
+        let opened = crate::ui::widgets::opened;
+        opened();
+        let slug = find(harness.root_id(), "slatedb/slatedb#2098").unwrap();
+        let c = slug.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        assert_eq!(
+            opened(),
+            vec!["https://github.com/slatedb/slatedb/pull/2098".to_string()]
+        );
+
+
+        // Every line's pieces are inside the line: a subject too long
+        // for the column is cut, and the time at the end stays on it.
+        // The children's rects are the row's own coordinates.
+        fn rows(id: floem::ViewId, out: &mut Vec<floem::ViewId>) {
+            if id.debug_name().contains("card:event") {
+                out.push(id);
+            }
+            for child in id.children() {
+                rows(child, out);
+            }
+        }
+        let mut found = Vec::new();
+        rows(harness.root_id(), &mut found);
+        assert_eq!(found.len(), 6, "opened, four of these, and merged");
+        for row in found {
+            let width = harness.get_layout_rect(row).width();
+            let last = *row.children().last().unwrap();
+            for child in row.children() {
+                let rect = harness.get_layout_rect(child);
+                assert!(
+                    rect.x1 <= width + 0.5,
+                    "{} runs past its line: {rect:?} in a row {width} wide",
+                    child.debug_name()
+                );
+            }
+            assert!(
+                harness.get_layout_rect(last).width() > 0.0,
+                "the time is off the end of {}",
+                row.debug_name()
+            );
+        }
     }
 
     /// A name on a card is a link to its page on GitHub: the author of a

@@ -1017,6 +1017,9 @@ pub struct ReviewState {
     /// The issue, when the item is one; the view is the issue view then.
     pub issue: RwSignal<Option<Arc<Issue>>>,
     pub issue_comments: RwSignal<Arc<Vec<IssueComment>>>,
+    /// What GitHub's timeline says was done to the issue. A pull
+    /// request's are in its discussion instead.
+    pub issue_events: RwSignal<Arc<Vec<perch_github::PullEvent>>>,
     /// The head the pull request moved to while the worktree had work in
     /// it. The files on screen are the older ones.
     pub stale_head: RwSignal<Option<String>>,
@@ -1368,6 +1371,7 @@ impl ReviewState {
             ready: RwSignal::new(false),
             issue: RwSignal::new(None),
             issue_comments: RwSignal::new(Arc::new(Vec::new())),
+            issue_events: RwSignal::new(Arc::new(Vec::new())),
             stale_head: RwSignal::new(None),
             offline: RwSignal::new(false),
             opening: RwSignal::new(false),
@@ -1522,6 +1526,7 @@ impl ReviewState {
         self.ready.set(false);
         self.issue.set(None);
         self.issue_comments.set(Arc::new(Vec::new()));
+        self.issue_events.set(Arc::new(Vec::new()));
         self.stale_head.set(None);
         self.offline.set(false);
         self.review_launcher_open.set(false);

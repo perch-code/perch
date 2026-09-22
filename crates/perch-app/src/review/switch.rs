@@ -27,6 +27,7 @@ pub fn switch(state: ReviewState) -> impl IntoView {
         let discussion = state.discussion.get();
         let issue = state.issue.get();
         let comments = state.issue_comments.get();
+        let issue_events = state.issue_events.get();
         let threads = state.comment_threads.with(|threads| {
             threads
                 .iter()
@@ -37,7 +38,8 @@ pub fn switch(state: ReviewState) -> impl IntoView {
         crate::review::timeline::timeline(
             pull.as_deref(),
             discussion.as_deref(),
-            issue.as_deref().map(|i| (i, comments.as_slice())),
+            issue.as_deref()
+                .map(|i| (i, comments.as_slice(), issue_events.as_slice())),
             &threads,
         )
         .iter()

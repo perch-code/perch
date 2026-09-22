@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use perch_github::{GitHub, PullEvent, PullEventKind, ReactionKind, Side};
+use perch_github::{GitHub, Label, PullEvent, PullEventKind, ReactionKind, Side};
 
 /// The request's path, and its body: the reactions query names its ids
 /// there.
@@ -29,6 +29,20 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
     let mut body = vec![0u8; content_length];
     std::io::Read::read_exact(&mut reader, &mut body).ok()?;
     Some((path, String::from_utf8_lossy(&body).into_owned()))
+}
+
+/// One page of the timeline: a label, a commit, a review request, and
+/// the merge that also closes the pull request. `mentioned` is sent to
+/// everyone and shown to no one, and `reviewed` is already a card.
+fn timeline() -> Vec<String> {
+    vec![
+        r#"{"event":"labeled","actor":{"login":"r"},"created_at":"2026-09-15T08:00:00Z","label":{"name":"bug","color":"d73a4a"}}"#.into(),
+        r#"{"event":"committed","sha":"abc1234def","message":"Fence the manifest\n\nlonger","author":{"name":"Chris","date":"2026-09-15T09:00:00Z"}}"#.into(),
+        r#"{"event":"review_requested","actor":{"login":"r"},"created_at":"2026-09-15T10:00:00Z","requested_reviewer":{"login":"a"}}"#.into(),
+        r#"{"event":"mentioned","actor":{"login":"r"},"created_at":"2026-09-15T11:00:00Z"}"#.into(),
+        r#"{"event":"closed","actor":{"login":"r"},"created_at":"2026-09-17T15:00:00Z"}"#.into(),
+        r#"{"event":"merged","actor":{"login":"r"},"created_at":"2026-09-17T15:00:00Z","commit_id":"h"}"#.into(),
+    ]
 }
 
 fn respond(stream: &mut TcpStream, body: &str) {
@@ -123,7 +137,9 @@ fn spawn(comments: usize) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec
                 .and_then(|p| p.split('&').next())
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(1);
-            let body = if path.contains("/issues/1/comments") {
+            let body = if path.contains("/issues/1/timeline") {
+                page(if page_no == 1 { timeline() } else { Vec::new() })
+            } else if path.contains("/issues/1/comments") {
                 let start = (page_no - 1) * 100;
                 let end = (start + 100).min(comments);
                 page((start..end).map(|i| comment(i + 1)).collect())
@@ -166,15 +182,37 @@ async fn every_page_of_the_conversation_is_read() {
     assert_eq!(d.review_comments[0].side, Side::Left);
     assert_eq!(d.review_comments[0].diff_hunk, "@@ -40,3 +40,3 @@");
     assert_eq!(d.review_comments[1].side, Side::Right, "no side is the head side");
-    // Opened and merged, out of the pull request's own payload.
+    // The opening out of the pull request's own payload, since the
+    // timeline has no line for it, and the rest out of the timeline. The
+    // merge is said once: the payload's and the close beside it are both
+    // the same moment.
+    let at = |s: &str| s.parse::<jiff::Timestamp>().unwrap();
     assert_eq!(
         d.events,
         vec![
-            PullEvent { kind: PullEventKind::Opened, at: "2026-09-14T14:02:00Z".parse().unwrap() },
-            PullEvent {
-                kind: PullEventKind::Merged { by: Some("r".into()) },
-                at: "2026-09-17T15:00:00Z".parse().unwrap(),
-            },
+            PullEvent::new(PullEventKind::Opened, at("2026-09-14T14:02:00Z"), ""),
+            PullEvent::new(
+                PullEventKind::Labeled {
+                    label: Label { name: "bug".into(), color: "d73a4a".into() }
+                },
+                at("2026-09-15T08:00:00Z"),
+                "r",
+            ),
+            PullEvent::new(
+                PullEventKind::Committed {
+                    sha: "abc1234def".into(),
+                    author: "Chris".into(),
+                    subject: "Fence the manifest".into(),
+                },
+                at("2026-09-15T09:00:00Z"),
+                "",
+            ),
+            PullEvent::new(
+                PullEventKind::ReviewRequested { who: "a".into() },
+                at("2026-09-15T10:00:00Z"),
+                "r",
+            ),
+            PullEvent::new(PullEventKind::Merged, at("2026-09-17T15:00:00Z"), "r"),
         ]
     );
     // The reactions, on everything at once: the description, 150 comments,
@@ -199,8 +237,9 @@ async fn every_page_of_the_conversation_is_read() {
     assert!(d.review_threads[0].resolved);
     assert!(!d.review_threads[0].outdated);
     // The pull request, two comment pages, one reviews page, one line page,
-    // the review threads query, and two reactions queries.
-    assert_eq!(requests.load(Ordering::SeqCst), 8);
+    // one timeline page, the review threads query, and two reactions
+    // queries.
+    assert_eq!(requests.load(Ordering::SeqCst), 9);
 }
 
 #[tokio::test]
