@@ -634,7 +634,7 @@ fn churn_labels(
 fn notices(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let present =
         move || state.historical_review.with(Option::is_some) || notice_text(state).is_some();
-    Stack::horizontal((historical_review(app, state, backend), notice(state)))
+    Stack::horizontal((snapshot_banner(app, state, backend), notice(state)))
         .debug_name("summary notices")
         .style(move |s| {
             s.items_center()
@@ -646,8 +646,9 @@ fn notices(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
         })
 }
 
-/// `Review #N snapshot · read-only`, and Back to current beside it.
-fn historical_review(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// `Review #N snapshot · read-only`, and Back to current beside it. Over
+/// the rows on Conversation, and in the tab bar on Files.
+pub fn snapshot_banner(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     dyn_container(
         move || state.historical_review.get(),
         move |review| match review {
@@ -682,8 +683,7 @@ fn historical_review(app: AppState, state: ReviewState, backend: Rc<Backend>) ->
     })
 }
 
-/// Back to current: the item as it is now, in place of the snapshot. The
-/// rail's banner on Files has one too, since the summary is not there.
+/// Back to current: the item as it is now, in place of the snapshot.
 pub fn back_to_current(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Label::derived(|| "Back to current".to_string())
         .on_event_stop(el::Click, move |_, _| {
@@ -1353,8 +1353,8 @@ mod tests {
         let back = rect(&harness, "back to current");
         assert!(back.width() > 0.0);
         assert!(
-            back.x1 <= theme::SIDEBAR_WIDTH + theme::RAIL_WIDTH,
-            "{back:?} is not in the rail"
+            within(back, rect(&harness, "file tabs")),
+            "{back:?} is not in the tab bar"
         );
         // The click asks for the item as it is now, and the view waits on
         // it.

@@ -40,8 +40,8 @@ const NOTIFICATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 pub const UI_META_KEYS: [&str; 6] = [
     "item_filters",
     "review.layout",
-    "agents.open",
-    "agents.width",
+    "drawer.view",
+    "drawer.width",
     "viewer.login",
     "viewer.avatar_url",
 ];

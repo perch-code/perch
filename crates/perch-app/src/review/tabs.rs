@@ -15,17 +15,21 @@ use floem::views::{
     Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack,
 };
 
+use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::cards::tip_with;
 use crate::review::model::{Layout, Origin, ReviewState};
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::drawer::{self, DrawerView};
 use crate::ui::widgets::icon_in;
 
-/// The open files as tabs, then, at the right end, the notice about what
-/// the files are when it is not the pull request's latest, the change
-/// navigation and the layout toggle.
-pub fn tab_bar(app: AppState, state: ReviewState) -> impl IntoView {
+/// The open files as tabs, then, at the right end, the way back from a
+/// retained snapshot, the notice about what the files are when it is not
+/// the pull request's latest, the change navigation, the layout toggle
+/// and the drawer's tiles. The way back is here because Files has no
+/// summary to hold it, and the drawer, which held it once, can be shut.
+pub fn tab_bar(app: AppState, state: ReviewState, backend: std::rc::Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         dyn_container(
             move || state.tabs.with(|t| t.is_empty()),
@@ -47,9 +51,11 @@ pub fn tab_bar(app: AppState, state: ReviewState) -> impl IntoView {
                 .min_width(0.0)
                 .height_full()
         }),
+        crate::review::summary::snapshot_banner(app, state, backend.clone())
+            .style(|s| s.margin_left(8.0)),
         crate::review::summary::notice(state).style(|s| s.margin_horiz(8.0)),
         change_nav(state),
-        layout_toggle(app, state),
+        layout_toggle(app, state, backend),
     ))
     .debug_name("file tabs")
     .style(|s| {
@@ -271,9 +277,10 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 }
 
 /// The tiles at the strip's right end: Source, while the open file is a
-/// picture, then Show whole, then Stacked and Split, with a rule between
-/// each group. A chosen tile is filled; the others are only a glyph until
-/// the pointer is over one.
+/// picture, then Show whole, then Stacked and Split, then the drawer on
+/// the right, on the files or on the agents, with a rule between each
+/// group. A chosen tile is filled; the others are only a glyph until the
+/// pointer is over one.
 ///
 /// The rules are there because the groups are kinds of preference. The
 /// layout outlives the item: it is a way of reading, not a fact about a
@@ -281,8 +288,9 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 /// launch. Show whole is the open tab's: a reader unfolds the file they
 /// are reading and not the others, so it lasts as long as the tab and
 /// every file opens folded. Source is the file's, for the app's life: a
-/// reader wants the markup of this SVG, not of SVGs.
-fn layout_toggle(app: AppState, state: ReviewState) -> impl IntoView {
+/// reader wants the markup of this SVG, not of SVGs. The drawer is the
+/// window's, and comes back at the next launch as the layout does.
+fn layout_toggle(app: AppState, state: ReviewState, backend: std::rc::Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         source_group(state),
         fold_tile(state),
@@ -290,6 +298,12 @@ fn layout_toggle(app: AppState, state: ReviewState) -> impl IntoView {
         Stack::horizontal((
             layout_tile(app, state, Layout::Stacked, SidebarIcon::Stacked),
             layout_tile(app, state, Layout::Split, SidebarIcon::Split),
+        ))
+        .style(|s| s.items_center().gap(2.0)),
+        tile_rule(),
+        Stack::horizontal((
+            drawer_tile(app, backend.clone(), DrawerView::Files),
+            drawer_tile(app, backend, DrawerView::Agents),
         ))
         .style(|s| s.items_center().gap(2.0)),
     ))
@@ -370,6 +384,28 @@ fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: Sidebar
         state.layout.set(layout);
         app.pending_meta.set(Some(("review.layout".into(), layout.name().into())));
     })
+    .debug_name(format!("{} tile", layout.name()))
+}
+
+/// The drawer on the right, on one of the things it holds: filled while
+/// it shows that. A click on the filled tile shuts the drawer; on the
+/// other, the drawer opens on it, or swaps to it. Nothing to give the
+/// keyboard back to afterwards: a tile is not a control it can rest on.
+fn drawer_tile(app: AppState, backend: std::rc::Rc<Backend>, view: DrawerView) -> impl IntoView {
+    let active = move || app.drawer_shown() == Some(view);
+    tip_with(
+        tile(view.glyph(), active, move || {
+            drawer::toggle(app, &backend, view, None)
+        })
+        .debug_name(format!("{} tile", view.what())),
+        move || {
+            if active() {
+                format!("Hide the {}", view.what())
+            } else {
+                format!("Show the {}", view.what())
+            }
+        },
+    )
 }
 
 /// The open file folded to its changes, which is the default and is drawn
@@ -414,6 +450,111 @@ fn tile(glyph: SidebarIcon, active: impl Fn() -> bool + Copy + 'static, on_click
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    use crate::review::header::tests::{
+        issue_harness, named, pull_request_harness, rect, within,
+    };
+    use crate::review::model::ItemTab;
+
+    /// The drawer's two tiles, after the layout tiles: a click opens the
+    /// drawer on the files or on the agents, and the pane moves over to
+    /// make room; a click on the filled one shuts it, and the other swaps
+    /// what it holds. The pane keeps the tab it was on through all of it.
+    #[test]
+    fn the_drawer_tiles_open_swap_and_shut_the_drawer_beside_the_pane() {
+        let (mut harness, app, state) = pull_request_harness();
+        // The sidebar shut, so the window has the room to dock, and
+        // Files, where the tiles are, with a worktree of one file.
+        app.sidebar_open.set(false);
+        state.show_tab(ItemTab::Files);
+        state.tree.set(Arc::new(vec![perch_git::TreeEntry::new("README.md", false)]));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(app.drawer_shown(), None);
+        let tabs = rect(&harness, "file tabs");
+        assert_eq!(tabs.x1, 1400.0);
+        let split = rect(&harness, "split tile");
+        let files = rect(&harness, "files tile");
+        let agents = rect(&harness, "agents tile");
+        assert!(split.x1 <= files.x0 && files.x1 <= agents.x0, "after the layout tiles");
+        assert!(within(files, tabs) && within(agents, tabs));
+
+        harness.click(files.center().x, files.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(app.drawer_shown(), Some(DrawerView::Files));
+        let drawer = rect(&harness, "right-drawer");
+        assert_eq!(drawer.x1, 1400.0);
+        assert_eq!(drawer.width(), theme::DRAWER_WIDTH);
+        assert_eq!(drawer.y0, 0.0, "the drawer starts at the window's top");
+        assert_eq!(
+            rect(&harness, "file tabs").x1,
+            drawer.x0,
+            "the pane stops where the drawer starts"
+        );
+        assert!(named(harness.root_id(), "files-panel").is_some(), "the drawer holds the files");
+        let close = rect(&harness, "files-close");
+        assert!(within(close, drawer));
+        assert!(
+            close.y1 <= theme::TITLEBAR_HEIGHT,
+            "the drawer's bar is on the title bar's line: {close:?}"
+        );
+        // The rail's tree is there, from the drawer's bar down.
+        let row = rect(&harness, "tree-row:README.md");
+        assert!(within(row, drawer));
+        assert!(row.y0 >= theme::TITLEBAR_HEIGHT + theme::SCOPE_BUTTON_HEIGHT);
+
+        // Agents: the drawer swaps what it holds, and stays put. The
+        // tiles moved over with the strip.
+        let agents = rect(&harness, "agents tile");
+        harness.click(agents.center().x, agents.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(app.drawer_shown(), Some(DrawerView::Agents));
+        assert!(named(harness.root_id(), "files-panel").is_none());
+        assert!(named(harness.root_id(), "agents-panel").is_some());
+        assert_eq!(rect(&harness, "right-drawer"), drawer);
+
+        // The filled tile shuts it, and the pane has the window again.
+        harness.click(agents.center().x, agents.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(app.drawer_shown(), None);
+        assert!(named(harness.root_id(), "agents-panel").is_none());
+        assert_eq!(rect(&harness, "file tabs").x1, 1400.0);
+        assert_eq!(state.tab.get(), ItemTab::Files);
+    }
+
+    /// A drawer asked to show the files stays shut on an issue, which has
+    /// none, and comes back on the next item with some; the wish is kept.
+    #[test]
+    fn a_files_drawer_stays_shut_on_an_issue_and_keeps_its_wish() {
+        let (mut harness, app, state) = issue_harness();
+        app.sidebar_open.set(false);
+        app.drawer.set(Some(DrawerView::Files));
+        harness.rebuild();
+        harness.paint();
+        assert!(!app.files_available());
+        assert_eq!(app.drawer_shown(), None);
+        assert_eq!(rect(&harness, "item bar").x1, 1400.0, "the pane has the window");
+
+        // Agents can still be shown, and the wish for Files is replaced.
+        drawer::show(app, &crate::backend::Backend::detached(), DrawerView::Agents, None);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(app.drawer_shown(), Some(DrawerView::Agents));
+        assert_eq!(rect(&harness, "item bar").x1, 1400.0 - theme::DRAWER_WIDTH);
+
+        // While another item is on its way the drawer's column stays, so
+        // opening one pull request after another does not move the pane
+        // twice; once it is an issue, the column goes.
+        app.drawer.set(Some(DrawerView::Files));
+        state.begin("Reading the issue");
+        harness.rebuild();
+        harness.paint();
+        assert!(app.files_available(), "an item on its way may have files");
+        assert_eq!(app.drawer_shown(), Some(DrawerView::Files));
+    }
 
     #[test]
     fn show_whole_is_the_open_tabs_alone_and_goes_with_the_tab() {

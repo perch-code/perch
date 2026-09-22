@@ -49,33 +49,35 @@ use crate::ui::widgets::centered_message;
 /// views that each need their own copy, and it captures the backend handle.
 pub type OpenFile = Rc<dyn Fn(&str)>;
 
-/// The whole right-hand side while a pull request is open.
+/// Opening a file: its tab, its content from the backend, and its row in
+/// the rail's tree. One closure for the item view and the drawer alike.
+pub fn open_file(state: ReviewState, backend: Rc<Backend>) -> OpenFile {
+    Rc::new(move |path: &str| {
+        // A file outside the worktree has no place in the tree, and is
+        // read from where it is; the loader's limits still apply.
+        if state.open_tab(path) {
+            if std::path::Path::new(path).is_absolute() {
+                backend.open_outside_file(path);
+            } else {
+                backend.open_file(path);
+            }
+        }
+        // Show it in the tree, so a file reached from a card or from
+        // a definition can be found there too: the way to it opens,
+        // the filter comes off when the file is not a change, and the
+        // rail scrolls to its row.
+        state.show_in_tree(path);
+    })
+}
+
+/// The main pane while an item is open.
 pub fn review_view(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
-    let open_file: OpenFile = Rc::new({
-        let backend = backend.clone();
-        move |path: &str| {
-            // A file outside the worktree has no place in the tree, and is
-            // read from where it is; the loader's limits still apply.
-            if state.open_tab(path) {
-                if std::path::Path::new(path).is_absolute() {
-                    backend.open_outside_file(path);
-                } else {
-                    backend.open_file(path);
-                }
-            }
-            // Show it in the tree, so a file reached from a card or from
-            // a definition can be found there too: the way to it opens,
-            // the filter comes off when the file is not a change, and the
-            // rail scrolls to its row.
-            state.show_in_tree(path);
-        }
-    });
-
+    let open_file = open_file(state, backend.clone());
     let body_backend = backend.clone();
 
     Stack::vertical((
@@ -164,23 +166,20 @@ fn item_view(
     .style(|s| s.size_full().min_height(0.0))
 }
 
-/// The file rail and the code. Threads anchored in the open file are drawn
-/// inline; the complete item conversation lives on the Conversation tab.
+/// The file tabs and the code. Threads anchored in the open file are
+/// drawn inline; the complete item conversation lives on the Conversation
+/// tab, and the files as a tree in the drawer on the right.
 fn body(
     app: AppState,
     state: ReviewState,
     open_file: OpenFile,
     backend: Rc<Backend>,
 ) -> impl IntoView {
-    Stack::horizontal((
-        rail::rail(app, state, open_file.clone(), backend.clone()),
-        Stack::vertical((
-            tabs::tab_bar(app, state),
-            editor::editor_pane(app, state, backend, open_file),
-        ))
-        .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full().flex_col()),
+    Stack::vertical((
+        tabs::tab_bar(app, state, backend.clone()),
+        editor::editor_pane(app, state, backend, open_file),
     ))
-    .style(|s| s.size_full().min_height(0.0))
+    .style(|s| s.size_full().min_height(0.0).flex_col())
 }
 
 /// The separator between the status line's parts.

@@ -1,6 +1,7 @@
 //! Window layout.
 
 pub mod agents;
+pub mod drawer;
 pub mod items;
 pub mod nav_row;
 pub mod notifications;
@@ -21,6 +22,7 @@ use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::drawer::DrawerView;
 use crate::ui::widgets::sidebar_glyph;
 
 /// The platform's command modifier.
@@ -191,29 +193,47 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 },
             )
-            // A zero basis: the pane takes what the drawer leaves, and
+            // A zero basis: the pane takes what the drawers leave, and
             // taffy never measures the whole item view unconstrained to
             // find out how wide it would like to be.
+            .debug_name("main-pane")
             .style(|s| {
                 s.flex_grow(1.0_f32)
                     .flex_basis(0.0)
                     .min_width(0.0)
                     .height_full()
             }),
+            // The drawer on the right: the open item's files, or the
+            // Agents inspector. Outside the review's keyed content, so the
+            // open file, its scroll and a composer survive it opening and
+            // shutting; over the pane's edge, when the window is too narrow
+            // to dock it, which is why the row is its positioning box.
+            drawer::panel(state, review, backend.clone()),
         ))
-        .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
+        .style(|s| {
+            s.flex_grow(1.0_f32)
+                .min_height(0.0)
+                .width_full()
+                .position(floem::style::Position::Relative)
+        }),
         status::status_bar(state, review, backend.clone()),
-        // The Agents inspector overlays the workspace. Keeping it outside the
-        // review's keyed content preserves the open file, scroll position and
-        // composer while app-wide work is inspected.
-        agents::panel(state, review, backend),
         agents::completion_notice(state, capture_backend.clone()),
-        // Over everything, and only while the drawer's edge is being dragged.
+        // Over everything, and only while a drawer's edge is being dragged.
         sidebar::resize_cursor_sheet(state),
-        agents::resize_cursor_sheet(state),
+        drawer::resize_cursor_sheet(state),
     ));
     let root_id = root.view_id();
     root
+        // The window's width, for the drawer on the right to know whether
+        // it can be docked. Read off the root's own layout, which is the
+        // window's size, after every layout; written only when it changes,
+        // and a change restyles the drawer within the same update.
+        .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+            let width = root_id.get_layout_rect().width();
+            if width > 0.0 && state.window_width.get_untracked() != width {
+                state.window_width.set(width);
+            }
+        })
         // The keys the code editor would otherwise keep. The editor stops
         // every key once it has focus, and these are pressed right after
         // clicking in it, so they are caught on the way down to it rather
@@ -227,21 +247,36 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             },
             move |cx, key: &KeyboardEvent| {
                 let key_backend = &capture_backend;
-                // Cmd-Shift-A is app-wide, including while the editor or a
-                // composer owns focus. Escape first backs out of details, then
-                // closes the inspector on the next press.
-                if key.code == Code::KeyA && key.modifiers == OS_MOD | Modifiers::SHIFT {
-                    let opener = (!state.agents_open.get())
-                        .then(|| focused_descendant(cx, root_id))
-                        .flatten();
-                    agents::toggle(state, key_backend, opener);
-                    return EventPropagation::Stop;
+                // Cmd-Shift-E and Cmd-Shift-A are the drawer on the right,
+                // on the files and on the Agents inspector, app-wide,
+                // including while the editor or a composer owns focus.
+                // Whatever had the keyboard gets it back when the drawer
+                // shuts, so it is noted as the drawer opens; a swap from
+                // one to the other keeps the note. Files is not offered
+                // for an item without files.
+                if key.modifiers == OS_MOD | Modifiers::SHIFT {
+                    let view = match key.code {
+                        Code::KeyA => Some(DrawerView::Agents),
+                        Code::KeyE if state.files_available() => Some(DrawerView::Files),
+                        _ => None,
+                    };
+                    if let Some(view) = view {
+                        let opener = state
+                            .drawer_shown_untracked()
+                            .is_none()
+                            .then(|| focused_descendant(cx, root_id))
+                            .flatten();
+                        drawer::toggle(state, key_backend, view, opener);
+                        return EventPropagation::Stop;
+                    }
                 }
-                if key.code == Code::Escape && key.modifiers.is_empty() && state.agents_open.get() {
+                // Escape first backs out of a run's details, then shuts the
+                // inspector on the next press.
+                if key.code == Code::Escape && key.modifiers.is_empty() && state.agents_open() {
                     if state.selected_agent_run.with(Option::is_some) {
                         agents::back_to_list(state);
                     } else {
-                        agents::close(state, key_backend, true);
+                        drawer::close(state, key_backend, true);
                     }
                     return EventPropagation::Stop;
                 }
@@ -813,17 +848,97 @@ mod tests {
         (harness, review)
     }
 
-    /// Cmd-W as the window receives it.
-    fn cmd_w() -> floem::event::Event {
+    /// A key as the window receives it.
+    fn key(code: Code, key: Key, modifiers: Modifiers) -> floem::event::Event {
         floem::event::Event::Key(KeyboardEvent {
             state: KeyState::Down,
-            key: Key::Character("w".into()),
-            code: Code::KeyW,
+            key,
+            code,
             location: Default::default(),
-            modifiers: OS_MOD,
+            modifiers,
             repeat: false,
             is_composing: false,
         })
+    }
+
+    /// Cmd-W as the window receives it.
+    fn cmd_w() -> floem::event::Event {
+        key(Code::KeyW, Key::Character("w".into()), OS_MOD)
+    }
+
+    /// Cmd-Shift-E and Cmd-Shift-A are the drawer on the right, on the
+    /// files and on the agents: each opens the drawer on its own, swaps
+    /// it from the other, and shuts it from itself. The pane beside it
+    /// keeps the open file and its editor through all of it, and the
+    /// editor gets the keyboard back when the drawer shuts.
+    #[test]
+    fn the_drawer_keys_open_swap_and_shut_the_drawer_around_the_editor() {
+        let (mut harness, review) = window_with_a_file_open();
+        let code = named(harness.root_id(), "tinted editor").expect("no editor in the window");
+        let rect = code.get_visual_rect_no_clip();
+        harness.click(rect.x0 + 200.0, rect.y0 + 40.0);
+        harness.rebuild();
+        harness.paint();
+        let editor = harness
+            .element_id_at(rect.x0 + 200.0, rect.y0 + 40.0)
+            .expect("nothing under the click")
+            .owning_id();
+        assert!(harness.is_focused(editor));
+        let drawer = named(harness.root_id(), "right-drawer").expect("no drawer in the window");
+        assert_eq!(drawer.get_visual_rect_no_clip().width(), 0.0, "shut, it takes no room");
+
+        let files = key(Code::KeyE, Key::Character("e".into()), OS_MOD | Modifiers::SHIFT);
+        let agents = key(Code::KeyA, Key::Character("a".into()), OS_MOD | Modifiers::SHIFT);
+        harness.dispatch_event(files.clone());
+        harness.rebuild();
+        harness.paint();
+        assert!(
+            named(harness.root_id(), "files-panel").is_some(),
+            "Cmd-Shift-E did not open the drawer on the files"
+        );
+        let drawer = named(harness.root_id(), "right-drawer")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert_eq!(drawer.x1, 1400.0);
+        assert!(drawer.width() >= theme::DRAWER_MIN_WIDTH);
+        // The same editor, moved over rather than built again.
+        let code_now = named(harness.root_id(), "tinted editor").unwrap();
+        assert_eq!(code_now, code, "the editor was rebuilt");
+        assert!(code.get_visual_rect_no_clip().x1 <= drawer.x0, "the editor is under the drawer");
+        assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
+
+        harness.dispatch_event(agents.clone());
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "files-panel").is_none());
+        assert!(named(harness.root_id(), "agents-panel").is_some(), "Cmd-Shift-A did not swap");
+
+        harness.dispatch_event(files.clone());
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "files-panel").is_some(), "Cmd-Shift-E did not swap back");
+
+        harness.dispatch_event(files);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "files-panel").is_none(), "Cmd-Shift-E did not shut it");
+        assert_eq!(
+            named(harness.root_id(), "right-drawer").unwrap().get_visual_rect_no_clip().width(),
+            0.0
+        );
+        assert_eq!(code.get_visual_rect_no_clip().x1, 1400.0, "the editor has the window again");
+        assert!(harness.is_focused(editor), "the editor did not get the keyboard back");
+        assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
+
+        // Escape shuts the agents, as it did when they were an overlay.
+        harness.dispatch_event(agents);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "agents-panel").is_some());
+        harness.dispatch_event(key(Code::Escape, Key::Named(NamedKey::Escape), Modifiers::empty()));
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "agents-panel").is_none());
     }
 
     /// Cmd-W closes the open file from the code too. The editor keeps

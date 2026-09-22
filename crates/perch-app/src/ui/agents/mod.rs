@@ -1,8 +1,9 @@
 //! App-wide agent activity.
 //!
-//! The inspector is an overlay rather than another workspace column. Opening
-//! it therefore leaves the editor, its selection, the conversation scroll and
-//! any composer exactly where the reader put them.
+//! The inspector is one of the two things the drawer on the right holds,
+//! so it is a column beside the workspace rather than part of it: opening
+//! it leaves the editor, its selection, the conversation scroll and any
+//! composer exactly where the reader put them.
 
 pub mod model;
 
@@ -12,11 +13,11 @@ mod list;
 use std::rc::Rc;
 use std::time::Duration;
 
-use floem::event::{DragConfig, EventPropagation};
+use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
-use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::{CursorStyle, Position};
+use floem::reactive::{Effect, SignalGet, SignalUpdate, SignalWith};
+use floem::style::Position;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
@@ -24,7 +25,7 @@ use crate::icons::SidebarIcon;
 use crate::review::model::{ItemTab, ReviewState};
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::titlebar::title_bar;
+use crate::ui::drawer::{self, DrawerView};
 use crate::ui::widgets::{clickable, sidebar_glyph};
 
 use model::{AgentRunStatus, AgentRunSummary};
@@ -80,11 +81,11 @@ pub fn control(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let click_backend = backend.clone();
     button
         .on_event_stop(el::Click, move |_, _| {
-            toggle(state, &click_backend, Some(id))
+            drawer::toggle(state, &click_backend, DrawerView::Agents, Some(id))
         })
         .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
             if matches!(key.code, Code::Enter | Code::Space) {
-                toggle(state, &backend, Some(id));
+                drawer::toggle(state, &backend, DrawerView::Agents, Some(id));
                 EventPropagation::Stop
             } else {
                 EventPropagation::Continue
@@ -99,7 +100,7 @@ pub fn control(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                 .keyboard_navigable()
                 .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
                 .hover(|s| s.background(theme::CANVAS_HOVER));
-            if state.agents_open.get() {
+            if state.agents_open() {
                 base.background(theme::BADGE_BG)
             } else {
                 base
@@ -108,75 +109,23 @@ pub fn control(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         .debug_name("agents-control")
 }
 
-pub fn toggle(state: AppState, backend: &Backend, opener: Option<floem::ViewId>) {
-    let open = !state.agents_open.get_untracked();
-    state.agents_open.set(open);
-    backend.set_meta("agents.open", if open { "true" } else { "false" });
-    if open {
-        if let Some(opener) = opener {
-            state.agents_opener.set(Some(opener));
-        }
-    } else {
-        state.selected_agent_run.set(None);
-        state.pending_agent_row_focus.set(None);
-        restore_opener(state);
-    }
-}
-
-pub fn close(state: AppState, backend: &Backend, restore_focus: bool) {
-    state.agents_open.set(false);
-    state.selected_agent_run.set(None);
-    state.pending_agent_row_focus.set(None);
-    backend.set_meta("agents.open", "false");
-    if restore_focus {
-        restore_opener(state);
-    } else {
-        state.agents_opener.set(None);
-    }
-}
-
-fn restore_opener(state: AppState) {
-    let opener = state.agents_opener.get_untracked();
-    state.agents_opener.set(None);
-    if let Some(opener) = opener {
-        opener.request_focus();
-    }
-}
-
-/// The overlay itself. It stays a sibling of the workspace instead of being
-/// keyed into it, which is what preserves all item-local view state.
-pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let load_backend = backend.clone();
+/// What follows the inspector opening: the first page of history is
+/// asked for, and the clock that keeps the elapsed times moving is
+/// started while there is running work to time. Once, from the drawer.
+pub fn wire(state: AppState, backend: Rc<Backend>) {
     Effect::new(move |previous: Option<(bool, bool)>| {
-        let open = state.agents_open.get();
+        let open = state.agents_open();
         let active = state
             .agent_runs
             .with(|runs| runs.iter().any(|run| run.status.is_active()));
         if open && !previous.is_some_and(|(was_open, _)| was_open) {
-            request_agent_runs(state, &load_backend, FIRST_HISTORY_PAGE);
+            request_agent_runs(state, &backend, FIRST_HISTORY_PAGE);
         }
         if open && active && !state.agents_clock_armed.get_untracked() {
             arm_clock(state);
         }
         (open, active)
     });
-    dyn_container(
-        move || state.agents_open.get(),
-        move |open| {
-            if !open {
-                return Empty::new().into_any();
-            }
-            surface(state, review, backend.clone()).into_any()
-        },
-    )
-    .style(|s| {
-        s.position(Position::Absolute)
-            .inset_top(0.0)
-            .inset_right(0.0)
-            .inset_bottom(0.0)
-            .z_index(60)
-    })
-    .debug_name("agents-panel-slot")
 }
 
 pub(super) fn request_agent_runs(state: AppState, backend: &Backend, history_limit: usize) {
@@ -187,41 +136,22 @@ pub(super) fn request_agent_runs(state: AppState, backend: &Backend, history_lim
     });
 }
 
-fn surface(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// The inspector in the drawer: its bar, then the list of runs or the
+/// one the reader opened.
+pub fn view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let header_backend = backend.clone();
-    let body_backend = backend.clone();
-    Container::new(
-        Stack::horizontal((
-            resize_handle(state, backend.clone()),
-            Stack::vertical((
-                panel_header(state, header_backend),
-                dyn_container(
-                    move || state.selected_agent_run.get(),
-                    move |selected| match selected.and_then(|id| state.agent_run(&id)) {
-                        Some(run) => {
-                            detail::view(state, review, body_backend.clone(), run).into_any()
-                        }
-                        None => list::view(state, review, body_backend.clone()).into_any(),
-                    },
-                )
-                .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
-            ))
-            .style(|s| s.size_full().flex_col().min_width(0.0)),
-        ))
-        .style(|s| s.size_full()),
-    )
-    .style(move |s| {
-        s.width(state.agents_width.get())
-            .max_width_full()
-            .height_full()
-            .background(theme::CANVAS)
-            .border_left(1.0)
-            .border_color(theme::BORDER)
-            .box_shadow_blur(18.0)
-            .box_shadow_h_offset(-5.0)
-            .box_shadow_color(theme::SHADOW)
-            .position(Position::Relative)
-    })
+    Stack::vertical((
+        panel_header(state, header_backend),
+        dyn_container(
+            move || state.selected_agent_run.get(),
+            move |selected| match selected.and_then(|id| state.agent_run(&id)) {
+                Some(run) => detail::view(state, review, backend.clone(), run).into_any(),
+                None => list::view(state, review, backend.clone()).into_any(),
+            },
+        )
+        .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
+    ))
+    .style(|s| s.size_full().flex_col().min_width(0.0))
     .debug_name("agents-panel")
 }
 
@@ -249,20 +179,6 @@ fn panel_header(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .into_any()
         },
     );
-    let title = Label::derived(move || {
-        if state.selected_agent_run.with(Option::is_some) {
-            "Run details".to_string()
-        } else {
-            "Agents".to_string()
-        }
-    })
-    .style(|s| {
-        s.font_size(theme::TEXT_TITLE)
-            .font_weight(theme::weight_emphasis())
-            .color(theme::FG)
-            .selectable(false)
-            .pointer_events_none()
-    });
     let count = Label::derived(move || {
         let (running, queued) = state.active_agent_counts();
         let total = running + queued;
@@ -286,10 +202,7 @@ fn panel_header(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .pointer_events_none()
             .apply_if(state.active_agent_counts() == (0, 0), |s| s.hide())
     });
-    let close_backend = backend.clone();
-    let close_button = icon_action(SidebarIcon::Close, "agents-close Close agents", move || {
-        close(state, &close_backend, true)
-    });
+    let close_button = drawer::close_button(state, backend, "agents-close Close agents");
     let close_id = close_button.view_id();
     let focus_close = state.selected_agent_run.get_untracked().is_none();
     let asked = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -299,30 +212,18 @@ fn panel_header(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         }
     });
 
-    title_bar(
-        Stack::horizontal((
-            back,
-            title,
-            count,
-            Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
-            close_button,
-        ))
-        .style(|s| {
-            s.items_center()
-                .width_full()
-                .gap(8.0)
-                .padding_left(12.0)
-                .padding_right(8.0)
-        }),
+    drawer::header_bar(
+        back,
+        move || {
+            if state.selected_agent_run.with(Option::is_some) {
+                "Run details".to_string()
+            } else {
+                "Agents".to_string()
+            }
+        },
+        count,
+        close_button,
     )
-    .style(|s| {
-        s.height(theme::AGENTS_HEADER_HEIGHT)
-            .width_full()
-            .flex_shrink(0.0_f32)
-            .background(theme::CANVAS)
-            .border_bottom(1.0)
-            .border_color(theme::BORDER)
-    })
 }
 
 pub fn back_to_list(state: AppState) {
@@ -331,7 +232,7 @@ pub fn back_to_list(state: AppState) {
     state.selected_agent_run.set(None);
 }
 
-pub(super) fn icon_action(
+pub(crate) fn icon_action(
     icon: SidebarIcon,
     debug: &'static str,
     action: impl Fn() + 'static,
@@ -456,7 +357,7 @@ pub(super) fn navigate_to_source(
         same_item,
         review.historical_review.with_untracked(Option::is_some),
     );
-    close(app, backend, false);
+    drawer::close(app, backend, false);
     if let Some(attempt_id) = run.review_attempt_id.clone() {
         let navigation_id = backend.view_review_attempt_owner(&item_id, &attempt_id);
         app.begin_agent_review_navigation(
@@ -498,88 +399,13 @@ fn tick_clock(state: AppState) {
         let active = state
             .agent_runs
             .with_untracked(|runs| runs.iter().any(|run| run.status.is_active()));
-        if state.agents_open.get_untracked() && active {
+        if floem::reactive::Effect::untrack(|| state.agents_open()) && active {
             state.now.set(jiff::Timestamp::now());
             tick_clock(state);
         } else {
             state.agents_clock_armed.set(false);
         }
     });
-}
-
-fn resize_handle(state: AppState, backend: Rc<Backend>) -> impl IntoView {
-    let start_width = RwSignal::new(theme::AGENTS_WIDTH);
-    Empty::new()
-        .on_event_stop(el::PointerDown, |cx, event: &PointerButtonEvent| {
-            if let Some(pointer) = event
-                .pointer
-                .pointer_id
-                .filter(|pointer| pointer.is_primary_pointer())
-            {
-                cx.request_pointer_capture(pointer);
-            }
-        })
-        .on_event_stop(el::GainedPointerCapture, |cx, token| {
-            cx.start_drag(
-                *token,
-                DragConfig {
-                    threshold: 1.0,
-                    animation_duration: Duration::ZERO,
-                    easing: Rc::new(floem::easing::Linear),
-                    custom_data: None,
-                    track_targets: false,
-                },
-                false,
-            );
-        })
-        .on_event_stop(el::DragStart, move |_, _: &floem::event::DragStartEvent| {
-            start_width.set(state.agents_width.get_untracked());
-            state.agents_resizing.set(true);
-        })
-        .on_event_stop(
-            el::DragMove,
-            move |cx, event: &floem::event::DragMoveEvent| {
-                let inverse = cx.world_transform.inverse();
-                let start = inverse * event.start_state.logical_point();
-                let current = inverse * event.current_state.logical_point();
-                let width = (start_width.get_untracked() + start.x - current.x)
-                    .clamp(theme::AGENTS_MIN_WIDTH, theme::AGENTS_MAX_WIDTH);
-                state.agents_width.set(width);
-            },
-        )
-        .on_event_stop(el::DragEnd, move |_, _: &floem::event::DragEndEvent| {
-            state.agents_resizing.set(false);
-            backend.set_meta(
-                "agents.width",
-                &state.agents_width.get_untracked().round().to_string(),
-            );
-        })
-        .on_event_stop(
-            el::DragCancel,
-            move |_, _: &floem::event::DragCancelEvent| {
-                state.agents_resizing.set(false);
-            },
-        )
-        .style(|s| {
-            s.position(Position::Absolute)
-                .inset_top(0.0)
-                .inset_bottom(0.0)
-                .inset_left(-4.0)
-                .width(8.0)
-                .z_index(3)
-                .hover(|s| s.cursor(CursorStyle::ColResize))
-        })
-}
-
-/// Keep the resize cursor while capture carries the pointer over the editor.
-pub fn resize_cursor_sheet(state: AppState) -> impl IntoView {
-    Empty::new().style(move |s| {
-        s.position(Position::Absolute)
-            .inset(0.0)
-            .z_index(101)
-            .cursor(CursorStyle::ColResize)
-            .apply_if(!state.agents_resizing.get(), |s| s.hide())
-    })
 }
 
 /// A terminal transition stays lightweight: enough context to identify it,
@@ -619,14 +445,15 @@ pub fn completion_notice(state: AppState, backend: Rc<Backend>) -> impl IntoView
                 true,
                 move || {
                     state.dismiss_agent_completion(token);
-                    state
-                        .agents_opener
-                        .set(state.agents_control.get_untracked());
-                    state.agents_open.set(true);
+                    drawer::show(
+                        state,
+                        &view_backend,
+                        DrawerView::Agents,
+                        state.agents_control.get_untracked(),
+                    );
                     state.agents_tab.set(model::AgentsTab::History);
                     state.selected_agent_run.set(Some(run_id.clone()));
                     state.set_agent_run_events_loading(&run_id);
-                    view_backend.set_meta("agents.open", "true");
                     view_backend.load_agent_run_detail(&run_id);
                 },
             );
@@ -740,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn the_keyboard_overlay_filters_streams_and_preserves_the_workspace() {
+    fn the_keyboard_opens_the_inspector_which_filters_streams_and_preserves_the_workspace() {
         let root = TestRoot::new();
         let app = AppState::new();
         let review = ReviewState::new();
@@ -764,7 +591,7 @@ mod tests {
         ));
         harness.rebuild();
         harness.paint();
-        assert!(app.agents_open.get());
+        assert!(app.agents_open());
         assert!(shown(&harness, "agent-run:stream"));
         let close = named(harness.root_id(), "agents-close").unwrap();
         assert!(harness.is_focused(close));
@@ -803,7 +630,7 @@ mod tests {
         ));
         harness.rebuild();
         harness.paint();
-        assert!(app.agents_open.get());
+        assert!(app.agents_open());
         assert!(app.selected_agent_run.get().is_none());
         assert!(shown(&harness, "agent-run:stream"));
         let rebuilt_row = named(harness.root_id(), "agent-run:stream").unwrap();
@@ -816,7 +643,7 @@ mod tests {
         ));
         harness.rebuild();
         harness.paint();
-        assert!(!app.agents_open.get());
+        assert!(!app.agents_open());
         assert_eq!(review.composer_draft.get(), "half a thought");
         assert!(harness.is_focused(control));
     }
@@ -826,7 +653,7 @@ mod tests {
         let root = TestRoot::new();
         let app = AppState::new();
         let review = ReviewState::new();
-        app.agents_open.set(true);
+        app.drawer.set(Some(DrawerView::Agents));
         let backend = Rc::new(Backend::detached());
         let view = crate::ui::app_view(app, review, backend);
         let mut harness = HeadlessHarness::new_with_size(root, view, 900.0, 700.0);
@@ -838,12 +665,15 @@ mod tests {
         assert!(app.agents_clock_armed.get());
     }
 
+    /// The inspector fills the drawer, top to status bar and edge to
+    /// edge, whether the drawer is docked beside the pane or, in a window
+    /// too narrow for both, over it.
     #[test]
-    fn panel_fills_the_window_and_its_contents_fill_the_allocated_width() {
+    fn the_inspector_fills_the_drawer_docked_and_over_the_pane() {
         let root = TestRoot::new();
         let app = AppState::new();
         let review = ReviewState::new();
-        app.agents_open.set(true);
+        app.drawer.set(Some(DrawerView::Agents));
         app.agents_tab.set(model::AgentsTab::History);
         let backend = Rc::new(Backend::detached());
         let view = crate::ui::app_view(app, review, backend);
@@ -851,21 +681,43 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
-        let panel = named(harness.root_id(), "agents-panel")
-            .expect("the open panel exists")
+        // With the sidebar open at 1200 there is no room to dock: the
+        // drawer lies over the pane's right edge at its own width.
+        let drawer = named(harness.root_id(), "right-drawer")
+            .expect("the open drawer exists")
             .get_visual_rect_no_clip();
         let list = named(harness.root_id(), "agents-list")
             .expect("the history list exists")
             .get_visual_rect_no_clip();
-        assert_eq!(panel.width(), theme::AGENTS_WIDTH);
+        assert_eq!(drawer.width(), theme::DRAWER_WIDTH);
+        assert_eq!(drawer.x1, 1200.0);
         assert!(
-            panel.y0.abs() < 0.01 && (panel.y1 - 760.0).abs() < 0.01,
-            "the panel must reach both vertical window edges: panel={panel:?}"
+            drawer.y0.abs() < 0.01 && (drawer.y1 - (760.0 - theme::STATUS_HEIGHT)).abs() < 0.01,
+            "the drawer runs from the top to the status bar: {drawer:?}"
         );
         assert!(
-            (panel.x1 - list.x1).abs() < 0.01,
-            "the panel content must reach the panel's right edge: panel={panel:?}, list={list:?}"
+            (drawer.x1 - list.x1).abs() < 0.01,
+            "the content must reach the drawer's right edge: drawer={drawer:?}, list={list:?}"
         );
+        let pane = named(harness.root_id(), "main-pane").expect("the main pane");
+        assert_eq!(
+            pane.get_visual_rect_no_clip().x1,
+            1200.0,
+            "the pane still has the whole width under the drawer"
+        );
+
+        // Shut the sidebar and there is: the drawer docks, and the pane
+        // stops where it starts.
+        app.sidebar_open.set(false);
+        harness.rebuild();
+        harness.paint();
+        let drawer = named(harness.root_id(), "right-drawer")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert_eq!(drawer.width(), theme::DRAWER_WIDTH);
+        assert_eq!(drawer.x1, 1200.0);
+        let pane = named(harness.root_id(), "main-pane").unwrap();
+        assert_eq!(pane.get_visual_rect_no_clip().x1, drawer.x0);
     }
 
     #[test]

@@ -1110,13 +1110,11 @@ fn progress_label(summary: &ReviewGroupSummary) -> String {
 
 fn open_agents(app: AppState, state: ReviewState, backend: &Backend, opener: floem::ViewId) {
     state.review_launcher_open.set(false);
-    app.agents_opener.set(Some(opener));
     app.agents_tab.set(AgentsTab::Active);
     app.agents_worktree_filter.set(WorktreeFilter::Current);
     app.agents_backend_filter.set(BackendFilter::All);
     app.selected_agent_run.set(None);
-    app.agents_open.set(true);
-    backend.set_meta("agents.open", "true");
+    crate::ui::drawer::show(app, backend, crate::ui::drawer::DrawerView::Agents, Some(opener));
 }
 
 fn group_title(summary: &ReviewGroupSummary) -> String {

@@ -145,13 +145,16 @@ Code or Codex in that item's worktree. Follow-ups remain attached to the local
 conversation, and the agents retain their read-only permissions. Nothing an
 agent writes reaches GitHub unless you post it (see Posting).
 
-The persistent **Agents** control in the status bar opens an app-wide activity
-inspector. Active work is grouped by worktree and continues while another item
-is open or while the panel is closed. Each row shows the agent, model, effort,
-queue or execution time, and latest tool activity. Selecting one shows its
-retained request, ordered activity, streamed response, usage, and errors.
-Active rows can be stopped, queued rows can be cancelled, and failed, stopped,
-or interrupted attempts can be retried without replacing their history.
+The app-wide activity inspector is one of the two things the drawer on the
+right holds (see [The drawer](#the-drawer)). The persistent **Agents** control
+in the status bar opens it, as do the Agents tile at the right end of the file
+tabs and `Cmd-Shift-A`. Active work is grouped by worktree and continues while
+another item is open or while the drawer is shut. Each row shows the agent,
+model, effort, queue or execution time, and latest tool activity. Selecting
+one shows its retained request, ordered activity, streamed response, usage,
+and errors. Active rows can be stopped, queued rows can be cancelled, and
+failed, stopped, or interrupted attempts can be retried without replacing
+their history.
 
 Perch executes at most four top-level agents by default and queues the rest in
 FIFO order. Stopping a run terminates and reaps its process group. Closing
@@ -266,6 +269,35 @@ deterministic Markdown at
 `~/.perch` when `PERCH_HOME` is unset). Re-exporting replaces that stable
 document rather than duplicating unchanged entries; unrelated legacy files in
 the knowledge directory are not imported.
+
+## The drawer
+
+The drawer on the right holds one of two things: the open item's files as a
+tree, or the Agents inspector. It is a column beside the main pane, so
+opening it moves the pane over rather than covering what is being read, and
+the open file, its scroll and a composer are kept through it opening,
+shutting, and changing what it holds. When the window is too narrow for both
+the drawer and a usable pane, the drawer lies over the pane's right edge
+instead, from the top of the window to the status bar.
+
+The two tiles at the right end of the file tabs open it, after the layout
+tiles: Files and Agents, as Codex has its folder there. Each is a toggle. The
+tile for what the drawer shows is filled, and a click on it shuts the drawer;
+a click on the other swaps what it holds. `Cmd-Shift-E` and `Cmd-Shift-A` do
+the same from anywhere, including from the code or a composer, and the Agents
+control in the status bar is the third way to the inspector. `Escape` backs
+out of a run's details and then shuts the inspector; the drawer's own close
+button shuts it from either. What the drawer holds and how wide it is are
+remembered between launches; asked for the files while an issue is open, it
+stays shut until an item with files opens.
+
+The files tree is the changed files until its filter is turned off, with the
+scope button and the viewed count above it. A file opened from the tree opens
+on Files, whichever tab the reader was on, and a file opened from anywhere
+else, a card or a definition, is shown in the tree: the way to it opens, the
+filter comes off when the file is not a change, and the tree scrolls to its
+row. During a retained snapshot the tree has no scope to pick and nothing to
+mark viewed, and the way back to the current files is in the tab strip.
 
 ## Code navigation
 

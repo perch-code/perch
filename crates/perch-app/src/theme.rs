@@ -162,12 +162,16 @@ pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
 /// An item row in the sidebar: two lines of text and the glyph beside them.
 pub const ROW_HEIGHT: f64 = 68.0;
 pub const STATUS_HEIGHT: f64 = 34.0;
-/// The app-wide Agents inspector. It overlays the workspace so opening it
-/// never rebuilds or reflows the file the reader is looking at.
-pub const AGENTS_WIDTH: f64 = 408.0;
-pub const AGENTS_MIN_WIDTH: f64 = 336.0;
-pub const AGENTS_MAX_WIDTH: f64 = 620.0;
-pub const AGENTS_HEADER_HEIGHT: f64 = 46.0;
+/// The drawer on the right, which holds the open item's files or the
+/// app-wide Agents inspector. Docked beside the main pane while the window
+/// has the room, and over it while it does not.
+pub const DRAWER_WIDTH: f64 = 408.0;
+pub const DRAWER_MIN_WIDTH: f64 = 336.0;
+pub const DRAWER_MAX_WIDTH: f64 = 620.0;
+/// The least the main pane is left with before the drawer stops taking
+/// room from it and lies over it instead: enough for the item bar's
+/// controls and its switch, with the title given way.
+pub const MAIN_MIN_WIDTH: f64 = 620.0;
 pub const AGENT_ROW_MIN_HEIGHT: f64 = 88.0;
 /// The strip at the top of the drawer, where the traffic lights sit.
 ///
@@ -360,7 +364,6 @@ pub const SCROLLBAR_SLIDER: Color = Color::from_rgba8(0x64, 0x64, 0x64, 0x66);
 pub const SCROLLBAR_SLIDER_HOVER: Color = Color::from_rgba8(0x64, 0x64, 0x64, 0xb3);
 pub const SCROLLBAR_SLIDER_ACTIVE: Color = Color::from_rgba8(0x00, 0x00, 0x00, 0x99);
 pub const SCROLLBAR_TRACK_LINE: Color = Color::from_rgba8(0x7f, 0x7f, 0x7f, 0x4d);
-pub const RAIL_WIDTH: f64 = 312.0;
 pub const REVIEW_HEADER_HEIGHT: f64 = TITLEBAR_HEIGHT;
 /// The room at either end of the bar over the item.
 pub const REVIEW_HEADER_PADDING: f64 = 14.0;

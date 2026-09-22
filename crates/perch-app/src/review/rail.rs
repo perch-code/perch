@@ -1,5 +1,6 @@
 //! The file rail: the scope, then the worktree as a tree, cut down to the
-//! changed files until the filter is turned off.
+//! changed files until the filter is turned off. It is what the drawer on
+//! the right holds while it holds the files.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -14,24 +15,43 @@ use perch_git::{ChangeStatus, ChangedFile, TreeEntry};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::model::ReviewState;
+use crate::review::model::{ItemTab, ReviewState};
 use crate::review::tree::{self, Row};
 use crate::review::OpenFile;
 use crate::review::{cards, scope};
 use crate::state::{AppState, Checked};
 use crate::theme;
+use crate::ui::drawer;
 use crate::ui::widgets::{checkbox, icon_button, scrollbars, sidebar_glyph};
 
 /// The changed files by path, for the tree, which lists every file and
 /// knows the changed ones only by path.
 type ChangedByPath = Memo<Arc<HashMap<String, ChangedFile>>>;
 
-pub fn rail(
-    app: AppState,
-    state: ReviewState,
-    on_open: OpenFile,
-    backend: Rc<Backend>,
-) -> impl IntoView {
+/// The drawer holding the files: its bar, then the rail. A file opened
+/// from the tree opens on Files, whichever tab the reader was on.
+pub fn drawer_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    let open_file = crate::review::open_file(state, backend.clone());
+    let on_open: OpenFile = Rc::new(move |path: &str| {
+        if state.tab.get_untracked() != ItemTab::Files {
+            state.show_tab(ItemTab::Files);
+        }
+        open_file(path);
+    });
+    Stack::vertical((
+        drawer::header_bar(
+            Empty::new(),
+            || "Files".to_string(),
+            Empty::new(),
+            drawer::close_button(app, backend.clone(), "files-close Close files"),
+        ),
+        rail(state, on_open, backend),
+    ))
+    .style(|s| s.size_full().flex_col().min_height(0.0))
+    .debug_name("files-panel")
+}
+
+pub fn rail(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl IntoView {
     let changed: ChangedByPath = Memo::new(move |_| {
         state
             .changed_files
@@ -41,60 +61,31 @@ pub fn rail(
     let controls_backend = backend.clone();
     Stack::vertical((
         dyn_container(
-            move || state.historical_review.get(),
+            move || state.historical_review.with(Option::is_some),
             // A retained snapshot has no scope to pick and nothing to mark
-            // viewed: the rows say so, and the way back to the item as it
-            // is now is here, since Files has no summary to hold it.
-            move |historical| match historical {
-                Some(review) => Stack::horizontal((
-                    Label::derived(move || {
-                        format!(
-                            "Review #{} retained snapshot · read-only",
-                            review.group.number
-                        )
-                    })
-                    .style(|s| {
-                        s.font_size(theme::TEXT_BADGE)
-                            .color(theme::FG_MUTED)
-                            .flex_grow(1.0_f32)
-                            .min_width(0.0)
-                            .text_wrap()
-                    }),
-                    crate::review::summary::back_to_current(
-                        app,
-                        state,
-                        controls_backend.clone(),
-                    ),
-                ))
-                .style(|s| {
-                    s.height(theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT)
-                        .width_full()
-                        .padding_horiz(10.0)
-                        .items_center()
-                        .gap(8.0)
-                        .background(theme::CANVAS_SUBTLE)
-                        .border_bottom(1.0)
-                        .border_color(theme::BORDER)
-                })
-                .into_any(),
-                None => Stack::vertical((
-                    scope::button(state, controls_backend.clone()),
-                    viewed_row(state, controls_backend.clone()),
-                ))
-                .style(|s| s.flex_col().width_full())
-                .into_any(),
+            // viewed, so neither row is there; the tab bar says what the
+            // files are, and holds the way back.
+            move |historical| {
+                if historical {
+                    Empty::new().into_any()
+                } else {
+                    Stack::vertical((
+                        scope::button(state, controls_backend.clone()),
+                        viewed_row(state, controls_backend.clone()),
+                    ))
+                    .style(|s| s.flex_col().width_full())
+                    .into_any()
+                }
             },
         ),
         tree_list(state, changed, on_open, backend),
     ))
     .style(|s| {
-        s.width(theme::RAIL_WIDTH)
-            .height_full()
+        s.width_full()
+            .flex_grow(1.0_f32)
+            .min_height(0.0)
             .flex_col()
-            .flex_shrink(0.0_f32)
             .background(theme::RAIL_BG)
-            .border_right(1.0)
-            .border_color(theme::BORDER)
     })
 }
 
@@ -561,11 +552,15 @@ mod tests {
         }
     }
 
+    /// The left edge of the drawer on the right, docked at its default
+    /// width against the window's right edge.
+    const DRAWER_LEFT: f64 = 1400.0 - theme::DRAWER_WIDTH;
+
     /// The whole window on Files with a worktree of `src` and a README,
     /// a branch that changed three of the files in `src`, the second of
-    /// them viewed, and the drawer shut so the rail starts at the
-    /// window's edge. The filter is on, so the rows are `src` and the
-    /// three changed files.
+    /// them viewed, and the sidebar shut so the drawer on the right, on
+    /// the files, is docked. The filter is on, so the rows are `src` and
+    /// the three changed files.
     fn app_harness() -> (HeadlessHarness, ReviewState) {
         let root = TestRoot::new();
         let app = AppState::new();
@@ -612,6 +607,7 @@ mod tests {
         ));
         state.composer_autofocus.set(false);
         app.sidebar_open.set(false);
+        app.drawer.set(Some(crate::ui::drawer::DrawerView::Files));
         let backend = crate::backend::Backend::detached();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
@@ -620,33 +616,31 @@ mod tests {
         (harness, state)
     }
 
-    /// The top of the tree: the header's bar, scope button, viewed row,
+    /// The top of the tree: the drawer's bar, scope button, viewed row,
     /// then the list's 4px of padding.
     fn list_top() -> f64 {
-        theme::REVIEW_HEADER_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT + 4.0
+        theme::TITLEBAR_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT + 4.0
     }
 
     /// The centre of a row's name, `row` rows down the tree.
     fn name_center(row: usize) -> (f64, f64) {
-        let x = 60.0;
+        let x = DRAWER_LEFT + 60.0;
         let y = list_top() + row as f64 * theme::TREE_ROW_HEIGHT + theme::TREE_ROW_HEIGHT / 2.0;
         (x, y)
     }
 
     /// The centre of a row's checkbox: 26 square against the row's 4px
-    /// right padding, in a rail `RAIL_WIDTH` wide from the window's edge.
+    /// right padding, at the window's right edge.
     fn checkbox_center(row: usize) -> (f64, f64) {
-        let x = theme::RAIL_WIDTH - 4.0 - 13.0;
+        let x = 1400.0 - 4.0 - 13.0;
         (x, name_center(row).1)
     }
 
     /// The centre of the filter button, at the right end of the viewed
     /// row, the same 26 square against the same 4px.
     fn filter_center() -> (f64, f64) {
-        let x = theme::RAIL_WIDTH - 4.0 - 13.0;
-        let y = theme::REVIEW_HEADER_HEIGHT
-            + theme::SCOPE_BUTTON_HEIGHT
-            + theme::VIEWED_ROW_HEIGHT / 2.0;
+        let x = 1400.0 - 4.0 - 13.0;
+        let y = theme::TITLEBAR_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT / 2.0;
         (x, y)
     }
 
@@ -680,7 +674,7 @@ mod tests {
         scrolls(harness.root_id(), &mut found);
         let rail: Vec<_> = found
             .into_iter()
-            .filter(|id| harness.get_layout_rect(*id).x1 <= theme::RAIL_WIDTH)
+            .filter(|id| id.get_visual_rect_no_clip().x0 >= DRAWER_LEFT)
             .collect();
         let [scroll] = rail[..] else {
             panic!("one scroll in the rail, not {}", rail.len())
@@ -983,7 +977,7 @@ mod tests {
         // The chevron, at the row's left edge after the 10px padding,
         // opens the run: the change is the directory itself, so only the
         // way to it started open.
-        let x = 10.0 + 7.0;
+        let x = DRAWER_LEFT + 10.0 + 7.0;
         let y = name_center(0).1;
         assert!(state.expanded.get().contains("vendor"));
         assert!(!state.expanded.get().contains("vendor/lib"));

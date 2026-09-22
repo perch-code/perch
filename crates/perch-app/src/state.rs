@@ -16,6 +16,7 @@ use crate::backend::{Event, Status};
 use crate::ui::agents::model::{
     AgentRunSummary, AgentsTab, BackendFilter, OutcomeFilter, WorktreeFilter,
 };
+use crate::ui::drawer::DrawerView;
 
 /// Whether a box is checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,10 +102,19 @@ pub struct AppState {
     /// the reader has opened, and fetched from newest toward oldest.
     pub agent_run_events_has_more: RwSignal<HashMap<String, bool>>,
     pub agent_run_events_loading: RwSignal<HashSet<String>>,
-    /// The Agents inspector and its remembered geometry.
-    pub agents_open: RwSignal<bool>,
-    pub agents_width: RwSignal<f64>,
-    pub agents_resizing: RwSignal<bool>,
+    /// What the reader asked the drawer on the right to hold: the open
+    /// item's files, or the Agents inspector. What it shows is
+    /// `drawer_shown`: Files only while there is an item with files.
+    pub drawer: RwSignal<Option<DrawerView>>,
+    /// How wide the drawer is. Dragged, so a signal rather than a constant;
+    /// docked, it may be shown narrower than this to leave the main pane
+    /// its minimum.
+    pub drawer_width: RwSignal<f64>,
+    pub drawer_resizing: RwSignal<bool>,
+    /// The window's width, from its last layout. The drawer takes room
+    /// from the main pane while there is enough, and lies over it when
+    /// there is not.
+    pub window_width: RwSignal<f64>,
     /// Guards the one shared elapsed-time ticker; rows never make timers of
     /// their own.
     pub agents_clock_armed: RwSignal<bool>,
@@ -114,7 +124,10 @@ pub struct AppState {
     pub agents_outcome_filter: RwSignal<OutcomeFilter>,
     pub selected_agent_run: RwSignal<Option<String>>,
     pub agents_control: RwSignal<Option<floem::ViewId>>,
-    pub agents_opener: RwSignal<Option<floem::ViewId>>,
+    /// The control the drawer was opened from, or whatever had the
+    /// keyboard when it was opened by a shortcut, to hand it back to when
+    /// the drawer shuts.
+    pub drawer_opener: RwSignal<Option<floem::ViewId>>,
     pub agent_history_loading: RwSignal<bool>,
     pub agent_history_has_more: RwSignal<bool>,
     /// A load that received no answer within the UI's bounded wait. A later
@@ -215,9 +228,10 @@ impl AppState {
             agent_run_events: RwSignal::new(HashMap::new()),
             agent_run_events_has_more: RwSignal::new(HashMap::new()),
             agent_run_events_loading: RwSignal::new(HashSet::new()),
-            agents_open: RwSignal::new(false),
-            agents_width: RwSignal::new(crate::theme::AGENTS_WIDTH),
-            agents_resizing: RwSignal::new(false),
+            drawer: RwSignal::new(None),
+            drawer_width: RwSignal::new(crate::theme::DRAWER_WIDTH),
+            drawer_resizing: RwSignal::new(false),
+            window_width: RwSignal::new(0.0),
             agents_clock_armed: RwSignal::new(false),
             agents_tab: RwSignal::new(AgentsTab::Active),
             agents_worktree_filter: RwSignal::new(WorktreeFilter::All),
@@ -225,7 +239,7 @@ impl AppState {
             agents_outcome_filter: RwSignal::new(OutcomeFilter::All),
             selected_agent_run: RwSignal::new(None),
             agents_control: RwSignal::new(None),
-            agents_opener: RwSignal::new(None),
+            drawer_opener: RwSignal::new(None),
             agent_history_loading: RwSignal::new(false),
             agent_history_has_more: RwSignal::new(false),
             agent_history_load_failed: RwSignal::new(false),
@@ -719,6 +733,40 @@ impl AppState {
                 self.schedule_agent_completion_dismissal(next.unwrap().token);
             }
         }
+    }
+
+    /// Whether the open item has files for the drawer to show: one with
+    /// a checkout, or one still on its way, which keeps the drawer's
+    /// column from going and coming back while a pull request opens after
+    /// another.
+    pub fn files_available(&self) -> bool {
+        self.review.get().is_some_and(|review| {
+            review.is_showing()
+                && review
+                    .item
+                    .with(|item| item.as_ref().is_none_or(|item| item.checkout.is_some()))
+        })
+    }
+
+    /// What the drawer shows: what was asked for, except Files while there
+    /// are no files to show, when the drawer is shut and the wish is kept
+    /// for the next item that has some.
+    pub fn drawer_shown(&self) -> Option<DrawerView> {
+        match self.drawer.get() {
+            Some(DrawerView::Files) => self.files_available().then_some(DrawerView::Files),
+            other => other,
+        }
+    }
+
+    /// `drawer_shown` for an event handler, which is not to depend on the
+    /// drawer merely for having looked.
+    pub fn drawer_shown_untracked(&self) -> Option<DrawerView> {
+        floem::reactive::Effect::untrack(|| self.drawer_shown())
+    }
+
+    /// Whether the drawer shows the Agents inspector.
+    pub fn agents_open(&self) -> bool {
+        self.drawer_shown() == Some(DrawerView::Agents)
     }
 
     pub fn active_agent_counts(&self) -> (usize, usize) {
@@ -1762,13 +1810,13 @@ impl AppState {
                         review.layout.set(layout);
                     }
                 }
-                "agents.open" => self.agents_open.set(value == "true"),
-                "agents.width" => match value.parse::<f64>() {
-                    Ok(width) => self.agents_width.set(width.clamp(
-                        crate::theme::AGENTS_MIN_WIDTH,
-                        crate::theme::AGENTS_MAX_WIDTH,
+                "drawer.view" => self.drawer.set(DrawerView::parse(&value)),
+                "drawer.width" => match value.parse::<f64>() {
+                    Ok(width) => self.drawer_width.set(width.clamp(
+                        crate::theme::DRAWER_MIN_WIDTH,
+                        crate::theme::DRAWER_MAX_WIDTH,
                     )),
-                    Err(e) => tracing::warn!(error = %e, "ignoring saved Agents width"),
+                    Err(e) => tracing::warn!(error = %e, "ignoring saved drawer width"),
                 },
                 // The two arrive one after the other; whichever comes second
                 // completes the pair.
