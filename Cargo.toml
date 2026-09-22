@@ -28,6 +28,16 @@ jiff = { version = "0.2", features = ["serde"] }
 directories = "6"
 toml = "0.9"
 
+# macOS's default `split-debuginfo = "unpacked"` leaves debug info in each
+# codegen unit's `.o` in target/debug/deps, and cargo never deletes the ones
+# a rebuild supersedes: about 0.65 GB per perch-app rebuild, so a busy target
+# reached 96 GB. Packed debug info goes into a .dSYM beside each binary and
+# the objects are dropped. It costs ~6 s of dsymutil per link; line tables
+# keep that small and still give panic backtraces their file:line.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "packed"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
