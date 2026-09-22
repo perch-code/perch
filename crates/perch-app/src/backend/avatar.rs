@@ -1,11 +1,11 @@
 //! A face as the window draws it: cropped square and cut to its circle
 //! here, once, as it arrives, so the view draws the picture as it is.
 //!
-//! The view cannot cut it. vger, the renderer, clips with one rectangle at
-//! a time and a hard edge, and an image fitted by cover sets its own
-//! square clip over its parent's round one, so a clipped face came out
-//! square. A circle in the picture's alpha has a soft rim whatever draws
-//! it.
+//! The view could clip it round, but vger, the renderer, clips with a hard
+//! edge and rounds all four corners of a clip by the top-left one's
+//! radius, so a face half under the top of a list, where its clip is cut
+//! square, would draw square. A circle in the picture's alpha has a soft
+//! rim whatever draws it.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};

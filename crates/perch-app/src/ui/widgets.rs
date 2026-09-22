@@ -430,9 +430,8 @@ pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, se
         move || state.avatar_for(&url()),
         move |bytes| match bytes {
             // The picture comes cut to its circle (`backend::avatar`) and is
-            // drawn as it is, filling its square. A clip cannot round it:
-            // vger clips with a hard edge, and an image fitted by cover
-            // sets its own square clip over its parent's round one.
+            // drawn as it is, filling its square. A clip would round it with
+            // a hard edge, and not at all half under the top of a list.
             Some(bytes) => img(move || bytes.as_ref().clone())
                 .style(move |s| s.size(size, size).object_fit(ObjectFit::Fill))
                 .into_any(),
@@ -591,7 +590,8 @@ mod tests {
     }
 
     /// A face is drawn as the backend cut it, at its size, with nothing
-    /// clipping it: under vger a clip is what drew faces square.
+    /// clipping it: under vger a clip drew faces square, and still would
+    /// half under the top of a list.
     #[test]
     fn a_face_is_drawn_whole_with_no_clip() {
         use floem::headless::{HeadlessHarness, TestRoot};
