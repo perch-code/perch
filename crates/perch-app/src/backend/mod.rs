@@ -1587,6 +1587,7 @@ impl DiscussionRequests {
         }
     }
 
+    #[cfg(test)]
     fn is_held(&self, item_id: &str) -> bool {
         self.latest
             .lock()
