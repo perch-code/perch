@@ -361,22 +361,6 @@ pub fn install_code_font() {
 pub const GUTTER_WIDTH: f64 = 70.0;
 /// Gap between the gutter's change bar and the first character of code.
 pub const CODE_GUTTER_GAP: f64 = 12.0;
-/// The Files view's scrollbars, as VSCode draws its own: a bar down the
-/// right edge, over the content rather than beside it, and one along the
-/// bottom that is there only while a line is wider than the view; the
-/// editor's are this wide, and the rail's and the panels' the width
-/// VSCode gives a list's. The slider is a flat, translucent grey that
-/// darkens under the pointer and again while it is dragged; the track
-/// paints nothing but, on the editor's vertical bar, the line VSCode
-/// draws down the left of its overview ruler, which is there whether or
-/// not the file is taller than the view. VSCode's light theme, over
-/// Perch's white code.
-pub const EDITOR_SCROLLBAR: f64 = 14.0;
-pub const LIST_SCROLLBAR: f64 = 10.0;
-pub const SCROLLBAR_SLIDER: Color = Color::from_rgba8(0x64, 0x64, 0x64, 0x66);
-pub const SCROLLBAR_SLIDER_HOVER: Color = Color::from_rgba8(0x64, 0x64, 0x64, 0xb3);
-pub const SCROLLBAR_SLIDER_ACTIVE: Color = Color::from_rgba8(0x00, 0x00, 0x00, 0x99);
-pub const SCROLLBAR_TRACK_LINE: Color = Color::from_rgba8(0x7f, 0x7f, 0x7f, 0x4d);
 pub const REVIEW_HEADER_HEIGHT: f64 = TITLEBAR_HEIGHT;
 /// The room at either end of the bar over the item.
 pub const REVIEW_HEADER_PADDING: f64 = 14.0;
@@ -581,9 +565,12 @@ pub const SELECTION_BG: Color = Color::from_rgba8(0x00, 0x7a, 0xff, 0x4d);
 /// so the current match's has to read on its own, without the blue.
 pub const FIND_MATCH_BG: Color = Color::from_rgba8(0xea, 0x5c, 0x00, 0x55);
 pub const FIND_CURRENT_BG: Color = Color::from_rgb8(0xa8, 0xac, 0x94);
-/// The find bar: how tall it is, and how wide its box is, as VS Code's.
+/// The find bar: how tall it is, how wide its box is, and how far in
+/// from the code's right edge it hangs, as VS Code's, which hangs it
+/// two of its 14px scrollbars in.
 pub const FIND_BAR_HEIGHT: f64 = 33.0;
 pub const FIND_BOX_WIDTH: f64 = 221.0;
+pub const FIND_BAR_INSET: f64 = 28.0;
 
 #[cfg(test)]
 mod tests {

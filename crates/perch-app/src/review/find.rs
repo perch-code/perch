@@ -529,7 +529,7 @@ pub fn bar(state: ReviewState) -> impl IntoView {
     .style(|s| {
         s.position(Position::Absolute)
             .inset_top(0.0)
-            .inset_right(2.0 * theme::EDITOR_SCROLLBAR)
+            .inset_right(theme::FIND_BAR_INSET)
             .z_index(100)
     })
 }

@@ -24,7 +24,7 @@ use crate::icons::SidebarIcon;
 use crate::review::model::{Direction, Hierarchy, HierarchyAsk, Located, ReviewState, Symbol};
 use crate::review::references::{self, close_button, line_text, panel_frame};
 use crate::theme;
-use crate::ui::widgets::{clickable, scrollbars, sidebar_glyph};
+use crate::ui::widgets::{clickable, sidebar_glyph};
 
 // ---------------------------------------------------------------------
 // Asking
@@ -298,12 +298,7 @@ fn tree(state: ReviewState) -> impl IntoView {
     )
     .style(|s| s.flex_col().width_full().padding_vert(4.0))
     .scroll()
-    .style(|s| {
-        scrollbars(
-            s.width_full().flex_grow(1.0_f32).min_height(0.0),
-            theme::LIST_SCROLLBAR,
-        )
-    })
+    .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
 }
 
 fn notice(depth: usize, text: String) -> impl IntoView {

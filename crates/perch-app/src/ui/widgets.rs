@@ -255,35 +255,6 @@ pub fn clickable(style: floem::style::Style) -> floem::style::Style {
         .hover(|s| s.cursor(floem::style::CursorStyle::Pointer))
 }
 
-/// VSCode's scrollbars on a scroll view: bars `width` wide, which floem
-/// draws over the content's edge while there is more than the view holds
-/// on that axis, so a vertical one for content taller than the view and
-/// a horizontal one only for content wider than it; the slider a flat
-/// translucent grey, darker under the pointer and darker still while it
-/// is dragged, over a track that paints nothing. floem's theme gives the
-/// slider a pill, a fade between its colours and a wash on the track
-/// under the pointer; each is set back. On the scroll's own style, or,
-/// for a scroll built inside another view, in that view's style within
-/// the scroll's class.
-pub fn scrollbars(style: Style, width: f64) -> Style {
-    use floem::style::Transition;
-    use floem::views::scroll::{Handle, Rounded, Track};
-    style
-        .scrollbar_width(width)
-        .class(Handle, |s| {
-            s.set(Rounded, false)
-                .border_radius(0.0)
-                .background(theme::SCROLLBAR_SLIDER)
-                .hover(|s| s.background(theme::SCROLLBAR_SLIDER_HOVER))
-                .active(|s| s.background(theme::SCROLLBAR_SLIDER_ACTIVE))
-                .transition_background(Transition::linear(std::time::Duration::ZERO))
-        })
-        .class(Track, |s| {
-            s.background(Color::TRANSPARENT)
-                .hover(|s| s.background(Color::TRANSPARENT))
-        })
-}
-
 /// A 16px icon in a colour of its own.
 ///
 /// floem draws an SVG in the view's text colour rather than the markup's
