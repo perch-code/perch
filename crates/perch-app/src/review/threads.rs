@@ -1734,23 +1734,23 @@ fn bare_message_view(
     let message = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
             run_surface(steps_view(state, run.clone())),
-            crate::review::markdown::render(&body),
+            crate::review::markdown::render_linked(&body, state),
             run_footer(app, state, backend, thread, message.body.clone(), run, face),
         ))
         .style(|s| s.flex_col().width_full().gap(8.0))
         .into_any(),
         Some(run) => Stack::vertical((
-            crate::review::markdown::render(&body),
+            crate::review::markdown::render_linked(&body, state),
             run_block(app, state, backend, thread, message.body.clone(), run, face),
         ))
         .style(|s| s.flex_col().width_full().gap(8.0))
         .into_any(),
         // A finding's text stops short of its right edge, where its
         // actions come, so they never sit on a word.
-        None if settled => Container::new(crate::review::markdown::render(&body))
+        None if settled => Container::new(crate::review::markdown::render_linked(&body, state))
             .style(|s| s.width_full().padding_right(theme::AGENT_ACTIONS_ROOM))
             .into_any(),
-        None => crate::review::markdown::render(&body).into_any(),
+        None => crate::review::markdown::render_linked(&body, state).into_any(),
     };
     let message = match actions_thread {
         Some(thread) => with_agent_actions(state, thread, body, finished, message),
@@ -1924,7 +1924,7 @@ fn github_message_view(
                 who,
                 cards::actions(state, backend, hovered, Some(reply_button), Some(ask), react, url),
             ),
-            crate::review::markdown::render(&message.body),
+            crate::review::markdown::render_linked(&message.body, state),
             reactions,
         ))
         .style(move |s| {
@@ -1989,7 +1989,7 @@ fn draft_message_view(
     cards::track_hover(
         Stack::vertical((
             readers_byline(app, Some(draft_pill().into_any()), None, actions),
-            crate::review::markdown::render(&message.body),
+            crate::review::markdown::render_linked(&message.body, state),
         ))
         .style(|s| s.flex_col().width_full().gap(6.0)),
         hovered,
@@ -2019,7 +2019,7 @@ fn posted_message_view(
                 Some(message.created_at),
                 cards::actions(state, backend, hovered, None, None, react, url),
             ),
-            crate::review::markdown::render(&message.body),
+            crate::review::markdown::render_linked(&message.body, state),
             reactions,
         ))
         .style(|s| s.flex_col().width_full().gap(6.0)),
@@ -2135,7 +2135,7 @@ pub fn run_block(
         .clone()
         .filter(|text| run.status != RunStatus::Completed && !text.trim().is_empty());
     let response = match partial {
-        Some(text) => Container::new(crate::review::markdown::render(&text))
+        Some(text) => Container::new(crate::review::markdown::render_linked(&text, state))
             .style(|s| {
                 s.width_full()
                     .padding_top(7.0)

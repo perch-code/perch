@@ -971,6 +971,52 @@ mod tests {
         assert_eq!(state.last_position.get(), Some((2, 0)));
     }
 
+    /// A file a comment names without a line opens as the tree opens it:
+    /// asked for, with nothing to jump to and so nothing unfolded, and the
+    /// place the reader left is where `Ctrl--` goes.
+    #[test]
+    fn a_file_named_alone_opens_with_no_jump_and_back_returns() {
+        let (mut harness, state, mut commands) = recording_harness();
+        state.go_to_file("src/y.rs", None);
+        harness.rebuild();
+        assert_eq!(state.pending_open.get(), None, "the view took it");
+        assert_eq!(state.active.get().as_deref(), Some("src/y.rs"));
+        assert_eq!(state.jump_to_line.get(), None);
+        let mut opened = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let Command::OpenFile { path, .. } = command {
+                opened.push(path);
+            }
+        }
+        assert_eq!(opened, vec!["src/y.rs".to_string()]);
+        let file = crate::backend::build_loaded_file(
+            "src/y.rs".into(),
+            HEAD.into(),
+            BASE.into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        state.finish_load("src/y.rs", Arc::new(file));
+        harness.rebuild();
+        harness.paint();
+
+        // Named again while it is open, it stays where it is.
+        let epoch = state.editor_epoch.get();
+        state.go_to_file("src/y.rs", None);
+        harness.rebuild();
+        assert_eq!(state.editor_epoch.get(), epoch, "the open file was not opened again");
+
+        harness.dispatch_event(key(
+            Code::Minus,
+            Key::Character("-".into()),
+            Modifiers::CONTROL,
+        ));
+        harness.rebuild();
+        assert_eq!(state.active.get().as_deref(), Some("src/x.rs"));
+    }
+
     #[test]
     fn the_keys_type_nothing_and_open_nothing_while_a_composer_has_the_keyboard() {
         let (mut harness, state, mut commands) = recording_harness();

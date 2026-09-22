@@ -16,6 +16,7 @@ use perch_github::{
 };
 use perch_syntax::{Language, LineSpans};
 
+use crate::review::code_refs::{Found, NameAsk, Named};
 use crate::review::doc::{self, Card, CardId, Doc, Reveals};
 use crate::review::picture::Picture;
 
@@ -1335,6 +1336,15 @@ pub struct ReviewState {
     /// A jump waiting to be made, as the file, the head line and the column
     /// the caret lands on. The view with the file-opening closure takes it.
     pub pending_jump: RwSignal<Option<(String, usize, usize)>>,
+    /// A file to open with no line to go to, as a link that names only the
+    /// file opens it. Taken by the same view as `pending_jump`.
+    pub pending_open: RwSignal<Option<String>>,
+    /// What rust-analyzer's workspace search made of each name written in
+    /// a comment or an answer, by the name as written, for the item's life.
+    pub names: RwSignal<HashMap<String, Named>>,
+    /// Names asked about and not yet sent, with each ask's token, drained
+    /// by the root view, which holds the backend handle.
+    pub pending_names: RwSignal<Vec<(u64, Vec<NameAsk>)>>,
     /// A head line to scroll to once the file it belongs to is loaded.
     pub jump_to_line: RwSignal<Option<usize>>,
     /// Where the caret lands after `jump_to_line`, as the head line and a
@@ -1481,6 +1491,9 @@ impl ReviewState {
             find_box: RwSignal::new(None),
             find_focus: RwSignal::new(false),
             pending_jump: RwSignal::new(None),
+            pending_open: RwSignal::new(None),
+            names: RwSignal::new(HashMap::new()),
+            pending_names: RwSignal::new(Vec::new()),
             jump_to_line: RwSignal::new(None),
             jump_caret: RwSignal::new(None),
             last_position: RwSignal::new(None),
@@ -1611,6 +1624,10 @@ impl ReviewState {
         self.hover.set(None);
         self.clear_highlights();
         self.last_position.set(None);
+        // The names were looked up in this checkout's worktree.
+        self.names.set(HashMap::new());
+        self.pending_names.set(Vec::new());
+        self.pending_open.set(None);
         // The bar goes with the files it was over; what it was looking
         // for stays, for the next item.
         self.find_open.set(false);
@@ -2054,6 +2071,91 @@ impl ReviewState {
     /// the caret on the symbol.
     pub fn open_located(&self, located: &Located) {
         self.navigate_to(&located.path, located.line.saturating_sub(1), located.character);
+    }
+
+    /// Go to a file a comment or an answer names, on Files: at the head
+    /// line and column it names, or, named alone, as the tree opens it,
+    /// with no jump to unfold anything. The place left is remembered for
+    /// `Ctrl--`, unless the file named alone is the one open, which
+    /// leaves nothing.
+    pub fn go_to_file(&self, path: &str, at: Option<(usize, usize)>) {
+        if self.tab.get_untracked() != ItemTab::Files {
+            self.show_tab(ItemTab::Files);
+        }
+        match at {
+            Some((line, column)) => self.navigate_to(path, line, column),
+            None => {
+                let from = self.current_place().filter(|from| from.path != path);
+                if let Some(from) = from {
+                    self.history.update(|h| h.push(from));
+                }
+                self.pending_open.set(Some(path.to_string()));
+            }
+        }
+    }
+
+    /// Go to what a name in a comment or an answer names, on Files: one
+    /// definition opens, and several open the panel as its definitions.
+    pub fn go_to_definitions(&self, name: &str, locations: &[Located]) {
+        if self.tab.get_untracked() != ItemTab::Files {
+            self.show_tab(ItemTab::Files);
+        }
+        match locations {
+            [] => {}
+            [one] => self.open_located(one),
+            several => self.open_references(References {
+                kind: Locations::Definitions,
+                symbol: name.to_string(),
+                locations: several.to_vec(),
+                pending: false,
+                token: self.next_token(),
+            }),
+        }
+    }
+
+    /// Ask the workspace search about the names not yet asked about, in
+    /// one batch under one token.
+    pub fn ask_names(&self, asks: &[NameAsk]) {
+        let mut seen = HashSet::new();
+        let fresh: Vec<NameAsk> = self.names.with_untracked(|names| {
+            asks.iter()
+                .filter(|ask| !names.contains_key(&ask.key) && seen.insert(ask.key.clone()))
+                .cloned()
+                .collect()
+        });
+        if fresh.is_empty() {
+            return;
+        }
+        let token = self.next_token();
+        floem::reactive::Effect::batch(|| {
+            self.names.update(|names| {
+                for ask in &fresh {
+                    names.insert(ask.key.clone(), Named::Asked(token));
+                }
+            });
+            self.pending_names.update(|pending| pending.push((token, fresh)));
+        });
+    }
+
+    /// The names' answers landed. Each is kept for the ask still waiting
+    /// on it: an item opened since has asked afresh, or not at all.
+    pub fn finish_names(&self, token: u64, answers: Vec<(String, Option<Found>)>) {
+        self.names.update(|names| {
+            for (key, answer) in answers {
+                if let Some(named) = names.get_mut(&key).filter(|n| **n == Named::Asked(token)) {
+                    *named = answer.map_or(Named::Missing, Named::Found);
+                }
+            }
+        });
+    }
+
+    /// The server is ready, or ready again: what it found nothing for may
+    /// have been asked before it had read the workspace, so it is asked
+    /// again by whatever still shows it.
+    pub fn forget_missing_names(&self) {
+        if self.names.with_untracked(|n| n.values().any(|n| *n == Named::Missing)) {
+            self.names.update(|names| names.retain(|_, n| *n != Named::Missing));
+        }
     }
 
     /// A goto's answer landed. One location opens; several open the panel

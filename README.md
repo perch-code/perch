@@ -249,7 +249,8 @@ Perch does not try to detect them; it limits what following one could do.
   the same way.
 - **Inert links.** A link in an answer or a comment does nothing until it
   is clicked. Hovering it shows the full destination; a click opens `http`
-  and `https` links only.
+  and `https` links in the browser and a file of the worktree in Files
+  (see [Links to code](#links-to-code)), and nothing else.
 
 What remains: the CLIs still read the repository's `CLAUDE.md` and
 `AGENTS.md` as instructions, along with your own user-level configuration,
@@ -382,6 +383,37 @@ so a change of size shows as one; an added or deleted one says which it is.
 The status line gives the picture's size. The Source tile at the right end
 of the tab strip shows that file's markup instead, with its diff, gutter and
 threads, and the picture is back at the next click.
+
+## Links to code
+
+A file, a line or a symbol of the worktree that a comment or an answer
+names is a link to it, on Conversation and in the cards over the code: in
+a code span, in a fenced block, or as a link's destination. A click goes to
+Files, opens the file with the caret on the line, and `Ctrl--` comes back.
+Hovering says where it goes. It is drawn as any link is, so the text reads
+as it did.
+
+A file links when the worktree has it. A line follows the path as the
+compiler writes one, `src/db.rs:17` or `src/db.rs:17:5`, or as GitHub
+does, `src/db.rs#L17`; a range opens at its start, and the line is the
+head's, which is what an agent reads. A path can be written short,
+`wal/mod.rs:303` or `gc.rs`, and links when only one file ends with it, or
+only one of the changed files does. An absolute path links only inside the
+worktree: nothing outside it opens from a comment.
+
+A symbol links through rust-analyzer's workspace symbol search: a name,
+`WalGcPolicy` or `list_wal_ssts`, or a name after what it belongs to,
+`Db::open`, `WalGcMode::Regular`. One definition opens and several open the
+panel as its definitions, generated code left out when there is code
+written by hand. Fields are not in the search, so `DbOptions.ttl` links
+`DbOptions`. A lone word in lower case, such as `inner`, is looked up only
+when it is called, `inner()`, since it is as often a field or a variable;
+and a name with more than ten definitions, such as `new`, links nothing.
+In a fenced block the paths link whatever the language, and the names that
+read as types do when the block is Rust, a diff, output or of no language
+named. A name links
+once rust-analyzer has answered, a moment after the text is drawn; while
+the server is absent or failed, only files do.
 
 ## Development
 

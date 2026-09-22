@@ -243,6 +243,12 @@ pub enum Command {
         token: u64,
         item: Box<perch_lsp::lsp_types::CallHierarchyItem>,
     },
+    /// Where names written in comments and answers are defined, through
+    /// the workspace symbol search.
+    Names {
+        token: u64,
+        names: Vec<crate::review::code_refs::NameAsk>,
+    },
     CloseReview {
         navigation_id: u64,
     },
@@ -782,6 +788,12 @@ pub enum Event {
     LspCalls {
         token: u64,
         calls: Vec<crate::review::model::Call>,
+    },
+    /// What each name asked about means, by the name as written: the
+    /// definitions of as much of it as the search found, or nothing.
+    LspNames {
+        token: u64,
+        answers: Vec<(String, Option<crate::review::code_refs::Found>)>,
     },
 }
 
@@ -1919,6 +1931,10 @@ impl Backend {
             line,
             character,
         });
+    }
+
+    pub fn names(&self, token: u64, names: Vec<crate::review::code_refs::NameAsk>) {
+        let _ = self.commands.send(Command::Names { token, names });
     }
 
     pub fn calls(
@@ -3375,6 +3391,15 @@ async fn run(
                     events.clone(),
                 );
             }
+            Command::Names { token, names } => {
+                spawn_names(
+                    token,
+                    names,
+                    checkout.clone(),
+                    language_server.clone(),
+                    events.clone(),
+                );
+            }
             // The three gotos: a position in, every location out, each
             // answered by the event of its name.
             Command::Definition {
@@ -3496,6 +3521,55 @@ fn spawn_goto(
             Goto::TypeDefinition => Event::LspTypeDefinition { token, locations },
             Goto::Implementation => Event::LspImplementation { token, locations },
         });
+    });
+}
+
+/// Look up names written in comments and answers: each identifier in them
+/// searched for once, among symbols of every kind, and each name answered
+/// with the definitions `code_refs::pick` makes of what came back, read
+/// as a goto's are, or with nothing. Without a server every name is
+/// answered with nothing, so none waits for good; the next time the
+/// server is ready they are asked again.
+fn spawn_names(
+    token: u64,
+    names: Vec<crate::review::code_refs::NameAsk>,
+    checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    events: EventSender<Event>,
+) {
+    tokio::spawn(async move {
+        let client = language_server.lock().await.clone();
+        let worktree = checkout
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
+        let mut answers = Vec::with_capacity(names.len());
+        let (Some(client), Some(worktree)) = (client, worktree) else {
+            let answers = names.into_iter().map(|name| (name.key, None)).collect();
+            let _ = events.send(Event::LspNames { token, answers });
+            return;
+        };
+        let mut found: std::collections::HashMap<String, Vec<perch_lsp::client::Defined>> =
+            std::collections::HashMap::new();
+        for name in names {
+            for segment in &name.segments {
+                if !found.contains_key(segment) {
+                    // `#` asks for symbols of every kind, not types alone.
+                    let symbols = client.workspace_symbols(&format!("{segment}#")).await;
+                    let exact = symbols.into_iter().filter(|s| s.name == *segment).collect();
+                    found.insert(segment.clone(), exact);
+                }
+            }
+            let answer = match crate::review::code_refs::pick(&name.segments, &found, &worktree) {
+                Some((segments, locations)) => {
+                    let located = read_locations(&worktree, &locations).await;
+                    (!located.is_empty()).then(|| (segments, Arc::new(located)))
+                }
+                None => None,
+            };
+            answers.push((name.key, answer));
+        }
+        let _ = events.send(Event::LspNames { token, answers });
     });
 }
 

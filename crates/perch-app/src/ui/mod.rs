@@ -89,6 +89,21 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
         });
     }
+    // The names comments and answers are drawn with are looked up from
+    // here as well.
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            let asks = review.pending_names.get();
+            if asks.is_empty() {
+                return;
+            }
+            review.pending_names.set(Vec::new());
+            for (token, names) in asks {
+                backend.names(token, names);
+            }
+        });
+    }
     // And the runs the reader opened out of a fold, or folded again, go
     // to the store from here too. The item is read as the write is sent:
     // the effect runs on the write, before anything else can open another.

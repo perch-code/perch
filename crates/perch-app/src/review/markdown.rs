@@ -10,6 +10,13 @@
 //! span ruled through and the words dragged over and copied by
 //! [`linked_text`], since the text stack has none of those of its own.
 //!
+//! Drawn for a review, with [`render_linked`], the code in it is linked
+//! too: a code span, a word of a fenced block or a link's destination
+//! that names a file, a line or a symbol of the worktree goes there in
+//! Files. [`code_refs`] finds what is named and looks it up; a fenced
+//! block that names something is drawn as linked text rather than a
+//! label, in the same font, to carry the links.
+//!
 //! What GitHub does that this does not: images are shown by their alt
 //! text or file name, raw HTML by its text, code in a fence is not
 //! coloured, a cell's wrapped lines all start at the left, and `$math$`
@@ -31,7 +38,9 @@ use pulldown_cmark::{
 };
 
 use crate::icons::SidebarIcon;
-use crate::review::linked_text::{linked_text, Strike};
+use crate::review::code_refs::{self, linked_run, Plan, Refs};
+use crate::review::linked_text::{linked_text, Strike, Target};
+use crate::review::model::ReviewState;
 use crate::theme;
 use crate::ui::widgets::sidebar_glyph;
 
@@ -875,21 +884,37 @@ pub fn render(text: &str) -> impl IntoView {
     render_blocks(parse(text), theme::TEXT_BODY)
 }
 
+/// The blocks, stacked, at the body size, with the files, lines and
+/// symbols of the review's worktree they name linked to Files. The same
+/// as `render` for an item with no checkout.
+pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
+    stack(
+        parse(text),
+        Ctx {
+            size: theme::TEXT_BODY,
+            color: theme::FG,
+            depth: 0,
+            refs: Refs::of(state),
+        },
+    )
+}
+
 /// Blocks already parsed, stacked, with the prose at `size`. A fenced
 /// block is drawn in the code font at Codex's small size, as a
 /// conversation card draws one; a tooltip hands its blocks here at the
 /// meta size, so a doc comment reads a step below the signature.
 pub fn render_blocks(blocks: Vec<Block>, size: f32) -> impl IntoView {
-    stack(blocks, Ctx { size, color: theme::FG, depth: 0 })
+    stack(blocks, Ctx { size, color: theme::FG, depth: 0, refs: None })
 }
 
 /// How the blocks in a container are drawn: the prose size, its colour,
-/// and how many lists deep.
+/// how many lists deep, and the review the code in them is looked up in.
 #[derive(Clone, Copy)]
 struct Ctx {
     size: f32,
     color: Color,
     depth: usize,
+    refs: Option<Refs>,
 }
 
 /// Codex's unit of vertical rhythm: a quarter of the prose size, 3.5px
@@ -942,16 +967,21 @@ fn stack(blocks: Vec<Block>, ctx: Ctx) -> AnyView {
 
 fn block_view(block: Block, ctx: Ctx) -> AnyView {
     match block {
-        Block::Paragraph(spans) => {
-            text_view(spans, ctx.size, theme::weight_body(), ctx.color, prose_leading(ctx.size))
-        }
+        Block::Paragraph(spans) => text_view(
+            spans,
+            ctx.size,
+            theme::weight_body(),
+            ctx.color,
+            prose_leading(ctx.size),
+            ctx.refs,
+        ),
         Block::Heading { level, spans } => heading_view(level, spans, ctx),
         Block::Quote { alert: None, blocks } => stack(blocks, Ctx { color: theme::FG_MUTED, ..ctx })
             .style(|s| s.padding_left(10.0).border_left(3.0).border_color(theme::BORDER))
             .into_any(),
         Block::Quote { alert: Some(alert), blocks } => alert_view(alert, blocks, ctx),
         Block::List { start, tight, items } => list_view(start, tight, items, ctx),
-        Block::Code { text, .. } => code_view(text, ctx.size),
+        Block::Code { lang, text } => code_view(text, lang, ctx),
         Block::Table { align, head, rows } => table_view(align, head, rows, ctx),
         Block::Rule => Empty::new()
             .style(|s| s.width_full().height(1.0).background(theme::BORDER).margin_vert(4.0))
@@ -998,6 +1028,7 @@ fn heading_view(level: u8, spans: Vec<Span>, ctx: Ctx) -> AnyView {
         theme::weight_strong(),
         ctx.color,
         heading_leading(level, ctx.size),
+        ctx.refs,
     )
     .debug_name(format!("heading:{level}"))
     .into_any()
@@ -1144,24 +1175,63 @@ fn task_box(checked: bool, size: f32) -> AnyView {
 }
 
 /// A label, there being no spans to style. The fence's language is
-/// parsed but not coloured.
-fn code_view(text: String, size: f32) -> AnyView {
-    let code_size = small_size(size);
-    Label::derived(move || text.clone())
-        .style(move |s| {
-            s.font_family(theme::CODE_FONT_STACK.to_string())
-                .font_size(code_size)
-                .color(theme::FG)
-                .line_height(theme::PROSE_CODE_LINE_HEIGHT)
-                .padding(8.0)
-                .width_full()
-                .text_wrap()
-                .background(theme::CANVAS_SUBTLE)
-                .border(1.0)
-                .border_color(theme::BORDER_MUTED)
-                .border_radius(theme::RADIUS)
-        })
-        .into_any()
+/// parsed but not coloured; it says whether the block's type names are
+/// looked up, for a block that names something of the review's worktree
+/// and so is drawn as linked text in the label's place.
+fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
+    let code_size = small_size(ctx.size);
+    let mut plan = Plan::default();
+    if let Some(refs) = ctx.refs {
+        let symbols = code_refs::names_in_fence(lang.as_deref());
+        plan.add_mentions(refs, 0, code_refs::scan(&text, symbols));
+    }
+    let code_box = move |s: floem::style::Style| {
+        s.padding(8.0)
+            .width_full()
+            .background(theme::CANVAS_SUBTLE)
+            .border(1.0)
+            .border_color(theme::BORDER_MUTED)
+            .border_radius(theme::RADIUS)
+    };
+    if plan.is_empty() {
+        return Label::derived(move || text.clone())
+            .style(move |s| {
+                code_box(
+                    s.font_family(theme::CODE_FONT_STACK.to_string())
+                        .font_size(code_size)
+                        .color(theme::FG)
+                        .line_height(theme::PROSE_CODE_LINE_HEIGHT)
+                        .text_wrap(),
+                )
+            })
+            .into_any();
+    }
+    let run = linked_run(plan, ctx.refs, move |links| {
+        let attrs = code_attrs(code_size, &links);
+        linked_text(text.clone(), attrs, links, Vec::new())
+            .style(|s| s.width_full())
+            .into_any()
+    });
+    Container::new(run).style(code_box).into_any()
+}
+
+/// A fenced block's text as the label draws it, its links in the links'
+/// colour.
+fn code_attrs(size: f32, links: &[(Range<usize>, Target)]) -> AttrsList {
+    let family: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
+    let base = || {
+        Attrs::new()
+            .color(theme::FG)
+            .font_size(size)
+            .weight(theme::weight_body())
+            .family(&family)
+            .line_height(LineHeightValue::Normal(theme::PROSE_CODE_LINE_HEIGHT))
+    };
+    let mut list = AttrsList::new(base());
+    for (range, _) in links {
+        list.add_span(range.clone(), base().color(theme::ACCENT));
+    }
+    list
 }
 
 fn table_view(align: Vec<Align>, head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>>, ctx: Ctx) -> AnyView {
@@ -1229,7 +1299,7 @@ fn cell_view(spans: Vec<Span>, align: Align, ctx: Ctx, kind: Cell) -> AnyView {
     // a width of its own, even a percentage, would throw the column's
     // measure off. A table is set a step under the prose, as Codex sets it.
     let size = small_size(ctx.size);
-    let text = prose_view(spans, size, weight, ctx.color, prose_leading(size));
+    let text = prose_view(spans, size, weight, ctx.color, prose_leading(size), ctx.refs, false);
     Container::new(text)
         .style(move |s| {
             let s = s.padding_horiz(10.0).padding_vert(5.0);
@@ -1266,29 +1336,74 @@ fn text_view(
     weight: FontWeight,
     color: Color,
     leading: LineHeightValue,
+    refs: Option<Refs>,
 ) -> AnyView {
-    prose_view(spans, size, weight, color, leading)
+    prose_view(spans, size, weight, color, leading, refs, true)
         .style(|s| s.width_full())
         .into_any()
 }
 
-/// The run, sized by whoever places it: rich text wrapped so that it can
-/// be dragged over and copied, its links followed and its struck spans
-/// ruled through, none of which floem's own view does.
+/// The run, sized by whoever places it, or across its container when
+/// `fill` is set: rich text wrapped so that it can be dragged over and
+/// copied, its links followed and its struck spans ruled through, none of
+/// which floem's own view does.
 fn prose_view(
     spans: Vec<Span>,
     size: f32,
     weight: FontWeight,
     color: Color,
     leading: LineHeightValue,
+    refs: Option<Refs>,
+    fill: bool,
 ) -> AnyView {
-    let (text, attrs, links, strikes) = layout(&spans, size, weight, color, leading);
-    linked_text(text, attrs, links, strikes).into_any()
+    let plan = plan(&spans, refs);
+    linked_run(plan, refs, move |links| {
+        let (text, attrs, links, strikes) = layout(&spans, size, weight, color, leading, links);
+        linked_text(text, attrs, links, strikes)
+            .style(move |s| if fill { s.width_full() } else { s })
+            .into_any()
+    })
+}
+
+/// What a run of spans links: every link's destination, one that is a
+/// path into the worktree opening in Files rather than the browser, and,
+/// with a review to look in, the code its code spans name. A link's runs
+/// split by another style are one link.
+fn plan(spans: &[Span], refs: Option<Refs>) -> Plan {
+    let mut plan = Plan::default();
+    let mut urls: Vec<(Range<usize>, String)> = Vec::new();
+    let mut at = 0;
+    for span in spans {
+        let range = at..at + span.text.len();
+        at = range.end;
+        if range.is_empty() {
+            continue;
+        }
+        match (&span.link, refs) {
+            (Some(url), _) => match urls.last_mut() {
+                Some((last, u)) if last.end == range.start && u == url => last.end = range.end,
+                _ => urls.push((range, url.clone())),
+            },
+            (None, Some(refs)) if span.code => {
+                plan.add_mentions(refs, range.start, code_refs::in_code_span(&span.text));
+            }
+            (None, _) => {}
+        }
+    }
+    for (range, url) in urls {
+        let target = refs
+            .and_then(|refs| Some(refs.file_target(refs.file_for_url(&url)?)))
+            .unwrap_or(Target::Url(url));
+        plan.links.push((range, target));
+    }
+    plan.links.sort_by_key(|(range, _)| range.start);
+    plan
 }
 
 /// The text of `spans` run together, the attributes over each styled
-/// byte range, where its links are as byte ranges and destinations, and
-/// the ranges to strike through in their text's colour.
+/// byte range, the links as `links` has them, and the ranges to strike
+/// through in their text's colour. A link is drawn in the links' colour
+/// wherever it runs, a part of a code span as well as a whole span.
 #[allow(clippy::type_complexity)]
 fn layout(
     spans: &[Span],
@@ -1296,7 +1411,8 @@ fn layout(
     weight: FontWeight,
     color: Color,
     leading: LineHeightValue,
-) -> (String, AttrsList, Vec<(Range<usize>, String)>, Vec<Strike>) {
+    links: Vec<(Range<usize>, Target)>,
+) -> (String, AttrsList, Vec<(Range<usize>, Target)>, Vec<Strike>) {
     let body: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::FONT_STACK).collect();
     let code: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
     let base = || {
@@ -1308,7 +1424,6 @@ fn layout(
             .line_height(leading)
     };
     let mut list = AttrsList::new(base());
-    let mut links: Vec<(Range<usize>, String)> = Vec::new();
     let mut strikes: Vec<Strike> = Vec::new();
 
     let mut text = String::new();
@@ -1319,37 +1434,42 @@ fn layout(
         if range.is_empty() {
             continue;
         }
-        let linked = span.link.is_some() || span.footnote;
-        let ink = if linked { theme::ACCENT } else { color };
-        if span.strike {
-            match strikes.last_mut() {
-                Some((last, tint)) if last.end == range.start && *tint == ink => last.end = range.end,
-                _ => strikes.push((range.clone(), ink)),
+        // The span in pieces, cut where a link starts or ends inside it:
+        // an attribute span replaces any it overlaps, so the part of a
+        // code span that is linked needs a span of its own beside the
+        // rest's.
+        let mut cuts = vec![range.start, range.end];
+        for (link, _) in &links {
+            cuts.extend([link.start, link.end].into_iter().filter(|&e| range.start < e && e < range.end));
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        for piece in cuts.windows(2).map(|pair| pair[0]..pair[1]) {
+            let linked = span.footnote
+                || links.iter().any(|(link, _)| link.start <= piece.start && piece.end <= link.end);
+            let ink = if linked { theme::ACCENT } else { color };
+            if span.strike {
+                match strikes.last_mut() {
+                    Some((last, tint)) if last.end == piece.start && *tint == ink => last.end = piece.end,
+                    _ => strikes.push((piece.clone(), ink)),
+                }
             }
-        }
-        if let Some(url) = &span.link {
-            // Adjacent runs of one link, split by another style, are one
-            // link to the pointer.
-            match links.last_mut() {
-                Some((last, u)) if last.end == range.start && u == url => last.end = range.end,
-                _ => links.push((range.clone(), url.clone())),
+            let mut attrs = base();
+            if span.bold {
+                attrs = attrs.weight(theme::weight_strong());
             }
-        }
-        let mut attrs = base();
-        if span.bold {
-            attrs = attrs.weight(theme::weight_strong());
-        }
-        if span.italic {
-            attrs = attrs.font_style(FontStyle::Italic);
-        }
-        if span.code {
-            attrs = attrs.family(&code).font_size(small_size(size));
-        }
-        if linked {
-            attrs = attrs.color(ink);
-        }
-        if span.bold || span.italic || span.code || linked {
-            list.add_span(range, attrs);
+            if span.italic {
+                attrs = attrs.font_style(FontStyle::Italic);
+            }
+            if span.code {
+                attrs = attrs.family(&code).font_size(small_size(size));
+            }
+            if linked {
+                attrs = attrs.color(ink);
+            }
+            if span.bold || span.italic || span.code || linked {
+                list.add_span(piece, attrs);
+            }
         }
     }
     (text, list, links, strikes)
@@ -1369,6 +1489,16 @@ mod tests {
 
     fn item(s: &str) -> Item {
         Item { checked: None, blocks: vec![paragraph(s)] }
+    }
+
+    /// The spans laid out as a paragraph with no review to look in: the
+    /// text, its links and its strikes.
+    #[allow(clippy::type_complexity)]
+    fn laid(spans: &[Span]) -> (String, Vec<(Range<usize>, Target)>, Vec<Strike>) {
+        let links = plan(spans, None).links;
+        let (text, _, links, strikes) =
+            layout(spans, 14.0, theme::weight_body(), theme::FG, prose_leading(14.0), links);
+        (text, links, strikes)
     }
 
     #[test]
@@ -1718,8 +1848,7 @@ mod tests {
             Span { text: "c".into(), strike: true, ..Default::default() },
             plain(" d"),
         ];
-        let (text, _, links, strikes) =
-            layout(&spans, 14.0, theme::weight_body(), theme::FG, prose_leading(14.0));
+        let (text, links, strikes) = laid(&spans);
         assert_eq!(text, "a bc d");
         assert!(links.is_empty());
         assert_eq!(strikes, vec![(2..4, theme::FG)]);
@@ -1731,9 +1860,8 @@ mod tests {
             Span { text: "a".into(), strike: true, ..Default::default() },
             Span { text: "b".into(), strike: true, link: Some("https://x".into()), ..Default::default() },
         ];
-        let (_, _, links, strikes) =
-            layout(&spans, 14.0, theme::weight_body(), theme::FG, prose_leading(14.0));
-        assert_eq!(links, vec![(1..2, "https://x".to_string())]);
+        let (_, links, strikes) = laid(&spans);
+        assert_eq!(links, vec![(1..2, Target::Url("https://x".into()))]);
         assert_eq!(strikes, vec![(0..1, theme::FG), (1..2, theme::ACCENT)]);
     }
 
@@ -1757,17 +1885,82 @@ mod tests {
                 ..Default::default()
             }
         );
-        let (text, _, links, _) =
-            layout(spans, 14.0, theme::weight_body(), theme::FG, prose_leading(14.0));
+        let (text, links, _) = laid(spans);
         assert_eq!(text, "See the docs and more.");
         assert_eq!(
             links,
             vec![
-                (4..12, "https://example.com/x".to_string()),
-                (17..21, "https://example.com/y".to_string()),
+                (4..12, Target::Url("https://example.com/x".into())),
+                (17..21, Target::Url("https://example.com/y".into())),
             ],
             "one link stays one range across its styles"
         );
+    }
+
+    fn spans_of(markdown: &str) -> Vec<Span> {
+        match parse(markdown).into_iter().next() {
+            Some(Block::Paragraph(spans)) => spans,
+            other => panic!("not a paragraph: {other:?}"),
+        }
+    }
+
+    fn local(tip: &str) -> Target {
+        Target::Local {
+            tip: tip.into(),
+            open: std::rc::Rc::new(|| {}),
+        }
+    }
+
+    #[test]
+    fn code_that_names_a_file_links_to_it_and_an_address_stays_one() {
+        let state = crate::review::code_refs::review_of(&["src/manifest.rs", "README.md"]);
+        let spans = spans_of(
+            "See `manifest.rs:2`, [the readme](README.md#L3), [x](https://x.y) and `src/nope.rs`.",
+        );
+        let planned = plan(&spans, Refs::of(state));
+        assert_eq!(
+            planned.links,
+            vec![
+                (4..17, local("src/manifest.rs:2")),
+                (19..29, local("README.md:3")),
+                (31..32, Target::Url("https://x.y".into())),
+            ]
+        );
+        assert!(planned.names.is_empty(), "a path is not a name");
+        // Without a review there is nothing to look in: the links are
+        // their addresses, and the code is code.
+        assert_eq!(
+            plan(&spans, None).links,
+            vec![
+                (19..29, Target::Url("README.md#L3".into())),
+                (31..32, Target::Url("https://x.y".into())),
+            ]
+        );
+        // A name in a code span waits on its answer, where it starts.
+        let named = plan(&spans_of("The `Manifest::load()` call"), Refs::of(state));
+        assert!(named.links.is_empty());
+        assert_eq!(named.names.len(), 1);
+        assert_eq!(named.names[0].0, 4);
+        assert_eq!(named.names[0].1.text, "Manifest::load()");
+    }
+
+    #[test]
+    fn a_link_inside_a_code_span_is_drawn_as_a_link_and_the_rest_as_code() {
+        let spans = spans_of("A `regular: Option<WalGcPolicy>` field");
+        let links = vec![(18..29, local("src/gc.rs:3"))];
+        let (text, attrs, links, _) =
+            layout(&spans, 14.0, theme::weight_body(), theme::FG, prose_leading(14.0), links);
+        assert_eq!(&text[18..29], "WalGcPolicy");
+        assert_eq!(links.len(), 1);
+        // Three pieces of code: before, the link in the links' colour,
+        // and after, each in the code font.
+        let pieces: Vec<Range<usize>> = attrs.spans().iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(pieces, vec![2..18, 18..29, 29..30]);
+        let size = small_size(14.0);
+        let code = |i: usize| attrs.get_span(i).font_size;
+        assert_eq!((code(5), code(25), code(29)), (size, size, size));
+        assert_eq!(attrs.get_span(25).get_color(), Some(theme::ACCENT));
+        assert_eq!(attrs.get_span(5).get_color(), Some(theme::FG));
     }
 
     #[test]
@@ -1780,6 +1973,8 @@ mod tests {
     }
 
     mod layout {
+        use std::sync::Arc;
+
         use super::*;
         use floem::headless::{HeadlessHarness, TestRoot};
         use floem::kurbo::Rect;
@@ -1927,6 +2122,157 @@ mod tests {
                 is_composing: false,
             }));
             assert_eq!(copied(), vec!["Some bold words, code and a link.".to_string()]);
+        }
+
+        /// A point on each link of the run of text with `index` among the
+        /// view's, left to right along its first line.
+        fn links_on_first_line(h: &mut HeadlessHarness, index: usize) -> Vec<floem::kurbo::Point> {
+            let mut all = Vec::new();
+            find_all(h.root_id(), "LinkedText", &mut all);
+            crate::review::linked_text::links_on_first_line(h, all[index])
+        }
+
+        /// The markdown drawn for a review of a checkout holding `files`,
+        /// with rust-analyzer ready.
+        fn linked_harness(markdown: &str, files: &[&str]) -> (HeadlessHarness, ReviewState) {
+            let root = TestRoot::new();
+            let state = crate::review::code_refs::review_of(files);
+            state.lsp_status.set(perch_lsp::Status::Ready);
+            let view = Container::new(render_linked(markdown, state))
+                .style(|s| s.width(WIDTH).padding(0.0));
+            let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 2000.0);
+            harness.rebuild();
+            harness.paint();
+            (harness, state)
+        }
+
+        #[test]
+        fn a_path_in_code_opens_its_file_at_the_line_on_files() {
+            use crate::review::model::ItemTab;
+            let (mut h, state) = linked_harness(
+                "Look at `manifest.rs:12` first.\n\n```\nerror: --> src/manifest.rs:40:5\n```",
+                &["src/manifest.rs"],
+            );
+            assert_eq!(state.tab.get(), ItemTab::Conversation);
+            let links = links_on_first_line(&mut h, 0);
+            assert_eq!(links.len(), 1, "{links:?}");
+            h.click(links[0].x, links[0].y);
+            assert_eq!(state.tab.get(), ItemTab::Files);
+            assert_eq!(state.pending_jump.get(), Some(("src/manifest.rs".into(), 11, 0)));
+
+            // A fenced block names it too, with a column.
+            state.pending_jump.set(None);
+            let links = links_on_first_line(&mut h, 1);
+            assert_eq!(links.len(), 1, "{links:?}");
+            h.click(links[0].x, links[0].y);
+            assert_eq!(state.pending_jump.get(), Some(("src/manifest.rs".into(), 39, 4)));
+            assert!(state.pending_names.get().is_empty(), "nothing here is a name");
+        }
+
+        /// A cell whose text waits on a name's answer is drawn again when
+        /// it lands, and wraps within the table either way.
+        #[test]
+        fn a_cell_that_names_a_symbol_still_wraps_in_its_table() {
+            let long = "word ".repeat(40);
+            let (mut h, state) = linked_harness(
+                &format!("| a | b |\n|---|---|\n| {long} `Manifest` | {long} |"),
+                &[],
+            );
+            let check = |h: &HeadlessHarness| {
+                let table = rect(h, "table");
+                assert!(table.width() <= WIDTH + 0.5, "{table:?}");
+                let short = rect(h, "cell:0:0");
+                let tall = rect(h, "cell:1:0");
+                assert!(tall.height() > short.height() * 3.0, "the long cell wraps: {short:?} {tall:?}");
+            };
+            check(&h);
+            let (token, _) = state.pending_names.get()[0].clone();
+            let found = vec![crate::review::code_refs::located("src/manifest.rs", 3, 11)];
+            state.finish_names(token, vec![("Manifest".into(), Some((1, Arc::new(found))))]);
+            h.rebuild();
+            h.paint();
+            check(&h);
+        }
+
+        #[test]
+        fn a_fenced_block_that_names_nothing_is_still_a_label() {
+            let (h, _) = linked_harness("```\nlet x = 1;\n```", &["src/manifest.rs"]);
+            let mut all = Vec::new();
+            find_all(h.root_id(), "LinkedText", &mut all);
+            assert!(all.is_empty(), "{all:?}");
+        }
+
+        #[test]
+        fn a_name_links_when_its_answer_lands_and_opens_its_definition() {
+            use crate::review::code_refs::{located, NameAsk};
+            use crate::review::model::ItemTab;
+            let (mut h, state) = linked_harness("Call `Manifest::load()` first.", &[]);
+            let asked = state.pending_names.get();
+            assert_eq!(asked.len(), 1, "{asked:?}");
+            let (token, names) = asked[0].clone();
+            assert_eq!(
+                names,
+                vec![NameAsk {
+                    key: "Manifest::load()".into(),
+                    segments: vec!["Manifest".into(), "load".into()],
+                }]
+            );
+            assert!(links_on_first_line(&mut h, 0).is_empty(), "no link before the answer");
+
+            let found = vec![located("src/manifest.rs", 12, 11)];
+            state.finish_names(token, vec![("Manifest::load()".into(), Some((2, Arc::new(found))))]);
+            h.rebuild();
+            h.paint();
+            let links = links_on_first_line(&mut h, 0);
+            assert_eq!(links.len(), 1, "{links:?}");
+            h.click(links[0].x, links[0].y);
+            assert_eq!(state.tab.get(), ItemTab::Files);
+            assert_eq!(state.pending_jump.get(), Some(("src/manifest.rs".into(), 11, 11)));
+        }
+
+        #[test]
+        fn a_name_with_several_definitions_opens_them_in_the_panel() {
+            use crate::review::code_refs::located;
+            use crate::review::model::Locations;
+            let (mut h, state) = linked_harness("A `Db` here.", &[]);
+            let (token, _) = state.pending_names.get()[0].clone();
+            let found = vec![located("slatedb/src/db.rs", 594, 11), located("bindings/uniffi/src/db.rs", 19, 11)];
+            state.finish_names(token, vec![("Db".into(), Some((1, Arc::new(found))))]);
+            h.rebuild();
+            h.paint();
+            let links = links_on_first_line(&mut h, 0);
+            h.click(links[0].x, links[0].y);
+            let panel = state.references.get().expect("the panel opened");
+            assert_eq!((panel.kind, panel.symbol.as_str(), panel.locations.len()), (Locations::Definitions, "Db", 2));
+            assert_eq!(state.pending_jump.get(), None);
+        }
+
+        #[test]
+        fn names_wait_for_the_server_and_go_with_it() {
+            let (mut h, state) = {
+                let root = TestRoot::new();
+                let state = crate::review::code_refs::review_of(&[]);
+                let view = Container::new(render_linked("A `Db` here.", state))
+                    .style(|s| s.width(WIDTH).padding(0.0));
+                let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 400.0);
+                harness.rebuild();
+                harness.paint();
+                (harness, state)
+            };
+            assert!(state.pending_names.get().is_empty(), "asked with no server");
+            state.lsp_status.set(perch_lsp::Status::Indexing { percent: Some(10) });
+            let asked = state.pending_names.get();
+            assert_eq!(asked.len(), 1, "asked once the server is there");
+            let found = vec![crate::review::code_refs::located("slatedb/src/db.rs", 594, 11)];
+            state.finish_names(asked[0].0, vec![("Db".into(), Some((1, Arc::new(found))))]);
+            h.rebuild();
+            h.paint();
+            assert_eq!(links_on_first_line(&mut h, 0).len(), 1);
+            // A server that fails takes its links with it.
+            state.lsp_status.set(perch_lsp::Status::Failed { reason: "gone".into() });
+            h.rebuild();
+            h.paint();
+            assert!(links_on_first_line(&mut h, 0).is_empty());
         }
 
         #[test]

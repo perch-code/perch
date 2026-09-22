@@ -540,6 +540,16 @@ mod tests {
         backend: crate::backend::Backend,
         discussion: Discussion,
     ) -> (HeadlessHarness, AppState, ReviewState) {
+        app_harness_prepared(backend, discussion, |_| {})
+    }
+
+    /// The same, with the review state set up further by `prepare` before
+    /// the window is built.
+    fn app_harness_prepared(
+        backend: crate::backend::Backend,
+        discussion: Discussion,
+        prepare: impl FnOnce(ReviewState),
+    ) -> (HeadlessHarness, AppState, ReviewState) {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = ReviewState::new();
@@ -567,6 +577,7 @@ mod tests {
         state.comment_threads.set(Arc::new(vec![thread()]));
         // See the field: a focused editor cannot be driven headlessly.
         state.composer_autofocus.set(false);
+        prepare(state);
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
         harness.rebuild();
@@ -998,6 +1009,60 @@ mod tests {
         assert_eq!(linked.get(Cursor), Some(CursorStyle::Pointer));
         click(&mut harness, me);
         assert_eq!(opened(), vec!["https://github.com/me".to_string()]);
+    }
+
+    /// Code a comment names is a link to it in Files. A path and a line in
+    /// a code span leaves Conversation for Files at a click and lands on
+    /// the line once the file is in; a name in a code span is asked about,
+    /// and the path is not.
+    #[test]
+    fn a_path_a_comment_names_opens_on_files_at_its_line() {
+        use crate::backend::Command;
+        use crate::review::model::ItemTab;
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let mut discussion = discussion();
+        discussion.comments[0].body = "See `manifest.rs:2` and `Manifest`.".into();
+        let (mut harness, _, state) = app_harness_prepared(backend, discussion, |state| {
+            state.tree.set(Arc::new(vec![
+                perch_git::TreeEntry::new("src", true),
+                perch_git::TreeEntry::new("src/manifest.rs", false),
+            ]));
+            state.lsp_status.set(perch_lsp::Status::Ready);
+        });
+        let mut asked = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let Command::Names { names, .. } = command {
+                asked.extend(names.into_iter().map(|n| n.key));
+            }
+        }
+        assert_eq!(asked, vec!["Manifest".to_string()]);
+
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        let text = find(comment, "LinkedText").unwrap();
+        let links = crate::review::linked_text::links_on_first_line(&mut harness, text);
+        assert_eq!(links.len(), 1, "the path, and not the name no one has answered: {links:?}");
+        harness.click(links[0].x, links[0].y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.active.get().as_deref(), Some("src/manifest.rs"));
+        // On its way already, for the thread's lines on Conversation.
+        assert!(state.is_loading("src/manifest.rs"));
+
+        let file = crate::backend::build_loaded_file(
+            "src/manifest.rs".into(),
+            "fn a() {}\nfn b() {}\nfn c() {}\n".into(),
+            "fn a() {}\nfn old() {}\nfn c() {}\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        state.finish_load("src/manifest.rs", Arc::new(file));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.jump_to_line.get(), None, "the editor took the jump");
+        assert_eq!(state.last_position.get(), Some((1, 0)), "the caret is on line 2");
     }
 
     /// One of GitHub's review threads is a thread card at its first

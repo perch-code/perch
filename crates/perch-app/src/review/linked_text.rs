@@ -4,10 +4,11 @@
 //!
 //! The text comes from an agent or from GitHub, so a link's words say
 //! nothing reliable about where it goes. Nothing happens on hover but a
-//! tooltip with the whole destination, and a click opens it in the
-//! browser, HTTP(S) only. floem's rich text view keeps its layout to
-//! itself, so this wraps one and lays the same text out again for
-//! hit-testing, at the width the wrapped view was given.
+//! tooltip with the whole destination, and a click opens an address in
+//! the browser, HTTP(S) only, or a place in the worktree in Files. floem's
+//! rich text view keeps its layout to itself, so this wraps one and lays
+//! the same text out again for hit-testing, at the width the wrapped view
+//! was given.
 //!
 //! floem's text attributes have no strikethrough either, and the rich
 //! text view draws only glyphs. So the same second layout says where a
@@ -60,7 +61,38 @@ const DRAG_SLOP: f64 = 2.0;
 
 struct Link {
     range: Range<usize>,
-    url: String,
+    target: Target,
+}
+
+/// Where a link goes.
+#[derive(Clone)]
+pub enum Target {
+    /// An address, opened in the browser when it is HTTP(S).
+    Url(String),
+    /// A file, a line of one, or a symbol's definitions in the worktree,
+    /// which `open` goes to in Files. `tip` says where.
+    Local { tip: String, open: Rc<dyn Fn()> },
+}
+
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Target::Url(url) => f.debug_tuple("Url").field(url).finish(),
+            Target::Local { tip, .. } => f.debug_struct("Local").field("tip", tip).finish(),
+        }
+    }
+}
+
+/// Two links are the same when they go to the same address, or say they
+/// go to the same place.
+impl PartialEq for Target {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Target::Url(a), Target::Url(b)) => a == b,
+            (Target::Local { tip: a, .. }, Target::Local { tip: b, .. }) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// A byte range to strike through, and the colour of its text.
@@ -115,12 +147,12 @@ pub struct LinkedText {
 }
 
 /// `text` with `attrs`, where each of `links` is a byte range of the text
-/// and its destination, and each of `strikes` a byte range to rule
-/// through in its colour.
+/// and where it goes, and each of `strikes` a byte range to rule through
+/// in its colour.
 pub fn linked_text(
     text: String,
     attrs: AttrsList,
-    links: Vec<(Range<usize>, String)>,
+    links: Vec<(Range<usize>, Target)>,
     strikes: Vec<Strike>,
 ) -> impl IntoView {
     let id = ViewId::new();
@@ -136,7 +168,7 @@ pub fn linked_text(
         attrs,
         links: links
             .into_iter()
-            .map(|(range, url)| Link { range, url })
+            .map(|(range, target)| Link { range, target })
             .collect(),
         strikes,
         shadow: RefCell::new(None),
@@ -444,7 +476,10 @@ impl LinkedText {
                 cx.window_state.request_paint(self.id);
                 match pressed {
                     Some(link) if self.link_at(state.logical_point()) == Some(link) => {
-                        open_in_browser(&self.links[link].url);
+                        match &self.links[link].target {
+                            Target::Url(url) => open_in_browser(url),
+                            Target::Local { open, .. } => open(),
+                        }
                         EventPropagation::Stop
                     }
                     _ => EventPropagation::Continue,
@@ -533,11 +568,12 @@ impl View for LinkedText {
             return;
         }
         self.pending_tip = None;
-        let url = self.links[link].url.clone();
-        let text = if url.starts_with("https://") || url.starts_with("http://") {
-            url
-        } else {
-            format!("{url} (not opened: only http and https links open)")
+        let text = match &self.links[link].target {
+            Target::Url(url) if url.starts_with("https://") || url.starts_with("http://") => {
+                url.clone()
+            }
+            Target::Url(url) => format!("{url} (not opened: only http and https links open)"),
+            Target::Local { tip, .. } => tip.clone(),
         };
         let at = self.id.get_visual_origin() + point.to_vec2() + (0.0, 14.0);
         let overlay = add_overlay(
@@ -661,6 +697,34 @@ fn rules(layout: &TextLayout, len: usize, strikes: &[Strike]) -> Vec<(Rect, Colo
     out
 }
 
+/// A point on each link of the linked text `id`, left to right along its
+/// first line, found as a reader finds one: where the pointer turns into
+/// a hand. The pointer is left off the text.
+#[cfg(test)]
+pub(crate) fn links_on_first_line(
+    harness: &mut floem::headless::HeadlessHarness,
+    id: ViewId,
+) -> Vec<Point> {
+    use floem::style::Cursor as CursorProp;
+    let run = id.get_visual_rect();
+    let y = run.y0 + 8.0;
+    let mut out = Vec::new();
+    let mut on = false;
+    let mut x = run.x0 + 1.0;
+    while x < run.x1 {
+        harness.pointer_move(x, y);
+        harness.recompute_styles();
+        let hand = harness.get_computed_style(id).get(CursorProp) == Some(CursorStyle::Pointer);
+        if hand && !on {
+            out.push(Point::new(x + 3.0, y));
+        }
+        on = hand;
+        x += 2.0;
+    }
+    harness.pointer_move(run.x1 + 10.0, run.y1 + 10.0);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,7 +734,7 @@ mod tests {
         let start = text.find(needle).unwrap();
         vec![Link {
             range: start..start + needle.len(),
-            url: url.into(),
+            target: Target::Url(url.into()),
         }]
     }
 
@@ -881,7 +945,7 @@ mod tests {
         /// top left, with `links` in it, and the view that carries it.
         /// The column is a button when `selectable` is off.
         fn harness(
-            links: Vec<(Range<usize>, String)>,
+            links: Vec<(Range<usize>, Target)>,
             selectable: bool,
         ) -> (HeadlessHarness, ViewId) {
             let root = TestRoot::new();
@@ -913,7 +977,7 @@ mod tests {
             let layout = layout_at(TEXT, prose(15.0), WIDTH as f32);
             let link = Link {
                 range: start..start + needle.len(),
-                url: String::new(),
+                target: Target::Url(String::new()),
             };
             let rects = line_rects(&layout, &link);
             assert_eq!(rects.len(), 1, "{needle:?} on one line: {rects:?}");
@@ -1066,7 +1130,7 @@ mod tests {
         #[test]
         fn a_press_on_a_link_is_the_links_and_selects_nothing() {
             let start = TEXT.find("fox").unwrap();
-            let link = (start..start + 3, "https://example.com/fox".to_string());
+            let link = (start..start + 3, Target::Url("https://example.com/fox".into()));
             let (mut h, id) = harness(vec![link], true);
             let (fox, lazy) = (glyphs("fox"), glyphs("lazy"));
             let y = fox.center().y;
@@ -1090,6 +1154,26 @@ mod tests {
             assert_eq!(opened(), Vec::<String>::new());
             assert_eq!(cursor(&mut h, id, quick.center()), Some(CursorStyle::Text));
             assert_eq!(cursor(&mut h, id, fox.center()), Some(CursorStyle::Pointer));
+        }
+
+        #[test]
+        fn a_click_on_a_local_link_goes_there_and_not_to_the_browser() {
+            let start = TEXT.find("fox").unwrap();
+            let went = Rc::new(std::cell::Cell::new(0));
+            let counted = went.clone();
+            let target = Target::Local {
+                tip: "src/fox.rs:3".into(),
+                open: Rc::new(move || counted.set(counted.get() + 1)),
+            };
+            let (mut h, id) = harness(vec![(start..start + 3, target)], true);
+            let (fox, lazy) = (glyphs("fox"), glyphs("lazy"));
+            assert_eq!(cursor(&mut h, id, fox.center()), Some(CursorStyle::Pointer));
+            h.click(fox.center().x, fox.center().y);
+            assert_eq!(went.get(), 1);
+            assert_eq!(opened(), Vec::<String>::new());
+            // A drag off it goes nowhere, as off any link.
+            drag(&mut h, fox.center(), lazy.center());
+            assert_eq!(went.get(), 1);
         }
 
         #[test]

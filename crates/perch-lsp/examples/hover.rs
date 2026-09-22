@@ -1,6 +1,7 @@
 //! Start rust-analyzer on a workspace and ask it about a position.
 //!
 //!     cargo run -p perch-lsp --example hover -- <worktree> <file> <line> <col> [mode]
+//!     cargo run -p perch-lsp --example hover -- <worktree> --symbols <query>
 //!
 //! The modes are `hover`, `definition`, `type-definition`, `implementation`,
 //! `references`, `highlight`, `callers` and `callees`. Line and col are
@@ -8,7 +9,9 @@
 //! prints one `path:line:character` per location on stdout, counted from
 //! one as an editor shows them, with paths inside the worktree made relative
 //! to it, so each request can be checked against a checkout from the shell
-//! before the UI asks it.
+//! before the UI asks it. `--symbols` searches the workspace for a name the
+//! way a name written in a comment is looked up, `#` and all, and prints
+//! each symbol's kind and container before its location.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -24,11 +27,16 @@ const MODES: &str =
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() < 4 {
+    let symbols = args.get(1).is_some_and(|a| a == "--symbols");
+    if args.len() < 4 && !(symbols && args.len() == 3) {
         eprintln!("usage: hover <worktree> <file> <line> <col> [{MODES}]");
+        eprintln!("       hover <worktree> --symbols <query>");
         std::process::exit(2);
     }
     let root = PathBuf::from(&args[0]).canonicalize()?;
+    if symbols {
+        return search(&root, &args[2]).await;
+    }
     let file = root.join(&args[1]);
     let line: u32 = args[2].parse()?;
     let col: u32 = args[3].parse()?;
@@ -165,8 +173,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             print_locations(&root, &locations);
         }
+        Request::WorkspaceSymbols => unreachable!("searched above"),
     }
 
+    client.shutdown().await;
+    Ok(())
+}
+
+/// `--symbols`: every symbol the workspace search names for `query`,
+/// asked for all kinds as Perch asks, once the server has indexed.
+async fn search(root: &Path, query: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let spec = find_server("rust").ok_or("rust-analyzer not found")?;
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client::start(spec, root, tx).await?;
+    let query = format!("{query}#");
+    let found = poll(|| nonempty(client.workspace_symbols(&query))).await;
+    let found = found.unwrap_or_default();
+    eprintln!("\n{} symbols", found.len());
+    for symbol in &found {
+        let container = symbol.container.as_deref().unwrap_or("-");
+        let at = place(root, &symbol.location);
+        println!("{:?} {} in {container}  {at}", symbol.kind, symbol.name);
+    }
     client.shutdown().await;
     Ok(())
 }
@@ -204,14 +232,20 @@ fn describe(item: &CallHierarchyItem) -> String {
 fn print_locations(root: &Path, locations: &[Location]) {
     eprintln!("\n{} locations", locations.len());
     for location in locations {
-        let uri = location.uri.to_string();
-        let path = uri_to_path(&uri)
-            .map(|p| p.strip_prefix(root).map(Path::to_path_buf).unwrap_or(p))
-            .map(|p| p.display().to_string())
-            .unwrap_or(uri);
-        let start = location.range.start;
-        println!("{path}:{}:{}", start.line + 1, start.character + 1);
+        println!("{}", place(root, location));
     }
+}
+
+/// `path:line:character`, counted from one, the path relative to the
+/// worktree when it is inside it.
+fn place(root: &Path, location: &Location) -> String {
+    let uri = location.uri.to_string();
+    let path = uri_to_path(&uri)
+        .map(|p| p.strip_prefix(root).map(Path::to_path_buf).unwrap_or(p))
+        .map(|p| p.display().to_string())
+        .unwrap_or(uri);
+    let start = location.range.start;
+    format!("{path}:{}:{}", start.line + 1, start.character + 1)
 }
 
 fn render(hover: &lsp_types::Hover) -> String {

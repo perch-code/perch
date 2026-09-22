@@ -14,9 +14,10 @@ use lsp_types::{
     DocumentHighlightClientCapabilities, DocumentHighlightParams, GeneralClientCapabilities,
     GotoCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverClientCapabilities,
     HoverParams, InitializeParams, InitializeResult, InitializedParams, Location, MarkupKind,
-    Position, PositionEncodingKind, PublishDiagnosticsParams, ReferenceContext, ReferenceParams,
-    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, Uri, WindowClientCapabilities, WorkDoneProgressParams,
+    OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams, ReferenceContext,
+    ReferenceParams, SymbolKind, TextDocumentClientCapabilities, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, Uri, WindowClientCapabilities,
+    WorkDoneProgressParams, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -62,6 +63,19 @@ pub enum Request {
     /// The functions the one at a position calls: `prepareCallHierarchy`,
     /// then `outgoingCalls`.
     Callees,
+    /// The symbols in the workspace with a name like the one given.
+    WorkspaceSymbols,
+}
+
+/// A symbol a workspace search named: what it is called, what kind of
+/// thing it is, the type or trait it belongs to when it belongs to one,
+/// and where it is defined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Defined {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub container: Option<String>,
+    pub location: Location,
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
@@ -133,6 +147,7 @@ impl Client {
         #[allow(deprecated)]
         let params = InitializeParams {
             root_uri: Some(uri.clone()),
+            initialization_options: Some(self.spec.options.clone()).filter(|o| !o.is_null()),
             capabilities: ClientCapabilities {
                 text_document: Some(TextDocumentClientCapabilities {
                     hover: Some(HoverClientCapabilities {
@@ -391,6 +406,25 @@ impl Client {
         decode_result(value).unwrap_or_default()
     }
 
+    /// The symbols in the workspace whose names match `query` as the server
+    /// matches them: rust-analyzer fuzzily, and types alone unless the query
+    /// carries a `#`. Its dependencies are left out. A symbol with no range
+    /// to go to is left out too.
+    pub async fn workspace_symbols(&self, query: &str) -> Vec<Defined> {
+        let params = WorkspaceSymbolParams {
+            partial_result_params: Default::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            query: query.to_string(),
+        };
+        let Ok(params) = serde_json::to_value(params) else {
+            return Vec::new();
+        };
+        let Ok(value) = self.request("workspace/symbol", params, QUICK_TIMEOUT).await else {
+            return Vec::new();
+        };
+        workspace_symbols(value)
+    }
+
     fn position(&self, path: &Path, line: u32, character: u32) -> Option<TextDocumentPositionParams> {
         Some(TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: path_to_uri(path)? },
@@ -556,6 +590,35 @@ fn goto_locations(value: Value) -> Vec<Location> {
 /// rather than a failure.
 fn reference_locations(value: Value) -> Vec<Location> {
     decode_result::<Vec<Location>>(value).unwrap_or_default()
+}
+
+/// The symbols in a `workspace/symbol` reply, in either of its shapes,
+/// in the order the server gave them. Null is none.
+fn workspace_symbols(value: Value) -> Vec<Defined> {
+    match decode_result::<WorkspaceSymbolResponse>(value) {
+        Some(WorkspaceSymbolResponse::Flat(symbols)) => symbols
+            .into_iter()
+            .map(|s| Defined {
+                name: s.name,
+                kind: s.kind,
+                container: s.container_name,
+                location: s.location,
+            })
+            .collect(),
+        Some(WorkspaceSymbolResponse::Nested(symbols)) => symbols
+            .into_iter()
+            .filter_map(|s| match s.location {
+                OneOf::Left(location) => Some(Defined {
+                    name: s.name,
+                    kind: s.kind,
+                    container: s.container_name,
+                    location,
+                }),
+                OneOf::Right(_) => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    }
 }
 
 /// Turn a `$/progress` notification into something the status line can show.
@@ -758,5 +821,44 @@ mod tests {
     #[test]
     fn the_gotos_ask_for_locations_and_not_links() {
         assert_eq!(plain_goto().link_support, Some(false));
+    }
+
+    #[test]
+    fn a_workspace_symbol_reply_is_read_in_either_shape() {
+        let range = json!({"start":{"line":39,"character":18},"end":{"line":39,"character":30}});
+        // rust-analyzer's own shape: symbols with a container and a location
+        // that may lack its range.
+        let nested = json!([
+            {"name":"SlateDbWalGc","kind":23,"location":{"uri":"file:///a/src/gc.rs","range":range}},
+            {"name":"open","kind":12,"containerName":"Db","location":{"uri":"file:///a/src/db.rs","range":range}},
+            {"name":"lazy","kind":12,"location":{"uri":"file:///a/src/lazy.rs"}}
+        ]);
+        let found = workspace_symbols(nested);
+        assert_eq!(found.len(), 2, "the one with no range is left out: {found:?}");
+        assert_eq!(found[0].name, "SlateDbWalGc");
+        assert_eq!(found[0].kind, SymbolKind::STRUCT);
+        assert_eq!(found[0].container, None);
+        assert_eq!(found[1].container.as_deref(), Some("Db"));
+        assert_eq!(found[1].location.range.start.line, 39);
+
+        // The older shape, every symbol with a full location.
+        let flat = json!([
+            {"name":"open","kind":12,"containerName":"Db","location":{"uri":"file:///a/src/db.rs","range":range}}
+        ]);
+        assert_eq!(workspace_symbols(flat)[0].container.as_deref(), Some("Db"));
+        assert!(workspace_symbols(Value::Null).is_empty(), "null is none");
+    }
+
+    #[test]
+    fn rust_analyzer_is_asked_for_more_matches_and_no_re_exports() {
+        let spec = ServerSpec {
+            binary: "rust-analyzer".into(),
+            args: Vec::new(),
+            language_id: "rust",
+            options: crate::server::rust_analyzer_options(),
+        };
+        let search = &spec.options["workspace"]["symbol"]["search"];
+        assert!(search["limit"].as_u64().unwrap_or(0) > 128, "{search}");
+        assert_eq!(search["excludeImports"], json!(true));
     }
 }

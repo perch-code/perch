@@ -94,6 +94,21 @@ pub fn editor_pane(
             }
         });
     }
+    // A file a link names with no line opens as the tree opens it, where
+    // it opens; the active file is only shown in the tree.
+    {
+        let open_file = open_file.clone();
+        Effect::new(move |_| {
+            if let Some(path) = state.pending_open.get() {
+                state.pending_open.set(None);
+                if state.active.with_untracked(|a| a.as_deref() != Some(path.as_str())) {
+                    open_file(&path);
+                } else {
+                    state.show_in_tree(&path);
+                }
+            }
+        });
+    }
 
     // The find bar's matches follow the file and the query from here,
     // beside the jump: one effect for the pane, whichever editor is up.

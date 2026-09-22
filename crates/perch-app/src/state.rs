@@ -1284,6 +1284,11 @@ impl AppState {
                 status,
             } => {
                 if self.accepts_navigation(navigation_id) {
+                    // Before the status, so what shows a name asks again as
+                    // the status reaches it.
+                    if status == perch_lsp::Status::Ready {
+                        review.forget_missing_names();
+                    }
                     review.lsp_status.set(status);
                 }
             }
@@ -1307,6 +1312,9 @@ impl AppState {
             }
             Event::LspCallHierarchy { token, items, place } => {
                 review.finish_prepare_hierarchy(token, items, place);
+            }
+            Event::LspNames { token, answers } => {
+                review.finish_names(token, answers);
             }
             Event::LspCalls { token, calls } => {
                 review.finish_calls(token, calls);
@@ -1869,6 +1877,7 @@ impl AppState {
             | Event::LspDocumentHighlight { .. }
             | Event::LspCallHierarchy { .. }
             | Event::LspCalls { .. }
+            | Event::LspNames { .. }
             | Event::DiscussionReady { .. }
             | Event::IssueComments { .. }
             | Event::ReactionsUpdated { .. }

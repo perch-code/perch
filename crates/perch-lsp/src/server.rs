@@ -9,6 +9,8 @@ pub struct ServerSpec {
     pub args: Vec<String>,
     /// The LSP language identifier sent with `textDocument/didOpen`.
     pub language_id: &'static str,
+    /// Settings sent with `initialize`, in the server's own shape.
+    pub options: serde_json::Value,
 }
 
 /// What the status line shows about a server.
@@ -62,6 +64,20 @@ pub fn find_server(language: &str) -> Option<ServerSpec> {
         binary,
         args: Vec::new(),
         language_id: "rust",
+        options: rust_analyzer_options(),
+    })
+}
+
+/// What rust-analyzer is told as it starts. Its workspace symbol search,
+/// which looks up a name written in a comment, stops at the first 128
+/// fuzzy matches in name order, which can leave out the one match that is
+/// the name for a short one; and it lists every `pub use` of an item as an
+/// item of its own, so a name re-exported twice would be three.
+pub(crate) fn rust_analyzer_options() -> serde_json::Value {
+    serde_json::json!({
+        "workspace": {
+            "symbol": { "search": { "limit": 1024, "excludeImports": true } }
+        }
     })
 }
 

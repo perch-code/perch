@@ -619,7 +619,7 @@ pub fn description_card(
             .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG_SUBTLE))
             .into_any()
     } else {
-        markdown::render(&body).into_any()
+        markdown::render_linked(&body, state).into_any()
     };
     let react = reactable(&node_id);
     let reactions = reactions_under(state, backend.clone(), &react);
@@ -678,7 +678,7 @@ pub fn comment_card(
                 who,
                 actions(state, backend, hovered, None, Some(ask), react, comment.html_url.clone()),
             )),
-            Stack::vertical((markdown::render(&comment.body), reactions))
+            Stack::vertical((markdown::render_linked(&comment.body, state), reactions))
                 .style(|s| s.flex_col().width_full())
                 .into_any(),
         ),
@@ -726,7 +726,7 @@ pub fn review_card(
 
     let body = match summary {
         Some(text) => Stack::vertical((
-            markdown::render(&text),
+            markdown::render_linked(&text, state),
             reactions_under(state, backend.clone(), &react),
         ))
         .style(|s| s.flex_col().width_full())
