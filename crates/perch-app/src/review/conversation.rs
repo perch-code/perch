@@ -683,6 +683,265 @@ mod tests {
         assert_eq!(state.reactions_of("IC_1").count(ReactionKind::ThumbsUp), 3);
     }
 
+    /// A comment with a Thumbs up from others and the reader's Rocket, in
+    /// the window, with the backend it asks.
+    fn reacted_harness() -> (
+        HeadlessHarness,
+        ReviewState,
+        tokio::sync::mpsc::UnboundedReceiver<crate::backend::Command>,
+    ) {
+        use perch_github::{ReactionGroup, ReactionKind, Reactions};
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let mut discussion = discussion();
+        discussion.comments[0].node_id = "IC_1".into();
+        discussion.comments[0].reactions = Reactions {
+            groups: vec![
+                ReactionGroup { kind: ReactionKind::ThumbsUp, count: 2, viewer_reacted: false },
+                ReactionGroup { kind: ReactionKind::Rocket, count: 1, viewer_reacted: true },
+            ],
+        };
+        let (harness, _, state) = app_harness_on(backend, discussion);
+        while commands.try_recv().is_ok() {}
+        (harness, state, commands)
+    }
+
+    fn click_on(harness: &mut HeadlessHarness, id: floem::ViewId) {
+        let c = id.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+    }
+
+    /// A named key going down, or, with `up`, coming up.
+    fn key(
+        code: floem::prelude::Code,
+        named: floem::prelude::NamedKey,
+        modifiers: floem::prelude::Modifiers,
+        up: bool,
+    ) -> floem::event::Event {
+        use floem::prelude::{Key, KeyState, KeyboardEvent};
+        floem::event::Event::Key(KeyboardEvent {
+            state: if up { KeyState::Up } else { KeyState::Down },
+            key: Key::Named(named),
+            code,
+            location: Default::default(),
+            modifiers,
+            repeat: false,
+            is_composing: false,
+        })
+    }
+
+    fn escape() -> floem::event::Event {
+        use floem::prelude::{Code, Modifiers, NamedKey};
+        key(Code::Escape, NamedKey::Escape, Modifiers::empty(), false)
+    }
+
+    /// The face after the pills opens GitHub's picker over itself: a card
+    /// of the eight in a row, starting at the face's left edge, drawn
+    /// over everything under it. A pick asks the backend, takes the
+    /// reader's own back, and closes the picker.
+    #[test]
+    fn the_rows_face_opens_the_picker_over_it_and_a_pick_closes_it() {
+        use perch_github::ReactionKind;
+        let (mut harness, state, mut commands) = reacted_harness();
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        let row = find(comment, "reactions").unwrap();
+        let face = find(row, "react-button").unwrap();
+        assert_eq!(
+            harness.get_layout_rect(face).height(),
+            crate::theme::REACTION_PILL_HEIGHT,
+            "the face is a pill's height"
+        );
+        assert!(find(harness.root_id(), "react-picker").is_none());
+
+        click_on(&mut harness, face);
+        let picker = find(harness.root_id(), "react-picker").expect("the click opened it");
+        let card = picker.get_visual_rect_no_clip();
+        let at = face.get_visual_rect_no_clip();
+        assert_eq!((card.width(), card.height()), (294.0, 42.0));
+        assert_eq!(card.y1, at.y0 - 8.0, "not over the face");
+        assert_eq!(card.x0, at.x0, "not from the face's left edge");
+        for (i, kind) in ReactionKind::ALL.into_iter().enumerate() {
+            let pick = find(picker, &format!("react-pick:{}", kind.graphql()))
+                .unwrap_or_else(|| panic!("no {kind:?}"));
+            let rect = pick.get_visual_rect_no_clip();
+            assert_eq!((rect.width(), rect.height()), (32.0, 32.0));
+            assert_eq!(rect.x0, card.x0 + 5.0 + 36.0 * i as f64, "{kind:?} out of line");
+            let c = rect.center();
+            assert_eq!(
+                harness.element_id_at(c.x, c.y).map(|e| e.owning_id()),
+                Some(pick),
+                "something is drawn over {kind:?}"
+            );
+        }
+        let order = harness.paint_and_get_order();
+        let painted = |id| order.iter().position(|&p| p == id).expect("not painted");
+        assert!(
+            painted(picker) > painted(comment),
+            "the entry is painted over the picker"
+        );
+        assert!(
+            harness.is_focused(find(picker, "react-pick:THUMBS_UP").unwrap()),
+            "the first emoji did not take the focus"
+        );
+
+        // The reader's Rocket is taken back, and the picker goes.
+        let rocket = find(picker, "react-pick:ROCKET").unwrap();
+        click_on(&mut harness, rocket);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::backend::Command::SetReaction { kind: ReactionKind::Rocket, add: false, .. })
+        ));
+        assert!(!state.reactions_of("IC_1").viewer_reacted(ReactionKind::Rocket));
+        assert!(find(harness.root_id(), "react-picker").is_none(), "the pick left it open");
+
+        // An Eyes is left, and a pill is drawn for it.
+        click_on(&mut harness, face);
+        let eyes = find(harness.root_id(), "react-pick:EYES").unwrap();
+        click_on(&mut harness, eyes);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::backend::Command::SetReaction { kind: ReactionKind::Eyes, add: true, .. })
+        ));
+        assert!(find(comment, "reaction:EYES").is_some());
+    }
+
+    /// The byline's face, drawn while the entry is under the pointer,
+    /// opens the picker under itself and running left, and it stays
+    /// drawn, as the picker's anchor, while the picker is open.
+    #[test]
+    fn the_bylines_face_opens_the_picker_under_it() {
+        let (mut harness, _, _commands) = reacted_harness();
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        let face = find(comment, "react-button").unwrap();
+        assert_eq!(harness.get_layout_rect(face).height(), 0.0, "drawn without the pointer");
+        let over = comment.get_visual_rect_no_clip().center();
+        harness.pointer_move(over.x, over.y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(harness.get_layout_rect(face).height(), 24.0);
+
+        click_on(&mut harness, face);
+        let card = find(harness.root_id(), "react-picker")
+            .expect("the click opened it")
+            .get_visual_rect_no_clip();
+        let at = face.get_visual_rect_no_clip();
+        assert_eq!(card.y0, at.y1 + 8.0, "not under the face");
+        assert_eq!(card.x1, at.x1, "not from the face's right edge");
+
+        // The pointer leaves the entry for the picker's backdrop; the face
+        // stays, and the picker with it.
+        harness.pointer_move(5.0, 5.0);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(harness.get_layout_rect(face).height(), 24.0, "the anchor went");
+        let picker = find(harness.root_id(), "react-picker").expect("the picker went");
+        assert_eq!(picker.get_visual_rect_no_clip(), card);
+    }
+
+    /// The picker hangs from its face, so an entry above that grows while
+    /// it is open carries it down with the face.
+    #[test]
+    fn the_picker_follows_its_face_when_the_column_moves() {
+        let (mut harness, state, _commands) = reacted_harness();
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        let face = find(find(comment, "reactions").unwrap(), "react-button").unwrap();
+        click_on(&mut harness, face);
+        let before = face.get_visual_rect_no_clip();
+
+        let mut longer = state.discussion.get_untracked().unwrap().as_ref().clone();
+        longer.body = "A much longer description.\n\n".repeat(6);
+        state.discussion.set(Some(std::sync::Arc::new(longer)));
+        harness.rebuild();
+        harness.paint();
+
+        let at = face.get_visual_rect_no_clip();
+        assert!(at.y0 > before.y0 + 50.0, "the face did not move: {before:?} to {at:?}");
+        let card = find(harness.root_id(), "react-picker")
+            .expect("the picker closed")
+            .get_visual_rect_no_clip();
+        assert_eq!((card.y1, card.x0), (at.y0 - 8.0, at.x0), "the picker stayed behind");
+    }
+
+    /// A click anywhere but the picker closes it and does nothing else:
+    /// the pill under it is not toggled. So does Escape. Either way the
+    /// face has the focus after, so a key still reaches the column.
+    #[test]
+    fn a_click_elsewhere_or_escape_closes_the_picker_and_does_nothing_else() {
+        use perch_github::ReactionKind;
+        let (mut harness, state, mut commands) = reacted_harness();
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        let row = find(comment, "reactions").unwrap();
+        let face = find(row, "react-button").unwrap();
+        let thumbs = find(comment, "reaction:THUMBS_UP").unwrap();
+
+        click_on(&mut harness, face);
+        assert!(find(harness.root_id(), "react-picker").is_some());
+        click_on(&mut harness, thumbs);
+        assert!(find(harness.root_id(), "react-picker").is_none(), "the click left it open");
+        assert!(commands.try_recv().is_err(), "the click reached the pill");
+        assert_eq!(state.reactions_of("IC_1").count(ReactionKind::ThumbsUp), 2);
+        assert!(harness.is_focused(face), "the click left the focus nowhere");
+
+        // The face again, which a click while it is open closes.
+        click_on(&mut harness, face);
+        click_on(&mut harness, face);
+        assert!(find(harness.root_id(), "react-picker").is_none(), "the face left it open");
+
+        // Escape reaches the picker, which took the focus as it opened.
+        click_on(&mut harness, face);
+        assert!(!harness.is_focused(face));
+        harness.dispatch_event(escape());
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "react-picker").is_none(), "Escape left it open");
+        assert!(harness.is_focused(face), "the face did not take the focus back");
+        assert!(commands.try_recv().is_err());
+    }
+
+    /// The keys move the focus along the picker's row and around from
+    /// either end, Tab included, so the focus stays in it; Return picks.
+    #[test]
+    fn the_keys_move_along_the_picker_and_return_picks() {
+        use floem::prelude::{Code, Modifiers, NamedKey};
+        use perch_github::ReactionKind;
+        let (mut harness, _, mut commands) = reacted_harness();
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        let face = find(find(comment, "reactions").unwrap(), "react-button").unwrap();
+        click_on(&mut harness, face);
+        let picker = find(harness.root_id(), "react-picker").unwrap();
+        let pick = |kind: &str| find(picker, &format!("react-pick:{kind}")).unwrap();
+        let none = Modifiers::empty();
+        for (code, named, modifiers, then) in [
+            (Code::ArrowLeft, NamedKey::ArrowLeft, none, "EYES"),
+            (Code::ArrowRight, NamedKey::ArrowRight, none, "THUMBS_UP"),
+            (Code::Tab, NamedKey::Tab, none, "THUMBS_DOWN"),
+            (Code::Tab, NamedKey::Tab, Modifiers::SHIFT, "THUMBS_UP"),
+            (Code::Tab, NamedKey::Tab, Modifiers::SHIFT, "EYES"),
+            (Code::Tab, NamedKey::Tab, none, "THUMBS_UP"),
+            (Code::End, NamedKey::End, none, "EYES"),
+            (Code::Home, NamedKey::Home, none, "THUMBS_UP"),
+            (Code::ArrowRight, NamedKey::ArrowRight, none, "THUMBS_DOWN"),
+            (Code::ArrowRight, NamedKey::ArrowRight, none, "LAUGH"),
+        ] {
+            harness.dispatch_event(key(code, named, modifiers, false));
+            harness.rebuild();
+            harness.paint();
+            assert!(harness.is_focused(pick(then)), "{code:?} did not reach {then}");
+        }
+
+        harness.dispatch_event(key(Code::Enter, NamedKey::Enter, none, false));
+        harness.dispatch_event(key(Code::Enter, NamedKey::Enter, none, true));
+        harness.rebuild();
+        harness.paint();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::backend::Command::SetReaction { kind: ReactionKind::Laugh, add: true, .. })
+        ));
+        assert!(find(harness.root_id(), "react-picker").is_none(), "Return left it open");
+        assert!(harness.is_focused(face));
+    }
+
     /// Every view's debug names, in tree order.
     fn names(id: floem::ViewId, out: &mut Vec<String>) {
         out.push(id.debug_name());

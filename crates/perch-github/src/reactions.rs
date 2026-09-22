@@ -51,7 +51,7 @@ impl ReactionKind {
         }
     }
 
-    /// The name beside the emoji in the picker, and in a pill's tip.
+    /// The name in a pill's tip, and in the tip of the picker's emoji.
     pub fn label(self) -> &'static str {
         match self {
             ReactionKind::ThumbsUp => "Thumbs up",

@@ -4181,6 +4181,43 @@ mod window {
         assert!(state.follow_up_is_inline("gh-100"));
     }
 
+    /// The reaction picker opens from a card in the code as it does on
+    /// Conversation: in the window's overlay, over the card layer and the
+    /// code, where neither the editor's scroll nor its layers reach it.
+    #[test]
+    fn the_reaction_picker_opens_over_the_code_from_a_card_in_it() {
+        use perch_github::{ReactionGroup, ReactionKind, Reactions};
+        let (mut harness, state) = harness();
+        state.set_comment_threads(Arc::new(vec![github_thread(100, 7, &["nit: name this"])]));
+        let hearts = Reactions {
+            groups: vec![ReactionGroup { kind: ReactionKind::Heart, count: 1, viewer_reacted: false }],
+        };
+        state.install_reactions([("PRRC_100", &hearts)]);
+        harness.rebuild();
+        harness.paint();
+
+        let card = find(harness.root_id(), "inline-card:gh-100").unwrap();
+        let face = find(find(card, "reactions").expect("the comment's pills"), "react-button").unwrap();
+        let c = face.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+
+        let picker = find(harness.root_id(), "react-picker").expect("the click opened it");
+        let at = face.get_visual_rect_no_clip();
+        let rect = picker.get_visual_rect_no_clip();
+        assert_eq!((rect.y1, rect.x0), (at.y0 - 8.0, at.x0), "not over the face");
+        for kind in ReactionKind::ALL {
+            let pick = find(picker, &format!("react-pick:{}", kind.graphql())).unwrap();
+            let c = pick.get_visual_rect_no_clip().center();
+            assert_eq!(
+                harness.element_id_at(c.x, c.y).map(|e| e.owning_id()),
+                Some(pick),
+                "something in the code is drawn over {kind:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_resolved_github_thread_starts_collapsed_and_opens_when_toggled() {
         use crate::review::doc::CardId;

@@ -15,15 +15,18 @@
 //! pills under its text, and the face in its byline that opens the
 //! picker. A click toggles the pill where it is and asks GitHub after.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
+use floem::context::VisualChanged;
+use floem::event::EventPropagation;
+use floem::kurbo::{Rect, Size};
 use floem::peniko::Color;
-use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::views::{
-    dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack, TooltipExt,
+    dyn_container, dyn_stack, Container, Decorators, Empty, Label, Overlay, Stack, TooltipExt,
 };
 use perch_git::{LineStatus, Row};
 use perch_github::{
@@ -318,57 +321,315 @@ fn react(state: ReviewState, backend: &Backend, node_id: &str, kind: ReactionKin
     }
 }
 
-/// The picker: GitHub's eight, each checked when the reader has left it,
-/// so picking one again takes it back. Built on each open, so it shows
-/// the reactions as they stand then.
-fn reaction_menu(state: ReviewState, backend: Rc<Backend>, node_id: String) -> Menu {
-    let reactions = state
-        .reactions
-        .with_untracked(|m| m.get(&node_id).cloned())
-        .unwrap_or_default();
-    let mut menu = Menu::new();
-    for kind in ReactionKind::ALL {
-        let mine = reactions.viewer_reacted(kind);
-        let busy = state.reacting.with_untracked(|r| r.contains(&(node_id.clone(), kind)));
-        let (node_id, backend) = (node_id.clone(), backend.clone());
-        menu = menu.item(format!("{}  {}", kind.emoji(), kind.label()), move |item| {
-            item.checked(mine)
-                .enabled(!busy)
-                .action(move || react(state, &backend, &node_id, kind))
-        });
+/// A button in the picker, and the room between the buttons and around
+/// them: GitHub's measures.
+const PICK_SIZE: f64 = 32.0;
+const PICK_GAP: f64 = 4.0;
+/// A picked emoji is drawn larger than a pill's.
+const PICK_EMOJI: f32 = 16.0;
+/// The room between the face and the picker it opens.
+const PICKER_OFFSET: f64 = 8.0;
+/// The picker's size: the eight in a row, padded, inside a 1px rule.
+const PICKER_WIDTH: f64 = ReactionKind::ALL.len() as f64 * (PICK_SIZE + PICK_GAP) + PICK_GAP + 2.0;
+const PICKER_HEIGHT: f64 = PICK_SIZE + 2.0 * PICK_GAP + 2.0;
+
+/// Where the picker opens from its face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Placement {
+    /// Over the face rather than under it.
+    above: bool,
+    /// From the face's left edge rightward rather than from its right
+    /// edge leftward.
+    rightward: bool,
+}
+
+impl Placement {
+    /// The byline's face is at the top right of its entry, so the picker
+    /// hangs under it and runs left; the row's is at the foot, after the
+    /// pills, and the picker stands over it and runs right, as GitHub's
+    /// does from the same place.
+    fn preferred(in_byline: bool) -> Self {
+        Placement {
+            above: !in_byline,
+            rightward: !in_byline,
+        }
     }
-    menu
+
+    /// This placement for a face drawn at `face` in a window of `window`,
+    /// turned on either axis where the picker would leave the window and
+    /// the other way would not.
+    fn fitted(self, face: Rect, window: Size) -> Self {
+        let room_above = face.y0 - PICKER_OFFSET - PICKER_HEIGHT >= 0.0;
+        let room_below = face.y1 + PICKER_OFFSET + PICKER_HEIGHT <= window.height;
+        let room_right = face.x0 + PICKER_WIDTH <= window.width;
+        let room_left = face.x1 - PICKER_WIDTH >= 0.0;
+        Placement {
+            above: if self.above {
+                room_above || !room_below
+            } else {
+                !room_below && room_above
+            },
+            rightward: if self.rightward {
+                room_right || !room_left
+            } else {
+                !room_left && room_right
+            },
+        }
+    }
 }
 
 /// A face that opens the picker. In a byline it is drawn only while the
 /// card is under the pointer, as Ask about this is, and hidden rather
 /// than absent so the byline keeps its shape; at the end of a row of
-/// pills it is always there.
+/// pills it is round and ruled like them, as GitHub's is, and always
+/// there. Either stays drawn, pressed, while its picker is open.
+///
+/// The face takes the focus back however the picker closes: a click on
+/// the backdrop focuses nothing, and a key must still find its way up
+/// through the column to the window's handler.
 fn react_button(
     state: ReviewState,
     backend: Rc<Backend>,
     node_id: String,
     hovered: Option<RwSignal<bool>>,
 ) -> impl IntoView {
-    let menu = move || reaction_menu(state, backend.clone(), node_id.clone());
+    let in_byline = hovered.is_some();
+    let (size, rule) = if in_byline {
+        (24.0, 0.0)
+    } else {
+        (theme::REACTION_PILL_HEIGHT, 1.0)
+    };
+    let face_id = floem::ViewId::new();
+    let open = RwSignal::new(None::<Placement>);
+    let shown = Memo::new(move |_| open.get());
+    let close: Rc<dyn Fn()> = Rc::new(move || {
+        open.set(None);
+        face_id.request_focus();
+    });
+    let toggle = move || {
+        if open.get_untracked().is_some() {
+            open.set(None);
+            return;
+        }
+        // A byline's face the pointer has left keeps the focus it took,
+        // hidden; Return on it must not open a picker from nowhere.
+        if hovered.is_some_and(|h| !h.get_untracked()) {
+            return;
+        }
+        let window = face_id.root().get_size().unwrap_or_default();
+        let face = face_id.get_visual_rect_no_clip();
+        open.set(Some(Placement::preferred(in_byline).fitted(face, window)));
+    };
+    // The picker hangs from the face's outer edge, its rule included.
+    let slot = dyn_container(
+        move || shown.get(),
+        move |placement| match placement {
+            Some(placement) => {
+                picker(state, backend.clone(), node_id.clone(), placement, size, close.clone())
+                    .into_any()
+            }
+            None => Empty::new().into_any(),
+        },
+    )
+    .style(move |s| s.absolute().inset(-rule));
     tip(
-        Container::new(
-            sidebar_glyph(SidebarIcon::Smiley, theme::FG_MUTED)
-                .style(|s| s.size(14.0, 14.0).pointer_events_none()),
+        Stack::with_id(
+            face_id,
+            (
+                sidebar_glyph(SidebarIcon::Smiley, theme::FG_MUTED)
+                    .style(|s| s.size(14.0, 14.0).pointer_events_none()),
+                slot,
+            ),
         )
-        .popout_menu(menu)
+        .on_event_stop(el::Click, move |_, _| toggle())
         .style(move |s| {
-            clickable(s)
-                .size(24.0, 24.0)
+            let open = shown.get().is_some();
+            let s = clickable(s)
+                .size(size, size)
                 .items_center()
                 .justify_center()
-                .border_radius(12.0)
-                .hover(|s| s.background(theme::BADGE_BG))
-                .apply_if(hovered.is_some_and(|h| !h.get()), |s| s.hide())
+                .border_radius(size / 2.0)
+                .keyboard_navigable()
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING));
+            let s = if in_byline {
+                s.hover(|s| s.background(theme::BADGE_BG))
+                    .apply_if(hovered.is_some_and(|h| !h.get()) && !open, |s| s.hide())
+            } else {
+                s.border(rule)
+                    .border_color(theme::BORDER)
+                    .background(theme::CANVAS)
+                    .hover(|s| s.background(theme::BADGE_BG).border_color(theme::FG_SUBTLE))
+            };
+            s.apply_if(open, |s| s.background(theme::BADGE_BG))
         })
         .debug_name("react-button"),
         "React".into(),
     )
+}
+
+/// GitHub's picker: its eight in a row on a white card, each washed blue
+/// while the reader's is among them, so picking it again takes it back.
+/// A pick closes it, and so do Escape and a click anywhere else, which
+/// nothing under the picker sees. It hangs from its face in the window's
+/// overlay, where the column's scroll cannot clip it and nothing drawn
+/// after the entry covers it, and follows the face if the column moves.
+///
+/// The first emoji takes the focus as it opens. The arrows and Tab move
+/// it along the row, around from either end, and Home and End to the
+/// ends; Return or Space picks. The focus never leaves the row while it
+/// is open, so Escape always reaches it.
+fn picker(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    node_id: String,
+    placement: Placement,
+    face: f64,
+    close: Rc<dyn Fn()>,
+) -> impl IntoView {
+    // Which emoji has the focus, and whether a key has moved it: floem
+    // rings the focus only once its own keys have moved it, and these
+    // keys are the picker's.
+    let current = RwSignal::new(0_usize);
+    let keyed = RwSignal::new(false);
+    let (ids, picks): (Vec<_>, Vec<_>) = ReactionKind::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(i, kind)| {
+            let (id, view) =
+                pick(state, backend.clone(), node_id.clone(), kind, keyed, close.clone());
+            let view = view
+                .into_intermediate()
+                .on_event_cont(el::FocusGained, move |_, _| current.set(i));
+            (id, view)
+        })
+        .unzip();
+    let first = ids[0];
+    let focused = Cell::new(false);
+    let card = Stack::horizontal_from_iter(picks)
+        // Once the card is styled and placed, and only then, or the emoji
+        // cannot take the focus: a view new this frame is not focusable
+        // yet. Only the first time, not each time the card moves.
+        .on_event_cont(VisualChanged::listener(), move |_, _| {
+            if !focused.replace(true) {
+                first.request_focus();
+            }
+        })
+        .debug_name("react-picker")
+        .style(move |s| {
+            let s = s
+                .absolute()
+                .size(PICKER_WIDTH, PICKER_HEIGHT)
+                .items_center()
+                .gap(PICK_GAP)
+                .padding(PICK_GAP)
+                .background(theme::CANVAS)
+                .border(1.0)
+                .border_color(theme::BORDER)
+                .border_radius(theme::RADIUS)
+                .box_shadow_blur(22.0)
+                .box_shadow_v_offset(7.0)
+                .box_shadow_color(theme::SHADOW);
+            let s = if placement.above {
+                s.inset_bottom(face + PICKER_OFFSET)
+            } else {
+                s.inset_top(face + PICKER_OFFSET)
+            };
+            if placement.rightward {
+                s.inset_left(0.0)
+            } else {
+                s.inset_right(0.0)
+            }
+        });
+    let dismiss = close.clone();
+    let backdrop = Empty::new()
+        .on_event_stop(el::PointerDown, move |_, _| dismiss())
+        .debug_name("react-backdrop")
+        .style(|s| s.fixed().inset(0.0));
+    // Level with the window's other overlays, not over them as an
+    // overlay is by default, so an emoji's tip, added after, is drawn
+    // over the card.
+    Overlay::new(Stack::new((backdrop, card)).style(|s| s.size_full()))
+        .on_event(el::KeyDown, move |cx, key: &KeyboardEvent| {
+            let (at, last) = (current.get_untracked(), ids.len() - 1);
+            let next = if at == last { 0 } else { at + 1 };
+            let previous = if at == 0 { last } else { at - 1 };
+            let plain = key.modifiers.is_empty();
+            let to = match key.code {
+                Code::Escape if plain => {
+                    close();
+                    return EventPropagation::Stop;
+                }
+                Code::ArrowRight if plain => next,
+                Code::ArrowLeft if plain => previous,
+                Code::Tab if plain => next,
+                Code::Tab if key.modifiers == Modifiers::SHIFT => previous,
+                Code::Home if plain => 0,
+                Code::End if plain => last,
+                _ => return EventPropagation::Continue,
+            };
+            // Tab would otherwise go on out of the row as well.
+            cx.prevent_default();
+            keyed.set(true);
+            ids[to].request_focus();
+            EventPropagation::Stop
+        })
+        .style(|s| s.absolute().inset(0.0).z_index(0))
+}
+
+/// One of the picker's eight: the emoji alone, with its name in a tip,
+/// washed blue while the reader's is among them, and ringed while it has
+/// the focus once a key has moved it. One with GitHub takes no click, as
+/// its pill takes none, and is drawn faint. The id is the button's, for
+/// the focus.
+fn pick(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    node_id: String,
+    kind: ReactionKind,
+    keyed: RwSignal<bool>,
+    close: Rc<dyn Fn()>,
+) -> (floem::ViewId, impl IntoView) {
+    let mine_node = node_id.clone();
+    let mine = Memo::new(move |_| {
+        state
+            .reactions
+            .with(|m| m.get(&mine_node).is_some_and(|r| r.viewer_reacted(kind)))
+    });
+    let busy_node = node_id.clone();
+    let busy = Memo::new(move |_| state.is_reacting(&busy_node, kind));
+    let button = Container::new(
+        Label::derived(move || kind.emoji().to_string()).style(|s| {
+            s.font_size(PICK_EMOJI)
+                .selectable(false)
+                .pointer_events_none()
+        }),
+    )
+    .on_event_stop(el::Click, move |_, _| {
+        if !busy.get_untracked() {
+            react(state, &backend, &node_id, kind);
+            close();
+        }
+    })
+    .debug_name(format!("react-pick:{}", kind.graphql()))
+    .style(move |s| {
+        let mine = mine.get();
+        clickable(s)
+            .size(PICK_SIZE, PICK_SIZE)
+            .flex_shrink(0.0_f32)
+            .items_center()
+            .justify_center()
+            .border_radius(theme::RADIUS)
+            .keyboard_navigable()
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .apply_if(keyed.get(), |s| {
+                s.focus(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            })
+            .apply_if(mine, |s| s.background(theme::REACTED_BG))
+            .hover(move |s| s.background(if mine { theme::REACTED_BG } else { theme::BADGE_BG }))
+            .apply_if(busy.get(), |s| s.opacity(0.4_f32))
+    });
+    let id = button.view_id();
+    (id, tip(button, kind.label().to_string()))
 }
 
 /// The reactions under an entry's text: a pill per kind anyone left,
@@ -1868,5 +2129,31 @@ mod tests {
             key(&event(PullEventKind::Opened)),
             key(&event(PullEventKind::Closed))
         );
+    }
+
+    /// The picker opens the way its face prefers while the window has room
+    /// there, and turns on an axis only when the other way has room.
+    #[test]
+    fn the_picker_turns_only_where_it_would_leave_the_window() {
+        let window = Size::new(1000.0, 800.0);
+        let face = |x: f64, y: f64| Rect::new(x, y, x + 26.0, y + 26.0);
+        let row = Placement::preferred(false);
+        let byline = Placement::preferred(true);
+        let at = |above, rightward| Placement { above, rightward };
+
+        assert_eq!(row.fitted(face(100.0, 400.0), window), at(true, true));
+        assert_eq!(byline.fitted(face(700.0, 400.0), window), at(false, false));
+        // Too near the top for the row's, too near the bottom for the
+        // byline's.
+        assert_eq!(row.fitted(face(100.0, 20.0), window), at(false, true));
+        assert_eq!(byline.fitted(face(700.0, 760.0), window), at(true, false));
+        // Too near the right for the row's, too near the left for the
+        // byline's.
+        assert_eq!(row.fitted(face(900.0, 400.0), window), at(true, false));
+        assert_eq!(byline.fitted(face(100.0, 400.0), window), at(false, true));
+        // A window with room on neither side keeps the face's own way.
+        let small = Size::new(200.0, 60.0);
+        assert_eq!(row.fitted(face(100.0, 20.0), small), row);
+        assert_eq!(byline.fitted(face(100.0, 20.0), small), byline);
     }
 }
