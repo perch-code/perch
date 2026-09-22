@@ -342,10 +342,11 @@ pub fn composer_view(
             state.composer_focused.set(true)
         })
         .on_event_cont(el::FocusLost, move |_, _| state.composer_focused.set(false))
-        // Escape closes an empty composer, or one editing a draft, whose
-        // words are still in the cache and come back as the message row.
-        // In the capture phase, because the editor stops every key once
-        // it has focus and this has to run first.
+        // Escape closes an empty composer, or one editing a draft: the
+        // draft's saved words come back as the message row, and whatever
+        // was typed over them since is dropped, as the edit was never
+        // sent. In the capture phase, because the editor stops every key
+        // once it has focus and this has to run first.
         .on_event_with_config(
             el::KeyDown,
             floem::context::EventCallbackConfig {
@@ -1311,7 +1312,7 @@ pub fn thread_menu(state: ReviewState, thread: &CommentThread, size: f64) -> imp
     .popout_menu(move || {
         let id = thread_id.clone();
         let label = if github_bound {
-            "Delete Perch Messages\u{2026}"
+            "Delete Perch's Messages\u{2026}"
         } else {
             "Delete Thread\u{2026}"
         };
@@ -1527,14 +1528,17 @@ fn private_lane(inner: impl IntoView + 'static) -> floem::AnyView {
 /// `PERCH ONLY` at the top of a run of private messages. Upper case rather
 /// than small caps, which floem's text cannot set.
 fn perch_only_label() -> impl IntoView {
-    Label::derived(|| "PERCH ONLY".to_string())
-        .debug_name("perch-only")
-        .style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::FG_MUTED)
-                .selectable(false)
-        })
+    cards::tip(
+        Label::derived(|| "PERCH ONLY".to_string())
+            .debug_name("perch-only")
+            .style(|s| {
+                s.font_size(theme::TEXT_SECTION)
+                    .font_weight(theme::weight_emphasis())
+                    .color(theme::FG_MUTED)
+                    .selectable(false)
+            }),
+        "Only Perch shows this; nothing here is on GitHub.".to_string(),
+    )
 }
 
 /// A message on its own, before any lane: a comment from GitHub with its
@@ -1554,6 +1558,9 @@ fn bare_message_view(
     }
     if message.is_draft() {
         return draft_message_view(app, state, backend, &thread, &message).into_any();
+    }
+    if message.from_github() {
+        return posted_message_view(app, state, backend, &message).into_any();
     }
     let is_agent = matches!(message.author, Author::Agent { .. });
     let body = message.body.clone();
@@ -1617,10 +1624,10 @@ fn bare_message_view(
 /// the thread can take a draft, and Copy. An agent's message has no
 /// byline to hold them, and a row of its own would move the text when
 /// the pointer came, so they sit over the corner instead. On an answer
-/// that is the end of its run's folded line, and they take the surface's
-/// colour so a long summary ends cleanly under them; a finding keeps the
-/// corner clear of its text. Shown only under the pointer, as a
-/// comment's are.
+/// the corner is the end of its run's folded line, and they take the
+/// surface's colour so a long summary ends cleanly under them; a finding
+/// keeps the corner clear of its text. Shown only under the pointer, as
+/// a comment's are.
 fn with_agent_actions(
     state: ReviewState,
     thread: CommentThread,
@@ -1692,10 +1699,12 @@ fn with_agent_actions(
 
 /// A comment from GitHub in a thread: a small byline, then the body, then
 /// the reactions on it. A reply, any comment after the thread's first,
-/// sits flush under the one it answers with a rule down its left. Ask
-/// about this opens the composer under the thread itself, so the answer
-/// lands beside the comment it is about; the thread's history carries
-/// the comment to the agent, and nothing is quoted.
+/// sits flush under the one it answers with a rule down its left. Reply
+/// opens the composer under the thread, bound for GitHub, whatever the
+/// thread's last message was, while the pull request can take the draft;
+/// Ask about this opens it to an agent, so the answer lands beside the
+/// comment it is about; the thread's history carries the comment to the
+/// agent, and nothing is quoted.
 fn github_message_view(
     app: AppState,
     state: ReviewState,
@@ -1726,6 +1735,32 @@ fn github_message_view(
             None,
         );
     });
+    // To GitHub, whatever the thread's last message was: an answer to
+    // the comment, under the agent's take on it if there is one. Absent
+    // where no draft could go, as Post to GitHub is.
+    let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
+    let reply_to: Rc<dyn Fn()> = Rc::new(move || {
+        state.open_composer_with(
+            Some(thread_id.clone()),
+            anchor.clone(),
+            String::new(),
+            Destination::GitHub,
+            None,
+        );
+    });
+    let for_reply = thread.clone();
+    let offered = Memo::new(move |_| state.takes_draft(&for_reply));
+    let reply_button = dyn_container(
+        move || offered.get(),
+        move |offered| {
+            if !offered {
+                return Empty::new().into_any();
+            }
+            cards::text_action(hovered, SidebarIcon::Reply, "Reply", "reply-github", reply_to.clone())
+                .into_any()
+        },
+    )
+    .into_any();
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(state, backend.clone(), &react);
@@ -1734,7 +1769,7 @@ fn github_message_view(
             cards::byline(
                 app,
                 who,
-                cards::actions(state, backend, hovered, Some(ask), react, url),
+                cards::actions(state, backend, hovered, Some(reply_button), Some(ask), react, url),
             ),
             crate::review::markdown::render(&message.body),
             reactions,
@@ -1787,14 +1822,20 @@ fn draft_message_view(
         backend.delete_draft(&item_id, &delete_id);
     });
     let actions = Stack::horizontal((
-        hover_icon(hovered, SidebarIcon::Pencil, "edit-draft", edit),
-        hover_icon(hovered, SidebarIcon::Trash, "delete-draft", delete),
+        cards::tip_with(
+            hover_icon(hovered, SidebarIcon::Pencil, "edit-draft", edit),
+            || "Edit".to_string(),
+        ),
+        cards::tip_with(
+            hover_icon(hovered, SidebarIcon::Trash, "delete-draft", delete),
+            || "Delete".to_string(),
+        ),
     ))
     .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
     .into_any();
     cards::track_hover(
         Stack::vertical((
-            draft_byline(app, actions),
+            readers_byline(app, Some(draft_pill().into_any()), None, actions),
             crate::review::markdown::render(&message.body),
         ))
         .style(|s| s.flex_col().width_full().gap(6.0)),
@@ -1802,9 +1843,46 @@ fn draft_message_view(
     )
 }
 
-/// The reader's face and name, as the thread byline draws them, with
-/// `Draft` after the name and whatever the caller puts at the right.
-fn draft_byline(app: AppState, trailing: floem::AnyView) -> impl IntoView {
+/// A comment of the reader's that is on GitHub: their own byline with
+/// the comment's time, its link and the reaction picker on hover, the
+/// body, and the reactions on it under. No Draft mark, no edit and no
+/// delete: what is on github.com is edited there. Flush with the
+/// comments it answers, as a draft is.
+fn posted_message_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    message: &CommentMessage,
+) -> impl IntoView {
+    let hovered = RwSignal::new(false);
+    let react = message.node_id.as_deref().and_then(cards::reactable);
+    let url = message.html_url.clone().unwrap_or_default();
+    let reactions = cards::reactions_under(state, backend.clone(), &react);
+    cards::track_hover(
+        Stack::vertical((
+            readers_byline(
+                app,
+                None,
+                Some(message.created_at),
+                cards::actions(state, backend, hovered, None, None, react, url),
+            ),
+            crate::review::markdown::render(&message.body),
+            reactions,
+        ))
+        .style(|s| s.flex_col().width_full().gap(6.0)),
+        hovered,
+    )
+}
+
+/// The reader's face and name, as the thread byline draws them, with a
+/// mark after the name, `Draft` on a draft, or the time when the message
+/// has one, and whatever the caller puts at the right.
+fn readers_byline(
+    app: AppState,
+    mark: Option<floem::AnyView>,
+    when: Option<jiff::Timestamp>,
+    trailing: floem::AnyView,
+) -> impl IntoView {
     let viewer = move || app.viewer.get().filter(|(l, _)| !l.is_empty());
     let seed = viewer().map(|(l, _)| l).unwrap_or_else(|| "you".into());
     Stack::horizontal((
@@ -1826,7 +1904,23 @@ fn draft_byline(app: AppState, trailing: floem::AnyView) -> impl IntoView {
                     .color(theme::FG)
             },
         ),
-        draft_pill(),
+        match mark {
+            Some(mark) => mark,
+            None => Empty::new().into_any(),
+        },
+        match when {
+            Some(at) => Label::derived(move || crate::timefmt::relative(at, app.now.get()))
+                .debug_name("posted-when")
+                .style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::FG_MUTED)
+                        .margin_left(6.0)
+                        .text_ellipsis()
+                        .min_width(0.0)
+                })
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         trailing,
     ))
@@ -1834,22 +1928,25 @@ fn draft_byline(app: AppState, trailing: floem::AnyView) -> impl IntoView {
 }
 
 /// The Draft mark after a draft's author, in GitHub's colour: this is
-/// going there.
+/// going there, and is not there yet.
 pub fn draft_pill() -> impl IntoView {
-    Label::derived(|| "Draft".to_string())
-        .debug_name("draft-pill")
-        .style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::GITHUB)
-                .background(theme::GITHUB_BG)
-                .border(1.0)
-                .border_color(theme::GITHUB_BG)
-                .border_radius(9.0)
-                .padding_horiz(6.0)
-                .margin_left(8.0)
-                .selectable(false)
-        })
+    cards::tip(
+        Label::derived(|| "Draft".to_string())
+            .debug_name("draft-pill")
+            .style(|s| {
+                s.font_size(theme::TEXT_SECTION)
+                    .font_weight(theme::weight_emphasis())
+                    .color(theme::GITHUB)
+                    .background(theme::GITHUB_BG)
+                    .border(1.0)
+                    .border_color(theme::GITHUB_BG)
+                    .border_radius(9.0)
+                    .padding_horiz(6.0)
+                    .margin_left(8.0)
+                    .selectable(false)
+            }),
+        "Not on GitHub until the review is submitted.".to_string(),
+    )
 }
 
 /// A small action drawn only while its message is under the pointer,
@@ -2624,12 +2721,14 @@ mod tests {
     /// Picking GitHub turns the send into Add to review, takes the effort
     /// picker away, and sending asks the backend to keep a draft on those
     /// lines with no thread; the face remembers, so the next composer on
-    /// lines opens on GitHub.
+    /// lines opens on GitHub. On lines of a branch, or of a pull request
+    /// no longer open, GitHub is not offered and the composer opens on an
+    /// agent whatever the face remembers: a draft there could never post.
     #[test]
     fn a_composer_on_lines_sent_to_github_keeps_a_draft_with_the_anchor_and_no_thread() {
         let root = TestRoot::new();
         let app = AppState::new();
-        let state = state_with_item();
+        let state = state_with_pull_request();
         let anchor = perch_github::Anchor {
             path: "src/x.rs".into(),
             start_line: 7,
@@ -2690,13 +2789,35 @@ mod tests {
         );
         assert_eq!(state.agent_last.get(), None, "no agent was sent to");
 
-        state.open_composer(None, Some(anchor), String::new(), sonnet_medium());
+        state.open_composer(None, Some(anchor.clone()), String::new(), sonnet_medium());
         assert_eq!(state.composer.get().unwrap().destination, Destination::GitHub);
         state.open_composer(None, None, String::new(), sonnet_medium());
         assert_eq!(
             state.composer.get().unwrap().destination,
             Destination::agent(sonnet_medium()),
             "about the item as a whole, an agent"
+        );
+
+        // A branch: no review to add to.
+        state.pull_request.set(None);
+        state.open_composer(None, Some(anchor.clone()), String::new(), sonnet_medium());
+        let composer = state.composer.get().unwrap();
+        assert!(!state.github_offered(&composer), "a branch takes no draft");
+        assert_eq!(composer.destination, Destination::agent(sonnet_medium()));
+
+        // A pull request that was closed: the same.
+        let mut closed = pull();
+        closed.state = "closed".into();
+        closed.closed_at = Some("2026-09-20T10:00:00Z".parse().unwrap());
+        state.pull_request.set(Some(Arc::new(closed)));
+        state.open_composer(None, Some(anchor), String::new(), sonnet_medium());
+        let composer = state.composer.get().unwrap();
+        assert!(!state.github_offered(&composer), "a closed pull request takes no draft");
+        assert_eq!(composer.destination, Destination::agent(sonnet_medium()));
+        state.open_composer(Some("gh-31".into()), None, String::new(), sonnet_medium());
+        assert!(
+            !state.github_offered(&state.composer.get().unwrap()),
+            "nor a reply on its thread"
         );
     }
 
@@ -2772,6 +2893,145 @@ mod tests {
         harness.paint();
         assert!(state.composer.get().is_none(), "Escape closed the edit");
         assert!(find(harness.root_id(), "draft-pill").is_some(), "the draft is back");
+
+        // Edited and sent: the backend is asked to rewrite that draft, in
+        // its thread, and the composer closes. Nothing is remembered for
+        // the face; an edit is GitHub's by nature, not by choice.
+        let root_id = harness.root_id();
+        let pill = find(root_id, "draft-pill").unwrap().get_visual_rect_no_clip().center();
+        harness.pointer_move(pill.x, pill.y);
+        harness.rebuild();
+        harness.paint();
+        let edit = find(root_id, "edit-draft").expect("edit, on the draft's row again");
+        let c = edit.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+        let text_box = state.composer_box.get().expect("the box registered itself");
+        assert!(harness.is_focused(text_box));
+        harness.dispatch_event(key(Key::Character("a".into()), Code::KeyA, Modifiers::META));
+        harness.dispatch_event(key(Key::Named(NamedKey::Backspace), Code::Backspace, Modifiers::empty()));
+        for ch in "I fixed it".chars() {
+            harness.dispatch_event(key(Key::Character(ch.to_string().into()), Code::KeyA, Modifiers::empty()));
+        }
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        match commands.try_recv() {
+            Ok(Command::SaveDraft { item_id, thread_id, anchor, body, editing }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(thread_id.as_deref(), Some("gh-31"));
+                assert_eq!(anchor, thread.anchor);
+                assert_eq!(body, "I fixed it");
+                assert_eq!(editing.as_deref(), Some("d1"));
+            }
+            other => panic!("Cmd-Enter did not rewrite the draft: {other:?}"),
+        }
+        assert!(state.composer.get().is_none(), "sending closes the edit");
+    }
+
+    /// A comment of the reader's that posted: their byline with the time,
+    /// the link and the reactions, and no Draft mark, edit or delete,
+    /// whether it opened its thread or answered someone's; the thread it
+    /// opened has no byline of its own over it.
+    #[test]
+    fn a_posted_comment_of_the_readers_keeps_its_byline_link_and_reactions() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let mut theirs = github_thread_with_private_messages();
+        let mut posted = theirs.messages[0].clone();
+        posted.id = "d1".into();
+        posted.author = Author::User;
+        posted.github_id = Some(88);
+        posted.node_id = Some("PRRC_88".into());
+        posted.html_url = Some("https://github.com/acme/repo/pull/42#discussion_r88".into());
+        posted.body = "I will fix it".into();
+        theirs.messages.push(posted.clone());
+        let mut ours = theirs.clone();
+        ours.id = "t1".into();
+        ours.github_id = Some(88);
+        ours.messages = vec![CommentMessage {
+            thread_id: "t1".into(),
+            ..posted
+        }];
+        state.comment_threads.set(Arc::new(vec![theirs.clone(), ours.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let backend = Rc::new(backend);
+        let view = floem::views::Stack::vertical((
+            messages_view(app, state, backend.clone(), theirs.id.clone(), ThreadFace::Card)
+                .debug_name("theirs"),
+            cards::thread_card(app, state, backend, Rc::new(|_| {}), ours)
+                .debug_name("ours"),
+        ))
+        .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        for name in ["theirs", "ours"] {
+            let card = find(harness.root_id(), name).unwrap();
+            assert!(find(card, "posted-when").is_some(), "{name}: the comment's time");
+            assert!(find(card, "github-link").is_some(), "{name}: its link");
+            assert!(find(card, "reactions").is_some(), "{name}: its reactions");
+            assert!(find(card, "draft-pill").is_none(), "{name}: not a draft any more");
+            assert!(find(card, "edit-draft").is_none(), "{name}: not edited here");
+            assert!(find(card, "delete-draft").is_none(), "{name}: not deleted here");
+            assert!(find(card, "Label: \"You\"").is_some(), "{name}: the reader's");
+        }
+        assert!(
+            find(find(harness.root_id(), "theirs").unwrap(), "reply-github").is_some(),
+            "rohan's comment offers Reply"
+        );
+        assert!(
+            find(find(harness.root_id(), "ours").unwrap(), "You asked").is_none(),
+            "the thread the reader opened on GitHub has no byline over its comment"
+        );
+    }
+
+    /// Reply on a GitHub user's comment opens the composer under the
+    /// thread bound for GitHub, whatever the thread ends in: here the
+    /// agent's answer, under which Follow up would open on the agent.
+    /// Only while the pull request is open; on a closed one it is absent.
+    #[test]
+    fn reply_on_a_github_comment_goes_to_github_under_the_agents_answer() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let thread = github_thread_with_private_messages();
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let reply = find(harness.root_id(), "reply-github").expect("Reply on rohan's comment");
+        assert_eq!(harness.get_layout_rect(reply).width(), 0.0, "hidden until hovered");
+        let at = find(harness.root_id(), "Label: \"rohan\"").unwrap().get_visual_rect_no_clip().center();
+        harness.pointer_move(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(harness.get_layout_rect(reply).width() > 0.0);
+        let c = reply.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        let composer = state.composer.get().expect("Reply opened the composer");
+        assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
+        assert_eq!(composer.anchor, thread.anchor);
+        assert_eq!(composer.destination, Destination::GitHub);
+        assert_eq!(composer.editing, None);
+        assert!(state.composer_draft.get().is_empty());
+        state.close_composer();
+
+        // Follow up under the same thread is the agent's, as before.
+        state.open_composer(Some("gh-31".into()), thread.anchor.clone(), String::new(), sonnet_medium());
+        assert!(!state.composer.get().unwrap().destination.is_github());
+        state.close_composer();
+
+        let mut closed = pull();
+        closed.state = "closed".into();
+        state.pull_request.set(Some(Arc::new(closed)));
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "reply-github").is_none(), "nowhere for a draft to go");
     }
 
     /// A follow-up follows the thread's last message: under rohan's
@@ -2782,7 +3042,7 @@ mod tests {
     fn a_follow_up_follows_the_last_message_and_ask_about_this_goes_to_an_agent() {
         let root = TestRoot::new();
         let app = AppState::new();
-        let state = state_with_item();
+        let state = state_with_pull_request();
         let thread = github_thread_with_private_messages();
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
 

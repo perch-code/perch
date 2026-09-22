@@ -202,21 +202,28 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
     .style(|s| s.items_center().width_full().min_width(0.0))
 }
 
-/// The right end of a GitHub byline: Ask about this and the reaction
-/// picker while the card is hovered, and the permalink always. `react` is
-/// the subject's node id; an entry an older build kept without one has no
+/// The right end of a GitHub byline: whatever the caller puts first, a
+/// Reply on a review comment; Ask about this and the reaction picker
+/// while the card is hovered, and the permalink always. `react` is the
+/// subject's node id; an entry an older build kept without one has no
 /// picker, since GitHub could not be told what it was for.
 pub(crate) fn actions(
     state: ReviewState,
     backend: Rc<Backend>,
     hovered: RwSignal<bool>,
+    leading: Option<floem::AnyView>,
     ask: Option<Rc<dyn Fn()>>,
     react: Option<String>,
     url: String,
 ) -> floem::AnyView {
     Stack::horizontal((
+        match leading {
+            Some(leading) => leading,
+            None => Empty::new().into_any(),
+        },
         match ask {
-            Some(ask) => ask_button(hovered, ask).into_any(),
+            Some(ask) => text_action(hovered, SidebarIcon::Thread, "Ask about this", "ask-about", ask)
+                .into_any(),
             None => Empty::new().into_any(),
         },
         match react {
@@ -231,6 +238,7 @@ pub(crate) fn actions(
                 || theme::FG_SUBTLE,
                 move || open_in_browser(&url),
             )
+            .debug_name("github-link")
             .style(|s| s.size(24.0, 24.0).margin_right(-4.0))
             .into_any()
         },
@@ -239,20 +247,26 @@ pub(crate) fn actions(
     .into_any()
 }
 
-/// "Ask about this", drawn only while the card is under the pointer.
-/// Hidden rather than absent, so the byline keeps its shape.
-fn ask_button(hovered: RwSignal<bool>, ask: Rc<dyn Fn()>) -> impl IntoView {
+/// A glyph and a word, "Ask about this" or "Reply", drawn only while the
+/// card is under the pointer. Hidden rather than absent, so the byline
+/// keeps its shape.
+pub(crate) fn text_action(
+    hovered: RwSignal<bool>,
+    icon: SidebarIcon,
+    label: &'static str,
+    name: &'static str,
+    action: Rc<dyn Fn()>,
+) -> impl IntoView {
     Stack::horizontal((
-        sidebar_glyph(SidebarIcon::Thread, theme::FG_MUTED)
-            .style(|s| s.size(12.0, 12.0).margin_right(5.0)),
-        Label::derived(|| "Ask about this".to_string()).style(|s| {
+        sidebar_glyph(icon, theme::FG_MUTED).style(|s| s.size(12.0, 12.0).margin_right(5.0)),
+        Label::derived(move || label.to_string()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
                 .color(theme::FG_MUTED)
                 .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
     ))
-    .on_event_stop(el::Click, move |_, _| ask())
-    .debug_name("ask-about")
+    .on_event_stop(el::Click, move |_, _| action())
+    .debug_name(name)
     .style(move |s| {
         clickable(s)
             .items_center()
@@ -614,7 +628,7 @@ pub fn description_card(
             byline_strip(byline(
                 app,
                 who,
-                actions(state, backend, hovered, None, react, String::new()),
+                actions(state, backend, hovered, None, None, react, String::new()),
             )),
             Stack::vertical((
                 Label::derived(|| "Description".to_string()).style(|s| {
@@ -662,7 +676,7 @@ pub fn comment_card(
             byline_strip(byline(
                 app,
                 who,
-                actions(state, backend, hovered, Some(ask), react, comment.html_url.clone()),
+                actions(state, backend, hovered, None, Some(ask), react, comment.html_url.clone()),
             )),
             Stack::vertical((markdown::render(&comment.body), reactions))
                 .style(|s| s.flex_col().width_full())
@@ -722,7 +736,7 @@ pub fn review_card(
 
     track_hover(
         card(
-            byline_strip(byline(app, who, actions(state, backend, hovered, ask, react, url))),
+            byline_strip(byline(app, who, actions(state, backend, hovered, None, ask, react, url))),
             body,
         ),
         hovered,

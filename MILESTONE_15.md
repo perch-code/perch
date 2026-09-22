@@ -89,10 +89,21 @@ at the foot of the conversation. The last destination is remembered as
 the model is, separately for the inline and conversation faces.
 
 The default destination follows the reply. A new composer on a line
-defaults to what the reader last used there. A follow-up under a
-message by a GitHub user defaults to GitHub. A follow-up under an agent
-defaults to that agent. Under the reader's own draft, GitHub. The
-reader flips it with one click, and flipping it keeps the text.
+defaults to what the reader last used there. A follow-up follows the
+thread's last message: under a message by a GitHub user, or under the
+reader's own draft or posted comment, GitHub; under an agent, that
+agent. A GitHub user's comment also offers `Reply` on hover, beside
+`Ask about this`, which opens the composer under the thread on GitHub
+whatever the thread ends in, so the reader can answer a reviewer after
+asking an agent about them. The reader flips the destination with one
+click, and flipping it keeps the text. The composer at the foot of the
+conversation always opens on an agent; the remembered destination is
+for composers on lines.
+
+GitHub is offered on lines and threads of an open pull request only.
+On a branch, or a pull request that is closed or merged, a draft could
+never post, so the picker has no GitHub entry and a composer opens on
+an agent whatever the face remembers.
 
 A message to an agent behaves exactly as today: `backend.ask`, a run,
 the answer under it. Sending it to GitHub instead makes a draft.
@@ -245,10 +256,14 @@ a local one, ordered by its first message's time.
   failed: Vec<(String, String)> }`.
 - `Command::PostIssueComment { item_id, body, token }` and
   `Event::IssueCommentPosted { token, result }`.
-- Ingestion lives in `perch_github::cache`, `ingest_review_comments`,
-  called wherever a discussion is stored. It is a pure function over
-  the old rows and the new comments, tested, and its result is written
-  in one transaction.
+- Ingestion lives in `perch_github::cache`, `ingest_review_threads`,
+  called wherever a discussion fetched from GitHub is stored. Grouping
+  the comments into threads, `comments::review_threads_of`, is pure and
+  tested; the adoption and replacement of rows runs inside the caller's
+  transaction and is tested through the cache. A copy of the discussion
+  Perch changes by its own hand, a reaction or an issue comment it just
+  posted, is kept with `rewrite_discussion`, which does not ingest: the
+  copy can be behind GitHub, and is not what GitHub lists.
 
 In `perch_github::client`:
 
@@ -315,15 +330,17 @@ Against a pull request with review comments from someone else:
   the draft is there.
 - Hover the draft, edit it, send. The text changed and there is one
   draft. Delete it. The thread is gone and the count is gone.
-- Reply under the reviewer's comment. The destination is GitHub without
-  clicking. Send. A draft, flush with the reviewer's comment, and the
-  agent's answer above it still inset.
+- Hover the reviewer's comment, `Reply`. The destination is GitHub
+  without clicking. Send. A draft, flush with the reviewer's comment,
+  and the agent's answer above it still inset.
 - Hover Claude's answer, `Post to GitHub`. The composer holds its text.
   Change a word, send. A draft. Claude's message is unchanged.
 - Open Submit review. Both drafts are listed with their locations.
-  Pick `Comment`, submit. The pills go. Refresh github.com: a review
-  with one new thread and one reply on the reviewer's thread, in the
-  reader's name.
+  Pick `Comment`, submit. The pills go; each comment keeps the reader's
+  byline, with its time, link and reactions. Refresh github.com: two
+  replies on the reviewer's thread, in the reader's name, and no
+  review, since both drafts were replies and an empty review is not
+  posted.
 - Push a commit to the branch with a draft pending. The title bar shows
   the stale head and the count. Update. Open the form; the draft reads
   `written against` its commit. Submit anyway; it posts against the

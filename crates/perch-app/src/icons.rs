@@ -171,6 +171,7 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M2.8 7.2 H9.2 a4 4 0 0 1 4 4 V13" fill="none" stroke="{c}"
                      stroke-width="1.5" stroke-linecap="round"/>"#
         ),
+        // A pencil at a slant: edit.
         SidebarIcon::Pencil => format!(
             r#"<path d="M3 13 l0.9 -3.4 l7.2 -7.2 a1.2 1.2 0 0 1 1.7 0 l0.8 0.8 a1.2 1.2 0 0 1 0 1.7 l-7.2 7.2 z"
                      fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>

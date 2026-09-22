@@ -2990,11 +2990,20 @@ impl ReviewState {
                 anchor.as_ref(),
                 self.last_destination[face.index()].get_untracked(),
                 self.agent_last.get_untracked(),
-                defaults,
+                defaults.clone(),
                 false,
                 agent,
             )
         });
+        // The rules say GitHub where a draft could go; where none can, on
+        // a branch or a pull request no longer open, the last agent.
+        let destination = if destination.is_github()
+            && !self.github_offered_for(thread_id.as_deref(), anchor.as_ref())
+        {
+            Destination::agent(self.agent_last.get_untracked().unwrap_or(defaults))
+        } else {
+            destination
+        };
         self.open_composer_with(thread_id, anchor, draft, destination, None);
     }
 
@@ -3174,14 +3183,19 @@ impl ReviewState {
     /// on GitHub, so there is nothing to reply under and nothing to draft
     /// for the review. Untracked.
     pub fn posts_issue_comment(&self, composer: &Composer) -> bool {
-        if composer.anchor.is_some() {
+        self.posts_issue_comment_about(composer.thread_id.as_deref(), composer.anchor.as_ref())
+    }
+
+    /// `posts_issue_comment` for a composer about `thread_id` or `anchor`.
+    fn posts_issue_comment_about(&self, thread_id: Option<&str>, anchor: Option<&Anchor>) -> bool {
+        if anchor.is_some() {
             return false;
         }
-        match &composer.thread_id {
+        match thread_id {
             None => true,
             Some(id) => self.comment_threads.with_untracked(|t| {
                 t.iter()
-                    .find(|t| &t.id == id)
+                    .find(|t| t.id == id)
                     .is_some_and(|t| t.anchor.is_none() && t.github_id.is_none())
             }),
         }
@@ -3202,22 +3216,33 @@ impl ReviewState {
     }
 
     /// Whether GitHub is a destination for `composer`: it has lines to
-    /// land on, its thread is on GitHub, or it is about a pull request as
-    /// a whole, where it posts as an issue comment. About an issue there
-    /// is nowhere to go yet. Untracked.
+    /// land on or its thread is on GitHub, and the pull request is open
+    /// to take the review the draft would ride in; or it is about a pull
+    /// request as a whole, where it posts as an issue comment. About an
+    /// issue, or lines of a branch, there is nowhere to go. Untracked.
     pub fn github_offered(&self, composer: &Composer) -> bool {
-        if composer.anchor.is_some() {
-            return true;
+        self.github_offered_for(composer.thread_id.as_deref(), composer.anchor.as_ref())
+    }
+
+    /// `github_offered` for a composer about `thread_id` or `anchor`.
+    fn github_offered_for(&self, thread_id: Option<&str>, anchor: Option<&Anchor>) -> bool {
+        let open_pull = self
+            .pull_request
+            .with_untracked(|pull| pull.as_ref().is_some_and(|pull| pull.is_open()));
+        if anchor.is_some() {
+            return open_pull;
         }
-        let on_github = composer.thread_id.as_ref().is_some_and(|id| {
+        let on_github = thread_id.is_some_and(|id| {
             self.comment_threads.with_untracked(|t| {
                 t.iter()
-                    .any(|t| &t.id == id && t.github_id.is_some())
+                    .any(|t| t.id == id && t.github_id.is_some())
             })
         });
-        on_github
-            || (self.pull_request.with_untracked(Option::is_some)
-                && self.posts_issue_comment(composer))
+        if on_github {
+            return open_pull;
+        }
+        self.pull_request.with_untracked(Option::is_some)
+            && self.posts_issue_comment_about(thread_id, anchor)
     }
 
     /// Whether `thread` can take a draft: it has lines to land on or is

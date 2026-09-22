@@ -515,25 +515,28 @@ fn item_head_sha_on(conn: &Connection, item_id: &str) -> Result<String, CacheErr
 /// and is a thread on its way there, as a draft's is.
 ///
 /// A row already pointing at a comment by `github_id` is the row that
-/// comment updates, whatever its id: a thread the reader opened here and
-/// posted keeps its Perch id, and so its runs and private messages, and a
-/// posted comment of the reader's keeps its id and stays the reader's
-/// rather than becoming a GitHub user's.
+/// comment updates, whatever its id and whatever thread it is under: a
+/// thread the reader opened here and posted keeps its Perch id, and so
+/// its runs and private messages, and a posted comment of the reader's
+/// keeps its id and stays the reader's rather than becoming a GitHub
+/// user's. A comment that is a root now but was a reply, its own root
+/// deleted on github.com, takes over the thread it was under, so what
+/// Perch put there stays with it. A thread that is left with nothing
+/// bound for GitHub under it is Perch's own again, as it is when its
+/// last draft is deleted.
+///
+/// `incoming` is what GitHub lists now. Runs inside the caller's
+/// transaction; nothing here is written on its own.
 pub(crate) fn ingest_review_threads(
     conn: &Connection,
     item_id: &str,
     incoming: &[CommentThread],
 ) -> Result<(), CacheError> {
+    let roots: HashSet<u64> = incoming.iter().filter_map(|t| t.github_id).collect();
     for thread in incoming {
         let anchor = thread.anchor.as_ref();
         let thread_id = match thread.github_id {
-            Some(github_id) => conn
-                .query_row(
-                    "SELECT id FROM comment_threads WHERE worktree_id = ?1 AND github_id = ?2",
-                    params![item_id, github_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
+            Some(github_id) => thread_row_for_root(conn, item_id, github_id, &roots)?
                 .unwrap_or_else(|| thread.id.clone()),
             None => thread.id.clone(),
         };
@@ -547,7 +550,8 @@ pub(crate) fn ingest_review_threads(
                 github_id=excluded.github_id, path=excluded.path,
                 start_line=excluded.start_line, line=excluded.line, side=excluded.side,
                 commit_sha=excluded.commit_sha, outdated=excluded.outdated,
-                resolved=excluded.resolved, created_at=excluded.created_at",
+                resolved=excluded.resolved,
+                created_at=min(created_at, excluded.created_at)",
             params![
                 thread_id,
                 item_id,
@@ -567,8 +571,10 @@ pub(crate) fn ingest_review_threads(
             let posted: Option<String> = match message.github_id {
                 Some(github_id) => conn
                     .query_row(
-                        "SELECT id FROM comment_messages WHERE thread_id = ?1 AND github_id = ?2",
-                        params![thread_id, github_id.to_string()],
+                        "SELECT m.id FROM comment_messages m
+                         JOIN comment_threads t ON t.id = m.thread_id
+                         WHERE t.worktree_id = ?1 AND m.github_id = ?2",
+                        params![item_id, github_id.to_string()],
                         |row| row.get(0),
                     )
                     .optional()?,
@@ -577,11 +583,12 @@ pub(crate) fn ingest_review_threads(
             if let Some(id) = posted {
                 conn.execute(
                     "UPDATE comment_messages
-                     SET body = ?2, node_id = ?3, html_url = ?4, diff_hunk = ?5,
-                         reactions_json = ?6
+                     SET thread_id = ?2, body = ?3, node_id = ?4, html_url = ?5,
+                         diff_hunk = ?6, reactions_json = ?7
                      WHERE id = ?1",
                     params![
                         id,
+                        thread_id,
                         message.body,
                         message.node_id,
                         message.html_url,
@@ -636,14 +643,57 @@ pub(crate) fn ingest_review_threads(
         params![item_id],
     )?;
 
-    let keep: HashSet<u64> = incoming.iter().filter_map(|t| t.github_id).collect();
-    for id in stale_thread_rows(conn, item_id, &keep)? {
+    for id in stale_thread_rows(conn, item_id, &roots)? {
         conn.execute(
             "UPDATE comment_threads SET github_id = NULL WHERE id = ?1",
             params![id],
         )?;
     }
+    // A thread with nothing bound for GitHub under it any more carries no
+    // destination of its own: the messages do.
+    conn.execute(
+        "UPDATE comment_threads SET origin = 'local'
+         WHERE worktree_id = ?1 AND origin = 'github' AND github_id IS NULL
+           AND NOT EXISTS (SELECT 1 FROM comment_messages
+                           WHERE thread_id = comment_threads.id AND origin = 'github')",
+        params![item_id],
+    )?;
     Ok(())
+}
+
+/// The row of the thread whose root is comment `github_id`, when the
+/// cache has one: the thread pointing at it, else the thread holding it
+/// as a message, a reply whose own root is gone from GitHub, unless that
+/// thread is still another incoming root's. `None` when the comment is
+/// new here.
+fn thread_row_for_root(
+    conn: &Connection,
+    item_id: &str,
+    github_id: u64,
+    roots: &HashSet<u64>,
+) -> Result<Option<String>, CacheError> {
+    let pointing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM comment_threads WHERE worktree_id = ?1 AND github_id = ?2",
+            params![item_id, github_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if pointing.is_some() {
+        return Ok(pointing);
+    }
+    let holding: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT t.id, t.github_id FROM comment_threads t
+             JOIN comment_messages m ON m.thread_id = t.id
+             WHERE t.worktree_id = ?1 AND m.github_id = ?2",
+            params![item_id, github_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(holding
+        .filter(|(_, root)| !is_kept(root, roots))
+        .map(|(id, _)| id))
 }
 
 /// Whether a `github_id` column names a comment among `keep`.
@@ -3407,6 +3457,28 @@ impl Cache {
         Ok(())
     }
 
+    /// Keep a discussion Perch changed by its own hand, a comment it just
+    /// posted put at the end or a reaction it just left, without treating
+    /// it as what GitHub lists: the comment threads are left alone. The
+    /// kept copy can be behind GitHub, a reply the reader posted after the
+    /// last fetch marked posted on its row but not in the copy, and a
+    /// refresh from that copy would delete the row as gone from GitHub.
+    pub fn rewrite_discussion(
+        &self,
+        item_id: &str,
+        discussion: &Discussion,
+    ) -> Result<(), CacheError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO discussions (item_id, fetched_at, json) VALUES (?1, ?2, ?3)",
+            params![
+                item_id,
+                Timestamp::now().to_string(),
+                serde_json::to_string(discussion)?
+            ],
+        )?;
+        Ok(())
+    }
+
     /// The kept discussion and when it was fetched. A row an older build
     /// wrote that no longer reads is `None`, the same as no row.
     pub fn load_discussion(
@@ -5672,6 +5744,11 @@ mod tests {
         c.insert_comment_message(&answer).unwrap();
         c.insert_comment_message(&draft).unwrap();
 
+        // Of all that, only the draft is for the review.
+        let drafts = c.load_drafts("item-pr-7").unwrap();
+        let ids: Vec<_> = drafts.iter().map(|d| d.message_id.as_str()).collect();
+        assert_eq!(ids, vec!["d1"], "nothing an agent wrote, nothing asked of one");
+
         c.delete_private_messages("gh-3").unwrap();
         let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
         let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
@@ -5708,6 +5785,7 @@ mod tests {
         c.store_discussion("item-pr-7", &gone).unwrap();
         let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
         assert_eq!((t.id.as_str(), t.github_id), ("gh-3", None));
+        assert_eq!(t.origin, ThreadOrigin::Local, "nothing under it is bound for GitHub");
 
         c.delete_private_messages("gh-3").unwrap();
         assert!(
@@ -5831,8 +5909,11 @@ mod tests {
         assert_eq!(ids, vec!["gh-3"]);
     }
 
+    /// The root is deleted on github.com and its reply is a root of its
+    /// own now: the reply takes over the thread it was under, the thread
+    /// keeps its id and what Perch put there, and points at the reply.
     #[test]
-    fn a_thread_whose_root_left_github_stops_pointing_at_it() {
+    fn a_reply_whose_root_left_github_takes_over_the_thread() {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         let mut d = discussion();
@@ -5858,11 +5939,72 @@ mod tests {
         d.review_comments.remove(0);
         c.store_discussion("item-pr-7", &d).unwrap();
         let threads = c.load_comment_threads("item-pr-7").unwrap();
-        let by_id = |id: &str| threads.iter().find(|t| t.id == id).unwrap();
-        assert_eq!(by_id("gh-4").github_id, Some(4));
-        assert_eq!(by_id("gh-3").github_id, None, "comment 3 is gone");
-        let ids: Vec<_> = by_id("gh-3").messages.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["q1"]);
+        assert_eq!(threads.len(), 1, "one thread, not the reply's beside the old one");
+        let t = &threads[0];
+        assert_eq!((t.id.as_str(), t.origin, t.github_id), ("gh-3", ThreadOrigin::GitHub, Some(4)));
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-4", "q1"], "comment 3 is gone; the question stays with the reply");
+        assert_eq!(t.created_at, stamp_of("2026-09-16T11:38:00Z"), "the thread's time stays");
+
+        // A comment on GitHub whose row is a posted draft of the reader's
+        // takes over the same way, and stays the reader's: one row for
+        // comment 5, not the reader's under one thread and GitHub's copy
+        // under another.
+        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z")).unwrap();
+        let reply = crate::discussion::ReviewComment {
+            in_reply_to_id: Some(4),
+            user: "chris".into(),
+            body: "I will fix it".into(),
+            ..review_comment(5, Some(4), "2026-09-16T12:03:00Z")
+        };
+        c.mark_draft_posted("d1", &reply, false).unwrap();
+        d.review_comments = vec![reply];
+        c.store_discussion("item-pr-7", &d).unwrap();
+        let threads = c.load_comment_threads("item-pr-7").unwrap();
+        assert_eq!(threads.len(), 1);
+        let t = &threads[0];
+        assert_eq!((t.id.as_str(), t.github_id), ("gh-3", Some(5)));
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["q1", "d1"]);
+        assert_eq!(t.messages[1].author, Author::User);
+        assert_eq!(t.messages[1].github_id, Some(5));
+    }
+
+    /// Perch rewrites the kept discussion by its own hand, a reaction or
+    /// an issue comment it just posted, and that copy can be behind
+    /// GitHub: a reply the reader posted since the last fetch is on its
+    /// row but not in the copy. Keeping the copy is not a refresh, so the
+    /// posted reply's row stays; a refresh from GitHub is what replaces
+    /// the rows.
+    #[test]
+    fn rewriting_the_kept_discussion_does_not_take_a_posted_reply_for_gone() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z")).unwrap();
+        let reply = crate::discussion::ReviewComment {
+            in_reply_to_id: Some(3),
+            user: "chris".into(),
+            body: "I will fix it".into(),
+            ..review_comment(5, Some(3), "2026-09-16T12:03:00Z")
+        };
+        c.mark_draft_posted("d1", &reply, false).unwrap();
+
+        let mut kept = c.load_discussion("item-pr-7").unwrap().unwrap().1;
+        kept.comments[0].reactions.toggle(crate::reactions::ReactionKind::Rocket, true);
+        c.rewrite_discussion("item-pr-7", &kept).unwrap();
+        assert_eq!(c.load_discussion("item-pr-7").unwrap().unwrap().1, kept, "the copy is kept");
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-3", "d1"], "the posted reply is not taken for gone");
+        assert_eq!(t.messages[1].github_id, Some(5));
+
+        // The same copy as a refresh from GitHub would take it, as the
+        // comment is not listed there.
+        c.store_discussion("item-pr-7", &kept).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-3"]);
     }
 
     #[test]

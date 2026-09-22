@@ -512,13 +512,16 @@ fn draft_row(
                         .text_ellipsis()
                         .selectable(false)
                 }),
-            icon_button(|| SidebarIcon::Trash, || theme::FG_SUBTLE, delete)
-                .debug_name("delete-draft")
-                .style(move |s| {
-                    s.size(22.0, 22.0)
-                        .flex_shrink(0.0_f32)
-                        .apply_if(!hovered.get(), |s| s.hide())
-                }),
+            crate::review::cards::tip_with(
+                icon_button(|| SidebarIcon::Trash, || theme::FG_SUBTLE, delete)
+                    .debug_name("delete-draft")
+                    .style(move |s| {
+                        s.size(22.0, 22.0)
+                            .flex_shrink(0.0_f32)
+                            .apply_if(!hovered.get(), |s| s.hide())
+                    }),
+                || "Delete".to_string(),
+            ),
         ))
         .style(|s| {
             s.items_center()
@@ -533,11 +536,12 @@ fn draft_row(
     )
 }
 
-/// `src/x.rs:41`, or `no anchor` for a draft with nowhere to point.
+/// `src/x.rs:41`, or `Reply` for a draft with no lines, which can only
+/// be a reply under a thread that has none of its own.
 fn draft_location(draft: &Draft) -> String {
     match &draft.anchor {
         Some(anchor) => anchor.label(),
-        None => "no anchor".to_string(),
+        None => "Reply".to_string(),
     }
 }
 

@@ -6740,7 +6740,7 @@ fn append_cached_issue_comment(
         return true;
     }
     discussion.comments.push(comment.clone());
-    if let Some(Err(error)) = ctx.with_cache(|cache| cache.store_discussion(item_id, &discussion)) {
+    if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
         tracing::warn!(item = item_id, %error, "could not cache the posted comment");
     }
     publish_discussion(ctx, item_id, discussion);
@@ -6760,7 +6760,7 @@ fn upsert_cached_reactions(ctx: &Ctx, item_id: &str, node_id: &str, reactions: &
     if !discussion.set_reactions(node_id, reactions) {
         return;
     }
-    if let Some(Err(error)) = ctx.with_cache(|cache| cache.store_discussion(item_id, &discussion)) {
+    if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
         tracing::warn!(item = item_id, %error, "could not cache the reaction");
     }
     if ctx.is_open(item_id) {
@@ -6805,7 +6805,7 @@ fn upsert_cached_review(
     discussion
         .reviews
         .sort_by_key(|review| (review.submitted_at, review.id));
-    if let Some(Err(error)) = ctx.with_cache(|cache| cache.store_discussion(item_id, &discussion)) {
+    if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
         tracing::warn!(item = item_id, %error, "could not cache the submitted review");
     }
     if ctx.is_open(item_id) {
