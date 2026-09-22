@@ -1347,8 +1347,12 @@ mod tests {
 
         assert!(find(harness.root_id(), "Label: \"1 reply, 2 comments\"").is_some());
 
-        // Delete is drawn while the pointer is over the row, and deletes
-        // that draft.
+        // Delete is drawn while the pointer is over the row, stays drawn
+        // with the pointer on it, and deletes that draft. The form is
+        // placed absolutely, where floem can hand the row its Leave last
+        // as the pointer reaches Delete; were Delete to hide then, the
+        // press and the release would land on different views, and the
+        // click would reach it only inside floem's 100ms.
         let delete = find(rows[1], "delete-draft").unwrap();
         assert!(!shown(&harness, delete), "hidden until hovered");
         let center = locations[1].get_visual_rect_no_clip().center();
@@ -1357,6 +1361,10 @@ mod tests {
         harness.paint();
         assert!(shown(&harness, delete));
         let at = delete.get_visual_rect_no_clip().center();
+        harness.pointer_move(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, delete), "the pointer on it keeps it");
         harness.click(at.x, at.y);
         match commands.try_recv() {
             Ok(Command::DeleteDraft { item_id, message_id }) => {

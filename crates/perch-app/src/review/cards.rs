@@ -282,10 +282,24 @@ pub(crate) fn text_action(
 }
 
 /// Follow the pointer in and out of a card, for Ask about this.
+///
+/// Whether the pointer is over the view is read from floem's hover path
+/// when either event arrives, rather than taken from which one it was.
+/// Inside an absolutely placed view, the Submit review form, floem can
+/// deliver a view's Enter and Leave out of the order its hover path took
+/// them: moving onto a draft's Delete left the row's Leave last, though
+/// the row was still under the pointer, and the Delete hid itself.
 pub(crate) fn track_hover<V: IntoView + 'static>(view: V, hovered: RwSignal<bool>) -> impl IntoView {
-    view.into_intermediate()
-        .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
-        .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
+    let view = view.into_intermediate();
+    let id = view.view_id();
+    let follow = move |cx: &mut floem::event::EventCx| {
+        let over = cx.window_state.is_hovered(id);
+        if hovered.get_untracked() != over {
+            hovered.set(over);
+        }
+    };
+    view.on_event_cont(el::PointerEnter, move |cx, _| follow(cx))
+        .on_event_cont(el::PointerLeave, move |cx, _| follow(cx))
 }
 
 // ---------------------------------------------------------------------
