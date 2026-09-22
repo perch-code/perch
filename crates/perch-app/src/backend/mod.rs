@@ -698,8 +698,11 @@ pub enum Event {
     /// `unmatched` drafts rode in the review but were not found in what
     /// GitHub listed after, and are drafts still; the `failed` ones were
     /// refused after the review landed, each with GitHub's reason, and
-    /// are drafts still. `review` is `None` when there was none to post:
-    /// a comment with no summary whose drafts all went on their own.
+    /// are drafts still; the `outside_diff` ones were kept out of the
+    /// review, on lines the pull request's diff does not show, which
+    /// GitHub refuses, and are drafts still. `review` is `None` when there
+    /// was none to post: a comment with no summary whose drafts all went
+    /// on their own, or stayed.
     PullRequestReviewSubmitted {
         item_id: String,
         repo_full_name: String,
@@ -710,6 +713,7 @@ pub enum Event {
         posted: usize,
         unmatched: Vec<String>,
         failed: Vec<(String, String)>,
+        outside_diff: Vec<String>,
     },
     PullRequestReviewFailed {
         item_id: String,
@@ -6314,7 +6318,7 @@ async fn submit_open_pull_request_review(
                 open.pull_request.clone().map(|pull_request| {
                     (
                         pull_request,
-                        open.checkout.head_sha.clone(),
+                        open.checkout.clone(),
                         open.review_snapshot_id.is_some()
                             || open.review_group_id.is_some()
                             || open.review_request_id.is_some(),
@@ -6322,7 +6326,7 @@ async fn submit_open_pull_request_review(
                 })
             })
     });
-    let Some((pull_request, checkout_head_sha, historical)) = open else {
+    let Some((pull_request, checkout, historical)) = open else {
         send_pull_request_review_failure(
             ctx,
             attempt_id,
@@ -6378,10 +6382,10 @@ async fn submit_open_pull_request_review(
         .with_cache(|cache| cache.load_drafts(item_id))
         .and_then(Result::ok)
         .unwrap_or_default();
-    let drafts = split_drafts(drafts, expected_head_sha);
+    let mut drafts = split_drafts(drafts, expected_head_sha);
     if let Err(message) = validate_pull_request_review_attempt(
         &pull_request,
-        &checkout_head_sha,
+        &checkout.head_sha,
         historical,
         &fresh,
         expected_head_sha,
@@ -6400,6 +6404,7 @@ async fn submit_open_pull_request_review(
         );
         return false;
     }
+    hold_back_outside_diff(ctx, &checkout, &fresh.base_sha, expected_head_sha, &mut drafts).await;
 
     // Nothing else commits to the item's discussion until the drafts are
     // matched to what posted: a read landing in between would list a
@@ -6572,7 +6577,12 @@ async fn submit_open_pull_request_review(
         }
     }
     drop(hold);
-    let kept = unmatched.len() + failed.len();
+    let outside_diff: Vec<String> = drafts
+        .outside_diff
+        .iter()
+        .map(|d| d.message_id.clone())
+        .collect();
+    let kept = unmatched.len() + failed.len() + outside_diff.len();
     if ctx.is_open(item_id) {
         ctx.send_threads(item_id);
         let _ = ctx.events.send(Event::PullRequestReviewSubmitted {
@@ -6585,10 +6595,13 @@ async fn submit_open_pull_request_review(
             posted,
             unmatched,
             failed,
+            outside_diff,
         });
     }
     let mut notice = if review_needed {
         "Review submitted".to_string()
+    } else if posted == 0 {
+        "Nothing posted".to_string()
     } else {
         format!("Posted {}", count_of(posted, "comment", "comments"))
     };
@@ -6632,6 +6645,10 @@ fn record_posted(
 struct SplitDrafts {
     /// Opens a thread at the head: rides in the review's comments.
     in_review: Vec<DraftRow>,
+    /// Would open a thread at the head on lines the pull request's diff
+    /// does not show, which GitHub refuses, and the whole review with it.
+    /// Kept back by `hold_back_outside_diff`, drafts still.
+    outside_diff: Vec<DraftRow>,
     /// Posted one request each after the review, in the order the cache
     /// lists them: a reply under a thread that is on GitHub (`thread_github_id`
     /// set), or one that opens a thread at a commit the head has moved
@@ -6674,6 +6691,110 @@ fn split_drafts(drafts: Vec<DraftRow>, head_sha: &str) -> SplitDrafts {
         }
     }
     split
+}
+
+/// Keep back from the review the drafts GitHub would refuse: those whose
+/// lines are not inside one hunk of the pull request's diff, first line
+/// and last, which GitHub's API asks of a review comment even where its
+/// own page takes one on any line. One such comment fails the whole
+/// review, so these stay drafts, and the rest go. The diff is the head
+/// against GitHub's merge base, read in the checkout with three lines of
+/// context, as `DraftLines` reads a review's findings. Where git cannot
+/// read it the drafts go unchecked and GitHub decides, as it always did.
+async fn hold_back_outside_diff(
+    ctx: &Ctx,
+    checkout: &perch_git::Checkout,
+    base_sha: &str,
+    head_sha: &str,
+    drafts: &mut SplitDrafts,
+) {
+    if drafts.in_review.is_empty() {
+        return;
+    }
+    let Some(merge_base) = github_merge_base(ctx, checkout, base_sha, head_sha).await else {
+        return;
+    };
+    let diff = match perch_git::RangeDiff::read(&checkout.bare, &merge_base, head_sha).await {
+        Ok(diff) => diff,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not read the pull request's diff; its drafts go unchecked"
+            );
+            return;
+        }
+    };
+    let mut hunks: std::collections::HashMap<
+        (String, perch_git::DiffSide),
+        Option<Vec<std::ops::RangeInclusive<u32>>>,
+    > = std::collections::HashMap::new();
+    for draft in std::mem::take(&mut drafts.in_review) {
+        let Some(anchor) = &draft.anchor else {
+            drafts.in_review.push(draft);
+            continue;
+        };
+        let side = match anchor.side {
+            perch_github::Side::Left => perch_git::DiffSide::Left,
+            perch_github::Side::Right => perch_git::DiffSide::Right,
+        };
+        let key = (anchor.path.clone(), side);
+        if !hunks.contains_key(&key) {
+            let read = match diff.hunks(&anchor.path, side).await {
+                Ok(read) => Some(read),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %anchor.path, %error,
+                        "could not read a draft's hunks; it goes unchecked"
+                    );
+                    None
+                }
+            };
+            hunks.insert(key.clone(), read);
+        }
+        let outside = matches!(&hunks[&key], Some(hunks) if !in_one_hunk(hunks, anchor));
+        if outside {
+            drafts.outside_diff.push(draft);
+        } else {
+            drafts.in_review.push(draft);
+        }
+    }
+}
+
+/// Whether `anchor`'s first and last lines are inside the same one of
+/// `hunks`, as GitHub asks of a review comment's.
+fn in_one_hunk(hunks: &[std::ops::RangeInclusive<u32>], anchor: &Anchor) -> bool {
+    hunks
+        .iter()
+        .any(|hunk| hunk.contains(&anchor.start_line) && hunk.contains(&anchor.line))
+}
+
+/// The commit GitHub diffs a pull request's head from: the merge base of
+/// the head and `base_sha`, its base as GitHub has it. A base the clone has
+/// not fetched has the merge base the checkout was opened with, unless the
+/// base branch was rewritten or changed since. `None` for a checkout that
+/// found none, which keeps its head there: no diff to go by.
+async fn github_merge_base(
+    ctx: &Ctx,
+    checkout: &perch_git::Checkout,
+    base_sha: &str,
+    head_sha: &str,
+) -> Option<String> {
+    let found = ctx
+        .preparer
+        .git()
+        .run(
+            Some(&checkout.bare),
+            ["merge-base", base_sha, head_sha],
+            Duration::from_secs(30),
+        )
+        .await
+        .ok()
+        .map(|out| out.trim().to_string())
+        .filter(|sha| !sha.is_empty());
+    found.or_else(|| {
+        (!checkout.merge_base.is_empty() && checkout.merge_base != head_sha)
+            .then(|| checkout.merge_base.clone())
+    })
 }
 
 /// A draft as the review, or a comment on its own, carries it. A draft's
@@ -11793,7 +11914,7 @@ mod tests {
         }
     }
 
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc::Receiver;
     use std::sync::Mutex;
@@ -11824,6 +11945,13 @@ mod tests {
     fn serve_by_method(
         answer: impl Fn(&str, &str, &[String]) -> (&'static str, String) + Send + 'static,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
+        serve_by_body(move |method, path, headers, _sent| answer(method, path, headers))
+    }
+
+    /// `serve_by_method`, told what each request sent as well.
+    fn serve_by_body(
+        answer: impl Fn(&str, &str, &[String], &str) -> (&'static str, String) + Send + 'static,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let paths = Arc::new(Mutex::new(Vec::new()));
@@ -11831,10 +11959,10 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
-                let Some((method, path, headers)) = request(&mut stream) else {
+                let Some((method, path, headers, sent)) = request(&mut stream) else {
                     continue;
                 };
-                let (status, body) = answer(&method, &path, &headers);
+                let (status, body) = answer(&method, &path, &headers, &sent);
                 seen.lock().unwrap().push(path);
                 let _ = write!(
                     stream,
@@ -11846,9 +11974,9 @@ mod tests {
         (base, paths)
     }
 
-    /// The method and path of one request, read past its headers so the
-    /// client sees the answer as the answer to it.
-    fn request(stream: &mut TcpStream) -> Option<(String, String, Vec<String>)> {
+    /// The method, path and headers of one request and what it sent, read
+    /// to its end so the client sees the answer as the answer to it.
+    fn request(stream: &mut TcpStream) -> Option<(String, String, Vec<String>, String)> {
         let mut reader = BufReader::new(stream.try_clone().ok()?);
         let mut start = String::new();
         reader.read_line(&mut start).ok()?;
@@ -11863,7 +11991,15 @@ mod tests {
             }
             headers.push(line.trim_end().to_string());
         }
-        Some((method, path, headers))
+        let length = headers
+            .iter()
+            .filter_map(|header| header.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut sent = vec![0; length];
+        reader.read_exact(&mut sent).ok()?;
+        Some((method, path, headers, String::from_utf8_lossy(&sent).into_owned()))
     }
 
     /// A base nothing listens on, so a request the code should not make
@@ -12815,6 +12951,98 @@ mod tests {
         );
     }
 
+    /// A repository at `repo` whose `feature` branch changes line 10 of a
+    /// thirty-line `code.rs` from `main`, so its one hunk is lines 7 to 13
+    /// on either side, and leaves `same.rs` alone. The merge base and head.
+    fn one_hunk_repo(repo: &Path) -> (String, String) {
+        std::fs::create_dir_all(repo).unwrap();
+        git(repo, &["init", "-q", "-b", "main"]);
+        let base: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(repo.join("code.rs"), &base).unwrap();
+        std::fs::write(repo.join("same.rs"), "unchanged\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        let merge_base = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.join("code.rs"), base.replace("line 10\n", "line ten\n")).unwrap();
+        git(repo, &["commit", "-q", "-am", "feature"]);
+        (merge_base, git(repo, &["rev-parse", "HEAD"]))
+    }
+
+    /// GitHub's API takes a review comment only inside one hunk of the
+    /// pull request's diff, first line and last, and one it refuses fails
+    /// the whole review. Those are kept out of it; where the diff cannot
+    /// be read, nothing is, and GitHub decides.
+    #[tokio::test]
+    async fn the_drafts_outside_the_diff_are_kept_out_of_the_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let repo = dir.path().join("repo");
+        let (merge_base, head) = one_hunk_repo(&repo);
+        let checkout = perch_git::Checkout {
+            worktree: repo.clone(),
+            bare: repo.clone(),
+            branch: "feature".into(),
+            head_sha: head.clone(),
+            stale: None,
+            merge_base: merge_base.clone(),
+        };
+        let on = |id: &str, path: &str, side, start_line, line| DraftRow {
+            anchor: Some(Anchor {
+                path: path.into(),
+                start_line,
+                line,
+                side,
+                commit_sha: head.clone(),
+            }),
+            ..draft_row(id, &format!("t-{id}"), &head, None, 0)
+        };
+        let at = |id: &str, start_line, line| {
+            on(id, "code.rs", perch_github::Side::Right, start_line, line)
+        };
+        let split = |in_review| SplitDrafts {
+            in_review,
+            ..SplitDrafts::default()
+        };
+        let ids = |rows: &[DraftRow]| {
+            rows.iter().map(|d| d.message_id.clone()).collect::<Vec<_>>()
+        };
+
+        let mut drafts = split(vec![
+            at("changed", 10, 10),
+            at("hunk", 7, 13),
+            at("below", 20, 20),
+            at("across", 12, 15),
+            on("untouched", "same.rs", perch_github::Side::Right, 1, 1),
+            on("removed", "code.rs", perch_github::Side::Left, 10, 10),
+        ]);
+        hold_back_outside_diff(&ctx, &checkout, &merge_base, &head, &mut drafts).await;
+        assert_eq!(ids(&drafts.in_review), ["changed", "hunk", "removed"]);
+        assert_eq!(ids(&drafts.outside_diff), ["below", "across", "untouched"]);
+
+        // A base the clone has not fetched: the merge base it was opened with.
+        let unfetched = "0".repeat(40);
+        let mut drafts = split(vec![at("changed", 10, 10), at("below", 20, 20)]);
+        hold_back_outside_diff(&ctx, &checkout, &unfetched, &head, &mut drafts).await;
+        assert_eq!(ids(&drafts.outside_diff), ["below"]);
+
+        // No merge base to go by, or no clone to read the diff in.
+        let unmerged = perch_git::Checkout {
+            merge_base: head.clone(),
+            ..checkout.clone()
+        };
+        let gone = perch_git::Checkout {
+            bare: dir.path().join("gone"),
+            ..checkout.clone()
+        };
+        for (checkout, base) in [(&unmerged, &unfetched), (&gone, &merge_base)] {
+            let mut drafts = split(vec![at("below", 20, 20)]);
+            hold_back_outside_diff(&ctx, checkout, base, &head, &mut drafts).await;
+            assert_eq!(ids(&drafts.in_review), ["below"], "{}", checkout.bare.display());
+            assert!(drafts.outside_diff.is_empty());
+        }
+    }
+
     /// A durable row for `a/b#<number>`, as an on-demand open makes it.
     fn store_pull(ctx: &Ctx, number: u64) -> Item {
         let mut item = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
@@ -13604,6 +13832,174 @@ mod tests {
         let posted = threads[0].messages.iter().find(|m| m.id == "d1").expect("kept its id");
         assert_eq!(posted.github_id, Some(602));
         assert_eq!(posted.author, Author::User);
+    }
+
+    /// One comment GitHub refuses fails the whole review, and GitHub's API
+    /// refuses one on lines outside the pull request's diff. That draft
+    /// stays a draft, the form is told which, and the rest of the review
+    /// posts.
+    #[tokio::test]
+    async fn a_draft_outside_the_diff_stays_and_the_rest_of_the_review_posts() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let (merge_base, head) = one_hunk_repo(&repo);
+        let pull = serde_json::json!({
+            "number": 7, "title": "seven", "state": "open", "draft": false,
+            "user": { "login": "u", "avatar_url": "" },
+            "head": { "sha": head, "ref": "feature", "repo": { "full_name": "a/b" } },
+            "base": { "sha": merge_base, "ref": "main", "repo": { "full_name": "a/b" } },
+            "updated_at": "2026-09-22T11:40:00Z",
+        })
+        .to_string();
+        let review = serde_json::json!({
+            "id": 9,
+            "user": { "login": "chris", "avatar_url": "" },
+            "body": "",
+            "state": "COMMENTED",
+            "submitted_at": "2026-09-22T18:00:00Z",
+            "html_url": "https://github.com/a/b/pull/7#pullrequestreview-9",
+        })
+        .to_string();
+        let listed = serde_json::json!([{
+            "id": 700,
+            "node_id": "PRRC_700",
+            "pull_request_review_id": 9,
+            "in_reply_to_id": null,
+            "user": { "login": "chris", "avatar_url": "" },
+            "body": "inside",
+            "path": "code.rs",
+            "line": 10,
+            "side": "RIGHT",
+            "diff_hunk": "@@ -7,7 +7,7 @@",
+            "commit_id": head,
+            "original_commit_id": head,
+            "created_at": "2026-09-22T18:00:00Z",
+            "html_url": "https://github.com/a/b/pull/7#discussion_r700",
+        }])
+        .to_string();
+        let sent_review: Arc<Mutex<Option<serde_json::Value>>> = Arc::default();
+        let seen = sent_review.clone();
+        let (base, _) = serve_by_body(move |method, path, _, sent| {
+            match (method, path.split('?').next().unwrap_or(path)) {
+                ("GET", "/repos/a/b/pulls/7") => ("200 OK", pull.clone()),
+                ("POST", "/repos/a/b/pulls/7/reviews") => {
+                    *seen.lock().unwrap() = serde_json::from_str(sent).ok();
+                    ("200 OK", review.clone())
+                }
+                ("GET", "/repos/a/b/pulls/7/comments") => ("200 OK", listed.clone()),
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let mut subject = pull_request(7);
+        subject.head_sha = head.clone();
+        subject.base_sha = merge_base.clone();
+        let mut item = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        item.subject = Some(ItemSubject::PullRequest(subject));
+        ctx.with_cache(|c| c.insert_item(&item)).unwrap().unwrap();
+        open_in_slot_at(&ctx, &item, &head);
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.checkout.bare = repo.clone();
+            open.checkout.merge_base = merge_base.clone();
+        }
+        for (minute, id, line) in [(0, "inside", 10), (1, "outside", 20)] {
+            let at: Timestamp = format!("2026-09-22T12:0{minute}:00Z").parse().unwrap();
+            let thread = CommentThread {
+                id: format!("t-{id}"),
+                worktree_id: item.id.clone(),
+                origin: ThreadOrigin::GitHub,
+                github_id: None,
+                anchor: Some(Anchor {
+                    path: "code.rs".into(),
+                    start_line: line,
+                    line,
+                    side: perch_github::Side::Right,
+                    commit_sha: head.clone(),
+                }),
+                outdated: false,
+                resolved: false,
+                node_id: None,
+                can_resolve: false,
+                created_at: at,
+                messages: vec![CommentMessage {
+                    id: id.into(),
+                    thread_id: format!("t-{id}"),
+                    origin: ThreadOrigin::GitHub,
+                    author: Author::User,
+                    body: id.into(),
+                    created_at: at,
+                    run: None,
+                    github_id: None,
+                    node_id: None,
+                    html_url: None,
+                    diff_hunk: None,
+                    reactions: Default::default(),
+                }],
+            };
+            ctx.with_cache(|c| c.insert_comment_thread(&thread)).unwrap().unwrap();
+        }
+
+        let submitted = submit_open_pull_request_review(
+            &ctx,
+            1,
+            &item.id,
+            "a/b",
+            7,
+            &head,
+            "",
+            PullReviewEvent::Comment,
+        )
+        .await;
+        assert!(submitted);
+
+        // The review carried the one inside the hunk and nothing else.
+        let sent = sent_review.lock().unwrap().clone().expect("a review went");
+        let carried: Vec<&str> = sent["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|comment| comment["body"].as_str().unwrap())
+            .collect();
+        assert_eq!(carried, ["inside"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        let outcome = events.iter().find_map(|e| match e {
+            Event::PullRequestReviewSubmitted {
+                review,
+                posted,
+                unmatched,
+                failed,
+                outside_diff,
+                ..
+            } => Some((
+                review.is_some(),
+                *posted,
+                unmatched.len(),
+                failed.len(),
+                outside_diff.clone(),
+            )),
+            _ => None,
+        });
+        assert_eq!(outcome, Some((true, 1, 0, 0, vec!["outside".to_string()])), "{events:?}");
+        let notice = events.iter().find_map(|e| match e {
+            Event::Notice(message) => Some(message.as_str()),
+            _ => None,
+        });
+        assert_eq!(notice, Some("Review submitted, 1 draft still a draft"));
+
+        // The one outside is a draft still, the other the reader's comment.
+        let kept = ctx.with_cache(|c| c.load_drafts(&item.id)).unwrap().unwrap();
+        assert_eq!(
+            kept.iter().map(|d| d.message_id.as_str()).collect::<Vec<_>>(),
+            ["outside"]
+        );
+        let threads = threads_of(&ctx, &item);
+        let inside = threads
+            .iter()
+            .flat_map(|t| &t.messages)
+            .find(|m| m.id == "inside")
+            .expect("kept its id");
+        assert_eq!(inside.github_id, Some(700));
     }
 
     #[tokio::test]

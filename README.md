@@ -104,6 +104,12 @@ head rides in the review, a comment written against an older commit is posted
 against that commit, and a reply is posted under its thread. A `Comment`
 review with drafts needs no summary. A draft that GitHub refuses, or that
 cannot be matched to what GitHub returns, stays a draft and the form says so.
+GitHub's API takes a review comment only on the lines of the pull request's
+diff, a changed line or one of the three around it, though github.com takes
+one on any line, and one comment it refuses fails the whole review. So a
+comment on the head that is not inside one hunk of the diff, first line and
+last, is kept out of the review: the rest posts, and it stays a draft, named
+by its lines on the form.
 
 At the foot of Conversation, a message to GitHub is an issue comment and
 posts at once, after one confirmation naming the pull request.

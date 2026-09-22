@@ -18,7 +18,7 @@ pub use display::{DisplayBuffer, Row};
 pub use prepare::{home_ref, Checkout, Cut, Preparer, Step};
 pub use review_snapshot::{
     map_anchor_between, AnchorMapping, CaptureOutcome, DiffSide, MappedAnchor, MappingCandidate,
-    MappingConfidence, MappingDocument, MappingEvidence, MappingMethod, MappingSnapshot,
+    MappingConfidence, MappingDocument, MappingEvidence, MappingMethod, MappingSnapshot, RangeDiff,
     ResolvedReviewRange, ReviewSnapshot, ReviewSnapshotStore, SnapshotAnchor, SnapshotCapture,
     SnapshotError, SnapshotFile, SnapshotManifest, UnmappedReason, BASE_TIP_REF, HEAD_REF,
     MERGE_BASE_REF,

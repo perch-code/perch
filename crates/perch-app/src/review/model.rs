@@ -753,15 +753,18 @@ fn count_of(n: usize, one: &str, many: &str) -> String {
 /// draft posted, from the counts the backend answered with: nothing when
 /// they all did. `review` says a review posted; `posted` counts the
 /// drafts confirmed on GitHub. `drafts` are the drafts still kept, which
-/// say whether a failed one was a reply or a comment.
+/// say whether a failed one was a reply or a comment, and where each of
+/// `outside_diff`, those kept out of the review, is. Those are named, the
+/// first three, since each has to be moved or dropped before it can go.
 pub fn submit_review_outcome(
     review: bool,
     posted: usize,
     unmatched: &[String],
     failed: &[(String, String)],
+    outside_diff: &[String],
     drafts: &[Draft],
 ) -> Option<String> {
-    if unmatched.is_empty() && failed.is_empty() {
+    if unmatched.is_empty() && failed.is_empty() && outside_diff.is_empty() {
         return None;
     }
     let mut text = String::new();
@@ -773,6 +776,38 @@ pub fn submit_review_outcome(
         text.push('.');
     } else if posted > 0 {
         text.push_str(&format!("Posted {}.", count_of(posted, "comment", "comments")));
+    }
+    if !outside_diff.is_empty() {
+        let n = outside_diff.len();
+        let mut named: Vec<String> = outside_diff
+            .iter()
+            .filter_map(|id| drafts.iter().find(|d| d.message_id == *id)?.anchor.as_ref())
+            .map(|anchor| anchor.label())
+            .take(3)
+            .collect();
+        let more = n - named.len();
+        if more > 0 {
+            named.push(if named.is_empty() {
+                count_of(more, "comment", "comments")
+            } else {
+                format!("{more} more")
+            });
+        }
+        let last = named.pop().unwrap_or_default();
+        let which = if named.is_empty() {
+            last
+        } else {
+            format!("{} and {last}", named.join(", "))
+        };
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(&format!(
+            "GitHub takes comments from Perch only on lines of the pull request's diff, \
+             so {which} {} still {}.",
+            if n == 1 { "is" } else { "are" },
+            if n == 1 { "a draft" } else { "drafts" },
+        ));
     }
     if !failed.is_empty() {
         let is_reply = |id: &str| drafts.iter().any(|d| d.message_id == id && d.reply);
@@ -5689,8 +5724,8 @@ mod tests {
 
     #[test]
     fn the_outcome_says_what_did_not_post_and_nothing_when_all_did() {
-        assert_eq!(submit_review_outcome(true, 3, &[], &[], &[]), None);
-        assert_eq!(submit_review_outcome(false, 1, &[], &[], &[]), None);
+        assert_eq!(submit_review_outcome(true, 3, &[], &[], &[], &[]), None);
+        assert_eq!(submit_review_outcome(false, 1, &[], &[], &[], &[]), None);
         let kept = [a_draft("r1", Some(31)), a_draft("c1", None), a_draft("c2", None)];
         assert_eq!(
             submit_review_outcome(
@@ -5698,6 +5733,7 @@ mod tests {
                 2,
                 &["c1".into()],
                 &[("r1".into(), "GitHub returned 422: nope.".into())],
+                &[],
                 &kept,
             )
             .as_deref(),
@@ -5707,7 +5743,8 @@ mod tests {
             )
         );
         assert_eq!(
-            submit_review_outcome(true, 0, &["c1".into(), "c2".into()], &[], &kept).as_deref(),
+            submit_review_outcome(true, 0, &["c1".into(), "c2".into()], &[], &[], &kept)
+                .as_deref(),
             Some(
                 "Posted the review. 2 comments could not be matched to what GitHub returned and \
                  are still drafts."
@@ -5716,12 +5753,12 @@ mod tests {
         // No review went: a reply on its own that did not post, or one
         // that did beside one that did not.
         assert_eq!(
-            submit_review_outcome(false, 0, &[], &[("r1".into(), "offline".into())], &kept)
+            submit_review_outcome(false, 0, &[], &[("r1".into(), "offline".into())], &[], &kept)
                 .as_deref(),
             Some("1 reply did not post: offline.")
         );
         assert_eq!(
-            submit_review_outcome(false, 1, &[], &[("r1".into(), "offline".into())], &kept)
+            submit_review_outcome(false, 1, &[], &[("r1".into(), "offline".into())], &[], &kept)
                 .as_deref(),
             Some("Posted 1 comment. 1 reply did not post: offline.")
         );
@@ -5735,10 +5772,68 @@ mod tests {
                     ("c1".into(), "offline".into()),
                     ("c2".into(), "offline".into()),
                 ],
+                &[],
                 &kept,
             )
             .as_deref(),
             Some("Posted the review and 1 comment. 1 reply and 2 comments did not post: offline.")
+        );
+    }
+
+    /// The drafts kept out of the review, on lines GitHub's diff does not
+    /// show, are named by their lines, the first three, since each has to
+    /// be moved or dropped; one the form no longer has is counted instead.
+    #[test]
+    fn the_outcome_names_the_drafts_kept_off_the_diff() {
+        let on = |id: &str, start_line: u32, line: u32| Draft {
+            anchor: Some(perch_github::Anchor {
+                path: format!("src/{id}.rs"),
+                start_line,
+                line,
+                side: perch_github::Side::Right,
+                commit_sha: "h".into(),
+            }),
+            ..a_draft(id, None)
+        };
+        let kept = [
+            on("a", 9, 9),
+            on("b", 3, 5),
+            on("c", 1, 1),
+            on("d", 7, 7),
+            a_draft("r1", Some(31)),
+        ];
+        assert_eq!(
+            submit_review_outcome(true, 1, &[], &[], &["a".into()], &kept).as_deref(),
+            Some(
+                "Posted the review and 1 comment. GitHub takes comments from Perch only on \
+                 lines of the pull request's diff, so src/a.rs:9 is still a draft."
+            )
+        );
+        assert_eq!(
+            submit_review_outcome(true, 0, &[], &[], &["a".into(), "b".into()], &kept)
+                .as_deref(),
+            Some(
+                "Posted the review. GitHub takes comments from Perch only on lines of the pull \
+                 request's diff, so src/a.rs:9 and src/b.rs:3\u{2013}5 are still drafts."
+            )
+        );
+        // No review went, and a reply under one of them could not follow it.
+        let four = ["a".into(), "b".into(), "c".into(), "d".into()];
+        let orphaned = [("r1".into(), "the comment that opens its thread did not post".into())];
+        assert_eq!(
+            submit_review_outcome(false, 0, &[], &orphaned, &four, &kept).as_deref(),
+            Some(
+                "GitHub takes comments from Perch only on lines of the pull request's diff, so \
+                 src/a.rs:9, src/b.rs:3\u{2013}5, src/c.rs:1 and 1 more are still drafts. 1 reply \
+                 did not post: the comment that opens its thread did not post."
+            )
+        );
+        assert_eq!(
+            submit_review_outcome(false, 0, &[], &[], &["gone".into()], &kept).as_deref(),
+            Some(
+                "GitHub takes comments from Perch only on lines of the pull request's diff, so \
+                 1 comment is still a draft."
+            )
         );
     }
 }

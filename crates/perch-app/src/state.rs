@@ -1639,6 +1639,7 @@ impl AppState {
                 posted,
                 unmatched,
                 failed,
+                outside_diff,
             } => {
                 // The review is already durable on GitHub. Accept it for the
                 // same pull request even if a follow-up refresh has meanwhile
@@ -1667,6 +1668,7 @@ impl AppState {
                         posted,
                         &unmatched,
                         &failed,
+                        &outside_diff,
                         &review.drafts(),
                     );
                     let review_of = submitted.as_deref().cloned();
@@ -3127,6 +3129,7 @@ mod tests {
                 posted: 0,
                 unmatched: Vec::new(),
                 failed: Vec::new(),
+                outside_diff: Vec::new(),
             },
             review,
         );
@@ -3149,6 +3152,7 @@ mod tests {
                 posted: 0,
                 unmatched: Vec::new(),
                 failed: Vec::new(),
+                outside_diff: Vec::new(),
             },
             review,
         );
@@ -3203,6 +3207,7 @@ mod tests {
                 posted: 1,
                 unmatched: vec!["d2".into()],
                 failed: vec![("d3".into(), "GitHub returned 422: no".into())],
+                outside_diff: vec!["d4".into()],
             },
             review,
         );
@@ -3214,8 +3219,10 @@ mod tests {
         assert_eq!(
             review.submit_review_outcome.get().as_deref(),
             Some(
-                "Posted the review and 1 comment. 1 comment did not post: GitHub returned 422: no. \
-                 1 comment could not be matched to what GitHub returned and is still a draft."
+                "Posted the review and 1 comment. GitHub takes comments from Perch only on lines \
+                 of the pull request's diff, so 1 comment is still a draft. 1 comment did not \
+                 post: GitHub returned 422: no. 1 comment could not be matched to what GitHub \
+                 returned and is still a draft."
             )
         );
         assert_eq!(review.submit_review_generation.get(), 1, "the form is built anew");
@@ -3243,6 +3250,7 @@ mod tests {
                 posted: 1,
                 unmatched: Vec::new(),
                 failed: Vec::new(),
+                outside_diff: Vec::new(),
             },
             review,
         );
@@ -3266,6 +3274,7 @@ mod tests {
                 posted: 0,
                 unmatched: Vec::new(),
                 failed: vec![("r1".into(), "offline".into())],
+                outside_diff: Vec::new(),
             },
             review,
         );
@@ -3426,6 +3435,7 @@ mod tests {
                 posted: 0,
                 unmatched: Vec::new(),
                 failed: Vec::new(),
+                outside_diff: Vec::new(),
             },
             review,
         );
