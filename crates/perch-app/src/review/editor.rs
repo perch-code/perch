@@ -957,7 +957,7 @@ fn card_layer(
                 .filter_map(|id| match &id {
                     CardId::Thread(thread_id) => threads
                         .iter()
-                        .find(|t| t.id == *thread_id && state.thread_visible(&t.id))
+                        .find(|t| t.id == *thread_id && state.thread_visible(t))
                         .cloned()
                         .map(CardItem::Thread),
                     CardId::Composer => composer.clone().map(CardItem::Composer),

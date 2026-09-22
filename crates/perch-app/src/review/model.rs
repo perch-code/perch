@@ -2694,7 +2694,7 @@ impl ReviewState {
         let mut out = self.comment_threads.with(|threads| {
             let visible = threads
                 .iter()
-                .filter(|thread| !thread.outdated && self.thread_visible(&thread.id))
+                .filter(|thread| !thread.outdated && self.thread_visible(thread))
                 .cloned()
                 .collect::<Vec<_>>();
             let mut out = anchors_of(&visible, path);
@@ -2744,7 +2744,7 @@ impl ReviewState {
         self.comment_threads.with(|threads| {
             let visible = threads
                 .iter()
-                .filter(|thread| !thread.outdated && self.thread_visible(&thread.id))
+                .filter(|thread| !thread.outdated && self.thread_visible(thread))
                 .cloned()
                 .collect::<Vec<_>>();
             let collapsed: HashSet<CardId> = visible
@@ -2797,7 +2797,7 @@ impl ReviewState {
         self.comment_threads.with(|threads| {
             threads
                 .iter()
-                .find(|t| t.id == thread_id && !t.outdated && self.thread_visible(&t.id))
+                .find(|t| t.id == thread_id && !t.outdated && self.thread_visible(t))
                 .and_then(|t| t.anchor.as_ref())
                 .is_some_and(|a| a.path == file.path && card_line(&file, a).is_some())
         })
@@ -3510,7 +3510,7 @@ impl ReviewState {
     ) -> Option<CommentThread> {
         self.comment_threads.with(|t| {
             t.iter()
-                .filter(|thread| !thread.outdated && self.thread_visible(&thread.id))
+                .filter(|thread| !thread.outdated && self.thread_visible(thread))
                 .find(|t| {
                     t.anchor.as_ref().is_some_and(|a| {
                         a.path == file.path
@@ -3534,7 +3534,7 @@ impl ReviewState {
         self.comment_threads.with(|threads| {
             threads
                 .iter()
-                .filter(|thread| !thread.outdated && self.thread_visible(&thread.id))
+                .filter(|thread| !thread.outdated && self.thread_visible(thread))
                 .find(|thread| {
                     thread.anchor.as_ref().is_some_and(|anchor| {
                         anchor.path == file.path
@@ -3547,10 +3547,18 @@ impl ReviewState {
         })
     }
 
-    pub fn thread_visible(&self, thread_id: &str) -> bool {
-        !self
-            .hidden_review_threads
-            .with(|hidden| hidden.contains(thread_id))
+    /// Whether a thread is drawn. One holding a draft always is: the draft
+    /// posts with the review, and nothing posts from out of sight. One with
+    /// nothing in it never is, as a finding's is once its draft is deleted.
+    /// Otherwise the findings filter says.
+    pub fn thread_visible(&self, thread: &CommentThread) -> bool {
+        if thread.messages.iter().any(|m| m.is_draft()) {
+            return true;
+        }
+        !thread.messages.is_empty()
+            && !self
+                .hidden_review_threads
+                .with(|hidden| hidden.contains(&thread.id))
     }
 
     pub fn apply_review_finding_filter(
@@ -3965,7 +3973,7 @@ mod tests {
             node_id: None,
             can_resolve: false,
             created_at: at,
-            messages: Vec::new(),
+            messages: anchored(id, 1, 1, "2026-09-18T09:59:00Z", false).messages,
         };
         let mut worktree = thread("w", "", 0, 0, Side::Right, false);
         worktree.anchor = None;
@@ -3988,6 +3996,36 @@ mod tests {
         let state = ReviewState::new();
         state.comment_threads.set(Arc::new(threads));
         assert_eq!(state.anchors_in("src/y.rs"), vec![(0, 2), (8, 8)]);
+    }
+
+    /// The findings filter hides a finding's thread, but never one with a
+    /// draft in it, which would post from out of sight; and a thread with
+    /// nothing in it, as a finding's is once its draft is deleted, is
+    /// never drawn, whatever the filter.
+    #[test]
+    fn a_draft_is_never_hidden_and_an_empty_thread_never_drawn() {
+        use perch_github::ThreadOrigin;
+        let at = "2026-09-18T10:00:00Z";
+        let finding = anchored("t1", 3, 3, at, false);
+        let mut drafted = anchored("t2", 5, 5, at, false);
+        drafted.origin = ThreadOrigin::GitHub;
+        drafted.messages[0].origin = ThreadOrigin::GitHub;
+        assert!(drafted.messages[0].is_draft());
+        let mut empty = anchored("t3", 7, 7, at, false);
+        empty.messages.clear();
+
+        let state = ReviewState::new();
+        state
+            .hidden_review_threads
+            .set(["t1", "t2", "t3"].map(String::from).into_iter().collect());
+        assert!(!state.thread_visible(&finding));
+        assert!(state.thread_visible(&drafted));
+        assert!(!state.thread_visible(&empty));
+
+        state.hidden_review_threads.set(HashSet::new());
+        assert!(state.thread_visible(&finding));
+        assert!(state.thread_visible(&drafted));
+        assert!(!state.thread_visible(&empty));
     }
 
     /// A thread of the reader's own anchored on head lines `start` to

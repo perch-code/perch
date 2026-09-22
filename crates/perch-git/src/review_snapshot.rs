@@ -7,6 +7,7 @@
 //! staging directory.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -195,6 +196,62 @@ impl ReviewSnapshot {
         .await
         .map(Some)
         .map_err(Into::into)
+    }
+
+    /// The head lines of a changed file that its hunks show, one range to
+    /// a hunk: the changed lines and three either side, as a unified diff
+    /// draws them. These are the lines of a pull request's diff, which
+    /// GitHub takes a review comment on and outside which it refuses one.
+    /// An added file is one hunk. Empty for a path with no head side, a
+    /// binary file, or one whose content did not change.
+    ///
+    /// Git is given the context, the joining of hunks and the algorithm
+    /// rather than the reader's config, which can make the hunks wider
+    /// than GitHub's.
+    pub async fn head_hunks(&self, path: &str) -> Result<Vec<RangeInclusive<u32>>, SnapshotError> {
+        validate_repository_path(path)?;
+        let Some(file) = self
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.path_on(DiffSide::Right) == Some(path))
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(head) = file.head_blob.as_deref().filter(|_| !file.binary) else {
+            return Ok(Vec::new());
+        };
+        let git = Git::new(None);
+        let repo = self.retained_repo();
+        let Some(base) = file.base_blob.as_deref() else {
+            let text = git
+                .run_bytes(Some(&repo), ["cat-file", "blob", head], QUERY_TIMEOUT)
+                .await?;
+            let lines = text.split(|&byte| byte == b'\n').count()
+                - usize::from(text.is_empty() || text.ends_with(b"\n"));
+            return Ok(match u32::try_from(lines) {
+                Ok(0) | Err(_) => Vec::new(),
+                Ok(lines) => vec![1..=lines],
+            });
+        };
+        let diff = git
+            .run_bytes(
+                Some(&repo),
+                [
+                    "diff",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--unified=3",
+                    "--inter-hunk-context=0",
+                    "--diff-algorithm=myers",
+                    base,
+                    head,
+                ],
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        Ok(head_hunk_ranges(&String::from_utf8_lossy(&diff)))
     }
 
     /// Load text/blob inputs for the pure mapper. Binary files retain their
@@ -986,6 +1043,24 @@ fn validate_snapshot_id(value: &str) -> Result<(), SnapshotError> {
     }
 }
 
+/// The head side of each hunk header in a unified diff, `@@ -a,b +c,d @@`,
+/// as the lines it covers. `+c` alone is one line, and a hunk with no head
+/// lines, `+c,0`, covers none. Only a header starts with `@@`: every line
+/// of a hunk's body starts with a space, `+`, `-` or `\`.
+fn head_hunk_ranges(diff: &str) -> Vec<RangeInclusive<u32>> {
+    diff.lines()
+        .filter_map(|line| line.strip_prefix("@@ -"))
+        .filter_map(|header| {
+            let head = header.split_whitespace().nth(1)?.strip_prefix('+')?;
+            let (start, count) = match head.split_once(',') {
+                Some((start, count)) => (start.parse::<u32>().ok()?, count.parse::<u32>().ok()?),
+                None => (head.parse::<u32>().ok()?, 1),
+            };
+            (count > 0).then(|| start..=start + (count - 1))
+        })
+        .collect()
+}
+
 fn validate_repository_path(value: &str) -> Result<(), SnapshotError> {
     let path = Path::new(value);
     let valid = !value.is_empty()
@@ -1761,6 +1836,52 @@ mod tests {
             std::fs::read_to_string(checkout.join("code.rs")).unwrap(),
             "base\nretained\n"
         );
+    }
+
+    #[test]
+    fn a_hunk_header_gives_the_head_lines_it_covers() {
+        let diff = "diff --git a/x b/x\n\
+                    index 1111111..2222222 100644\n\
+                    --- a/x\n\
+                    +++ b/x\n\
+                    @@ -7,7 +7,8 @@ fn a()\n line\n-old\n+new\n+more\n\
+                    @@ -30 +31 @@\n-a\n+b\n\
+                    @@ -40,2 +42,0 @@\n-gone\n-too\n";
+        assert_eq!(head_hunk_ranges(diff), vec![7..=14, 31..=31]);
+    }
+
+    #[tokio::test]
+    async fn head_hunks_are_the_changed_lines_and_three_either_side() {
+        let repo = repository();
+        let base: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(repo.path().join("code.rs"), &base).unwrap();
+        std::fs::write(repo.path().join("same.rs"), "unchanged\n").unwrap();
+        commit_all(repo.path(), "base");
+        git(repo.path(), &["checkout", "-q", "-b", "feature"]);
+        let head = base
+            .replace("line 10\n", "line ten\n")
+            .replace("line 25\n", "line twenty-five\n");
+        std::fs::write(repo.path().join("code.rs"), head).unwrap();
+        std::fs::write(repo.path().join("added.rs"), "one\ntwo\nthree").unwrap();
+        git(repo.path(), &["mv", "same.rs", "moved.rs"]);
+        commit_all(repo.path(), "feature");
+
+        let storage = tempfile::tempdir().unwrap();
+        let store = ReviewSnapshotStore::new(storage.path());
+        let snapshot = captured(store.capture(request("hunks", repo.path())).await.unwrap());
+
+        assert_eq!(
+            snapshot.head_hunks("code.rs").await.unwrap(),
+            vec![7..=13, 22..=28]
+        );
+        assert_eq!(snapshot.head_hunks("added.rs").await.unwrap(), vec![1..=3]);
+        assert!(snapshot.head_hunks("moved.rs").await.unwrap().is_empty());
+        assert!(snapshot.head_hunks("same.rs").await.unwrap().is_empty());
+        assert!(snapshot
+            .head_hunks("elsewhere.rs")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

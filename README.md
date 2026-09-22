@@ -118,7 +118,9 @@ An agent's answer never posts on its own: **Post to GitHub** under the pointer
 puts its text in a composer for you to edit and send, and nothing records
 where it came from. It goes the same two ways as anything else: a draft under
 a thread with lines or a place on GitHub, an issue comment under one of
-Perch's own, such as a question asked at the foot of Conversation.
+Perch's own, such as a question asked at the foot of Conversation. A review's
+findings on an open pull request arrive as drafts already (see Worktree
+reviews), and post only with the review.
 
 A thread ends in **Resolve**, or **Unresolve** once it is resolved. On a
 thread that is on GitHub the button is there wherever GitHub says you may
@@ -299,9 +301,21 @@ existing thread. **Retry** creates another attempt with the original snapshot
 and settings. **Review latest** creates a new group and immutable snapshot from
 the branch's current committed state.
 
-Review results and follow-ups stay local to Perch unless you post one
-yourself (see Posting). Reviews do not resolve threads on GitHub, modify code,
-run automatically after a push, or use a hosted review service. Perch also exports each item's review history as
+On an open pull request, a new finding on lines of its diff arrives as your
+draft on those lines, in place of the reviewer's message. It is a draft like
+one you write (see Posting): you edit or delete it, and it posts only when you
+submit the review. The card above it still gives the severity and the
+reviewer. Deleting the draft dismisses the finding, and dismissing the finding
+or linking it as a duplicate deletes the draft. GitHub takes a review comment
+only on a line its diff shows, a changed line or one of the three around it,
+so this needs the review to be of what GitHub has: the pull request's head,
+diffed from the same merge base. Any other finding stays in Perch as the
+reviewer's message, as does every finding on a branch without an open pull
+request.
+
+Follow-ups stay local to Perch unless you post one yourself. Reviews do not
+resolve threads on GitHub, modify code, run automatically after a push, or use
+a hosted review service. Perch also exports each item's review history as
 deterministic Markdown at
 `$PERCH_HOME/knowledge/reviews/<owner>/<repo>/<item-id>.md` (under
 `~/.perch` when `PERCH_HOME` is unset). Re-exporting replaces that stable

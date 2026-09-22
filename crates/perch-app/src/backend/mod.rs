@@ -10740,23 +10740,36 @@ fn save_draft(
 
 /// Throw a draft away. A thread that was only on its way to GitHub for
 /// this draft goes with it when nothing else is under it, and turns back
-/// into one of Perch's own when only Perch's messages are left; the
-/// cache does that in one go. The threads are sent whichever way it went,
-/// so the view shows what the cache holds.
+/// into one of Perch's own when only Perch's messages are left; a review
+/// finding that spoke through the draft is dismissed with it. The cache
+/// does that in one go. The threads are sent whichever way it went, so the
+/// view shows what the cache holds.
 fn delete_draft(ctx: &Ctx, item_id: &str, message_id: &str) {
-    if let Some(Err(e)) = ctx.with_cache(|c| c.delete_draft(message_id)) {
-        ctx.notice(format!("Could not delete the draft: {e}"));
-    }
+    let dismissed = match ctx.with_cache(|c| c.delete_draft(message_id)) {
+        Some(Ok(dismissed)) => dismissed,
+        Some(Err(e)) => {
+            ctx.notice(format!("Could not delete the draft: {e}"));
+            None
+        }
+        None => None,
+    };
     ctx.send_threads(item_id);
+    reviews::publish_dismissed(ctx, item_id, dismissed.as_slice());
 }
 
 /// Throw every draft in the item away, each as `delete_draft` does, in
 /// one go.
 fn discard_drafts(ctx: &Ctx, item_id: &str) {
-    if let Some(Err(e)) = ctx.with_cache(|c| c.delete_all_drafts(item_id)) {
-        ctx.notice(format!("Could not discard the drafts: {e}"));
-    }
+    let dismissed = match ctx.with_cache(|c| c.delete_all_drafts(item_id)) {
+        Some(Ok((_, dismissed))) => dismissed,
+        Some(Err(e)) => {
+            ctx.notice(format!("Could not discard the drafts: {e}"));
+            Vec::new()
+        }
+        None => Vec::new(),
+    };
     ctx.send_threads(item_id);
+    reviews::publish_dismissed(ctx, item_id, &dismissed);
 }
 
 /// A checkout for a worktree already on disk, without touching the network.
@@ -15022,5 +15035,142 @@ mod tests {
         assert_eq!(face.get_pixel(0, 0)[3], 0, "the corner was not cut");
         assert_eq!(face.get_pixel(32, 32)[3], 255);
         assert_eq!(cache.lock().unwrap().load_avatar(&url), Some(sent));
+    }
+
+    /// A review's findings go on the pull request as drafts only when its
+    /// snapshot is the pull request as GitHub has it, open, at its head,
+    /// from GitHub's merge base, and then only on the head lines of a hunk.
+    #[tokio::test]
+    async fn a_finding_is_a_draft_only_on_the_open_pull_requests_diff() {
+        use perch_github::Side::{Left, Right};
+
+        async fn drafts(ctx: &Ctx, item_id: &str, snapshot: &perch_git::ReviewSnapshot) -> bool {
+            let lines = reviews::DraftLines::of(ctx, item_id, snapshot).await;
+            lines.is_some()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        let base: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(repo.join("code.rs"), &base).unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        let head = base.replace("line 10\n", "line ten\n");
+        std::fs::write(repo.join("code.rs"), head).unwrap();
+        git(&repo, &["commit", "-q", "-am", "feature"]);
+        // GitHub's base has moved on since the branch left it; the merge
+        // base is the same. And a base the branch never left from.
+        git(&repo, &["checkout", "-q", "-b", "moved", "main"]);
+        std::fs::write(repo.join("other.rs"), "other\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "moved"]);
+        let moved = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "feature"]);
+        git(&repo, &["checkout", "-q", "-b", "later", "feature"]);
+        std::fs::write(repo.join("later.rs"), "later\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "later"]);
+        let later = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "feature"]);
+
+        let snapshot = match ctx
+            .review_snapshots
+            .capture(perch_git::SnapshotCapture {
+                snapshot_id: "s1".into(),
+                source_checkout: repo.clone(),
+                source_repository: "a/b".into(),
+                branch_label: "feature".into(),
+                requested_base: "main".into(),
+            })
+            .await
+            .unwrap()
+        {
+            perch_git::CaptureOutcome::Captured(snapshot) => snapshot,
+            perch_git::CaptureOutcome::Empty(range) => panic!("nothing to review: {range:?}"),
+        };
+        let range = snapshot.manifest.range.clone();
+        let mut pull = pull_request(7);
+        pull.head_sha = range.head.clone();
+        pull.base_sha = range.base_tip.clone();
+        let mut item = Item::new("a/b", Timestamp::now());
+        item.subject = Some(ItemSubject::PullRequest(pull.clone()));
+        item.checkout = Some(ItemCheckout {
+            branch: "feature".into(),
+            base_ref: "main".into(),
+            head_sha: range.head.clone(),
+            path: repo.clone(),
+            ..root_checkout("feature")
+        });
+        ctx.with_cache(|c| c.insert_item(&item)).unwrap().unwrap();
+        let with_pull = |pull: &PullRequest| {
+            let mut item = item.clone();
+            item.subject = Some(ItemSubject::PullRequest(pull.clone()));
+            ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+        };
+        let anchor = |side, start_line, end_line| perch_github::ReviewAnchor {
+            snapshot_id: "s1".into(),
+            path: "code.rs".into(),
+            side,
+            start_line,
+            end_line,
+            commit_sha: range.head.clone(),
+            blob_sha: String::new(),
+        };
+
+        let mut lines = reviews::DraftLines::of(&ctx, &item.id, &snapshot)
+            .await
+            .expect("the pull request's head, from its base");
+        assert!(lines.takes(&anchor(Right, 10, 10)).await);
+        assert!(lines.takes(&anchor(Right, 7, 13)).await);
+        assert!(
+            !lines.takes(&anchor(Right, 6, 10)).await,
+            "a range that starts before the hunk"
+        );
+        assert!(!lines.takes(&anchor(Right, 20, 20)).await);
+        assert!(!lines.takes(&anchor(Left, 10, 10)).await, "the base side");
+
+        let mut base_moved = pull.clone();
+        base_moved.base_sha = moved;
+        with_pull(&base_moved);
+        assert!(
+            drafts(&ctx, &item.id, &snapshot).await,
+            "GitHub's base moved on, and its merge base did not"
+        );
+
+        let mut other_base = pull.clone();
+        other_base.base_sha = later;
+        with_pull(&other_base);
+        assert!(
+            !drafts(&ctx, &item.id, &snapshot).await,
+            "GitHub diffs from another merge base"
+        );
+
+        let mut unknown_base = pull.clone();
+        unknown_base.base_sha = "0".repeat(40);
+        with_pull(&unknown_base);
+        assert!(
+            !drafts(&ctx, &item.id, &snapshot).await,
+            "a base git does not have"
+        );
+
+        let mut moved_head = pull.clone();
+        moved_head.head_sha = "f".repeat(40);
+        with_pull(&moved_head);
+        assert!(
+            !drafts(&ctx, &item.id, &snapshot).await,
+            "GitHub's head is not what was reviewed"
+        );
+
+        let mut closed = pull.clone();
+        closed.state = "closed".into();
+        with_pull(&closed);
+        assert!(
+            !drafts(&ctx, &item.id, &snapshot).await,
+            "a closed pull request takes no review"
+        );
     }
 }

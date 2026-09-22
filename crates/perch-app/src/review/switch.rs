@@ -31,7 +31,7 @@ pub fn switch(state: ReviewState) -> impl IntoView {
         let threads = state.comment_threads.with(|threads| {
             threads
                 .iter()
-                .filter(|thread| state.thread_visible(&thread.id))
+                .filter(|thread| state.thread_visible(thread))
                 .cloned()
                 .collect::<Vec<_>>()
         });

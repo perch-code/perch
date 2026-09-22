@@ -495,6 +495,10 @@ pub struct NewFinding {
     pub stable_key: String,
     pub thread_id: String,
     pub initial_message: ReviewThreadMessage,
+    /// The initial message is the reader's draft for the pull request, on
+    /// the finding's lines, rather than the reviewer's message to them.
+    /// It posts with their review, and deleting it dismisses the finding.
+    pub draft: bool,
     pub possible_duplicate_of: Option<String>,
     pub possible_duplicate_evidence: ReviewEvidence,
 }

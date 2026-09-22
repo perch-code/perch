@@ -49,7 +49,7 @@ pub fn view(
         let threads = state.comment_threads.with(|threads| {
             threads
                 .iter()
-                .filter(|thread| state.thread_visible(&thread.id))
+                .filter(|thread| state.thread_visible(thread))
                 .cloned()
                 .collect::<Vec<_>>()
         });

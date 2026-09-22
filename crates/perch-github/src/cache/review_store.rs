@@ -1623,7 +1623,108 @@ fn ensure_related_finding_on(
     Ok(related)
 }
 
+/// Why a finding is dismissed when the reader deletes the draft it opened
+/// its thread with: they have decided not to say it.
+const DRAFT_DELETED: &str = "Its draft was deleted";
+
+/// The open finding a draft speaks for: the one whose report opened its
+/// thread with it, rather than a reply the reader wrote under a finding.
+/// Asked before the draft is deleted, since its observation lets go of the
+/// message then.
+pub(super) fn open_finding_of_draft_on(
+    conn: &rusqlite::Connection,
+    message_id: &str,
+) -> Result<Option<String>, CacheError> {
+    Ok(conn
+        .query_row(
+            "SELECT f.id FROM review_findings f
+             JOIN review_observations o ON o.finding_id = f.id
+             WHERE o.message_id = ?1 AND o.kind = 'reported' AND f.disposition = 'open'
+             LIMIT 1",
+            params![message_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Dismiss a finding whose draft the reader has deleted.
+pub(super) fn dismiss_for_deleted_draft_on(
+    conn: &rusqlite::Connection,
+    finding_id: &str,
+    at: Timestamp,
+) -> Result<(), CacheError> {
+    let evidence = ReviewEvidence {
+        note: Some("Deleted the draft in Perch".into()),
+        ..ReviewEvidence::default()
+    };
+    dismiss_finding_on(conn, finding_id, DRAFT_DELETED, &evidence, at).map(|_| ())
+}
+
+/// Throw away the finding's own draft, the comment it would have been on
+/// the pull request, when it still has one.
+fn remove_own_draft_on(conn: &rusqlite::Connection, finding_id: &str) -> Result<(), CacheError> {
+    let draft: Option<String> = conn
+        .query_row(
+            "SELECT m.id FROM review_observations o
+             JOIN comment_messages m ON m.id = o.message_id
+             WHERE o.finding_id = ?1 AND o.kind = 'reported'
+               AND m.origin = 'github' AND m.github_id IS NULL AND m.author_kind = 'user'
+             LIMIT 1",
+            params![finding_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match draft {
+        Some(id) => super::remove_draft_on(conn, &id),
+        None => Ok(()),
+    }
+}
+
+fn dismiss_finding_on(
+    conn: &rusqlite::Connection,
+    finding_id: &str,
+    reason: &str,
+    evidence: &ReviewEvidence,
+    at: Timestamp,
+) -> Result<Finding, CacheError> {
+    if reason.trim().is_empty() {
+        return Err(CacheError::ReviewConflict(
+            "dismissing a finding requires a reason".into(),
+        ));
+    }
+    let finding = load_finding_on(conn, finding_id)?
+        .ok_or_else(|| CacheError::ReviewConflict(format!("no finding {finding_id}")))?;
+    if finding.disposition == FindingDisposition::Dismissed
+        && finding.dismissal_reason.as_deref() == Some(reason)
+    {
+        return Ok(finding);
+    }
+    conn.execute(
+        "UPDATE review_findings SET disposition='dismissed', dismissal_reason=?2,
+         updated_at=?3 WHERE id=?1",
+        params![finding_id, reason, at.to_string()],
+    )?;
+    insert_audit_on(
+        conn,
+        FindingAuditInsert {
+            finding_id,
+            action: FindingAuditAction::Dismissed,
+            from: finding.disposition,
+            to: FindingDisposition::Dismissed,
+            related_finding_id: None,
+            snapshot_id: finding.last_checked_snapshot_id.as_deref(),
+            reason: Some(reason),
+            evidence,
+            at,
+        },
+    )?;
+    load_finding_on(conn, finding_id)?
+        .ok_or_else(|| CacheError::Corrupt("dismissed finding".into()))
+}
+
 impl Cache {
+    /// Dismiss a finding, and its own draft with it: what the reader has
+    /// dismissed is not something they will post.
     pub fn dismiss_finding(
         &self,
         finding_id: &str,
@@ -1631,40 +1732,9 @@ impl Cache {
         evidence: &ReviewEvidence,
         at: Timestamp,
     ) -> Result<Finding, CacheError> {
-        if reason.trim().is_empty() {
-            return Err(CacheError::ReviewConflict(
-                "dismissing a finding requires a reason".into(),
-            ));
-        }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let finding = load_finding_on(&tx, finding_id)?
-            .ok_or_else(|| CacheError::ReviewConflict(format!("no finding {finding_id}")))?;
-        if finding.disposition == FindingDisposition::Dismissed
-            && finding.dismissal_reason.as_deref() == Some(reason)
-        {
-            return Ok(finding);
-        }
-        tx.execute(
-            "UPDATE review_findings SET disposition='dismissed', dismissal_reason=?2,
-             updated_at=?3 WHERE id=?1",
-            params![finding_id, reason, at.to_string()],
-        )?;
-        insert_audit_on(
-            &tx,
-            FindingAuditInsert {
-                finding_id,
-                action: FindingAuditAction::Dismissed,
-                from: finding.disposition,
-                to: FindingDisposition::Dismissed,
-                related_finding_id: None,
-                snapshot_id: finding.last_checked_snapshot_id.as_deref(),
-                reason: Some(reason),
-                evidence,
-                at,
-            },
-        )?;
-        let stored = load_finding_on(&tx, finding_id)?
-            .ok_or_else(|| CacheError::Corrupt("dismissed finding".into()))?;
+        let stored = dismiss_finding_on(&tx, finding_id, reason, evidence, at)?;
+        remove_own_draft_on(&tx, finding_id)?;
         tx.commit()?;
         Ok(stored)
     }
@@ -1952,6 +2022,8 @@ impl Cache {
                 "duplicate links cannot form a cycle".into(),
             ));
         }
+        // The finding it duplicates says it; two drafts would say it twice.
+        remove_own_draft_on(&tx, finding_id)?;
         tx.execute(
             "UPDATE review_findings SET duplicate_of_id=?2, possible_duplicate_of_id=NULL,
              updated_at=?3 WHERE id=?1",
@@ -2365,11 +2437,29 @@ fn insert_finding_thread_on(
         ));
     }
     let anchor = observation.anchor.as_ref();
+    if new.draft && anchor.is_none() {
+        return Err(CacheError::ReviewConflict(
+            "a finding drafted for the pull request needs lines to go on".into(),
+        ));
+    }
+    // A draft is the reader's, on its way to GitHub with the thread it
+    // opens; otherwise the reviewer speaks, in a thread of Perch's own.
+    let (origin, author) = if new.draft {
+        (ThreadOrigin::GitHub, Author::User)
+    } else {
+        (
+            ThreadOrigin::Local,
+            Author::Agent {
+                backend: attempt.backend.clone(),
+                model: attempt.model.clone(),
+            },
+        )
+    };
     conn.execute(
         "INSERT INTO comment_threads
          (id, worktree_id, origin, path, start_line, line, side, commit_sha,
           outdated, resolved, created_at, anchor_snapshot_id, anchor_blob_sha)
-         VALUES (?1,?2,'local',?3,?4,?5,?6,?7,0,0,?8,?9,?10)",
+         VALUES (?1,?2,?11,?3,?4,?5,?6,?7,0,0,?8,?9,?10)",
         params![
             new.thread_id,
             item_id,
@@ -2381,6 +2471,7 @@ fn insert_finding_thread_on(
             observation.created_at.to_string(),
             anchor.map(|value| value.snapshot_id.as_str()),
             anchor.map(|value| value.blob_sha.as_str()),
+            origin.name(),
         ],
     )?;
     insert_comment_message_row(
@@ -2388,11 +2479,8 @@ fn insert_finding_thread_on(
         &CommentMessage {
             id: new.initial_message.id.clone(),
             thread_id: new.thread_id.clone(),
-            origin: ThreadOrigin::Local,
-            author: Author::Agent {
-                backend: attempt.backend.clone(),
-                model: attempt.model.clone(),
-            },
+            origin,
+            author,
             body: new.initial_message.body.clone(),
             created_at: observation.created_at,
             run: None,
@@ -2959,6 +3047,7 @@ mod tests {
                     id: format!("message-{observation_id}"),
                     body: format!("Finding {stable_key}"),
                 },
+                draft: false,
                 possible_duplicate_of: None,
                 possible_duplicate_evidence: ReviewEvidence::default(),
             })),
@@ -3767,6 +3856,251 @@ mod tests {
         assert_eq!(t.origin, crate::comments::ThreadOrigin::Local);
         assert!(t.messages.is_empty());
         assert!(cache.load_finding("f1").unwrap().is_some());
+    }
+
+    /// `new_report` as the reader's draft for the pull request.
+    fn drafted_report(
+        finding_id: &str,
+        thread_id: &str,
+        observation_id: &str,
+    ) -> ReconciledObservation {
+        let mut report = new_report(
+            finding_id,
+            finding_id,
+            thread_id,
+            observation_id,
+            &format!("source-{observation_id}"),
+            "s1",
+            3,
+        );
+        if let FindingTarget::New(new) = &mut report.finding {
+            new.draft = true;
+        }
+        report
+    }
+
+    /// Item `item` with one review, attempt a1 of group g1, saved and
+    /// ready to ingest.
+    fn reviewed_item(cache: &Cache) {
+        insert_item(cache, "item");
+        cache
+            .admit_review_group(&admission(
+                "g1",
+                "s1",
+                "item",
+                vec![attempt("a1", "codex", 1)],
+                1,
+            ))
+            .unwrap();
+        save_output(cache, "a1", "output", 2);
+    }
+
+    fn ingestion(observations: Vec<ReconciledObservation>) -> ReviewIngestion {
+        ReviewIngestion {
+            attempt_id: "a1".into(),
+            output_id: "output".into(),
+            result_kind: ReviewResultKind::Findings,
+            observations,
+            anchor_mappings: vec![],
+            completed_at: stamp(3),
+        }
+    }
+
+    fn thread_of(cache: &Cache, id: &str) -> comments::CommentThread {
+        cache
+            .load_comment_threads("item")
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("no thread {id}"))
+    }
+
+    fn draft_ids(cache: &Cache) -> Vec<String> {
+        cache
+            .load_drafts("item")
+            .unwrap()
+            .into_iter()
+            .map(|d| d.message_id)
+            .collect()
+    }
+
+    #[test]
+    fn a_finding_drafted_for_the_pull_request_opens_its_thread_as_the_readers_draft() {
+        let cache = Cache::open_in_memory().unwrap();
+        reviewed_item(&cache);
+        cache
+            .ingest_review_output(&ingestion(vec![drafted_report("f1", "t1", "o1")]))
+            .unwrap();
+
+        let t = thread_of(&cache, "t1");
+        assert_eq!(t.origin, ThreadOrigin::GitHub, "on its way to GitHub");
+        assert_eq!(t.github_id, None);
+        assert_eq!(
+            t.messages.len(),
+            1,
+            "and no word from the reviewer beside it"
+        );
+        assert!(t.messages[0].is_draft());
+        assert_eq!(t.messages[0].body, "Finding f1");
+        let drafts = cache.load_drafts("item").unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(
+            drafts[0].anchor.as_ref().map(|a| (a.start_line, a.line)),
+            Some((7, 9)),
+            "at the finding's lines"
+        );
+    }
+
+    #[test]
+    fn a_finding_drafted_for_the_pull_request_needs_lines() {
+        let cache = Cache::open_in_memory().unwrap();
+        reviewed_item(&cache);
+        let mut report = drafted_report("f1", "t1", "o1");
+        report.observation.anchor = None;
+        assert!(matches!(
+            cache.ingest_review_output(&ingestion(vec![report])),
+            Err(CacheError::ReviewConflict(_))
+        ));
+        assert!(cache.load_comment_threads("item").unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_findings_draft_dismisses_the_finding_and_keeps_its_history() {
+        let cache = Cache::open_in_memory().unwrap();
+        reviewed_item(&cache);
+        let reported = new_report("f2", "f2", "t2", "o2", "source-o2", "s1", 3);
+        cache
+            .ingest_review_output(&ingestion(vec![drafted_report("f1", "t1", "o1"), reported]))
+            .unwrap();
+        // A reply the reader drafted under the reviewer's message.
+        cache
+            .insert_draft(&CommentMessage {
+                id: "d2".into(),
+                thread_id: "t2".into(),
+                origin: ThreadOrigin::GitHub,
+                author: Author::User,
+                body: "please".into(),
+                created_at: stamp(4),
+                run: None,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Reactions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            cache.delete_draft("d2").unwrap(),
+            None,
+            "a reply speaks for no finding"
+        );
+        let f2 = cache.load_finding("f2").unwrap().unwrap();
+        assert_eq!(f2.disposition, FindingDisposition::Open);
+
+        assert_eq!(
+            cache.delete_draft("message-o1").unwrap().as_deref(),
+            Some("f1")
+        );
+        let f1 = cache.load_finding("f1").unwrap().unwrap();
+        assert_eq!(f1.disposition, FindingDisposition::Dismissed);
+        assert_eq!(f1.dismissal_reason.as_deref(), Some(DRAFT_DELETED));
+        assert!(cache
+            .list_finding_audit("f1")
+            .unwrap()
+            .iter()
+            .any(|entry| entry.action == FindingAuditAction::Dismissed));
+        let observations = cache.list_finding_observations("f1").unwrap();
+        assert_eq!(observations.len(), 1, "what the reviewer said is kept");
+        assert_eq!(observations[0].title, "Problem f1");
+        let t1 = thread_of(&cache, "t1");
+        assert_eq!(t1.origin, ThreadOrigin::Local);
+        assert!(t1.messages.is_empty());
+        assert!(draft_ids(&cache).is_empty());
+    }
+
+    #[test]
+    fn dismissing_or_linking_a_finding_takes_its_draft() {
+        let cache = Cache::open_in_memory().unwrap();
+        reviewed_item(&cache);
+        cache
+            .ingest_review_output(&ingestion(vec![
+                drafted_report("f1", "t1", "o1"),
+                drafted_report("f2", "t2", "o2"),
+            ]))
+            .unwrap();
+        assert_eq!(draft_ids(&cache), ["message-o1", "message-o2"]);
+
+        cache
+            .link_duplicate("f2", "f1", None, &ReviewEvidence::default(), stamp(4))
+            .unwrap();
+        assert_eq!(
+            draft_ids(&cache),
+            ["message-o1"],
+            "the finding it duplicates says it"
+        );
+        assert!(thread_of(&cache, "t2").messages.is_empty());
+
+        let f1 = cache
+            .dismiss_finding("f1", "not a bug", &ReviewEvidence::default(), stamp(5))
+            .unwrap();
+        assert_eq!(f1.dismissal_reason.as_deref(), Some("not a bug"));
+        assert!(draft_ids(&cache).is_empty());
+        assert_eq!(thread_of(&cache, "t1").origin, ThreadOrigin::Local);
+    }
+
+    #[test]
+    fn a_findings_thread_outlives_its_comment_leaving_github() {
+        let cache = Cache::open_in_memory().unwrap();
+        reviewed_item(&cache);
+        cache
+            .ingest_review_output(&ingestion(vec![drafted_report("f1", "t1", "o1")]))
+            .unwrap();
+        let comment = crate::discussion::ReviewComment {
+            id: 500,
+            node_id: "PRRC_500".into(),
+            pull_request_review_id: Some(9),
+            in_reply_to_id: None,
+            user: "chris".into(),
+            user_avatar_url: String::new(),
+            body: "Finding f1".into(),
+            path: "src/lib.rs".into(),
+            line: Some(9),
+            original_line: None,
+            start_line: Some(7),
+            original_start_line: None,
+            diff_hunk: "@@ -5,5 +5,5 @@".into(),
+            side: comments::Side::Right,
+            start_side: Some(comments::Side::Right),
+            commit_id: "head-1".into(),
+            original_commit_id: String::new(),
+            created_at: stamp(5),
+            updated_at: None,
+            html_url: "https://github.com/acme/widgets/pull/7#discussion_r500".into(),
+            reactions: Reactions::default(),
+        };
+        cache
+            .mark_draft_posted("message-o1", &comment, true)
+            .unwrap();
+        let listed = crate::discussion::Discussion {
+            review_comments: vec![comment],
+            ..Default::default()
+        };
+        cache.store_discussion("item", &listed).unwrap();
+        assert_eq!(thread_of(&cache, "t1").github_id, Some(500));
+
+        // Deleted on github.com.
+        cache
+            .store_discussion("item", &crate::discussion::Discussion::default())
+            .unwrap();
+        let t1 = thread_of(&cache, "t1");
+        assert!(t1.messages.is_empty());
+        assert_eq!((t1.origin, t1.github_id), (ThreadOrigin::Local, None));
+        assert!(
+            cache.load_finding("f1").unwrap().is_some(),
+            "and the finding with it"
+        );
+        assert_eq!(cache.list_finding_observations("f1").unwrap().len(), 1);
     }
 
     #[test]

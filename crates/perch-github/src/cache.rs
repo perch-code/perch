@@ -593,9 +593,9 @@ fn item_head_sha_on(conn: &Connection, item_id: &str) -> Result<String, CacheErr
 /// everything local under it: the reader's questions to an agent and the
 /// answers, and a draft not yet posted. Only comments that are on GitHub
 /// are replaced. A thread no longer on GitHub keeps its row while anything
-/// else is under it, and goes when nothing is. The one that stays has no
-/// comment on GitHub to point at any more, so it loses its `github_id`
-/// and is a thread on its way there, as a draft's is.
+/// else is under it or a review finding owns it, and goes otherwise. The
+/// one that stays has no comment on GitHub to point at any more, so it
+/// loses its `github_id` and is a thread on its way there, as a draft's is.
 ///
 /// A row already pointing at a comment by `github_id` is the row that
 /// comment updates, whatever its id and whatever thread it is under: a
@@ -722,10 +722,13 @@ pub(crate) fn ingest_review_threads(
     for id in stale_message_rows(conn, item_id, &keep)? {
         conn.execute("DELETE FROM comment_messages WHERE id = ?1", params![id])?;
     }
+    // A review finding's thread stays whatever went from under it: the
+    // finding, and its history, would go with the row.
     conn.execute(
         "DELETE FROM comment_threads
          WHERE worktree_id = ?1 AND origin = 'github'
-           AND NOT EXISTS (SELECT 1 FROM comment_messages WHERE thread_id = comment_threads.id)",
+           AND NOT EXISTS (SELECT 1 FROM comment_messages WHERE thread_id = comment_threads.id)
+           AND NOT EXISTS (SELECT 1 FROM review_findings WHERE thread_id = comment_threads.id)",
         params![item_id],
     )?;
 
@@ -2005,7 +2008,18 @@ fn sync_legacy_steps(conn: &Connection, run: &RunRecord) -> Result<(), CacheErro
 }
 
 /// `delete_draft` on `conn`; see there.
-fn delete_draft_on(conn: &Connection, message_id: &str) -> Result<(), CacheError> {
+fn delete_draft_on(conn: &Connection, message_id: &str) -> Result<Option<String>, CacheError> {
+    let finding = review_store::open_finding_of_draft_on(conn, message_id)?;
+    remove_draft_on(conn, message_id)?;
+    if let Some(finding_id) = &finding {
+        review_store::dismiss_for_deleted_draft_on(conn, finding_id, Timestamp::now())?;
+    }
+    Ok(finding)
+}
+
+/// Throw a draft away with what follows from it for its thread, as
+/// `delete_draft` does, and leave any finding it speaks for as it is.
+fn remove_draft_on(conn: &Connection, message_id: &str) -> Result<(), CacheError> {
     let thread_id: Option<String> = conn
         .query_row(
             "SELECT thread_id FROM comment_messages
@@ -2720,16 +2734,21 @@ impl Cache {
     /// when it turns back into Perch's own instead; one with only Perch's
     /// messages left turns back as well. A thread that is on GitHub is
     /// left as it is. A message that is not a draft is not touched.
-    pub fn delete_draft(&self, message_id: &str) -> Result<(), CacheError> {
+    ///
+    /// A review finding that opened its thread with the draft is
+    /// dismissed with it, and its id returned: the draft was the finding,
+    /// as the reader would have said it.
+    pub fn delete_draft(&self, message_id: &str) -> Result<Option<String>, CacheError> {
         let tx = self.conn.unchecked_transaction()?;
-        delete_draft_on(&tx, message_id)?;
+        let dismissed = delete_draft_on(&tx, message_id)?;
         tx.commit()?;
-        Ok(())
+        Ok(dismissed)
     }
 
     /// Throw every draft in the item away, each as `delete_draft` would,
-    /// in one transaction: Discard all leaves none or all of them.
-    pub fn delete_all_drafts(&self, item_id: &str) -> Result<usize, CacheError> {
+    /// in one transaction: Discard all leaves none or all of them. How
+    /// many went, and the findings dismissed with them.
+    pub fn delete_all_drafts(&self, item_id: &str) -> Result<(usize, Vec<String>), CacheError> {
         let tx = self.conn.unchecked_transaction()?;
         let drafts: Vec<String> = {
             let mut stmt = tx.prepare(
@@ -2741,11 +2760,12 @@ impl Cache {
             let rows = stmt.query_map(params![item_id], |row| row.get(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
+        let mut dismissed = Vec::new();
         for id in &drafts {
-            delete_draft_on(&tx, id)?;
+            dismissed.extend(delete_draft_on(&tx, id)?);
         }
         tx.commit()?;
-        Ok(drafts.len())
+        Ok((drafts.len(), dismissed))
     }
 
     /// The drafts in an item, threads in the order they were made and a
@@ -3332,7 +3352,8 @@ impl Cache {
     /// one on GitHub can see, and their runs. Every message that went to
     /// GitHub, or is on its way, stays, and the thread with it. A thread
     /// whose root had already left GitHub, with only Perch's messages under
-    /// it, has nothing left, and goes too rather than draw as an empty card.
+    /// it, has nothing left, and goes too rather than draw as an empty card,
+    /// unless a review finding owns it.
     pub fn delete_private_messages(&self, thread_id: &str) -> Result<(), CacheError> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
@@ -3346,7 +3367,8 @@ impl Cache {
         )?;
         tx.execute(
             "DELETE FROM comment_threads WHERE id = ?1
-               AND NOT EXISTS (SELECT 1 FROM comment_messages WHERE thread_id = ?1)",
+               AND NOT EXISTS (SELECT 1 FROM comment_messages WHERE thread_id = ?1)
+               AND NOT EXISTS (SELECT 1 FROM review_findings WHERE thread_id = ?1)",
             params![thread_id],
         )?;
         tx.commit()?;
@@ -6373,12 +6395,12 @@ mod tests {
         assert_eq!(drafts[2].created_at, stamp_of("2026-09-19T08:30:00Z"));
         assert!(c.load_drafts("item-pr-8").unwrap().is_empty());
 
-        assert_eq!(c.delete_all_drafts("item-pr-7").unwrap(), 3);
+        assert_eq!(c.delete_all_drafts("item-pr-7").unwrap(), (3, vec![]));
         assert!(c.load_drafts("item-pr-7").unwrap().is_empty());
         let threads = c.load_comment_threads("item-pr-7").unwrap();
         assert_eq!(threads.len(), 1, "the thread made for its drafts went with them");
         assert_eq!(threads[0].id, "gh-3");
-        assert_eq!(c.delete_all_drafts("item-pr-7").unwrap(), 0);
+        assert_eq!(c.delete_all_drafts("item-pr-7").unwrap(), (0, vec![]));
     }
 
     #[test]

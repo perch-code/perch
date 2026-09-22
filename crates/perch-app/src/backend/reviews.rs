@@ -71,7 +71,11 @@ pub(super) fn dismiss_finding(ctx: &Ctx, finding_id: &str, reason: &str) {
     match cache(ctx, |cache| {
         cache.dismiss_finding(finding_id, reason, &evidence, Timestamp::now())
     }) {
-        Ok(finding) => publish_finding(ctx, finding),
+        Ok(finding) => {
+            // Its draft went with it.
+            ctx.send_threads(&finding.item_id);
+            publish_finding(ctx, finding);
+        }
         Err(error) => ctx.notice(format!("Could not dismiss review finding: {error}")),
     }
 }
@@ -102,7 +106,11 @@ pub(super) fn link_duplicate(ctx: &Ctx, finding_id: &str, canonical_finding_id: 
             Timestamp::now(),
         )
     }) {
-        Ok(finding) => publish_finding(ctx, finding),
+        Ok(finding) => {
+            // Its draft went with it.
+            ctx.send_threads(&finding.item_id);
+            publish_finding(ctx, finding);
+        }
         Err(error) => ctx.notice(format!("Could not link duplicate finding: {error}")),
     }
 }
@@ -128,6 +136,31 @@ fn user_action_evidence(note: &str) -> ReviewEvidence {
         note: Some(note.to_string()),
         ..ReviewEvidence::default()
     }
+}
+
+/// Tell the window about findings the cache dismissed as their drafts were
+/// deleted, and export the item's history once for all of them.
+pub(super) fn publish_dismissed(ctx: &Ctx, item_id: &str, finding_ids: &[String]) {
+    if finding_ids.is_empty() {
+        return;
+    }
+    for finding_id in finding_ids {
+        let summary = cache(ctx, |cache| cache.load_finding(finding_id))
+            .and_then(|finding| finding.ok_or_else(|| format!("no finding {finding_id}")))
+            .and_then(|finding| finding_summary(ctx, finding));
+        match summary {
+            Ok(summary) => {
+                let _ = ctx.events.send(Event::ReviewFindingUpdated {
+                    item_id: item_id.to_string(),
+                    summary,
+                });
+            }
+            Err(error) => ctx.notice(format!(
+                "Review finding changed, but could not refresh it: {error}"
+            )),
+        }
+    }
+    export_item(ctx, item_id);
 }
 
 fn publish_finding(ctx: &Ctx, finding: Finding) {
@@ -2217,6 +2250,7 @@ async fn reconcile_and_ingest(ctx: &Ctx, input: ReconciliationInput<'_>) -> Resu
     }
 
     let mut mappings = MappingCache::new(snapshot, &attempt.id).await?;
+    let mut drafts = DraftLines::of(ctx, &group.item_id, snapshot).await;
     let mut claimed = HashSet::new();
     let mut reconciled = Vec::new();
     for reported in &extraction.findings {
@@ -2260,9 +2294,17 @@ async fn reconcile_and_ingest(ctx: &Ctx, input: ReconciliationInput<'_>) -> Resu
             Association::New { possible_duplicate } => {
                 let finding_id = perch_github::comments::new_id();
                 let thread_id = perch_github::comments::new_id();
+                let draft = match (drafts.as_mut(), anchor.as_ref()) {
+                    (Some(lines), Some(anchor)) => lines.takes(anchor).await,
+                    _ => false,
+                };
                 let initial_message = ReviewThreadMessage {
                     id: perch_github::comments::new_id(),
-                    body: finding_message(reported, attempt, group.number),
+                    body: if draft {
+                        draft_message(reported)
+                    } else {
+                        finding_message(reported, attempt, group.number)
+                    },
                 };
                 (
                     FindingTarget::New(Box::new(NewFinding {
@@ -2270,6 +2312,7 @@ async fn reconcile_and_ingest(ctx: &Ctx, input: ReconciliationInput<'_>) -> Resu
                         stable_key: perch_github::comments::new_id(),
                         thread_id,
                         initial_message,
+                        draft,
                         possible_duplicate_of: possible_duplicate
                             .as_ref()
                             .map(|candidate| candidate.finding.id.clone()),
@@ -2612,6 +2655,80 @@ impl MappingCache {
             sources: HashMap::new(),
             records: Vec::new(),
         })
+    }
+}
+
+/// The lines of a review's snapshot a new finding goes on as the reader's
+/// draft rather than as the reviewer's message: those of the open pull
+/// request's diff, which GitHub takes a review comment on. There are none
+/// unless the snapshot is the pull request as GitHub has it, at its head
+/// and diffed from the merge base GitHub diffs it from; a finding about
+/// anything else could not be posted where it points.
+pub(super) struct DraftLines<'a> {
+    snapshot: &'a perch_git::ReviewSnapshot,
+    /// The head lines of each file's hunks, read as a finding asks.
+    hunks: HashMap<String, Vec<std::ops::RangeInclusive<u32>>>,
+}
+
+impl<'a> DraftLines<'a> {
+    pub(super) async fn of(
+        ctx: &Ctx,
+        item_id: &str,
+        snapshot: &'a perch_git::ReviewSnapshot,
+    ) -> Option<Self> {
+        let item = ctx.item(item_id)?;
+        let pull = item.pull_request().filter(|pull| pull.is_open())?;
+        let range = &snapshot.manifest.range;
+        if pull.head_sha != range.head {
+            return None;
+        }
+        // The same base tip has the same merge base. Another has it only
+        // when git says so, which it can only for a base it has fetched.
+        if pull.base_sha != range.base_tip {
+            let checkout = item.checkout.as_ref().filter(|checkout| checkout.on_disk)?;
+            let merge_base = ctx
+                .preparer
+                .git()
+                .run(
+                    Some(&checkout.path),
+                    ["merge-base", pull.base_sha.as_str(), range.head.as_str()],
+                    GIT_QUERY_TIMEOUT,
+                )
+                .await
+                .ok()?;
+            if merge_base.trim() != range.merge_base {
+                return None;
+            }
+        }
+        Some(Self {
+            snapshot,
+            hunks: HashMap::new(),
+        })
+    }
+
+    /// Whether `anchor` is lines GitHub takes a comment on: on the head,
+    /// and inside one hunk of the diff, as a comment's first and last
+    /// lines must be.
+    pub(super) async fn takes(&mut self, anchor: &ReviewAnchor) -> bool {
+        if anchor.side != Side::Right {
+            return false;
+        }
+        if !self.hunks.contains_key(&anchor.path) {
+            let hunks = match self.snapshot.head_hunks(&anchor.path).await {
+                Ok(hunks) => hunks,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %anchor.path, %error,
+                        "could not read the hunks a finding is in"
+                    );
+                    Vec::new()
+                }
+            };
+            self.hunks.insert(anchor.path.clone(), hunks);
+        }
+        self.hunks[&anchor.path]
+            .iter()
+            .any(|hunk| hunk.contains(&anchor.start_line) && hunk.contains(&anchor.end_line))
     }
 }
 
@@ -3032,6 +3149,18 @@ fn finding_message(
         attempt.backend,
         attempt.model,
         review_number
+    )
+}
+
+/// A finding as the reader's draft says it on the pull request: what the
+/// reviewer found, without who found it or Perch's number for the review,
+/// which mean nothing on GitHub. The card says both.
+fn draft_message(finding: &ReviewFinding) -> String {
+    format!(
+        "**{} · {}**\n\n{}",
+        severity_label(finding.severity),
+        finding.title,
+        finding.body
     )
 }
 

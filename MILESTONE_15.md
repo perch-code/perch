@@ -39,7 +39,9 @@ colleague can see.
   Submission for what this costs.
 - Posting an agent's answer without the reader reading it. There is no
   auto-post, no "post all findings", no bot account. Every message to
-  GitHub is one the reader wrote or edited and sent.
+  GitHub is one the reader wrote, or edited and sent, or kept as a
+  draft and submitted. A review's findings arrive as drafts (see
+  Findings as drafts), which post only with the reader's review.
 - Mentions, autocomplete, emoji pickers, attachments, suggested changes.
   A GitHub composer is the composer Perch has, with markdown.
 - Comments on the base side of a split, or on lines outside the diff.
@@ -157,6 +159,35 @@ where neither can go: on an issue, and on a closed pull request for the
 threads whose draft would need a review.
 
 On a findings thread the same action is on the finding's message.
+
+### Findings as drafts
+
+Added after the milestone. Each finding worth keeping took Post to
+GitHub and a send, one at a time, so on an open pull request a new
+finding arrives as the reader's draft on its lines instead of as the
+reviewer's message. Its thread is GitHub-bound from the start, its
+one message the draft, `**High · Title**` and the body, without the
+reviewer's name or Perch's review number, which mean nothing on GitHub.
+The finding's row above it still gives both. The reader edits, deletes
+or keeps it, and Submit review posts it with the rest.
+
+A finding's draft and the finding go together. Deleting the draft,
+from the card, the form or Discard all, dismisses the finding, `Its
+draft was deleted`; dismissing the finding, or linking it as a
+duplicate of another, deletes the draft. The finding's thread is left
+with nothing in it and is not drawn, and the finding's history, its
+observations and audit, stays whole. A thread with a draft in it is
+never hidden by the findings filter, since the draft would post from
+out of sight: one the next review verifies fixed stays in view for the
+reader to decide on.
+
+GitHub takes a review comment only on a line its diff shows, and one
+it refuses fails the whole review. So a finding is a draft only when
+the review is of the pull request as GitHub has it, open, at its head
+and from the merge base GitHub diffs from, and only when its lines are
+on the head side and inside one hunk of that diff, three lines of
+context as GitHub draws it. Any other finding stays the reviewer's
+message, private, with Post to GitHub under it as before.
 
 ### Submission
 
