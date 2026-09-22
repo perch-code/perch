@@ -164,13 +164,14 @@ impl GitHub {
     /// `all=true` keeps read rows alongside unread ones, but can also include
     /// Done history because the payload has no Inbox/Done membership field.
     /// `last_modified` is used only for a conditional request. A 304 keeps the
-    /// cached result; a 200 is the new complete first page and is followed by
-    /// any remaining pages.
+    /// cached result. A 200 is not the inbox: GitHub answers it with only the
+    /// threads updated since `If-Modified-Since`, so the list is fetched again
+    /// without the validator.
     pub async fn list_threads_since(
         &self,
         last_modified: Option<&str>,
     ) -> Result<ListResult, Error> {
-        let mut first_page = None;
+        let mut probe_interval = None;
         if let Some(last_modified) = last_modified {
             let probe = self.fetch_notification_page(1, Some(last_modified)).await?;
             if probe.status == StatusCode::NOT_MODIFIED {
@@ -183,7 +184,7 @@ impl GitHub {
                     poll_interval: probe.poll_interval,
                 });
             }
-            first_page = Some(probe);
+            probe_interval = Some(probe.poll_interval);
         }
 
         let mut threads = Vec::new();
@@ -192,13 +193,12 @@ impl GitHub {
         let mut poll_interval = Duration::from_secs(DEFAULT_POLL_SECS);
 
         loop {
-            let response = match first_page.take() {
-                Some(response) if page == 1 => response,
-                _ => self.fetch_notification_page(page, None).await?,
-            };
+            let response = self.fetch_notification_page(page, None).await?;
             if page == 1 {
                 response_last_modified = response.last_modified.clone();
-                poll_interval = response.poll_interval;
+                poll_interval = probe_interval.map_or(response.poll_interval, |probe| {
+                    probe.max(response.poll_interval)
+                });
             } else {
                 poll_interval = poll_interval.max(response.poll_interval);
             }
