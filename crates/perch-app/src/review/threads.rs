@@ -119,6 +119,42 @@ impl ThreadFace {
     }
 }
 
+/// Where a message sits across the thread's width. In a thread that has
+/// something on GitHub, a message that does not, the reader's question to
+/// an agent and the agent's answer, is drawn in the private lane: inset,
+/// with a hairline down its left, so the reader never wonders what a
+/// colleague can see. The first of each run of them carries the lane's
+/// label. Everything else, and every message of a wholly private thread,
+/// sits flush: the lane is a difference, not a decoration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Lane {
+    Flush,
+    PrivateStart,
+    PrivateContinue,
+}
+
+impl Lane {
+    /// The lane of each message of `thread`, in order.
+    pub fn of(thread: &CommentThread) -> Vec<Lane> {
+        let mixed = thread.has_github_message();
+        let mut after_private = false;
+        thread
+            .messages
+            .iter()
+            .map(|m| {
+                let private = mixed && m.is_private();
+                let lane = match (private, after_private) {
+                    (false, _) => Lane::Flush,
+                    (true, false) => Lane::PrivateStart,
+                    (true, true) => Lane::PrivateContinue,
+                };
+                after_private = private;
+                lane
+            })
+            .collect()
+    }
+}
+
 // ---------------------------------------------------------------------
 // Composer
 // ---------------------------------------------------------------------
@@ -1156,12 +1192,13 @@ pub fn messages_view(
                     .map(|t| {
                         t.messages
                             .iter()
-                            .map(|m| {
+                            .zip(Lane::of(t))
+                            .map(|(m, lane)| {
                                 let opening = editing
                                     .as_ref()
                                     .filter(|(id, _)| *id == m.id)
                                     .map(|(_, opening)| *opening);
-                                (m.clone(), opening)
+                                (m.clone(), opening, lane)
                             })
                             .collect::<Vec<_>>()
                     })
@@ -1169,9 +1206,10 @@ pub fn messages_view(
             })
         },
         // The key follows what the row shows: an edit on GitHub changes
-        // the body, a draft posted gains its id, and a draft being edited
-        // is the composer.
-        |(m, editing)| {
+        // the body, a draft posted gains its id, a draft being edited is
+        // the composer, and a draft added to a thread that was wholly
+        // private puts the rest of it in the lane.
+        |(m, editing, lane)| {
             (
                 m.id.clone(),
                 m.origin.name(),
@@ -1181,9 +1219,10 @@ pub fn messages_view(
                     .as_ref()
                     .map(|r| (r.status.name(), r.steps.len(), r.error.clone())),
                 *editing,
+                *lane,
             )
         },
-        move |(m, editing)| {
+        move |(m, editing, lane)| {
             let thread = state
                 .comment_threads
                 .with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
@@ -1195,7 +1234,7 @@ pub fn messages_view(
                     None => Empty::new().into_any(),
                 },
                 (Some(thread), None) => {
-                    message_view(app, state, backend.clone(), thread, m, face).into_any()
+                    message_view(app, state, backend.clone(), thread, m, face, lane).into_any()
                 }
                 (None, _) => Empty::new().into_any(),
             }
@@ -1277,6 +1316,8 @@ pub fn follow_up(
 /// produced it, or under a question the run that is answering it. A
 /// comment from GitHub carries its own byline, with Ask about this, the
 /// reaction picker and its link on hover, and the reactions on it under.
+/// A message in the private lane is drawn there, whole, with the lane's
+/// label above the first of a run.
 pub fn message_view(
     app: AppState,
     state: ReviewState,
@@ -1284,7 +1325,57 @@ pub fn message_view(
     thread: CommentThread,
     message: CommentMessage,
     face: ThreadFace,
+    lane: Lane,
 ) -> impl IntoView {
+    let message = bare_message_view(app, state, backend, thread, message, face);
+    match lane {
+        Lane::Flush => message,
+        Lane::PrivateStart => private_lane(
+            Stack::vertical((perch_only_label(), message))
+                .style(|s| s.flex_col().width_full().gap(6.0)),
+        ),
+        Lane::PrivateContinue => private_lane(message),
+    }
+}
+
+/// The lane's inset and hairline around a private message, or the label
+/// and the message together.
+fn private_lane(inner: impl IntoView + 'static) -> floem::AnyView {
+    Container::new(inner)
+        .debug_name("private-lane")
+        .style(|s| {
+            s.width_full()
+                .padding_left(theme::PRIVATE_LANE_INSET)
+                .border_left(1.0)
+                .border_color(theme::BORDER_MUTED)
+        })
+        .into_any()
+}
+
+/// `PERCH ONLY` at the top of a run of private messages. Upper case rather
+/// than small caps, which floem's text cannot set.
+fn perch_only_label() -> impl IntoView {
+    Label::derived(|| "PERCH ONLY".to_string())
+        .debug_name("perch-only")
+        .style(|s| {
+            s.font_size(theme::TEXT_SECTION)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG_MUTED)
+                .selectable(false)
+        })
+}
+
+/// A message on its own, before any lane: a comment from GitHub with its
+/// byline, a draft with the Draft mark, or the reader's question and the
+/// agent's answer with their runs.
+fn bare_message_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread: CommentThread,
+    message: CommentMessage,
+    face: ThreadFace,
+) -> floem::AnyView {
     if let (ThreadOrigin::GitHub, Author::GitHubUser(login)) = (message.origin, &message.author) {
         return github_message_view(app, state, backend, &thread, &message, login.clone())
             .into_any();
@@ -1922,6 +2013,18 @@ mod tests {
         id.children().into_iter().find_map(|c| find(c, text))
     }
 
+    /// Every view whose debug name contains `text`, in tree order.
+    fn find_all(id: floem::ViewId, text: &str) -> Vec<floem::ViewId> {
+        let mut found = Vec::new();
+        if id.debug_name().contains(text) {
+            found.push(id);
+        }
+        for c in id.children() {
+            found.extend(find_all(c, text));
+        }
+        found
+    }
+
     /// One of GitHub's threads with a comment by rohan and, after it, the
     /// reader's question and the agent's answer, which are Perch's alone.
     fn github_thread_with_private_messages() -> CommentThread {
@@ -2460,6 +2563,7 @@ mod tests {
             theirs.clone(),
             theirs.messages[0].clone(),
             ThreadFace::Card,
+            Lane::Flush,
         )
         .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
@@ -2476,6 +2580,135 @@ mod tests {
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
         assert_eq!(composer.destination, Destination::agent(sonnet_medium()));
         assert_eq!(composer.editing, None);
+    }
+
+    /// The draft the reader leaves in `thread`, bound for GitHub.
+    fn draft_under(thread: &CommentThread) -> CommentMessage {
+        let mut draft = thread.messages[0].clone();
+        draft.id = "d1".into();
+        draft.origin = ThreadOrigin::GitHub;
+        draft.author = Author::User;
+        draft.github_id = None;
+        draft.body = "I will fix it".into();
+        draft
+    }
+
+    /// Under rohan's comment the question and the answer are in the lane,
+    /// the answer continuing the question's run; the draft after them is
+    /// flush. A thread that is wholly Perch's has no lane, and a draft
+    /// between two private messages starts a second run.
+    #[test]
+    fn lanes_follow_runs_of_private_messages_in_a_thread_with_a_github_message() {
+        let mut thread = github_thread_with_private_messages();
+        thread.messages.push(draft_under(&thread));
+        assert_eq!(
+            Lane::of(&thread),
+            [Lane::Flush, Lane::PrivateStart, Lane::PrivateContinue, Lane::Flush]
+        );
+
+        let mut split = thread.clone();
+        split.messages.swap(2, 3);
+        assert_eq!(
+            Lane::of(&split),
+            [Lane::Flush, Lane::PrivateStart, Lane::Flush, Lane::PrivateStart]
+        );
+
+        let mut private = thread.clone();
+        private.messages.remove(3);
+        private.messages.remove(0);
+        assert!(!private.has_github_message());
+        assert_eq!(Lane::of(&private), [Lane::Flush, Lane::Flush]);
+    }
+
+    /// Under rohan's comment, the reader's question and the agent's answer
+    /// are drawn in the lane, inset with the rule, and `PERCH ONLY` sits
+    /// once above the question; rohan's comment and the draft are flush.
+    /// The same on both faces.
+    #[test]
+    fn private_messages_under_a_github_comment_are_drawn_in_the_lane_with_one_label() {
+        for face in [ThreadFace::Card, ThreadFace::Inline] {
+            let root = TestRoot::new();
+            let app = AppState::new();
+            let state = state_with_item();
+            let mut thread = github_thread_with_private_messages();
+            thread.messages.push(draft_under(&thread));
+            state.comment_threads.set(Arc::new(vec![thread.clone()]));
+            let (backend, _commands) = crate::backend::Backend::recording();
+            let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), face)
+                .style(|s| s.width(600.0));
+            let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+            harness.rebuild();
+            harness.paint();
+            let root_id = harness.root_id();
+
+            let lanes = find_all(root_id, "private-lane");
+            assert_eq!(lanes.len(), 2, "{face:?}: the question and the answer");
+            let labels = find_all(root_id, "perch-only");
+            assert_eq!(labels.len(), 1, "{face:?}: one label for the run");
+            assert!(find(lanes[0], "perch-only").is_some(), "{face:?}: the label is in the first lane");
+            assert!(find(lanes[1], "perch-only").is_none(), "{face:?}: and not the second");
+            assert!(harness.get_layout_rect(labels[0]).width() > 0.0, "{face:?}: the label is drawn");
+
+            // The rows are siblings in the stack, so their rects share a
+            // frame: a lane's content sits inset past the rule, and every
+            // other row's starts at the thread's edge.
+            let stack = lanes[0].parent().expect("the lane is a row of the stack");
+            let rows = stack.children();
+            assert_eq!(rows.len(), 4, "{face:?}: a row per message");
+            for row in &rows {
+                let content = harness.get_content_rect(*row);
+                assert!(content.width() > 0.0, "{face:?}: the row is laid out");
+                let expected = if lanes.contains(row) { theme::PRIVATE_LANE_INSET + 1.0 } else { 0.0 };
+                assert_eq!(content.x0, expected, "{face:?}: the row's inset");
+            }
+
+            // The draft and rohan's comment are not in any lane.
+            let pill = find(root_id, "draft-pill").expect("the draft");
+            assert!(lanes.iter().all(|l| find(*l, "draft-pill").is_none()), "{face:?}: the draft is flush");
+            assert!(harness.get_layout_rect(pill).width() > 0.0);
+            assert!(find(root_id, "Label: \"Ask about this\"").is_some(), "rohan's comment");
+            assert!(lanes.iter().all(|l| find(*l, "Label: \"Ask about this\"").is_none()), "{face:?}: rohan is flush");
+        }
+    }
+
+    /// A thread that is wholly Perch's, as every thread was before drafts,
+    /// draws no lane and no label: the inset would say nothing there.
+    #[test]
+    fn a_wholly_private_thread_has_no_lane() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let mut thread = github_thread_with_private_messages();
+        thread.messages.remove(0);
+        thread.origin = ThreadOrigin::Local;
+        thread.github_id = None;
+        thread.id = "t1".into();
+        for m in &mut thread.messages {
+            m.thread_id = "t1".into();
+        }
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find(root_id, "private-lane").is_none());
+        assert!(find(root_id, "perch-only").is_none());
+
+        // A draft added under it puts what was there in the lane.
+        let mut with_draft = thread.clone();
+        let mut draft = draft_under(&with_draft);
+        draft.thread_id = "t1".into();
+        with_draft.messages.push(draft);
+        state.comment_threads.set(Arc::new(vec![with_draft]));
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert_eq!(find_all(root_id, "private-lane").len(), 2, "the question and the answer moved into the lane");
+        assert_eq!(find_all(root_id, "perch-only").len(), 1);
+        assert!(find(root_id, "draft-pill").is_some());
     }
 
     /// The lines wrap inside the box's padding, and the box's border takes

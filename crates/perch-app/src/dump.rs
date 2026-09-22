@@ -5,8 +5,10 @@
 //! capture under each token, a divider where a run of unchanged lines is
 //! folded away, and a spacer for each row a thread's card takes, with the
 //! card's messages under its first spacer, one line each: the author, a
-//! `[draft]` mark on a message that is on its way to GitHub, and the
-//! body's first line. Lets the data path be checked without a window. The folds are around the
+//! `[draft]` mark on a message that is on its way to GitHub, a `[perch]`
+//! mark on one no one on GitHub can see when the thread has something
+//! there, and the body's first line. Lets the data path be checked
+//! without a window. The folds are around the
 //! changes and the anchors of the item's threads, less the reveals stored
 //! for the file's blob; the cards are the item's threads anchored in the
 //! file, the reader's own and GitHub's review threads alike, at their
@@ -213,9 +215,11 @@ fn print_rows(file: &LoadedFile, doc: &Doc, side: Option<Side>, threads: &[Comme
                 let total = doc.rows.iter().filter(|r| matches!(r, DocRow::Spacer { card: c, .. } if c == card));
                 println!("  [{}, row {} of {}]", card_name(card), row + 1, total.count());
                 if let (doc::CardId::Thread(id), 0) = (card, row) {
-                    let messages = threads.iter().find(|t| &t.id == id).map(|t| t.messages.as_slice());
-                    for message in messages.unwrap_or_default() {
-                        println!("{}", message_line(message));
+                    if let Some(thread) = threads.iter().find(|t| &t.id == id) {
+                        let mixed = thread.has_github_message();
+                        for message in &thread.messages {
+                            println!("{}", message_line(message, mixed));
+                        }
                     }
                 }
                 continue;
@@ -262,16 +266,24 @@ fn card_name(card: &doc::CardId) -> String {
 }
 
 /// A message under its card's spacer: `    you [draft]: I will fix it`,
-/// `    sonnet: because`, `    rohan: epoch`. The author as the byline
-/// names them, `[draft]` after one that has not gone to GitHub yet, and
-/// the body's first line.
-fn message_line(message: &CommentMessage) -> String {
+/// `    sonnet [perch]: because`, `    rohan: epoch`. The author as the
+/// byline names them, `[draft]` after one that has not gone to GitHub
+/// yet, `[perch]` after one no one on GitHub can see when the thread is
+/// `mixed`, that is, has something on GitHub, as the window draws the
+/// private lane only there; and the body's first line.
+fn message_line(message: &CommentMessage, mixed: bool) -> String {
     let author = match &message.author {
         Author::User => "you",
         Author::Agent { model, .. } => model.as_str(),
         Author::GitHubUser(login) => login.as_str(),
     };
-    let mark = if message.is_draft() { " [draft]" } else { "" };
+    let mark = if message.is_draft() {
+        " [draft]"
+    } else if mixed && message.is_private() {
+        " [perch]"
+    } else {
+        ""
+    };
     let body = message.body.lines().next().unwrap_or_default();
     format!("    {author}{mark}: {body}")
 }
@@ -383,14 +395,31 @@ mod tests {
     #[test]
     fn a_draft_is_marked_after_its_author_and_a_posted_comment_is_not() {
         let draft = message(Author::User, ThreadOrigin::GitHub, None);
-        assert_eq!(message_line(&draft), "    you [draft]: I will fix it");
+        assert_eq!(message_line(&draft, true), "    you [draft]: I will fix it");
         let posted = message(Author::GitHubUser("rohan".into()), ThreadOrigin::GitHub, Some(31));
-        assert_eq!(message_line(&posted), "    rohan: I will fix it");
+        assert_eq!(message_line(&posted, true), "    rohan: I will fix it");
         let answer = message(
             Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
             ThreadOrigin::Local,
             None,
         );
-        assert_eq!(message_line(&answer), "    sonnet: I will fix it");
+        assert_eq!(message_line(&answer, false), "    sonnet: I will fix it");
+    }
+
+    /// The private rows of a thread with something on GitHub are marked;
+    /// in a thread that is wholly Perch's nothing is, as the window draws
+    /// no lane there.
+    #[test]
+    fn a_private_message_is_marked_only_in_a_thread_with_a_github_message() {
+        let question = message(Author::User, ThreadOrigin::Local, None);
+        let answer = message(
+            Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+            ThreadOrigin::Local,
+            None,
+        );
+        assert_eq!(message_line(&question, true), "    you [perch]: I will fix it");
+        assert_eq!(message_line(&answer, true), "    sonnet [perch]: I will fix it");
+        assert_eq!(message_line(&question, false), "    you: I will fix it");
+        assert_eq!(message_line(&answer, false), "    sonnet: I will fix it");
     }
 }

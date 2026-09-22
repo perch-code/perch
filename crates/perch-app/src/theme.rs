@@ -435,6 +435,11 @@ pub const HUNK_LINES: usize = 4;
 pub const ANCHOR_LINES: usize = 8;
 /// The rule down the left of a reply under a line comment.
 pub const REPLY_RULE: f64 = 2.0;
+/// The padding past the lane's 1px hairline before a private message in
+/// a thread that has something on GitHub, so its content starts 19px in,
+/// the way a reply's does past `REPLY_RULE`. A wholly private thread has
+/// no lane.
+pub const PRIVATE_LANE_INSET: f64 = 18.0;
 /// A local thread's border is dashed, so it cannot be taken for a
 /// GitHub comment's.
 pub const THREAD_DASH: [f64; 2] = [4.0, 3.0];
