@@ -911,7 +911,8 @@ pub struct ReviewState {
     pub tree: RwSignal<Arc<Vec<TreeEntry>>>,
     /// Whether the rail's tree is cut down to the changed files. On by
     /// default: the review is of the changes, and the whole worktree is
-    /// a click away.
+    /// a click away. Comes off on its own when a file the cut hides is
+    /// opened, from a definition say, so the tree can show it.
     pub changed_only: RwSignal<bool>,
     pub tabs: RwSignal<Vec<Tab>>,
     pub active: RwSignal<Option<String>>,
@@ -1028,6 +1029,10 @@ pub struct ReviewState {
     /// Directories open in the rail's tree. A checkout has thousands of
     /// entries, so only the way to each changed file starts open.
     pub expanded: RwSignal<std::collections::HashSet<String>>,
+    /// The row the rail's tree scrolls to once it is laid out: the file
+    /// just opened, which may be far down the tree or in a part of it the
+    /// filter hid until now. The row takes it on its next layout.
+    pub scroll_to_row: RwSignal<Option<String>>,
 }
 
 /// How many tabs stay open before the oldest is dropped.
@@ -1140,6 +1145,7 @@ impl ReviewState {
             jump_caret: RwSignal::new(None),
             last_position: RwSignal::new(None),
             expanded: RwSignal::new(std::collections::HashSet::new()),
+            scroll_to_row: RwSignal::new(None),
         }
     }
 
@@ -1252,6 +1258,7 @@ impl ReviewState {
         self.composer_focused.set(false);
         self.composer_draft.set(String::new());
         self.expanded.set(std::collections::HashSet::new());
+        self.scroll_to_row.set(None);
         self.editor_epoch.update(|e| *e += 1);
         self.docs.set(None);
         self.pointer_symbol.set(None);
@@ -1912,6 +1919,44 @@ impl ReviewState {
         if hidden && self.tab.get_untracked() != ItemTab::Conversation {
             self.show_tab(ItemTab::Conversation);
         }
+    }
+
+    /// Show a file just opened in the rail's tree: open the directories
+    /// on the way to it, turn the filter off when it is not one of the
+    /// changed files, since the filtered tree has no row for it, and
+    /// scroll its row into view. The row is the active one, so it is
+    /// drawn selected. A file outside the worktree has no row and is left
+    /// alone, as is one the listing lacks, in an ignored directory say:
+    /// the filter would come off for a tree that still does not show it.
+    pub fn show_in_tree(&self, path: &str) {
+        if std::path::Path::new(path).is_absolute() {
+            return;
+        }
+        let changed = self
+            .changed_files
+            .with_untracked(|files| files.iter().any(|f| f.path == path));
+        // A deleted file is in the changed list and not the listing, and
+        // the rail gives it a row all the same.
+        let has_row = changed
+            || self
+                .tree
+                .with_untracked(|tree| tree.iter().any(|e| e.path == path));
+        if !has_row {
+            return;
+        }
+        // One rebuild of the rows, not one per write.
+        floem::reactive::Effect::batch(|| {
+            self.expanded
+                .update(|expanded| crate::review::tree::reveal(expanded, path));
+            // With nothing changed the tree is whole whatever the filter
+            // says, so the reader's setting stands.
+            let cut = self.changed_only.get_untracked()
+                && !self.changed_files.with_untracked(|files| files.is_empty());
+            if cut && !changed {
+                self.changed_only.set(false);
+            }
+            self.scroll_to_row.set(Some(path.to_string()));
+        });
     }
 
     pub fn close_tab(&self, path: &str) {
@@ -3038,6 +3083,68 @@ mod tests {
         let expanded = state.expanded.get();
         assert!(expanded.contains("docs"));
         assert!(!expanded.contains("src/ui"));
+    }
+
+    /// Showing an opened file in the tree opens the way to it and asks
+    /// the rail to scroll to it; a file the filter hides turns the filter
+    /// off, and one with no row does nothing.
+    #[test]
+    fn showing_a_file_in_the_tree_turns_the_filter_off_when_it_hides_the_file() {
+        let state = ReviewState::new();
+        state.tree.set(Arc::new(
+            [
+                "src",
+                "src/a.rs",
+                "src/untouched.rs",
+                "docs",
+                "docs/guide.md",
+            ]
+            .into_iter()
+            .map(|path| perch_git::TreeEntry::new(path, !path.contains('.')))
+            .collect(),
+        ));
+        state.set_changed_files(Arc::new(vec![
+            changed("src/a.rs", Some("blob-a")),
+            changed("src/gone.rs", None),
+        ]));
+        state
+            .expanded
+            .update(|e| crate::review::tree::toggle(e, "src"));
+        assert!(state.changed_only.get(), "the filter starts on");
+
+        // A changed file is in the filtered tree: the filter stays.
+        state.show_in_tree("src/a.rs");
+        assert!(state.changed_only.get());
+        assert!(state.expanded.get().contains("src"), "the way to it opened");
+        assert_eq!(state.scroll_to_row.get().as_deref(), Some("src/a.rs"));
+        // So is a deleted one, though the worktree lacks it.
+        state.scroll_to_row.set(None);
+        state.show_in_tree("src/gone.rs");
+        assert!(state.changed_only.get());
+        assert_eq!(state.scroll_to_row.get().as_deref(), Some("src/gone.rs"));
+
+        // A file the branch left alone is not, so the whole worktree shows.
+        state.show_in_tree("docs/guide.md");
+        assert!(!state.changed_only.get(), "the filter came off");
+        assert!(state.expanded.get().contains("docs"));
+        assert_eq!(state.scroll_to_row.get().as_deref(), Some("docs/guide.md"));
+
+        // Nothing to show for a file with no row: one the listing lacks,
+        // or one outside the worktree.
+        state.changed_only.set(true);
+        state.scroll_to_row.set(None);
+        state.show_in_tree("target/out.rs");
+        state.show_in_tree("/Users/me/.cargo/registry/src/index/tokio-1.40.0/src/lib.rs");
+        assert!(state.changed_only.get(), "the filter stands");
+        assert_eq!(state.scroll_to_row.get(), None);
+        assert!(!state.expanded.get().contains("target"));
+
+        // With nothing changed the tree is whole already, and the flag is
+        // the reader's to keep.
+        state.set_changed_files(Arc::new(Vec::new()));
+        state.show_in_tree("src/untouched.rs");
+        assert!(state.changed_only.get());
+        assert_eq!(state.scroll_to_row.get().as_deref(), Some("src/untouched.rs"));
     }
 
     #[test]

@@ -418,12 +418,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                             let forward = key.code == Code::BracketRight;
                             if let Some(path) = review.next_unviewed(active.as_deref(), forward) {
                                 // The same path a click in the rail takes.
-                                review.expanded.update(|expanded| {
-                                    crate::review::tree::reveal(expanded, &path)
-                                });
                                 if review.open_tab(&path) {
                                     key_backend.open_file(&path);
                                 }
+                                review.show_in_tree(&path);
                             }
                             return EventPropagation::Stop;
                         }

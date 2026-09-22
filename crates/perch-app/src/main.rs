@@ -205,6 +205,7 @@ fn main() {
                             if review.open_tab(&path) {
                                 backend.open_file(&path);
                             }
+                            review.show_in_tree(&path);
                             true
                         });
                     }

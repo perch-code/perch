@@ -32,7 +32,7 @@ pub mod tree;
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{SignalGet, SignalWith};
 use floem::views::{dyn_container, Decorators, Stack};
 
 use crate::backend::Backend;
@@ -67,13 +67,11 @@ pub fn review_view(
                     backend.open_file(path);
                 }
             }
-            // Open the path to it in the tree, so a file reached from the
-            // changed list or from a definition can be found there too.
-            if !std::path::Path::new(path).is_absolute() {
-                state
-                    .expanded
-                    .update(|expanded| tree::reveal(expanded, path));
-            }
+            // Show it in the tree, so a file reached from a card or from
+            // a definition can be found there too: the way to it opens,
+            // the filter comes off when the file is not a change, and the
+            // rail scrolls to its row.
+            state.show_in_tree(path);
         }
     });
 

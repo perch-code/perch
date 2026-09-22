@@ -284,7 +284,8 @@ fn tree_row(
     let chevron_click_row = row.clone();
     let is_expanded = move || state.expanded.with(|e| tree::is_expanded(&chevron_row, e));
     // One closure per use: each captures a String, so none of them is Copy.
-    let (name_path, row_path, file_path, viewed_path) = (
+    let (name_path, row_path, file_path, viewed_path, scroll_path) = (
+        row.path.clone(),
         row.path.clone(),
         row.path.clone(),
         row.path.clone(),
@@ -308,7 +309,7 @@ fn tree_row(
     // what is left to read stands out from what is done.
     let viewed = move || changed.with(|c| c.get(&viewed_path).is_some_and(|f| state.is_viewed(f)));
 
-    Stack::horizontal((
+    let row = Stack::horizontal((
         Empty::new().style(move |s| s.width(depth as f64 * 12.0).flex_shrink(0.0_f32)),
         // A chevron drawn rather than typed: the arrow characters are not in
         // the UI font and rendered as missing-glyph boxes. On a directory
@@ -388,6 +389,21 @@ fn tree_row(
             base.background(theme::ACCENT_SUBTLE)
         } else {
             base
+        }
+    })
+    .debug_name(format!("tree-row:{scroll_path}"));
+    // The row of the file just opened scrolls into view. From the first
+    // layout after the ask rather than at once: a row the open brought
+    // into the tree, by opening its directory or turning the filter off,
+    // has no place to scroll to until it is laid out.
+    let row_id = row.view_id();
+    row.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+        let mine = state
+            .scroll_to_row
+            .with_untracked(|p| p.as_deref() == Some(scroll_path.as_str()));
+        if mine {
+            state.scroll_to_row.set(None);
+            row_id.scroll_to(None);
         }
     })
 }
@@ -640,6 +656,38 @@ mod tests {
         harness.paint();
     }
 
+    /// The view given `name` as its debug name, which floem follows with
+    /// the view's own: `tree-row:src - Horizontal Stack`.
+    fn find(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
+        let debug = id.debug_name();
+        if debug == name || debug.starts_with(&format!("{name} - ")) {
+            return Some(id);
+        }
+        id.children().into_iter().find_map(|c| find(c, name))
+    }
+
+    /// The one scroll in the rail, the tree's.
+    fn rail_scroll(harness: &HeadlessHarness) -> floem::ViewId {
+        fn scrolls(id: floem::ViewId, out: &mut Vec<floem::ViewId>) {
+            if id.debug_name() == "Scroll" {
+                out.push(id);
+            }
+            for child in id.children() {
+                scrolls(child, out);
+            }
+        }
+        let mut found = Vec::new();
+        scrolls(harness.root_id(), &mut found);
+        let rail: Vec<_> = found
+            .into_iter()
+            .filter(|id| harness.get_layout_rect(*id).x1 <= theme::RAIL_WIDTH)
+            .collect();
+        let [scroll] = rail[..] else {
+            panic!("one scroll in the rail, not {}", rail.len())
+        };
+        scroll
+    }
+
     /// The check is inside a row that is itself a button, and a click on
     /// it must check and not open. The keys are not driven here: a bare
     /// `}` only reaches a focused view, and the one focusable view on
@@ -729,24 +777,8 @@ mod tests {
         use floem::peniko::Brush;
         use floem::style::Background;
         use floem::views::scroll::{Handle, Rounded};
-        fn scrolls(id: floem::ViewId, out: &mut Vec<floem::ViewId>) {
-            if id.debug_name() == "Scroll" {
-                out.push(id);
-            }
-            for child in id.children() {
-                scrolls(child, out);
-            }
-        }
         let (harness, _) = app_harness();
-        let mut found = Vec::new();
-        scrolls(harness.root_id(), &mut found);
-        let rail: Vec<_> = found
-            .into_iter()
-            .filter(|id| harness.get_layout_rect(*id).x1 <= theme::RAIL_WIDTH)
-            .collect();
-        let [scroll] = rail[..] else {
-            panic!("one scroll in the rail, not {}", rail.len())
-        };
+        let scroll = rail_scroll(&harness);
         let style = harness.get_computed_style(scroll);
         assert_eq!(style.get(floem::style::ScrollbarWidth).0, theme::LIST_SCROLLBAR);
         let slider = style.apply_class(Handle);
@@ -790,6 +822,84 @@ mod tests {
             Some("src/a.rs"),
             "row 4 is gone again"
         );
+    }
+
+    /// A file opened from outside the rail, a definition Cmd-click landed
+    /// on say, that the filter hides: the tree turns to the whole
+    /// worktree, the way to the file opens, and its row is selected.
+    #[test]
+    fn opening_a_file_the_filter_hides_shows_the_whole_worktree_at_it() {
+        use floem::peniko::Brush;
+        use floem::style::Background;
+        let (mut harness, state) = app_harness();
+        // The reader shut src; the jump opens it again.
+        click(&mut harness, name_center(0));
+        assert!(!state.expanded.get().contains("src"));
+
+        state.navigate_to("src/untouched.rs", 0, 0);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.active.get().as_deref(), Some("src/untouched.rs"));
+        assert!(!state.changed_only.get(), "the filter came off");
+        assert!(state.expanded.get().contains("src"));
+        // Row 4 of the whole tree, drawn as the active row.
+        let row =
+            find(harness.root_id(), "tree-row:src/untouched.rs").expect("the row is in the tree");
+        let rect = row.get_visual_rect_no_clip();
+        assert_eq!(rect.center().y, name_center(4).1);
+        assert_eq!(
+            harness.get_computed_style(row).get(Background),
+            Some(Brush::Solid(theme::ACCENT_SUBTLE)),
+            "the row is selected"
+        );
+        assert_eq!(state.scroll_to_row.get(), None, "the row took the scroll");
+
+        // A jump to a changed file leaves the filter as the reader set it.
+        click(&mut harness, filter_center());
+        assert!(state.changed_only.get());
+        state.navigate_to("src/b.rs", 0, 0);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.active.get().as_deref(), Some("src/b.rs"));
+        assert!(state.changed_only.get(), "b.rs is in the filtered tree");
+    }
+
+    /// The rail scrolls to the opened file's row: a definition can be far
+    /// down a tree the filter had cut to a handful of rows.
+    #[test]
+    fn the_rail_scrolls_to_the_opened_file() {
+        let (mut harness, state) = app_harness();
+        let files: Vec<String> = (0..60).map(|i| format!("src/f{i:02}.rs")).collect();
+        state.tree.set(Arc::new(
+            std::iter::once(TreeEntry::new("src", true))
+                .chain(
+                    files
+                        .iter()
+                        .map(|path| TreeEntry::new(path.as_str(), false)),
+                )
+                .chain(std::iter::once(TreeEntry::new("README.md", false)))
+                .collect(),
+        ));
+        state.set_changed_files(Arc::new(vec![changed("src/f00.rs", Some("blob-0"))]));
+        harness.rebuild();
+        harness.paint();
+
+        state.navigate_to("src/f59.rs", 0, 0);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.changed_only.get());
+        let scroll = rail_scroll(&harness);
+        let viewport = scroll.get_visual_rect();
+        let row = find(harness.root_id(), "tree-row:src/f59.rs").expect("the row is in the tree");
+        let rect = row.get_visual_rect_no_clip();
+        assert!(
+            viewport.contains_rect(rect),
+            "row 60 at {rect:?} is in the rail's {viewport:?}"
+        );
+        // The list scrolled: the top row is off the top.
+        let top = find(harness.root_id(), "tree-row:src").unwrap();
+        assert!(top.get_visual_rect_no_clip().y1 < viewport.y0);
+        assert_eq!(state.scroll_to_row.get(), None);
     }
 
     /// A run of lone directories is one row, and that row opens and
