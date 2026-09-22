@@ -56,11 +56,16 @@ codegen-units = 4
 # a markdown table at its own width drew its last column over its border
 # and its last row under it, one that wraps a label's or rich text's lines
 # at the view's width when a word is wider than the view, where every line
-# broke at the word's width and ran past the edge, and one that nests
-# clips under vger. vger has one scissor, which each clip replaced and
-# each clear lifted, so once a clipped view in a scroll had painted, the
-# rest of the scroll painted past its viewport: the Cmd-P palette drew its
-# rows' letters and dots over its query box and past its border. Drop a
+# broke at the word's width and ran past the edge, one that nests clips
+# under vger, and one that sets every glyph of a line on its baseline,
+# rounded to a whole pixel, under vger too. vger has one scissor, which
+# each clip replaced and each clear lifted, so once a clipped view in a
+# scroll had painted, the rest of the scroll painted past its viewport:
+# the Cmd-P palette drew its rows' letters and dots over its query box and
+# past its border. And vger drew glyphs up to two pixels above their
+# baseline, and a letter first drawn above the window's top a pixel lower
+# than one first drawn on the screen, so the letters of one word stood at
+# two heights. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
