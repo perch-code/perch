@@ -242,6 +242,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         drawer::resize_cursor_sheet(state),
     ));
     let root_id = root.view_id();
+    // macOS's scroll bar setting, read again whenever it changes.
+    let scroller_style = floem::ext_event::create_trigger();
+    crate::scrollers::watch(scroller_style);
     root
         // The window's width, for the drawer on the right to know whether
         // it can be docked. Read off the root's own layout, which is the
@@ -643,7 +646,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 _ => EventPropagation::Continue,
             }
         })
-        .style(|s| {
+        .style(move |s| {
+            scroller_style.track();
             s.size_full()
                 .flex_col()
                 .position(floem::style::Position::Relative)
@@ -656,6 +660,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // in the same blue as one over prose and in an editor.
                 .custom_style_class(|s: floem::views::LabelCustomStyle| {
                     s.selection_color(theme::SELECTION_BG)
+                })
+                // Every scroll's bars as macOS's own: when it overlays
+                // them, there while the view scrolls and while the pointer
+                // is on one, and fading out once it stops.
+                .custom_style_class(|s: floem::views::scroll::ScrollCustomStyle| {
+                    s.show_bars_when_idle(!crate::scrollers::overlaid())
                 })
         })
 }

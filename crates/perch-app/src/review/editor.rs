@@ -2216,13 +2216,15 @@ mod window {
     /// pushed the scroll, which floem sizes to the editor's padding box,
     /// out past the window, and the bar with it. The bars are the theme's,
     /// as on every other scroll in Perch: a rounded slider at floem's
-    /// width, down the right while the file is taller than the view and
-    /// along the bottom while a line is wider than it, and nothing in
-    /// either place while there is nothing more to see.
+    /// width, which fades out once the code stops scrolling when macOS
+    /// overlays its scroll bars,
+    /// down the right while the file is taller than the view and along
+    /// the bottom while a line is wider than it, and nothing in either
+    /// place while there is nothing more to see.
     #[test]
     fn the_bars_are_at_the_codes_edges_only_while_there_is_more_to_see() {
         use floem::style::{ScrollbarWidth, StyleProp};
-        use floem::views::scroll::{Handle, Rounded};
+        use floem::views::scroll::{Handle, Rounded, ShowBarsWhenIdle};
         let bar = ScrollbarWidth::default_value().0;
         let (harness, _) = harness();
         let root = harness.root_id();
@@ -2237,6 +2239,11 @@ mod window {
         );
         let style = harness.get_computed_style(scroll);
         assert_eq!(style.get(ScrollbarWidth).0, bar);
+        assert_eq!(
+            style.get(ShowBarsWhenIdle),
+            !crate::scrollers::overlaid(),
+            "the bars fade out while the code is still when macOS overlays them"
+        );
         assert!(
             style.apply_class(Handle).get(Rounded),
             "the slider is a pill"

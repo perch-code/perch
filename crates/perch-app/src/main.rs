@@ -10,6 +10,7 @@ mod items;
 mod items_cli;
 mod repos;
 mod review;
+mod scrollers;
 mod state;
 mod theme;
 mod timefmt;
