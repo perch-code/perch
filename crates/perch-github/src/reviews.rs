@@ -285,6 +285,9 @@ pub struct ReviewGroup {
     pub created_at: Timestamp,
     pub started_at: Option<Timestamp>,
     pub ended_at: Option<Timestamp>,
+    /// What the requester asked the reviewers to focus on, kept so a retry
+    /// reviews the same thing.
+    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -465,6 +468,7 @@ pub struct ReviewAdmission {
     pub snapshot: ReviewSnapshot,
     pub attempts: Vec<NewReviewerAttempt>,
     pub admitted_at: Timestamp,
+    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

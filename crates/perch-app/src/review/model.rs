@@ -882,6 +882,8 @@ pub struct ReviewLaunchRequest {
     pub item_id: String,
     pub base_ref: String,
     pub reviewers: Vec<ReviewLaunchChoice>,
+    /// What to focus on, trimmed; `None` when the box was left empty.
+    pub instructions: Option<String>,
 }
 
 /// The launcher's editable, durable preference for one backend. An
@@ -1098,6 +1100,10 @@ pub struct ReviewState {
     pub review_launcher_open: RwSignal<bool>,
     pub review_launcher_draft: RwSignal<Option<ReviewLaunchDraft>>,
     pub review_launcher_opener: RwSignal<Option<floem::ViewId>>,
+    /// The launcher's instructions box. Apart from the draft, which is
+    /// rebuilt whenever a reviewer's support changes while it is open, and
+    /// kept across closing it until another checkout opens.
+    pub review_launcher_instructions: RwSignal<String>,
     /// GitHub's review submission surface is separate from the native agent
     /// review launcher above. Its draft stays with the open pull request so a
     /// cancelled or failed submission can be resumed without retyping it.
@@ -1479,6 +1485,7 @@ impl ReviewState {
             review_launcher_open: RwSignal::new(false),
             review_launcher_draft: RwSignal::new(None),
             review_launcher_opener: RwSignal::new(None),
+            review_launcher_instructions: RwSignal::new(String::new()),
             submit_review_open: RwSignal::new(false),
             submit_review_draft: RwSignal::new(String::new()),
             submit_review_event: RwSignal::new(PullReviewEvent::Comment),
@@ -1642,6 +1649,7 @@ impl ReviewState {
         self.review_launcher_open.set(false);
         self.review_launcher_draft.set(None);
         self.review_launcher_opener.set(None);
+        self.review_launcher_instructions.set(String::new());
         self.submit_review_open.set(false);
         self.submit_review_draft.set(String::new());
         self.submit_review_event.set(PullReviewEvent::Comment);

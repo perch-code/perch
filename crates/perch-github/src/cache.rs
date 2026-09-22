@@ -33,9 +33,10 @@ mod review_store;
 /// the discussions already kept. Version 22 moves who did a thing off the
 /// merge event and onto every event, for the rest of what GitHub's
 /// timeline lists. Version 23 keeps each GitHub thread's own id and
-/// whether the reader may resolve it. Schemas 13 through 22 migrate in
-/// place so local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 23;
+/// whether the reader may resolve it. Version 24 keeps the instructions a
+/// worktree review was run with. Schemas 13 through 23 migrate in place so
+/// local conversations and agent history are never discarded.
+pub const SCHEMA_VERSION: u32 = 24;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -382,6 +383,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             20 => migrate_20_to_21(&tx)?,
             21 => migrate_21_to_22(&tx)?,
             22 => add_github_thread_columns(&tx)?,
+            23 => review_store::add_group_instructions(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -6614,6 +6616,34 @@ mod tests {
         assert_eq!(threads[0].messages.len(), local.messages.len(), "nothing under it lost");
         cache.set_thread_resolved("local-22", true).unwrap();
         assert!(cache.load_comment_threads(&item.id).unwrap()[0].resolved);
+    }
+
+    #[test]
+    fn schema_23_gains_review_instructions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache
+                .conn
+                .execute("ALTER TABLE review_groups DROP COLUMN instructions", [])
+                .unwrap();
+            cache.set_meta("schema_version", "23").unwrap();
+        }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 23, to: SCHEMA_VERSION });
+        let has_column: bool = cache
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pragma_table_info('review_groups') WHERE name='instructions'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_column);
     }
 
     #[test]

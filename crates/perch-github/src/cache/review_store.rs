@@ -47,6 +47,7 @@ CREATE TABLE review_groups (
     created_at       TEXT NOT NULL,
     started_at       TEXT,
     ended_at         TEXT,
+    instructions     TEXT,
     FOREIGN KEY (snapshot_id, item_id) REFERENCES review_snapshots(id, item_id) ON DELETE CASCADE,
     UNIQUE (id, item_id),
     UNIQUE (item_id, number),
@@ -197,6 +198,23 @@ pub(super) fn migrate_17_to_18(tx: &Transaction<'_>) -> Result<(), CacheError> {
     Ok(())
 }
 
+/// Schema 24 keeps what the requester asked a review to focus on. A cache
+/// that reached review history through schema 18 after this change already
+/// has the column.
+pub(super) fn add_group_instructions(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM pragma_table_info('review_groups') WHERE name='instructions'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        tx.execute("ALTER TABLE review_groups ADD COLUMN instructions TEXT", [])?;
+    }
+    Ok(())
+}
+
 pub(super) fn migrate_18_to_19(tx: &Transaction<'_>) -> Result<(), CacheError> {
     let exists: bool = tx.query_row(
         "SELECT EXISTS(
@@ -220,7 +238,7 @@ const SNAPSHOT_COLUMNS: &str = "id, item_id, repository, branch_label, requested
     base_tip_sha, merge_base_sha, head_sha, dirty_edits_excluded, retention_key, retained_ref,
     manifest_path, diff_path, created_at";
 const GROUP_COLUMNS: &str = "id, item_id, snapshot_id, number, status, new_findings,
-    still_present, verified_fixed, not_verified, created_at, started_at, ended_at";
+    still_present, verified_fixed, not_verified, created_at, started_at, ended_at, instructions";
 const ATTEMPT_COLUMNS: &str = "id, group_id, run_id, backend, executable, executable_version,
     model, effort, adapter_version, output_format_version, attempt_number, retry_of_id, phase,
     ingestion_state, result_kind, output_id, raw_result, diagnostics, verification_input_json,
@@ -290,6 +308,7 @@ type GroupRow = (
     String,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 fn read_group_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GroupRow> {
@@ -306,6 +325,7 @@ fn read_group_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GroupRow> {
         row.get(9)?,
         row.get(10)?,
         row.get(11)?,
+        row.get(12)?,
     ))
 }
 
@@ -323,6 +343,7 @@ fn group_from_row(row: GroupRow) -> Result<ReviewGroup, CacheError> {
         created_at: timestamp(row.9, "review created_at")?,
         started_at: optional_timestamp(row.10, "review started_at")?,
         ended_at: optional_timestamp(row.11, "review ended_at")?,
+        instructions: row.12,
     })
 }
 
@@ -809,8 +830,8 @@ impl Cache {
         };
         tx.execute(
             "INSERT INTO review_groups
-             (id, item_id, snapshot_id, number, status, created_at, ended_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+             (id, item_id, snapshot_id, number, status, created_at, ended_at, instructions)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 admission.group_id,
                 admission.snapshot.item_id,
@@ -819,6 +840,7 @@ impl Cache {
                 status.name(),
                 admission.admitted_at.to_string(),
                 (status == ReviewGroupStatus::Empty).then(|| admission.admitted_at.to_string()),
+                admission.instructions,
             ],
         )?;
         for attempt in &admission.attempts {
@@ -844,6 +866,7 @@ impl Cache {
             created_at: admission.admitted_at,
             started_at: None,
             ended_at: (status == ReviewGroupStatus::Empty).then_some(admission.admitted_at),
+            instructions: admission.instructions.clone(),
         };
         tx.commit()?;
         Ok(group)
@@ -2977,6 +3000,7 @@ mod tests {
             snapshot: snapshot(snapshot_id, item_id, second),
             attempts,
             admitted_at: stamp(second),
+            instructions: None,
         }
     }
 
@@ -3108,6 +3132,18 @@ mod tests {
             cache.list_review_groups("item", None, 10).unwrap()[1].status,
             ReviewGroupStatus::Empty
         );
+    }
+
+    #[test]
+    fn a_groups_instructions_come_back_with_it() {
+        let cache = Cache::open_in_memory().unwrap();
+        insert_item(&cache, "item");
+        let mut admitted = admission("g1", "s1", "item", vec![attempt("a1", "codex", 1)], 1);
+        admitted.instructions = Some("Review rfcs/multi_get.md only".into());
+        let group = cache.admit_review_group(&admitted).unwrap();
+        assert_eq!(group.instructions, admitted.instructions);
+        assert_eq!(cache.load_review_group("g1").unwrap().unwrap(), group);
+        assert_eq!(cache.list_review_groups("item", None, 10).unwrap(), [group]);
     }
 
     #[test]

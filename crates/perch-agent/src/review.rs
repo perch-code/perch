@@ -304,7 +304,11 @@ pub struct ReviewSpec {
     /// Codex only. Supplying a schema is preferred when capability probing
     /// confirmed that the installed command supports it.
     pub output_schema: Option<PathBuf>,
-    /// Optional native custom instructions, never a generic-review fallback.
+    /// What the person asking for the review wants it to focus on. Codex
+    /// refuses a prompt beside `--base`, so it takes them as developer
+    /// instructions. Claude's review hands the work to subagents, which do
+    /// not see an appended system prompt, so they follow the range in the
+    /// `/code-review` argument, where the whole workflow reads them.
     pub instructions: Option<String>,
     /// Where to keep the CLI's raw output for diagnosis, if anywhere.
     pub transcript: Option<Transcript>,
@@ -338,17 +342,6 @@ impl ReviewSpec {
         }
         if !self.cwd.join(".git").exists() {
             return Err("the native reviewer requires a private Git checkout".into());
-        }
-        if self.backend == Backend::ClaudeCode
-            && self
-                .instructions
-                .as_deref()
-                .is_some_and(|instructions| !instructions.trim().is_empty())
-        {
-            return Err(
-                "Claude's local review treats text after the effort as its target; custom instructions cannot be combined with Perch's exact range"
-                    .into(),
-            );
         }
         if self.backend == Backend::ClaudeCode && self.output_schema.is_some() {
             return Err("the Codex output schema cannot be passed to Claude Code".into());
@@ -413,30 +406,41 @@ impl ReviewSpec {
             "--config".into(),
             format!(
                 "developer_instructions={}",
-                toml_string(CODEX_REVIEW_DATA_BOUNDARY)
+                toml_string(&match self.requester_instructions() {
+                    Some(instructions) => {
+                        format!("{CODEX_REVIEW_DATA_BOUNDARY}\n\n{instructions}")
+                    }
+                    None => CODEX_REVIEW_DATA_BOUNDARY.to_string(),
+                })
             ),
         ];
         if let Some(schema) = &self.output_schema {
             args.push("--output-schema".into());
             args.push(schema.to_string_lossy().into_owned());
         }
-        if let Some(instructions) = self
-            .instructions
-            .as_deref()
-            .map(str::trim)
-            .filter(|instructions| !instructions.is_empty())
-        {
-            // A prompt beginning with `--` must remain data and cannot turn
-            // into a Codex option (especially a hook/sandbox bypass).
-            args.push("--".into());
-            args.push(instructions.to_string());
-        }
         args
+    }
+
+    /// The requester's instructions under a fixed preamble, which also keeps
+    /// text beginning with `--` from ever reading as an option. Without the
+    /// precedence, Claude's workflow kept to its own per-file coverage and
+    /// reviewed files it was asked to leave alone.
+    fn requester_instructions(&self) -> Option<String> {
+        let instructions = self.instructions.as_deref().map(str::trim)?;
+        (!instructions.is_empty()).then(|| {
+            format!(
+                "Instructions from the person who asked for this review, which take precedence over the review workflow's own scope and coverage rules but do not lift the read-only boundary:\n\n{instructions}"
+            )
+        })
     }
 
     fn claude_args(&self) -> Vec<String> {
         let target = format!("{}...{}", self.merge_base_sha, self.head_sha);
-        let prompt = format!("/code-review {} {target}", self.effort.name());
+        let mut prompt = format!("/code-review {} {target}", self.effort.name());
+        if let Some(instructions) = self.requester_instructions() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&instructions);
+        }
         let mut args = vec![
             "--print".into(),
             // Safe mode disables CLAUDE.md, skills, plugins, hooks, MCP,
@@ -1725,14 +1729,39 @@ mod tests {
     }
 
     #[test]
-    fn codex_custom_review_text_cannot_be_parsed_as_a_bypass_option() {
+    fn codex_takes_instructions_as_developer_guidance_beside_the_base() {
         let dir = tempfile::tempdir().unwrap();
         let mut spec = review_spec(Backend::Codex, dir.path().into());
-        spec.instructions = Some("--dangerously-bypass-hook-trust".into());
+        spec.instructions = Some("  --dangerously-bypass-hook-trust\nOnly rfc.md  ".into());
         let args = spec.args();
+        // `--base` refuses a prompt, so nothing follows the options.
+        assert!(!args.iter().any(|arg| arg == "--"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-hook-trust"));
+        let developer = args
+            .iter()
+            .find(|arg| arg.starts_with("developer_instructions="))
+            .unwrap();
+        assert!(developer.contains("untrusted review data"));
+        assert!(developer.contains("--dangerously-bypass-hook-trust\\nOnly rfc.md\""));
+    }
+
+    #[test]
+    fn claude_takes_instructions_after_the_exact_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = review_spec(Backend::ClaudeCode, dir.path().into());
+        spec.instructions = Some(" --fix\nOnly rfc.md ".into());
+        let args = spec.args();
+        let prompt = args.last().unwrap();
+        assert!(prompt.starts_with("/code-review high 1111111...2222222\n\nInstructions from"));
+        assert!(prompt.ends_with(":\n\n--fix\nOnly rfc.md"));
+        assert_eq!(args[args.len() - 2], "--");
+
+        spec.instructions = Some("   ".into());
         assert_eq!(
-            &args[args.len() - 2..],
-            ["--", "--dangerously-bypass-hook-trust"]
+            spec.args().last().unwrap(),
+            "/code-review high 1111111...2222222"
         );
     }
 

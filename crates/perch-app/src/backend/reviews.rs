@@ -445,6 +445,7 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
         snapshot: snapshot.clone(),
         attempts: attempts.clone(),
         admitted_at: now,
+        instructions: request.instructions.clone(),
     };
     if let Err(error) = cache(ctx, |cache| cache.admit_review_group(&admission)) {
         if captured_snapshot.is_some() {
@@ -462,7 +463,16 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
 
     let captured_snapshot = captured_snapshot.expect("non-empty admission has a snapshot");
     for attempt in attempts {
-        queue_attempt(ctx, &item, &snapshot, &captured_snapshot, attempt, None).await;
+        queue_attempt(
+            ctx,
+            &item,
+            &snapshot,
+            &captured_snapshot,
+            request.instructions.as_deref(),
+            attempt,
+            None,
+        )
+        .await;
     }
     send_group(ctx, &group_id);
     Ok(())
@@ -564,7 +574,16 @@ async fn retry_attempt_inner(ctx: &Ctx, attempt_id: &str) -> Result<(), String> 
         created_at: Timestamp::now(),
     };
     cache(ctx, |cache| cache.admit_reviewer_retry(attempt_id, &retry))?;
-    queue_attempt(ctx, &item, &snapshot, &captured, retry, previous.run_id).await;
+    queue_attempt(
+        ctx,
+        &item,
+        &snapshot,
+        &captured,
+        group.instructions.as_deref(),
+        retry,
+        previous.run_id,
+    )
+    .await;
     send_group(ctx, &group.id);
     Ok(())
 }
@@ -851,6 +870,7 @@ async fn queue_attempt(
     item: &perch_github::Item,
     snapshot: &ReviewSnapshot,
     captured: &perch_git::ReviewSnapshot,
+    instructions: Option<&str>,
     attempt: NewReviewerAttempt,
     retry_of_run_id: Option<String>,
 ) {
@@ -875,10 +895,16 @@ async fn queue_attempt(
             snapshot.branch_label.as_deref().unwrap_or("branch"),
             snapshot.requested_base_ref
         ),
-        prompt_snapshot: Some(format!(
-            "Native review of immutable range {}...{}",
-            snapshot.merge_base_sha, snapshot.head_sha
-        )),
+        prompt_snapshot: Some(match instructions {
+            Some(instructions) => format!(
+                "Native review of immutable range {}...{}\n\nInstructions: {instructions}",
+                snapshot.merge_base_sha, snapshot.head_sha
+            ),
+            None => format!(
+                "Native review of immutable range {}...{}",
+                snapshot.merge_base_sha, snapshot.head_sha
+            ),
+        }),
         working_directory: Some(captured.checkout().to_string_lossy().into_owned()),
         revision: RevisionContext::Snapshot {
             base_sha: snapshot.merge_base_sha.clone(),
@@ -973,6 +999,26 @@ async fn execute_attempt(
         }
     };
     let group_id = attempt.group_id.clone();
+    // Reviewing everything when the requester asked for less is not a
+    // fallback, so a group that cannot be read fails the attempt.
+    let instructions = match cache(ctx, |cache| cache.load_review_group(&group_id)) {
+        Ok(Some(group)) => group.instructions,
+        Ok(None) => {
+            finish_failed_attempt(
+                ctx,
+                &attempt,
+                run,
+                lease,
+                TerminalReason::Other,
+                "The review this attempt belongs to disappeared",
+            );
+            return;
+        }
+        Err(message) => {
+            finish_failed_attempt(ctx, &attempt, run, lease, TerminalReason::Other, &message);
+            return;
+        }
+    };
     transition_attempt(ctx, &attempt_id, ReviewerPhase::Preparing);
     send_group(ctx, &group_id);
 
@@ -1068,7 +1114,7 @@ async fn execute_attempt(
         merge_base_sha: captured.manifest.range.merge_base.clone(),
         head_sha: captured.manifest.range.head.clone(),
         output_schema: schema,
-        instructions: None,
+        instructions,
         transcript: Some(transcript(captured.root(), &attempt.id, "review")),
     };
 
@@ -3724,6 +3770,7 @@ mod tests {
             created_at: now,
             started_at: Some(now),
             ended_at: Some(now),
+            instructions: None,
         };
 
         assert!(valid_empty_snapshot(&group, &snapshot));

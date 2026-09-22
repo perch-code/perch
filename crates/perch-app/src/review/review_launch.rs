@@ -11,7 +11,9 @@ use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{Effect, SignalGet, SignalUpdate, SignalWith};
 use floem::style::{CursorStyle, Position};
-use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
+use floem::views::{
+    dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack,
+};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -22,7 +24,7 @@ use crate::review::model::{
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::agents::model::{AgentsTab, BackendFilter, WorktreeFilter};
-use crate::ui::widgets::{clickable, sidebar_glyph};
+use crate::ui::widgets::{clickable, editor_box, lay_out_every_line, sidebar_glyph};
 
 /// The bar's entry point, drawn as Codex draws Chat beside Submit review:
 /// a quiet button of the same height. An active review opens Agents;
@@ -214,6 +216,16 @@ fn launcher(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
         .unwrap_or_else(|| "branch".into());
     let rows_backend = backend.clone();
     let run_backend = backend.clone();
+    let run: Rc<dyn Fn()> = Rc::new(move || {
+        let validation = launch_validation(app, state);
+        let Some(request) = validation.request else {
+            return;
+        };
+        app.begin_review_dashboard_load(&request.item_id);
+        run_backend.start_review(request);
+        close_launcher(state, true);
+    });
+    let button_run = run.clone();
     let content = Stack::vertical((
         Stack::horizontal((
             Stack::vertical((
@@ -256,6 +268,7 @@ fn launcher(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
             },
         ),
         base_row(app, state),
+        instructions_box(state, run),
         launch_error(app, state),
         Stack::horizontal((
             dyn_container(
@@ -278,15 +291,7 @@ fn launcher(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
                 "run-review",
                 true,
                 move || launch_validation(app, state).request.is_some(),
-                move || {
-                    let validation = launch_validation(app, state);
-                    let Some(request) = validation.request else {
-                        return;
-                    };
-                    app.begin_review_dashboard_load(&request.item_id);
-                    run_backend.start_review(request);
-                    close_launcher(state, true);
-                },
+                move || button_run(),
             ),
         ))
         .style(|s| s.items_center().width_full().gap(12.0)),
@@ -536,6 +541,56 @@ fn base_row(app: AppState, state: ReviewState) -> impl IntoView {
     .style(|s| s.items_center().width_full().gap(8.0))
 }
 
+/// What the reviewers should focus on, such as one file of a branch that
+/// carries more. Cmd-Enter runs the review and Escape closes the launcher,
+/// as in the Submit review box.
+fn instructions_box(state: ReviewState, run: Rc<dyn Fn()>) -> impl IntoView {
+    use floem::views::editor::command::CommandExecuted;
+
+    use crate::review::threads::cmd_enter;
+
+    let editor = text_editor(state.review_launcher_instructions.get_untracked())
+        .placeholder("Instructions for the reviewers (optional)".to_string())
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
+    lay_out_every_line(editor.editor());
+    let editor = editor
+        .pre_command(move |cmd| {
+            if cmd_enter(&cmd) {
+                run();
+                return CommandExecuted::Yes;
+            }
+            CommandExecuted::No
+        })
+        .update(move |update| {
+            if let Some(editor) = update.editor {
+                state
+                    .review_launcher_instructions
+                    .set(editor.doc().text().to_string());
+            }
+        })
+        .on_event_with_config(
+            el::KeyDown,
+            floem::context::EventCallbackConfig {
+                phases: floem::context::Phases::CAPTURE,
+            },
+            move |_, key: &KeyboardEvent| {
+                if key.code == Code::Escape && key.modifiers.is_empty() {
+                    close_launcher(state, true);
+                    EventPropagation::Stop
+                } else {
+                    EventPropagation::Continue
+                }
+            },
+        )
+        .style(|s| {
+            s.size_full()
+                .font_family(theme::FONT_STACK.to_string())
+                .font_size(theme::TEXT_META)
+        })
+        .debug_name("review-instructions");
+    editor_box(editor, || (64.0, 160.0), true)
+}
+
 fn launch_error(app: AppState, state: ReviewState) -> impl IntoView {
     dyn_container(
         move || {
@@ -610,11 +665,16 @@ fn launch_validation(app: AppState, state: ReviewState) -> LaunchValidation {
     if reviewers.is_empty() {
         return invalid("Select at least one reviewer");
     }
+    let instructions = state.review_launcher_instructions.with_untracked(|text| {
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    });
     LaunchValidation {
         request: Some(ReviewLaunchRequest {
             item_id,
             base_ref,
             reviewers,
+            instructions,
         }),
         reason: None,
     }
@@ -713,6 +773,7 @@ fn group_card(
     summary: ReviewGroupSummary,
 ) -> impl IntoView {
     let title = group_title(&summary);
+    let instructions = summary.group.instructions.clone();
     let attempts = attempt_summary(&summary);
     let counts = count_summary(&summary);
     let newer_summary = summary.clone();
@@ -810,6 +871,22 @@ fn group_card(
                 open,
             ))
             .style(|s| s.items_start().width_full().gap(8.0)),
+            match instructions {
+                Some(instructions) => Label::derived(move || instructions.clone())
+                    .style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .color(theme::FG_MUTED)
+                            .line_height(theme::PROSE_LINE_HEIGHT)
+                            .text_wrap()
+                            .width_full()
+                            .padding_left(8.0)
+                            .border_left(2.0)
+                            .border_color(theme::BORDER)
+                    })
+                    .debug_name("review-group-instructions")
+                    .into_any(),
+                None => Empty::new().into_any(),
+            },
             Label::derived(move || attempts.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::FG_MUTED)
@@ -1425,6 +1502,7 @@ mod tests {
                 created_at,
                 started_at: Some(created_at),
                 ended_at: status.is_terminal().then_some(created_at),
+                instructions: None,
             },
             snapshot: perch_github::ReviewSnapshot {
                 id: "snapshot-3".into(),
@@ -1540,6 +1618,50 @@ mod tests {
     }
 
     #[test]
+    fn instructions_ride_along_trimmed_and_an_empty_box_sends_none() {
+        let (app, state) = item_state();
+        state
+            .review_launcher_draft
+            .set(build_draft(app, state, "worktree"));
+        assert_eq!(launch_validation(app, state).request.unwrap().instructions, None);
+
+        state.review_launcher_instructions.set("  \n ".into());
+        assert_eq!(launch_validation(app, state).request.unwrap().instructions, None);
+
+        state
+            .review_launcher_instructions
+            .set("\nReview rfcs/multi_get.md only.\n".into());
+        assert_eq!(
+            launch_validation(app, state)
+                .request
+                .unwrap()
+                .instructions
+                .as_deref(),
+            Some("Review rfcs/multi_get.md only.")
+        );
+
+        // A reviewer's support changing rebuilds the draft, not the box.
+        state
+            .review_launcher_draft
+            .set(build_draft(app, state, "worktree"));
+        assert!(launch_validation(app, state).request.unwrap().instructions.is_some());
+    }
+
+    #[test]
+    fn a_history_card_shows_what_the_review_was_asked_to_focus_on() {
+        let (app, state) = item_state();
+        let mut scoped = summary(perch_github::ReviewGroupStatus::Completed);
+        scoped.group.instructions = Some("Review rfcs/multi_get.md only.".into());
+        app.update_review_group("worktree".into(), scoped);
+        let root = TestRoot::new();
+        let view = history(app, state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 500.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "review-group-instructions").is_some());
+    }
+
+    #[test]
     fn zero_attempt_review_still_has_a_history_card() {
         let (app, state) = item_state();
         app.update_review_group(
@@ -1574,6 +1696,7 @@ mod tests {
         assert!(state.review_launcher_open.get());
         let close = named(harness.root_id(), "review-launch-close").unwrap();
         assert!(harness.is_focused(close));
+        assert!(named(harness.root_id(), "review-instructions").is_some());
 
         harness.dispatch_event(key(Code::Escape, Key::Named(NamedKey::Escape)));
         harness.rebuild();

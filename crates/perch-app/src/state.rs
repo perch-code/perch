@@ -2222,6 +2222,7 @@ mod tests {
                 created_at,
                 started_at: Some(created_at),
                 ended_at: Some(created_at),
+                instructions: None,
             },
             snapshot: perch_github::ReviewSnapshot {
                 id: "snapshot".into(),

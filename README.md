@@ -295,6 +295,13 @@ edits are excluded`. Staged-only, individual-commit, and incremental-only
 review scopes are not supported. If the committed diff is empty, Perch records
 that result without launching an agent.
 
+The launcher's instructions box tells the reviewers what to focus on, such as
+"review rfcs/multi_get.md only" on a branch that also carries a prototype. The
+range reviewed stays the same: Claude reads the instructions after the range in
+its `/code-review` argument, and Codex, which refuses a custom prompt beside
+`--base`, reads them as developer instructions. A review keeps its
+instructions, so **Retry** uses them again and its history card shows them.
+
 Every review uses a clean, read-only, immutable snapshot in Perch-owned
 storage. Perch retains its exact diff, manifest, commits, and anchored blobs so
 history remains readable after the branch moves or an external checkout is
