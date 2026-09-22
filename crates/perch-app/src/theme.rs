@@ -440,6 +440,14 @@ pub const REPLY_RULE: f64 = 2.0;
 /// the way a reply's does past `REPLY_RULE`. A wholly private thread has
 /// no lane.
 pub const PRIVATE_LANE_INSET: f64 = 18.0;
+/// How far in from an agent message's top right corner its actions sit:
+/// a 24px button here centres on the folded line of a run's surface,
+/// whose padding is 10.
+pub const AGENT_ACTIONS_INSET: f64 = 6.0;
+/// What a finding keeps clear at its right for them, having no run's
+/// line for them to land on: the two buttons, the gap between, and the
+/// inset either side.
+pub const AGENT_ACTIONS_ROOM: f64 = 2.0 * 24.0 + 4.0 + 2.0 * AGENT_ACTIONS_INSET;
 /// A local thread's border is dashed, so it cannot be taken for a
 /// GitHub comment's.
 pub const THREAD_DASH: [f64; 2] = [4.0, 3.0];

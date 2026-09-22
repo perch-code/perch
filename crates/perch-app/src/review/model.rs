@@ -3220,6 +3220,17 @@ impl ReviewState {
                 && self.posts_issue_comment(composer))
     }
 
+    /// Whether `thread` can take a draft: it has lines to land on or is
+    /// on GitHub, and the item is a pull request that is still open. What
+    /// Post to GitHub on an agent's message is offered on. A tracked read
+    /// of the pull request, which lands after the threads do.
+    pub fn takes_draft(&self, thread: &CommentThread) -> bool {
+        (thread.anchor.is_some() || thread.github_id.is_some())
+            && self
+                .pull_request
+                .with(|pull| pull.as_ref().is_some_and(|pull| pull.is_open()))
+    }
+
     /// Every draft in the open item, in thread order and time order within
     /// a thread: what the review form lists and the gutter marks. A
     /// tracked read over the threads.

@@ -176,6 +176,13 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                      fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
                <path d="M9.9 3.6 l2.5 2.5" fill="none" stroke="{c}" stroke-width="1.4"/>"#
         ),
+        // Two pages, one behind the other: copy.
+        SidebarIcon::Copy => format!(
+            r#"<rect x="5.7" y="5.7" width="7.6" height="7.6" rx="1.3" fill="none" stroke="{c}"
+                     stroke-width="1.4"/>
+               <path d="M10.3 4.2 V3.7 a1 1 0 0 0 -1 -1 H3.7 a1 1 0 0 0 -1 1 V9.3 a1 1 0 0 0 1 1 H4.2"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
         SidebarIcon::Trash => format!(
             r#"<path d="M2.8 4.3 H13.2" stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>
                <path d="M6.2 4.3 V2.9 a0.7 0.7 0 0 1 0.7 -0.7 H9.1 a0.7 0.7 0 0 1 0.7 0.7 V4.3"
@@ -461,6 +468,8 @@ pub enum SidebarIcon {
     Source,
     /// A pencil at a slant: edit.
     Pencil,
+    /// Two pages, one behind the other: copy.
+    Copy,
     /// An arrow curling back: a reply.
     Reply,
 }
@@ -469,7 +478,8 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 48] = [
+    pub const ALL: [SidebarIcon; 49] = [
+        SidebarIcon::Copy,
         SidebarIcon::Reply,
         SidebarIcon::Pencil,
         SidebarIcon::Source,

@@ -1566,6 +1566,12 @@ fn bare_message_view(
         .run
         .as_ref()
         .is_some_and(|r| r.status == RunStatus::Completed);
+    // An answer that is done, or a finding, which has no run of its own,
+    // can be copied and sent on to GitHub.
+    let settled = is_agent
+        && !body.trim().is_empty()
+        && (finished || message.run.is_none());
+    let actions_thread = settled.then(|| thread.clone());
     let message = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
             run_surface(steps_view(state, run.clone())),
@@ -1580,7 +1586,16 @@ fn bare_message_view(
         ))
         .style(|s| s.flex_col().width_full().gap(8.0))
         .into_any(),
+        // A finding's text stops short of its right edge, where its
+        // actions come, so they never sit on a word.
+        None if settled => Container::new(crate::review::markdown::render(&body))
+            .style(|s| s.width_full().padding_right(theme::AGENT_ACTIONS_ROOM))
+            .into_any(),
         None => crate::review::markdown::render(&body).into_any(),
+    };
+    let message = match actions_thread {
+        Some(thread) => with_agent_actions(state, thread, body, finished, message),
+        None => message,
     };
 
     if face == ThreadFace::Card && !is_agent {
@@ -1595,6 +1610,84 @@ fn bare_message_view(
     } else {
         message
     }
+}
+
+/// An agent's message with its actions laid over its top right corner,
+/// where a GitHub comment's byline ends in its own: Post to GitHub, while
+/// the thread can take a draft, and Copy. An agent's message has no
+/// byline to hold them, and a row of its own would move the text when
+/// the pointer came, so they sit over the corner instead. On an answer
+/// that is the end of its run's folded line, and they take the surface's
+/// colour so a long summary ends cleanly under them; a finding keeps the
+/// corner clear of its text. Shown only under the pointer, as a
+/// comment's are.
+fn with_agent_actions(
+    state: ReviewState,
+    thread: CommentThread,
+    body: String,
+    on_run: bool,
+    message: floem::AnyView,
+) -> floem::AnyView {
+    let hovered = RwSignal::new(false);
+    let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
+    let draft = body.clone();
+    // Under the thread's last message, bound for GitHub, with the answer
+    // as the text: a follow-up the reader edits and sends as their own.
+    // Nothing remembers where it came from.
+    let post: Rc<dyn Fn()> = Rc::new(move || {
+        state.open_composer_with(
+            Some(thread_id.clone()),
+            anchor.clone(),
+            draft.clone(),
+            Destination::GitHub,
+            None,
+        );
+    });
+    let copy: Rc<dyn Fn()> = Rc::new(move || crate::ui::widgets::copy_to_clipboard(body.clone()));
+    // Absent, not greyed, where no draft could go: on a thread with no
+    // lines and no place on GitHub, or an item that is not an open pull
+    // request. The pull request lands after the threads, so this follows
+    // it rather than the message's own rebuild.
+    let offered = Memo::new(move |_| state.takes_draft(&thread));
+    let actions = Stack::horizontal((
+        dyn_container(
+            move || offered.get(),
+            move |offered| {
+                if !offered {
+                    return Empty::new().into_any();
+                }
+                cards::tip_with(
+                    hover_icon(hovered, SidebarIcon::PullRequest, "post-to-github", post.clone()),
+                    || "Post to GitHub".to_string(),
+                )
+                .into_any()
+            },
+        ),
+        cards::tip_with(
+            hover_icon(hovered, SidebarIcon::Copy, "copy-message", copy),
+            || "Copy".to_string(),
+        ),
+    ))
+    .debug_name("agent-actions")
+    .style(move |s| {
+        s.absolute()
+            .inset_top(theme::AGENT_ACTIONS_INSET)
+            .inset_right(theme::AGENT_ACTIONS_INSET)
+            .z_index(2)
+            .items_center()
+            .gap(4.0)
+            .apply_if(on_run && hovered.get(), |s| {
+                s.padding_left(4.0)
+                    .border_radius(13.0)
+                    .background(theme::CANVAS_SUBTLE)
+            })
+    });
+    cards::track_hover(
+        Stack::new((message, actions))
+            .style(|s| s.width_full().position(floem::style::Position::Relative)),
+        hovered,
+    )
+    .into_any()
 }
 
 /// A comment from GitHub in a thread: a small byline, then the body, then
@@ -2752,6 +2845,254 @@ mod tests {
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
         assert_eq!(composer.destination, Destination::agent(sonnet_medium()));
         assert_eq!(composer.editing, None);
+    }
+
+    /// An agent's finished answer offers Post to GitHub and Copy at its
+    /// top right, under the pointer only. Post opens the follow-up
+    /// composer on the thread, bound for GitHub, with the answer's
+    /// markdown as the text and nothing marked as its source; Copy puts
+    /// the markdown on the clipboard.
+    #[test]
+    fn an_agents_answer_offers_post_to_github_and_copy_under_the_pointer() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let mut thread = github_thread_with_private_messages();
+        let answer = thread.messages.last_mut().unwrap();
+        answer.run = Some(perch_github::RunRecord {
+            id: "r1".into(),
+            backend: "claude-code".into(),
+            model: "sonnet".into(),
+            effort: "medium".into(),
+            status: perch_github::RunStatus::Completed,
+            ..Default::default()
+        });
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = message_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.clone(),
+            thread.messages[2].clone(),
+            ThreadFace::Card,
+            Lane::PrivateContinue,
+        )
+        .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        let post = find(root_id, "post-to-github").expect("Post to GitHub");
+        let copy = find(root_id, "copy-message").expect("Copy");
+        assert_eq!(harness.get_layout_rect(post).width(), 0.0, "hidden until hovered");
+        assert_eq!(harness.get_layout_rect(copy).width(), 0.0, "hidden until hovered");
+
+        let at = harness.get_layout_rect(root_id).center();
+        harness.pointer_move(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(harness.get_layout_rect(post).width(), 24.0);
+        assert_eq!(harness.get_layout_rect(copy).width(), 24.0);
+        // Over the message's top right corner, not in a row of its own.
+        let corner = post.get_visual_rect_no_clip();
+        assert!(corner.y0 < 20.0, "at the top: {corner:?}");
+        assert!(corner.x1 > 600.0 - 60.0, "at the right: {corner:?}");
+
+        let _ = crate::ui::widgets::copied();
+        let c = copy.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        assert_eq!(crate::ui::widgets::copied(), vec!["because".to_string()]);
+
+        let c = post.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        let composer = state.composer.get().expect("Post to GitHub opened the composer");
+        assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
+        assert_eq!(composer.destination, Destination::GitHub);
+        assert_eq!(composer.anchor, thread.anchor);
+        assert_eq!(composer.editing, None, "a new draft, not an edit");
+        assert_eq!(state.composer_draft.get(), "because");
+    }
+
+    /// A finding's thread is Perch's own, on the lines the reviewer
+    /// pointed at, and its message carries the finding's text with no
+    /// run. It offers Post to GitHub as an answer does, and keeps its
+    /// text clear of the corner the actions come to, so a pointer resting
+    /// on the finding to read it never puts a glyph on a word.
+    #[test]
+    fn a_findings_message_offers_post_to_github_beside_its_text() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let thread = finding_thread(
+            "The lock is taken twice on the retry path, once in the caller and \
+             once in the helper it calls, so a second attempt deadlocks the \
+             writer; the retry has to drop it before it calls back in.",
+        );
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = message_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.clone(),
+            thread.messages[0].clone(),
+            ThreadFace::Card,
+            Lane::Flush,
+        )
+        .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        let post = find(root_id, "post-to-github").expect("a finding offers it");
+        let at = harness.get_layout_rect(root_id).center();
+        harness.pointer_move(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        let actions = find(root_id, "agent-actions").unwrap().get_visual_rect_no_clip();
+        let prose = find(root_id, "RichText").expect("the finding's text").get_visual_rect_no_clip();
+        assert!(prose.height() > 40.0, "the text wraps: {prose:?}");
+        assert!(
+            actions.intersect(prose).is_zero_area(),
+            "the actions sit beside the text, not on it: {actions:?} over {prose:?}"
+        );
+        let c = post.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        let composer = state.composer.get().expect("the composer opened");
+        assert_eq!(composer.thread_id.as_deref(), Some("finding-1"));
+        assert_eq!(composer.destination, Destination::GitHub);
+        assert_eq!(composer.anchor, thread.anchor);
+        assert_eq!(state.composer_draft.get(), thread.messages[0].body);
+    }
+
+    /// A draft can go where a thread has lines or a place on GitHub, and
+    /// either is enough: a thread of the reader's own on a selection, or
+    /// a reply under an issue's comment, which has no lines.
+    #[test]
+    fn a_draft_can_go_to_a_thread_with_lines_or_a_place_on_github() {
+        let state = state_with_pull_request();
+        let mut lines = github_thread_with_private_messages();
+        lines.origin = ThreadOrigin::Local;
+        lines.github_id = None;
+        assert!(state.takes_draft(&lines), "lines alone");
+        let mut place = github_thread_with_private_messages();
+        place.anchor = None;
+        assert!(state.takes_draft(&place), "a place on GitHub alone");
+        let mut neither = lines.clone();
+        neither.anchor = None;
+        assert!(!state.takes_draft(&neither), "neither");
+    }
+
+    /// A finding's thread as the reviewer leaves it: Perch's own, on the
+    /// lines the finding is about, with the finding's text as an agent's
+    /// message that no run produced.
+    fn finding_thread(text: &str) -> CommentThread {
+        use perch_github::{Anchor, Side};
+        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
+        CommentThread {
+            id: "finding-1".into(),
+            worktree_id: "item-1".into(),
+            origin: ThreadOrigin::Local,
+            github_id: None,
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: 7,
+                line: 9,
+                side: Side::Right,
+                commit_sha: "h".into(),
+            }),
+            outdated: false,
+            resolved: false,
+            created_at: at,
+            messages: vec![CommentMessage {
+                id: "f1".into(),
+                thread_id: "finding-1".into(),
+                origin: ThreadOrigin::Local,
+                author: Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                body: text.into(),
+                created_at: at,
+                run: None,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
+            }],
+        }
+    }
+
+    /// Post to GitHub is offered where a draft could go and nowhere
+    /// else: not on a thread with no lines and no place on GitHub. Copy
+    /// stays.
+    #[test]
+    fn post_to_github_is_absent_on_a_thread_with_no_lines_and_no_place_on_github() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let mut nowhere = github_thread_with_private_messages();
+        nowhere.id = "ours".into();
+        nowhere.origin = ThreadOrigin::Local;
+        nowhere.anchor = None;
+        nowhere.github_id = None;
+        for m in &mut nowhere.messages {
+            m.thread_id = "ours".into();
+            m.github_id = None;
+        }
+        state.comment_threads.set(Arc::new(vec![nowhere.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = message_view(
+            app,
+            state,
+            Rc::new(backend),
+            nowhere.clone(),
+            nowhere.messages[2].clone(),
+            ThreadFace::Card,
+            Lane::Flush,
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "post-to-github").is_none(), "nowhere for a draft");
+        assert!(find(harness.root_id(), "copy-message").is_some(), "Copy stays");
+    }
+
+    /// Post to GitHub is offered only on an open pull request, and the
+    /// pull request lands after the threads, so the action follows it:
+    /// absent until it arrives, gone again when it closes.
+    #[test]
+    fn post_to_github_follows_the_pull_request() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let thread = github_thread_with_private_messages();
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = message_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.clone(),
+            thread.messages[2].clone(),
+            ThreadFace::Card,
+            Lane::Flush,
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "post-to-github").is_none(), "no pull request yet");
+
+        state.pull_request.set(Some(Arc::new(pull())));
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "post-to-github").is_some(), "the pull request landed");
+
+        let mut closed = pull();
+        closed.state = "closed".into();
+        state.pull_request.set(Some(Arc::new(closed)));
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "post-to-github").is_none(), "closed takes no review");
     }
 
     /// The draft the reader leaves in `thread`, bound for GitHub.
