@@ -59,7 +59,8 @@ pub struct AgentCompletionNotice {
 
 #[derive(Clone, Copy)]
 pub struct AppState {
-    /// Encoded image bytes, shared so a clone is a refcount bump.
+    /// Each face as a PNG already cut to its circle (`backend::avatar`),
+    /// shared so a clone is a refcount bump.
     pub avatars: RwSignal<HashMap<String, Arc<Vec<u8>>>>,
     /// Declared repository identities and display names, also offered by
     /// the sidebar's Repository filter when they have no cached items.

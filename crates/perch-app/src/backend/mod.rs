@@ -26,6 +26,7 @@ use perch_github::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
+mod avatar;
 pub(crate) mod reviews;
 pub(crate) mod runs;
 
@@ -11351,15 +11352,16 @@ fn spawn_avatar(
     limit: Arc<Semaphore>,
     url: String,
 ) {
-    // Disk first. Avatars change rarely and a hit costs no request.
-    if let Some(cache) = cache.as_ref() {
-        if let Ok(guard) = cache.lock() {
-            if let Some(bytes) = guard.load_avatar(&url) {
-                tracing::debug!(url, bytes = bytes.len(), "avatar from disk");
-                let _ = events.send(Event::Avatar { url, bytes });
-                return;
-            }
-        }
+    // Disk first. Avatars change rarely and a hit costs no request. The
+    // face is cut with the cache let go.
+    let kept = cache
+        .as_ref()
+        .and_then(|cache| cache.lock().ok()?.load_avatar(&url));
+    if let Some(bytes) = kept {
+        tracing::debug!(url, bytes = bytes.len(), "avatar from disk");
+        let bytes = avatar::drawn(bytes);
+        let _ = events.send(Event::Avatar { url, bytes });
+        return;
     }
 
     let Some(github) = github else { return };
@@ -11370,11 +11372,13 @@ fn spawn_avatar(
         };
         match github.fetch_avatar(&url).await {
             Ok(bytes) => {
+                // What GitHub sent is kept, and cut again on each load.
                 if let Some(cache) = cache.as_ref() {
                     if let Ok(guard) = cache.lock() {
                         let _ = guard.store_avatar(&url, &bytes);
                     }
                 }
+                let bytes = avatar::drawn(bytes);
                 let _ = events.send(Event::Avatar { url, bytes });
             }
             Err(e) => tracing::debug!(error = %e, url, "avatar fetch failed"),
@@ -14649,5 +14653,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(ctx.item(&opened.id).unwrap(), opened);
+    }
+
+    /// A face kept on disk reaches the window cut to its circle, and the
+    /// file goes on holding what GitHub sent.
+    #[test]
+    fn a_face_from_disk_reaches_the_window_cut_to_its_circle() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(&dir.path().join("perch.db"), Some(dir.path().into())).unwrap();
+        let url = "https://avatars.githubusercontent.com/u/1?v=4".to_string();
+        let sent = avatar::tests::picture(64, 64);
+        cache.store_avatar(&url, &sent).unwrap();
+        let cache = Arc::new(std::sync::Mutex::new(cache));
+        let (events, received) = std::sync::mpsc::channel();
+
+        spawn_avatar(None, Some(cache.clone()), events, Arc::new(Semaphore::new(1)), url.clone());
+
+        let Ok(Event::Avatar { url: face_url, bytes }) = received.try_recv() else {
+            panic!("no face was sent");
+        };
+        assert_eq!(face_url, url);
+        let face = image::load_from_memory(&bytes).unwrap().into_rgba8();
+        assert_eq!(face.dimensions(), (64, 64));
+        assert_eq!(face.get_pixel(0, 0)[3], 0, "the corner was not cut");
+        assert_eq!(face.get_pixel(32, 32)[3], 255);
+        assert_eq!(cache.lock().unwrap().load_avatar(&url), Some(sent));
     }
 }

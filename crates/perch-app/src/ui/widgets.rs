@@ -4,7 +4,7 @@ use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::style::Style;
-use floem::views::{ClipExt, Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
+use floem::views::{Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
 use perch_github::SubjectState;
 
 use crate::icons::{self, SidebarIcon};
@@ -429,13 +429,12 @@ pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, se
     dyn_container(
         move || state.avatar_for(&url()),
         move |bytes| match bytes {
-            // An Img draws its bitmap square: border_radius alone would only
-            // round the border, not the picture. Clipping is what actually
-            // makes the avatar circular.
+            // The picture comes cut to its circle (`backend::avatar`) and is
+            // drawn as it is, filling its square. A clip cannot round it:
+            // vger clips with a hard edge, and an image fitted by cover
+            // sets its own square clip over its parent's round one.
             Some(bytes) => img(move || bytes.as_ref().clone())
-                .style(move |s| s.size(size, size).object_fit(ObjectFit::Cover))
-                .clip()
-                .style(move |s| s.size(size, size).border_radius(radius))
+                .style(move |s| s.size(size, size).object_fit(ObjectFit::Fill))
                 .into_any(),
             None => {
                 let initial = seed
@@ -589,5 +588,47 @@ mod tests {
         ] {
             assert!(!is_browser_url(url), "accepted {url}");
         }
+    }
+
+    /// A face is drawn as the backend cut it, at its size, with nothing
+    /// clipping it: under vger a clip is what drew faces square.
+    #[test]
+    fn a_face_is_drawn_whole_with_no_clip() {
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use image::{ImageFormat, Rgba, RgbaImage};
+
+        let root = TestRoot::new();
+        let app = crate::state::AppState::new();
+        let mut png = Vec::new();
+        RgbaImage::from_pixel(64, 64, Rgba([10, 20, 30, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        app.apply(crate::backend::Event::Avatar {
+            url: "face".into(),
+            bytes: png,
+        });
+        let view = super::avatar(app, || "face".to_string(), 22.0, "chris".into());
+        let mut harness = HeadlessHarness::new_with_size(root, view, 100.0, 100.0);
+        harness.rebuild();
+        harness.paint();
+
+        fn all(id: floem::ViewId, out: &mut Vec<floem::ViewId>) {
+            out.push(id);
+            for child in id.children() {
+                all(child, out);
+            }
+        }
+        let mut views = Vec::new();
+        all(harness.root_id(), &mut views);
+        let picture = views
+            .iter()
+            .find(|id| id.debug_name().contains("Img"))
+            .expect("the picture is drawn");
+        let drawn = picture.get_visual_rect_no_clip();
+        assert_eq!((drawn.width(), drawn.height()), (22.0, 22.0));
+        assert!(
+            !views.iter().any(|id| id.debug_name().contains("Clip")),
+            "the face is clipped"
+        );
     }
 }
