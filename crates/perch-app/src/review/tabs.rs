@@ -3,9 +3,9 @@
 //!
 //! The active tab takes the surface of what it shows, the editor's or the
 //! page's, and an accent stripe along its top, so it reads as continuous
-//! with what is below it. Only the inactive tabs carry the rule that
-//! separates the strip from the pane; drawing that rule under the active
-//! tab too would cut it off from what it is showing.
+//! with what is below it. Everything in the strip but the active tab
+//! carries the rule that separates the strip from the pane; drawing that
+//! rule under the active tab too would cut it off from what it is showing.
 
 use std::rc::Rc;
 
@@ -46,7 +46,7 @@ pub fn tab_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 let backend = backend.clone();
                 move |empty| {
                     if empty {
-                        Empty::new().style(|s| s.size_full()).into_any()
+                        strip_rule().style(|s| s.size_full()).into_any()
                     } else {
                         open_tabs(state, backend.clone()).into_any()
                     }
@@ -80,7 +80,13 @@ pub fn tab_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .into_any()
             }
         })
-        .style(|s| s.items_center().min_width(0.0)),
+        .style(|s| {
+            s.items_center()
+                .min_width(0.0)
+                .height_full()
+                .border_bottom(1.0)
+                .border_color(theme::BORDER)
+        }),
         change_nav(state),
         tiles(app, state, backend),
     ))
@@ -133,12 +139,20 @@ fn conversation_tab(state: ReviewState) -> impl IntoView {
 }
 
 fn open_tabs(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    dyn_stack(
-        move || state.tabs.get(),
-        |tab| tab.path.clone(),
-        move |tab| tab_view(state, backend.clone(), tab.path, tab.origin),
-    )
-    .style(|s| s.items_center().height_full())
+    // The strip's height given outright: a scroll leaves its content's
+    // height open, so a full one came out at the tabs' own and they
+    // stopped short of the pane. The room after the last tab carries the
+    // rule on to the controls.
+    Stack::horizontal((
+        dyn_stack(
+            move || state.tabs.get(),
+            |tab| tab.path.clone(),
+            move |tab| tab_view(state, backend.clone(), tab.path, tab.origin),
+        )
+        .style(|s| s.items_center().height_full()),
+        strip_rule().debug_name("tabs rule"),
+    ))
+    .style(|s| s.height(theme::TAB_HEIGHT).min_width_full())
     .scroll()
     // No visible bar on a strip this short: it would sit over the tab names,
     // and the wheel still scrolls. A trackpad's vertical scroll moves the
@@ -194,6 +208,18 @@ fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Orig
         }
     })
     .style(move |s| tab_style(s, is_active_box()))
+}
+
+/// Room in the strip with nothing in it, ruled along its bottom as the
+/// inactive tabs are, so the rule under the strip runs unbroken to the
+/// active tab.
+fn strip_rule() -> Empty {
+    Empty::new().style(|s| {
+        s.flex_grow(1.0_f32)
+            .height_full()
+            .border_bottom(1.0)
+            .border_color(theme::BORDER)
+    })
 }
 
 /// A tab, a file's or Conversation's. The active one has the surface of
@@ -694,6 +720,8 @@ mod tests {
         assert_eq!(conversation.x0, strip.x0, "Conversation's tab is first");
         assert!(within(conversation, strip) && within(file, strip));
         assert!(conversation.x1 <= file.x0);
+        assert_eq!((file.y0, file.y1), (strip.y0, strip.y1), "a file's tab fills the strip, as Conversation's does");
+        assert_eq!((conversation.y0, conversation.y1), (strip.y0, strip.y1));
         let tile = rect(&harness, "chat tile");
         assert!(tile.x1 <= rect(&harness, "files tile").x0);
         assert!(rect(&harness, "files tile").x1 <= rect(&harness, "agents tile").x0);
@@ -713,6 +741,12 @@ mod tests {
         assert!(rect(&harness, "file tiles").width() > 0.0);
         assert_eq!(rect(&harness, "chat tile"), tile);
         assert!(named(harness.root_id(), "conversation-title").is_none());
+        // The room after the tab is ruled, from the tab to the controls
+        // and down to the pane.
+        let rule = rect(&harness, "tabs rule");
+        assert_eq!(rule.x0, file.x1);
+        assert_eq!(rule.y1, strip.y1);
+        assert!(rule.width() > 0.0);
 
         // Back to Conversation, and closed from its tab: the file shows.
         harness.click(conversation.center().x, conversation.center().y);
