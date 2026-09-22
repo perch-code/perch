@@ -3258,15 +3258,21 @@ impl ReviewState {
             && self.posts_issue_comment_about(thread_id, anchor)
     }
 
-    /// Whether `thread` can take a draft: it has lines to land on or is
-    /// on GitHub, and the item is a pull request that is still open. What
-    /// Post to GitHub on an agent's message is offered on. A tracked read
-    /// of the pull request, which lands after the threads do.
-    pub fn takes_draft(&self, thread: &CommentThread) -> bool {
-        (thread.anchor.is_some() || thread.github_id.is_some())
-            && self
-                .pull_request
-                .with(|pull| pull.as_ref().is_some_and(|pull| pull.is_open()))
+    /// Whether a message from `thread` has anywhere on GitHub to go, as
+    /// `github_offered` asks it of a composer. A thread with lines or a
+    /// place on GitHub takes a draft, which rides in a review, so the
+    /// pull request has to be open to take one. A thread of Perch's own
+    /// with neither has nowhere to reply, so it posts as an issue
+    /// comment about the pull request instead, which a closed one takes
+    /// as well. What Post to GitHub on an agent's message is offered on,
+    /// and Reply on a reviewer's. A tracked read of the pull request,
+    /// which lands after the threads do.
+    pub fn github_offered_on(&self, thread: &CommentThread) -> bool {
+        let takes_draft = thread.anchor.is_some() || thread.github_id.is_some();
+        self.pull_request.with(|pull| match pull.as_ref() {
+            None => false,
+            Some(pull) => !takes_draft || pull.is_open(),
+        })
     }
 
     /// Every draft in the open item, in thread order and time order within

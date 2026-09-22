@@ -1770,9 +1770,9 @@ fn bare_message_view(
 
 /// An agent's message with its actions laid over its top right corner,
 /// where a GitHub comment's byline ends in its own: Post to GitHub, while
-/// the thread can take a draft, and Copy. An agent's message has no
-/// byline to hold them, and a row of its own would move the text when
-/// the pointer came, so they sit over the corner instead. On an answer
+/// the thread has somewhere on GitHub to go, and Copy. An agent's
+/// message has no byline to hold them, and a row of its own would move
+/// the text when the pointer came, so they sit over the corner instead. On an answer
 /// the corner is the end of its run's folded line, and they take the
 /// surface's colour so a long summary ends cleanly under them; a finding
 /// keeps the corner clear of its text. Shown only under the pointer, as
@@ -1788,8 +1788,9 @@ fn with_agent_actions(
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     let draft = body.clone();
     // Under the thread's last message, bound for GitHub, with the answer
-    // as the text: a follow-up the reader edits and sends as their own.
-    // Nothing remembers where it came from.
+    // as the text: a follow-up the reader edits and sends as their own,
+    // a draft where the thread takes one and an issue comment where it
+    // has no reply to make. Nothing remembers where it came from.
     let post: Rc<dyn Fn()> = Rc::new(move || {
         state.open_composer_with(
             Some(thread_id.clone()),
@@ -1800,11 +1801,11 @@ fn with_agent_actions(
         );
     });
     let copy: Rc<dyn Fn()> = Rc::new(move || crate::ui::widgets::copy_to_clipboard(body.clone()));
-    // Absent, not greyed, where no draft could go: on a thread with no
-    // lines and no place on GitHub, or an item that is not an open pull
-    // request. The pull request lands after the threads, so this follows
-    // it rather than the message's own rebuild.
-    let offered = Memo::new(move |_| state.takes_draft(&thread));
+    // Absent, not greyed, where the message has nowhere to go: an item
+    // that is not a pull request at all, or a closed one under a thread
+    // whose draft would need a review. The pull request lands after the
+    // threads, so this follows it rather than the message's own rebuild.
+    let offered = Memo::new(move |_| state.github_offered_on(&thread));
     let actions = Stack::horizontal((
         dyn_container(
             move || offered.get(),
@@ -1850,7 +1851,7 @@ fn with_agent_actions(
 /// the reactions on it. A reply, any comment after the thread's first,
 /// sits flush under the one it answers with a rule down its left. Reply
 /// opens the composer under the thread, bound for GitHub, whatever the
-/// thread's last message was, while the pull request can take the draft;
+/// thread's last message was, while it has somewhere on GitHub to go;
 /// Ask about this opens it to an agent, so the answer lands beside the
 /// comment it is about; the thread's history carries the comment to the
 /// agent, and nothing is quoted.
@@ -1886,7 +1887,7 @@ fn github_message_view(
     });
     // To GitHub, whatever the thread's last message was: an answer to
     // the comment, under the agent's take on it if there is one. Absent
-    // where no draft could go, as Post to GitHub is.
+    // where it has nowhere to go, as Post to GitHub is.
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     let reply_to: Rc<dyn Fn()> = Rc::new(move || {
         state.open_composer_with(
@@ -1898,7 +1899,7 @@ fn github_message_view(
         );
     });
     let for_reply = thread.clone();
-    let offered = Memo::new(move |_| state.takes_draft(&for_reply));
+    let offered = Memo::new(move |_| state.github_offered_on(&for_reply));
     let reply_button = dyn_container(
         move || offered.get(),
         move |offered| {
@@ -3375,22 +3376,34 @@ mod tests {
         assert_eq!(state.composer_draft.get(), thread.messages[0].body);
     }
 
-    /// A draft can go where a thread has lines or a place on GitHub, and
-    /// either is enough: a thread of the reader's own on a selection, or
-    /// a reply under an issue's comment, which has no lines.
+    /// Where a message from a thread can go on a pull request. Lines or
+    /// a place on GitHub, either alone, take a draft, which needs the
+    /// pull request open to ride in a review. Neither takes an issue
+    /// comment instead, which a closed pull request still accepts, so
+    /// what closing takes away is the draft and not the comment.
     #[test]
-    fn a_draft_can_go_to_a_thread_with_lines_or_a_place_on_github() {
+    fn a_thread_with_lines_or_a_place_on_github_takes_a_draft_and_one_with_neither_comments() {
         let state = state_with_pull_request();
         let mut lines = github_thread_with_private_messages();
         lines.origin = ThreadOrigin::Local;
         lines.github_id = None;
-        assert!(state.takes_draft(&lines), "lines alone");
+        assert!(state.github_offered_on(&lines), "lines alone");
         let mut place = github_thread_with_private_messages();
         place.anchor = None;
-        assert!(state.takes_draft(&place), "a place on GitHub alone");
+        assert!(state.github_offered_on(&place), "a place on GitHub alone");
         let mut neither = lines.clone();
         neither.anchor = None;
-        assert!(!state.takes_draft(&neither), "neither");
+        assert!(state.github_offered_on(&neither), "neither, so an issue comment");
+
+        let mut closed = pull();
+        closed.state = "closed".into();
+        state.pull_request.set(Some(Arc::new(closed)));
+        assert!(!state.github_offered_on(&lines), "no review to take the draft");
+        assert!(!state.github_offered_on(&place), "nor a reply for one");
+        assert!(state.github_offered_on(&neither), "a closed pull request still takes a comment");
+
+        state.pull_request.set(None);
+        assert!(!state.github_offered_on(&neither), "an issue has none of it yet");
     }
 
     /// A finding's thread as the reviewer leaves it: Perch's own, on the
@@ -3431,39 +3444,62 @@ mod tests {
         }
     }
 
-    /// Post to GitHub is offered where a draft could go and nowhere
-    /// else: not on a thread with no lines and no place on GitHub. Copy
-    /// stays.
+    /// An answer asked at the foot of a pull request sits in a thread of
+    /// Perch's own with no lines and no place on GitHub, where a draft
+    /// could not go. Post to GitHub is offered there all the same, since
+    /// the composer it opens posts an issue comment: the same send the
+    /// foot has, which is what the reader would otherwise paste into.
+    /// With no pull request to comment on it goes, and Copy stays.
     #[test]
-    fn post_to_github_is_absent_on_a_thread_with_no_lines_and_no_place_on_github() {
+    fn post_to_github_is_offered_on_a_thread_of_perchs_own_and_posts_an_issue_comment() {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = state_with_pull_request();
-        let mut nowhere = github_thread_with_private_messages();
-        nowhere.id = "ours".into();
-        nowhere.origin = ThreadOrigin::Local;
-        nowhere.anchor = None;
-        nowhere.github_id = None;
-        for m in &mut nowhere.messages {
+        let mut ours = github_thread_with_private_messages();
+        ours.id = "ours".into();
+        ours.origin = ThreadOrigin::Local;
+        ours.anchor = None;
+        ours.github_id = None;
+        for m in &mut ours.messages {
             m.thread_id = "ours".into();
             m.github_id = None;
         }
-        state.comment_threads.set(Arc::new(vec![nowhere.clone()]));
+        state.comment_threads.set(Arc::new(vec![ours.clone()]));
         let (backend, _commands) = crate::backend::Backend::recording();
         let view = message_view(
             app,
             state,
             Rc::new(backend),
-            nowhere.clone(),
-            nowhere.messages[2].clone(),
+            ours.clone(),
+            ours.messages[2].clone(),
             ThreadFace::Card,
             Lane::Flush,
         );
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "post-to-github").is_none(), "nowhere for a draft");
-        assert!(find(harness.root_id(), "copy-message").is_some(), "Copy stays");
+        let root_id = harness.root_id();
+        let post = find(root_id, "post-to-github").expect("nowhere to reply, so it comments");
+        assert!(find(root_id, "copy-message").is_some(), "Copy stays");
+
+        let at = harness.get_layout_rect(root_id).center();
+        harness.pointer_move(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        let c = post.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        let composer = state.composer.get().expect("Post to GitHub opened the composer");
+        assert_eq!(composer.thread_id.as_deref(), Some("ours"));
+        assert_eq!(composer.destination, Destination::GitHub);
+        assert_eq!(composer.anchor, None);
+        assert_eq!(state.composer_draft.get(), "because");
+        assert!(state.posts_issue_comment(&composer), "an issue comment, not a draft");
+
+        // An issue has no pull request to comment on.
+        state.pull_request.set(None);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "post-to-github").is_none(), "nowhere at all");
     }
 
     /// Post to GitHub is offered only on an open pull request, and the

@@ -144,9 +144,17 @@ flush with the GitHub comments they answer.
 An agent message gains `Post to GitHub` in its hover actions, beside
 copy. It opens a composer under the thread's last message, destination
 GitHub, with the answer's markdown as the text, the caret at the end.
-The reader edits and sends, and it is a draft like any other. The
-agent's message stays where it was, private. Nothing records that the
-draft came from it.
+The reader edits and sends. The agent's message stays where it was,
+private. Nothing records that the message came from it.
+
+What the send does is the composer's rule, not the action's: under a
+thread with lines or a place on GitHub it is a draft like any other,
+and under one of Perch's own, where there is nothing to reply to, it is
+an issue comment and posts at once. So an answer asked at the foot of
+the conversation, about the pull request as a whole, can go to the pull
+request without a trip through the clipboard. The action is absent only
+where neither can go: on an issue, and on a closed pull request for the
+threads whose draft would need a review.
 
 On a findings thread the same action is on the finding's message.
 
@@ -335,6 +343,10 @@ Against a pull request with review comments from someone else:
   and the agent's answer above it still inset.
 - Hover Claude's answer, `Post to GitHub`. The composer holds its text.
   Change a word, send. A draft. Claude's message is unchanged.
+- Ask Claude about the pull request at the foot of the conversation.
+  Hover its answer, `Post to GitHub`. The composer holds its text and
+  the send reads `Comment`. Send, confirm: an issue comment, and
+  Claude's message is unchanged.
 - Open Submit review. Both drafts are listed with their locations.
   Pick `Comment`, submit. The pills go; each comment keeps the reader's
   byline, with its time, link and reactions. Refresh github.com: two

@@ -98,7 +98,9 @@ what an agent said and what you asked it are inset behind a rule marked
 `PERCH ONLY`.
 An agent's answer never posts on its own: **Post to GitHub** under the pointer
 puts its text in a composer for you to edit and send, and nothing records
-where the draft came from.
+where it came from. It goes the same two ways as anything else: a draft under
+a thread with lines or a place on GitHub, an issue comment under one of
+Perch's own, such as a question asked at the foot of Conversation.
 
 ## Authentication
 
