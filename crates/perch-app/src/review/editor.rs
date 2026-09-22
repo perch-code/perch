@@ -53,6 +53,7 @@ use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::cards;
 use crate::review::doc::{self, Card, CardId, Doc, DocRow, Reveals, Run, Tint};
+use crate::review::find;
 use crate::review::gutter::{column_offset, diff_gutter, plain_gutter, side_gutter, visible_lines};
 use crate::review::hierarchy;
 use crate::review::hover;
@@ -95,72 +96,83 @@ pub fn editor_pane(
         });
     }
 
+    // The find bar's matches follow the file and the query from here,
+    // beside the jump: one effect for the pane, whichever editor is up.
+    find::wire(state);
+
     let code_backend = backend.clone();
     let code_open = open_file.clone();
 
     Stack::vertical((
-        dyn_container(
-            // The epoch changes whenever the active file or its content
-            // changes, and the layout when the toggle is clicked. Another
-            // file or another layout is another editor: a fresh one resets
-            // the layout caches cleanly, and nothing of the old is worth
-            // keeping. What changes under the one file is for editing the
-            // document in place, through the live documents held below.
-            // A picture flipped to its markup, or back, is another view
-            // of the file the same way.
-            move || {
-                let path = state.active.get();
-                let source = path
-                    .as_deref()
-                    .is_some_and(|path| state.shows_source(path));
-                (path, state.editor_epoch.get(), state.layout.get(), source)
-            },
-            move |(path, epoch, layout, source)| {
-                // Whatever editor stood here is going with its documents;
-                // the one built below registers its own.
-                state.docs.set(None);
-                match path {
-                    None => centered_message(
-                        SidebarIcon::Search,
-                        || "No file open".to_string(),
-                        || "Pick a file from the list to read it.".to_string(),
-                    )
-                    .into_any(),
-                    Some(path) => match state.file(&path) {
-                        Some(file) => {
-                            // A file that draws is drawn, unless the reader
-                            // asked for its markup.
-                            let drawn = if source { None } else { file.picture.clone() };
-                            match drawn {
-                                Some(picture) => {
-                                    // No editor, no selection: `a` would
-                                    // otherwise anchor a question on the
-                                    // lines the last editor had selected.
-                                    state.selection.set(None);
-                                    picture::pane(&file, &picture).into_any()
+        Stack::new((
+            dyn_container(
+                // The epoch changes whenever the active file or its content
+                // changes, and the layout when the toggle is clicked. Another
+                // file or another layout is another editor: a fresh one resets
+                // the layout caches cleanly, and nothing of the old is worth
+                // keeping. What changes under the one file is for editing the
+                // document in place, through the live documents held below.
+                // A picture flipped to its markup, or back, is another view
+                // of the file the same way.
+                move || {
+                    let path = state.active.get();
+                    let source = path
+                        .as_deref()
+                        .is_some_and(|path| state.shows_source(path));
+                    (path, state.editor_epoch.get(), state.layout.get(), source)
+                },
+                move |(path, epoch, layout, source)| {
+                    // Whatever editor stood here is going with its documents;
+                    // the one built below registers its own.
+                    state.docs.set(None);
+                    match path {
+                        None => centered_message(
+                            SidebarIcon::Search,
+                            || "No file open".to_string(),
+                            || "Pick a file from the list to read it.".to_string(),
+                        )
+                        .into_any(),
+                        Some(path) => match state.file(&path) {
+                            Some(file) => {
+                                // A file that draws is drawn, unless the reader
+                                // asked for its markup.
+                                let drawn = if source { None } else { file.picture.clone() };
+                                match drawn {
+                                    Some(picture) => {
+                                        // No editor, no selection: `a` would
+                                        // otherwise anchor a question on the
+                                        // lines the last editor had selected.
+                                        state.selection.set(None);
+                                        picture::pane(&file, &picture).into_any()
+                                    }
+                                    None => code_view(
+                                        app,
+                                        state,
+                                        file,
+                                        epoch,
+                                        layout,
+                                        code_backend.clone(),
+                                        code_open.clone(),
+                                    )
+                                    .into_any(),
                                 }
-                                None => code_view(
-                                    app,
-                                    state,
-                                    file,
-                                    epoch,
-                                    layout,
-                                    code_backend.clone(),
-                                    code_open.clone(),
-                                )
-                                .into_any(),
                             }
-                        }
-                        None => loading_view(path).into_any(),
-                    },
-                }
-            },
-        )
+                            None => loading_view(path).into_any(),
+                        },
+                    }
+                },
+            )
+            .style(|s| s.size_full().background(theme::CODE_BG)),
+            // The find bar hangs from the top right of the code, over it and
+            // outside the container that swaps editors, so it stays up with
+            // its text and its keyboard from one file to the next.
+            find::bar(state),
+        ))
         .style(|s| {
             s.flex_grow(1.0_f32)
                 .min_height(0.0)
                 .width_full()
-                .background(theme::CODE_BG)
+                .position(Position::Relative)
         }),
         references::panel(state, open_file),
         hierarchy::panel(state, backend),
@@ -270,10 +282,22 @@ fn stacked_view(
     });
     let text = built.text.clone();
     let doc = RwSignal::new(Arc::new(built));
-    let editor = code_editor(text, PerchStyling::new(file.clone(), doc, state.highlights, epoch));
+    let editor = code_editor(
+        text,
+        PerchStyling::new(
+            file.clone(),
+            doc,
+            state.highlights,
+            state.find_matches,
+            state.find_current,
+            epoch,
+        ),
+    );
     let live = LiveDoc {
         handle: editor.doc(),
         doc,
+        cursor: editor.editor().cursor,
+        content: editor.editor().editor_view_id.get_untracked(),
     };
     state.docs.set(Some(LiveDocs {
         epoch,
@@ -354,6 +378,12 @@ fn stacked_view(
     .style(|s| s.size_full().min_height(0.0))
 }
 
+/// Whether a file has two sides to split: a base to put on the left, and
+/// the alignment of the two, which a file that is not text has not.
+pub(crate) fn splits(file: &LoadedFile) -> bool {
+    file.base_buffer.is_some() && !file.truncated && !file.alignment.is_empty()
+}
+
 /// The folds of a file: the runs around its changes and anchors less the
 /// reveals, or none when the worktree's files are shown whole. A file
 /// outside the changed list has no status and is never folded, whatever
@@ -402,10 +432,10 @@ pub(crate) fn split_doc(
     reveals: &Reveals,
     cards: &[Card],
 ) -> Option<(Doc, Doc)> {
-    let base = file.base_buffer.as_ref()?;
-    if file.truncated || file.alignment.is_empty() {
+    if !splits(file) {
         return None;
     }
+    let base = file.base_buffer.as_ref()?;
     let folds = folds_of(file, folded, anchors, reveals);
     Some(doc::build_split(
         &file.alignment,
@@ -1173,7 +1203,15 @@ fn split_view(
     // Distinct cache keys, in case the two ever share a layout cache.
     let left = code_editor(
         left_text,
-        PerchStyling::side(file.clone(), Side::Base, left_doc, state.highlights, epoch.wrapping_mul(2)),
+        PerchStyling::side(
+            file.clone(),
+            Side::Base,
+            left_doc,
+            state.highlights,
+            state.find_matches,
+            state.find_current,
+            epoch.wrapping_mul(2),
+        ),
     )
     .style(|s| {
         s.pointer_events_none()
@@ -1186,16 +1224,22 @@ fn split_view(
             Side::Head,
             right_doc,
             state.highlights,
+            state.find_matches,
+            state.find_current,
             epoch.wrapping_mul(2) + 1,
         ),
     );
     let left_live = LiveDoc {
         handle: left.doc(),
         doc: left_doc,
+        cursor: left.editor().cursor,
+        content: left.editor().editor_view_id.get_untracked(),
     };
     let right_live = LiveDoc {
         handle: right.doc(),
         doc: right_doc,
+        cursor: right.editor().cursor,
+        content: right.editor().editor_view_id.get_untracked(),
     };
     state.docs.set(Some(LiveDocs {
         epoch,
@@ -1502,12 +1546,15 @@ fn wire_cursor(
 }
 
 /// The editor lays its lines out through the styling, and caches them;
-/// when the tint changes, the cached layouts are stale, and are dropped
-/// so the lines in view are laid out again with the tint, or without it.
+/// when the tint changes, the symbol's or the find bar's, the cached
+/// layouts are stale, and are dropped so the lines in view are laid out
+/// again with the tint, or without it.
 fn wire_highlights(state: ReviewState, live: &LiveDoc) {
     let handle = live.handle.clone();
     Effect::new(move |before: Option<()>| {
         state.highlights.track();
+        state.find_matches.track();
+        state.find_current.track();
         // The layouts built with the editor are right; only a change
         // after that makes them stale.
         if before.is_some() {
@@ -1544,18 +1591,8 @@ fn wire_jump(
         }
         state.jump_to_line.set(None);
         let mut row = doc.with_untracked(|d| d.row_of_head(head_line));
-        if row.is_none()
-            && Effect::untrack(|| state.folded(&file.path))
-            && file.buffer.display_line(head_line).is_some()
-        {
-            // The reveal reaches the editor before this returns: the
-            // effect that rebuilds the document runs on the write.
-            state.reveal(
-                &file.path,
-                &file.blob,
-                head_line.saturating_sub(doc::CONTEXT_LINES),
-                head_line + doc::CONTEXT_LINES,
-            );
+        if row.is_none() {
+            state.reveal_around(&file, head_line);
             row = doc.with_untracked(|d| d.row_of_head(head_line));
         }
         // A line the file does not have lands at the end of it.

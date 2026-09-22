@@ -46,6 +46,9 @@ floem_renderer = { git = "https://github.com/lapce/floem", branch = "main" }
 # registering SF Mono's files by hand: see `theme::install_code_font`.
 # The version is parley's, and a bump of floem's parley must move it.
 fontique = "0.7"
+# The find bar's query, plain or as a pattern: both go through one
+# matcher, the plain one escaped.
+regex = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

@@ -512,6 +512,15 @@ pub const SYMBOL_HIGHLIGHT_BG: Color = Color::from_rgba8(0x32, 0x32, 0x2f, 0x1c)
 /// diff on github.com does. floem's own default is black at half alpha
 /// in an editor and its theme's teal over a label.
 pub const SELECTION_BG: Color = Color::from_rgba8(0x00, 0x7a, 0xff, 0x4d);
+/// The tint behind every match of the find bar's query, and the darker
+/// one behind the match the bar is on: VS Code's, orange at a third and
+/// an olive grey. The editor paints a range's tint over the selection,
+/// so the current match's has to read on its own, without the blue.
+pub const FIND_MATCH_BG: Color = Color::from_rgba8(0xea, 0x5c, 0x00, 0x55);
+pub const FIND_CURRENT_BG: Color = Color::from_rgb8(0xa8, 0xac, 0x94);
+/// The find bar: how tall it is, and how wide its box is, as VS Code's.
+pub const FIND_BAR_HEIGHT: f64 = 33.0;
+pub const FIND_BOX_WIDTH: f64 = 221.0;
 
 #[cfg(test)]
 mod tests {

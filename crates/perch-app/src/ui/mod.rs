@@ -248,6 +248,50 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 let typing = state.search_focused.get()
                     || review.composer_focused.get()
                     || review.submit_review_open.get();
+                // The find bar's keys, from the code and from the bar alike:
+                // Cmd-F puts the bar up over the code, or gives it the
+                // keyboard again; Cmd-G and Cmd-Shift-G walk the matches,
+                // putting the bar up without the keyboard when it is down;
+                // Alt-Cmd-C, -W and -R are its toggles. Files only, with a
+                // file that has an editor to find anything in; a text box
+                // elsewhere keeps its own keys.
+                let finding = !typing
+                    && review.is_open()
+                    && review.tab.get() == crate::review::model::ItemTab::Files
+                    && review.active.with(Option::is_some)
+                    && review.drawn_picture().is_none();
+                if finding {
+                    let cmd = key.modifiers == OS_MOD;
+                    let cmd_shift = key.modifiers == OS_MOD | Modifiers::SHIFT;
+                    let alt_cmd = key.modifiers == OS_MOD | Modifiers::ALT && review.find_open.get();
+                    match key.code {
+                        Code::KeyF if cmd => {
+                            crate::review::find::open(review, true);
+                            return EventPropagation::Stop;
+                        }
+                        Code::KeyG if cmd || cmd_shift => {
+                            if !review.find_open.get() {
+                                crate::review::find::open(review, false);
+                            }
+                            crate::review::find::walk(review, cmd);
+                            return EventPropagation::Stop;
+                        }
+                        Code::KeyC if alt_cmd => {
+                            review.find_options.update(|o| o.match_case = !o.match_case);
+                            return EventPropagation::Stop;
+                        }
+                        Code::KeyW if alt_cmd => {
+                            review.find_options.update(|o| o.whole_word = !o.whole_word);
+                            return EventPropagation::Stop;
+                        }
+                        Code::KeyR if alt_cmd => {
+                            review.find_options.update(|o| o.regex = !o.regex);
+                            return EventPropagation::Stop;
+                        }
+                        _ => {}
+                    }
+                }
+                let typing = typing || review.find_focused.get();
                 if typing || !review.is_open() {
                     return EventPropagation::Continue;
                 }
@@ -307,6 +351,13 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     && review.confirm_thread.with(Option::is_some)
                 {
                     review.confirm_thread.set(None);
+                    return EventPropagation::Stop;
+                }
+                // Then puts the find bar away, from the code; the bar takes
+                // its own Escape. A bar out of sight, on Conversation, is
+                // not what Escape is about.
+                if key.code == Code::Escape && key.modifiers.is_empty() && finding && review.find_open.get() {
+                    crate::review::find::close(review);
                     return EventPropagation::Stop;
                 }
                 // Escape closes the panel under the editor, references or
@@ -451,6 +502,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 && !state.search_focused.get()
                 && !review.composer_focused.get()
                 && !review.submit_review_open.get()
+                && !review.find_focused.get()
                 && key.code == Code::KeyS
             {
                 let target = state

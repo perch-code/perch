@@ -3680,6 +3680,7 @@ dependencies = [
  "perch-lsp",
  "perch-syntax",
  "pulldown-cmark",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

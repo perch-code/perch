@@ -271,6 +271,23 @@ identifier tints its other uses in the file. All of it is read-only, and all
 of it is rust-analyzer: while the server is absent or failed, the status line
 says so and nothing else happens.
 
+`Cmd-F` puts a find bar over the top right of the code, as in VS Code: a box
+for the text, toggles for match case, whole word and regular expression, the
+count, and arrows. Every match in the open file is tinted, the current one
+darker and selected, and the editor scrolls to it; as the text is typed the
+bar moves to the nearest match from the caret, and a match inside a folded
+run reveals the run. `Cmd-F` with something selected on one line looks for
+that. The bar stays up from one file to the next, looking for the same text
+in each, and searches a diff's removed lines along with the rest in the
+stacked layout.
+
+| Action | Key |
+|---|---|
+| Find | `Cmd-F` |
+| Next match, previous match | `Enter`, `Shift-Enter`, or `Cmd-G`, `Cmd-Shift-G` |
+| Match case, whole word, regular expression | `Alt-Cmd-C`, `Alt-Cmd-W`, `Alt-Cmd-R` |
+| Close the bar | `Escape` |
+
 An SVG opens as the picture it draws rather than as its markup, fitted to the
 pane. A changed one shows before and after side by side, both at one scale,
 so a change of size shows as one; an added or deleted one says which it is.

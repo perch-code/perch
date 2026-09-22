@@ -2,10 +2,11 @@
 //!
 //! Two hooks do all the work. `apply_attr_styles` colours the text from
 //! tree-sitter spans, and `apply_layout_styles` paints the tint behind
-//! every other use of the symbol the caret rests on, on the range rather
-//! than the line. Both are handed a row of the editor, so anything that
-//! needs a real file position goes through the document's rows first, and
-//! from there through the buffer's row table.
+//! every other use of the symbol the caret rests on, and behind every
+//! match of the find bar's query, on the range rather than the line.
+//! Both are handed a row of the editor, so anything that needs a real
+//! file position goes through the document's rows first, and from there
+//! through the buffer's row table.
 //!
 //! The diff tint behind a whole line is not painted here. The editor
 //! paints a line's extra styles after the selection, so a tint among them
@@ -15,7 +16,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use floem::reactive::{RwSignal, SignalWith};
+use floem::reactive::{RwSignal, SignalGet, SignalWith};
 use floem::text::{Affinity, Attrs, AttrsList, FamilyOwned, FontWeight};
 use floem::views::editor::id::EditorId;
 use floem::views::editor::layout::{LineExtraStyle, TextLayoutLine};
@@ -25,6 +26,7 @@ use perch_syntax::Span;
 
 use crate::review::doc::{Doc, DocRow, Tint};
 use crate::review::editor::Side;
+use crate::review::find::Match;
 use crate::review::model::LoadedFile;
 use crate::theme;
 
@@ -41,6 +43,10 @@ pub struct PerchStyling {
     /// editor's layouts are dropped when they change, and rebuilt through
     /// this.
     highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
+    /// The find bar's matches, as display lines, and which of them the
+    /// bar is on. Read live the same way.
+    find: RwSignal<Arc<Vec<Match>>>,
+    find_current: RwSignal<Option<usize>>,
     families: Vec<FamilyOwned>,
     /// Cache key. Bumped per loaded file so the editor drops layouts from the
     /// file before; without this a second file reuses the first one's colours.
@@ -53,6 +59,8 @@ impl PerchStyling {
         file: Arc<LoadedFile>,
         doc: RwSignal<Arc<Doc>>,
         highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
+        find: RwSignal<Arc<Vec<Match>>>,
+        find_current: RwSignal<Option<usize>>,
         id: u64,
     ) -> Self {
         Self {
@@ -60,6 +68,8 @@ impl PerchStyling {
             doc,
             side: None,
             highlights,
+            find,
+            find_current,
             families: FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect(),
             id,
         }
@@ -71,9 +81,11 @@ impl PerchStyling {
         side: Side,
         doc: RwSignal<Arc<Doc>>,
         highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
+        find: RwSignal<Arc<Vec<Match>>>,
+        find_current: RwSignal<Option<usize>>,
         id: u64,
     ) -> Self {
-        Self { side: Some(side), ..Self::new(file, doc, highlights, id) }
+        Self { side: Some(side), ..Self::new(file, doc, highlights, find, find_current, id) }
     }
 
     /// The columns of the caret's symbol's uses on a row: those on the
@@ -90,6 +102,34 @@ impl PerchStyling {
                 .filter(|(line, _, _)| *line == head)
                 .map(|(_, start, end)| ((*start).min(len), (*end).min(len)))
                 .filter(|(start, end)| start < end)
+                .collect()
+        })
+    }
+
+    /// The columns of the find bar's matches on a row, each with whether
+    /// it is the one the bar is on: those on the row's display line,
+    /// clamped to the line. A match is a line of the unified buffer, so a
+    /// ghost's are drawn where the ghost is, and a split's base side,
+    /// whose lines are the base file's own, draws none. A row that is no
+    /// line has none, and a match inside a fold is on no row.
+    fn matches_for(&self, row: usize) -> Vec<(usize, usize, bool)> {
+        if self.side == Some(Side::Base) {
+            return Vec::new();
+        }
+        let Some(display) = self.doc.with_untracked(|d| d.display_line(row)) else {
+            return Vec::new();
+        };
+        let len = self.line_len(row);
+        let current = self.find_current.get_untracked();
+        self.find.with_untracked(|matches| {
+            // In order down the file, so the row's are one run of it.
+            let first = matches.partition_point(|m| m.display < display);
+            matches[first..]
+                .iter()
+                .take_while(|m| m.display == display)
+                .enumerate()
+                .map(|(i, m)| (m.start.min(len), m.end.min(len), current == Some(first + i)))
+                .filter(|(start, end, _)| start < end)
                 .collect()
         })
     }
@@ -191,9 +231,17 @@ impl Styling for PerchStyling {
         line: usize,
         layout_line: &mut TextLayoutLine,
     ) {
-        // The symbol's uses: the range's columns as the layout places
-        // them.
-        for (start, end) in self.highlights_for(line) {
+        // The symbol's uses, then the find bar's matches over them: the
+        // range's columns as the layout places them.
+        let uses = self
+            .highlights_for(line)
+            .into_iter()
+            .map(|(start, end)| (start, end, theme::SYMBOL_HIGHLIGHT_BG));
+        let matches = self.matches_for(line).into_iter().map(|(start, end, current)| {
+            let color = if current { theme::FIND_CURRENT_BG } else { theme::FIND_MATCH_BG };
+            (start, end, color)
+        });
+        for (start, end, color) in uses.chain(matches) {
             let x0 = layout_line.text.cursor_point(start, Affinity::Downstream).x;
             let x1 = layout_line.text.cursor_point(end, Affinity::Upstream).x;
             if x1 <= x0 {
@@ -204,7 +252,7 @@ impl Styling for PerchStyling {
                 y: 0.0,
                 width: Some(x1 - x0),
                 height: theme::CODE_LINE_HEIGHT as f64,
-                bg_color: Some(theme::SYMBOL_HIGHLIGHT_BG),
+                bg_color: Some(color),
                 under_line: None,
                 wave_line: None,
             });
@@ -234,7 +282,14 @@ mod tests {
             String::new(),
         ));
         let doc = RwSignal::new(Arc::new(doc::build(&DisplayBuffer::plain(text), &folds, &[])));
-        PerchStyling::new(file, doc, RwSignal::new(Arc::new(Vec::new())), 1)
+        PerchStyling::new(
+            file,
+            doc,
+            RwSignal::new(Arc::new(Vec::new())),
+            RwSignal::new(Arc::new(Vec::new())),
+            RwSignal::new(None),
+            1,
+        )
     }
 
     #[test]
@@ -262,5 +317,41 @@ mod tests {
         // A range past the line is clamped to it, and one on nothing is
         // dropped.
         assert_eq!(styling.highlights_for(5), vec![(8, 12)]);
+    }
+
+    #[test]
+    fn the_matches_on_a_row_are_its_display_lines_and_the_current_one_is_marked() {
+        let m = |display, start, end| Match { display, start, end };
+        let text = "let path = 1;\nlet a = path;\nlet b = path;\nlet c = path;\nlet d = path;\nlet e = path;\nlet f = 2;\n";
+        // Display lines 2 to 4 folded away, as above.
+        let styling = styling(text, vec![Run::new(2, 4, 2)]);
+        styling.find.set(Arc::new(vec![m(0, 4, 8), m(1, 8, 12), m(3, 8, 12), m(5, 8, 12), m(5, 40, 44)]));
+        styling.find_current.set(Some(3));
+
+        assert_eq!(styling.matches_for(0), vec![(4, 8, false)]);
+        assert_eq!(styling.matches_for(1), vec![(8, 12, false)]);
+        assert!(styling.matches_for(2).is_empty(), "the divider is no line");
+        assert_eq!(
+            styling.matches_for(3),
+            vec![(8, 12, true)],
+            "row 3 is line 5, the current match; the range past the line is dropped"
+        );
+        assert!(styling.matches_for(4).is_empty(), "line 6 has none");
+        assert!(styling.matches_for(9).is_empty(), "a row the document does not have");
+
+        // Revealed, line 3's match has a row, and is not the current one.
+        let whole = doc::build(&DisplayBuffer::plain(text), &[], &[]);
+        styling.doc.set(Arc::new(whole));
+        assert_eq!(styling.matches_for(3), vec![(8, 12, false)]);
+        assert_eq!(styling.matches_for(5), vec![(8, 12, true)]);
+        styling.find_current.set(None);
+        assert_eq!(styling.matches_for(5), vec![(8, 12, false)]);
+
+        // A split's base side is over the base file, whose lines are not
+        // the unified buffer's: nothing is drawn there.
+        let base = PerchStyling { side: Some(Side::Base), ..styling };
+        assert!(base.matches_for(0).is_empty());
+        let head = PerchStyling { side: Some(Side::Head), ..base };
+        assert_eq!(head.matches_for(0), vec![(4, 8, false)]);
     }
 }

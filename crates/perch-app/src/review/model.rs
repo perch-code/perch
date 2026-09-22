@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::views::editor::core::cursor::Cursor;
 use floem::views::editor::text::Document;
 use perch_git::{
     ChangeStatus, ChangedFile, Commit, Dirt, DisplayBuffer, LineStatus, Row, Scope, TreeEntry,
@@ -690,15 +691,20 @@ pub struct Tab {
 /// a programmatic edit goes through, and the row table over it, which
 /// everything that reads the editor's rows goes through. The table is a
 /// signal so that a lookup after an edit sees the edited document rather
-/// than a snapshot taken when the editor was built.
+/// than a snapshot taken when the editor was built. With them the
+/// editor's cursor, for the find bar to select a match through, and its
+/// content view, the one a click gives the keyboard to, for the bar to
+/// give it back to.
 ///
-/// Both live with the editor's view: the signal is disposed when the
-/// editor is torn down, so a reader that can run after that, on another
-/// tab, reads it with the `try_` variants.
+/// All of it lives with the editor's view: the signals are disposed when
+/// the editor is torn down, so a reader that can run after that, on
+/// another tab, reads them with the `try_` variants.
 #[derive(Clone)]
 pub struct LiveDoc {
     pub handle: Rc<dyn Document>,
     pub doc: RwSignal<Arc<Doc>>,
+    pub cursor: RwSignal<Cursor>,
+    pub content: Option<floem::ViewId>,
 }
 
 /// The documents the open editors hold, for the epoch they were built in.
@@ -1013,6 +1019,38 @@ pub struct ReviewState {
     /// The document highlight asked for, with the symbol at the caret it
     /// is about, until the caret leaves the symbol.
     pub highlight_ask: RwSignal<Option<(u64, Symbol)>>,
+    /// Whether the find bar is over the code. It stays up from one file
+    /// to the next, searching each for the same thing, until Escape or
+    /// its Close puts it away; leaving the item puts it away too.
+    pub find_open: RwSignal<bool>,
+    /// What is in the find bar's box. Kept for the app's life, as
+    /// `agent_last` is: the bar opens on what was last looked for.
+    pub find_query: RwSignal<String>,
+    /// How the query is read: with regard to case, as a whole word, as a
+    /// regular expression. Kept with the query.
+    pub find_options: RwSignal<crate::review::find::Options>,
+    /// Every match of the query in the active file, in order down it, as
+    /// a display line and byte columns; the editor tints them. Empty
+    /// while the bar is closed, with no query, and for a pattern that
+    /// does not parse.
+    pub find_matches: RwSignal<Arc<Vec<crate::review::find::Match>>>,
+    /// Which of `find_matches` the bar is on: the one selected in the
+    /// editor and counted up to. `None` when the bar has not walked to
+    /// one, as when it has just opened or the file has just changed.
+    pub find_current: RwSignal<Option<usize>>,
+    /// Why a pattern matched nothing, when it did not parse, for the bar
+    /// to say in place of the count.
+    pub find_error: RwSignal<Option<String>>,
+    /// True while the find bar's box has the keyboard, so the code's
+    /// keys stand down, as `composer_focused` does for the composer.
+    pub find_focused: RwSignal<bool>,
+    /// The find bar's box while the bar is up, so Cmd-F can give it the
+    /// keyboard again.
+    pub find_box: RwSignal<Option<floem::ViewId>>,
+    /// Cmd-F asked for the keyboard before the bar's box was built; the
+    /// box takes it once it is in the tree, as the sidebar's search box
+    /// does with `focus_search`.
+    pub find_focus: RwSignal<bool>,
     /// A jump waiting to be made, as the file, the head line and the column
     /// the caret lands on. The view with the file-opening closure takes it.
     pub pending_jump: RwSignal<Option<(String, usize, usize)>>,
@@ -1140,6 +1178,15 @@ impl ReviewState {
             hover: RwSignal::new(None),
             highlights: RwSignal::new(Arc::new(Vec::new())),
             highlight_ask: RwSignal::new(None),
+            find_open: RwSignal::new(false),
+            find_query: RwSignal::new(String::new()),
+            find_options: RwSignal::new(Default::default()),
+            find_matches: RwSignal::new(Arc::new(Vec::new())),
+            find_current: RwSignal::new(None),
+            find_error: RwSignal::new(None),
+            find_focused: RwSignal::new(false),
+            find_box: RwSignal::new(None),
+            find_focus: RwSignal::new(false),
             pending_jump: RwSignal::new(None),
             jump_to_line: RwSignal::new(None),
             jump_caret: RwSignal::new(None),
@@ -1265,6 +1312,16 @@ impl ReviewState {
         self.hover.set(None);
         self.clear_highlights();
         self.last_position.set(None);
+        // The bar goes with the files it was over; what it was looking
+        // for stays, for the next item.
+        self.find_open.set(false);
+        self.find_focused.set(false);
+        self.find_focus.set(false);
+        self.find_current.set(None);
+        self.find_error.set(None);
+        if !self.find_matches.with_untracked(|m| m.is_empty()) {
+            self.find_matches.set(Arc::new(Vec::new()));
+        }
     }
 
     /// Prepare to install an accepted live result. Agent history navigation
@@ -2384,6 +2441,24 @@ impl ReviewState {
                 first: first as u32,
                 last: last as u32,
             },
+        );
+    }
+
+    /// Reveal the lines around a head line of a folded file, for a jump
+    /// into a fold: a few of context on either side, as a divider shows
+    /// around a change. Nothing for a file shown whole, or one whose line
+    /// is not in it. The reveal reaches the editor before this returns:
+    /// the effect that rebuilds the document runs on the write.
+    pub fn reveal_around(&self, file: &LoadedFile, head_line: usize) {
+        let folded = floem::reactive::Effect::untrack(|| self.folded(&file.path));
+        if !folded || file.buffer.display_line(head_line).is_none() {
+            return;
+        }
+        self.reveal(
+            &file.path,
+            &file.blob,
+            head_line.saturating_sub(doc::CONTEXT_LINES),
+            head_line + doc::CONTEXT_LINES,
         );
     }
 
