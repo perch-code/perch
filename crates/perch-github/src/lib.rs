@@ -14,6 +14,7 @@ pub mod model;
 pub mod pulls;
 pub mod reactions;
 pub mod reviews;
+mod responses;
 mod subjects;
 pub mod timeline;
 pub mod workflow_runs;

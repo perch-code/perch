@@ -1,8 +1,9 @@
 //! GitHub REST client: notification history and targeted item lookups.
 //!
 //! Uses octocrab's raw `_get_with_headers` rather than its typed builders,
-//! because polling needs `X-Poll-Interval` and `Last-Modified`, targeted
-//! branch lookup uses `ETag`, and rate-limit headers classify failures.
+//! because polling needs `X-Poll-Interval` and `Last-Modified`, every
+//! other read asks with the `ETag` it last saw, and rate-limit headers
+//! classify failures.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -31,6 +32,7 @@ use crate::reactions::{
     reaction_mutation, reactions_query, ReactionKind, ReactionMutationData, Reactions,
     ReactionsData, NODES_PER_QUERY,
 };
+use crate::responses::{Responses, BUDGET_BYTES};
 use crate::subjects::{SubjectLook, SubjectLookData};
 use crate::timeline::{tidy, PullEvent, TimelineEventPayload, TIMELINE_MAX_PAGES};
 use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunsPayload};
@@ -112,6 +114,9 @@ pub struct GitHub {
     /// Shared by every clone so one rate-limit response gates all later API
     /// calls, including item fetches spawned outside the poll loop.
     rate_limit_until: Arc<AtomicI64>,
+    /// The bodies of recent reads and their tags, shared by every clone,
+    /// so a read of an unchanged path costs a 304.
+    responses: Arc<std::sync::Mutex<Responses>>,
 }
 
 impl GitHub {
@@ -148,6 +153,7 @@ impl GitHub {
             http,
             api_request_lock: Arc::new(tokio::sync::Mutex::new(())),
             rate_limit_until: Arc::new(AtomicI64::new(0)),
+            responses: Arc::new(std::sync::Mutex::new(Responses::new(BUDGET_BYTES))),
         })
     }
 
@@ -304,10 +310,11 @@ impl GitHub {
         repo_full_name: &str,
         number: u64,
     ) -> Result<PullRequest, Error> {
-        let path = format!("/repos/{repo_full_name}/pulls/{number}");
-        let fetched = self.get(&path, None).await?;
+        let body = self
+            .get_text(&format!("/repos/{repo_full_name}/pulls/{number}"))
+            .await?;
         let payload: PullPayload =
-            serde_json::from_str(&fetched.body).map_err(|e| Error::Decode(e.to_string()))?;
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
 
         Ok(payload.into_pull_request(repo_full_name))
     }
@@ -1025,8 +1032,30 @@ impl GitHub {
     }
 
     /// One GET whose body is all the caller wants.
+    ///
+    /// Asked with the tag of the body last read at `path`, if one is kept:
+    /// a 304 hands that body back, so the caller cannot tell the two apart
+    /// except by the rate limit it did not spend.
     async fn get_text(&self, path: &str) -> Result<String, Error> {
-        Ok(self.get(path, None).await?.body)
+        let known = self.responses.lock().unwrap().get(path);
+        let fetched = self
+            .get(path, conditional(known.as_ref().map(|k| k.etag.as_str())))
+            .await?;
+        if fetched.status == StatusCode::NOT_MODIFIED {
+            return match known {
+                Some(known) => Ok(known.body.to_string()),
+                None => Err(Error::Status {
+                    status: StatusCode::NOT_MODIFIED.as_u16(),
+                    body: String::new(),
+                }),
+            };
+        }
+        let mut responses = self.responses.lock().unwrap();
+        match header_str(&fetched.headers, ETAG.as_str()) {
+            Some(etag) => responses.put(path, etag, fetched.body.as_str().into()),
+            None => responses.remove(path),
+        }
+        Ok(fetched.body)
     }
 
     /// One GET, classified the way every request is.
