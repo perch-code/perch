@@ -178,7 +178,7 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> im
         })
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
-        .context_menu(move || notification_menu(menu_backend.clone(), &menu_thread))
+        .context_menu(move || notification_menu(state, menu_backend.clone(), &menu_thread))
         .style(|s| nav_row::row_style(s, false));
     Container::new(row).style(nav_row::row_gutter)
 }
@@ -274,16 +274,18 @@ fn notification_trailing(
                 .into_any();
             }
             let done_backend = backend.clone();
-            let done_id = thread.id.clone();
+            let done_thread = thread.clone();
             let menu_backend = backend.clone();
             let menu_thread = thread.clone();
             Stack::horizontal((
                 icon_button(
                     || SidebarIcon::Check,
                     || theme::FG_SUBTLE,
-                    move || done_backend.done_notification(&done_id),
+                    move || done(state, &done_backend, &done_thread),
                 ),
-                nav_row::more_button(move || notification_menu(menu_backend.clone(), &menu_thread)),
+                nav_row::more_button(move || {
+                    notification_menu(state, menu_backend.clone(), &menu_thread)
+                }),
             ))
             .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(4.0))
             .into_any()
@@ -292,19 +294,32 @@ fn notification_trailing(
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
-fn notification_menu(backend: Rc<Backend>, thread: &Thread) -> Menu {
+/// Mark the thread Done. The reader is finished with it, so if the main
+/// pane has its pull request or issue open, that closes as Cmd-[ would.
+fn done(state: AppState, backend: &Backend, thread: &Thread) {
+    backend.done_notification(&thread.id);
+    if !state.is_viewing_thread(thread) {
+        return;
+    }
+    if let Some(review) = state.review.get_untracked() {
+        let navigation_id = backend.close_review();
+        state.begin_close(review, navigation_id);
+    }
+}
+
+fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread) -> Menu {
     let unread_backend = backend.clone();
     let unread_id = thread.id.clone();
     let unread = thread.unread;
     let done_backend = backend.clone();
-    let done_id = thread.id.clone();
+    let done_thread = thread.clone();
     let unsubscribe_backend = backend;
     let unsubscribe_id = thread.id.clone();
     Menu::new()
         .item("Done", move |item| {
             let backend = done_backend.clone();
-            let id = done_id.clone();
-            item.action(move || backend.done_notification(&id))
+            let thread = done_thread.clone();
+            item.action(move || done(state, &backend, &thread))
         })
         .item("Mark Unread", move |item| {
             let backend = unread_backend.clone();

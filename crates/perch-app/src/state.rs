@@ -1996,6 +1996,21 @@ impl AppState {
         })
     }
 
+    /// Whether the main pane has the notification's pull request or issue
+    /// open: what marking it Done closes. One still opening has no item
+    /// yet, so it is not.
+    pub fn is_viewing_thread(&self, thread: &Thread) -> bool {
+        self.review.get_untracked().is_some_and(|review| {
+            review.item.with_untracked(|item| {
+                item.as_ref()
+                    .and_then(|item| item.subject.as_ref())
+                    .is_some_and(|subject| {
+                        thread.is_about(subject.repo_full_name(), subject.kind(), subject.number())
+                    })
+            })
+        })
+    }
+
     /// The flat sidebar under the current scope, filters and search.
     pub fn visible_items(&self) -> Vec<Item> {
         let mut filters = self.item_filters.get();
@@ -2212,6 +2227,48 @@ mod tests {
         );
         assert!(!notifications[0].unread);
         assert!(notifications[1].unread);
+    }
+
+    #[test]
+    fn done_closes_only_the_pane_showing_the_notifications_subject() {
+        let issue = |repo: &str, number: u64| {
+            let now = "2026-09-19T12:00:00Z".parse().unwrap();
+            let mut item = Item::new(repo, now);
+            item.subject = Some(perch_github::ItemSubject::Issue(perch_github::Issue {
+                node_id: String::new(),
+                reactions: Default::default(),
+                number,
+                title: format!("Issue {number}"),
+                body: String::new(),
+                state: "open".into(),
+                state_reason: None,
+                author_login: "u".into(),
+                author_avatar_url: String::new(),
+                labels: vec![],
+                assignees: vec![],
+                repo_full_name: repo.into(),
+                comments: 0,
+                created_at: Some(now),
+                updated_at: now,
+            }));
+            Arc::new(item)
+        };
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.review.set(Some(review));
+        let thread = notification("7", true);
+
+        assert!(!app.is_viewing_thread(&thread));
+        review.item.set(Some(issue("org/repo", 7)));
+        assert!(app.is_viewing_thread(&thread));
+        review.item.set(Some(issue("org/repo", 8)));
+        assert!(!app.is_viewing_thread(&thread));
+        review.item.set(Some(issue("org/other", 7)));
+        assert!(!app.is_viewing_thread(&thread));
+        // Still opening: no item yet, so nothing to close.
+        review.item.set(Some(issue("org/repo", 7)));
+        review.begin("Reading the notification");
+        assert!(!app.is_viewing_thread(&thread));
     }
 
     #[test]
