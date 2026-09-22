@@ -56,7 +56,8 @@ codegen-units = 4
 # a markdown table at its own width drew its last column over its border
 # and its last row under it, one that wraps a label's or rich text's lines
 # at the view's width when a word is wider than the view, where every line
-# broke at the word's width and ran past the edge, one that nests clips
+# broke at the word's width and ran past the edge and the view was as tall
+# as its text broken after every word, one that nests clips
 # under vger, and one that sets every glyph of a line on its baseline,
 # rounded to a whole pixel, under vger too. vger has one scissor, which
 # each clip replaced and each clear lifted, so once a clipped view in a

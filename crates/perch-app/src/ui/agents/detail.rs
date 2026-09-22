@@ -6,7 +6,8 @@ use std::sync::Arc;
 use floem::peniko::kurbo::Point;
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::Position;
+use floem::style::{Position, TextOverflow};
+use floem::text::{OverflowWrap, WordBreakStrength};
 use floem::views::scroll::ScrollChanged;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
@@ -18,7 +19,9 @@ use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 
-use super::model::{elapsed_label, AgentRetryTarget, AgentRunStatus, AgentRunSummary};
+use super::model::{
+    elapsed_label, AgentRetryTarget, AgentRunPurpose, AgentRunStatus, AgentRunSummary,
+};
 use super::{metadata, navigate_to_source, status_color, text_action};
 
 pub fn view(
@@ -395,7 +398,12 @@ fn activity_section(
                                 theme::CLOSED
                             })
                             .line_height(theme::PROSE_LINE_HEIGHT)
-                            .text_wrap()
+                            // A hash or a path in a command breaks at the
+                            // column's edge rather than running past it.
+                            .text_overflow(TextOverflow::Wrap {
+                                overflow_wrap: OverflowWrap::Anywhere,
+                                word_break: WordBreakStrength::Normal,
+                            })
                             .min_width(0.0)
                             .flex_grow(1.0_f32)
                     }),
@@ -465,8 +473,9 @@ fn activity_rows(run: &AgentRunSummary, events: &[RunEventRecord]) -> Vec<Activi
                 RunEvent::ToolCall {
                     summary, parent_id, ..
                 } => (
+                    // The code font has no `↳`: it drew a blank.
                     if parent_id.is_some() {
-                        format!("↳ {summary}")
+                        format!("└ {summary}")
                     } else {
                         summary.clone()
                     },
@@ -531,11 +540,22 @@ fn result_section(
     )
 }
 
+/// The stored response as it is read. A review keeps the findings it filed
+/// and their verification after its prose, as data for extraction.
+fn answer(run: &AgentRunSummary) -> &str {
+    if run.purpose == AgentRunPurpose::Review {
+        crate::backend::reviews::reviewer_prose(&run.response)
+    } else {
+        &run.response
+    }
+}
+
 fn response_text(
     run: &AgentRunSummary,
     events: &[RunEventRecord],
     has_more: bool,
 ) -> (String, Option<&'static str>) {
+    let response = answer(run);
     let streamed = events
         .iter()
         .filter_map(|record| match &record.event {
@@ -547,7 +567,7 @@ fn response_text(
     if run.response_truncated {
         if streamed.trim().is_empty() {
             return (
-                run.response.clone(),
+                response.to_string(),
                 Some("The stored response is truncated; response activity has not been fully loaded."),
             );
         }
@@ -568,10 +588,10 @@ fn response_text(
         }
         return (streamed, None);
     }
-    if run.response.trim().is_empty() {
+    if response.trim().is_empty() {
         (streamed, None)
     } else {
-        (run.response.clone(), None)
+        (response.to_string(), None)
     }
 }
 
@@ -796,7 +816,7 @@ mod tests {
                 ),
             ],
         );
-        assert_eq!(rows[0].text, "↳ Inspect parser");
+        assert_eq!(rows[0].text, "└ Inspect parser");
         assert_eq!(rows[1].text, "Parser inspected");
         assert!(rows[1].ok);
         assert_eq!(rows[2].text, "Read: outside the checkout");
@@ -827,6 +847,142 @@ mod tests {
         assert!(label.contains("Output tokens unavailable"));
         assert!(label.contains("Cached input tokens unavailable"));
         assert!(label.contains("Cost unavailable"));
+    }
+
+    /// A finished run's detail at `width`, with `events` and `response`.
+    fn detail_at(
+        width: f64,
+        events: Vec<RunEventRecord>,
+        response: &str,
+    ) -> floem::headless::HeadlessHarness {
+        let root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let record = perch_github::RunRecord {
+            id: "run".into(),
+            backend: "claude-code".into(),
+            model: "claude-opus-5".into(),
+            effort: "high".into(),
+            status: perch_github::RunStatus::Completed,
+            final_result: Some(response.to_string()),
+            queued_at: jiff::Timestamp::UNIX_EPOCH,
+            ..perch_github::RunRecord::default()
+        };
+        app.merge_agent_runs([perch_github::RunSummary::from(&record)], false);
+        app.set_agent_run_detail(&record, events, false);
+        let run = app.agent_run("run").unwrap();
+        let view = view(app, ReviewState::new(), Rc::new(Backend::detached()), run);
+        let mut harness = floem::headless::HeadlessHarness::new_with_size(root, view, width, 800.0);
+        harness.rebuild();
+        harness.paint();
+        harness
+    }
+
+    /// The text view whose text holds `needle`.
+    fn text_holding(id: floem::ViewId, needle: &str) -> Option<floem::ViewId> {
+        if id.debug_name().contains(needle) {
+            return Some(id);
+        }
+        id.children()
+            .into_iter()
+            .find_map(|child| text_holding(child, needle))
+    }
+
+    /// How tall `text` is in the code font, wrapped at `width`.
+    fn code_height(text: &str, size: f32, leading: f32, wrap: OverflowWrap, width: f64) -> f64 {
+        use floem::text::{Attrs, AttrsList, FamilyOwned, LineHeightValue, TextLayout, TextWrapMode};
+        let family: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
+        let attrs = Attrs::new()
+            .font_size(size)
+            .family(&family)
+            .line_height(LineHeightValue::Normal(leading));
+        let mut layout = TextLayout::new();
+        layout.set_text_wrap_mode(TextWrapMode::Wrap);
+        layout.set_overflow_wrap(wrap);
+        layout.set_text(text, AttrsList::new(attrs), None);
+        layout.set_size(width as f32, f32::MAX);
+        layout.size().height
+    }
+
+    /// A command with a hash and a path in it is wider than the drawer at
+    /// its narrowest. It breaks at the column's edge and its row is as tall
+    /// as its lines. Its text used to stay as wide as the path, running
+    /// past the edge, and the row could take the height of the command
+    /// broken after every word: a dozen empty lines under three.
+    #[test]
+    fn a_long_command_breaks_at_the_column_and_its_row_fits_its_lines() {
+        let command = "Ran git show 629af7af4a76c2ba32eb0c68a7262f9799c6deeb:slatedb/src/format/sst.rs | sed -n '520,600p'";
+        let call = RunEvent::ToolCall {
+            id: "call".into(),
+            name: "Bash".into(),
+            summary: command.into(),
+            parent_id: Some("task".into()),
+        };
+        let harness = detail_at(theme::DRAWER_MIN_WIDTH, vec![event(1, call)], "Done.");
+        let row = text_holding(harness.root_id(), "629af7af").expect("the row is drawn");
+        let content = harness.get_content_rect(row);
+        let taffy = row.taffy();
+        let text = taffy
+            .borrow()
+            .layout(taffy.borrow().children(row.taffy_node()).unwrap()[0])
+            .unwrap()
+            .size;
+        assert!(
+            f64::from(text.width) <= content.width() + 0.5,
+            "the text stays in its column: {text:?} in {content:?}"
+        );
+        let want = code_height(
+            &format!("└ {command}"),
+            theme::TEXT_BADGE,
+            theme::PROSE_LINE_HEIGHT,
+            OverflowWrap::Anywhere,
+            content.width(),
+        );
+        assert!(
+            (content.height() - want).abs() < 0.5,
+            "the row is as tall as its lines ({want}), not {}",
+            content.height()
+        );
+    }
+
+    /// A fenced block in the answer with a word wider than its column is as
+    /// tall as its lines. It was once as tall as the block broken after
+    /// every word, 42,000px for a review's findings, most of it an empty
+    /// box under the code.
+    #[test]
+    fn a_code_block_with_a_long_word_is_as_tall_as_its_lines() {
+        let word = "test_alignment_larger_than_block_size_gives_each_block_a_unit";
+        let code = format!(
+            "{{\n  \"failure_scenario\": \"{word} records it as correct, and it wastes the difference in every block\"\n}}"
+        );
+        let response = format!("Here are the findings.\n\n```json\n{code}\n```\n\nDone.");
+        let harness = detail_at(theme::DRAWER_MIN_WIDTH, Vec::new(), &response);
+        let block = text_holding(harness.root_id(), word).expect("the block is drawn");
+        let content = harness.get_content_rect(block);
+        let want = code_height(
+            &code,
+            theme::CODE_FONT_SIZE,
+            theme::PROSE_CODE_LINE_HEIGHT,
+            OverflowWrap::Normal,
+            content.width(),
+        );
+        assert!(
+            (content.height() - want).abs() < 0.5,
+            "the block is as tall as its lines ({want}), not {}",
+            content.height()
+        );
+    }
+
+    #[test]
+    fn a_review_reads_as_its_prose_without_the_findings_it_filed() {
+        let report = serde_json::json!({ "findings": [{ "file": "src/lib.rs", "line": 4 }] });
+        let mut run = summary();
+        run.purpose = AgentRunPurpose::Review;
+        run.response = perch_agent::preserve_native_response("Reported 1 finding.", Some(&report));
+        assert_eq!(response_text(&run, &[], false).0, "Reported 1 finding.");
+
+        // Only a review files one: an answer that quotes the marker keeps it.
+        run.purpose = AgentRunPurpose::Question;
+        assert!(response_text(&run, &[], false).0.contains("\"findings\""));
     }
 
     #[test]

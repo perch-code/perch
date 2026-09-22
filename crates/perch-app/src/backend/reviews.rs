@@ -36,6 +36,18 @@ const REVIEW_HISTORY_PAGE: usize = 500;
 const GIT_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 const VERIFICATION_DELIMITER: &str = "\n\n--- Perch prior-finding verification ---\n\n";
 
+/// What a reviewer said, out of the result a review run keeps: the prose
+/// before the findings it filed through a tool and before the verification
+/// of earlier findings. Both follow the prose as JSON for extraction to
+/// re-read, and the findings are shown as findings, not as the answer.
+pub(crate) fn reviewer_prose(raw: &str) -> &str {
+    [perch_agent::REPORT_DELIMITER, VERIFICATION_DELIMITER]
+        .into_iter()
+        .filter_map(|delimiter| raw.find(delimiter))
+        .min()
+        .map_or(raw, |end| &raw[..end])
+}
+
 pub(super) async fn load_dashboard(ctx: &Ctx, item_id: &str) {
     match dashboard(ctx, item_id).await {
         Ok((base_refs, preferences, groups, findings)) => {
@@ -3663,6 +3675,18 @@ mod tests {
         assert!(semantic.similarity >= 0.55, "{semantic:?}");
         assert!(!semantic.identity_safe);
         assert!(!confident_association(LocationMatch::Confident, semantic));
+    }
+
+    #[test]
+    fn a_reviewers_answer_leaves_out_its_filed_report_and_the_verification() {
+        let report = serde_json::json!({ "findings": [{ "file": "src/lib.rs", "line": 4 }] });
+        let native = perch_agent::preserve_native_response("Reported one finding.", Some(&report));
+        assert_eq!(reviewer_prose(&native), "Reported one finding.");
+        let verified = format!("{native}{VERIFICATION_DELIMITER}{{\"verifications\":[]}}");
+        assert_eq!(reviewer_prose(&verified), "Reported one finding.");
+        let unreported = format!("Found nothing.{VERIFICATION_DELIMITER}{{}}");
+        assert_eq!(reviewer_prose(&unreported), "Found nothing.");
+        assert_eq!(reviewer_prose("Just prose."), "Just prose.");
     }
 
     #[test]
