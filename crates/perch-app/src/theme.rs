@@ -27,6 +27,12 @@ pub const NAV_HOVER: Color = Color::from_rgb8(0xf8, 0xf8, 0xf8);
 pub const NAV_SELECTED: Color = Color::from_rgb8(0xf4, 0xf4, 0xf4);
 pub const NAV_SELECTED_PRESSED: Color = Color::from_rgb8(0xee, 0xee, 0xee);
 pub const NAV_FG: Color = Color::from_rgb8(0x19, 0x1a, 0x1c);
+/// The title of a row whose notification has been read. GitHub's own
+/// inbox greys a read row, and so does this: far enough off `NAV_FG` to
+/// tell at a glance, not as far as an archived row's `NAV_SUBTLE`. The
+/// weight axis cannot carry this on its own, since Regular against
+/// Medium at 14px is a tenth of a pixel of stem.
+pub const NAV_READ: Color = Color::from_rgb8(0x5b, 0x5b, 0x5e);
 pub const NAV_MUTED: Color = Color::from_rgb8(0x88, 0x88, 0x8a);
 pub const NAV_SUBTLE: Color = Color::from_rgb8(0xa3, 0xa3, 0xa5);
 /// A row's churn: the additions and the deletions, in the quiet green and
@@ -121,10 +127,15 @@ pub const TEXT_SECTION: f32 = 12.0;
 /// Emphasis is Medium, for a title, a section's heading, a selected tab
 /// and a button that matters; Codex keeps Semibold for prose, where a
 /// heading, a bold run and a table's header row carry it, and for the
-/// initial on a placeholder avatar. Nothing is Bold.
+/// initial on a placeholder avatar. Nothing is Bold. Regular is the one
+/// step below the body, and only a read row's title takes it, so it sits
+/// as far from an unread title's Medium as the axis is worth using.
 ///
 /// Functions rather than constants because a weight off the named
 /// steps cannot be built in a `const`.
+pub fn weight_read() -> FontWeight {
+    FontWeight::NORMAL
+}
 pub fn weight_body() -> FontWeight {
     FontWeight::new(430.0)
 }

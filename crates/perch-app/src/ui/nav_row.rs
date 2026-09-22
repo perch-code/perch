@@ -106,21 +106,33 @@ pub fn lines(
 }
 
 /// The title, in one style, so a renamed branch and an unread
-/// notification differ only where they mean to. `bold` is read with the
-/// style, so a row whose notification is read while it is on screen
-/// goes to the body weight without being rebuilt.
-pub fn title_label(text: String, muted: bool, bold: impl Fn() -> bool + 'static) -> impl IntoView {
+/// notification differ only where they mean to.
+///
+/// An unread row's title is Medium in the full foreground. A read one
+/// steps back on both counts, to Regular in `NAV_READ`, because the
+/// weight alone is a tenth of a pixel of stem at this size and the two
+/// read as the same title. `unread` is read with the style, so a row
+/// whose notification is read while it is on screen steps back without
+/// being rebuilt.
+pub fn title_label(
+    text: String,
+    muted: bool,
+    unread: impl Fn() -> bool + 'static,
+) -> impl IntoView {
     Label::derived(move || text.clone()).style(move |s| {
+        let unread = unread();
         s.font_size(theme::TEXT_TITLE)
-            .font_weight(if bold() {
+            .font_weight(if unread {
                 theme::weight_emphasis()
             } else {
-                theme::weight_body()
+                theme::weight_read()
             })
             .color(if muted {
                 theme::NAV_SUBTLE
-            } else {
+            } else if unread {
                 theme::NAV_FG
+            } else {
+                theme::NAV_READ
             })
             .text_ellipsis()
             .max_width_full()
