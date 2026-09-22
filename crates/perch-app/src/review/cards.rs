@@ -284,10 +284,12 @@ pub(crate) fn text_action(
 ///
 /// Whether the pointer is over the view is read from floem's hover path
 /// when either event arrives, rather than taken from which one it was.
-/// Inside an absolutely placed view, the Submit review form, floem can
-/// deliver a view's Enter and Leave out of the order its hover path took
-/// them: moving onto a draft's Delete left the row's Leave last, though
-/// the row was still under the pointer, and the Delete hid itself.
+/// A floem hover path holds only the views whose own boxes hold the
+/// pointer, so when the pointer crosses the edge of an ancestor's box,
+/// as the Submit review form hangs out of its button's, every view
+/// inside is left and entered again at once; and floem routes those
+/// events in reverse, the Leave last, though the view is still under
+/// the pointer. That hid a draft's Delete as the pointer reached it.
 pub(crate) fn track_hover<V: IntoView + 'static>(view: V, hovered: RwSignal<bool>) -> impl IntoView {
     let view = view.into_intermediate();
     let id = view.view_id();
