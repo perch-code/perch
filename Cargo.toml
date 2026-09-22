@@ -79,12 +79,19 @@ codegen-units = 4
 # two heights. Then one that makes a scroll's `ShowBarsWhenIdle` do what
 # its docs say: set false, it had hidden the bars for good, and now they
 # show as the user scrolls and fade out once scrolling stops, as macOS's
-# overlay scroll bars do. Last, one that times a press and its release on
+# overlay scroll bars do. Then one that times a press and its release on
 # one clock: floem stamped each from a clock of its own, started at its
 # first use in the process, and counts a press and a release on different
 # views as a click only within 100ms, so the first click in a process
 # always passed and a long first press widened the window for every click
-# after it. Drop a
+# after it. Last, one that sends a pointer move's PointerLeave events
+# before its PointerEnter events, and neither to a view the pointer stays
+# on. floem routed them newest first, so a move from one row to the next
+# entered the new row before it left the old one; and a hover path holds
+# only the ancestors whose own box holds the pointer, so crossing the edge
+# of a box a view hangs out of left and re-entered every view inside it,
+# the Leave last. A draft's Delete in the Submit review form hid under the
+# pointer that way. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,

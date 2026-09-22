@@ -286,10 +286,11 @@ pub(crate) fn text_action(
 /// when either event arrives, rather than taken from which one it was.
 /// A floem hover path holds only the views whose own boxes hold the
 /// pointer, so when the pointer crosses the edge of an ancestor's box,
-/// as the Submit review form hangs out of its button's, every view
-/// inside is left and entered again at once; and floem routes those
-/// events in reverse, the Leave last, though the view is still under
-/// the pointer. That hid a draft's Delete as the pointer reached it.
+/// as the Submit review form hangs out of its button's, the path changes
+/// above views still under the pointer. floem used to leave and re-enter
+/// each of them then, the Leave last, which hid a draft's Delete as the
+/// pointer reached it. The fork's `perch` branch sends them neither event
+/// now; reading the path keeps this right whatever order events come in.
 pub(crate) fn track_hover<V: IntoView + 'static>(view: V, hovered: RwSignal<bool>) -> impl IntoView {
     let view = view.into_intermediate();
     let id = view.view_id();

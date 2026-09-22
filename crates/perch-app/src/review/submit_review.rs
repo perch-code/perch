@@ -1350,10 +1350,10 @@ mod tests {
         // Delete is drawn while the pointer is over the row, stays drawn
         // with the pointer on it, and deletes that draft. The pointer goes
         // onto Delete before the click, as a hand's would: that crosses
-        // the edge of the box the form hangs out of, where floem hands the
-        // row its Leave last (see `track_hover`). Had Delete hidden, the
-        // press and the release would land on different views, which
-        // floem counts as a click only within 100ms of the press.
+        // the edge of the box the form hangs out of, where floem once
+        // handed the row its Leave last (see `track_hover`). Had Delete
+        // hidden, the press and the release would land on different views,
+        // which floem counts as a click only within 100ms of the press.
         let delete = find(rows[1], "delete-draft").unwrap();
         assert!(!shown(&harness, delete), "hidden until hovered");
         let center = locations[1].get_visual_rect_no_clip().center();
