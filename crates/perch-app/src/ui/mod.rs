@@ -75,8 +75,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
         });
     }
-    // Files thrown away by a scope change are asked for again here, for
-    // the same reason.
+    // Files thrown away by a scope change, and those of the tabs an item
+    // opens on again, are asked for here, for the same reason.
     {
         let backend = backend.clone();
         floem::reactive::Effect::new(move |_| {
@@ -84,7 +84,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             if !paths.is_empty() {
                 state.reload.set(Vec::new());
                 for path in paths {
-                    backend.open_file(&path);
+                    crate::review::load_file(&backend, &path);
                 }
             }
         });
@@ -373,9 +373,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 if typing || !review.is_open() {
                     return EventPropagation::Continue;
                 }
-                // Cmd-Shift-1 and Cmd-Shift-2 are the item view's tabs. Here
-                // rather than with the other Cmd keys because they are pressed
-                // from the code as often as from anywhere.
+                // Cmd-Shift-1 shows Conversation, opening its tab again if it
+                // was closed, as the strip's chat tile does; Cmd-Shift-2 goes
+                // back to the open file. Here rather than with the other Cmd
+                // keys because they are pressed from the code as often as
+                // from anywhere.
                 if key.modifiers == OS_MOD | Modifiers::SHIFT {
                     match key.code {
                         Code::Digit1 => {
@@ -383,10 +385,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                             return EventPropagation::Stop;
                         }
                         Code::Digit2 => {
-                            let has_files = review
-                                .item
-                                .with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
-                            if has_files {
+                            if review.has_files() && review.active.with(Option::is_some) {
                                 review.show_tab(crate::review::model::ItemTab::Files);
                             }
                             return EventPropagation::Stop;
@@ -510,6 +509,16 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 }
 
+                // Cmd-W closes Conversation's tab while it shows, as it
+                // closes a file's.
+                if key.code == Code::KeyW
+                    && key.modifiers == OS_MOD
+                    && review.tab.get() == crate::review::model::ItemTab::Conversation
+                    && review.conversation_open.get()
+                {
+                    review.close_conversation();
+                    return EventPropagation::Stop;
+                }
                 // Cmd-W closes the open file, as in any editor; `v` checks it
                 // as viewed, `]` and `[` go to the next and previous change,
                 // `}` and `{` open the next and previous unviewed file. Files
@@ -1020,25 +1029,43 @@ mod tests {
         harness.paint();
         assert_eq!(review.active.get(), None, "the file is still open");
         assert!(review.tabs.with(Vec::is_empty), "the tab is still there");
+        // Conversation's tab, the one left, shows in its place; the next
+        // Cmd-W closes it.
+        assert_eq!(review.tab.get(), crate::review::model::ItemTab::Conversation);
+        harness.dispatch_event(cmd_w());
+        harness.rebuild();
+        assert!(!review.conversation_open.get());
 
         // With nothing open, the key is left for whoever else wants it.
         harness.dispatch_event(cmd_w());
         harness.rebuild();
         assert_eq!(review.active.get(), None);
+        assert!(!review.conversation_open.get());
     }
 
-    /// On Conversation the file's tab is out of sight, and Cmd-W leaves
-    /// it be.
+    /// On Conversation, Cmd-W closes Conversation's tab, as it would a
+    /// file's, and leaves the file's be: the file shows in its place. The
+    /// file's goes on the next.
     #[test]
-    fn cmd_w_on_conversation_leaves_the_files_tab_alone() {
+    fn cmd_w_on_conversation_closes_it_and_leaves_the_files_tab() {
+        use crate::review::model::ItemTab;
         let (mut harness, review) = window_with_a_file_open();
-        review.show_tab(crate::review::model::ItemTab::Conversation);
+        review.show_tab(ItemTab::Conversation);
         harness.rebuild();
         harness.paint();
 
         harness.dispatch_event(cmd_w());
         harness.rebuild();
+        harness.paint();
+        assert!(!review.conversation_open.get(), "Conversation's tab is still there");
+        assert_eq!(review.tab.get(), ItemTab::Files);
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
         assert_eq!(review.tabs.with(Vec::len), 1);
+        assert!(named(harness.root_id(), "chat tab").is_none());
+        assert!(named(harness.root_id(), "tinted editor").is_some(), "the file is not showing");
+
+        harness.dispatch_event(cmd_w());
+        harness.rebuild();
+        assert!(review.tabs.with(Vec::is_empty), "the file's tab is still there");
     }
 }

@@ -368,8 +368,10 @@ pub(super) fn navigate_to_source(
         );
         return;
     }
-    review.show_tab(ItemTab::Conversation);
+    // Another item shows Conversation once its threads land; the one left
+    // keeps its pane for when it is opened again.
     if same_live_item {
+        review.show_tab(ItemTab::Conversation);
         if let Some(thread_id) = &run.thread_id {
             review
                 .focus_card

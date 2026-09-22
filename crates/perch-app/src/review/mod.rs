@@ -26,7 +26,6 @@ pub mod scope;
 pub mod styling;
 pub mod submit_review;
 pub mod summary;
-pub mod switch;
 pub mod tabs;
 pub mod threads;
 pub mod timeline;
@@ -55,14 +54,8 @@ pub type OpenFile = Rc<dyn Fn(&str)>;
 /// the rail's tree. One closure for the item view and the drawer alike.
 pub fn open_file(state: ReviewState, backend: Rc<Backend>) -> OpenFile {
     Rc::new(move |path: &str| {
-        // A file outside the worktree has no place in the tree, and is
-        // read from where it is; the loader's limits still apply.
         if state.open_tab(path) {
-            if std::path::Path::new(path).is_absolute() {
-                backend.open_outside_file(path);
-            } else {
-                backend.open_file(path);
-            }
+            load_file(&backend, path);
         }
         // Show it in the tree, so a file reached from a card or from
         // a definition can be found there too: the way to it opens,
@@ -70,6 +63,17 @@ pub fn open_file(state: ReviewState, backend: Rc<Backend>) -> OpenFile {
         // rail scrolls to its row.
         state.show_in_tree(path);
     })
+}
+
+/// Ask the backend for a file's content. A file outside the worktree has
+/// no place in the tree, and is read from where it is; the loader's
+/// limits still apply.
+pub fn load_file(backend: &Backend, path: &str) {
+    if std::path::Path::new(path).is_absolute() {
+        backend.open_outside_file(path);
+    } else {
+        backend.open_file(path);
+    }
 }
 
 /// The main pane while an item is open.
@@ -131,8 +135,20 @@ pub fn review_view(
     })
 }
 
-/// The tab the header's switch has picked: Conversation for every item,
-/// Files for one with a checkout.
+/// What the pane under the tabs holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Showing {
+    Conversation,
+    /// The open file, or the word that none is, for an item with files.
+    Code,
+    /// Every tab closed on an item with no files to open.
+    Nothing,
+}
+
+/// The tabs, Conversation's and the files', over what the one showing
+/// holds. Threads anchored in the open file are drawn inline in the code;
+/// the whole conversation is Conversation's, and the files are a tree in
+/// the drawer on the right.
 fn item_view(
     app: AppState,
     state: ReviewState,
@@ -140,46 +156,40 @@ fn item_view(
     backend: Rc<Backend>,
     open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
-    // An item without a checkout has no Files to show, whatever the tab
-    // remembered for it says.
-    let tab = floem::reactive::Memo::new(move |_| {
-        let has_files = state
-            .item
-            .with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
-        match state.tab.get() {
-            ItemTab::Files if has_files => ItemTab::Files,
-            _ => ItemTab::Conversation,
-        }
+    // A memo, so the pane is built again when what it shows changes and
+    // not on every write to the tab.
+    let showing = floem::reactive::Memo::new(move |_| match state.tab.get() {
+        ItemTab::Conversation => Showing::Conversation,
+        ItemTab::Files if state.has_files() => Showing::Code,
+        ItemTab::Files => Showing::Nothing,
     });
-    dyn_container(
-        move || tab.get(),
-        move |tab| match tab {
-            ItemTab::Conversation => conversation::view(
-                app,
-                state,
-                backend.clone(),
-                open_file.clone(),
-                open_item.clone(),
-            )
-            .into_any(),
-            ItemTab::Files => body(app, state, open_file.clone(), backend.clone()).into_any(),
-        },
-    )
-    .style(|s| s.size_full().min_height(0.0))
-}
-
-/// The file tabs and the code. Threads anchored in the open file are
-/// drawn inline; the complete item conversation lives on the Conversation
-/// tab, and the files as a tree in the drawer on the right.
-fn body(
-    app: AppState,
-    state: ReviewState,
-    open_file: OpenFile,
-    backend: Rc<Backend>,
-) -> impl IntoView {
+    let pane_backend = backend.clone();
     Stack::vertical((
-        tabs::tab_bar(app, state, backend.clone()),
-        editor::editor_pane(app, state, backend, open_file),
+        tabs::tab_bar(app, state, backend),
+        dyn_container(
+            move || showing.get(),
+            move |showing| match showing {
+                Showing::Conversation => conversation::view(
+                    app,
+                    state,
+                    pane_backend.clone(),
+                    open_file.clone(),
+                    open_item.clone(),
+                )
+                .into_any(),
+                Showing::Code => {
+                    editor::editor_pane(app, state, pane_backend.clone(), open_file.clone())
+                        .into_any()
+                }
+                Showing::Nothing => centered_message(
+                    SidebarIcon::Chat,
+                    || "Nothing open".to_string(),
+                    || "Press ⇧⌘1 to show the conversation.".to_string(),
+                )
+                .into_any(),
+            },
+        )
+        .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
     ))
     .style(|s| s.size_full().min_height(0.0).flex_col())
 }

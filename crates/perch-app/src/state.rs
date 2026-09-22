@@ -882,6 +882,9 @@ impl AppState {
                     tracing::debug!(item = %item.id, "ignored a stale item-open result");
                     return;
                 }
+                // The item's pane comes back unless it is the one open
+                // already, whose pane is still on screen.
+                let fresh = !review.is_item(&item.id);
                 review.prepare_ready_for(&item.id);
                 self.open_expectation
                     .set(OpenExpectation::Item(item.id.clone()));
@@ -905,7 +908,11 @@ impl AppState {
                 // The threads follow on their own event; whatever is here
                 // is the last item's.
                 review.comment_threads.set(Arc::new(Vec::new()));
-                review.restore_tab();
+                if fresh {
+                    for path in review.restore_pane() {
+                        self.reload.update(|reload| reload.push(path));
+                    }
+                }
                 review.ready.set(true);
                 review.set_phase(Phase::Ready);
             }
@@ -922,6 +929,7 @@ impl AppState {
                     tracing::debug!(item = %item.id, "ignored a stale issue-open result");
                     return;
                 }
+                let fresh = !review.is_item(&item.id);
                 review.prepare_ready_for(&item.id);
                 self.open_expectation
                     .set(OpenExpectation::Item(item.id.clone()));
@@ -940,7 +948,10 @@ impl AppState {
                 review.issue_comments.set(comments);
                 review.issue_events.set(events);
                 review.comment_threads.set(Arc::new(Vec::new()));
-                review.tab.set(ItemTab::Conversation);
+                // An issue has no files, so its pane has nothing to load.
+                if fresh {
+                    review.restore_pane();
+                }
                 review.ready.set(true);
                 review.set_phase(Phase::Issue);
             }
@@ -2376,6 +2387,60 @@ mod tests {
         assert!(review.tabs.with(Vec::is_empty));
         assert!(review.loading.with(HashMap::is_empty));
         assert_eq!(review.lsp_status.get(), perch_lsp::Status::Absent);
+    }
+
+    /// An item opened again comes back on the pane it was left with, and
+    /// the files its tabs hold are asked for, the one showing first. One
+    /// opened for the first time is on Conversation alone.
+    #[test]
+    fn an_item_opened_again_comes_back_on_its_pane_and_asks_for_its_files() {
+        use crate::review::model::ItemTab;
+        let app = AppState::new();
+        let review = ReviewState::new();
+
+        app.begin_item_review(review, "Open", "a", 71);
+        app.apply_with_review(review_ready("a", 71), review);
+        assert_eq!(review.tab.get(), ItemTab::Conversation);
+        assert!(review.conversation_open.get());
+        review.open_tab("src/x.rs");
+        review.open_tab("src/y.rs");
+        review.show_tab(ItemTab::Files);
+        review.close_conversation();
+
+        app.begin_item_review(review, "Open", "b", 72);
+        app.apply_with_review(review_ready("b", 72), review);
+        assert!(review.conversation_open.get());
+        assert_eq!(review.tab.get(), ItemTab::Conversation);
+        assert!(review.tabs.with(Vec::is_empty));
+        assert!(app.reload.get().is_empty());
+
+        app.begin_item_review(review, "Open", "a", 73);
+        app.apply_with_review(review_ready("a", 73), review);
+        assert!(!review.conversation_open.get());
+        assert_eq!(review.tab.get(), ItemTab::Files);
+        assert_eq!(review.tabs.with(Vec::len), 2);
+        assert_eq!(review.active.get().as_deref(), Some("src/y.rs"));
+        assert_eq!(app.reload.get(), ["src/y.rs", "src/x.rs"]);
+    }
+
+    /// A ready for the item already open, as agent navigation within it
+    /// sends, leaves its pane as it is on screen.
+    #[test]
+    fn a_ready_for_the_item_already_open_keeps_its_pane() {
+        use crate::review::model::ItemTab;
+        let app = AppState::new();
+        let review = review_of("same");
+        review.open_tab("src/x.rs");
+        review.show_tab(ItemTab::Files);
+        review.close_conversation();
+        app.expect_item_navigation("same", 43);
+
+        app.apply_with_review(review_ready("same", 43), review);
+
+        assert_eq!(review.tab.get(), ItemTab::Files);
+        assert!(!review.conversation_open.get());
+        assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
+        assert!(app.reload.get().is_empty());
     }
 
     #[test]

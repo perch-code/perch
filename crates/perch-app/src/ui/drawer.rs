@@ -8,7 +8,7 @@
 //! so the open file, its scroll and a composer survive the drawer opening,
 //! shutting, and changing what it holds.
 //!
-//! Two tiles at the right end of the file tabs open it, one for each
+//! Two tiles at the right end of the item's tabs open it, one for each
 //! thing it holds, as Codex has its folder there; the Agents control in
 //! the status bar and Cmd-Shift-E and Cmd-Shift-A do the same from
 //! anywhere. Each is a toggle: the control for what the drawer shows
@@ -96,7 +96,7 @@ fn room(window_width: f64, sidebar: Option<f64>) -> f64 {
 /// The drawer is docked while the room is at least its minimum, narrower
 /// than the reader set it if that is what fits. With less room than that
 /// it lies over the pane at the reader's width, since a pane squeezed
-/// under its minimum has its controls over its switch.
+/// under its minimum has no room for its controls.
 pub fn placement(window_width: f64, sidebar: Option<f64>, preferred: f64) -> Placement {
     let room = room(window_width, sidebar);
     if room >= theme::DRAWER_MIN_WIDTH {

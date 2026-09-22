@@ -181,7 +181,7 @@ pub const DRAWER_MIN_WIDTH: f64 = 336.0;
 pub const DRAWER_MAX_WIDTH: f64 = 620.0;
 /// The least the main pane is left with before the drawer stops taking
 /// room from it and lies over it instead: enough for the item bar's
-/// controls and its switch, with the title given way.
+/// controls and the tab strip's, with the title given way.
 pub const MAIN_MIN_WIDTH: f64 = 620.0;
 pub const AGENT_ROW_MIN_HEIGHT: f64 = 88.0;
 /// The strip at the top of the drawer, where the traffic lights sit.

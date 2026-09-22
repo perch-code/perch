@@ -1272,7 +1272,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let notice = rect(&harness, "item notice");
-        let tabs = rect(&harness, "file tabs");
+        let tabs = rect(&harness, "tab strip");
         assert!(
             within(notice, tabs),
             "{notice:?} is not in the tab bar {tabs:?}"
@@ -1297,7 +1297,7 @@ mod tests {
             alone,
             "twenty tabs squeezed the notice to {notice:?}"
         );
-        assert!(within(notice, rect(&harness, "file tabs")));
+        assert!(within(notice, rect(&harness, "tab strip")));
     }
 
     fn snapshot() -> crate::review::model::ReviewGroupSummary {
@@ -1354,7 +1354,7 @@ mod tests {
         let back = rect(&harness, "back to current");
         assert!(back.width() > 0.0);
         assert!(
-            within(back, rect(&harness, "file tabs")),
+            within(back, rect(&harness, "tab strip")),
             "{back:?} is not in the tab bar"
         );
         // The click asks for the item as it is now, and the view waits on
