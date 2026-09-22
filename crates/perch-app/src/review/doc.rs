@@ -57,10 +57,10 @@ const ESTIMATE_COLUMNS: usize = 80;
 /// gap below.
 const ROWS_PER_MESSAGE: usize = 2;
 
-/// The rows a card takes besides its messages: the first row, with the
-/// chevron and the menu where Conversation has the anchor label, and the
-/// follow-up line.
-const CARD_CHROME_ROWS: usize = 2;
+/// The rows a card takes besides its messages: the header, "Comment on
+/// line R12" with the chevron and the menu, the Follow up box under the
+/// comments, and the foot with Resolve, each a little over a row.
+const CARD_CHROME_ROWS: usize = 5;
 
 /// How a line is painted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -82,8 +82,8 @@ pub enum CardId {
 
 /// How many rows a thread's card is given before it has been laid out:
 /// one per line of every message body, wrapped at eighty columns, plus
-/// the byline and the gap for each message, the first row and the
-/// follow-up line, and never more than `CARD_MAX_ROWS`. Collapsed, it is
+/// the byline and the gap for each message, the header, the Follow up
+/// box and the foot, and never more than `CARD_MAX_ROWS`. Collapsed, it is
 /// one row whatever the thread holds. The estimate can be wrong by a few
 /// rows; it only has to be near enough that the first paint is not a
 /// jump, and the card's laid-out height corrects it.
@@ -1129,15 +1129,24 @@ mod tests {
 
     #[test]
     fn a_short_thread_is_its_lines_plus_the_chrome() {
-        // One line, its byline and gap, the first row and the follow-up.
-        assert_eq!(estimate_rows(&thread_of(&["why?"]), false), 1 + 2 + 2);
+        // One line, its byline and gap, and the header, the Follow up box
+        // and the foot.
+        let (message, chrome) = (ROWS_PER_MESSAGE, CARD_CHROME_ROWS);
+        assert_eq!(estimate_rows(&thread_of(&["why?"]), false), 1 + message + chrome);
         // A question and a three-line answer with a blank line in it:
         // every line counts, blank ones too, since they are gaps.
-        assert_eq!(estimate_rows(&thread_of(&["why?", "because\n\nof this"]), false), (1 + 2) + (3 + 2) + 2);
+        assert_eq!(
+            estimate_rows(&thread_of(&["why?", "because\n\nof this"]), false),
+            (1 + message) + (3 + message) + chrome
+        );
         // A line wraps at eighty columns: 200 characters are three rows.
         let long_line = "x".repeat(200);
-        assert_eq!(estimate_rows(&thread_of(&[&long_line]), false), 3 + 2 + 2);
-        assert_eq!(estimate_rows(&thread_of(&[&"y".repeat(80)]), false), 1 + 2 + 2, "eighty fit on one");
+        assert_eq!(estimate_rows(&thread_of(&[&long_line]), false), 3 + message + chrome);
+        assert_eq!(
+            estimate_rows(&thread_of(&[&"y".repeat(80)]), false),
+            1 + message + chrome,
+            "eighty fit on one"
+        );
         // A thread with no messages yet is the chrome alone.
         assert_eq!(estimate_rows(&thread_of(&[]), false), CARD_CHROME_ROWS);
     }
@@ -1147,7 +1156,11 @@ mod tests {
         let hundred_lines = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
         assert_eq!(estimate_rows(&thread_of(&["why?", &hundred_lines]), false), CARD_MAX_ROWS);
         let thirty = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        assert_eq!(estimate_rows(&thread_of(&["why?", &thirty]), false), (1 + 2) + (30 + 2) + 2, "under the cap it is what it is");
+        assert_eq!(
+            estimate_rows(&thread_of(&["why?", &thirty]), false),
+            (1 + ROWS_PER_MESSAGE) + (30 + ROWS_PER_MESSAGE) + CARD_CHROME_ROWS,
+            "under the cap it is what it is"
+        );
     }
 
     #[test]
@@ -1169,7 +1182,10 @@ mod tests {
             m.author = Author::GitHubUser("octocat".into());
             m.github_id = Some(100 + i as u64);
         }
-        assert_eq!(estimate_rows(&thread, false), (1 + 2) + (3 + 2) + 2);
+        assert_eq!(
+            estimate_rows(&thread, false),
+            (1 + ROWS_PER_MESSAGE) + (3 + ROWS_PER_MESSAGE) + CARD_CHROME_ROWS
+        );
         assert_eq!(
             estimate_rows(&thread, false),
             estimate_rows(&thread_of(&["nit", "done\n\nthanks"]), false),

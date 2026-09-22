@@ -6,7 +6,10 @@
 //! under selected lines or on Conversation for an item-level question; a
 //! follow-up's composer sits under its thread.
 //!
-//! The message, the run's steps and footer, the follow-up line and the
+//! Both faces are drawn as github.com draws a thread: a box with a
+//! header, each message laid out as a comment under its author's face and
+//! byline, the Follow up box where GitHub has Reply, and a foot with
+//! Resolve. The message, the run's steps and footer, the foot and the
 //! composer are one set of views here, taking a [`ThreadFace`] for the
 //! sizes that differ, so Conversation and inline cards cannot drift apart.
 
@@ -14,7 +17,7 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::CursorStyle;
+use floem::style::{BorderBottomLeftRadius, BorderBottomRightRadius, CursorStyle};
 use floem::views::{
     dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
@@ -111,22 +114,64 @@ impl ThreadFace {
         }
     }
 
-    /// Room between a thread's messages.
-    fn message_gap(self) -> f64 {
+    /// The avatar beside a comment.
+    fn avatar(self) -> f64 {
         match self {
-            ThreadFace::Inline => theme::THREAD_GAP,
-            ThreadFace::Card => 20.0,
+            ThreadFace::Inline => theme::INLINE_THREAD_AVATAR,
+            ThreadFace::Card => theme::THREAD_AVATAR,
+        }
+    }
+
+    /// The room at a thread's sides, and over its first comment.
+    fn inset(self) -> f64 {
+        match self {
+            ThreadFace::Inline => theme::INLINE_THREAD_INSET,
+            ThreadFace::Card => theme::THREAD_INSET,
+        }
+    }
+
+    /// The room above and below a comment.
+    fn comment_space(self) -> f64 {
+        match self {
+            ThreadFace::Inline => theme::INLINE_THREAD_COMMENT_SPACE,
+            ThreadFace::Card => theme::THREAD_COMMENT_SPACE,
         }
     }
 }
 
-/// Where a message sits across the thread's width. In a thread that has
+/// Where a message is in its thread: the first, which in the code sits
+/// flush at the card's left, and the last, under which the line down the
+/// avatars stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Place {
+    pub first: bool,
+    pub last: bool,
+}
+
+impl Place {
+    /// Where the message with `id` is in `thread`; one the thread does not
+    /// hold is taken for a message on its own.
+    fn of(thread: &CommentThread, id: &str) -> Place {
+        match thread.messages.iter().position(|m| m.id == id) {
+            Some(i) => Place {
+                first: i == 0,
+                last: i + 1 == thread.messages.len(),
+            },
+            None => Place {
+                first: true,
+                last: true,
+            },
+        }
+    }
+}
+
+/// Whether a message is marked as Perch's alone. In a thread that has
 /// something on GitHub, a message that does not, the reader's question to
-/// an agent and the agent's answer, is drawn in the private lane: inset,
-/// with a hairline down its left, so the reader never wonders what a
-/// colleague can see. The first of each run of them carries the lane's
-/// label. Everything else, and every message of a wholly private thread,
-/// sits flush: the lane is a difference, not a decoration.
+/// an agent and the agent's answer, is labelled Perch only in its byline,
+/// so the reader never wonders what a colleague can see; the runs of them
+/// are told apart from their first message on. Everything else, and every
+/// message of a wholly private thread, is flush and unlabelled: the label
+/// is a difference, not a decoration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lane {
     Flush,
@@ -135,7 +180,7 @@ pub enum Lane {
 }
 
 impl Lane {
-    /// The lane of each message of `thread`, in order.
+    /// Whether each message of `thread` is marked Perch only, in order.
     pub fn of(thread: &CommentThread) -> Vec<Lane> {
         let mixed = thread.has_github_message();
         let mut after_private = false;
@@ -193,7 +238,8 @@ pub fn composer_view(
                 .with(|t| t.iter().find(|t| &t.id == id).map(|t| t.outdated))
         })
         .unwrap_or(false);
-    let placeholder = if composer.thread_id.is_some() {
+    let follow_up = composer.thread_id.is_some();
+    let placeholder = if follow_up {
         "Follow up…".to_string()
     } else if composer.anchor.is_some() {
         "Ask about these lines…".to_string()
@@ -473,7 +519,7 @@ pub fn composer_view(
     .debug_name("composer-box")
     .style(move |s| {
         let base = s.flex_col().padding(12.0).border(1.0).border_radius(14.0);
-        match face {
+        let base = match face {
             ThreadFace::Card => base
                 .width_full()
                 .background(theme::CANVAS_SUBTLE)
@@ -483,7 +529,14 @@ pub fn composer_view(
             ThreadFace::Inline => base
                 .background(theme::CANVAS)
                 .border_color(theme::ACCENT_RING),
-        }
+        };
+        // Under a thread it is the thread's reply form, as GitHub's is:
+        // white, in the thread's rule, with a box's corners.
+        base.apply_if(follow_up, |s| {
+            s.background(theme::CANVAS)
+                .border_color(theme::BORDER)
+                .border_radius(theme::RADIUS)
+        })
     })
 }
 
@@ -1037,13 +1090,12 @@ pub fn outdated_pill(outdated: bool) -> impl IntoView {
 // Threads
 // ---------------------------------------------------------------------
 
-/// A thread inline in the code, led by a chevron that collapses it to one
-/// row, with no anchor label since it is already under those lines. It
-/// holds the messages, the run under an agent's answer with its steps on
-/// one line, and the follow-up line. A gutter marker click flashes its
-/// border. One of the reader's own is grey inside a dashed border; one of
-/// GitHub's is white inside a solid one, so neither can be taken for the
-/// other.
+/// A thread inline in the code, as github.com's Files changed draws one:
+/// a box under the lines it is about, headed "Comment on line R12" with
+/// the chevron that collapses it to one row, then its comments, the
+/// Follow up box and the foot with Resolve. A gutter marker click
+/// flashes its border. One of the reader's own has a dashed border and
+/// one of GitHub's a solid one, so neither can be taken for the other.
 pub fn thread_card(
     app: AppState,
     state: ReviewState,
@@ -1071,25 +1123,20 @@ pub fn thread_card(
         },
     )
     .style(move |s| {
-        // Collapsed, it is its one row exactly. The layer sets its width
-        // from the edges it is placed against.
-        let base = s.apply_if(collapsed.get(), |s| s.height(theme::CODE_LINE_HEIGHT as f64));
-        let base = match origin {
-            ThreadOrigin::Local => base
-                .background(theme::CANVAS_SUBTLE)
-                .border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
-                .border_radius(theme::RADIUS_LG)
-                .border_color(theme::BORDER),
-            ThreadOrigin::GitHub => base
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_radius(theme::RADIUS)
-                .border_color(theme::BORDER_MUTED),
-        };
-        if flashing.get() {
-            base.border_color(theme::ACCENT)
-        } else {
-            base
+        // Collapsed, it is its one row exactly, on the grey GitHub folds
+        // a thread to. The layer sets its width from the edges it is
+        // placed against.
+        let folded = collapsed.get();
+        let base = s
+            .apply_if(folded, |s| s.height(theme::CODE_LINE_HEIGHT as f64))
+            .background(if folded { theme::CANVAS_SUBTLE } else { theme::CANVAS })
+            .border_radius(theme::RADIUS)
+            .border_color(if flashing.get() { theme::ACCENT } else { theme::BORDER });
+        match origin {
+            ThreadOrigin::Local => {
+                base.border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
+            }
+            ThreadOrigin::GitHub => base.border(1.0),
         }
     });
 
@@ -1117,10 +1164,10 @@ pub(crate) fn wire_flash(state: ReviewState, card_id: CardId, flashing: RwSignal
     });
 }
 
-/// A thread's card open: its first row, the delete confirmation when one
-/// is asked for, the messages and the follow-up. In the code the messages
-/// scroll inside the card once it is as tall as a card may be, so a long
-/// thread cannot push the code off the screen.
+/// A thread's card open: its header, a finding's controls and the delete
+/// confirmation when one is asked for, the comments, and the foot. The
+/// comments scroll inside the card once it is as tall as a card may be,
+/// so a long thread cannot push the code off the screen.
 fn open_inline_card(
     app: AppState,
     state: ReviewState,
@@ -1128,12 +1175,6 @@ fn open_inline_card(
     thread: CommentThread,
 ) -> impl IntoView {
     let menu = thread_menu(state, &thread, theme::THREAD_MENU).into_any();
-    let first_row = chevron_row(
-        state,
-        CardId::Thread(thread.id.clone()),
-        thread.outdated,
-        menu,
-    );
     let messages = messages_view(
         app,
         state,
@@ -1144,10 +1185,8 @@ fn open_inline_card(
     .scroll()
     .style(card_scroll);
     Stack::vertical((
-        first_row.style(|s| s.flex_shrink(0.0_f32)),
-        crate::review::cards::finding_controls(app, state, backend.clone(), thread.id.clone())
-            .style(|s| s.flex_shrink(0.0_f32)),
-        delete_confirmation(state, backend.clone(), thread.id.clone(), thread.is_github_bound())
+        inline_header(app, state, &thread, menu).style(|s| s.flex_shrink(0.0_f32)),
+        notices(app, state, backend.clone(), &thread, ThreadFace::Inline)
             .style(|s| s.flex_shrink(0.0_f32)),
         messages,
         follow_up(app, state, backend, thread.id.clone(), ThreadFace::Inline)
@@ -1156,8 +1195,6 @@ fn open_inline_card(
     .style(|s| {
         s.flex_col()
             .width_full()
-            .padding(theme::THREAD_PADDING)
-            .gap(theme::THREAD_GAP)
             .max_height(inline_card_max_height())
     })
 }
@@ -1170,74 +1207,250 @@ pub(crate) fn inline_card_max_height() -> f64 {
         - 2.0
 }
 
-/// The scroll a card's messages sit in, for the cap. floem keeps the
+/// The scroll a card's comments sit in, for the cap. floem keeps the
 /// bar's width whether or not anything overflows, off the right of the
 /// content for the vertical bar and under it for the horizontal one. The
-/// messages take the card's whole width and never scroll sideways, so the
-/// scroll reaches `CARD_SCROLLBAR` into the card's right padding, where
-/// the bar draws at the cap, and keeps nothing under the messages.
+/// comments never scroll sideways, so nothing is kept under them, and
+/// the bar's room comes out of the inset at their right, where it draws
+/// at the cap.
 pub(crate) fn card_scroll(s: floem::style::Style) -> floem::style::Style {
     s.flex_shrink(1.0_f32)
         .min_height(0.0)
         .overflow_x(floem::taffy::Overflow::Hidden)
         .scrollbar_width(theme::CARD_SCROLLBAR)
-        .margin_right(-theme::CARD_SCROLLBAR)
 }
 
-/// The first row of a card in the code, where its Conversation card has an
-/// anchor label: the chevron that collapses it, Outdated, and at the
-/// end whatever the card puts there, the `...` menu on a thread of the
-/// reader's own. The row is as tall as that menu whether or not it holds
-/// one, so the chevron sits at one height on every card.
-pub(crate) fn chevron_row(
+/// The header across a thread in the code, as Files changed has it: the
+/// chevron that collapses the card, the lines the thread is on,
+/// Outdated, Local on one of the reader's own, Hide resolved on one that
+/// is resolved, and the `...` menu. The chevron sits where the collapsed
+/// row has it, so it does not move out from under the pointer.
+fn inline_header(
+    app: AppState,
     state: ReviewState,
-    card_id: CardId,
-    outdated: bool,
-    trailing: floem::AnyView,
+    thread: &CommentThread,
+    menu: floem::AnyView,
 ) -> impl IntoView {
+    let card_id = CardId::Thread(thread.id.clone());
+    let toggle_id = card_id.clone();
     Stack::horizontal((
         chevron(state, card_id, true),
-        outdated_pill(outdated),
+        lines_heading(app, state, thread),
+        outdated_pill(thread.outdated),
+        local_chip(!thread.is_github_bound()),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        trailing,
+        resolved_toggle(
+            state,
+            thread.id.clone(),
+            || false,
+            ThreadFace::Inline,
+            move || state.toggle_card(&toggle_id),
+        ),
+        menu,
     ))
-    .style(|s| s.items_center().width_full().height(theme::THREAD_MENU))
+    .debug_name("thread-header")
+    .style(|s| {
+        s.items_center()
+            .width_full()
+            .height(theme::INLINE_THREAD_HEADER)
+            .padding_horiz(theme::COLLAPSED_CARD_PADDING)
+            .border_bottom(1.0)
+            .border_color(theme::BORDER)
+    })
+}
+
+/// What a thread in the code is on, as Files changed words it: "Comment
+/// on line R12", or on lines R10 to R12, L for the base's side. A thread
+/// of the reader's own is a question, and a finding's a finding.
+fn lines_heading(app: AppState, state: ReviewState, thread: &CommentThread) -> floem::AnyView {
+    let Some(anchor) = thread.anchor.clone() else {
+        return Empty::new().into_any();
+    };
+    let side = match anchor.side {
+        perch_github::Side::Left => "L",
+        perch_github::Side::Right => "R",
+    };
+    let id = thread.id.clone();
+    let github = thread.is_github_bound();
+    let range = anchor.start_line != anchor.line;
+    let words = move || {
+        let noun = if github {
+            "Comment"
+        } else if cards::finding_of(app, state, &id).is_some() {
+            "Finding"
+        } else {
+            "Question"
+        };
+        format!("{noun} on {}", if range { "lines" } else { "line" })
+    };
+    let muted = |s: floem::style::Style| {
+        s.font_size(theme::TEXT_BADGE)
+            .color(theme::FG_MUTED)
+            .selectable(false)
+            .flex_shrink(0.0_f32)
+    };
+    let strong = |s: floem::style::Style| {
+        s.font_size(theme::TEXT_BADGE)
+            .font_weight(theme::weight_strong())
+            .color(theme::FG)
+            .selectable(false)
+            .margin_left(4.0)
+            .flex_shrink(0.0_f32)
+    };
+    let first = format!("{side}{}", anchor.start_line);
+    let last = format!("{side}{}", anchor.line);
+    Stack::horizontal((
+        Label::derived(words).style(muted),
+        Label::derived(move || first.clone()).style(strong),
+        if range {
+            Stack::horizontal((
+                Label::derived(|| "to".to_string()).style(move |s| muted(s).margin_left(4.0)),
+                Label::derived(move || last.clone()).style(strong),
+            ))
+            .style(|s| s.items_center())
+            .into_any()
+        } else {
+            Empty::new().into_any()
+        },
+    ))
+    .debug_name("lines-heading")
+    .style(|s| s.items_center().margin_left(6.0).min_width(0.0))
+    .into_any()
+}
+
+/// The mark that says a thread is Perch's and not GitHub's, where
+/// `shown`.
+pub(crate) fn local_chip(shown: bool) -> floem::AnyView {
+    if !shown {
+        return Empty::new().into_any();
+    }
+    cards::tip(
+        Container::new(Label::derived(|| "Local".to_string()).style(|s| {
+            s.font_size(theme::TEXT_SECTION)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG_MUTED)
+                .selectable(false)
+                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
+        }))
+        .style(|s| {
+            s.height(theme::CHIP_HEIGHT)
+                .padding_horiz(7.0)
+                .margin_left(8.0)
+                .items_center()
+                .justify_center()
+                .background(theme::BADGE_BG)
+                .border_radius(theme::CHIP_HEIGHT / 2.0)
+                .flex_shrink(0.0_f32)
+        }),
+        "This thread is on this machine and is not on GitHub.".to_string(),
+    )
+    .into_any()
+}
+
+/// Show resolved on a resolved thread that is `folded` away, and Hide
+/// resolved on one the reader opened, as github.com offers either at
+/// the end of a resolved thread's header. Hidden on a thread that is not
+/// resolved.
+pub(crate) fn resolved_toggle(
+    state: ReviewState,
+    thread_id: String,
+    folded: impl Fn() -> bool + Copy + 'static,
+    face: ThreadFace,
+    toggle: impl Fn() + 'static,
+) -> impl IntoView {
+    let resolved = Memo::new(move |_| state.is_resolved(&thread_id));
+    let (height, size) = match face {
+        ThreadFace::Card => (theme::THREAD_HEADER_BUTTON, theme::TEXT_META),
+        ThreadFace::Inline => (theme::COLLAPSED_CARD_MENU, theme::TEXT_BADGE),
+    };
+    Stack::horizontal((
+        crate::ui::widgets::icon_in(
+            move || {
+                let icon = if folded() {
+                    SidebarIcon::Unfold
+                } else {
+                    SidebarIcon::Fold
+                };
+                crate::icons::sidebar_icon(icon, theme::FG_MUTED)
+            },
+            || theme::FG_MUTED,
+        )
+        .style(|s| s.size(14.0, 14.0).margin_right(4.0)),
+        Label::derived(move || {
+            if folded() {
+                "Show resolved".to_string()
+            } else {
+                "Hide resolved".to_string()
+            }
+        })
+        .style(move |s| s.font_size(size).color(theme::FG_MUTED).selectable(false)),
+    ))
+    .on_event_stop(el::Click, move |_, _| toggle())
+    .debug_name("resolved-toggle")
+    .style(move |s| {
+        clickable(s)
+            .items_center()
+            .height(height)
+            .padding_horiz(6.0)
+            .border_radius(theme::RADIUS)
+            .flex_shrink(0.0_f32)
+            .hover(|s| s.background(theme::BADGE_BG))
+            .apply_if(!resolved.get(), |s| s.hide())
+    })
 }
 
 /// A thread collapsed to its one row: who spoke first, the first line of
-/// what they said, how many messages follow, Outdated, and the `...`
-/// menu, smaller than the open card's so it fits the row.
+/// what they said, how many messages follow, Outdated, Show resolved on
+/// one that is resolved, and the `...` menu, smaller than the open
+/// card's so it fits the row.
 fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
     let first = thread.messages.first();
     let author = first.map(|m| m.author.clone()).unwrap_or(Author::User);
     let line = first
         .map(|m| crate::review::timeline::first_line(&m.body))
         .unwrap_or_default();
+    let card_id = CardId::Thread(thread.id.clone());
+    let toggle_id = card_id.clone();
     // Set off from the pill before it as the pills are from what is
     // before them: the pill's fill and the menu's hover fill are one
     // colour, and would touch.
-    let menu = thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU)
-        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP))
-        .into_any();
+    let trailing = Stack::horizontal((
+        resolved_toggle(
+            state,
+            thread.id.clone(),
+            || true,
+            ThreadFace::Inline,
+            move || state.toggle_card(&toggle_id),
+        )
+        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP)),
+        thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU)
+            .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP)),
+    ))
+    .style(|s| s.items_center().flex_shrink(0.0_f32))
+    .into_any();
+    let avatar = author_avatar(app, state, &author, theme::COLLAPSED_CARD_PILL);
     collapsed_card_row(
         state,
-        CardId::Thread(thread.id),
+        card_id,
+        avatar,
         move || author_name(app, &author),
         line,
         thread.messages.len().saturating_sub(1),
         thread.outdated,
-        menu,
+        trailing,
     )
 }
 
-/// A card in the code collapsed to its one row: the chevron, `author`,
-/// the first `line` of the first message, how many `more` messages
-/// follow, Outdated, and at the end whatever the card puts there. The
-/// author is read each time it is drawn, since who the reader is can
-/// land after the card is built.
+/// A card in the code collapsed to its one row: the chevron, the face
+/// and name of the `author`, the first `line` of the first message, how
+/// many `more` messages follow, Outdated, and at the end whatever the
+/// card puts there. The author is read each time it is drawn, since who
+/// the reader is can land after the card is built.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collapsed_card_row(
     state: ReviewState,
     card_id: CardId,
+    avatar: floem::AnyView,
     author: impl Fn() -> Name + 'static,
     line: String,
     more: usize,
@@ -1246,9 +1459,10 @@ pub(crate) fn collapsed_card_row(
 ) -> impl IntoView {
     Stack::horizontal((
         chevron(state, card_id, false),
+        avatar.style(|s| s.margin_left(6.0).flex_shrink(0.0_f32)),
         name_label(author, |s| {
             s.font_size(theme::TEXT_BADGE)
-                .font_weight(theme::weight_emphasis())
+                .font_weight(theme::weight_strong())
                 .color(theme::FG)
                 .selectable(false)
                 .margin_left(6.0)
@@ -1292,6 +1506,66 @@ fn author_name(app: AppState, author: &Author) -> Name {
     }
 }
 
+/// The face beside a message, `size` across: a login's picture, the
+/// reader's own, or an agent's mark.
+pub(crate) fn author_avatar(
+    app: AppState,
+    state: ReviewState,
+    author: &Author,
+    size: f64,
+) -> floem::AnyView {
+    match author {
+        Author::GitHubUser(login) => crate::ui::widgets::avatar(
+            app,
+            cards::avatar_url_of(state, login.clone()),
+            size,
+            login.clone(),
+        )
+        .into_any(),
+        Author::User => viewer_avatar(app, size).into_any(),
+        Author::Agent { .. } => agent_avatar(size).into_any(),
+    }
+}
+
+/// The reader's face, once GitHub has said who the token belongs to, and
+/// their initial on a tint until then. Read live, since that answer can
+/// land after the view is built.
+fn viewer_avatar(app: AppState, size: f64) -> impl IntoView {
+    let viewer = move || app.viewer.get().filter(|(l, _)| !l.is_empty());
+    let seed = viewer().map(|(l, _)| l).unwrap_or_else(|| "you".into());
+    crate::ui::widgets::avatar(
+        app,
+        move || viewer().map(|(_, a)| a).unwrap_or_default(),
+        size,
+        seed,
+    )
+}
+
+/// The reader's login, once GitHub has said it.
+fn viewer_login(app: AppState) -> Option<String> {
+    app.viewer
+        .get()
+        .map(|(login, _)| login)
+        .filter(|l| !l.is_empty())
+}
+
+/// An agent's mark in place of a face: its glyph on a grey disc.
+fn agent_avatar(size: f64) -> impl IntoView {
+    Container::new(
+        sidebar_glyph(SidebarIcon::Agents, theme::FG_MUTED)
+            .style(move |s| s.size(size * 0.6, size * 0.6)),
+    )
+    .debug_name("agent-avatar")
+    .style(move |s| {
+        s.size(size, size)
+            .border_radius(size / 2.0)
+            .background(theme::BADGE_BG)
+            .items_center()
+            .justify_center()
+            .flex_shrink(0.0_f32)
+    })
+}
+
 /// "3 more": how many messages a collapsed card's first line stands in
 /// for. Nothing when none do.
 fn more_pill(more: usize) -> impl IntoView {
@@ -1320,6 +1594,24 @@ fn more_pill(more: usize) -> impl IntoView {
 /// collapsed and down while it is open, as a run's steps have it, in a
 /// slot the size of the gutter's controls. Click toggles the card.
 fn chevron(state: ReviewState, card_id: CardId, open: bool) -> impl IntoView {
+    chevron_button(
+        move || open,
+        theme::CHEVRON_SLOT,
+        theme::CHEVRON_GLYPH,
+        move || state.toggle_card(&card_id),
+    )
+}
+
+/// A chevron `glyph` across in a square button `slot` across, pointing
+/// down while what it opens is `open` and right while it is not. The
+/// glyph is the one for the way it points rather than one turned: vger
+/// draws an SVG square to the screen, and a turn would only move it.
+pub(crate) fn chevron_button(
+    open: impl Fn() -> bool + 'static,
+    slot: f64,
+    glyph: f64,
+    toggle: impl Fn() + 'static,
+) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let color = move || {
         if hovered.get() {
@@ -1330,27 +1622,28 @@ fn chevron(state: ReviewState, card_id: CardId, open: bool) -> impl IntoView {
     };
     Container::new(
         crate::ui::widgets::icon_in(
-            move || crate::icons::sidebar_icon(SidebarIcon::ChevronRight, color()),
+            move || {
+                let icon = if open() {
+                    SidebarIcon::ChevronDown
+                } else {
+                    SidebarIcon::ChevronRight
+                };
+                crate::icons::sidebar_icon(icon, color())
+            },
             color,
         )
-        .style(move |s| {
-            let base = s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH);
-            if open {
-                base.rotate(floem::style::Angle::QUARTER_TURN)
-            } else {
-                base
-            }
-        }),
+        .style(move |s| s.size(glyph, glyph)),
     )
-    .on_event_stop(el::Click, move |_, _| state.toggle_card(&card_id))
+    .on_event_stop(el::Click, move |_, _| toggle())
     .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
     .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
-    .style(|s| {
+    .debug_name("thread-chevron")
+    .style(move |s| {
         clickable(s)
-            .size(theme::CHEVRON_SLOT, theme::CHEVRON_SLOT)
+            .size(slot, slot)
             .items_center()
             .justify_center()
-            .border_radius(3.0)
+            .border_radius(if slot > theme::CHEVRON_SLOT { theme::RADIUS } else { 3.0 })
             .flex_shrink(0.0_f32)
             .hover(|s| s.background(theme::BADGE_BG))
     })
@@ -1445,7 +1738,7 @@ pub fn delete_confirmation(
     .style(move |s| s.width_full().apply_if(!asking.get(), |s| s.hide()))
 }
 
-/// The `...` at the end of a thread's first row, and the menu under it,
+/// The `...` at the end of a thread's header, and the menu under it,
 /// in a round button `size` across. A thread of the reader's own offers
 /// Delete Thread. One of GitHub's offers to delete Perch's messages under
 /// it, and only while there are any; with none, there is no menu at all,
@@ -1490,7 +1783,8 @@ pub fn thread_menu(state: ReviewState, thread: &CommentThread, size: f64) -> imp
 /// A thread's messages, read from the state rather than from the thread
 /// the caller was built with, so a run's steps and its answer show as they
 /// arrive: the row that holds the thread keeps its key through a run, and
-/// a kept row is not rebuilt.
+/// a kept row is not rebuilt. Set in from the thread's sides; in the code
+/// the room at the right is less the scroll bar's, which draws there.
 pub fn messages_view(
     app: AppState,
     state: ReviewState,
@@ -1515,15 +1809,21 @@ pub fn messages_view(
                 t.iter()
                     .find(|t| t.id == list_id)
                     .map(|t| {
+                        let count = t.messages.len();
                         t.messages
                             .iter()
                             .zip(Lane::of(t))
-                            .map(|(m, lane)| {
+                            .enumerate()
+                            .map(|(i, (m, lane))| {
                                 let opening = editing
                                     .as_ref()
                                     .filter(|(id, _)| *id == m.id)
                                     .map(|(_, opening)| *opening);
-                                (m.clone(), opening, lane)
+                                let place = Place {
+                                    first: i == 0,
+                                    last: i + 1 == count,
+                                };
+                                (m.clone(), opening, lane, place)
                             })
                             .collect::<Vec<_>>()
                     })
@@ -1532,9 +1832,10 @@ pub fn messages_view(
         },
         // The key follows what the row shows: an edit on GitHub changes
         // the body, a draft posted gains its id, a draft being edited is
-        // the composer, and a draft added to a thread that was wholly
-        // private puts the rest of it in the lane.
-        |(m, editing, lane)| {
+        // the composer, a draft added to a thread that was wholly private
+        // labels the rest of it Perch only, and a message answered is no
+        // longer the last, under which the line down the avatars stops.
+        |(m, editing, lane, place)| {
             (
                 m.id.clone(),
                 m.origin.name(),
@@ -1545,16 +1846,17 @@ pub fn messages_view(
                     .map(|r| (r.status.name(), r.steps.len(), r.error.clone())),
                 *editing,
                 *lane,
+                *place,
             )
         },
-        move |(m, editing, lane)| {
+        move |(m, editing, lane, _)| {
             let thread = state
                 .comment_threads
                 .with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
             match (thread, editing) {
                 (Some(_), Some(_)) => match state.composer.get_untracked() {
                     Some(c) => composer_view(app, state, backend.clone(), c, face)
-                        .style(|s| s.width_full())
+                        .style(move |s| s.width_full().padding_vert(face.comment_space()))
                         .into_any(),
                     None => Empty::new().into_any(),
                 },
@@ -1565,11 +1867,49 @@ pub fn messages_view(
             }
         },
     )
-    .style(move |s| s.flex_col().width_full().gap(face.message_gap()))
+    .debug_name("thread-messages")
+    .style(move |s| {
+        let s = s.flex_col().width_full();
+        match face {
+            ThreadFace::Card => s.padding_horiz(theme::THREAD_INSET),
+            ThreadFace::Inline => s
+                .padding_left(theme::INLINE_THREAD_INSET)
+                .padding_right(theme::INLINE_THREAD_INSET - theme::CARD_SCROLLBAR),
+        }
+    })
 }
 
-/// The follow-up composer under a thread when one is open for it, else the
-/// line that opens one, with Resolve at its end.
+/// What is said about a thread before its comments, each set in from its
+/// sides: a finding's provenance and what can be done with it, and the
+/// delete confirmation while one is asked for.
+pub(crate) fn notices(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread: &CommentThread,
+    face: ThreadFace,
+) -> impl IntoView {
+    let inset = face.inset();
+    let finding_id = thread.id.clone();
+    let finding = Memo::new(move |_| cards::finding_of(app, state, &finding_id).is_some());
+    Stack::vertical((
+        Container::new(cards::finding_controls(app, state, backend.clone(), thread.id.clone()))
+            .style(move |s| {
+                s.width_full()
+                    .padding_top(inset)
+                    .padding_horiz(inset)
+                    .apply_if(!finding.get(), |s| s.hide())
+            }),
+        delete_confirmation(state, backend, thread.id.clone(), thread.is_github_bound())
+            .style(move |s| s.padding_top(inset).padding_horiz(inset)),
+    ))
+    .style(|s| s.flex_col().width_full())
+}
+
+/// The foot of a thread: the Follow up box, or the composer when one is
+/// open for the thread, and under it the foot with Resolve. On
+/// Conversation the box sits in GitHub's grey reply bar beside the
+/// reader's face; in the code it sits under the comments.
 ///
 /// The composer is drawn in one place on the visible surface. A thread with
 /// a card in the open file takes it inside that card; Conversation's card
@@ -1583,8 +1923,8 @@ pub fn follow_up(
 ) -> impl IntoView {
     let composer_thread = thread_id.clone();
     let running_thread = thread_id.clone();
-    let resolve = resolve_button(app, state, backend.clone(), thread_id.clone());
-    // Keyed on whether a run is going as well as on the composer: the line
+    let reply_thread = thread_id.clone();
+    // Keyed on whether a run is going as well as on the composer: the box
     // is absent while the agent works and has to appear when it is done,
     // which only the thread list says.
     let running = Memo::new(move |_| {
@@ -1610,10 +1950,20 @@ pub fn follow_up(
         };
         composer.filter(|_| drawn_here)
     });
-    // The composer's box takes the row; a draft edited up among the
-    // messages leaves the line here, and Resolve beside it.
+    // The composer's box takes the foot; a draft edited up among the
+    // messages leaves the box here, and Resolve under it.
     let composing = Memo::new(move |_| matches!(composer.get(), Some((_, _, None))));
-    let foot = dyn_container(
+    // Nothing in the box's place: an agent at work with no composer open,
+    // or a draft being edited up among the comments.
+    let empty = Memo::new(move |_| match composer.get() {
+        Some((_, _, Some(_))) => true,
+        Some(_) => false,
+        None => running.get(),
+    });
+    let offered = resolve_offered(app, state, thread_id.clone());
+    let foot_hidden = Memo::new(move |_| !offered.get() || composing.get());
+    let reply_backend = backend.clone();
+    let reply = dyn_container(
         move || (composer.get(), running.get()),
         move |(composer, _)| match composer {
             // A draft being edited has the composer in its own row, up
@@ -1622,7 +1972,7 @@ pub fn follow_up(
             // Under a thread the composer is a child of this container,
             // not a card placed by its edges, and takes the width here.
             Some(_) => match state.composer.get_untracked() {
-                Some(c) => composer_view(app, state, backend.clone(), c, face)
+                Some(c) => composer_view(app, state, reply_backend.clone(), c, face)
                     .style(|s| s.width_full())
                     .into_any(),
                 None => Empty::new().into_any(),
@@ -1630,7 +1980,7 @@ pub fn follow_up(
             None => {
                 let thread = state
                     .comment_threads
-                    .with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
+                    .with_untracked(|t| t.iter().find(|t| t.id == reply_thread).cloned());
                 match thread {
                     Some(thread) => reply_line(app, state, thread, face).into_any(),
                     None => Empty::new().into_any(),
@@ -1639,53 +1989,102 @@ pub fn follow_up(
         },
     )
     .style(|s| s.flex_grow(1.0_f32).min_width(0.0));
-    Stack::horizontal((
-        foot,
-        resolve.style(move |s| s.apply_if(composing.get(), |s| s.hide())),
+    let bar = match face {
+        ThreadFace::Card => Stack::horizontal((
+            viewer_avatar(app, theme::THREAD_AVATAR).style(move |s| {
+                s.margin_right(theme::THREAD_AVATAR_GAP)
+                    .flex_shrink(0.0_f32)
+                    .apply_if(composing.get(), |s| s.hide())
+            }),
+            reply,
+        ))
+        .debug_name("reply-bar")
+        .style(move |s| {
+            // The box's corners, while nothing is under the bar.
+            let radius = if foot_hidden.get() {
+                theme::RADIUS - 1.0
+            } else {
+                0.0
+            };
+            s.items_center()
+                .width_full()
+                .padding_vert(8.0)
+                .padding_horiz(theme::THREAD_INSET)
+                .background(theme::CANVAS_SUBTLE)
+                .border_top(1.0)
+                .border_color(theme::BORDER)
+                .set(BorderBottomLeftRadius, radius)
+                .set(BorderBottomRightRadius, radius)
+                .apply_if(empty.get(), |s| s.hide())
+        })
+        .into_any(),
+        ThreadFace::Inline => Container::new(reply)
+            .debug_name("reply-bar")
+            .style(move |s| {
+                s.width_full()
+                    .padding_horiz(theme::INLINE_THREAD_INSET)
+                    .padding_bottom(theme::INLINE_THREAD_INSET)
+                    .apply_if(empty.get(), |s| s.hide())
+            })
+            .into_any(),
+    };
+    Stack::vertical((
+        bar,
+        resolve_foot(state, backend, thread_id, face, offered, foot_hidden),
     ))
-    .style(|s| s.items_center().width_full())
+    .style(|s| s.flex_col().width_full())
 }
 
-/// Resolve at the end of a thread's foot, or Unresolve on one that is
-/// resolved. On one of GitHub's it is there where GitHub lets the reader
-/// do either, and changes github.com at once, as the button there does;
-/// on any other it is always there and changes only Perch. A finding's
-/// thread has Dismiss and Reopen instead. The thread shows the click
-/// before the answer, and resolved, it folds in the code as one resolved
-/// on GitHub does. While the ask is out it is dimmed and takes no click.
-fn resolve_button(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    thread_id: String,
-) -> impl IntoView {
-    let offered_id = thread_id.clone();
-    let offered = Memo::new(move |_| {
+/// Whether a thread's foot offers Resolve: on one of GitHub's where
+/// GitHub lets the reader, on any other always, and never on a
+/// finding's, which has Dismiss and Reopen instead.
+fn resolve_offered(app: AppState, state: ReviewState, thread_id: String) -> Memo<bool> {
+    Memo::new(move |_| {
         let resolvable = state.comment_threads.with(|threads| {
             threads
                 .iter()
-                .find(|t| t.id == offered_id)
+                .find(|t| t.id == thread_id)
                 .is_some_and(CommentThread::resolvable)
         });
-        resolvable && cards::finding_of(app, state, &offered_id).is_none()
-    });
+        resolvable && cards::finding_of(app, state, &thread_id).is_none()
+    })
+}
+
+/// The foot under a thread with Resolve in it, or Unresolve on one that
+/// is resolved, as github.com words them: Resolve conversation on
+/// Conversation and Resolve comment in the code. On one of GitHub's it
+/// changes github.com at once, as the button there does; on any other it
+/// changes only Perch. The thread shows the click before the answer, and
+/// resolved, it folds, as one resolved on GitHub arrives. While the ask
+/// is out the button is dimmed and takes no click. The foot is `hidden`
+/// where Resolve is not `offered`, and while the composer has the
+/// thread, whose own buttons are the ones to press.
+fn resolve_foot(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread_id: String,
+    face: ThreadFace,
+    offered: Memo<bool>,
+    hidden: Memo<bool>,
+) -> impl IntoView {
     let resolved_id = thread_id.clone();
     let resolved = Memo::new(move |_| state.is_resolved(&resolved_id));
-    dyn_container(
+    let button = dyn_container(
         move || offered.get().then(|| resolved.get()),
         move |shown| {
             let Some(resolved) = shown else {
                 return Empty::new().into_any();
             };
-            let (label, name) = if resolved {
-                ("Unresolve", "thread-unresolve")
-            } else {
-                ("Resolve", "thread-resolve")
+            let (label, name) = match (face, resolved) {
+                (ThreadFace::Card, false) => ("Resolve conversation", "thread-resolve"),
+                (ThreadFace::Card, true) => ("Unresolve conversation", "thread-unresolve"),
+                (ThreadFace::Inline, false) => ("Resolve comment", "thread-resolve"),
+                (ThreadFace::Inline, true) => ("Unresolve comment", "thread-unresolve"),
             };
             let backend = backend.clone();
             let id = thread_id.clone();
             let busy_id = thread_id.clone();
-            cards::thread_action(label, move || {
+            foot_button(label, face, move || {
                 let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
                 else {
                     return;
@@ -1696,24 +2095,59 @@ fn resolve_button(
             })
             .debug_name(name)
             .style(move |s| {
-                s.margin_left(8.0)
-                    .flex_shrink(0.0_f32)
-                    .apply_if(state.is_resolving(&busy_id), |s| {
-                        s.color(theme::FG_SUBTLE).cursor(CursorStyle::Default)
-                    })
+                s.apply_if(state.is_resolving(&busy_id), |s| {
+                    s.color(theme::FG_SUBTLE).cursor(CursorStyle::Default)
+                })
             })
             .into_any()
         },
-    )
-    .style(move |s| s.apply_if(!offered.get(), |s| s.hide()))
+    );
+    Container::new(button)
+        .debug_name("thread-foot")
+        .style(move |s| {
+            s.width_full()
+                .padding_vert(8.0)
+                .padding_horiz(face.inset())
+                .border_top(1.0)
+                .border_color(theme::BORDER)
+                .apply_if(hidden.get(), |s| s.hide())
+        })
 }
 
-/// One message: the text as markdown, and under an answer the run that
-/// produced it, or under a question the run that is answering it. A
-/// comment from GitHub carries its own byline, with Ask about this, the
-/// reaction picker and its link on hover, and the reactions on it under.
-/// A message in the private lane is drawn there, whole, with the lane's
-/// label above the first of a run.
+/// A button in a thread's foot, as GitHub draws a secondary one: the
+/// word on grey, in a rule, with a box's corners. Smaller in the code.
+fn foot_button(label: &'static str, face: ThreadFace, action: impl Fn() + 'static) -> Label {
+    Label::derived(move || label.to_string())
+        .on_event_stop(el::Click, move |_, _| action())
+        .style(move |s| {
+            let (height, size) = match face {
+                ThreadFace::Card => (theme::THREAD_CONTROL, theme::TEXT_BODY),
+                ThreadFace::Inline => (theme::THREAD_CONTROL - 4.0, theme::TEXT_META),
+            };
+            clickable(s)
+                .height(height)
+                .padding_horiz(12.0)
+                .items_center()
+                .font_size(size)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG)
+                .background(theme::CANVAS_SUBTLE)
+                .border(1.0)
+                .border_color(theme::BORDER)
+                .border_radius(theme::RADIUS)
+                .hover(|s| s.background(theme::CANVAS_HOVER))
+        })
+}
+
+/// One message, laid out as github.com lays out a comment: a face, a
+/// byline with the name, when it was said and its labels, and what was
+/// said under it. A comment from GitHub has Reply, Ask about this, the
+/// reaction picker and its link at the end of its byline under the
+/// pointer, and the reactions on it under its text. A draft has the
+/// Draft mark, and edit and delete. The reader's question to an agent
+/// and the agent's answer are Perch's alone; in a thread that has
+/// something on GitHub each is labelled Perch only, so the reader never
+/// wonders what a colleague can see.
 pub fn message_view(
     app: AppState,
     state: ReviewState,
@@ -1722,149 +2156,283 @@ pub fn message_view(
     message: CommentMessage,
     face: ThreadFace,
     lane: Lane,
-) -> impl IntoView {
-    let message = bare_message_view(app, state, backend, thread, message, face);
-    match lane {
-        Lane::Flush => message,
-        Lane::PrivateStart => private_lane(
-            Stack::vertical((perch_only_label(), message))
-                .style(|s| s.flex_col().width_full().gap(6.0)),
-        ),
-        Lane::PrivateContinue => private_lane(message),
+) -> floem::AnyView {
+    let place = Place::of(&thread, &message.id);
+    if let (ThreadOrigin::GitHub, Author::GitHubUser(login)) = (message.origin, &message.author) {
+        let login = login.clone();
+        return github_message_view(app, state, backend, &thread, &message, login, face, place);
     }
+    if message.is_draft() {
+        return draft_message_view(app, state, backend, &thread, &message, face, place);
+    }
+    if message.from_github() {
+        return posted_message_view(app, state, backend, &message, face, place);
+    }
+    local_message_view(app, state, backend, thread, message, face, place, lane != Lane::Flush)
 }
 
-/// The lane's inset and hairline around a private message, or the label
-/// and the message together.
-fn private_lane(inner: impl IntoView + 'static) -> floem::AnyView {
-    Container::new(inner)
-        .debug_name("private-lane")
-        .style(|s| {
-            s.width_full()
-                .padding_left(theme::PRIVATE_LANE_INSET)
-                .border_left(1.0)
-                .border_color(theme::BORDER_MUTED)
+/// The height of a comment's byline: the buttons at its end, which the
+/// avatar beside it is centred on.
+const BYLINE_ROW: f64 = 24.0;
+
+/// The room between a comment's byline and its text.
+const COMMENT_BODY_GAP: f64 = 6.0;
+
+/// A message laid out as github.com lays out a comment: the avatar at the
+/// left of its byline, and its text under the byline, indented past the
+/// avatar, with a line down the avatars from each message to the next.
+/// The first message in the code has its text flush under its avatar
+/// instead, as Files changed sets the comment a thread opens with, and
+/// the line starts under it.
+fn comment_frame(
+    face: ThreadFace,
+    place: Place,
+    avatar: floem::AnyView,
+    byline: floem::AnyView,
+    body: floem::AnyView,
+) -> floem::AnyView {
+    let space = face.comment_space();
+    let top = if place.first { face.inset() } else { space };
+    if face == ThreadFace::Inline && place.first {
+        return Stack::vertical((
+            Stack::horizontal((
+                avatar.style(|s| s.margin_right(theme::THREAD_AVATAR_GAP).flex_shrink(0.0_f32)),
+                byline,
+            ))
+            .style(|s| s.items_center().width_full().min_width(0.0)),
+            body,
+        ))
+        .style(move |s| {
+            s.flex_col()
+                .width_full()
+                .gap(COMMENT_BODY_GAP)
+                .padding_top(top)
+                .padding_bottom(space)
         })
+        .into_any();
+    }
+    let rail = Stack::vertical((
+        connector(!place.first).style(move |s| s.height(top).flex_shrink(0.0_f32)),
+        Container::new(avatar).style(|s| {
+            s.height(BYLINE_ROW)
+                .items_center()
+                .justify_center()
+                .flex_shrink(0.0_f32)
+        }),
+        connector(!place.last).style(|s| s.flex_grow(1.0_f32)),
+    ))
+    .debug_name("comment-rail")
+    .style(move |s| {
+        s.flex_col()
+            .items_center()
+            .width(face.avatar())
+            .flex_shrink(0.0_f32)
+    });
+    let content = Stack::vertical((byline, body)).style(move |s| {
+        s.flex_col()
+            .gap(COMMENT_BODY_GAP)
+            .flex_grow(1.0_f32)
+            .flex_basis(0.0)
+            .min_width(0.0)
+            .padding_top(top)
+            .padding_bottom(space)
+    });
+    Stack::horizontal((rail, content))
+        .style(|s| s.width_full().gap(theme::THREAD_AVATAR_GAP))
         .into_any()
 }
 
-/// `PERCH ONLY` at the top of a run of private messages. Upper case rather
-/// than small caps, which floem's text cannot set.
+/// A stretch of the line down the avatars, where it is `shown`, or the
+/// room it would take.
+fn connector(shown: bool) -> impl IntoView {
+    Empty::new().style(move |s| {
+        s.width(theme::THREAD_CONNECTOR)
+            .apply_if(shown, |s| s.background(theme::BORDER_MUTED))
+    })
+}
+
+/// A comment's byline: the `name`, then what comes `after` it, when it
+/// was said and its labels, and at the end what can be done with it.
+fn byline_row(
+    name: impl IntoView + 'static,
+    after: Vec<floem::AnyView>,
+    trailing: floem::AnyView,
+) -> floem::AnyView {
+    let mut children = vec![name.into_any()];
+    children.extend(after);
+    children.push(Empty::new().style(|s| s.flex_grow(1.0_f32)).into_any());
+    children.push(trailing);
+    Stack::horizontal_from_iter(children)
+        .debug_name("comment-byline")
+        .style(|s| s.items_center().width_full().min_width(0.0).height(BYLINE_ROW))
+        .into_any()
+}
+
+/// A name as a comment's byline sets it: GitHub's semibold, a step down
+/// in the code.
+fn name_style(s: floem::style::Style, face: ThreadFace) -> floem::style::Style {
+    let size = match face {
+        ThreadFace::Card => theme::TEXT_BODY,
+        ThreadFace::Inline => theme::TEXT_META,
+    };
+    s.font_size(size)
+        .font_weight(theme::weight_strong())
+        .color(theme::FG)
+        .flex_shrink(0.0_f32)
+}
+
+/// When a message was said, "3 hours ago", kept current by the clock.
+fn when_label(
+    app: AppState,
+    at: jiff::Timestamp,
+    face: ThreadFace,
+    name: &'static str,
+) -> impl IntoView {
+    Label::derived(move || crate::timefmt::relative(at, app.now.get()))
+        .debug_name(name)
+        .style(move |s| {
+            let size = match face {
+                ThreadFace::Card => theme::TEXT_BODY,
+                ThreadFace::Inline => theme::TEXT_BADGE,
+            };
+            s.font_size(size)
+                .color(theme::FG_MUTED)
+                .margin_left(6.0)
+                .text_ellipsis()
+                .min_width(0.0)
+        })
+}
+
+/// A label in a comment's byline, as GitHub sets Author and its kin: the
+/// word in a pill with a rule round it.
+fn byline_label(text: &'static str, name: &'static str) -> Label {
+    Label::derived(move || text.to_string())
+        .debug_name(name)
+        .style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG_MUTED)
+                .padding_horiz(7.0)
+                .border(1.0)
+                .border_color(theme::BORDER)
+                .border_radius(theme::BYLINE_LABEL / 2.0)
+                .margin_left(6.0)
+                .selectable(false)
+                .flex_shrink(0.0_f32)
+        })
+}
+
+/// Author, beside a comment by whoever opened the pull request or the
+/// issue, as GitHub marks them. `login` is read as it is drawn.
+fn author_label(
+    state: ReviewState,
+    login: impl Fn() -> Option<String> + 'static,
+) -> impl IntoView {
+    let is_author = Memo::new(move |_| {
+        let Some(login) = login() else {
+            return false;
+        };
+        let pull = state
+            .pull_request
+            .with(|p| p.as_ref().map(|p| p.author_login == login));
+        pull.or_else(|| {
+            state
+                .issue
+                .with(|i| i.as_ref().map(|i| i.author_login == login))
+        })
+        .unwrap_or(false)
+    });
+    byline_label("Author", "author-label")
+        .style(move |s| s.apply_if(!is_author.get(), |s| s.hide()))
+}
+
+/// Perch only, in the byline of a message nobody on GitHub can see, in a
+/// thread where they can see the rest.
 fn perch_only_label() -> impl IntoView {
     cards::tip(
-        Label::derived(|| "PERCH ONLY".to_string())
-            .debug_name("perch-only")
-            .style(|s| {
-                s.font_size(theme::TEXT_SECTION)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::FG_MUTED)
-                    .selectable(false)
-            }),
+        byline_label("Perch only", "perch-only"),
         "Only Perch shows this; nothing here is on GitHub.".to_string(),
     )
 }
 
-/// A message on its own, before any lane: a comment from GitHub with its
-/// byline, a draft with the Draft mark, or the reader's question and the
-/// agent's answer with their runs.
-fn bare_message_view(
+/// The reader's question to an agent, or an agent's answer, under the
+/// reader's face and name or the agent's mark and its model, `private`
+/// marking it Perch only. A finished run sits on the answer, and reads in
+/// the order it went: what the agent did, then what it said, then what
+/// it cost. While it runs, or when it failed, the run sits under the
+/// question whole. An answer that is done, or a finding, which has no run
+/// of its own, has Post to GitHub and Copy at the end of its byline.
+#[allow(clippy::too_many_arguments)]
+fn local_message_view(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     thread: CommentThread,
     message: CommentMessage,
     face: ThreadFace,
+    place: Place,
+    private: bool,
 ) -> floem::AnyView {
-    if let (ThreadOrigin::GitHub, Author::GitHubUser(login)) = (message.origin, &message.author) {
-        return github_message_view(app, state, backend, &thread, &message, login.clone())
-            .into_any();
-    }
-    if message.is_draft() {
-        return draft_message_view(app, state, backend, &thread, &message).into_any();
-    }
-    if message.from_github() {
-        return posted_message_view(app, state, backend, &message).into_any();
-    }
+    let hovered = RwSignal::new(false);
     let is_agent = matches!(message.author, Author::Agent { .. });
     let body = message.body.clone();
-
-    // Questions and answers are both markdown; the reader writes it too.
-    // A finished run sits on the answer, and reads in the order it went:
-    // what the agent did, then what it said, then what it cost. While it
-    // runs, or when it failed, the run sits under the question whole.
     let finished = message
         .run
         .as_ref()
         .is_some_and(|r| r.status == RunStatus::Completed);
-    // An answer that is done, or a finding, which has no run of its own,
-    // can be copied and sent on to GitHub.
     let settled = is_agent
         && !body.trim().is_empty()
         && (finished || message.run.is_none());
-    let actions_thread = settled.then(|| thread.clone());
-    let message = match message.run.clone() {
+    let actions = if settled {
+        agent_actions(state, thread, body.clone(), hovered)
+    } else {
+        Empty::new().into_any()
+    };
+    let content = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
             run_surface(steps_view(state, run.clone())),
             crate::review::markdown::render_linked(&body, state),
-            run_footer(app, state, backend, thread, message.body.clone(), run, face),
+            run_footer(backend, run),
         ))
         .style(|s| s.flex_col().width_full().gap(8.0))
         .into_any(),
         Some(run) => Stack::vertical((
             crate::review::markdown::render_linked(&body, state),
-            run_block(app, state, backend, thread, message.body.clone(), run, face),
+            run_block(state, backend, run),
         ))
         .style(|s| s.flex_col().width_full().gap(8.0))
         .into_any(),
-        // A finding's text stops short of its right edge, where its
-        // actions come, so they never sit on a word.
-        None if settled => Container::new(crate::review::markdown::render_linked(&body, state))
-            .style(|s| s.width_full().padding_right(theme::AGENT_ACTIONS_ROOM))
-            .into_any(),
         None => crate::review::markdown::render_linked(&body, state).into_any(),
     };
-    let message = match actions_thread {
-        Some(thread) => with_agent_actions(state, thread, body, finished, message),
-        None => message,
-    };
-
-    if face == ThreadFace::Card && !is_agent {
-        Container::new(message)
-            .style(|s| {
-                s.width_full()
-                    .padding(14.0)
-                    .background(theme::CANVAS_SUBTLE)
-                    .border_radius(12.0)
-            })
-            .into_any()
-    } else {
-        message
+    let author = message.author.clone();
+    let mut after = vec![when_label(app, message.created_at, face, "comment-when").into_any()];
+    if private {
+        after.push(perch_only_label().into_any());
     }
+    let avatar = author_avatar(app, state, &author, face.avatar());
+    let byline = byline_row(
+        name_label(move || author_name(app, &author), move |s| name_style(s, face)),
+        after,
+        actions,
+    );
+    cards::track_hover(comment_frame(face, place, avatar, byline, content), hovered).into_any()
 }
 
-/// An agent's message with its actions laid over its top right corner,
-/// where a GitHub comment's byline ends in its own: Post to GitHub, while
-/// the thread has somewhere on GitHub to go, and Copy. An agent's
-/// message has no byline to hold them, and a row of its own would move
-/// the text when the pointer came, so they sit over the corner instead. On an answer
-/// the corner is the end of its run's folded line, and they take the
-/// surface's colour so a long summary ends cleanly under them; a finding
-/// keeps the corner clear of its text. Shown only under the pointer, as
-/// a comment's are.
-fn with_agent_actions(
+/// Post to GitHub, while the thread has somewhere on GitHub to go, and
+/// Copy, at the end of an agent's byline, under the pointer only, as a
+/// comment's are. Post opens the composer under the thread's last
+/// message, bound for GitHub, with the answer as the text: a follow-up
+/// the reader edits and sends as their own, a draft where the thread
+/// takes one and an issue comment where it has no reply to make. Nothing
+/// remembers where it came from.
+fn agent_actions(
     state: ReviewState,
     thread: CommentThread,
     body: String,
-    on_run: bool,
-    message: floem::AnyView,
+    hovered: RwSignal<bool>,
 ) -> floem::AnyView {
-    let hovered = RwSignal::new(false);
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     let draft = body.clone();
-    // Under the thread's last message, bound for GitHub, with the answer
-    // as the text: a follow-up the reader edits and sends as their own,
-    // a draft where the thread takes one and an issue comment where it
-    // has no reply to make. Nothing remembers where it came from.
     let post: Rc<dyn Fn()> = Rc::new(move || {
         state.open_composer_with(
             Some(thread_id.clone()),
@@ -1880,7 +2448,7 @@ fn with_agent_actions(
     // whose draft would need a review. The pull request lands after the
     // threads, so this follows it rather than the message's own rebuild.
     let offered = Memo::new(move |_| state.github_offered_on(&thread));
-    let actions = Stack::horizontal((
+    Stack::horizontal((
         dyn_container(
             move || offered.get(),
             move |offered| {
@@ -1900,35 +2468,18 @@ fn with_agent_actions(
         ),
     ))
     .debug_name("agent-actions")
-    .style(move |s| {
-        s.absolute()
-            .inset_top(theme::AGENT_ACTIONS_INSET)
-            .inset_right(theme::AGENT_ACTIONS_INSET)
-            .z_index(2)
-            .items_center()
-            .gap(4.0)
-            .apply_if(on_run && hovered.get(), |s| {
-                s.padding_left(4.0)
-                    .border_radius(13.0)
-                    .background(theme::CANVAS_SUBTLE)
-            })
-    });
-    cards::track_hover(
-        Stack::new((message, actions))
-            .style(|s| s.width_full().position(floem::style::Position::Relative)),
-        hovered,
-    )
+    .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
     .into_any()
 }
 
-/// A comment from GitHub in a thread: a small byline, then the body, then
-/// the reactions on it. A reply, any comment after the thread's first,
-/// sits flush under the one it answers with a rule down its left. Reply
-/// opens the composer under the thread, bound for GitHub, whatever the
-/// thread's last message was, while it has somewhere on GitHub to go;
-/// Ask about this opens it to an agent, so the answer lands beside the
-/// comment it is about; the thread's history carries the comment to the
-/// agent, and nothing is quoted.
+/// A comment from GitHub in a thread, under its author's face and
+/// byline, with the reactions on it under its text. Reply opens the
+/// composer under the thread, bound for GitHub, whatever the thread's
+/// last message was, while it has somewhere on GitHub to go; Ask about
+/// this opens it to an agent, so the answer lands beside the comment it
+/// is about; the thread's history carries the comment to the agent, and
+/// nothing is quoted.
+#[allow(clippy::too_many_arguments)]
 fn github_message_view(
     app: AppState,
     state: ReviewState,
@@ -1936,17 +2487,10 @@ fn github_message_view(
     thread: &CommentThread,
     message: &CommentMessage,
     login: String,
-) -> impl IntoView {
+    face: ThreadFace,
+    place: Place,
+) -> floem::AnyView {
     let hovered = RwSignal::new(false);
-    let reply = thread.messages.first().is_some_and(|m| m.id != message.id);
-    let who = cards::Byline {
-        login: login.clone(),
-        avatar_url: cards::avatar_url_of(state, login.clone()),
-        avatar_size: theme::NESTED_AVATAR,
-        glyph: None,
-        verb: String::new(),
-        when: Some(message.created_at),
-    };
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     // To an agent, whatever the thread's last message was: the point is
     // to ask about the comment, not to answer it.
@@ -1988,44 +2532,46 @@ fn github_message_view(
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(state, backend.clone(), &react);
-    cards::track_hover(
-        Stack::vertical((
-            cards::byline(
-                app,
-                who,
-                cards::actions(state, backend, hovered, Some(reply_button), Some(ask), react, url),
-            ),
-            crate::review::markdown::render_linked(&message.body, state),
-            reactions,
-        ))
-        .style(move |s| {
-            let base = s.flex_col().width_full().gap(6.0);
-            if reply {
-                base.padding_left(12.0)
-                    .border_left(theme::REPLY_RULE)
-                    .border_color(theme::BORDER_MUTED)
-            } else {
-                base
-            }
-        }),
-        hovered,
+    let name = login.clone();
+    let author = login.clone();
+    let byline = byline_row(
+        name_label(move || Name::Login(name.clone()), move |s| name_style(s, face)),
+        vec![
+            when_label(app, message.created_at, face, "comment-when").into_any(),
+            author_label(state, move || Some(author.clone())).into_any(),
+        ],
+        cards::actions(state, backend, hovered, Some(reply_button), Some(ask), react, url),
+    );
+    let avatar = crate::ui::widgets::avatar(
+        app,
+        cards::avatar_url_of(state, login.clone()),
+        face.avatar(),
+        login,
     )
+    .into_any();
+    let body = Stack::vertical((
+        crate::review::markdown::render_linked(&message.body, state),
+        reactions,
+    ))
+    .style(|s| s.flex_col().width_full())
+    .into_any();
+    cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
 }
 
-/// The reader's message on its way to GitHub: their own byline with the
-/// Draft mark after the name and no time, since it has not gone
-/// anywhere yet; edit and delete on hover, and the body. Flush with the
-/// comments it answers, whether it is the thread's first or a reply,
-/// since it is theirs and not a rule under someone else's. Edit opens
-/// the composer in this row with the text; delete asks nothing, a draft
-/// being Perch's alone.
+/// The reader's message on its way to GitHub, under their face and name
+/// with the Draft mark after it and no time, since it has not gone
+/// anywhere yet; edit and delete on hover, and the text. Edit opens the
+/// composer in this row with the text; delete asks nothing, a draft being
+/// Perch's alone.
 fn draft_message_view(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     thread: &CommentThread,
     message: &CommentMessage,
-) -> impl IntoView {
+    face: ThreadFace,
+    place: Place,
+) -> floem::AnyView {
     let hovered = RwSignal::new(false);
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     let (edit_id, edit_body) = (message.id.clone(), message.body.clone());
@@ -2057,98 +2603,51 @@ fn draft_message_view(
     ))
     .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
     .into_any();
-    cards::track_hover(
-        Stack::vertical((
-            readers_byline(app, Some(draft_pill().into_any()), None, actions),
-            crate::review::markdown::render_linked(&message.body, state),
-        ))
-        .style(|s| s.flex_col().width_full().gap(6.0)),
-        hovered,
-    )
+    let byline = byline_row(
+        name_label(move || author_name(app, &Author::User), move |s| name_style(s, face)),
+        vec![
+            draft_pill().into_any(),
+            author_label(state, move || viewer_login(app)).into_any(),
+        ],
+        actions,
+    );
+    let body = crate::review::markdown::render_linked(&message.body, state).into_any();
+    let avatar = viewer_avatar(app, face.avatar()).into_any();
+    cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
 }
 
-/// A comment of the reader's that is on GitHub: their own byline with
-/// the comment's time, its link and the reaction picker on hover, the
-/// body, and the reactions on it under. No Draft mark, no edit and no
-/// delete: what is on github.com is edited there. Flush with the
-/// comments it answers, as a draft is.
+/// A comment of the reader's that is on GitHub, under their face and
+/// name with the comment's time, its link and the reaction picker on
+/// hover, and the reactions on it under its text. No Draft mark, no edit
+/// and no delete: what is on github.com is edited there.
 fn posted_message_view(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     message: &CommentMessage,
-) -> impl IntoView {
+    face: ThreadFace,
+    place: Place,
+) -> floem::AnyView {
     let hovered = RwSignal::new(false);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(state, backend.clone(), &react);
-    cards::track_hover(
-        Stack::vertical((
-            readers_byline(
-                app,
-                None,
-                Some(message.created_at),
-                cards::actions(state, backend, hovered, None, None, react, url),
-            ),
-            crate::review::markdown::render_linked(&message.body, state),
-            reactions,
-        ))
-        .style(|s| s.flex_col().width_full().gap(6.0)),
-        hovered,
-    )
-}
-
-/// The reader's face and name, as the thread byline draws them, with a
-/// mark after the name, `Draft` on a draft, or the time when the message
-/// has one, and whatever the caller puts at the right.
-fn readers_byline(
-    app: AppState,
-    mark: Option<floem::AnyView>,
-    when: Option<jiff::Timestamp>,
-    trailing: floem::AnyView,
-) -> impl IntoView {
-    let viewer = move || app.viewer.get().filter(|(l, _)| !l.is_empty());
-    let seed = viewer().map(|(l, _)| l).unwrap_or_else(|| "you".into());
-    Stack::horizontal((
-        crate::ui::widgets::avatar(
-            app,
-            move || viewer().map(|(_, a)| a).unwrap_or_default(),
-            theme::NESTED_AVATAR,
-            seed,
-        )
-        .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
-        name_label(
-            move || match viewer() {
-                Some((login, _)) => Name::Login(login),
-                None => Name::Plain("You".into()),
-            },
-            |s| {
-                s.font_size(theme::TEXT_META)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
-            },
-        ),
-        match mark {
-            Some(mark) => mark,
-            None => Empty::new().into_any(),
-        },
-        match when {
-            Some(at) => Label::derived(move || crate::timefmt::relative(at, app.now.get()))
-                .debug_name("posted-when")
-                .style(|s| {
-                    s.font_size(theme::TEXT_META)
-                        .color(theme::FG_MUTED)
-                        .margin_left(6.0)
-                        .text_ellipsis()
-                        .min_width(0.0)
-                })
-                .into_any(),
-            None => Empty::new().into_any(),
-        },
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        trailing,
+    let byline = byline_row(
+        name_label(move || author_name(app, &Author::User), move |s| name_style(s, face)),
+        vec![
+            when_label(app, message.created_at, face, "posted-when").into_any(),
+            author_label(state, move || viewer_login(app)).into_any(),
+        ],
+        cards::actions(state, backend, hovered, None, None, react, url),
+    );
+    let body = Stack::vertical((
+        crate::review::markdown::render_linked(&message.body, state),
+        reactions,
     ))
-    .style(|s| s.items_center().width_full().min_width(0.0))
+    .style(|s| s.flex_col().width_full())
+    .into_any();
+    let avatar = viewer_avatar(app, face.avatar()).into_any();
+    cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
 }
 
 /// The Draft mark after a draft's author, in GitHub's colour: this is
@@ -2192,15 +2691,7 @@ fn hover_icon(
 /// What the agent did, under its answer or under the question while it
 /// works: the steps, folded to one line until it is clicked, and the
 /// footer or the Stop button.
-pub fn run_block(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    thread: CommentThread,
-    question: String,
-    run: RunRecord,
-    face: ThreadFace,
-) -> impl IntoView {
+pub fn run_block(state: ReviewState, backend: Rc<Backend>, run: RunRecord) -> impl IntoView {
     let partial = run
         .final_result
         .clone()
@@ -2220,7 +2711,7 @@ pub fn run_block(
         Stack::vertical((
             steps_view(state, run.clone()),
             response,
-            run_footer(app, state, backend, thread, question, run, face),
+            run_footer(backend, run),
         ))
         .style(|s| s.flex_col().width_full().gap(6.0)),
     )
@@ -2232,22 +2723,14 @@ fn run_surface(inner: impl IntoView + 'static) -> impl IntoView {
     Container::new(inner).style(|s| {
         s.width_full()
             .padding(10.0)
-            .border_radius(12.0)
+            .border_radius(theme::RADIUS)
             .background(theme::CANVAS_SUBTLE)
     })
 }
 
 /// The footer under a run: Stop while it goes, cost and time once it is
 /// done, the error and Retry when it is not.
-fn run_footer(
-    _app: AppState,
-    _state: ReviewState,
-    backend: Rc<Backend>,
-    _thread: CommentThread,
-    _question: String,
-    run: RunRecord,
-    face: ThreadFace,
-) -> floem::AnyView {
+fn run_footer(backend: Rc<Backend>, run: RunRecord) -> floem::AnyView {
     let cancel_id = run.id.clone();
     match run.status {
         RunStatus::Queued => text_button(
@@ -2274,17 +2757,9 @@ fn run_footer(
             let effort = perch_agent::Effort::parse(&run.effort)
                 .map(|e| e.label().to_string())
                 .unwrap_or_else(|| run.effort.clone());
-            // A Conversation card's byline already names the model and the
-            // effort; the card in the code has no byline, so its footer says.
-            match face {
-                ThreadFace::Inline => {
-                    format!(
-                        "{} \u{00b7} {effort} \u{00b7} {secs:.0}s{cost}",
-                        model_label(&run.model)
-                    )
-                }
-                ThreadFace::Card => format!("{secs:.0}s{cost}"),
-            }
+            // The answer's byline names the model; the run says how hard
+            // it thought, how long it took and what it cost.
+            format!("{effort} \u{00b7} {secs:.0}s{cost}")
         })
         .style(|s| {
             s.font_size(theme::TEXT_SECTION)
@@ -2332,14 +2807,21 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
     Stack::vertical((
         Container::new(
             Stack::horizontal((
-                sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE).style(move |s| {
-                    let base = s.size(10.0, 10.0).margin_right(5.0);
-                    if expanded_chevron() {
-                        base.rotate(floem::style::Angle::QUARTER_TURN)
-                    } else {
-                        base
-                    }
-                }),
+                // The glyph for the way it points, not a turned one: vger
+                // draws an SVG square to the screen, and a turn would only
+                // move it.
+                crate::ui::widgets::icon_in(
+                    move || {
+                        let icon = if expanded_chevron() {
+                            SidebarIcon::ChevronDown
+                        } else {
+                            SidebarIcon::ChevronRight
+                        };
+                        crate::icons::sidebar_icon(icon, theme::FG_SUBTLE)
+                    },
+                    || theme::FG_SUBTLE,
+                )
+                .style(|s| s.size(10.0, 10.0).margin_right(5.0)),
                 Label::derived(move || {
                     if running && steps.is_empty() {
                         "Working…".to_string()
@@ -2440,7 +2922,8 @@ pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
     text
 }
 
-/// The one-line invitation at the bottom of a thread.
+/// The Follow up box at the foot of a thread, where GitHub has Reply: a
+/// click opens the composer in its place.
 pub fn reply_line(
     app: AppState,
     state: ReviewState,
@@ -2469,27 +2952,22 @@ pub fn reply_line(
             }
         })
         .style(move |s| {
-            let base = clickable(s)
-                .font_size(theme::TEXT_META)
+            let (height, size) = match face {
+                ThreadFace::Card => (theme::THREAD_CONTROL, theme::TEXT_BODY),
+                ThreadFace::Inline => (theme::THREAD_CONTROL - 4.0, theme::TEXT_META),
+            };
+            s.font_size(size)
                 .color(theme::FG_SUBTLE)
                 .width_full()
-                .padding_vert(4.0)
-                .hover(|s| s.color(theme::ACCENT));
-            // On a Conversation card the line stands where the composer's
-            // box will be, and takes the box's shape. In the code it is a
-            // bare line, one row of the card's estimate.
-            match face {
-                ThreadFace::Inline => base,
-                ThreadFace::Card => base
-                    .padding_horiz(12.0)
-                    .height(theme::ASK_BOX_HEIGHT - 12.0)
-                    .items_center()
-                    .background(theme::CANVAS)
-                    .border(1.0)
-                    .border_color(theme::BORDER_MUTED)
-                    .border_radius(theme::RADIUS)
-                    .hover(|s| s.color(theme::ACCENT).border_color(theme::BORDER)),
-            }
+                .height(height)
+                .padding_horiz(12.0)
+                .items_center()
+                .background(theme::CANVAS)
+                .border(1.0)
+                .border_color(theme::BORDER)
+                .border_radius(theme::RADIUS)
+                .selectable(false)
+                .hover(|s| s.border_color(theme::FG_SUBTLE).cursor(CursorStyle::Text))
         })
         .into_any()
 }
@@ -3629,9 +4107,9 @@ mod tests {
         draft
     }
 
-    /// Under rohan's comment the question and the answer are in the lane,
+    /// Under rohan's comment the question and the answer are Perch only,
     /// the answer continuing the question's run; the draft after them is
-    /// flush. A thread that is wholly Perch's has no lane, and a draft
+    /// flush. A thread that is wholly Perch's marks nothing, and a draft
     /// between two private messages starts a second run.
     #[test]
     fn lanes_follow_runs_of_private_messages_in_a_thread_with_a_github_message() {
@@ -3657,11 +4135,14 @@ mod tests {
     }
 
     /// Under rohan's comment, the reader's question and the agent's answer
-    /// are drawn in the lane, inset with the rule, and `PERCH ONLY` sits
-    /// once above the question; rohan's comment and the draft are flush.
-    /// The same on both faces.
+    /// each say Perch only in their bylines; rohan's comment and the
+    /// draft say nothing of the kind. Every message is laid out as GitHub
+    /// lays out a comment, its text under its byline: on Conversation
+    /// each is indented past its avatar, with the line down the avatars
+    /// between them, and in the code the first sits flush under its
+    /// avatar and the replies are indented under the line.
     #[test]
-    fn private_messages_under_a_github_comment_are_drawn_in_the_lane_with_one_label() {
+    fn private_messages_under_a_github_comment_are_labelled_perch_only_in_their_bylines() {
         for face in [ThreadFace::Card, ThreadFace::Inline] {
             let root = TestRoot::new();
             let app = AppState::new();
@@ -3677,40 +4158,52 @@ mod tests {
             harness.paint();
             let root_id = harness.root_id();
 
-            let lanes = find_all(root_id, "private-lane");
-            assert_eq!(lanes.len(), 2, "{face:?}: the question and the answer");
-            let labels = find_all(root_id, "perch-only");
-            assert_eq!(labels.len(), 1, "{face:?}: one label for the run");
-            assert!(find(lanes[0], "perch-only").is_some(), "{face:?}: the label is in the first lane");
-            assert!(find(lanes[1], "perch-only").is_none(), "{face:?}: and not the second");
-            assert!(harness.get_layout_rect(labels[0]).width() > 0.0, "{face:?}: the label is drawn");
-
-            // The rows are siblings in the stack, so their rects share a
-            // frame: a lane's content sits inset past the rule, and every
-            // other row's starts at the thread's edge.
-            let stack = lanes[0].parent().expect("the lane is a row of the stack");
+            assert_eq!(find_all(root_id, "comment-byline").len(), 4, "{face:?}: a byline per message");
+            let stack = find(root_id, "thread-messages").expect("the messages");
             let rows = stack.children();
             assert_eq!(rows.len(), 4, "{face:?}: a row per message");
-            for row in &rows {
-                let content = harness.get_content_rect(*row);
-                assert!(content.width() > 0.0, "{face:?}: the row is laid out");
-                let expected = if lanes.contains(row) { theme::PRIVATE_LANE_INSET + 1.0 } else { 0.0 };
-                assert_eq!(content.x0, expected, "{face:?}: the row's inset");
+            let labelled: Vec<bool> = rows.iter().map(|r| find(*r, "perch-only").is_some()).collect();
+            assert_eq!(labelled, [false, true, true, false], "{face:?}: the question and the answer");
+            for label in find_all(root_id, "perch-only") {
+                assert!(harness.get_layout_rect(label).width() > 0.0, "{face:?}: the label is drawn");
             }
+            assert!(find(rows[3], "draft-pill").is_some(), "{face:?}: the draft is last");
+            assert!(find(rows[0], "Label: \"Ask about this\"").is_some(), "{face:?}: rohan's comment");
 
-            // The draft and rohan's comment are not in any lane.
-            let pill = find(root_id, "draft-pill").expect("the draft");
-            assert!(lanes.iter().all(|l| find(*l, "draft-pill").is_none()), "{face:?}: the draft is flush");
-            assert!(harness.get_layout_rect(pill).width() > 0.0);
-            assert!(find(root_id, "Label: \"Ask about this\"").is_some(), "rohan's comment");
-            assert!(lanes.iter().all(|l| find(*l, "Label: \"Ask about this\"").is_none()), "{face:?}: rohan is flush");
+            // Every byline starts at one place, past the avatar; the text
+            // under it starts there too, but for the first message in the
+            // code, which is flush with its avatar.
+            let left = stack.get_visual_rect_no_clip().x0;
+            let inset = match face {
+                ThreadFace::Card => theme::THREAD_INSET,
+                ThreadFace::Inline => theme::INLINE_THREAD_INSET,
+            };
+            let avatar = match face {
+                ThreadFace::Card => theme::THREAD_AVATAR,
+                ThreadFace::Inline => theme::INLINE_THREAD_AVATAR,
+            };
+            let past_avatar = inset + avatar + theme::THREAD_AVATAR_GAP;
+            for (i, row) in rows.iter().enumerate() {
+                let byline = find(*row, "comment-byline").unwrap().get_visual_rect_no_clip();
+                assert_eq!(byline.x0 - left, past_avatar, "{face:?}: row {i}'s byline");
+                let text = find(*row, "LinkedText")
+                    .or_else(|| find(*row, "RichText"))
+                    .expect("the message's text")
+                    .get_visual_rect_no_clip();
+                let flush = face == ThreadFace::Inline && i == 0;
+                let expected = if flush { inset } else { past_avatar };
+                assert_eq!(text.x0 - left, expected, "{face:?}: row {i}'s text");
+                // The line down the avatars runs beside every message
+                // indented under it.
+                assert_eq!(find(*row, "comment-rail").is_some(), !flush, "{face:?}: row {i}'s rail");
+            }
         }
     }
 
     /// A thread that is wholly Perch's, as every thread was before drafts,
-    /// draws no lane and no label: the inset would say nothing there.
+    /// labels nothing Perch only: the label would say nothing there.
     #[test]
-    fn a_wholly_private_thread_has_no_lane() {
+    fn a_wholly_private_thread_labels_nothing_perch_only() {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = state_with_item();
@@ -3730,10 +4223,11 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        assert!(find(root_id, "private-lane").is_none());
         assert!(find(root_id, "perch-only").is_none());
+        assert_eq!(find_all(root_id, "comment-byline").len(), 2, "the question and the answer have bylines");
+        assert!(find(root_id, "agent-avatar").is_some(), "the answer is under the agent's mark");
 
-        // A draft added under it puts what was there in the lane.
+        // A draft added under it labels what was there.
         let mut with_draft = thread.clone();
         let mut draft = draft_under(&with_draft);
         draft.thread_id = "t1".into();
@@ -3742,8 +4236,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        assert_eq!(find_all(root_id, "private-lane").len(), 2, "the question and the answer moved into the lane");
-        assert_eq!(find_all(root_id, "perch-only").len(), 1);
+        assert_eq!(find_all(root_id, "perch-only").len(), 2, "the question and the answer are labelled");
         assert!(find(root_id, "draft-pill").is_some());
     }
 
@@ -3881,7 +4374,9 @@ mod tests {
     }
 
     /// Only where GitHub lets the reader, and not while the composer has
-    /// the row.
+    /// the foot. On Conversation, Resolve conversation is in the foot
+    /// under the grey reply bar, at the thread's left, where github.com
+    /// puts it.
     #[test]
     fn resolve_is_absent_where_github_does_not_let_the_reader_and_while_composing() {
         let root = TestRoot::new();
@@ -3904,17 +4399,31 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(shown(&harness, "thread-resolve"));
+        assert!(find(harness.root_id(), "Label: \"Resolve conversation\"").is_some(), "GitHub's words");
         let line = find(harness.root_id(), "Follow up").unwrap().get_visual_rect_no_clip();
         let button = find(harness.root_id(), "thread-resolve").unwrap().get_visual_rect_no_clip();
-        assert!(button.x0 > line.x1 && button.x1 <= 600.0, "at the end of the line: {line:?} {button:?}");
-        assert!((button.center().y - line.center().y).abs() < 1.0, "on its row: {line:?} {button:?}");
+        assert!(button.y0 > line.y1, "under the Follow up box: {line:?} {button:?}");
+        assert_eq!(button.x0, theme::THREAD_INSET, "at the thread's left, in its inset: {button:?}");
+        // The box sits past the reader's face, in the bar's inset.
+        let bar = find(harness.root_id(), "reply-bar").unwrap().get_visual_rect_no_clip();
+        assert_eq!(bar.width(), 600.0, "the bar is the thread's width");
+        assert_eq!(
+            line.x0,
+            theme::THREAD_INSET + theme::THREAD_AVATAR + theme::THREAD_AVATAR_GAP,
+            "the box is past the face"
+        );
+        assert_eq!(line.x1, 600.0 - theme::THREAD_INSET, "and reaches the bar's inset");
 
         state.open_composer(Some(thread.id.clone()), thread.anchor.clone(), String::new(), sonnet_medium());
         harness.rebuild();
         harness.paint();
         assert!(!shown(&harness, "thread-resolve"));
         let composer = find(harness.root_id(), "composer-box").expect("the composer is under the thread");
-        assert_eq!(harness.get_layout_rect(composer).width(), 600.0, "and has the row to itself");
+        assert_eq!(
+            harness.get_layout_rect(composer).width(),
+            600.0 - 2.0 * theme::THREAD_INSET,
+            "and has the bar to itself, the face gone"
+        );
         state.close_composer();
         harness.rebuild();
         harness.paint();
@@ -3987,6 +4496,190 @@ mod tests {
         harness.paint();
         assert!(!shown(&harness, "thread-resolve"));
         assert!(!shown(&harness, "thread-unresolve"));
+    }
+
+    /// The words of every label under `id`, in tree order.
+    fn texts(id: floem::ViewId) -> Vec<String> {
+        let mut out = Vec::new();
+        let name = id.debug_name();
+        if let Some(start) = name.find("Label: \"") {
+            let rest = &name[start + "Label: \"".len()..];
+            if let Some(end) = rest.rfind('"') {
+                out.push(rest[..end].to_string());
+            }
+        }
+        for c in id.children() {
+            out.extend(texts(c));
+        }
+        out
+    }
+
+    /// On Conversation a thread folds as github.com's does. Its chevron
+    /// folds it to its header and opens it again; Resolve conversation
+    /// folds it at once, before GitHub answers, with Show resolved at the
+    /// header's end; Show resolved opens it, with Hide resolved there and
+    /// Unresolve conversation in its foot; and none of it opens or
+    /// collapses the thread's card in the code.
+    #[test]
+    fn resolve_folds_a_conversation_thread_to_its_header_and_show_resolved_opens_it() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let thread = resolvable_thread(false);
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = cards::thread_card(app, state, Rc::new(backend), Rc::new(|_| {}), thread.clone())
+            .style(|s| s.width(700.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 800.0);
+        harness.rebuild();
+        harness.paint();
+        let comment = "name label - Label: \"rohan\"";
+        assert!(shown(&harness, comment), "open, the comment shows");
+        assert!(shown(&harness, "thread-path"), "the header names the file");
+        assert!(!shown(&harness, "resolved-toggle"), "nothing to show or hide on a thread not resolved");
+
+        // The chevron folds it to its header, and opens it again.
+        click(&mut harness, "thread-chevron");
+        assert!(state.is_folded("gh-31"));
+        assert!(find(harness.root_id(), comment).is_none(), "folded to its header");
+        assert!(shown(&harness, "thread-path"));
+        click(&mut harness, "thread-chevron");
+        assert!(shown(&harness, comment));
+
+        // Resolve conversation folds it before GitHub answers.
+        assert!(shown(&harness, "Label: \"Resolve conversation\""));
+        click(&mut harness, "thread-resolve");
+        // The card asked for its file's lines as it was built; past that,
+        // Resolve asked GitHub.
+        let resolve = std::iter::from_fn(|| commands.try_recv().ok())
+            .find(|c| matches!(c, Command::ResolveThread { .. }));
+        match resolve {
+            Some(Command::ResolveThread { thread_id, resolve: true, .. }) => assert_eq!(thread_id, "gh-31"),
+            other => panic!("Resolve asked nothing: {other:?}"),
+        }
+        assert!(find(harness.root_id(), comment).is_none(), "resolved, folded to its header");
+        assert!(shown(&harness, "Label: \"Show resolved\""));
+
+        // GitHub answers, and the thread stays folded.
+        let mut resolved = thread.clone();
+        resolved.resolved = true;
+        state.comment_threads.set(Arc::new(vec![resolved]));
+        state.settle_resolution("gh-31");
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), comment).is_none());
+
+        // Show resolved opens it: Hide resolved in the header, Unresolve
+        // conversation in the foot. The card in the code stays collapsed.
+        click(&mut harness, "resolved-toggle");
+        assert!(shown(&harness, comment));
+        assert!(shown(&harness, "Label: \"Hide resolved\""));
+        assert!(shown(&harness, "Label: \"Unresolve conversation\""));
+        assert!(state.is_collapsed(&CardId::Thread("gh-31".into())));
+
+        // Hide resolved folds it again.
+        click(&mut harness, "resolved-toggle");
+        assert!(find(harness.root_id(), comment).is_none());
+        assert!(shown(&harness, "Label: \"Show resolved\""));
+    }
+
+    /// In the code a thread is headed as Files changed heads one: GitHub's
+    /// "Comment on line R7", and one of the reader's own a question on its
+    /// lines, marked Local. Resolved, a thread is its one row with Show
+    /// resolved, which opens it with Hide resolved in its header and
+    /// Unresolve comment in its foot, and leaves Conversation folded.
+    #[test]
+    fn a_card_in_the_code_is_headed_by_its_lines_and_a_resolved_one_offers_show_resolved() {
+        use perch_github::{Anchor, Side};
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let theirs = resolvable_thread(true);
+        let mut ours = theirs.clone();
+        ours.id = "t1".into();
+        ours.origin = ThreadOrigin::Local;
+        ours.github_id = None;
+        ours.resolved = false;
+        ours.anchor = Some(Anchor {
+            path: "src/x.rs".into(),
+            start_line: 5,
+            line: 7,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        });
+        ours.messages = vec![CommentMessage {
+            id: "q1".into(),
+            thread_id: "t1".into(),
+            origin: ThreadOrigin::Local,
+            author: Author::User,
+            github_id: None,
+            body: "why?".into(),
+            ..theirs.messages[0].clone()
+        }];
+        state.comment_threads.set(Arc::new(vec![theirs.clone(), ours.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let backend = Rc::new(backend);
+        let view = floem::views::Stack::vertical((
+            thread_card(app, state, backend.clone(), theirs).debug_name("theirs"),
+            thread_card(app, state, backend, ours).debug_name("ours"),
+        ))
+        .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+
+        let ours = find(harness.root_id(), "ours").unwrap();
+        let heading = find(ours, "lines-heading").expect("the reader's thread is open");
+        assert_eq!(texts(heading).join(" "), "Question on lines R5 to R7");
+        assert!(find(ours, "Label: \"Local\"").is_some(), "marked as the reader's own");
+
+        let theirs = find(harness.root_id(), "theirs").unwrap();
+        assert!(find(theirs, "lines-heading").is_none(), "resolved, so collapsed to its row");
+        let toggle = find(theirs, "resolved-toggle").expect("Show resolved on the row");
+        assert!(harness.get_layout_rect(toggle).width() > 0.0);
+        assert_eq!(texts(toggle), ["Show resolved"]);
+        let c = toggle.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.is_collapsed(&CardId::Thread("gh-31".into())));
+        let theirs = find(harness.root_id(), "theirs").unwrap();
+        let heading = find(theirs, "lines-heading").expect("open, with its header");
+        assert_eq!(texts(heading).join(" "), "Comment on line R7");
+        assert_eq!(texts(find(theirs, "resolved-toggle").unwrap()), ["Hide resolved"]);
+        assert!(find(theirs, "Label: \"Unresolve comment\"").is_some());
+        assert!(state.is_folded("gh-31"), "opening it in the code leaves Conversation folded");
+    }
+
+    /// A comment by whoever opened the pull request says Author in its
+    /// byline, as GitHub marks them; anyone else's does not.
+    #[test]
+    fn a_comment_by_the_pull_requests_author_is_marked_author() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let mut thread = resolvable_thread(false);
+        let mut reply = thread.messages[0].clone();
+        reply.id = "gh-32".into();
+        reply.author = Author::GitHubUser("octocat".into());
+        reply.github_id = Some(32);
+        reply.body = "fixed".into();
+        thread.messages.push(reply);
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let rows = find(harness.root_id(), "thread-messages").unwrap().children();
+        let marked: Vec<bool> = rows
+            .iter()
+            .map(|row| {
+                find(*row, "author-label").is_some_and(|l| harness.get_layout_rect(l).width() > 0.0)
+            })
+            .collect();
+        assert_eq!(marked, [false, true], "octocat opened the pull request; rohan did not");
     }
 
     /// At the foot of a pull request's conversation GitHub is offered

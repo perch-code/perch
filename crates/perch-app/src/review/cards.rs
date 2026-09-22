@@ -4,12 +4,11 @@
 //! surface; its hierarchy comes from type, whitespace and hairlines rather
 //! than a stack of framed cards.
 //!
-//! A local thread and a GitHub thread must never look like one. Nothing
-//! local reaches GitHub, so a local thread keeps an inset rule and a
-//! Local chip while GitHub entries remain directly on white. The same
-//! distinction holds in the code, where a GitHub thread's card under its
-//! line is white and solid, against the grey and dashed card of the
-//! reader's own.
+//! A thread is drawn as github.com draws one, a box with a grey header,
+//! on Conversation and in the code alike. A local thread and a GitHub
+//! thread must never look like one: nothing local reaches GitHub, so a
+//! local thread's box is dashed and its header says Local, where
+//! GitHub's is solid.
 //!
 //! What a GitHub entry does carry of the reader's is its reactions: the
 //! pills under its text, and the face in its byline that opens the
@@ -1018,66 +1017,28 @@ pub fn review_card(
     )
 }
 
-/// `path:line` across the top of a nested block, with Outdated when the
-/// thread is, and whatever the caller puts at the right. Click the label
-/// and Files opens on the file, scrolled to the line.
-fn location_row(
-    state: ReviewState,
-    open_file: OpenFile,
-    path: String,
-    line: Option<u64>,
-    heading: String,
-    outdated: bool,
-    trailing: floem::AnyView,
-) -> impl IntoView {
-    Stack::horizontal((
-        Label::derived(move || heading.clone())
-            .on_event_stop(el::Click, move |_, _| {
-                state.show_tab(ItemTab::Files);
-                open_file(&path);
-                if let Some(line) = line {
-                    state
-                        .jump_to_line
-                        .set(Some(line.saturating_sub(1) as usize));
-                }
-            })
-            .style(|s| {
-                clickable(s)
-                    .font_size(theme::TEXT_BADGE)
-                    .font_family(theme::CODE_FONT_STACK.to_string())
-                    .color(theme::FG_MUTED)
-                    .text_ellipsis()
-                    .min_width(0.0)
-                    .hover(|s| s.color(theme::ACCENT))
-            }),
-        threads::outdated_pill(outdated),
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        trailing,
-    ))
-    .style(|s| {
-        s.items_center()
-            .width_full()
-            .height(30.0)
-            .padding_horiz(12.0)
-            .background(theme::CANVAS_SIDEBAR)
-            .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
-    })
-}
-
-/// The row a GitHub thread with no line opens with: the location row's
-/// chrome with nothing to name, holding only the thread's menu, so what
-/// Perch put under the thread can still be taken out.
-fn menu_row(menu: floem::AnyView) -> impl IntoView {
-    Stack::horizontal((Empty::new().style(|s| s.flex_grow(1.0_f32)), menu)).style(|s| {
-        s.items_center()
-            .width_full()
-            .height(30.0)
-            .padding_horiz(12.0)
-            .background(theme::CANVAS_SIDEBAR)
-            .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
-    })
+/// The file a thread is on, as the header across it names it: the path
+/// in the code face, which opens Files on the file, scrolled to the
+/// thread's first line.
+fn path_link(state: ReviewState, open_file: OpenFile, anchor: Anchor) -> impl IntoView {
+    let path = anchor.path.clone();
+    let line = anchor.start_line.min(anchor.line) as usize;
+    Label::derived(move || anchor.path.clone())
+        .on_event_stop(el::Click, move |_, _| {
+            state.show_tab(ItemTab::Files);
+            open_file(&path);
+            state.jump_to_line.set(Some(line.saturating_sub(1)));
+        })
+        .debug_name("thread-path")
+        .style(|s| {
+            clickable(s)
+                .font_size(theme::TEXT_BADGE)
+                .font_family(theme::CODE_FONT_STACK.to_string())
+                .color(theme::FG)
+                .text_ellipsis()
+                .min_width(0.0)
+                .hover(|s| s.color(theme::GITHUB))
+        })
 }
 
 // ---------------------------------------------------------------------
@@ -1263,14 +1224,23 @@ fn code_lines(lines: Vec<CodeLine>) -> impl IntoView {
         s.flex_col()
             .width_full()
             .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::BORDER)
     })
     .into_any()
 }
 
+/// The column a line's `+` or `-` sits in, between its number and its
+/// text, as GitHub sets a diff's lines.
+const CODE_ROW_MARKER_WIDTH: f64 = 22.0;
+
 fn code_row(line: CodeLine) -> impl IntoView {
     let (bg, fg) = line.tint.colors();
     let number = line.number.map(|n| n.to_string()).unwrap_or_default();
+    let marker = match line.tint {
+        Tint::Plain => "",
+        Tint::Added | Tint::Modified => "+",
+        Tint::Removed => "-",
+    };
     let text = line.text;
     Stack::horizontal((
         Label::derived(move || number.clone()).style(|s| {
@@ -1280,6 +1250,15 @@ fn code_row(line: CodeLine) -> impl IntoView {
                 .font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::TEXT_BADGE)
                 .color(theme::GUTTER_FG)
+                .selectable(false)
+                .flex_shrink(0.0_f32)
+        }),
+        Label::derived(move || marker.to_string()).style(move |s| {
+            s.width(CODE_ROW_MARKER_WIDTH)
+                .padding_left(8.0)
+                .font_family(theme::CODE_FONT_STACK.to_string())
+                .font_size(theme::TEXT_BADGE)
+                .color(fg)
                 .selectable(false)
                 .flex_shrink(0.0_f32)
         }),
@@ -1314,13 +1293,13 @@ fn more_row(more: usize) -> impl IntoView {
         .style(|s| {
             s.font_size(theme::TEXT_SECTION)
                 .color(theme::FG_SUBTLE)
-                .padding_left(theme::CODE_ROW_NUMBER_WIDTH)
+                .padding_left(theme::CODE_ROW_NUMBER_WIDTH + CODE_ROW_MARKER_WIDTH)
                 .height(theme::CODE_ROW_HEIGHT)
                 .items_center()
                 .width_full()
                 .selectable(false)
                 .border_bottom(1.0)
-                .border_color(theme::BORDER_MUTED)
+                .border_color(theme::BORDER)
         })
         .into_any()
 }
@@ -1470,12 +1449,14 @@ fn event_piece(piece: Piece) -> floem::AnyView {
 // The thread card
 // ---------------------------------------------------------------------
 
-/// A thread. One of the reader's own opens with "You asked" and keeps a
-/// quiet inset rule and the Local chip, so it is distinct from GitHub
-/// without breaking the transcript into another framed card. One of
-/// GitHub's, or one that starts with a draft on its way there, opens
-/// with where it was left: each comment carries its own byline, and the
-/// thread's menu sits at the end of that row.
+/// A thread on Conversation, as github.com's Conversation draws one: a
+/// box headed by the chevron that folds it, the file it is on, Outdated,
+/// and Show resolved or Hide resolved on one that is resolved; under the
+/// header the lines it is on, its comments, the Follow up bar and the
+/// foot with Resolve conversation. A resolved thread is folded to its
+/// header, as it arrives on github.com, and Resolve folds one. One of
+/// Perch's own is marked Local in its header and has a dashed border, so
+/// it is never taken for one of GitHub's.
 pub fn thread_card(
     app: AppState,
     state: ReviewState,
@@ -1483,58 +1464,122 @@ pub fn thread_card(
     open_file: OpenFile,
     thread: CommentThread,
 ) -> impl IntoView {
-    let id = thread.id.clone();
-    let first = thread.messages.first();
-    let from_github = first.is_some_and(|m| m.from_github() || m.is_draft());
-    let hunk = first
+    let local = thread.origin == perch_github::ThreadOrigin::Local;
+    let folded = {
+        let id = thread.id.clone();
+        Memo::new(move |_| state.is_folded(&id))
+    };
+    let hunk = thread
+        .messages
+        .first()
         .filter(|m| m.from_github())
         .and_then(|m| m.diff_hunk.clone());
-    let menu = if from_github {
-        threads::thread_menu(state, &thread, theme::THREAD_MENU).into_any()
-    } else {
-        Empty::new().into_any()
-    };
-    Stack::vertical((
-        if from_github {
-            Empty::new().into_any()
-        } else {
-            thread_byline(app, state, &thread).into_any()
-        },
-        finding_controls(app, state, backend.clone(), thread.id.clone()),
-        threads::delete_confirmation(state, backend.clone(), id.clone(), thread.is_github_bound()),
-        match thread.anchor.clone() {
-            Some(anchor) => anchor_block(
-                state,
-                backend.clone(),
-                open_file,
-                anchor,
-                thread.outdated,
-                hunk,
-                menu,
-            )
-            .into_any(),
-            None if from_github && thread.messages.iter().any(|m| m.is_private()) => {
-                menu_row(menu).into_any()
+    let header = thread_header(state, open_file, &thread, folded);
+    let body = dyn_container(
+        move || folded.get(),
+        move |folded| {
+            if folded {
+                return Empty::new().into_any();
             }
-            None => Empty::new().into_any(),
+            let thread = thread.clone();
+            Stack::vertical((
+                match thread.anchor.clone() {
+                    Some(anchor) => {
+                        anchor_block(state, backend.clone(), anchor, thread.outdated, hunk.clone())
+                            .into_any()
+                    }
+                    None => Empty::new().into_any(),
+                },
+                threads::notices(app, state, backend.clone(), &thread, ThreadFace::Card),
+                threads::messages_view(
+                    app,
+                    state,
+                    backend.clone(),
+                    thread.id.clone(),
+                    ThreadFace::Card,
+                ),
+                threads::follow_up(app, state, backend.clone(), thread.id.clone(), ThreadFace::Card),
+            ))
+            .style(|s| s.flex_col().width_full())
+            .into_any()
         },
-        threads::messages_view(app, state, backend.clone(), id.clone(), ThreadFace::Card),
-        threads::follow_up(app, state, backend, id, ThreadFace::Card),
-    ))
-    .style(move |s| {
+    )
+    .style(|s| s.width_full());
+    Stack::vertical((header, body)).style(move |s| {
         let base = s
             .flex_col()
             .width_full()
-            .padding_vert(theme::CONVERSATION_ENTRY_PADDING)
-            .gap(theme::CARD_GAP)
             .background(theme::CANVAS)
-            .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED);
-        if from_github {
-            base
+            .border_radius(theme::RADIUS)
+            .border_color(theme::BORDER);
+        if local {
+            base.border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
         } else {
-            base.padding_left(16.0).border_left(2.0)
+            base.border(1.0)
         }
+    })
+}
+
+/// The header across a thread on Conversation, grey as GitHub's is: the
+/// chevron that folds the thread, the file it is on, Outdated, Local on
+/// one of Perch's own, then Show resolved or Hide resolved on one that is
+/// resolved, and the thread's `...` menu. A thread about the item as a
+/// whole says so where a file would be. It has the box's corners at its
+/// top, and at its foot too while the thread is folded.
+fn thread_header(
+    state: ReviewState,
+    open_file: OpenFile,
+    thread: &CommentThread,
+    folded: Memo<bool>,
+) -> impl IntoView {
+    use floem::style::{
+        BorderBottomLeftRadius, BorderBottomRightRadius, BorderTopLeftRadius, BorderTopRightRadius,
+    };
+    let location = match thread.anchor.clone() {
+        Some(anchor) => path_link(state, open_file, anchor).into_any(),
+        None => Label::derived(move || format!("This {}", threads::subject_word(state)))
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG_MUTED)
+                    .selectable(false)
+            })
+            .into_any(),
+    };
+    let (chevron_id, toggle_id) = (thread.id.clone(), thread.id.clone());
+    Stack::horizontal((
+        threads::chevron_button(
+            move || !folded.get(),
+            theme::THREAD_HEADER_BUTTON,
+            16.0,
+            move || state.toggle_fold(&chevron_id),
+        )
+        .style(|s| s.margin_right(8.0)),
+        location,
+        threads::outdated_pill(thread.outdated),
+        threads::local_chip(!thread.is_github_bound()),
+        Empty::new().style(|s| s.flex_grow(1.0_f32).min_width(12.0)),
+        threads::resolved_toggle(
+            state,
+            thread.id.clone(),
+            move || folded.get(),
+            ThreadFace::Card,
+            move || state.toggle_fold(&toggle_id),
+        ),
+        threads::thread_menu(state, thread, theme::THREAD_MENU)
+            .style(|s| s.margin_left(4.0)),
+    ))
+    .debug_name("thread-header")
+    .style(move |s| {
+        let radius = theme::RADIUS - 1.0;
+        let foot = if folded.get() { radius } else { 0.0 };
+        s.items_center()
+            .width_full()
+            .padding(theme::THREAD_HEADER_PADDING)
+            .background(theme::CANVAS_SUBTLE)
+            .set(BorderTopLeftRadius, radius)
+            .set(BorderTopRightRadius, radius)
+            .set(BorderBottomLeftRadius, foot)
+            .set(BorderBottomRightRadius, foot)
     })
 }
 
@@ -1797,113 +1842,21 @@ fn short_finding(value: &str) -> String {
     format!("finding {}", &value[..value.len().min(8)])
 }
 
-/// "You asked Sonnet · High", the time, Local, and the thread's menu.
-/// Local is left off a thread on its way to GitHub with a draft.
-fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> impl IntoView {
-    let local = !thread.is_github_bound();
-    let question = thread.messages.first();
-    // The run sits on the question while it goes and on the answer once
-    // it is done; whichever message has one names the model.
-    let run = thread.messages.iter().rev().find_map(|m| m.run.as_ref());
-    let asked = match run {
-        Some(run) => {
-            let effort = perch_agent::Effort::parse(&run.effort)
-                .map(|e| e.label().to_string())
-                .unwrap_or_else(|| run.effort.clone());
-            format!(
-                "asked {} \u{00b7} {effort}",
-                threads::model_label(&run.model)
-            )
-        }
-        None => "asked".to_string(),
-    };
-    let at = question.map(|m| m.created_at).unwrap_or(thread.created_at);
-    // The reader's own face and login, once GitHub has said who the token
-    // belongs to; "You" until then. Read live, since that answer can land
-    // after the card is built.
-    let viewer = move || app.viewer.get().filter(|(l, _)| !l.is_empty());
-    let seed = viewer().map(|(l, _)| l).unwrap_or_else(|| "you".into());
-    Stack::horizontal((
-        avatar(
-            app,
-            move || viewer().map(|(_, a)| a).unwrap_or_default(),
-            theme::CARD_AVATAR,
-            seed,
-        )
-        .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
-        name_label(
-            move || match viewer() {
-                Some((login, _)) => Name::Login(login),
-                None => Name::Plain("You".into()),
-            },
-            |s| {
-                s.font_size(theme::TEXT_META)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
-            },
-        ),
-        Label::derived(move || {
-            format!("{asked} \u{00b7} {}", timefmt::relative(at, app.now.get()))
-        })
-        .style(|s| {
-            s.font_size(theme::TEXT_META)
-                .color(theme::FG_MUTED)
-                .margin_left(6.0)
-                .text_ellipsis()
-                .min_width(0.0)
-        }),
-        if local {
-            local_chip().into_any()
-        } else {
-            Empty::new().into_any()
-        },
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        threads::thread_menu(state, thread, theme::THREAD_MENU),
-    ))
-    .style(|s| s.items_center().width_full().min_width(0.0))
-}
-
-/// The mark that says this is Perch's and not GitHub's.
-fn local_chip() -> impl IntoView {
-    tip(
-        Container::new(Label::derived(|| "Local".to_string()).style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::FG_MUTED)
-                .selectable(false)
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-        }))
-        .style(|s| {
-            s.height(theme::CHIP_HEIGHT)
-                .padding_horiz(7.0)
-                .margin_left(8.0)
-                .items_center()
-                .justify_center()
-                .background(theme::BADGE_BG)
-                .border_radius(theme::CHIP_HEIGHT / 2.0)
-                .flex_shrink(0.0_f32)
-        }),
-        "This thread is on this machine and is not on GitHub.".to_string(),
-    )
-}
-
-/// Where a thread is anchored, and the lines. The lines come from the
-/// loaded file, which is asked for when nothing has loaded it yet; a load
-/// fills `files` without opening a tab. A thread from GitHub brings the
-/// hunk its comment was left on, `hunk`, which stands in for the file
-/// when the thread is outdated or the checkout is not at the pull
-/// request's head, since GitHub's line numbers are the head's: a root
-/// ahead of the pull request, or a checkout left stale, would put the
-/// comment's number on another line. The window is then the hunk's: the
-/// commented line and the few above it.
+/// The lines a thread is on, under its header. They come from the loaded
+/// file, which is asked for when nothing has loaded it yet; a load fills
+/// `files` without opening a tab. A thread from GitHub brings the hunk
+/// its comment was left on, `hunk`, which stands in for the file when
+/// the thread is outdated or the checkout is not at the pull request's
+/// head, since GitHub's line numbers are the head's: a root ahead of the
+/// pull request, or a checkout left stale, would put the comment's number
+/// on another line. The window is then the hunk's: the commented line
+/// and the few above it.
 fn anchor_block(
     state: ReviewState,
     backend: Rc<Backend>,
-    open_file: OpenFile,
     anchor: Anchor,
     outdated: bool,
     hunk: Option<String>,
-    trailing: floem::AnyView,
 ) -> impl IntoView {
     let path = anchor.path.clone();
     let loaded = Memo::new(move |_| state.files.with(|m| m.contains_key(&path)));
@@ -1939,47 +1892,27 @@ fn anchor_block(
     } else {
         anchor.clone()
     };
-    Stack::vertical((
-        location_row(
-            state,
-            open_file,
-            anchor.path.clone(),
-            Some(anchor.start_line as u64),
-            anchor.label(),
-            outdated,
-            trailing,
-        ),
-        dyn_container(
-            move || (loaded.get(), from_file()),
-            move |(loaded, from_file)| {
-                let file = (loaded && from_file)
-                    .then(|| state.file(&lines_anchor.path))
-                    .flatten()
-                    .filter(|f| !has_hunk || f.scope == perch_git::Scope::Branch);
-                match (file, &hunk) {
-                    (Some(file), _) => {
-                        let (lines, more) =
-                            anchored_lines(&file, &lines_anchor, theme::ANCHOR_LINES);
-                        Stack::vertical((code_lines(lines), more_row(more)))
-                            .style(|s| s.flex_col().width_full())
-                            .into_any()
-                    }
-                    (None, Some(hunk)) => code_lines(hunk.clone()).into_any(),
-                    (None, None) => Empty::new().into_any(),
+    dyn_container(
+        move || (loaded.get(), from_file()),
+        move |(loaded, from_file)| {
+            let file = (loaded && from_file)
+                .then(|| state.file(&lines_anchor.path))
+                .flatten()
+                .filter(|f| !has_hunk || f.scope == perch_git::Scope::Branch);
+            match (file, &hunk) {
+                (Some(file), _) => {
+                    let (lines, more) = anchored_lines(&file, &lines_anchor, theme::ANCHOR_LINES);
+                    Stack::vertical((code_lines(lines), more_row(more)))
+                        .style(|s| s.flex_col().width_full())
+                        .into_any()
                 }
-            },
-        )
-        .style(|s| s.width_full()),
-    ))
-    .style(|s| s.flex_col().width_full())
-    .clip()
-    .style(|s| {
-        s.width_full()
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER_MUTED)
-            .border_radius(theme::RADIUS)
-    })
+                (None, Some(hunk)) => code_lines(hunk.clone()).into_any(),
+                (None, None) => Empty::new().into_any(),
+            }
+        },
+    )
+    .debug_name("thread-lines")
+    .style(|s| s.width_full())
 }
 
 // ---------------------------------------------------------------------

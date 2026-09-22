@@ -421,43 +421,51 @@ pub const BYLINE_HEIGHT: f64 = 32.0;
 /// A reaction pill under a comment, and the room above the row of them.
 pub const REACTION_PILL_HEIGHT: f64 = 26.0;
 pub const REACTIONS_GAP: f64 = 10.0;
-/// A card's byline avatar, and the smaller one on a line comment nested
-/// inside a review.
+/// A card's byline avatar.
 pub const CARD_AVATAR: f64 = 22.0;
-pub const NESTED_AVATAR: f64 = 18.0;
 /// An event is one line with a dot where the avatars sit.
 pub const EVENT_HEIGHT: f64 = 32.0;
 pub const EVENT_DOT: f64 = 8.0;
-/// A line of code shown under a review comment or a thread's anchor.
-pub const CODE_ROW_HEIGHT: f64 = 22.0;
-pub const CODE_ROW_NUMBER_WIDTH: f64 = 40.0;
+/// A line of code under a thread's header: GitHub's 20px rows and its
+/// 50px number column.
+pub const CODE_ROW_HEIGHT: f64 = 20.0;
+pub const CODE_ROW_NUMBER_WIDTH: f64 = 50.0;
 /// How many lines of a review comment's hunk are shown above it, and how
 /// many of a thread's anchor before the rest are counted instead.
 pub const HUNK_LINES: usize = 4;
 pub const ANCHOR_LINES: usize = 8;
-/// The rule down the left of a reply under a line comment.
-pub const REPLY_RULE: f64 = 2.0;
-/// The padding past the lane's 1px hairline before a private message in
-/// a thread that has something on GitHub, so its content starts 19px in,
-/// the way a reply's does past `REPLY_RULE`. A wholly private thread has
-/// no lane.
-pub const PRIVATE_LANE_INSET: f64 = 18.0;
-/// How far in from an agent message's top right corner its actions sit:
-/// a 24px button here centres on the folded line of a run's surface,
-/// whose padding is 10.
-pub const AGENT_ACTIONS_INSET: f64 = 6.0;
-/// What a finding keeps clear at its right for them, having no run's
-/// line for them to land on: the two buttons, the gap between, and the
-/// inset either side.
-pub const AGENT_ACTIONS_ROOM: f64 = 2.0 * 24.0 + 4.0 + 2.0 * AGENT_ACTIONS_INSET;
 /// A local thread's border is dashed, so it cannot be taken for a
 /// GitHub comment's.
 pub const THREAD_DASH: [f64; 2] = [4.0, 3.0];
-/// A thread in the column, and inline in the code: the room inside its
-/// border and between its parts. Denser than a Conversation card, since
-/// it sits beside or among the code.
-pub const THREAD_PADDING: f64 = 12.0;
-pub const THREAD_GAP: f64 = 10.0;
+/// A thread as github.com draws one, on Conversation and in the code: a
+/// box with a header, the comments, the reply and a foot with Resolve.
+/// The avatar beside each comment, smaller in the code, and the room
+/// between it and the name, past which a reply's text is indented.
+pub const THREAD_AVATAR: f64 = 24.0;
+pub const INLINE_THREAD_AVATAR: f64 = 20.0;
+pub const THREAD_AVATAR_GAP: f64 = 8.0;
+/// The room at a thread's sides, GitHub's 16 on Conversation and less in
+/// the code, and above and below each comment, so two comments are twice
+/// it apart. The first comment has the side's room over it.
+pub const THREAD_INSET: f64 = 16.0;
+pub const INLINE_THREAD_INSET: f64 = 12.0;
+pub const THREAD_COMMENT_SPACE: f64 = 12.0;
+pub const INLINE_THREAD_COMMENT_SPACE: f64 = 10.0;
+/// The line down the avatars, from one comment to the next.
+pub const THREAD_CONNECTOR: f64 = 2.0;
+/// The header across a thread on Conversation: GitHub's 8px round a 28px
+/// chevron button.
+pub const THREAD_HEADER_PADDING: f64 = 8.0;
+pub const THREAD_HEADER_BUTTON: f64 = 28.0;
+/// The header of a thread in the code, "Comment on line R12".
+pub const INLINE_THREAD_HEADER: f64 = 32.0;
+/// A thread in the code is no wider than github.com draws one.
+pub const INLINE_THREAD_MAX_WIDTH: f64 = 780.0;
+/// The Follow up box and the foot's Resolve button.
+pub const THREAD_CONTROL: f64 = 32.0;
+/// A label in a comment's byline, as GitHub sets Author: a pill with a
+/// rule round it.
+pub const BYLINE_LABEL: f64 = 20.0;
 /// A line of a comment being typed, which the composer's styling gives
 /// the editor and the box's heights are counted in.
 pub const COMPOSER_LINE_HEIGHT: f32 = TEXT_BODY * 1.5;
@@ -486,7 +494,7 @@ const fn composer_lines(lines: f64) -> f64 {
     lines * COMPOSER_LINE_HEIGHT as f64 + 2.0 * EDITOR_BOX_PADDING + 2.0
 }
 
-/// The `...` at the end of a thread's first row, and the smaller one on
+/// The `...` at the end of a thread's header, and the smaller one on
 /// a collapsed card, whose one row a 22px button would not fit.
 pub const THREAD_MENU: f64 = 22.0;
 pub const COLLAPSED_CARD_MENU: f64 = 18.0;

@@ -269,8 +269,8 @@ fn card_name(card: &doc::CardId) -> String {
 /// `    sonnet [perch]: because`, `    rohan: epoch`. The author as the
 /// byline names them, `[draft]` after one that has not gone to GitHub
 /// yet, `[perch]` after one no one on GitHub can see when the thread is
-/// `mixed`, that is, has something on GitHub, as the window draws the
-/// private lane only there; and the body's first line.
+/// `mixed`, that is, has something on GitHub, as the window labels a
+/// message Perch only there; and the body's first line.
 fn message_line(message: &CommentMessage, mixed: bool) -> String {
     let author = match &message.author {
         Author::User => "you",

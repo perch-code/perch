@@ -373,6 +373,7 @@ fn stacked_view(
                 scroll_delta,
                 scroll_to,
                 theme::CODE_GUTTER_GAP,
+                Some(theme::INLINE_THREAD_MAX_WIDTH),
             ),
         ))
         .style(|s| {
@@ -894,7 +895,7 @@ impl CardItem {
     /// What the card is keyed on: its id, and what changes what it is
     /// built from. A thread's messages are read live inside its card, so
     /// a streaming answer redraws in place, and the key carries whether
-    /// the thread is outdated, which its first row and its starting
+    /// the thread is outdated, which its header and its starting
     /// state show, its anchor, which GitHub moves under a thread of its
     /// own, how many messages it has, which is last and what the first
     /// says, which the collapsed row shows. The composer's carries which
@@ -927,7 +928,10 @@ impl CardItem {
 /// first spacer row from the live document and the viewport in its own
 /// style closure, as the divider bars are, because the cards are sparse
 /// and a card outlives the scroll. `left` is where a card's edge sits:
-/// the first code column, past the gutter in a split.
+/// the first code column, past the gutter in a split. `max_width` is how
+/// wide a card may be: in the stacked layout no wider than github.com
+/// draws a thread, and in a split, where a card spans both sides, as
+/// wide as they are.
 #[allow(clippy::too_many_arguments)]
 fn card_layer(
     app: AppState,
@@ -939,6 +943,7 @@ fn card_layer(
     scroll_delta: RwSignal<Vec2>,
     scroll_to: RwSignal<Option<Vec2>>,
     left: f64,
+    max_width: Option<f64>,
 ) -> impl IntoView {
     let cards = move || {
         // The document says which cards have rows: a thread whose line is
@@ -976,6 +981,7 @@ fn card_layer(
             scroll_to,
             item,
             left,
+            max_width,
         )
     })
     .style(|s| s.size_full());
@@ -991,7 +997,8 @@ fn card_layer(
 /// without its heading and lines, or the composer, set into its first
 /// spacer row a little way in, so its border never touches a tinted
 /// line, from the first code column to the right edge less the same
-/// margin. Collapsed, it is its one row whole. The wheel over it scrolls
+/// margin, or `max_width` across where that is less. Collapsed, it is
+/// its one row whole. The wheel over it scrolls
 /// the code, as it does over the gutter, unless what is inside it takes
 /// the wheel first.
 ///
@@ -1017,6 +1024,7 @@ fn inline_card(
     scroll_to: RwSignal<Option<Vec2>>,
     item: CardItem,
     left: f64,
+    max_width: Option<f64>,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
     let card_id = item.id();
@@ -1083,6 +1091,7 @@ fn inline_card(
                 .inset_top(top)
                 .inset_left(left)
                 .inset_right(theme::CODE_GUTTER_GAP)
+                .apply_opt(max_width, |s, w| s.max_width(w))
                 .pointer_events_auto()
         })
 }
@@ -1344,6 +1353,7 @@ fn split_view(
             right_delta,
             right_scroll_to,
             theme::GUTTER_WIDTH + theme::CODE_GUTTER_GAP,
+            None,
         ),
     ))
     .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
@@ -3591,12 +3601,11 @@ mod window {
 
     // The height correction.
 
-    /// A question alone is estimated at five rows: its one line, the
-    /// byline and the gap, the first row and the follow-up line. On the
-    /// screen the first row, the padding and the follow-up line are more
-    /// than the two rows the estimate charges, so the laid-out card is
-    /// always taller than five rows; here, with the fonts on this
-    /// machine, it is seven. The assertions are on the rows the layout
+    /// A question alone is estimated at eight rows: its one line, the
+    /// byline and the gap, and five for the header, the Follow up box and
+    /// the foot. On the screen the comment's padding and the chrome are
+    /// more than the estimate charges, so the laid-out card is always
+    /// taller than eight rows. The assertions are on the rows the layout
     /// gave, so they hold wherever the fonts put it.
     #[test]
     fn a_card_laid_out_taller_than_its_rows_moves_the_lines_below_it_and_nothing_else() {
@@ -3611,10 +3620,10 @@ mod window {
 
         // The thread arrives, and the document is built from the estimate
         // before anything is laid out: the card is under row 8, and the
-        // line under the card is five rows on.
+        // line under the card is eight rows on.
         let thread = thread_with("t1", 5, 7, &["why?"]);
         let estimate = crate::review::doc::estimate_rows(&thread, false);
-        assert_eq!(estimate, 5);
+        assert_eq!(estimate, 8);
         state.set_comment_threads(Arc::new(vec![thread]));
         let before = live.doc.get();
         assert_eq!(before.len(), 120 + estimate);
@@ -3634,7 +3643,7 @@ mod window {
         let rows = laid_out_rows(&harness, "t1");
         assert!(
             rows > estimate,
-            "the chrome is more than two rows: {rows} rows for {}px",
+            "the chrome is more than the estimate's: {rows} rows for {}px",
             card_rect(&harness, "t1").height()
         );
         let grew = rows - estimate;
@@ -3811,7 +3820,7 @@ mod window {
         assert_eq!(rows, laid_out_rows(&harness, "t1"));
         let len = doc.len();
 
-        // Follow up: the composer's box takes the follow-up line's place
+        // Follow up: the composer's box takes the Follow up box's place
         // inside the card, which grows around it, and the document with
         // it. The box is never focused here; see `composer_autofocus`.
         let choice = (
@@ -3857,7 +3866,8 @@ mod window {
         state.set_comment_threads(Arc::new(vec![thread.clone()]));
         harness.rebuild();
         harness.paint();
-        // The thread is drawn in the code, with its follow-up line and no box.
+        // The thread is drawn in the code, with its Follow up box and no
+        // composer.
         assert_eq!(count(harness.root_id(), "composer-box"), 0);
         assert_eq!(count(harness.root_id(), "Follow up…"), 1);
 
@@ -4339,10 +4349,16 @@ mod window {
         assert_eq!(rect.y0, 9.0 * line_height + crate::theme::CARD_INSET);
         assert_eq!(rect.x0, crate::theme::CODE_GUTTER_GAP);
         let (pane_left, _) = pane_origin();
+        let right_edge =
+            1400.0 - pane_left - crate::theme::GUTTER_WIDTH - crate::theme::CODE_GUTTER_GAP;
+        assert!(
+            right_edge > rect.x0 + crate::theme::INLINE_THREAD_MAX_WIDTH,
+            "the pane is wider than a card may be"
+        );
         assert_eq!(
             rect.x1,
-            1400.0 - pane_left - crate::theme::GUTTER_WIDTH - crate::theme::CODE_GUTTER_GAP,
-            "to the right edge, less the margin"
+            rect.x0 + crate::theme::INLINE_THREAD_MAX_WIDTH,
+            "no wider than github.com draws a thread, short of the right edge"
         );
 
         // Escape, with nothing typed, puts the composer away, and the

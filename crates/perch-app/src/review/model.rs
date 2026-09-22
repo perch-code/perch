@@ -1296,6 +1296,13 @@ pub struct ReviewState {
     /// `collapsed_cards`, so a thread resolved on GitHub folds away
     /// without a write.
     pub opened_cards: RwSignal<HashSet<CardId>>,
+    /// Conversation's threads the reader folded to their header, and the
+    /// resolved ones they showed. Conversation keeps its own, as
+    /// github.com's Conversation keeps its own from Files changed: a
+    /// resolved thread is folded there until it is shown, and any other
+    /// is open until it is folded. By thread id, for the app's life.
+    pub folded_threads: RwSignal<HashSet<String>>,
+    pub shown_resolved: RwSignal<HashSet<String>>,
     /// Every card that has arrived since launch. A thread's card starts
     /// collapsed when the thread is outdated, and that default is applied
     /// once, when the thread first arrives; after that the reader's own
@@ -1544,6 +1551,8 @@ impl ReviewState {
             card_rows: RwSignal::new(HashMap::new()),
             collapsed_cards: RwSignal::new(HashSet::new()),
             opened_cards: RwSignal::new(HashSet::new()),
+            folded_threads: RwSignal::new(HashSet::new()),
+            shown_resolved: RwSignal::new(HashSet::new()),
             known_cards: RwSignal::new(HashSet::new()),
             agent_last: RwSignal::new(None),
             last_destination: [RwSignal::new(None), RwSignal::new(None)],
@@ -3026,10 +3035,10 @@ impl ReviewState {
     }
 
     /// The reader resolves a thread, or unresolves it: the thread shows
-    /// it before the backend is asked. A thread resolved here folds in
-    /// the code, as one resolved on GitHub arrives folded, whatever the
-    /// reader opened before. Whether to ask: not while an earlier ask
-    /// about the thread is unanswered.
+    /// it before the backend is asked. A thread resolved here folds, in
+    /// the code and on Conversation, as one resolved on GitHub arrives
+    /// folded, whatever the reader opened before. Whether to ask: not
+    /// while an earlier ask about the thread is unanswered.
     pub fn begin_resolve(&self, thread_id: &str, resolve: bool) -> bool {
         if self.resolving.with_untracked(|r| r.contains_key(thread_id)) {
             return false;
@@ -3039,6 +3048,11 @@ impl ReviewState {
             if resolve && self.opened_cards.with_untracked(|c| c.contains(&card)) {
                 self.opened_cards.update(|c| {
                     c.remove(&card);
+                });
+            }
+            if resolve && self.shown_resolved.with_untracked(|s| s.contains(thread_id)) {
+                self.shown_resolved.update(|s| {
+                    s.remove(thread_id);
                 });
             }
             self.resolving.update(|r| {
@@ -3071,6 +3085,44 @@ impl ReviewState {
         }
         self.card_rows.update(|r| {
             r.insert(card.clone(), rows);
+        });
+    }
+
+    /// Whether a thread on Conversation is folded to its header. A
+    /// resolved thread's is, unless the reader showed it; any other's is
+    /// when the reader folded it. Tracked.
+    pub fn is_folded(&self, thread_id: &str) -> bool {
+        if self.is_resolved(thread_id) {
+            return !self.shown_resolved.with(|s| s.contains(thread_id));
+        }
+        self.folded_threads.with(|f| f.contains(thread_id))
+    }
+
+    /// A thread's header on Conversation was clicked, or Show resolved or
+    /// Hide resolved: a folded thread opens, an open one folds. A
+    /// resolved thread shown is no longer one the reader folded, so it
+    /// stays open if it is unresolved.
+    pub fn toggle_fold(&self, thread_id: &str) {
+        if self.is_resolved(thread_id) {
+            let showing = self.shown_resolved.with_untracked(|s| !s.contains(thread_id));
+            floem::reactive::Effect::batch(|| {
+                self.shown_resolved.update(|s| {
+                    if !s.remove(thread_id) {
+                        s.insert(thread_id.to_string());
+                    }
+                });
+                if showing && self.folded_threads.with_untracked(|f| f.contains(thread_id)) {
+                    self.folded_threads.update(|f| {
+                        f.remove(thread_id);
+                    });
+                }
+            });
+            return;
+        }
+        self.folded_threads.update(|f| {
+            if !f.remove(thread_id) {
+                f.insert(thread_id.to_string());
+            }
         });
     }
 
@@ -4725,6 +4777,59 @@ mod tests {
         // Unresolved on GitHub, it is as the reader last left it.
         state.comment_threads.set(Arc::new(vec![thread]));
         assert!(!state.is_collapsed(&card));
+    }
+
+    /// Conversation keeps its own folds, as github.com's Conversation
+    /// keeps its own from Files changed: a resolved thread is folded there
+    /// until the reader shows it, any other is open until they fold it,
+    /// and resolving one folds it wherever it was opened. Nothing done on
+    /// Conversation opens or collapses the card in the code.
+    #[test]
+    fn conversation_folds_a_resolved_thread_until_it_is_shown_and_resolving_folds_it_again() {
+        use perch_github::Side;
+        let state = ReviewState::new();
+        let mut resolved = github_thread(10, 3, Side::Right, "2026-09-18T09:00:00Z", 1);
+        resolved.resolved = true;
+        let open = github_thread(20, 4, Side::Right, "2026-09-18T09:30:00Z", 0);
+        state.comment_threads.set(Arc::new(vec![resolved.clone(), open.clone()]));
+        let card = CardId::Thread("gh-10".into());
+        assert!(state.is_folded("gh-10"), "resolved, so folded");
+        assert!(!state.is_folded("gh-20"), "open until folded");
+
+        // Shown on Conversation, the resolved thread is open there and
+        // still collapsed in the code.
+        state.toggle_fold("gh-10");
+        assert!(!state.is_folded("gh-10"));
+        assert!(state.is_collapsed(&card), "Conversation's fold is its own");
+        state.toggle_fold("gh-10");
+        assert!(state.is_folded("gh-10"), "Hide resolved folds it again");
+
+        // Any other thread folds from its chevron, and not in the code.
+        state.toggle_fold("gh-20");
+        assert!(state.is_folded("gh-20"));
+        assert!(!state.is_collapsed(&CardId::Thread("gh-20".into())));
+        state.toggle_fold("gh-20");
+        assert!(!state.is_folded("gh-20"));
+
+        // Resolving a thread the reader showed, or never folded, folds it,
+        // before the answer and after.
+        state.toggle_fold("gh-10");
+        let mut reopened = resolved.clone();
+        reopened.resolved = false;
+        state.comment_threads.set(Arc::new(vec![reopened, open.clone()]));
+        assert!(!state.is_folded("gh-10"), "unresolved on GitHub, it stays as the reader left it");
+        assert!(state.begin_resolve("gh-10", true));
+        assert!(state.is_folded("gh-10"), "resolved here, folded at once");
+        state.comment_threads.set(Arc::new(vec![resolved, open]));
+        state.settle_resolution("gh-10");
+        assert!(state.is_folded("gh-10"), "and still folded once GitHub has it");
+        assert!(state.begin_resolve("gh-20", true));
+        assert!(state.is_folded("gh-20"));
+
+        // Unresolving shows the thread, as github.com does.
+        state.settle_resolution("gh-20");
+        assert!(state.begin_resolve("gh-10", false));
+        assert!(!state.is_folded("gh-10"));
     }
 
     #[test]

@@ -116,10 +116,14 @@ posts at once, after one confirmation naming the pull request.
 
 GitHub's review threads are drawn beside Perch's own with the same cards, in
 both Files and Conversation, so one thread can hold a reviewer's comment, your
-reply to them, and an agent's private take on both. A reviewer's comment
-offers **Reply** and **Ask about this** under the pointer. In such a thread,
-what an agent said and what you asked it are inset behind a rule marked
-`PERCH ONLY`.
+reply to them, and an agent's private take on both. A thread looks as it does
+on github.com: on Conversation, a box headed by its file with the lines it is
+on under the header; in Files, a box under those lines headed "Comment on line
+R12". Each message sits under its author's face and name, with **Author** by
+whoever opened the pull request, and the thread ends in a **Follow up** box and
+a foot with **Resolve**. A reviewer's comment offers **Reply** and **Ask about
+this** under the pointer. In such a thread, what an agent said and what you
+asked it are labelled **Perch only**.
 An agent's answer never posts on its own: **Post to GitHub** under the pointer
 puts its text in a composer for you to edit and send, and nothing records
 where it came from. It goes the same two ways as anything else: a draft under
@@ -135,8 +139,11 @@ the button there does. The thread shows the change before GitHub answers
 and goes back if GitHub refuses. On a thread of Perch's own, a question to
 an agent and its answers, the button is always there and the change stays
 in Perch. A review finding has **Dismiss** and **Reopen** instead.
-Resolved, a thread folds to one row in Files, as one resolved on
-github.com arrives; Conversation leaves it open.
+Resolved, a thread folds, in Files to one row and on Conversation to its
+header, as one resolved on github.com arrives; **Show resolved** opens it
+again and **Hide resolved** folds it. Conversation and Files each keep their
+own, as github.com's tabs do, and the chevron on a thread's header folds any
+thread.
 
 ## Authentication
 

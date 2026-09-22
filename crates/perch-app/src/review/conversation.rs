@@ -1085,7 +1085,7 @@ mod tests {
             "Local",
             "You",
             "merged",
-            "src/manifest.rs:41",
+            "Label: \"src/manifest.rs\"",
             "Ask about this pull request",
         ] {
             assert!(text.contains(expected), "no {expected:?} on screen");
@@ -1360,7 +1360,7 @@ mod tests {
         let mut all = Vec::new();
         names(card, &mut all);
         let text = all.join("\n");
-        assert!(text.contains("src/manifest.rs:41"), "{text}");
+        assert!(text.contains("thread-path - Label: \"src/manifest.rs\""), "the header names the file: {text}");
         assert_eq!(text.matches("name label - Label: \"chris\"").count(), 2, "a byline a comment");
         assert!(!text.contains("Label: \"Local\""), "GitHub's thread is not marked Local");
         assert!(!text.contains("Label: \"You\""), "nobody here asked");
@@ -1456,7 +1456,7 @@ mod tests {
             "question about stale lines",
             "question in another file",
             "Outdated",
-            "src/elsewhere.rs:41",
+            "Label: \"src/elsewhere.rs\"",
         ] {
             assert!(text.contains(expected), "no {expected:?} on Conversation");
         }
@@ -1586,11 +1586,17 @@ mod tests {
             "each face folds the run's steps to one line"
         );
         assert_eq!(text.matches("Follow up…").count(), 4);
-        // The inline card has no anchor label: it is under its lines.
+        // Conversation's header names the file, as github.com's does; the
+        // card in the code is under its lines, and names them.
         assert_eq!(
-            text.matches("src/manifest.rs:41").count(),
+            text.matches("Label: \"src/manifest.rs\"").count(),
             1,
-            "Conversation's card names the lines; the inline one does not"
+            "Conversation's card names the file; the inline one does not"
+        );
+        assert_eq!(
+            text.matches("Label: \"R41\"").count(),
+            1,
+            "the inline card is on line R41; Conversation's does not say"
         );
     }
 

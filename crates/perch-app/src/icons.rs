@@ -332,6 +332,16 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                        L4.6 13.4 V10.9 H3.7 a1.5 1.5 0 0 1 -1.5 -1.5 V4.2 a1.5 1.5 0 0 1 1.5 -1.5 Z"
                      fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>"#
         ),
+        // The fold opened: the rule dotted, and the chevrons pointing away
+        // from it, as github.com draws Show resolved.
+        SidebarIcon::Unfold => format!(
+            r#"<path d="M2.5 8 H3.7 M6.4 8 H9.6 M12.3 8 H13.5" stroke="{c}" stroke-width="1.5"
+                     stroke-linecap="round"/>
+               <path d="M8 5.6 V2.2 M5.9 4.1 L8 2 L10.1 4.1" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M8 10.4 V13.8 M5.9 11.9 L8 14 L10.1 11.9" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
         // A frame with a rule down its left third: the drawer, as Codex and
         // the system draw the sidebar toggle.
         SidebarIcon::Drawer => format!(
@@ -438,6 +448,9 @@ pub enum SidebarIcon {
     /// A rule with a chevron pointing at it from above and below: a diff
     /// folded to its changes.
     Fold,
+    /// The same rule dotted, with the chevrons pointing away from it:
+    /// something folded, to open.
+    Unfold,
     /// A frame with a rule down its left third: the drawer toggle.
     Drawer,
     /// A speech bubble with round corners: Conversation, on its tab and
@@ -488,8 +501,9 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 50] = [
+    pub const ALL: [SidebarIcon; 51] = [
         SidebarIcon::Chat,
+        SidebarIcon::Unfold,
         SidebarIcon::Copy,
         SidebarIcon::Reply,
         SidebarIcon::Pencil,
