@@ -142,7 +142,7 @@ pub fn editor_pane(
                         None => centered_message(
                             SidebarIcon::Search,
                             || "No file open".to_string(),
-                            || "Pick a file from the list to read it.".to_string(),
+                            || "Pick a file from the list, or press ⌘P to go to one by name.".to_string(),
                         )
                         .into_any(),
                         Some(path) => match state.file(&path) {

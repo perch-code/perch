@@ -115,6 +115,9 @@ pub struct AppState {
     /// from the main pane while there is enough, and lies over it when
     /// there is not.
     pub window_width: RwSignal<f64>,
+    /// The main pane's left and right edges in the window, from its last
+    /// layout, for Cmd-P's palette to centre itself over.
+    pub main_pane: RwSignal<(f64, f64)>,
     /// Guards the one shared elapsed-time ticker; rows never make timers of
     /// their own.
     pub agents_clock_armed: RwSignal<bool>,
@@ -232,6 +235,7 @@ impl AppState {
             drawer_width: RwSignal::new(crate::theme::DRAWER_WIDTH),
             drawer_resizing: RwSignal::new(false),
             window_width: RwSignal::new(0.0),
+            main_pane: RwSignal::new((0.0, 0.0)),
             agents_clock_armed: RwSignal::new(false),
             agents_tab: RwSignal::new(AgentsTab::Active),
             agents_worktree_filter: RwSignal::new(WorktreeFilter::All),

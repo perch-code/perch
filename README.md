@@ -325,6 +325,35 @@ filter comes off when the file is not a change, and the tree scrolls to its
 row. During a retained snapshot the tree has no scope to pick and nothing to
 mark viewed, and the way back to the current files is in the tab strip.
 
+## Going to a file
+
+`Cmd-P` puts VS Code's Go to File over the top of the pane, from Files or
+Conversation, for any item with files. Before anything is typed it lists
+the files the item has had open, the most recent first, and then its
+changes. As you type, it lists the recently opened files that match and
+then every other file in the worktree that does, with the matched letters
+in blue and a change's status letter at the right.
+
+The ranking is VS Code's own. The letters must come in order. A run of
+them beats the same letters spread out, a match in the name beats one
+that needs the directory, and a name that starts with the query comes
+first, shorter names before longer. A `/` in the query matches against
+the whole path, words separated by spaces must all match, and a query in
+double quotes must match as one run. A recently opened file is listed as
+recent only when the letters form one run in its name, or in its path for
+a query with a `/`; otherwise it is ranked with the other files.
+
+`Enter` opens the file on Files, and `config.rs:42` opens it at line 42;
+`:42` alone goes to line 42 of the open file. The list of recently opened
+files is kept for each item until Perch quits.
+
+| Action | Key |
+|---|---|
+| Go to File | `Cmd-P` |
+| Next, previous | `Down`, `Up`, or `Ctrl-N`, `Ctrl-P`; `Cmd-P` again for next |
+| Open | `Enter` |
+| Close | `Escape`, or a click outside it |
+
 ## Code navigation
 
 Files reads like an IDE when rust-analyzer is installed. Rest the pointer on

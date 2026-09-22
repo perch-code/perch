@@ -7,6 +7,7 @@ pub mod conversation;
 pub mod doc;
 pub mod editor;
 pub mod find;
+pub mod go_to;
 pub mod gutter;
 pub mod header;
 pub mod hierarchy;

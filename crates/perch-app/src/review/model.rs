@@ -1333,6 +1333,14 @@ pub struct ReviewState {
     /// box takes it once it is in the tree, as the sidebar's search box
     /// does with `focus_search`.
     pub find_focus: RwSignal<bool>,
+    /// Cmd-P's palette.
+    pub go_to: crate::review::go_to::GoTo,
+    /// The files each item has had on screen, by item, the most recent
+    /// first, for Cmd-P to list before anything is typed: a file moves to
+    /// the front whenever it becomes the active one, from a tab, the
+    /// tree, a definition or anywhere else. Kept for the life of the app,
+    /// as `tabs_by_item` is.
+    pub recent_files: RwSignal<HashMap<String, Vec<String>>>,
     /// A jump waiting to be made, as the file, the head line and the column
     /// the caret lands on. The view with the file-opening closure takes it.
     pub pending_jump: RwSignal<Option<(String, usize, usize)>>,
@@ -1366,6 +1374,9 @@ pub struct ReviewState {
 
 /// How many tabs stay open before the oldest is dropped.
 const MAX_TABS: usize = 20;
+
+/// How many files an item's recently opened list keeps.
+const MAX_RECENT: usize = 50;
 
 impl Default for ReviewState {
     fn default() -> Self {
@@ -1490,6 +1501,8 @@ impl ReviewState {
             find_focused: RwSignal::new(false),
             find_box: RwSignal::new(None),
             find_focus: RwSignal::new(false),
+            go_to: crate::review::go_to::GoTo::new(),
+            recent_files: RwSignal::new(HashMap::new()),
             pending_jump: RwSignal::new(None),
             pending_open: RwSignal::new(None),
             names: RwSignal::new(HashMap::new()),
@@ -1638,6 +1651,8 @@ impl ReviewState {
         if !self.find_matches.with_untracked(|m| m.is_empty()) {
             self.find_matches.set(Arc::new(Vec::new()));
         }
+        // Cmd-P's palette goes too; what each item had open stays.
+        self.go_to.reset();
     }
 
     /// Prepare to install an accepted live result. Agent history navigation
@@ -2377,6 +2392,7 @@ impl ReviewState {
             }
         }
         self.active.set(Some(path.to_string()));
+        self.remember_recent(path);
         self.cursor_line.set(0);
         // The tint was another file's, or another caret's.
         self.clear_highlights();
@@ -2468,11 +2484,51 @@ impl ReviewState {
 
         // Keep the loaded content: reopening a closed tab should not refetch.
         if was_active {
+            if let Some(neighbour) = &neighbour {
+                self.remember_recent(neighbour);
+            }
             self.active.set(neighbour);
             self.cursor_line.set(0);
             self.editor_epoch.update(|e| *e += 1);
             self.keep_composer_in_view(composer_was_in_code);
         }
+    }
+
+    /// The files the open item has had on screen, the most recent first.
+    /// Tracked.
+    pub fn recent(&self) -> Vec<String> {
+        let Some(id) = self.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
+            return Vec::new();
+        };
+        self.recent_files
+            .with(|all| all.get(&id).cloned())
+            .unwrap_or_default()
+    }
+
+    /// A file became the active one: first among the item's recent files.
+    /// Not written when it is first already, so nothing that lists them
+    /// is woken for a tab clicked twice.
+    fn remember_recent(&self, path: &str) {
+        let Some(id) = self
+            .item
+            .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+        else {
+            return;
+        };
+        let first = self.recent_files.with_untracked(|all| {
+            all.get(&id)
+                .and_then(|recent| recent.first())
+                .is_some_and(|p| p == path)
+        });
+        if first {
+            return;
+        }
+        self.recent_files.update(|all| {
+            let recent = all.entry(id).or_default();
+            recent.retain(|p| p != path);
+            recent.insert(0, path.to_string());
+            recent.truncate(MAX_RECENT);
+        });
     }
 
     /// A tab is gone: its file is folded again next time. Only written

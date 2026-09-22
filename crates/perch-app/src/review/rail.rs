@@ -460,7 +460,9 @@ fn viewed_box(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> im
     .into_any()
 }
 
-fn status_letter(status: ChangeStatus) -> impl IntoView {
+/// A changed file's status as git's letter in its colour: the rail's, and
+/// Cmd-P's list's.
+pub(crate) fn status_letter(status: ChangeStatus) -> impl IntoView {
     let color = match status {
         ChangeStatus::Added => theme::STATUS_ADDED,
         ChangeStatus::Modified | ChangeStatus::TypeChanged => theme::STATUS_MODIFIED,

@@ -148,6 +148,52 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         )
     });
 
+    // The main area: the review view over the sidebar, or the empty
+    // state, which on a fresh install with no token is what to do about
+    // that. A memo, because a signal tells its readers about every write
+    // and the container builds its child again on each: the status is
+    // written on every poll, and a page built again is a scroll back at
+    // the top.
+    let pane = dyn_container(
+        move || main_pane.get(),
+        move |(open, no_token)| {
+            if open {
+                crate::review::review_view(
+                    state,
+                    review,
+                    review_backend.clone(),
+                    review_open_item.clone(),
+                )
+                .into_any()
+            } else if no_token {
+                empty_pane(state, token_help(state)).into_any()
+            } else {
+                empty_pane(
+                    state,
+                    widgets::centered_message(
+                        SidebarIcon::Branch,
+                        || "Nothing open".to_string(),
+                        || "Pick a pull request, an issue, or a branch from the sidebar.".to_string(),
+                    ),
+                )
+                .into_any()
+            }
+        },
+    )
+    // A zero basis: the pane takes what the drawers leave, and taffy
+    // never measures the whole item view unconstrained to find out how
+    // wide it would like to be.
+    .debug_name("main-pane")
+    .style(|s| {
+        s.flex_grow(1.0_f32)
+            .flex_basis(0.0)
+            .min_width(0.0)
+            .height_full()
+    });
+    let pane_id = pane.view_id();
+    // Opening a file from Cmd-P's palette, which the window's keys do.
+    let go_to_file = crate::review::open_file(review, backend.clone());
+
     let root = Stack::vertical((
         Stack::horizontal((
             dyn_container(
@@ -173,51 +219,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 },
             ),
-            // The main area: the review view over the sidebar, or the
-            // empty state, which on a fresh install with no token is what
-            // to do about that. A memo, because a signal tells its readers
-            // about every write and the container builds its child again
-            // on each: the status is written on every poll, and a page
-            // built again is a scroll back at the top.
-            dyn_container(
-                move || main_pane.get(),
-                move |(open, no_token)| {
-                    if open {
-                        crate::review::review_view(
-                            state,
-                            review,
-                            review_backend.clone(),
-                            review_open_item.clone(),
-                        )
-                        .into_any()
-                    } else if no_token {
-                        empty_pane(state, token_help(state)).into_any()
-                    } else {
-                        empty_pane(
-                            state,
-                            widgets::centered_message(
-                                SidebarIcon::Branch,
-                                || "Nothing open".to_string(),
-                                || {
-                                    "Pick a pull request, an issue, or a branch from the sidebar."
-                                        .to_string()
-                                },
-                            ),
-                        )
-                        .into_any()
-                    }
-                },
-            )
-            // A zero basis: the pane takes what the drawers leave, and
-            // taffy never measures the whole item view unconstrained to
-            // find out how wide it would like to be.
-            .debug_name("main-pane")
-            .style(|s| {
-                s.flex_grow(1.0_f32)
-                    .flex_basis(0.0)
-                    .min_width(0.0)
-                    .height_full()
-            }),
+            pane,
             // The drawer on the right: the open item's files, or the
             // Agents inspector. Outside the review's keyed content, so the
             // open file, its scroll and a composer survive it opening and
@@ -233,6 +235,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         }),
         status::status_bar(state, review, backend.clone()),
         agents::completion_notice(state, capture_backend.clone()),
+        // Cmd-P's palette, over everything but a drag's cursor.
+        crate::review::go_to::palette(state, review, backend.clone()),
         // Over everything, and only while a drawer's edge is being dragged.
         sidebar::resize_cursor_sheet(state),
         drawer::resize_cursor_sheet(state),
@@ -248,6 +252,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             if width > 0.0 && state.window_width.get_untracked() != width {
                 state.window_width.set(width);
             }
+            // The pane's row starts at the window's left edge, so where
+            // the pane is in the row is where it is in the window.
+            let pane = pane_id.get_layout_rect();
+            if state.main_pane.get_untracked() != (pane.x0, pane.x1) {
+                state.main_pane.set((pane.x0, pane.x1));
+            }
         })
         // The keys the code editor would otherwise keep. The editor stops
         // every key once it has focus, and these are pressed right after
@@ -262,6 +272,21 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             },
             move |cx, key: &KeyboardEvent| {
                 let key_backend = &capture_backend;
+                // Cmd-P's palette is modal: while it is up, its keys are
+                // its own, whatever has the keyboard, and the rest are its
+                // box's.
+                if review.go_to.open.get() {
+                    return crate::review::go_to::key(review, &go_to_file, key);
+                }
+                // Cmd-P puts it up, app-wide, as the drawer keys are; Escape
+                // gives the keyboard back to whatever had it.
+                if key.code == Code::KeyP
+                    && key.modifiers == OS_MOD
+                    && crate::review::go_to::available(review)
+                {
+                    crate::review::go_to::open(review, focused_descendant(cx, root_id));
+                    return EventPropagation::Stop;
+                }
                 // Cmd-Shift-E and Cmd-Shift-A are the drawer on the right,
                 // on the files and on the Agents inspector, app-wide,
                 // including while the editor or a composer owns focus.
@@ -544,6 +569,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // Window-level shortcuts. Key events bubble from whatever has focus, so
         // a handler on the root view catches them wherever the reader is.
         .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            // None of these while Cmd-P's palette is up: it is modal.
+            if review.go_to.open.get() {
+                return EventPropagation::Continue;
+            }
             // Escape puts away whatever the sidebar has open under a row.
             if key.code == Code::Escape && key.modifiers.is_empty() {
                 let had = state.renaming.with(Option::is_some)

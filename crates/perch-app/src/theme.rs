@@ -571,6 +571,20 @@ pub const FIND_CURRENT_BG: Color = Color::from_rgb8(0xa8, 0xac, 0x94);
 pub const FIND_BAR_HEIGHT: f64 = 33.0;
 pub const FIND_BOX_WIDTH: f64 = 221.0;
 pub const FIND_BAR_INSET: f64 = 28.0;
+/// Cmd-P's palette: as wide as VS Code's at most, and hung just under the
+/// bar over the item, across the file tabs, as VS Code's is under its
+/// title bar; the room inside its edge, where its list's bar runs; its
+/// box; a row of its list; and how tall the list grows before it
+/// scrolls, sixteen rows.
+pub const GO_TO_WIDTH: f64 = 600.0;
+pub const GO_TO_TOP: f64 = TITLEBAR_HEIGHT + 6.0;
+pub const GO_TO_PADDING: f64 = 6.0;
+pub const GO_TO_BOX_HEIGHT: f64 = 30.0;
+pub const GO_TO_ROW_HEIGHT: f64 = 26.0;
+pub const GO_TO_LIST_HEIGHT: f64 = 16.0 * GO_TO_ROW_HEIGHT;
+/// The letters of a name that a query matched, in Cmd-P's list: blue, as
+/// VS Code draws them, and GitHub's blue so it is one Perch already uses.
+pub const MATCH_FG: Color = Color::from_rgb8(0x09, 0x69, 0xda);
 
 #[cfg(test)]
 mod tests {
