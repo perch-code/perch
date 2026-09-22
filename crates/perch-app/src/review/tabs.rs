@@ -158,7 +158,9 @@ fn open_tabs(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // and the wheel still scrolls. A trackpad's vertical scroll moves the
     // strip sideways, which is the only direction it can go.
     .custom_style(|s: ScrollCustomStyle| s.hide_bars(true).vertical_scroll_as_horizontal(true))
-    .style(|s| s.height_full().width_full())
+    // floem keeps a bar's width at the right whether or not a bar shows,
+    // which cut the rule short of the controls.
+    .style(|s| s.height_full().width_full().scrollbar_width(0.0))
 }
 
 fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Origin) -> impl IntoView {
@@ -731,6 +733,9 @@ mod tests {
             "a file's tiles on Conversation"
         );
         assert!(named(harness.root_id(), "conversation-title").is_some());
+        // The rule after the tabs runs on to the tiles, with no gap before
+        // them.
+        assert_eq!(rect(&harness, "tabs rule").x1, rect(&harness, "file tiles").x0);
 
         // The file's tab shows the file, and its tiles come; the chat
         // tile stays where it was.
