@@ -64,6 +64,34 @@ Reactions are read with the discussion through GitHub's GraphQL API, a
 hundred entries to a request, and left the same way. An entry cached by an
 older build of Perch has no reactions until it is fetched again.
 
+## Posting
+
+Every composer in Perch has a destination: Claude, Codex, or GitHub, picked
+from the same menu as the model. What goes to an agent stays in Perch. What
+goes to GitHub goes one of two ways.
+
+On a line of a file, or under a thread that is on GitHub, a message to GitHub
+is a draft: it is kept in Perch's cache the moment it is sent, drawn with a
+`Draft` pill, marked in the gutter in GitHub's blue, and can be edited in
+place or deleted on hover. Drafts survive a restart and being offline, and
+github.com does not show them. **Submit review** lists them above the summary,
+counts them on the button, and posts them with the verdict: a comment on the
+head rides in the review, a comment written against an older commit is posted
+against that commit, and a reply is posted under its thread. A `Comment`
+review with drafts needs no summary. A draft that GitHub refuses, or that
+cannot be matched to what GitHub returns, stays a draft and the form says so.
+
+At the foot of Conversation, a message to GitHub is an issue comment and
+posts at once, after one confirmation naming the pull request.
+
+GitHub's review threads are drawn beside Perch's own with the same cards, in
+both Files and Conversation, so one thread can hold a reviewer's comment, your
+reply to them, and an agent's private take on both. In such a thread, what an
+agent said and what you asked it are inset behind a rule marked `PERCH ONLY`.
+An agent's answer never posts on its own: **Post to GitHub** under the pointer
+puts its text in a composer for you to edit and send, and nothing records
+where the draft came from.
+
 ## Authentication
 
 Perch calls GitHub's API directly. It resolves credentials in this order:
@@ -112,7 +140,8 @@ the original database in place.
 
 Questions about an item or selected lines in its Files view run through Claude
 Code or Codex in that item's worktree. Follow-ups remain attached to the local
-conversation, and the agents retain their read-only permissions.
+conversation, and the agents retain their read-only permissions. Nothing an
+agent writes reaches GitHub unless you post it (see Posting).
 
 The persistent **Agents** control in the status bar opens an app-wide activity
 inspector. Active work is grouped by worktree and continues while another item
@@ -227,9 +256,9 @@ existing thread. **Retry** creates another attempt with the original snapshot
 and settings. **Review latest** creates a new group and immutable snapshot from
 the branch's current committed state.
 
-Review results and follow-ups stay local to Perch. Reviews do not post,
-resolve, or comment on GitHub, modify code, run automatically after a push, or
-use a hosted review service. Perch also exports each item's review history as
+Review results and follow-ups stay local to Perch unless you post one
+yourself (see Posting). Reviews do not resolve threads on GitHub, modify code,
+run automatically after a push, or use a hosted review service. Perch also exports each item's review history as
 deterministic Markdown at
 `$PERCH_HOME/knowledge/reviews/<owner>/<repo>/<item-id>.md` (under
 `~/.perch` when `PERCH_HOME` is unset). Re-exporting replaces that stable
