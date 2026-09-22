@@ -23,7 +23,9 @@ use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::model::{drafts_summary, Draft, ReviewState};
 use crate::theme;
-use crate::ui::widgets::{clickable, editor_box, icon_button, sidebar_glyph, text_button};
+use crate::ui::widgets::{
+    clickable, editor_box, icon_button, lay_out_every_line, sidebar_glyph, text_button,
+};
 
 /// How much of a draft's text its row shows.
 const EXCERPT_CHARS: usize = 60;
@@ -574,6 +576,8 @@ fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
         styling_doc,
         styling_id,
     ));
+    // Every line laid out, so a long review does not jump as it is typed.
+    lay_out_every_line(editor.editor());
     let key_submit = submit.clone();
     let editor = editor
         // Cmd-Enter submits, before the editor can take it for a line.
@@ -1732,5 +1736,66 @@ mod tests {
             PullReviewEvent::Approve,
             "pending review options ignore keyboard selection"
         );
+    }
+
+    /// A summary longer than its box stays scrolled to the caret as it is
+    /// typed into, as the question's box does: floem forgot the rows of a
+    /// wrapped line with every key, and the box jumped to the top and back.
+    #[test]
+    fn a_long_summary_stays_scrolled_to_the_caret_as_it_is_typed() {
+        let root = TestRoot::new();
+        let state = review_state();
+        state.submit_review_autofocus.set(true);
+        let summary = (1..=60)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        state.submit_review_draft.set(summary);
+        open(state, None);
+        let view = control(state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+
+        let lines = find(harness.root_id(), "submit-review-editor")
+            .and_then(|editor| find(editor, "Editor View"))
+            .expect("the summary's lines");
+        let scrolled = || {
+            let shown = lines.get_visual_rect();
+            let whole = lines.get_visual_rect_no_clip();
+            (shown.y0 - whole.y0, whole.height() - shown.height())
+        };
+        let key = |key: Key, code: Code, modifiers: Modifiers| {
+            floem::event::Event::Key(KeyboardEvent {
+                state: KeyState::Down,
+                key,
+                code,
+                location: Default::default(),
+                modifiers,
+                repeat: false,
+                is_composing: false,
+            })
+        };
+
+        // The caret starts at the top; Cmd-Down takes it to the end.
+        harness.dispatch_event(key(
+            Key::Named(NamedKey::ArrowDown),
+            Code::ArrowDown,
+            Modifiers::META,
+        ));
+        harness.paint();
+        let (at, end) = scrolled();
+        assert!(end > 0.0, "the summary is longer than its box");
+        assert_eq!(at, end, "the box went down with the caret");
+
+        for ch in "abc".chars() {
+            harness.dispatch_event(key(
+                Key::Character(ch.to_string()),
+                Code::KeyX,
+                Modifiers::empty(),
+            ));
+            harness.paint();
+            assert_eq!(scrolled(), (end, end), "the box stayed down");
+        }
     }
 }

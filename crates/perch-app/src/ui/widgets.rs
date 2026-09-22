@@ -249,6 +249,46 @@ pub fn editor_box(
         .debug_name("editor-box")
 }
 
+/// Keeps every line of a box's text laid out, so the rows a wrapped line
+/// takes are counted rather than guessed.
+///
+/// floem lays out only the lines on screen, counts a line it has not laid
+/// out as a single row, and drops every layout on each edit and each new
+/// wrap width. In a box scrolled down a text that wraps, the rows above
+/// the view shrank under it with every key, and the caret was put on its
+/// line's first row until the line was laid out again, so the box jumped
+/// to the top and back as it was typed into. A question or a review is
+/// short enough to lay out whole.
+///
+/// The lines are laid out again whenever the document marks its layouts
+/// stale, in a memo rather than an effect: floem runs memos first, so
+/// they are all there before the editor's own effect places the rows on
+/// screen. floem drops them for a new width in an effect of its own; the
+/// effect here, made after the editor's, runs after that one and marks
+/// the layouts stale, so they are laid out again at the new width.
+pub fn lay_out_every_line(editor: &floem::views::editor::Editor) {
+    use floem::reactive::{Effect, Memo};
+
+    let ed = editor.clone();
+    Memo::new(move |_| {
+        let rev = ed.doc().cache_rev().get();
+        Effect::untrack(|| {
+            ed.lines()
+                .init_all(rev, ed.config_id(), ed.text_prov(), false)
+        });
+        rev
+    });
+
+    let ed = editor.clone();
+    let width = std::cell::Cell::new(None);
+    Effect::new(move |_| {
+        let now = ed.viewport.with(|v| v.width());
+        if width.replace(Some(now)).is_some_and(|was| was != now) {
+            ed.doc().cache_rev().update(|rev| *rev += 1);
+        }
+    });
+}
+
 pub fn clickable(style: floem::style::Style) -> floem::style::Style {
     style
         .selectable(false)

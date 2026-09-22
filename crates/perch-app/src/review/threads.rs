@@ -28,7 +28,8 @@ use crate::review::model::{AgentChoice, Composer, Destination, ReviewState};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
-    clickable, editor_box, icon_button, name_label, sidebar_glyph, text_button, Name,
+    clickable, editor_box, icon_button, lay_out_every_line, name_label, sidebar_glyph, text_button,
+    Name,
 };
 
 /// A model alias as the screen shows it: "Sonnet" for `sonnet`. A full id
@@ -215,6 +216,8 @@ pub fn composer_view(
         styling_doc,
         styling_id,
     ));
+    // Every line laid out, so a long question does not jump as it is typed.
+    lay_out_every_line(editor.editor());
     let doc_editor = editor.editor().clone();
     let read_text = Rc::new(move || doc_editor.doc().text().to_string());
     // A draft the box starts with, a retried question or a quoted comment,
@@ -4152,5 +4155,121 @@ mod tests {
             Some(theme::COMPOSER_HEIGHT + 100.0),
             "the box stays where it was left"
         );
+    }
+
+    /// How far a box's lines are scrolled, and how far they can be: the
+    /// lines run past the box, and the part of them that shows is the box.
+    fn scrolled(lines: floem::ViewId) -> (f64, f64) {
+        let shown = lines.get_visual_rect();
+        let whole = lines.get_visual_rect_no_clip();
+        (shown.y0 - whole.y0, whole.height() - shown.height())
+    }
+
+    /// Types `text` into the focused box a key at a time, and hands back
+    /// how far the box's lines were scrolled after each key.
+    fn type_into(harness: &mut HeadlessHarness, lines: floem::ViewId, text: &str) -> Vec<f64> {
+        text.chars()
+            .map(|ch| {
+                let code = if ch == ' ' { Code::Space } else { Code::KeyX };
+                harness.dispatch_event(key(
+                    Key::Character(ch.to_string()),
+                    code,
+                    Modifiers::empty(),
+                ));
+                harness.paint();
+                scrolled(lines).0
+            })
+            .collect()
+    }
+
+    /// A question longer than its box opens scrolled to the caret at its
+    /// end, and stays there as it is typed into, following the caret onto
+    /// a new row. floem forgot the rows of the wrapped line with every key
+    /// and put the caret on the line's first one, so the box jumped to the
+    /// top and back on alternate keys.
+    #[test]
+    fn a_long_question_stays_scrolled_to_the_caret_as_it_is_typed() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let question = (1..=80)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        state.open_composer(None, None, question, sonnet_medium());
+        let composer = state.composer.get().unwrap();
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Inline);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+
+        let text_box = find(harness.root_id(), "editor-box").expect("the box");
+        let lines = find(text_box, "Editor View").expect("the lines in it");
+        let (at, end) = scrolled(lines);
+        assert!(end > 0.0, "the question is longer than its box");
+        assert_eq!(at, end, "the box opens on the caret");
+
+        let offsets = type_into(&mut harness, lines, " and then some more");
+        let (_, end_now) = scrolled(lines);
+        assert!(end_now > end, "the words went onto a new row");
+        assert!(
+            offsets.iter().all(|&at| at >= end),
+            "the box stayed down with the caret as it was typed into: {offsets:?}"
+        );
+        assert_eq!(
+            scrolled(lines).0,
+            end_now,
+            "and followed it onto the new row"
+        );
+    }
+
+    /// A question of several paragraphs opens scrolled to its end, and a
+    /// word typed into its middle leaves the box where it is. The rows
+    /// of the paragraphs above the view counted as one each until they
+    /// were laid out again, so the box opened short of the caret, and
+    /// every key moved it.
+    #[test]
+    fn a_question_of_paragraphs_opens_on_its_end_and_holds_still_mid_way() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let question = (1..=6)
+            .map(|p| {
+                (1..=25)
+                    .map(|i| format!("w{p}x{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.open_composer(None, None, question, sonnet_medium());
+        let composer = state.composer.get().unwrap();
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Inline);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+
+        let text_box = find(harness.root_id(), "editor-box").expect("the box");
+        let lines = find(text_box, "Editor View").expect("the lines in it");
+        let (at, end) = scrolled(lines);
+        assert_eq!(at, end, "the box opens on the caret at the end");
+
+        // Up into the middle of the question, well above where the box
+        // opened.
+        for _ in 0..14 {
+            harness.dispatch_event(key(
+                Key::Named(NamedKey::ArrowUp),
+                Code::ArrowUp,
+                Modifiers::empty(),
+            ));
+        }
+        harness.paint();
+        let (mid_way, _) = scrolled(lines);
+        assert!(mid_way < end - 100.0, "the caret went up the question");
+
+        let offsets = type_into(&mut harness, lines, "abc");
+        assert_eq!(offsets, vec![mid_way; 3], "the box held still");
     }
 }
