@@ -286,9 +286,7 @@ fn card_view(
         } => cards::description_card(app, state, backend, author, avatar_url, at, body, node_id)
             .into_any(),
         Card::Comment(comment) => cards::comment_card(app, state, backend, comment).into_any(),
-        Card::Review { review, comments } => {
-            cards::review_card(app, state, backend, open_file, review, comments).into_any()
-        }
+        Card::Review { review } => cards::review_card(app, state, backend, review).into_any(),
         Card::Event(event) => {
             cards::event_row(app, event, pull.map(|p| p.author_login.clone())).into_any()
         }
@@ -402,6 +400,12 @@ mod tests {
             path: "src/manifest.rs".into(),
             line: Some(41),
             original_line: None,
+            start_line: None,
+            original_start_line: None,
+            start_side: None,
+            commit_id: String::new(),
+            original_commit_id: String::new(),
+            user_avatar_url: String::new(),
             diff_hunk: "@@ -39,3 +39,3 @@\n a\n-b\n+c".into(),
             side: Side::Right,
             created_at: at(when),
@@ -450,6 +454,7 @@ mod tests {
                     at: at("2026-09-17T15:00:00Z"),
                 },
             ],
+            review_threads: Vec::new(),
         }
     }
 
@@ -495,11 +500,17 @@ mod tests {
             body: body.into(),
             created_at: at(when),
             run: Some(run()),
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Default::default(),
         };
         CommentThread {
             id: "t1".into(),
             worktree_id: "wt".into(),
             origin: ThreadOrigin::Local,
+            github_id: None,
             anchor: Some(Anchor {
                 path: "src/manifest.rs".into(),
                 start_line: 41,
@@ -885,6 +896,77 @@ mod tests {
         assert_eq!(linked.get(Cursor), Some(CursorStyle::Pointer));
         click(&mut harness, me);
         assert_eq!(opened(), vec!["https://github.com/me".to_string()]);
+    }
+
+    /// One of GitHub's review threads is a thread card at its first
+    /// comment's time, opening with where it was left rather than "You
+    /// asked": each comment carries its own byline, the reply under the
+    /// comment it answers, and no Local chip. Ask about this on a comment
+    /// opens the composer under the thread itself, with nothing quoted.
+    #[test]
+    fn a_github_thread_is_a_thread_card_whose_ask_opens_under_it() {
+        let (mut harness, _, state) = app_harness();
+        let discussion = discussion();
+        let mut github = perch_github::comments::review_threads_of(&discussion, "wt", "h");
+        assert_eq!(github.len(), 1);
+        let github = github.remove(0);
+        assert_eq!(github.id, "gh-31");
+        state.set_comment_threads(Arc::new(vec![thread(), github]));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(
+            cards_in_order(&harness),
+            [
+                "card:description",
+                "card:event",
+                "card:comment",
+                "card:thread",
+                "card:review",
+                "card:thread",
+                "card:event"
+            ],
+            "GitHub's thread at its comment's time, before the review it was left in"
+        );
+        let root = harness.root_id();
+        let card = find(root, "card:thread").unwrap();
+        let mut all = Vec::new();
+        names(card, &mut all);
+        let text = all.join("\n");
+        assert!(text.contains("src/manifest.rs:41"), "{text}");
+        assert_eq!(text.matches("name label - Label: \"chris\"").count(), 2, "a byline a comment");
+        assert!(!text.contains("Label: \"Local\""), "GitHub's thread is not marked Local");
+        assert!(!text.contains("Label: \"You\""), "nobody here asked");
+        assert!(text.contains("[\"epoch\"]") && text.contains("[\"the reply\"]"), "{text}");
+        let bylines: Vec<_> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.contains("name label - Label: \"chris\""))
+            .map(|(i, _)| i)
+            .collect();
+        let reply_after_root = all[bylines[0]..bylines[1]].iter().any(|n| n.contains("[\"epoch\"]"));
+        assert!(reply_after_root, "the reply's byline comes after the comment");
+
+        // The card is under the fold; bring it up and hover it for the Ask.
+        card.scroll_to(None);
+        harness.rebuild();
+        harness.paint();
+        let c = card.get_visual_rect_no_clip().center();
+        harness.pointer_move(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+        let ask = find(card, "ask-about").expect("the comment offers Ask about this");
+        let c = ask.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+        let composer = state.composer.get().expect("the composer opened");
+        assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
+        assert_eq!(composer.anchor.as_ref().map(|a| a.label()), Some("src/manifest.rs:41".to_string()));
+        assert_eq!(state.composer_draft.get(), "", "the thread carries the comment; nothing is quoted");
+        assert!(
+            find(card, "composer-box").is_some(),
+            "the follow-up composer is inside the GitHub thread's card"
+        );
     }
 
     /// Conversation is the home for local threads that have no inline card:

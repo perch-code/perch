@@ -1,10 +1,10 @@
 //! `perch --timeline <item-id>`
 //!
 //! Prints an item's Conversation as text: one line per card with its kind,
-//! time and first line, and a review's line comments and their replies
-//! indented under it. From the cache the app uses, so the interleave can be
-//! read without a window. An issue's comments are fetched on open and not
-//! kept, so an issue prints without them and says so.
+//! time and first line, and a thread's anchor and the messages after its
+//! first indented under it. From the cache the app uses, so the interleave
+//! can be read without a window. An issue's comments are fetched on open and
+//! not kept, so an issue prints without them and says so.
 
 use perch_github::Cache;
 
@@ -60,18 +60,19 @@ fn print(id: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// `<kind>  <time or -->  <first line>`, with a review's line comments as
-/// `  <path:line> <first line>` and each reply as `    reply <first line>`.
+/// `<kind>  <time or -->  <first line>`, with a thread's anchor as
+/// `  <path:line>` and each message after its first as
+/// `    reply <first line>`.
 fn render(out: &mut String, cards: &[Card]) {
     for card in cards {
         let at = card.at().map(|t| t.to_string()).unwrap_or_else(|| "--".into());
         out.push_str(&format!("{:<11}  {at}  {}\n", card.kind(), card.first_line()));
-        if let Card::Review { comments, .. } = card {
-            for thread in comments {
-                out.push_str(&format!("  {} {}\n", thread.comment.location(), first_line(&thread.comment.body)));
-                for reply in &thread.replies {
-                    out.push_str(&format!("    reply {}\n", first_line(&reply.body)));
-                }
+        if let Card::Thread(thread) = card {
+            if let Some(anchor) = &thread.anchor {
+                out.push_str(&format!("  {}\n", anchor.label()));
+            }
+            for reply in thread.messages.iter().skip(1) {
+                out.push_str(&format!("    reply {}\n", first_line(&reply.body)));
             }
         }
     }
@@ -80,21 +81,45 @@ fn render(out: &mut String, cards: &[Card]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::review::timeline::tests::{event, line, review};
-    use crate::review::timeline::LineThread;
-    use perch_github::PullEventKind;
+    use crate::review::timeline::tests::{at, event, review};
+    use perch_github::{Anchor, Author, CommentMessage, CommentThread, PullEventKind, Side, ThreadOrigin};
+
+    fn message(id: u64, when: &str, body: &str) -> CommentMessage {
+        CommentMessage {
+            id: format!("gh-{id}"),
+            thread_id: "gh-31".into(),
+            origin: ThreadOrigin::GitHub,
+            author: Author::GitHubUser("rohan".into()),
+            body: body.into(),
+            created_at: at(when),
+            run: None,
+            github_id: Some(id),
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Default::default(),
+        }
+    }
 
     #[test]
-    fn a_review_prints_its_line_comments_and_their_replies_under_it() {
+    fn a_thread_prints_its_anchor_and_the_replies_under_it() {
         let cards = vec![
             Card::Event(event(PullEventKind::Opened, "2026-09-14T14:02:00Z")),
-            Card::Review {
-                review: Some(review(9, "APPROVED", "Looks right.\n\nMore below.", Some("2026-09-16T11:40:00Z"))),
-                comments: vec![LineThread {
-                    comment: line(31, Some(9), None, "2026-09-16T11:38:00Z", "epoch\nsecond line"),
-                    replies: vec![line(32, Some(10), Some(31), "2026-09-16T12:00:00Z", "  the reply ")],
-                }],
-            },
+            Card::Review { review: review(9, "APPROVED", "Looks right.\n\nMore below.", Some("2026-09-16T11:40:00Z")) },
+            Card::Thread(CommentThread {
+                id: "gh-31".into(),
+                worktree_id: "w".into(),
+                origin: ThreadOrigin::GitHub,
+                github_id: Some(31),
+                anchor: Some(Anchor { path: "src/manifest.rs".into(), start_line: 41, line: 41, side: Side::Right, commit_sha: "h".into() }),
+                outdated: false,
+                resolved: false,
+                created_at: at("2026-09-16T11:38:00Z"),
+                messages: vec![
+                    message(31, "2026-09-16T11:38:00Z", "epoch\nsecond line"),
+                    message(32, "2026-09-16T12:00:00Z", "  the reply "),
+                ],
+            }),
             Card::Description { author: "rohan".into(), avatar_url: String::new(), at: None, body: String::new(), node_id: String::new() },
         ];
         let mut out = String::new();
@@ -102,7 +127,8 @@ mod tests {
         let want = [
             "event        2026-09-14T14:02:00Z  opened",
             "review       2026-09-16T11:40:00Z  approved  Looks right.",
-            "  src/manifest.rs:41 epoch",
+            "thread       2026-09-16T11:38:00Z  epoch",
+            "  src/manifest.rs:41",
             "    reply the reply",
             "description  --  No description.",
             "",

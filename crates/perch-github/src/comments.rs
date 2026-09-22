@@ -2,14 +2,18 @@
 //! that answer in them.
 //!
 //! Shaped like GitHub's review threads on purpose: `side` and `start_line`
-//! are its names, so review threads fetched later can sit in the same list
-//! with the same anchor type. Nothing here fetches or posts one; the
-//! `origin` column exists so that milestone needs no migration.
+//! are its names, and a review thread fetched from GitHub sits in the same
+//! list with the same anchor type, told apart by `origin`. Nothing here
+//! fetches or posts one; `review_threads_of` turns a fetched discussion
+//! into threads, and the cache keeps them.
 //!
 //! `CommentThread` rather than `Thread`: that word is the notification.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+
+use crate::discussion::{Discussion, ReviewComment};
+use crate::reactions::Reactions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadOrigin {
@@ -90,10 +94,14 @@ impl Anchor {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommentThread {
-    /// Perch's own id for a local thread, GitHub's node id later.
+    /// Perch's own id for a local thread; `gh-{root comment id}` for one
+    /// from GitHub, so ingesting the same thread twice finds the same row.
     pub id: String,
     pub worktree_id: String,
     pub origin: ThreadOrigin,
+    /// The id of the root review comment on GitHub. `None` for Perch's own
+    /// and for a thread on its way to GitHub.
+    pub github_id: Option<u64>,
     /// `None` for a thread about the worktree as a whole.
     pub anchor: Option<Anchor>,
     /// The file changed after the anchor was made; the lines may have moved.
@@ -127,6 +135,16 @@ impl CommentThread {
             .filter_map(|m| m.run.as_ref())
             .find(|r| r.status.is_active())
     }
+
+    /// Whether the thread is GitHub's, posted or not yet.
+    pub fn is_github_bound(&self) -> bool {
+        self.origin == ThreadOrigin::GitHub
+    }
+
+    /// Whether anything in the thread went to GitHub, or is going.
+    pub fn has_github_message(&self) -> bool {
+        self.messages.iter().any(|m| m.origin == ThreadOrigin::GitHub)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,6 +158,8 @@ pub enum Author {
 pub struct CommentMessage {
     pub id: String,
     pub thread_id: String,
+    /// Where the message went: to GitHub, or to an agent and so to no one
+    /// else.
     pub origin: ThreadOrigin,
     pub author: Author,
     pub body: String,
@@ -149,6 +169,159 @@ pub struct CommentMessage {
     /// the thread has somewhere to show the steps before there is an
     /// answer.
     pub run: Option<RunRecord>,
+    /// The comment's id on GitHub; `None` until it is posted.
+    pub github_id: Option<u64>,
+    /// The comment's GraphQL node id, which reactions are left by.
+    pub node_id: Option<String>,
+    /// Where the comment is on github.com.
+    pub html_url: Option<String>,
+    /// The hunk a review comment was left on, as GitHub shows it, for
+    /// when the lines are not in the checkout.
+    pub diff_hunk: Option<String>,
+    /// The reactions on a comment from GitHub. Empty on Perch's own.
+    pub reactions: Reactions,
+}
+
+impl CommentMessage {
+    /// The reader's message to GitHub that has not been posted yet.
+    pub fn is_draft(&self) -> bool {
+        self.origin == ThreadOrigin::GitHub
+            && self.author == Author::User
+            && self.github_id.is_none()
+    }
+
+    /// A message no one on GitHub can see.
+    pub fn is_private(&self) -> bool {
+        self.origin == ThreadOrigin::Local
+    }
+
+    /// A comment that is on GitHub.
+    pub fn from_github(&self) -> bool {
+        self.origin == ThreadOrigin::GitHub && self.github_id.is_some()
+    }
+}
+
+/// The review threads of a discussion as `CommentThread`s: each root
+/// comment with its replies under it, in time order, threads in the order
+/// their roots were left. A reply names the first comment of its thread,
+/// but a chain is followed all the same, and a reply whose parent is
+/// missing starts a thread of its own. Comments of a review still pending
+/// on github.com are the viewer's own unfinished review and are left out.
+///
+/// The thread's anchor is the root's line, or the line it was left on when
+/// the head no longer has it, and the commit likewise; a root that names
+/// no commit is anchored at `fallback_head_sha`. What GitHub says of the
+/// thread's state wins; without it, a root with no head line is outdated
+/// and nothing is resolved.
+pub fn review_threads_of(
+    discussion: &Discussion,
+    item_id: &str,
+    fallback_head_sha: &str,
+) -> Vec<CommentThread> {
+    let pending: Vec<u64> = discussion
+        .reviews
+        .iter()
+        .filter(|r| r.state == "PENDING")
+        .map(|r| r.id)
+        .collect();
+    let comments: Vec<&ReviewComment> = discussion
+        .review_comments
+        .iter()
+        .filter(|c| !c.pull_request_review_id.is_some_and(|id| pending.contains(&id)))
+        .collect();
+
+    let root_of = |c: &ReviewComment| -> u64 {
+        let mut at = c;
+        // Bounded, in case the ids loop.
+        for _ in 0..comments.len() {
+            let Some(parent) = at
+                .in_reply_to_id
+                .and_then(|id| comments.iter().find(|p| p.id == id))
+            else {
+                break;
+            };
+            at = parent;
+        }
+        at.id
+    };
+
+    let mut threads: Vec<CommentThread> = comments
+        .iter()
+        .filter(|c| root_of(c) == c.id)
+        .map(|root| {
+            let state = discussion
+                .review_threads
+                .iter()
+                .find(|s| s.root_comment_id == root.id);
+            let at_head = root.line.is_some();
+            let line = root.line.or(root.original_line);
+            let anchor = line.map(|line| {
+                let start_line = if at_head { root.start_line } else { root.original_start_line };
+                let commit = if at_head { &root.commit_id } else { &root.original_commit_id };
+                Anchor {
+                    path: root.path.clone(),
+                    start_line: start_line.unwrap_or(line) as u32,
+                    line: line as u32,
+                    side: root.side,
+                    commit_sha: if commit.is_empty() {
+                        fallback_head_sha.to_string()
+                    } else {
+                        commit.clone()
+                    },
+                }
+            });
+            CommentThread {
+                id: github_thread_id(root.id),
+                worktree_id: item_id.to_string(),
+                origin: ThreadOrigin::GitHub,
+                github_id: Some(root.id),
+                anchor,
+                outdated: state.map_or(!at_head, |s| s.outdated),
+                resolved: state.is_some_and(|s| s.resolved),
+                created_at: root.created_at,
+                messages: vec![github_message(root, root.id)],
+            }
+        })
+        .collect();
+    for c in comments.iter().filter(|c| root_of(c) != c.id) {
+        let root = root_of(c);
+        if let Some(t) = threads.iter_mut().find(|t| t.github_id == Some(root)) {
+            t.messages.push(github_message(c, root));
+        }
+    }
+    for t in &mut threads {
+        t.messages[1..].sort_by_key(|m| m.created_at);
+    }
+    threads.sort_by_key(|t| t.created_at);
+    threads
+}
+
+/// The thread id a GitHub review thread has in Perch, from its root
+/// comment's id.
+pub fn github_thread_id(root_comment_id: u64) -> String {
+    format!("gh-{root_comment_id}")
+}
+
+/// The message id a GitHub comment has in Perch.
+pub fn github_message_id(comment_id: u64) -> String {
+    format!("gh-{comment_id}")
+}
+
+fn github_message(c: &ReviewComment, root_id: u64) -> CommentMessage {
+    CommentMessage {
+        id: github_message_id(c.id),
+        thread_id: github_thread_id(root_id),
+        origin: ThreadOrigin::GitHub,
+        author: Author::GitHubUser(c.user.clone()),
+        body: c.body.clone(),
+        created_at: c.created_at,
+        run: None,
+        github_id: Some(c.id),
+        node_id: Some(c.node_id.clone()).filter(|id| !id.is_empty()),
+        html_url: Some(c.html_url.clone()).filter(|url| !url.is_empty()),
+        diff_hunk: Some(c.diff_hunk.clone()).filter(|hunk| !hunk.is_empty()),
+        reactions: c.reactions.clone(),
+    }
 }
 
 /// The durable thing an agent run belongs to. Labels and paths are display
@@ -770,12 +943,18 @@ mod tests {
                 body: String::new(),
                 created_at: Timestamp::UNIX_EPOCH,
                 run: Some(r),
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Reactions::default(),
             })
             .collect();
         CommentThread {
             id: "t".into(),
             worktree_id: "w".into(),
             origin: ThreadOrigin::Local,
+            github_id: None,
             anchor: None,
             outdated: false,
             resolved: false,
@@ -817,5 +996,164 @@ mod tests {
         );
         let none = thread_of(vec![run("claude-code", "sess-1", RunStatus::Failed)]);
         assert_eq!(none.resumable_session("claude-code"), None);
+    }
+
+    fn at(s: &str) -> Timestamp {
+        s.parse().unwrap()
+    }
+
+    fn comment(id: u64, reply_to: Option<u64>, at_s: &str) -> ReviewComment {
+        ReviewComment {
+            id,
+            node_id: format!("PRRC_{id}"),
+            pull_request_review_id: Some(9),
+            in_reply_to_id: reply_to,
+            user: format!("u{id}"),
+            user_avatar_url: String::new(),
+            body: format!("c{id}"),
+            path: "a.rs".into(),
+            line: Some(41),
+            original_line: Some(40),
+            start_line: None,
+            original_start_line: None,
+            diff_hunk: "@@ -40,3 +40,3 @@".into(),
+            side: Side::Right,
+            start_side: None,
+            commit_id: "head".into(),
+            original_commit_id: "orig".into(),
+            created_at: at(at_s),
+            updated_at: None,
+            html_url: format!("https://github.com/a/b/pull/1#discussion_r{id}"),
+            reactions: Reactions::default(),
+        }
+    }
+
+    fn discussion(comments: Vec<ReviewComment>) -> Discussion {
+        Discussion {
+            review_comments: comments,
+            ..Discussion::default()
+        }
+    }
+
+    #[test]
+    fn replies_nest_under_their_root_and_a_reply_whose_root_is_missing_is_its_own_root() {
+        let d = discussion(vec![
+            comment(3, Some(1), "2026-09-16T11:40:00Z"),
+            comment(2, Some(1), "2026-09-16T11:39:00Z"),
+            comment(1, None, "2026-09-16T11:38:00Z"),
+            comment(7, Some(6), "2026-09-16T11:30:00Z"),
+        ]);
+        let threads = review_threads_of(&d, "w", "fallback");
+        let ids: Vec<_> = threads.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-7", "gh-1"], "threads sort by their root's time");
+        let first = &threads[1];
+        assert_eq!(first.github_id, Some(1));
+        assert_eq!(first.origin, ThreadOrigin::GitHub);
+        assert_eq!(first.worktree_id, "w");
+        assert_eq!(first.created_at, at("2026-09-16T11:38:00Z"));
+        let messages: Vec<_> = first.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(messages, vec!["gh-1", "gh-2", "gh-3"]);
+        let root = &first.messages[0];
+        assert_eq!(root.author, Author::GitHubUser("u1".into()));
+        assert_eq!(root.thread_id, "gh-1");
+        assert_eq!(root.github_id, Some(1));
+        assert_eq!(root.node_id.as_deref(), Some("PRRC_1"));
+        assert_eq!(root.html_url.as_deref(), Some("https://github.com/a/b/pull/1#discussion_r1"));
+        assert_eq!(root.diff_hunk.as_deref(), Some("@@ -40,3 +40,3 @@"));
+        assert!(root.from_github() && !root.is_draft() && !root.is_private());
+        assert_eq!(first.messages[2].thread_id, "gh-1");
+        assert!(first.is_github_bound() && first.has_github_message());
+        assert_eq!(threads[0].messages.len(), 1);
+    }
+
+    #[test]
+    fn comments_of_a_pending_review_are_left_out() {
+        let mut d = discussion(vec![
+            comment(1, None, "2026-09-16T11:38:00Z"),
+            comment(2, None, "2026-09-16T11:39:00Z"),
+        ]);
+        d.review_comments[1].pull_request_review_id = Some(10);
+        d.reviews = vec![
+            crate::discussion::Review {
+                id: 10,
+                node_id: String::new(),
+                user: "me".into(),
+                body: String::new(),
+                state: "PENDING".into(),
+                submitted_at: None,
+                html_url: String::new(),
+                reactions: Reactions::default(),
+            },
+        ];
+        let threads = review_threads_of(&d, "w", "");
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "gh-1");
+    }
+
+    #[test]
+    fn the_anchor_is_the_head_line_and_commit_when_the_head_has_it() {
+        let mut root = comment(1, None, "2026-09-16T11:38:00Z");
+        root.start_line = Some(39);
+        root.original_start_line = Some(30);
+        let threads = review_threads_of(&discussion(vec![root]), "w", "fallback");
+        assert_eq!(
+            threads[0].anchor,
+            Some(Anchor {
+                path: "a.rs".into(),
+                start_line: 39,
+                line: 41,
+                side: Side::Right,
+                commit_sha: "head".into(),
+            })
+        );
+        assert!(!threads[0].outdated);
+        assert!(!threads[0].resolved);
+    }
+
+    #[test]
+    fn a_comment_the_head_no_longer_has_anchors_where_it_was_left_and_is_outdated() {
+        let mut root = comment(1, None, "2026-09-16T11:38:00Z");
+        root.line = None;
+        root.start_line = None;
+        root.original_start_line = Some(30);
+        let threads = review_threads_of(&discussion(vec![root]), "w", "fallback");
+        assert_eq!(
+            threads[0].anchor,
+            Some(Anchor {
+                path: "a.rs".into(),
+                start_line: 30,
+                line: 40,
+                side: Side::Right,
+                commit_sha: "orig".into(),
+            })
+        );
+        assert!(threads[0].outdated, "no head line means outdated without GitHub's word");
+    }
+
+    #[test]
+    fn github_says_when_a_thread_is_resolved_or_outdated() {
+        let mut root = comment(1, None, "2026-09-16T11:38:00Z");
+        root.line = None;
+        let mut d = discussion(vec![root, comment(2, None, "2026-09-16T11:39:00Z")]);
+        d.review_threads = vec![
+            crate::discussion::ReviewThreadState { node_id: "PRRT_1".into(), root_comment_id: 1, resolved: true, outdated: false },
+            crate::discussion::ReviewThreadState { node_id: "PRRT_2".into(), root_comment_id: 2, resolved: false, outdated: true },
+        ];
+        let threads = review_threads_of(&d, "w", "");
+        assert!((threads[0].resolved, threads[0].outdated) == (true, false), "GitHub's word wins over the missing line");
+        assert!((threads[1].resolved, threads[1].outdated) == (false, true));
+    }
+
+    #[test]
+    fn a_root_without_a_commit_is_anchored_at_the_head_passed_in_and_without_a_line_at_nothing() {
+        let mut root = comment(1, None, "2026-09-16T11:38:00Z");
+        root.commit_id = String::new();
+        let mut nowhere = comment(2, None, "2026-09-16T11:39:00Z");
+        nowhere.line = None;
+        nowhere.original_line = None;
+        let threads = review_threads_of(&discussion(vec![root, nowhere]), "w", "fallback");
+        assert_eq!(threads[0].anchor.as_ref().unwrap().commit_sha, "fallback");
+        assert_eq!(threads[1].anchor, None);
+        assert!(threads[1].outdated);
     }
 }

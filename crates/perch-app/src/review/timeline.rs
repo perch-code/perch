@@ -3,14 +3,14 @@
 //! one sorted list of cards comes out. This is where the interleave lives,
 //! so it can be checked without a window.
 //!
-//! GitHub's three lists do not nest. A review's line comments name their
-//! review by id, a reply names the comment it answers, and a reply's own
+//! A review's line comments are not here. The cache turns them into
+//! comment threads, and a thread from GitHub is a `Card::Thread` like one of
+//! Perch's own, ordered by its first comment. A reply's own
 //! `pull_request_review_id` is a review of its own that GitHub made for it,
-//! with no body. The nesting is rebuilt here, and that empty review is the
-//! noise that gets dropped.
+//! with no body, and that empty review is the noise that gets dropped.
 
 use jiff::Timestamp;
-use perch_github::{CommentThread, Discussion, Issue, IssueComment, PullEvent, PullEventKind, PullRequest, Review, ReviewComment};
+use perch_github::{CommentThread, Discussion, Issue, IssueComment, PullEvent, PullEventKind, PullRequest, Review};
 
 /// One card on Conversation.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,20 +20,12 @@ pub enum Card {
     /// pull request's discussion has not landed, or an older build kept it.
     Description { author: String, avatar_url: String, at: Option<Timestamp>, body: String, node_id: String },
     Comment(IssueComment),
-    /// A review with its verdict and the line comments that belong to it.
-    /// `review` is None for line comments whose review is not in the list
-    /// (GitHub sends those for single comments made outside a review); such
-    /// a card reads as "commented".
-    Review { review: Option<Review>, comments: Vec<LineThread> },
+    /// A review with its verdict and summary. Its line comments are threads
+    /// of their own.
+    Review { review: Review },
     Event(PullEvent),
+    /// One of Perch's threads or one of GitHub's; `origin` tells them apart.
     Thread(CommentThread),
-}
-
-/// A line comment and the replies under it, in time order.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LineThread {
-    pub comment: ReviewComment,
-    pub replies: Vec<ReviewComment>,
 }
 
 /// How many characters of a first line the harness shows.
@@ -41,16 +33,13 @@ const FIRST_LINE_CHARS: usize = 80;
 
 impl Card {
     /// The time the card sorts by: a thread by its first message, a review
-    /// by when it was submitted or else by its first comment. `None` sorts
-    /// first, and the description is first whatever its time.
+    /// by when it was submitted. `None` sorts first, and the description is
+    /// first whatever its time.
     pub fn at(&self) -> Option<Timestamp> {
         match self {
             Card::Description { at, .. } => *at,
             Card::Comment(c) => Some(c.created_at),
-            Card::Review { review, comments } => review
-                .as_ref()
-                .and_then(|r| r.submitted_at)
-                .or_else(|| comments.first().map(|c| c.comment.created_at)),
+            Card::Review { review } => review.submitted_at,
             Card::Event(e) => Some(e.at),
             Card::Thread(t) => Some(t.messages.first().map(|m| m.created_at).unwrap_or(t.created_at)),
         }
@@ -74,9 +63,9 @@ impl Card {
             Card::Description { body, .. } if body.trim().is_empty() => "No description.".into(),
             Card::Description { body, .. } => first_line(body),
             Card::Comment(c) => first_line(&c.body),
-            Card::Review { review, .. } => {
-                let verdict = verdict(review.as_ref());
-                match review.as_ref().map(|r| first_line(&r.body)).filter(|l| !l.is_empty()) {
+            Card::Review { review } => {
+                let verdict = verdict(review);
+                match Some(first_line(&review.body)).filter(|l| !l.is_empty()) {
                     Some(summary) => cut(&format!("{verdict}  {summary}")),
                     None => verdict.into(),
                 }
@@ -100,12 +89,12 @@ impl Card {
 }
 
 /// The word in a review's byline. Anything GitHub sends that is not a
-/// verdict, and a card with no review, is "commented".
-pub fn verdict(review: Option<&Review>) -> &'static str {
-    match review.map(|r| r.state.as_str()) {
-        Some("APPROVED") => "approved",
-        Some("CHANGES_REQUESTED") => "requested changes",
-        Some("DISMISSED") => "dismissed",
+/// verdict is "commented".
+pub fn verdict(review: &Review) -> &'static str {
+    match review.state.as_str() {
+        "APPROVED" => "approved",
+        "CHANGES_REQUESTED" => "requested changes",
+        "DISMISSED" => "dismissed",
         _ => "commented",
     }
 }
@@ -165,7 +154,7 @@ pub fn timeline(
     if let Some(d) = discussion {
         cards.extend(d.comments.iter().cloned().map(Card::Comment));
         cards.extend(d.events.iter().cloned().map(Card::Event));
-        cards.extend(review_cards(&d.reviews, &d.review_comments));
+        cards.extend(review_cards(&d.reviews));
     }
     if let Some((_, comments)) = issue {
         cards.extend(comments.iter().cloned().map(Card::Comment));
@@ -177,77 +166,24 @@ pub fn timeline(
     cards
 }
 
-/// The review cards: each review with the line threads under it, and a
-/// card with no review for each review id the list does not carry.
-fn review_cards(reviews: &[Review], comments: &[ReviewComment]) -> Vec<Card> {
-    let mut threads = line_threads(comments);
-    let mut cards = Vec::new();
-
-    for review in reviews {
-        // A pending review is the reader's own draft, and so are its
-        // comments; none of it has been said yet.
-        if review.state == "PENDING" {
-            threads.retain(|t| t.comment.pull_request_review_id != Some(review.id));
-            continue;
-        }
-        let mine: Vec<LineThread> = threads
-            .extract_if(.., |t| t.comment.pull_request_review_id == Some(review.id))
-            .collect();
-        if review.state == "COMMENTED" && review.body.trim().is_empty() && mine.is_empty() {
-            continue;
-        }
-        cards.push(Card::Review { review: Some(review.clone()), comments: mine });
-    }
-
-    // What is left names a review that was not sent. Comments of one such
-    // review stay together, as they would have under it.
-    while let Some(first) = threads.first() {
-        let id = first.comment.pull_request_review_id;
-        let mine: Vec<LineThread> = threads.extract_if(.., |t| t.comment.pull_request_review_id == id).collect();
-        cards.push(Card::Review { review: None, comments: mine });
-    }
-    cards
-}
-
-/// Nest replies under the comment they answer, in time order. A reply
-/// points at the first comment of its thread, but a chain is followed all
-/// the same, and a reply whose parent is missing starts a thread of its own.
-pub fn line_threads(comments: &[ReviewComment]) -> Vec<LineThread> {
-    let root_of = |c: &ReviewComment| -> u64 {
-        let mut at = c;
-        // Bounded, in case the ids loop.
-        for _ in 0..comments.len() {
-            let Some(parent) = at.in_reply_to_id.and_then(|id| comments.iter().find(|p| p.id == id)) else {
-                break;
-            };
-            at = parent;
-        }
-        at.id
-    };
-
-    let mut threads: Vec<LineThread> = comments
+/// The review cards. A pending review is the reader's own draft on
+/// github.com and has not been said yet; a review that only said
+/// "commented" with nothing in its body was made by GitHub for a line
+/// comment, which is a thread of its own.
+fn review_cards(reviews: &[Review]) -> Vec<Card> {
+    reviews
         .iter()
-        .filter(|c| root_of(c) == c.id)
-        .map(|c| LineThread { comment: c.clone(), replies: Vec::new() })
-        .collect();
-    for c in comments.iter().filter(|c| root_of(c) != c.id) {
-        let root = root_of(c);
-        if let Some(t) = threads.iter_mut().find(|t| t.comment.id == root) {
-            t.replies.push(c.clone());
-        }
-    }
-    for t in &mut threads {
-        t.replies.sort_by_key(|r| r.created_at);
-    }
-    threads.sort_by_key(|t| t.comment.created_at);
-    threads
+        .filter(|review| review.state != "PENDING")
+        .filter(|review| !(review.state == "COMMENTED" && review.body.trim().is_empty()))
+        .map(|review| Card::Review { review: review.clone() })
+        .collect()
 }
 
 /// The fixtures are shared with the harness's test.
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use perch_github::{Anchor, Author, CommentMessage, Side, ThreadOrigin};
+    use perch_github::{Anchor, Author, CommentMessage, ReviewComment, Side, ThreadOrigin};
 
     pub(crate) fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -316,6 +252,7 @@ pub(crate) mod tests {
             reviews,
             review_comments,
             events: vec![],
+            review_threads: Vec::new(),
         }
     }
 
@@ -358,6 +295,12 @@ pub(crate) mod tests {
             path: "src/manifest.rs".into(),
             line: Some(41),
             original_line: None,
+            start_line: None,
+            original_start_line: None,
+            start_side: None,
+            commit_id: String::new(),
+            original_commit_id: String::new(),
+            user_avatar_url: String::new(),
             diff_hunk: String::new(),
             side: Side::Right,
             created_at: at(when),
@@ -376,6 +319,7 @@ pub(crate) mod tests {
             id: id.into(),
             worktree_id: "w".into(),
             origin: ThreadOrigin::Local,
+            github_id: None,
             anchor: Some(Anchor { path: "src/x.rs".into(), start_line: 41, line: 58, side: Side::Right, commit_sha: "h".into() }),
             outdated: false,
             resolved: false,
@@ -388,6 +332,11 @@ pub(crate) mod tests {
                 body: question.into(),
                 created_at: at(asked),
                 run: None,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
             }],
         }
     }
@@ -401,7 +350,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_reviews_line_comments_stay_inside_it_whatever_their_time() {
+    fn a_review_sorts_by_its_own_time_and_its_line_comments_are_not_in_it() {
         let mut d = discussion(
             vec![review(9, "APPROVED", "Looks right.", Some("2026-09-16T11:40:00Z"))],
             vec![
@@ -413,36 +362,25 @@ pub(crate) mod tests {
         let cards = timeline(Some(&pull()), Some(&d), None, &[]);
         assert_eq!(kinds(&cards), ["description", "review", "comment"]);
         assert_eq!(lines(&cards), ["The description.", "approved  Looks right.", "Thanks"]);
-        let Card::Review { review, comments } = &cards[1] else { panic!("{cards:?}") };
-        assert_eq!(review.as_ref().map(|r| r.id), Some(9));
-        assert_eq!(comments.iter().map(|t| t.comment.id).collect::<Vec<_>>(), [31, 32], "in time order");
+        let Card::Review { review } = &cards[1] else { panic!("{cards:?}") };
+        assert_eq!(review.id, 9);
         assert_eq!(cards[1].at(), Some(at("2026-09-16T11:40:00Z")), "the review's own time");
     }
 
     #[test]
-    fn replies_nest_under_their_parent_and_orphans_become_top_level() {
-        let d = discussion(
-            vec![review(9, "COMMENTED", "", Some("2026-09-16T11:40:00Z"))],
-            vec![
-                line(31, Some(9), None, "2026-09-16T11:38:00Z", "epoch"),
-                // A reply's own review is GitHub's empty one; it belongs
-                // with its parent.
-                line(33, Some(10), Some(32), "2026-09-16T13:00:00Z", "the chain"),
-                line(32, Some(10), Some(31), "2026-09-16T12:00:00Z", "the reply"),
-                line(34, Some(11), Some(999), "2026-09-16T12:30:00Z", "the orphan"),
-            ],
-        );
-        let cards = timeline(Some(&pull()), Some(&d), None, &[]);
-        assert_eq!(kinds(&cards), ["description", "review", "review"]);
-        let Card::Review { review, comments } = &cards[1] else { panic!("{cards:?}") };
-        assert_eq!(review.as_ref().map(|r| r.id), Some(9));
-        assert_eq!(comments.len(), 1);
-        assert_eq!(comments[0].comment.id, 31);
-        assert_eq!(comments[0].replies.iter().map(|r| r.id).collect::<Vec<_>>(), [32, 33]);
-        let Card::Review { review, comments } = &cards[2] else { panic!("{cards:?}") };
-        assert_eq!(*review, None, "the orphan's review 11 is not in the list");
-        assert_eq!(comments[0].comment.id, 34);
-        assert!(comments[0].replies.is_empty());
+    fn a_github_thread_is_a_thread_card_at_its_first_comments_time() {
+        let mut d = discussion(vec![review(9, "COMMENTED", "", Some("2026-09-16T11:40:00Z"))], vec![]);
+        d.comments.push(comment(1, "2026-09-16T10:00:00Z", "first"));
+        d.comments.push(comment(2, "2026-09-16T12:00:00Z", "second"));
+        let mut t = thread("gh-31", "2026-09-16T11:38:00Z", "2026-09-16T11:38:00Z", "epoch");
+        t.origin = ThreadOrigin::GitHub;
+        t.github_id = Some(31);
+        t.messages[0].origin = ThreadOrigin::GitHub;
+        t.messages[0].author = Author::GitHubUser("rohan".into());
+        t.messages[0].github_id = Some(31);
+        let cards = timeline(Some(&pull()), Some(&d), None, &[t]);
+        assert_eq!(kinds(&cards), ["description", "comment", "thread", "comment"], "the empty review is noise");
+        assert_eq!(cards[2].first_line(), "epoch");
     }
 
     #[test]
@@ -520,34 +458,26 @@ pub(crate) mod tests {
             ],
         );
         let cards = timeline(Some(&pull()), Some(&d), None, &[]);
-        assert_eq!(kinds(&cards), ["description", "review", "review"]);
-        assert_eq!(lines(&cards)[1..], ["commented", "dismissed"]);
-        let Card::Review { review, .. } = &cards[1] else { panic!("{cards:?}") };
-        assert_eq!(review.as_ref().map(|r| r.id), Some(3));
+        assert_eq!(kinds(&cards), ["description", "review"], "a line comment no longer keeps its empty review");
+        assert_eq!(lines(&cards)[1..], ["dismissed"]);
+        let Card::Review { review } = &cards[1] else { panic!("{cards:?}") };
+        assert_eq!(review.id, 4);
     }
 
     #[test]
-    fn a_line_comment_with_no_review_becomes_a_review_card_with_review_none() {
+    fn a_line_comment_with_no_review_in_the_list_is_not_a_card() {
         let d = discussion(vec![], vec![line(31, Some(77), None, "2026-09-16T11:38:00Z", "epoch")]);
         let cards = timeline(Some(&pull()), Some(&d), None, &[]);
-        assert_eq!(kinds(&cards), ["description", "review"]);
-        assert_eq!(cards[1].first_line(), "commented");
-        assert_eq!(cards[1].at(), Some(at("2026-09-16T11:38:00Z")), "the first comment's time");
-        let Card::Review { review, comments } = &cards[1] else { panic!("{cards:?}") };
-        assert_eq!(*review, None);
-        assert_eq!(comments[0].comment.id, 31);
+        assert_eq!(kinds(&cards), ["description"]);
     }
 
     #[test]
-    fn a_review_without_a_time_sorts_by_its_first_comment() {
-        let mut d = discussion(
-            vec![review(9, "APPROVED", "", None)],
-            vec![line(31, Some(9), None, "2026-09-16T11:38:00Z", "epoch")],
-        );
+    fn a_review_without_a_time_sorts_first() {
+        let mut d = discussion(vec![review(9, "APPROVED", "", None)], vec![]);
         d.comments.push(comment(1, "2026-09-16T11:00:00Z", "before"));
         d.comments.push(comment(2, "2026-09-16T12:00:00Z", "after"));
         let cards = timeline(Some(&pull()), Some(&d), None, &[]);
-        assert_eq!(lines(&cards), ["The description.", "before", "approved", "after"]);
+        assert_eq!(lines(&cards), ["The description.", "approved", "before", "after"]);
     }
 
     #[test]
@@ -560,7 +490,7 @@ pub(crate) mod tests {
         let c = Card::Comment(comment(1, "2026-09-16T11:00:00Z", " \n\t"));
         assert_eq!(c.first_line(), "");
         assert_eq!(Card::Event(event(PullEventKind::Draft, "2026-09-16T11:00:00Z")).first_line(), "converted to draft");
-        assert_eq!(verdict(Some(&review(1, "CHANGES_REQUESTED", "", None))), "requested changes");
-        assert_eq!(verdict(Some(&review(1, "SOMETHING_NEW", "", None))), "commented");
+        assert_eq!(verdict(&review(1, "CHANGES_REQUESTED", "", None)), "requested changes");
+        assert_eq!(verdict(&review(1, "SOMETHING_NEW", "", None)), "commented");
     }
 }

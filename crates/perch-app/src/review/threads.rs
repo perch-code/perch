@@ -18,10 +18,11 @@ use floem::style::CursorStyle;
 use floem::views::{
     dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
-use perch_github::{Author, CommentMessage, CommentThread, RunRecord, RunStatus};
+use perch_github::{Author, CommentMessage, CommentThread, RunRecord, RunStatus, ThreadOrigin};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
+use crate::review::cards;
 use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, Composer, ReviewState};
 use crate::state::AppState;
@@ -576,11 +577,13 @@ pub fn outdated_pill(outdated: bool) -> impl IntoView {
 // Threads
 // ---------------------------------------------------------------------
 
-/// A thread of the reader's own inline in the code: dashed chrome led by a
-/// chevron that collapses it to one row, with no anchor label since it is
-/// already under those lines. It holds the messages, the run under an
-/// agent's answer with its steps on one line, and the follow-up line. A
-/// gutter marker click flashes its border.
+/// A thread inline in the code, led by a chevron that collapses it to one
+/// row, with no anchor label since it is already under those lines. It
+/// holds the messages, the run under an agent's answer with its steps on
+/// one line, and the follow-up line. A gutter marker click flashes its
+/// border. One of the reader's own is grey inside a dashed border; one of
+/// GitHub's is white inside a solid one, so neither can be taken for the
+/// other.
 pub fn thread_card(
     app: AppState,
     state: ReviewState,
@@ -589,6 +592,7 @@ pub fn thread_card(
 ) -> impl IntoView {
     let card_id = CardId::Thread(thread.id.clone());
     let flashing = RwSignal::new(false);
+    let origin = thread.origin;
 
     let collapsed = {
         let card_id = card_id.clone();
@@ -607,21 +611,25 @@ pub fn thread_card(
         },
     )
     .style(move |s| {
-        // Page grey inside a dashed border, as on Conversation, so it
-        // cannot be taken for a line of GitHub's. Collapsed, it is its one
-        // row exactly. The layer sets its width from the edges it is placed
-        // against.
-        let base = s
-            .background(theme::CANVAS_SUBTLE)
-            .border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
-            .border_radius(theme::RADIUS_LG)
-            .apply_if(collapsed.get(), |s| {
-                s.height(theme::CODE_LINE_HEIGHT as f64)
-            });
+        // Collapsed, it is its one row exactly. The layer sets its width
+        // from the edges it is placed against.
+        let base = s.apply_if(collapsed.get(), |s| s.height(theme::CODE_LINE_HEIGHT as f64));
+        let base = match origin {
+            ThreadOrigin::Local => base
+                .background(theme::CANVAS_SUBTLE)
+                .border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
+                .border_radius(theme::RADIUS_LG)
+                .border_color(theme::BORDER),
+            ThreadOrigin::GitHub => base
+                .background(theme::CANVAS)
+                .border(1.0)
+                .border_radius(theme::RADIUS)
+                .border_color(theme::BORDER_MUTED),
+        };
         if flashing.get() {
             base.border_color(theme::ACCENT)
         } else {
-            base.border_color(theme::BORDER)
+            base
         }
     });
 
@@ -659,7 +667,7 @@ fn open_inline_card(
     backend: Rc<Backend>,
     thread: CommentThread,
 ) -> impl IntoView {
-    let menu = thread_menu(state, thread.id.clone(), theme::THREAD_MENU).into_any();
+    let menu = thread_menu(state, &thread, theme::THREAD_MENU).into_any();
     let first_row = chevron_row(
         state,
         CardId::Thread(thread.id.clone()),
@@ -679,7 +687,7 @@ fn open_inline_card(
         first_row.style(|s| s.flex_shrink(0.0_f32)),
         crate::review::cards::finding_controls(app, state, backend.clone(), thread.id.clone())
             .style(|s| s.flex_shrink(0.0_f32)),
-        delete_confirmation(state, backend.clone(), thread.id.clone())
+        delete_confirmation(state, backend.clone(), thread.id.clone(), thread.is_github_bound())
             .style(|s| s.flex_shrink(0.0_f32)),
         messages,
         follow_up(app, state, backend, thread.id.clone(), ThreadFace::Inline)
@@ -736,9 +744,9 @@ pub(crate) fn chevron_row(
     .style(|s| s.items_center().width_full().height(theme::THREAD_MENU))
 }
 
-/// A thread of the reader's own collapsed to its one row: who asked, the
-/// first line of what they asked, how many messages follow, Outdated,
-/// and the `...` menu, smaller than the open card's so it fits the row.
+/// A thread collapsed to its one row: who spoke first, the first line of
+/// what they said, how many messages follow, Outdated, and the `...`
+/// menu, smaller than the open card's so it fits the row.
 fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
     let first = thread.messages.first();
     let author = first.map(|m| m.author.clone()).unwrap_or(Author::User);
@@ -748,7 +756,7 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
     // Set off from the pill before it as the pills are from what is
     // before them: the pill's fill and the menu's hover fill are one
     // colour, and would touch.
-    let menu = thread_menu(state, thread.id.clone(), theme::COLLAPSED_CARD_MENU)
+    let menu = thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU)
         .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP))
         .into_any();
     collapsed_card_row(
@@ -889,11 +897,14 @@ fn chevron(state: ReviewState, card_id: CardId, open: bool) -> impl IntoView {
 }
 
 /// "Delete this thread?" with Delete and Cancel, under the thread that
-/// asked, on its card. Nothing else deletes.
+/// asked, on its card. Nothing else deletes. On a thread of GitHub's,
+/// `github_bound`, it is Perch's messages that go: the questions and
+/// answers asked there, and never the thread or anything on GitHub.
 pub fn delete_confirmation(
     state: ReviewState,
     backend: Rc<Backend>,
     thread_id: String,
+    github_bound: bool,
 ) -> impl IntoView {
     let asking = Memo::new(move |_| {
         state
@@ -907,17 +918,25 @@ pub fn delete_confirmation(
                 return Empty::new().into_any();
             }
             let backend = backend.clone();
+            let (title, copy) = if github_bound {
+                (
+                    "Delete Perch's messages?",
+                    "The questions and answers asked here go. Nothing on GitHub is touched.",
+                )
+            } else {
+                (
+                    "Delete this thread?",
+                    "The question, its answers and the anchor go. Nothing on GitHub is touched.",
+                )
+            };
             Stack::vertical((
-                Label::derived(|| "Delete this thread?".to_string()).style(|s| {
+                Label::derived(move || title.to_string()).style(|s| {
                     s.font_size(theme::TEXT_META)
                         .font_weight(theme::weight_emphasis())
                         .color(theme::FG)
                         .selectable(false)
                 }),
-                Label::derived(|| {
-                    "The question, its answers and the anchor go. Nothing on GitHub is touched."
-                        .to_string()
-                })
+                Label::derived(move || copy.to_string())
                 .style(|s| {
                     s.font_size(theme::TEXT_BADGE)
                         .color(theme::FG_MUTED)
@@ -931,7 +950,11 @@ pub fn delete_confirmation(
                         SidebarIcon::Trash,
                         move || {
                             if let Some(id) = state.confirm_thread.get_untracked() {
-                                backend.delete_comment_thread(&id);
+                                if github_bound {
+                                    backend.delete_private_messages(&id);
+                                } else {
+                                    backend.delete_comment_thread(&id);
+                                }
                             }
                             state.confirm_thread.set(None);
                         },
@@ -963,18 +986,31 @@ pub fn delete_confirmation(
 }
 
 /// The `...` at the end of a thread's first row, and the menu under it,
-/// in a round button `size` across.
-pub fn thread_menu(state: ReviewState, thread_id: String, size: f64) -> impl IntoView {
+/// in a round button `size` across. A thread of the reader's own offers
+/// Delete Thread. One of GitHub's offers to delete Perch's messages under
+/// it, and only while there are any; with none, there is no menu at all,
+/// since nothing here may touch what is on GitHub.
+pub fn thread_menu(state: ReviewState, thread: &CommentThread, size: f64) -> impl IntoView {
     use floem::menu::Menu;
 
+    let github_bound = thread.is_github_bound();
+    if github_bound && !thread.messages.iter().any(|m| m.is_private()) {
+        return Empty::new().into_any();
+    }
+    let thread_id = thread.id.clone();
     Container::new(
         sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE).style(|s| s.pointer_events_none()),
     )
     .popout_menu(move || {
         let id = thread_id.clone();
+        let label = if github_bound {
+            "Delete Perch Messages\u{2026}"
+        } else {
+            "Delete Thread\u{2026}"
+        };
         // Delete asks first, under the byline, wherever the thread is
         // showing; the confirmation is the one thing that deletes.
-        Menu::new().item("Delete Thread\u{2026}", move |item| {
+        Menu::new().item(label, move |item| {
             let id = id.clone();
             item.action(move || state.confirm_thread.set(Some(id.clone())))
         })
@@ -988,6 +1024,7 @@ pub fn thread_menu(state: ReviewState, thread_id: String, size: f64) -> impl Int
             .flex_shrink(0.0_f32)
             .hover(|s| s.background(theme::BADGE_BG))
     })
+    .into_any()
 }
 
 /// A thread's messages, read from the state rather than from the thread
@@ -1011,10 +1048,14 @@ pub fn messages_view(
                     .unwrap_or_default()
             })
         },
+        // The key follows what the row shows: an edit on GitHub changes
+        // the body, and a draft posted gains its id.
         |m| {
             (
                 m.id.clone(),
-                m.body.len(),
+                m.origin.name(),
+                m.github_id,
+                cards::body_hash(&m.body),
                 m.run
                     .as_ref()
                     .map(|r| (r.status.name(), r.steps.len(), r.error.clone())),
@@ -1094,7 +1135,9 @@ pub fn follow_up(
 }
 
 /// One message: the text as markdown, and under an answer the run that
-/// produced it, or under a question the run that is answering it.
+/// produced it, or under a question the run that is answering it. A
+/// comment from GitHub carries its own byline, with Ask about this, the
+/// reaction picker and its link on hover, and the reactions on it under.
 pub fn message_view(
     app: AppState,
     state: ReviewState,
@@ -1103,6 +1146,10 @@ pub fn message_view(
     message: CommentMessage,
     face: ThreadFace,
 ) -> impl IntoView {
+    if let (ThreadOrigin::GitHub, Author::GitHubUser(login)) = (message.origin, &message.author) {
+        return github_message_view(app, state, backend, &thread, &message, login.clone())
+            .into_any();
+    }
     let is_agent = matches!(message.author, Author::Agent { .. });
     let body = message.body.clone();
 
@@ -1143,6 +1190,66 @@ pub fn message_view(
     } else {
         message
     }
+}
+
+/// A comment from GitHub in a thread: a small byline, then the body, then
+/// the reactions on it. A reply, any comment after the thread's first,
+/// sits flush under the one it answers with a rule down its left. Ask
+/// about this opens the composer under the thread itself, so the answer
+/// lands beside the comment it is about; the thread's history carries
+/// the comment to the agent, and nothing is quoted.
+fn github_message_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread: &CommentThread,
+    message: &CommentMessage,
+    login: String,
+) -> impl IntoView {
+    let hovered = RwSignal::new(false);
+    let reply = thread.messages.first().is_some_and(|m| m.id != message.id);
+    let who = cards::Byline {
+        login: login.clone(),
+        avatar_url: cards::avatar_url_of(state, login.clone()),
+        avatar_size: theme::NESTED_AVATAR,
+        glyph: None,
+        verb: String::new(),
+        when: Some(message.created_at),
+    };
+    let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
+    let ask: Rc<dyn Fn()> = Rc::new(move || {
+        state.open_composer(
+            Some(thread_id.clone()),
+            anchor.clone(),
+            String::new(),
+            defaults(app),
+        );
+    });
+    let react = message.node_id.as_deref().and_then(cards::reactable);
+    let url = message.html_url.clone().unwrap_or_default();
+    let reactions = cards::reactions_under(state, backend.clone(), &react);
+    cards::track_hover(
+        Stack::vertical((
+            cards::byline(
+                app,
+                who,
+                cards::actions(state, backend, hovered, Some(ask), react, url),
+            ),
+            crate::review::markdown::render(&message.body),
+            reactions,
+        ))
+        .style(move |s| {
+            let base = s.flex_col().width_full().gap(6.0);
+            if reply {
+                base.padding_left(12.0)
+                    .border_left(theme::REPLY_RULE)
+                    .border_color(theme::BORDER_MUTED)
+            } else {
+                base
+            }
+        }),
+        hovered,
+    )
 }
 
 /// What the agent did, under its answer or under the question while it
@@ -1545,6 +1652,119 @@ mod tests {
             other => panic!("Cmd-Enter did not send: {other:?}"),
         }
         assert!(state.composer.get().is_none(), "sending closes the composer");
+    }
+
+    /// The first view whose debug name contains `text`.
+    fn find(id: floem::ViewId, text: &str) -> Option<floem::ViewId> {
+        if id.debug_name().contains(text) {
+            return Some(id);
+        }
+        id.children().into_iter().find_map(|c| find(c, text))
+    }
+
+    /// One of GitHub's threads with a comment by rohan and, after it, the
+    /// reader's question and the agent's answer, which are Perch's alone.
+    fn github_thread_with_private_messages() -> CommentThread {
+        use perch_github::{Anchor, Side};
+        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
+        let message = |id: &str, origin: ThreadOrigin, author: Author, body: &str| CommentMessage {
+            id: id.into(),
+            thread_id: "gh-31".into(),
+            origin,
+            author,
+            body: body.into(),
+            created_at: at,
+            run: None,
+            github_id: (origin == ThreadOrigin::GitHub).then_some(31),
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Default::default(),
+        };
+        CommentThread {
+            id: "gh-31".into(),
+            worktree_id: "item-1".into(),
+            origin: ThreadOrigin::GitHub,
+            github_id: Some(31),
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: 7,
+                line: 7,
+                side: Side::Right,
+                commit_sha: "h".into(),
+            }),
+            outdated: false,
+            resolved: false,
+            created_at: at,
+            messages: vec![
+                message("gh-31", ThreadOrigin::GitHub, Author::GitHubUser("rohan".into()), "epoch"),
+                message("q1", ThreadOrigin::Local, Author::User, "why?"),
+                message(
+                    "a1",
+                    ThreadOrigin::Local,
+                    Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                    "because",
+                ),
+            ],
+        }
+    }
+
+    /// The delete under a thread of GitHub's takes Perch's messages and
+    /// leaves the thread: the confirmation says so, and Delete asks the
+    /// backend for that and not for the thread.
+    #[test]
+    fn deleting_under_a_github_thread_takes_perchs_messages_and_not_the_thread() {
+        let root = TestRoot::new();
+        let state = ReviewState::new();
+        let thread = github_thread_with_private_messages();
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = delete_confirmation(state, Rc::new(backend), thread.id.clone(), thread.is_github_bound());
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Delete Perch's messages?").is_none(), "nothing asked yet");
+
+        state.confirm_thread.set(Some("gh-31".into()));
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find(root_id, "Delete Perch's messages?").is_some());
+        assert!(
+            find(root_id, "The questions and answers asked here go. Nothing on GitHub is touched.").is_some()
+        );
+        let delete = find(root_id, "Label: \"Delete\"").expect("a Delete button");
+        let c = delete.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        match commands.try_recv() {
+            Ok(Command::DeletePrivateMessages { thread_id }) => assert_eq!(thread_id, "gh-31"),
+            other => panic!("Delete did not ask for Perch's messages: {other:?}"),
+        }
+        assert_eq!(state.confirm_thread.get(), None);
+    }
+
+    /// The menu is offered on a thread of GitHub's only while Perch has
+    /// put something under it; with nothing of Perch's there, there is
+    /// nothing it could delete.
+    #[test]
+    fn a_github_thread_has_a_menu_only_while_perch_has_messages_under_it() {
+        let root = TestRoot::new();
+        let state = ReviewState::new();
+        let mut thread = github_thread_with_private_messages();
+        let with = thread_menu(state, &thread, theme::THREAD_MENU);
+        thread.messages.truncate(1);
+        let without = thread_menu(state, &thread, theme::THREAD_MENU);
+        let view = floem::views::Stack::vertical((
+            with.debug_name("menu-with"),
+            without.debug_name("menu-without"),
+        ));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let with = find(harness.root_id(), "menu-with").unwrap();
+        let without = find(harness.root_id(), "menu-without").unwrap();
+        assert_eq!(harness.get_layout_rect(with).height(), theme::THREAD_MENU);
+        assert_eq!(harness.get_layout_rect(without).height(), 0.0);
     }
 
     fn key(key: Key, code: Code, modifiers: Modifiers) -> floem::event::Event {

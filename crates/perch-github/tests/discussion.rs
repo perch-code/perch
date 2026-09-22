@@ -75,13 +75,23 @@ fn reactions_for(body: &str) -> String {
     format!(r#"{{"data":{{"nodes":[{}]}}}}"#, nodes.join(","))
 }
 
+/// The review threads answer: one thread, resolved, rooted at comment 3.
+fn review_threads() -> String {
+    r#"{"data":{"repository":{"pull_request":{"review_threads":{
+        "page_info":{"has_next_page":false,"end_cursor":null},
+        "nodes":[{"id":"PRRT_1","is_resolved":true,"is_outdated":false,
+                  "comments":{"nodes":[{"database_id":3}]}}]}}}}}"#
+        .into()
+}
+
 fn page(items: Vec<String>) -> String {
     format!("[{}]", items.join(","))
 }
 
 /// A pull request with 150 conversation comments, one review, and two line
-/// comments, served a hundred a page, and the reactions on all of it. The
-/// ids each reactions query named are kept, a query at a time.
+/// comments, served a hundred a page, the state of its one review thread,
+/// and the reactions on all of it. The ids each reactions query named are
+/// kept, a query at a time.
 fn spawn(comments: usize) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -94,6 +104,10 @@ fn spawn(comments: usize) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec
             let Ok(mut stream) = stream else { continue };
             let Some((path, request_body)) = read_request(&mut stream) else { continue };
             counter.fetch_add(1, Ordering::SeqCst);
+            if path.starts_with("/graphql") && request_body.contains("reviewThreads") {
+                respond(&mut stream, &review_threads());
+                continue;
+            }
             if path.starts_with("/graphql") {
                 let ids: Vec<String> = serde_json::from_str::<serde_json::Value>(&request_body)
                     .ok()
@@ -178,9 +192,15 @@ async fn every_page_of_the_conversation_is_read() {
     assert_eq!(asked.iter().map(Vec::len).collect::<Vec<_>>(), vec![100, 54]);
     assert_eq!(asked[0][0], "PR_1");
     assert_eq!(asked[1][53], "PRRC_4");
+    // The state of the one review thread, by its first comment.
+    assert_eq!(d.review_threads.len(), 1);
+    assert_eq!(d.review_threads[0].node_id, "PRRT_1");
+    assert_eq!(d.review_threads[0].root_comment_id, 3);
+    assert!(d.review_threads[0].resolved);
+    assert!(!d.review_threads[0].outdated);
     // The pull request, two comment pages, one reviews page, one line page,
-    // and two reactions queries.
-    assert_eq!(requests.load(Ordering::SeqCst), 7);
+    // the review threads query, and two reactions queries.
+    assert_eq!(requests.load(Ordering::SeqCst), 8);
 }
 
 #[tokio::test]

@@ -61,6 +61,11 @@ pub struct Discussion {
     pub review_comments: Vec<ReviewComment>,
     /// What the pull request did, from its own payload.
     pub events: Vec<PullEvent>,
+    /// What GitHub says of each review thread: resolved or not, outdated or
+    /// not. Read by a query of its own, so a discussion whose lists came
+    /// may have none, as one an older build kept has none.
+    #[serde(default)]
+    pub review_threads: Vec<ReviewThreadState>,
 }
 
 impl Discussion {
@@ -142,6 +147,17 @@ pub enum PullEventKind {
     Ready,
 }
 
+/// A review thread as GitHub keeps it: whether someone resolved it, and
+/// whether the lines it was left on are gone from the head. Keyed by the
+/// thread's first comment, which is the only id the REST list shares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewThreadState {
+    pub node_id: String,
+    pub root_comment_id: u64,
+    pub resolved: bool,
+    pub outdated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueComment {
     pub id: u64,
@@ -189,16 +205,32 @@ pub struct ReviewComment {
     pub pull_request_review_id: Option<u64>,
     pub in_reply_to_id: Option<u64>,
     pub user: String,
+    /// The author's avatar. Empty on a row an older build kept.
+    #[serde(default)]
+    pub user_avatar_url: String,
     pub body: String,
     pub path: String,
     /// The line on the head side, or on the base side for a removed line.
     pub line: Option<u64>,
     pub original_line: Option<u64>,
+    /// The first line of a range, when the comment is on more than one.
+    #[serde(default)]
+    pub start_line: Option<u64>,
+    #[serde(default)]
+    pub original_start_line: Option<u64>,
     /// The hunk the comment was left on, as GitHub shows it. What the
     /// nested block shows when the lines are not in the checkout.
     pub diff_hunk: String,
     /// Which file `line` counts in. `Left` is a comment on a removed line.
     pub side: Side,
+    #[serde(default)]
+    pub start_side: Option<Side>,
+    /// The head the comment is on now, and the head it was left on. Empty
+    /// on a row an older build kept.
+    #[serde(default)]
+    pub commit_id: String,
+    #[serde(default)]
+    pub original_commit_id: String,
     pub created_at: Timestamp,
     pub updated_at: Option<Timestamp>,
     pub html_url: String,
@@ -303,10 +335,20 @@ pub(crate) struct ReviewCommentPayload {
     #[serde(default)]
     pub original_line: Option<u64>,
     #[serde(default)]
+    pub start_line: Option<u64>,
+    #[serde(default)]
+    pub original_start_line: Option<u64>,
+    #[serde(default)]
     pub diff_hunk: String,
     /// `LEFT` or `RIGHT`; absent on a comment older than the field.
     #[serde(default)]
     pub side: Option<String>,
+    #[serde(default)]
+    pub start_side: Option<String>,
+    #[serde(default)]
+    pub commit_id: String,
+    #[serde(default)]
+    pub original_commit_id: String,
     pub created_at: Timestamp,
     #[serde(default)]
     pub updated_at: Option<Timestamp>,
@@ -316,22 +358,27 @@ pub(crate) struct ReviewCommentPayload {
 
 impl From<ReviewCommentPayload> for ReviewComment {
     fn from(p: ReviewCommentPayload) -> Self {
-        let side = match p.side.as_deref() {
-            Some(s) if s.eq_ignore_ascii_case("left") => Side::Left,
-            _ => Side::Right,
-        };
+        let side = p.side.as_deref().map(parse_side).unwrap_or(Side::Right);
+        let start_side = p.start_side.as_deref().map(parse_side);
+        let (user, user_avatar_url) = p.user.map(|u| (u.login, u.avatar_url)).unwrap_or_default();
         ReviewComment {
             id: p.id,
             node_id: p.node_id,
             pull_request_review_id: p.pull_request_review_id,
             in_reply_to_id: p.in_reply_to_id,
-            user: login(p.user),
+            user,
+            user_avatar_url,
             body: p.body,
             path: p.path,
             line: p.line,
             original_line: p.original_line,
+            start_line: p.start_line,
+            original_start_line: p.original_start_line,
             diff_hunk: p.diff_hunk,
             side,
+            start_side,
+            commit_id: p.commit_id,
+            original_commit_id: p.original_commit_id,
             created_at: p.created_at,
             updated_at: p.updated_at,
             html_url: p.html_url,
@@ -343,6 +390,132 @@ impl From<ReviewCommentPayload> for ReviewComment {
 /// GitHub nests the author under `user`; only the login is wanted.
 fn login(user: Option<UserRef>) -> String {
     user.map(|u| u.login).unwrap_or_default()
+}
+
+/// `LEFT` is the base side; anything else, the head.
+fn parse_side(s: &str) -> Side {
+    if s.eq_ignore_ascii_case("left") {
+        Side::Left
+    } else {
+        Side::Right
+    }
+}
+
+/// One page of a pull request's review threads, with the first comment of
+/// each so the thread can be matched to the REST list's root.
+pub(crate) const REVIEW_THREADS_QUERY: &str = r#"
+query ReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pull_request: pullRequest(number: $number) {
+      review_threads: reviewThreads(first: 100, after: $cursor) {
+        page_info: pageInfo {
+          has_next_page: hasNextPage
+          end_cursor: endCursor
+        }
+        nodes {
+          id
+          is_resolved: isResolved
+          is_outdated: isOutdated
+          comments(first: 1) {
+            nodes {
+              database_id: databaseId
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+/// The most pages of review threads read for one pull request.
+pub(crate) const REVIEW_THREADS_MAX_PAGES: usize = 10;
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReviewThreadsData {
+    #[serde(default)]
+    repository: Option<ReviewThreadsRepositoryPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadsRepositoryPayload {
+    #[serde(default)]
+    pull_request: Option<ReviewThreadsPullPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadsPullPayload {
+    #[serde(default)]
+    review_threads: Option<ReviewThreadsConnection>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReviewThreadsConnection {
+    #[serde(default)]
+    page_info: ReviewThreadsPageInfo,
+    #[serde(default)]
+    nodes: Vec<Option<ReviewThreadPayload>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReviewThreadsPageInfo {
+    #[serde(default)]
+    has_next_page: bool,
+    #[serde(default)]
+    end_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadPayload {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    is_resolved: bool,
+    #[serde(default)]
+    is_outdated: bool,
+    #[serde(default)]
+    comments: ReviewThreadCommentsPayload,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReviewThreadCommentsPayload {
+    #[serde(default)]
+    nodes: Vec<Option<ReviewThreadCommentPayload>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewThreadCommentPayload {
+    #[serde(default)]
+    database_id: Option<u64>,
+}
+
+impl ReviewThreadsData {
+    /// The threads on the page, and the cursor of the next page if there
+    /// is one. `None` when GitHub answered without the pull request. A
+    /// thread whose first comment has no id cannot be matched and is left
+    /// out.
+    pub(crate) fn into_page(self) -> Option<(Vec<ReviewThreadState>, Option<String>)> {
+        let connection = self.repository?.pull_request?.review_threads.unwrap_or_default();
+        let threads = connection
+            .nodes
+            .into_iter()
+            .flatten()
+            .filter_map(|t| {
+                let root_comment_id = t.comments.nodes.into_iter().flatten().next()?.database_id?;
+                Some(ReviewThreadState {
+                    node_id: t.id,
+                    root_comment_id,
+                    resolved: t.is_resolved,
+                    outdated: t.is_outdated,
+                })
+            })
+            .collect();
+        let next = connection
+            .page_info
+            .end_cursor
+            .filter(|_| connection.page_info.has_next_page);
+        Some((threads, next))
+    }
 }
 
 /// The part of the pull request payload the discussion reads: the
@@ -397,15 +570,21 @@ mod tests {
     #[test]
     fn a_review_comment_reads_its_location_from_the_head_line() {
         let p: ReviewCommentPayload = serde_json::from_str(
-            r#"{"id":3,"user":{"login":"chris"},"body":"x","path":"src/manifest.rs",
-                "line":41,"original_line":40,"side":"LEFT","diff_hunk":"@@ -40,3 +40,3 @@",
+            r#"{"id":3,"user":{"login":"chris","avatar_url":"https://avatars/1"},"body":"x","path":"src/manifest.rs",
+                "line":41,"original_line":40,"start_line":39,"original_start_line":38,
+                "side":"LEFT","start_side":"RIGHT","diff_hunk":"@@ -40,3 +40,3 @@",
+                "commit_id":"head","original_commit_id":"orig",
                 "created_at":"2026-09-16T11:38:00Z"}"#,
         )
         .unwrap();
         let c = ReviewComment::from(p);
         assert_eq!(c.location(), "src/manifest.rs:41");
         assert_eq!(c.user, "chris");
+        assert_eq!(c.user_avatar_url, "https://avatars/1");
         assert_eq!(c.side, Side::Left);
+        assert_eq!(c.start_side, Some(Side::Right));
+        assert_eq!((c.start_line, c.original_start_line), (Some(39), Some(38)));
+        assert_eq!((c.commit_id.as_str(), c.original_commit_id.as_str()), ("head", "orig"));
         assert_eq!(c.diff_hunk, "@@ -40,3 +40,3 @@");
     }
 
@@ -420,7 +599,9 @@ mod tests {
         assert_eq!(c.location(), "a.rs:7");
         assert_eq!(c.user, "", "a deleted account is not an error");
         assert_eq!(c.side, Side::Right, "no side is the head side");
+        assert_eq!(c.start_side, None);
         assert_eq!(c.diff_hunk, "");
+        assert_eq!(c.commit_id, "");
     }
 
     #[test]
@@ -518,6 +699,35 @@ mod tests {
     }
 
     #[test]
+    fn a_review_threads_page_reads_each_thread_by_its_first_comment() {
+        let data: ReviewThreadsData = serde_json::from_str(
+            r#"{"repository":{"pull_request":{"review_threads":{
+                "page_info":{"has_next_page":true,"end_cursor":"c2"},
+                "nodes":[
+                  {"id":"PRRT_1","is_resolved":true,"is_outdated":false,"comments":{"nodes":[{"database_id":3}]}},
+                  {"id":"PRRT_2","is_resolved":false,"is_outdated":true,"comments":{"nodes":[]}},
+                  null
+                ]}}}}"#,
+        )
+        .unwrap();
+        let (threads, next) = data.into_page().unwrap();
+        assert_eq!(
+            threads,
+            vec![ReviewThreadState { node_id: "PRRT_1".into(), root_comment_id: 3, resolved: true, outdated: false }]
+        );
+        assert_eq!(next.as_deref(), Some("c2"));
+
+        let last: ReviewThreadsData = serde_json::from_str(
+            r#"{"repository":{"pull_request":{"review_threads":{
+                "page_info":{"has_next_page":false,"end_cursor":"c3"},"nodes":[]}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(last.into_page().unwrap(), (vec![], None));
+        let gone: ReviewThreadsData = serde_json::from_str(r#"{"repository":null}"#).unwrap();
+        assert!(gone.into_page().is_none());
+    }
+
+    #[test]
     fn a_discussion_round_trips_through_json() {
         let mut thumbs = Reactions::default();
         thumbs.toggle(crate::reactions::ReactionKind::ThumbsUp, true);
@@ -553,12 +763,18 @@ mod tests {
                 pull_request_review_id: Some(9),
                 in_reply_to_id: None,
                 user: "chris".into(),
+                user_avatar_url: "https://avatars/1".into(),
                 body: "epoch".into(),
                 path: "src/manifest.rs".into(),
                 line: Some(41),
                 original_line: None,
+                start_line: Some(40),
+                original_start_line: None,
                 diff_hunk: "@@ -40,3 +40,3 @@".into(),
                 side: Side::Left,
+                start_side: Some(Side::Left),
+                commit_id: "abc".into(),
+                original_commit_id: "abc".into(),
                 created_at: at("2026-09-16T11:38:00Z"),
                 updated_at: Some(at("2026-09-16T11:38:00Z")),
                 html_url: String::new(),
@@ -569,6 +785,12 @@ mod tests {
                 PullEvent { kind: PullEventKind::Merged { by: None }, at: at("2026-09-17T15:00:00Z") },
                 PullEvent { kind: PullEventKind::Ready, at: at("2026-09-15T15:00:00Z") },
             ],
+            review_threads: vec![ReviewThreadState {
+                node_id: "PRRT_1".into(),
+                root_comment_id: 3,
+                resolved: true,
+                outdated: false,
+            }],
         };
         let json = serde_json::to_string(&d).unwrap();
         assert_eq!(serde_json::from_str::<Discussion>(&json).unwrap(), d);
@@ -583,7 +805,11 @@ mod tests {
         let d: Discussion = serde_json::from_str(
             r#"{"opened_at":null,"body":"b","comments":[
                 {"id":1,"user":"a","user_avatar_url":"","body":"q","created_at":"2026-09-15T09:14:00Z","updated_at":null,"html_url":""}],
-              "reviews":[],"review_comments":[],"events":[]}"#,
+              "reviews":[],"review_comments":[
+                {"id":3,"pull_request_review_id":9,"in_reply_to_id":null,"user":"rohan","body":"epoch?",
+                 "path":"src/lib.rs","line":41,"original_line":40,"diff_hunk":"@@ -40,3 +40,3 @@",
+                 "side":"right","created_at":"2026-09-16T11:38:00Z","updated_at":null,"html_url":""}],
+              "events":[]}"#,
         )
         .unwrap();
         assert_eq!(d.node_id, "");
@@ -591,5 +817,11 @@ mod tests {
         assert_eq!(d.comments[0].node_id, "");
         assert!(d.comments[0].reactions.is_empty());
         assert!(d.reactable_ids().is_empty());
+        assert!(d.review_threads.is_empty());
+        let rc = &d.review_comments[0];
+        assert_eq!((rc.id, rc.line, rc.side), (3, Some(41), Side::Right));
+        assert_eq!(rc.user_avatar_url, "");
+        assert_eq!((rc.start_line, rc.original_start_line, rc.start_side), (None, None, None));
+        assert_eq!((rc.commit_id.as_str(), rc.original_commit_id.as_str()), ("", ""));
     }
 }

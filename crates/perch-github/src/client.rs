@@ -17,7 +17,8 @@ use octocrab::Octocrab;
 
 use crate::discussion::{
     Discussion, IssueComment, IssueCommentPayload, PullReviewEvent, PullSummary, Review,
-    ReviewComment, ReviewCommentPayload, ReviewPayload,
+    ReviewComment, ReviewCommentPayload, ReviewPayload, ReviewThreadState, ReviewThreadsData,
+    REVIEW_THREADS_MAX_PAGES, REVIEW_THREADS_QUERY,
 };
 use crate::items::{Issue, IssuePayload};
 use crate::model::{SubjectSnapshot, Thread};
@@ -491,10 +492,10 @@ impl GitHub {
 
     /// Everything said on a pull request: description, conversation,
     /// reviews, and line comments. Three lists, each read to the end, the
-    /// events the pull request's own payload carries, and the reactions on
-    /// all of it. The reactions are the one part that may be missing: a
-    /// discussion whose lists came is returned without them rather than
-    /// not at all.
+    /// events the pull request's own payload carries, the state of each
+    /// review thread, and the reactions on all of it. The thread states
+    /// and the reactions are the parts that may be missing: a discussion
+    /// whose lists came is returned without them rather than not at all.
     pub async fn fetch_discussion(
         &self,
         repo_full_name: &str,
@@ -527,11 +528,81 @@ impl GitHub {
                 .into_iter()
                 .map(ReviewComment::from)
                 .collect(),
+            review_threads: Vec::new(),
         };
+        if !discussion.review_comments.is_empty() {
+            match self.fetch_review_thread_states(repo_full_name, number).await {
+                Ok(states) => discussion.review_threads = states,
+                Err(e) => {
+                    tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the review threads");
+                }
+            }
+        }
         if let Err(e) = self.fill_reactions(&mut discussion).await {
             tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the reactions");
         }
         Ok(discussion)
+    }
+
+    /// Whether each review thread on a pull request is resolved, and
+    /// whether GitHub considers it outdated, by the thread's first comment.
+    /// The REST lists say neither. A hundred threads to a page, ten pages
+    /// at most.
+    pub async fn fetch_review_thread_states(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<Vec<ReviewThreadState>, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        let number = i32::try_from(number)
+            .map_err(|_| Error::Decode(format!("pull request number is too large: {number}")))?;
+        let mut cursor = None::<String>;
+        let mut states = Vec::new();
+        for _ in 0..REVIEW_THREADS_MAX_PAGES {
+            let payload = serde_json::json!({
+                "query": REVIEW_THREADS_QUERY,
+                "variables": {
+                    "owner": owner,
+                    "name": name,
+                    "number": number,
+                    "cursor": cursor.as_deref(),
+                }
+            });
+            let (data, problems) = self.graphql_partial::<ReviewThreadsData>(&payload).await?;
+            let Some(data) = data else {
+                return Err(if problems.is_empty() {
+                    Error::Decode("GitHub's GraphQL response had no data".into())
+                } else {
+                    Error::Graphql(problems.join("; "))
+                });
+            };
+            let Some((page, next)) = data.into_page() else {
+                return Err(if problems.is_empty() {
+                    Error::Decode(format!(
+                        "GitHub returned no pull request for {repo_full_name}#{number}"
+                    ))
+                } else {
+                    Error::Graphql(problems.join("; "))
+                });
+            };
+            for problem in problems {
+                tracing::debug!(problem, "part of the review threads could not be read");
+            }
+            states.extend(page);
+            let Some(next) = next else { return Ok(states) };
+            if cursor.as_deref() == Some(next.as_str()) {
+                return Err(Error::Decode(
+                    "GitHub repeated a review thread page cursor".into(),
+                ));
+            }
+            cursor = Some(next);
+        }
+        tracing::warn!(
+            repo = repo_full_name,
+            number,
+            "more review threads than {REVIEW_THREADS_MAX_PAGES} pages hold; the rest go unread"
+        );
+        Ok(states)
     }
 
     /// The reactions on everything in a discussion, as the reader sees

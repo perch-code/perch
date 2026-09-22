@@ -5,6 +5,7 @@ use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 
 use super::{insert_comment_message_row, load_run_projection_on, Cache, CacheError};
 use crate::comments::{self, Author, CommentMessage, RunOwner, RunPurpose, ThreadOrigin};
+use crate::reactions::Reactions;
 use crate::reviews::*;
 
 pub(super) const REVIEW_SCHEMA: &str = r#"
@@ -2395,6 +2396,11 @@ fn insert_finding_thread_on(
             body: new.initial_message.body.clone(),
             created_at: observation.created_at,
             run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
         },
     )
 }
@@ -2424,6 +2430,11 @@ fn append_review_message_on(
             body: message.body.clone(),
             created_at: at,
             run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
         },
     )
 }

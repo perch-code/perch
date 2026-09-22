@@ -7,8 +7,9 @@
 //! data path be checked without a window. The folds are around the
 //! changes and the anchors of the item's threads, less the reveals stored
 //! for the file's blob; the cards are the item's threads anchored in the
-//! file and GitHub's review threads on it, at their estimated heights,
-//! since nothing has laid them out; all read from the cache the app uses.
+//! file, the reader's own and GitHub's review threads alike, at their
+//! estimated heights, since nothing has laid them out; all read from the
+//! cache the app uses.
 //! `--whole` renders the buffer whole, with nothing folded and no card.
 //! The window's Show whole is the open tab's and is not stored, so none
 //! of it is read here.
@@ -242,12 +243,11 @@ fn print_rows(file: &LoadedFile, doc: &Doc, side: Option<Side>) {
     }
 }
 
-/// How a spacer names its card: `thread abc123`, `github 12345`, or
-/// `composer`.
+/// How a spacer names its card: `thread abc123`, `thread gh-12345` for
+/// one of GitHub's, or `composer`.
 fn card_name(card: &doc::CardId) -> String {
     match card {
         doc::CardId::Thread(id) => format!("thread {id}"),
-        doc::CardId::GitHub(id) => format!("github {id}"),
         doc::CardId::Composer => "composer".to_string(),
     }
 }
@@ -314,8 +314,7 @@ fn kept_in(db: &std::path::Path, full_name: &str, number: u64, file: &LoadedFile
         return Ok(None);
     };
     let threads = cache.load_comment_threads(&item.id).map_err(|e| e.to_string())?;
-    let discussion = cache.load_discussion(&item.id).map_err(|e| e.to_string())?.map(|(_, d)| d);
-    let anchors = crate::review::model::anchors_of(&threads, discussion.as_ref(), &file.path);
+    let anchors = crate::review::model::anchors_of(&threads, &file.path);
     // A file with no blob has no rows, as in the window.
     let reveals = if file.blob.is_empty() {
         Reveals::default()
@@ -329,7 +328,6 @@ fn kept_in(db: &std::path::Path, full_name: &str, number: u64, file: &LoadedFile
             .map(|(a, b)| (a as usize, b as usize))
             .collect()
     };
-    let github = crate::review::model::github_threads_of(discussion.as_ref(), &file.path);
-    let cards = crate::review::model::cards_of(&threads, &github, None, file, &Default::default(), &Default::default());
+    let cards = crate::review::model::cards_of(&threads, None, file, &Default::default(), &Default::default());
     Ok(Some(Kept { anchors, reveals, cards }))
 }

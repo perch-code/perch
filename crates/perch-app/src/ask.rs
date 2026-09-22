@@ -1572,6 +1572,32 @@ mod tests {
     }
 
     #[test]
+    fn a_first_question_under_githubs_thread_carries_its_comments_as_history() {
+        // Ask about this on a review comment is a follow-up on the thread
+        // GitHub's comments are in, with no run to resume: the comments
+        // are the history, each an untrusted block, and the framing is
+        // the first prompt's.
+        let history = vec![
+            (Author::GitHubUser("rohan".into()), "Why the fence?".to_string()),
+            (Author::GitHubUser("chris".into()), "For the manifest.".to_string()),
+        ];
+        let anchor = anchor(41, 41);
+        let p = follow_up_prompt(&PromptInput {
+            history: &history,
+            ..input(Some(&anchor), None, "is that right?")
+        });
+        assert_eq!(p.system.as_deref(), Some(FRAMING));
+        assert!(
+            p.user.contains(
+                "Earlier in this thread:\n\n[BEGIN untrusted text: comment by rohan]\nWhy the fence?\n[END untrusted text]\n\n[BEGIN untrusted text: comment by chris]\nFor the manifest.\n[END untrusted text]\n\nQuestion: is that right?"
+            ),
+            "{}",
+            p.user
+        );
+        assert!(!p.user.contains("Reader:"), "nothing of the reader's came before");
+    }
+
+    #[test]
     fn a_thread_with_nothing_to_resume_folds_its_history_in() {
         let history = vec![
             (Author::User, "first?".to_string()),

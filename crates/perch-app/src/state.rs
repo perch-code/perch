@@ -3191,6 +3191,7 @@ mod tests {
             id: "current-thread".into(),
             worktree_id: "wt".into(),
             origin: perch_github::ThreadOrigin::Local,
+            github_id: None,
             anchor: None,
             outdated: false,
             resolved: false,

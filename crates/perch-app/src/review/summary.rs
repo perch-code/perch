@@ -934,7 +934,7 @@ fn reviewers_view(
                             submitted_at: None,
                             html_url: String::new(),
                         };
-                        let (icon, color) = verdict_glyph(Some(&review));
+                        let (icon, color) = verdict_glyph(&review);
                         sidebar_glyph(icon, color)
                             .style(|s| s.size(12.0, 12.0).margin_left(4.0))
                             .into_any()

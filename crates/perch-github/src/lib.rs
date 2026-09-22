@@ -34,6 +34,7 @@ pub use config::{
 };
 pub use discussion::{
     Discussion, IssueComment, PullEvent, PullEventKind, PullReviewEvent, Review, ReviewComment,
+    ReviewThreadState,
 };
 pub use items::{
     Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind,

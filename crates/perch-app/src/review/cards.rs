@@ -1,14 +1,15 @@
 //! The entries on Conversation: the description, each comment and review
-//! from GitHub, a line for each event, and each local thread. Conversation
-//! is a flat reading surface; its hierarchy comes from type, whitespace and
-//! hairlines rather than a stack of framed cards.
+//! from GitHub, a line for each event, and each thread, the reader's own
+//! and GitHub's review threads alike. Conversation is a flat reading
+//! surface; its hierarchy comes from type, whitespace and hairlines rather
+//! than a stack of framed cards.
 //!
-//! A local thread and a GitHub comment must never look like one. Nothing
+//! A local thread and a GitHub thread must never look like one. Nothing
 //! local reaches GitHub, so a local thread keeps an inset rule and a
 //! Local chip while GitHub entries remain directly on white. The same
-//! distinction holds in the code, where a review
-//! comment's block is a card under its line: white and solid, against
-//! the grey and dashed card of the reader's own.
+//! distinction holds in the code, where a GitHub thread's card under its
+//! line is white and solid, against the grey and dashed card of the
+//! reader's own.
 //!
 //! What a GitHub entry does carry of the reader's is its reactions: the
 //! pills under its text, and the face in its byline that opens the
@@ -19,24 +20,23 @@ use std::rc::Rc;
 use floem::peniko::Color;
 use floem::menu::Menu;
 use floem::prelude::*;
-use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::views::{
-    dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack, TooltipExt,
+    dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack, TooltipExt,
 };
 use perch_git::{LineStatus, Row};
 use perch_github::{
     Anchor, CommentThread, IssueComment, PullEvent, PullEventKind, ReactionGroup, ReactionKind,
-    Review, ReviewComment,
+    Review,
 };
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::doc::CardId;
 use crate::review::markdown;
 use crate::review::model::{ItemTab, LoadedFile, ReviewState};
 use crate::review::threads::{self, ThreadFace};
-use crate::review::timeline::{event_name, verdict, Card, LineThread};
+use crate::review::timeline::{event_name, verdict, Card};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
@@ -47,35 +47,65 @@ use crate::ui::widgets::{
 
 /// What a card's row in the column is keyed by. A row with the same key is
 /// kept as it is, so the key changes with anything the card shows that
-/// GitHub can edit; a thread's messages are read live and stay out of it.
+/// GitHub can edit; a thread's messages are read live inside its card,
+/// and the key carries their count, which is last, and the first's body,
+/// which a collapsed row shows. It carries the anchor too: GitHub moves a
+/// comment's line as commits land above it, and the card names the line.
 pub fn key(card: &Card) -> String {
     match card {
         // The time lands with the discussion, after a first paint from
         // the snapshot, and an edit can keep a body's length.
         Card::Description { body, at, .. } => {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            body.hash(&mut h);
-            format!("description:{:?}:{:x}", at, h.finish())
+            format!("description:{:?}:{:x}", at, body_hash(body))
         }
         Card::Comment(c) => format!("comment:{}:{:?}", c.id, c.updated_at),
-        Card::Review { review, comments } => {
-            let id = review
-                .as_ref()
-                .map(|r| r.id)
-                .or_else(|| comments.first().map(|t| t.comment.id))
-                .unwrap_or(0);
-            let edited = comments
-                .iter()
-                .flat_map(|t| std::iter::once(&t.comment).chain(t.replies.iter()))
-                .filter_map(|c| c.updated_at)
-                .max();
-            let count: usize = comments.iter().map(|t| 1 + t.replies.len()).sum();
-            format!("review:{id}:{count}:{edited:?}")
+        Card::Review { review } => {
+            format!("review:{}:{:?}:{:x}", review.id, review.submitted_at, body_hash(&review.body))
         }
         Card::Event(e) => format!("event:{}:{}", event_name(&e.kind), e.at),
-        Card::Thread(t) => format!("thread:{}:{}", t.id, t.outdated),
+        Card::Thread(t) => format!(
+            "thread:{}:{}:{}:{}",
+            t.id,
+            t.outdated,
+            t.resolved,
+            thread_key_tail(t)
+        ),
     }
+}
+
+/// The part of a thread's key that both faces share: the anchor, the
+/// message count, the last message's id and the first's body.
+pub(crate) fn thread_key_tail(t: &CommentThread) -> String {
+    let anchor = t
+        .anchor
+        .as_ref()
+        .map(|a| {
+            format!(
+                "{}:{}:{}:{}:{}",
+                a.path,
+                a.start_line,
+                a.line,
+                a.side.name(),
+                a.commit_sha
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "{}:{}:{}:{:x}",
+        anchor,
+        t.messages.len(),
+        t.messages.last().map(|m| m.id.as_str()).unwrap_or_default(),
+        t.messages.first().map(|m| body_hash(&m.body)).unwrap_or_default()
+    )
+}
+
+/// A body's hash, for a key that must follow an edit which keeps the
+/// body's length.
+pub(crate) fn body_hash(body: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut h);
+    h.finish()
 }
 
 // ---------------------------------------------------------------------
@@ -112,20 +142,22 @@ fn byline_strip(content: impl IntoView + 'static) -> impl IntoView {
     })
 }
 
-/// Who, with what glyph, did what, when.
-struct Byline {
-    login: String,
-    avatar_url: String,
-    avatar_size: f64,
+/// Who, with what glyph, did what, when. The avatar is read when it is
+/// drawn, so a byline built before the discussion has landed can still
+/// find its picture in it.
+pub(crate) struct Byline {
+    pub(crate) login: String,
+    pub(crate) avatar_url: Box<dyn Fn() -> String>,
+    pub(crate) avatar_size: f64,
     /// A verdict's glyph between the avatar and the login.
-    glyph: Option<(SidebarIcon, Color)>,
-    verb: String,
-    when: Option<jiff::Timestamp>,
+    pub(crate) glyph: Option<(SidebarIcon, Color)>,
+    pub(crate) verb: String,
+    pub(crate) when: Option<jiff::Timestamp>,
 }
 
 /// Avatar, login, what they did and when, and whatever the caller puts at
 /// the right: the permalink and Ask about this.
-fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> impl IntoView {
+pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> impl IntoView {
     let Byline {
         login,
         avatar_url,
@@ -136,7 +168,7 @@ fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> impl IntoView
     } = who;
     let seed = login.clone();
     Stack::horizontal((
-        avatar(app, move || avatar_url.clone(), avatar_size, seed)
+        avatar(app, avatar_url, avatar_size, seed)
             .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
         match glyph {
             Some((icon, color)) => sidebar_glyph(icon, color)
@@ -174,7 +206,7 @@ fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> impl IntoView
 /// picker while the card is hovered, and the permalink always. `react` is
 /// the subject's node id; an entry an older build kept without one has no
 /// picker, since GitHub could not be told what it was for.
-fn actions(
+pub(crate) fn actions(
     state: ReviewState,
     backend: Rc<Backend>,
     hovered: RwSignal<bool>,
@@ -220,6 +252,7 @@ fn ask_button(hovered: RwSignal<bool>, ask: Rc<dyn Fn()>) -> impl IntoView {
         }),
     ))
     .on_event_stop(el::Click, move |_, _| ask())
+    .debug_name("ask-about")
     .style(move |s| {
         clickable(s)
             .items_center()
@@ -232,7 +265,7 @@ fn ask_button(hovered: RwSignal<bool>, ask: Rc<dyn Fn()>) -> impl IntoView {
 }
 
 /// Follow the pointer in and out of a card, for Ask about this.
-fn track_hover<V: IntoView + 'static>(view: V, hovered: RwSignal<bool>) -> impl IntoView {
+pub(crate) fn track_hover<V: IntoView + 'static>(view: V, hovered: RwSignal<bool>) -> impl IntoView {
     view.into_intermediate()
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
@@ -243,13 +276,13 @@ fn track_hover<V: IntoView + 'static>(view: V, hovered: RwSignal<bool>) -> impl 
 // ---------------------------------------------------------------------
 
 /// The node id a reaction is left by, when the entry has one.
-fn reactable(node_id: &str) -> Option<String> {
+pub(crate) fn reactable(node_id: &str) -> Option<String> {
     (!node_id.is_empty()).then(|| node_id.to_string())
 }
 
 /// The row of pills under an entry's text, for an entry with a node id;
 /// nothing for one without, since nothing could be left on it.
-fn reactions_under(
+pub(crate) fn reactions_under(
     state: ReviewState,
     backend: Rc<Backend>,
     react: &Option<String>,
@@ -449,10 +482,30 @@ pub fn tip_body(text: impl Fn() -> String + 'static) -> Label {
     })
 }
 
+/// An avatar the caller already has.
+pub(crate) fn fixed(url: String) -> Box<dyn Fn() -> String> {
+    Box::new(move || url.clone())
+}
+
+/// The avatar for a login as it stands when it is drawn: what
+/// `avatar_url_for` finds, followed as the payloads it searches land. A
+/// GitHub thread's rows are built from the threads event, which can reach
+/// the state before the discussion that carries the reviewer's picture.
+pub(crate) fn avatar_url_of(state: ReviewState, login: String) -> Box<dyn Fn() -> String> {
+    let url = Memo::new(move |_| {
+        state.pull_request.track();
+        state.issue.track();
+        state.discussion.track();
+        state.issue_comments.track();
+        avatar_url_for(state, &login)
+    });
+    Box::new(move || url.get())
+}
+
 /// The avatar GitHub sent for a login, from whichever payload carries one:
-/// the author, a conversation comment, a requested reviewer. A review and
-/// a line comment come with none of their own, and would otherwise show
-/// an initial beside the same person's picture.
+/// the author, a conversation comment, a review comment, a requested
+/// reviewer. A review comes with none of its own, and would otherwise
+/// show an initial beside the same person's picture.
 pub fn avatar_url_for(state: ReviewState, login: &str) -> String {
     state
         .pull_request
@@ -480,6 +533,12 @@ pub fn avatar_url_for(state: ReviewState, login: &str) -> String {
                         .iter()
                         .find(|c| c.user == login)
                         .map(|c| c.user_avatar_url.clone())
+                        .or_else(|| {
+                            d.review_comments
+                                .iter()
+                                .find(|c| c.user == login && !c.user_avatar_url.is_empty())
+                                .map(|c| c.user_avatar_url.clone())
+                        })
                 })
             })
         })
@@ -529,7 +588,7 @@ pub fn description_card(
     let hovered = RwSignal::new(false);
     let who = Byline {
         login: author,
-        avatar_url,
+        avatar_url: fixed(avatar_url),
         avatar_size: theme::CARD_AVATAR,
         glyph: None,
         verb: "opened".into(),
@@ -578,7 +637,7 @@ pub fn comment_card(
     let hovered = RwSignal::new(false);
     let who = Byline {
         login: comment.user.clone(),
-        avatar_url: comment.user_avatar_url.clone(),
+        avatar_url: fixed(comment.user_avatar_url.clone()),
         avatar_size: theme::CARD_AVATAR,
         glyph: None,
         verb: "commented".into(),
@@ -609,50 +668,33 @@ pub fn comment_card(
 
 /// The glyph a verdict takes: a green check, a red page of changes, or a
 /// muted comment bubble for anything else.
-pub fn verdict_glyph(review: Option<&Review>) -> (SidebarIcon, Color) {
-    match review.map(|r| r.state.as_str()) {
-        Some("APPROVED") => (SidebarIcon::Check, theme::OPEN),
-        Some("CHANGES_REQUESTED") => (SidebarIcon::ChangesRequested, theme::CLOSED),
+pub fn verdict_glyph(review: &Review) -> (SidebarIcon, Color) {
+    match review.state.as_str() {
+        "APPROVED" => (SidebarIcon::Check, theme::OPEN),
+        "CHANGES_REQUESTED" => (SidebarIcon::ChangesRequested, theme::CLOSED),
         _ => (SidebarIcon::Comment, theme::FG_MUTED),
     }
 }
 
-/// A review: its verdict and summary, then the line comments that belong
-/// to it, each in a block of its own headed by where it was left.
+/// A review: its verdict and summary. Its line comments are threads of
+/// their own, each a card where its first comment was left.
 pub fn review_card(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
-    open_file: OpenFile,
-    review: Option<Review>,
-    comments: Vec<LineThread>,
+    review: Review,
 ) -> impl IntoView {
     let hovered = RwSignal::new(false);
-    // A card with no review is a line comment left on its own; it reads
-    // as its author's.
-    let login = review
-        .as_ref()
-        .map(|r| r.user.clone())
-        .or_else(|| comments.first().map(|t| t.comment.user.clone()))
-        .unwrap_or_default();
-    let summary = review
-        .as_ref()
-        .map(|r| r.body.clone())
-        .filter(|b| !b.trim().is_empty());
-    let url = review
-        .as_ref()
-        .map(|r| r.html_url.clone())
-        .unwrap_or_default();
+    let login = review.user.clone();
+    let summary = Some(review.body.clone()).filter(|b| !b.trim().is_empty());
+    let url = review.html_url.clone();
     let who = Byline {
         login: login.clone(),
-        avatar_url: avatar_url_for(state, &login),
+        avatar_url: fixed(avatar_url_for(state, &login)),
         avatar_size: theme::CARD_AVATAR,
-        glyph: Some(verdict_glyph(review.as_ref())),
-        verb: verdict(review.as_ref()).to_string(),
-        when: review
-            .as_ref()
-            .and_then(|r| r.submitted_at)
-            .or_else(|| comments.first().map(|t| t.comment.created_at)),
+        glyph: Some(verdict_glyph(&review)),
+        verb: verdict(&review).to_string(),
+        when: review.submitted_at,
     };
     let ask = summary.clone().map(|body| {
         let (author, url) = (login.clone(), url.clone());
@@ -660,298 +702,30 @@ pub fn review_card(
     });
     // A review with no summary has nothing to react to; GitHub allows it,
     // but there would be nothing to draw the pills under.
-    let react = summary
-        .as_ref()
-        .and(review.as_ref())
-        .and_then(|r| reactable(&r.node_id));
+    let react = summary.as_ref().and_then(|_| reactable(&review.node_id));
 
-    let body = Stack::vertical((
-        match summary {
-            Some(text) => Stack::vertical((
-                markdown::render(&text),
-                reactions_under(state, backend.clone(), &react),
-            ))
-            .style(|s| s.flex_col().width_full())
-            .into_any(),
-            None => Empty::new().into_any(),
-        },
-        dyn_stack(
-            move || comments.clone(),
-            |t| t.comment.id,
-            {
-                let backend = backend.clone();
-                move |t| {
-                    line_thread_block(
-                        app,
-                        state,
-                        backend.clone(),
-                        open_file.clone(),
-                        t,
-                        ThreadFace::Card,
-                    )
-                }
-            },
-        )
-        .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP)),
-    ))
-    .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP));
+    let body = match summary {
+        Some(text) => Stack::vertical((
+            markdown::render(&text),
+            reactions_under(state, backend.clone(), &react),
+        ))
+        .style(|s| s.flex_col().width_full())
+        .into_any(),
+        None => Empty::new().into_any(),
+    };
 
     track_hover(
         card(
             byline_strip(byline(app, who, actions(state, backend, hovered, ask, react, url))),
-            body.into_any(),
+            body,
         ),
         hovered,
     )
 }
 
-/// A review comment and its replies as one block, each with Ask about
-/// this. On Conversation inside a review card, the comments come under
-/// `path:line` and the lines the comment was left on; in the code, as a
-/// card under those lines, they come under the chevron that collapses the
-/// card to one row, and neither the heading nor the lines, since the card
-/// is under them.
-pub fn line_thread_block(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    open_file: OpenFile,
-    thread: LineThread,
-    face: ThreadFace,
-) -> floem::AnyView {
-    match face {
-        ThreadFace::Card => located_block(app, state, backend, open_file, thread).into_any(),
-        ThreadFace::Inline => github_card(app, state, backend, thread).into_any(),
-    }
-}
-
-/// The block headed by where the comment was left, over the lines.
-fn located_block(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    open_file: OpenFile,
-    thread: LineThread,
-) -> impl IntoView {
-    let first = thread.comment.clone();
-    let path = first.path.clone();
-    let line = first.line.or(first.original_line);
-    let heading = first.location();
-
-    // The lines as the checkout has them, when the checkout is at the
-    // pull request's head, so GitHub's line numbers are its, and the file
-    // is loaded at the branch head; GitHub's hunk, as of the comment's
-    // commit, otherwise. A root ahead of the pull request, or a checkout
-    // left stale, would put the comment's number on another line. The
-    // file is asked for when nothing has loaded it. The window is the
-    // hunk's: the commented line and the few above it.
-    let hunk = hunk_tail(&first.diff_hunk, theme::HUNK_LINES);
-    let at_head = state.item.with_untracked(|i| {
-        let checkout = i
-            .as_ref()
-            .and_then(|i| i.checkout.as_ref())
-            .map(|c| c.head_sha.clone());
-        let pr = state
-            .pull_request
-            .with_untracked(|p| p.as_ref().map(|p| p.head_sha.clone()));
-        checkout.is_some() && checkout == pr
-    }) && state.stale_head.with_untracked(Option::is_none);
-    let anchor = anchor_for(state, &first)
-        .filter(|_| at_head)
-        .map(|a| Anchor {
-            start_line: a.line.saturating_sub(theme::HUNK_LINES as u32 - 1).max(1),
-            ..a
-        });
-    let lines_path = first.path.clone();
-    let loaded = Memo::new(move |_| state.files.with(|m| m.contains_key(&lines_path)));
-    if anchor.is_some() && !loaded.get_untracked() && !state.is_loading(&first.path) {
-        state.loading.update(|m| {
-            m.insert(first.path.clone(), ());
-        });
-        backend.open_file(&first.path);
-    }
-    let lines_anchor = anchor.clone();
-    let lines_view = dyn_container(
-        move || loaded.get(),
-        move |loaded| {
-            let checkout = lines_anchor
-                .as_ref()
-                .filter(|_| loaded)
-                .and_then(|a| state.file(&a.path).map(|f| (f, a.clone())))
-                .filter(|(f, _)| f.scope == perch_git::Scope::Branch)
-                .map(|(f, a)| anchored_lines(&f, &a, theme::HUNK_LINES).0)
-                .filter(|l| !l.is_empty());
-            code_lines(checkout.unwrap_or_else(|| hunk.clone())).into_any()
-        },
-    )
-    .style(|s| s.width_full());
-
-    Stack::vertical((
-        location_row(state, open_file, path, line, heading, false),
-        lines_view,
-        comments_view(app, state, backend, &thread).style(|s| s.padding(12.0)),
-    ))
-    .style(|s| s.flex_col().width_full())
-    .clip()
-    .style(|s| {
-        s.width_full()
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER_MUTED)
-            .border_radius(theme::RADIUS)
-    })
-}
-
-/// The comment and its replies, each with Ask about this, a reply flush
-/// under the comment it answers.
-fn comments_view(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    thread: &LineThread,
-) -> impl IntoView {
-    let first = thread.comment.clone();
-    let replies = thread.replies.clone();
-    let anchor_of = move |c: &ReviewComment| anchor_for(state, c);
-    Stack::vertical((
-        nested_comment(app, state, backend.clone(), first.clone(), anchor_of(&first), false),
-        dyn_stack(
-            move || replies.clone(),
-            |r| r.id,
-            move |r| {
-                let anchor = anchor_of(&r);
-                nested_comment(app, state, backend.clone(), r, anchor, true)
-            },
-        )
-        .style(|s| s.flex_col().width_full().gap(10.0)),
-    ))
-    .style(|s| s.flex_col().width_full().gap(10.0))
-}
-
-/// One of GitHub's threads as a card in the code, under the line it was
-/// left on: the block's white and solid chrome, so it cannot be taken
-/// for a thread of the reader's own, led by the chevron that collapses
-/// it to one row. Collapsed, it is its one row exactly: the chevron, who
-/// commented, the first line, and how many replies follow. The Ask in
-/// each byline opens the composer, which is a card under the same line.
-/// A gutter marker click on the thread flashes the border. Nothing here
-/// says whether GitHub has the thread resolved: the comments GitHub
-/// sends do not say, so the card starts open.
-fn github_card(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    thread: LineThread,
-) -> impl IntoView {
-    let card_id = CardId::GitHub(thread.comment.id);
-    let flashing = RwSignal::new(false);
-    let collapsed = {
-        let card_id = card_id.clone();
-        Memo::new(move |_| state.is_collapsed(&card_id))
-    };
-    let open_thread = thread.clone();
-    let card = dyn_container(
-        move || collapsed.get(),
-        move |collapsed| {
-            if collapsed {
-                collapsed_github_row(state, open_thread.clone()).into_any()
-            } else {
-                open_github_card(app, state, backend.clone(), open_thread.clone()).into_any()
-            }
-        },
-    )
-    .style(move |s| {
-        let base = s
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_radius(theme::RADIUS)
-            .apply_if(collapsed.get(), |s| {
-                s.height(theme::CODE_LINE_HEIGHT as f64)
-            });
-        if flashing.get() {
-            base.border_color(theme::ACCENT)
-        } else {
-            base.border_color(theme::BORDER_MUTED)
-        }
-    });
-    threads::wire_flash(state, card_id, flashing);
-    card
-}
-
-/// The GitHub card open: the chevron row, then the comments, which
-/// scroll inside the card once it is as tall as a card may be.
-fn open_github_card(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    thread: LineThread,
-) -> impl IntoView {
-    let card_id = CardId::GitHub(thread.comment.id);
-    Stack::vertical((
-        threads::chevron_row(state, card_id, false, Empty::new().into_any())
-            .style(|s| s.flex_shrink(0.0_f32)),
-        comments_view(app, state, backend, &thread)
-            .scroll()
-            .style(threads::card_scroll),
-    ))
-    .style(|s| {
-        s.flex_col()
-            .width_full()
-            .padding(theme::THREAD_PADDING)
-            .gap(theme::THREAD_GAP)
-            .max_height(threads::inline_card_max_height())
-    })
-}
-
-/// The GitHub card collapsed to its one row.
-fn collapsed_github_row(state: ReviewState, thread: LineThread) -> impl IntoView {
-    let user = thread.comment.user.clone();
-    threads::collapsed_card_row(
-        state,
-        CardId::GitHub(thread.comment.id),
-        move || Name::Login(user.clone()),
-        crate::review::timeline::first_line(&thread.comment.body),
-        thread.replies.len(),
-        false,
-        Empty::new().into_any(),
-    )
-}
-
-/// The line a GitHub comment was left on, as an anchor for a thread about
-/// it: the head side unless the comment is on a removed line. `None` when
-/// GitHub no longer places it.
-fn anchor_for(state: ReviewState, comment: &ReviewComment) -> Option<Anchor> {
-    // Anchors are on the head. A comment on a removed line is on the
-    // base, and one GitHub no longer places has no line; both go through
-    // as the quote alone.
-    if comment.side == perch_github::Side::Left {
-        return None;
-    }
-    let line = comment.line? as u32;
-    let commit_sha = state
-        .item
-        .with(|i| {
-            i.as_ref()
-                .and_then(|i| i.checkout.as_ref())
-                .map(|c| c.head_sha.clone())
-        })
-        .or_else(|| {
-            state
-                .pull_request
-                .with(|p| p.as_ref().map(|p| p.head_sha.clone()))
-        })
-        .unwrap_or_default();
-    Some(Anchor {
-        path: comment.path.clone(),
-        start_line: line,
-        line,
-        side: comment.side,
-        commit_sha,
-    })
-}
-
-/// `path:line` across the top of a nested block. Click it and Files opens
-/// on the file, scrolled to the line.
+/// `path:line` across the top of a nested block, with Outdated when the
+/// thread is, and whatever the caller puts at the right. Click the label
+/// and Files opens on the file, scrolled to the line.
 fn location_row(
     state: ReviewState,
     open_file: OpenFile,
@@ -959,6 +733,7 @@ fn location_row(
     line: Option<u64>,
     heading: String,
     outdated: bool,
+    trailing: floem::AnyView,
 ) -> impl IntoView {
     Stack::horizontal((
         Label::derived(move || heading.clone())
@@ -981,6 +756,8 @@ fn location_row(
                     .hover(|s| s.color(theme::ACCENT))
             }),
         threads::outdated_pill(outdated),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        trailing,
     ))
     .style(|s| {
         s.items_center()
@@ -993,57 +770,19 @@ fn location_row(
     })
 }
 
-/// One comment inside a review's block: a small byline, then the body,
-/// then the reactions on it. A reply sits flush under the comment it
-/// answers, with a rule down its left.
-fn nested_comment(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    comment: ReviewComment,
-    anchor: Option<Anchor>,
-    reply: bool,
-) -> impl IntoView {
-    let hovered = RwSignal::new(false);
-    let who = Byline {
-        login: comment.user.clone(),
-        avatar_url: avatar_url_for(state, &comment.user),
-        avatar_size: theme::NESTED_AVATAR,
-        glyph: None,
-        verb: String::new(),
-        when: Some(comment.created_at),
-    };
-    let (author, url, body) = (
-        comment.user.clone(),
-        comment.html_url.clone(),
-        comment.body.clone(),
-    );
-    let ask: Rc<dyn Fn()> =
-        Rc::new(move || ask_about(app, state, anchor.clone(), &author, &url, &body));
-    let react = reactable(&comment.node_id);
-    let reactions = reactions_under(state, backend.clone(), &react);
-    track_hover(
-        Stack::vertical((
-            byline(
-                app,
-                who,
-                actions(state, backend, hovered, Some(ask), react, comment.html_url.clone()),
-            ),
-            markdown::render(&comment.body),
-            reactions,
-        ))
-        .style(move |s| {
-            let base = s.flex_col().width_full().gap(6.0);
-            if reply {
-                base.padding_left(12.0)
-                    .border_left(theme::REPLY_RULE)
-                    .border_color(theme::BORDER_MUTED)
-            } else {
-                base
-            }
-        }),
-        hovered,
-    )
+/// The row a GitHub thread with no line opens with: the location row's
+/// chrome with nothing to name, holding only the thread's menu, so what
+/// Perch put under the thread can still be taken out.
+fn menu_row(menu: floem::AnyView) -> impl IntoView {
+    Stack::horizontal((Empty::new().style(|s| s.flex_grow(1.0_f32)), menu)).style(|s| {
+        s.items_center()
+            .width_full()
+            .height(30.0)
+            .padding_horiz(12.0)
+            .background(theme::CANVAS_SIDEBAR)
+            .border_bottom(1.0)
+            .border_color(theme::BORDER_MUTED)
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -1362,8 +1101,11 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
 // The thread card
 // ---------------------------------------------------------------------
 
-/// A local thread. A quiet inset rule and the Local chip keep it distinct
-/// from GitHub without breaking the transcript into another framed card.
+/// A thread. One of the reader's own opens with "You asked" and keeps a
+/// quiet inset rule and the Local chip, so it is distinct from GitHub
+/// without breaking the transcript into another framed card. One of
+/// GitHub's opens with where it was left: each comment carries its own
+/// byline, and the thread's menu sits at the end of that row.
 pub fn thread_card(
     app: AppState,
     state: ReviewState,
@@ -1372,29 +1114,58 @@ pub fn thread_card(
     thread: CommentThread,
 ) -> impl IntoView {
     let id = thread.id.clone();
+    let from_github = thread.messages.first().is_some_and(|m| m.from_github());
+    let hunk = thread
+        .messages
+        .first()
+        .filter(|_| from_github)
+        .and_then(|m| m.diff_hunk.clone());
+    let menu = if from_github {
+        threads::thread_menu(state, &thread, theme::THREAD_MENU).into_any()
+    } else {
+        Empty::new().into_any()
+    };
     Stack::vertical((
-        thread_byline(app, state, &thread),
+        if from_github {
+            Empty::new().into_any()
+        } else {
+            thread_byline(app, state, &thread).into_any()
+        },
         finding_controls(app, state, backend.clone(), thread.id.clone()),
-        threads::delete_confirmation(state, backend.clone(), id.clone()),
+        threads::delete_confirmation(state, backend.clone(), id.clone(), thread.is_github_bound()),
         match thread.anchor.clone() {
-            Some(anchor) => {
-                anchor_block(state, backend.clone(), open_file, anchor, thread.outdated).into_any()
+            Some(anchor) => anchor_block(
+                state,
+                backend.clone(),
+                open_file,
+                anchor,
+                thread.outdated,
+                hunk,
+                menu,
+            )
+            .into_any(),
+            None if from_github && thread.messages.iter().any(|m| m.is_private()) => {
+                menu_row(menu).into_any()
             }
             None => Empty::new().into_any(),
         },
         threads::messages_view(app, state, backend.clone(), id.clone(), ThreadFace::Card),
         threads::follow_up(app, state, backend, id, ThreadFace::Card),
     ))
-    .style(|s| {
-        s.flex_col()
+    .style(move |s| {
+        let base = s
+            .flex_col()
             .width_full()
             .padding_vert(theme::CONVERSATION_ENTRY_PADDING)
-            .padding_left(16.0)
             .gap(theme::CARD_GAP)
             .background(theme::CANVAS)
-            .border_left(2.0)
             .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::BORDER_MUTED);
+        if from_github {
+            base
+        } else {
+            base.padding_left(16.0).border_left(2.0)
+        }
     })
 }
 
@@ -1696,7 +1467,7 @@ fn thread_byline(app: AppState, state: ReviewState, thread: &CommentThread) -> i
         }),
         local_chip(),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        threads::thread_menu(state, thread.id.clone(), theme::THREAD_MENU),
+        threads::thread_menu(state, thread, theme::THREAD_MENU),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0))
 }
@@ -1725,26 +1496,58 @@ fn local_chip() -> impl IntoView {
     )
 }
 
-/// Where a thread is anchored, and the lines: the same block a review
-/// comment shows its lines in. The lines come from the loaded file, which
-/// is asked for when nothing has loaded it yet; a load fills `files`
-/// without opening a tab.
+/// Where a thread is anchored, and the lines. The lines come from the
+/// loaded file, which is asked for when nothing has loaded it yet; a load
+/// fills `files` without opening a tab. A thread from GitHub brings the
+/// hunk its comment was left on, `hunk`, which stands in for the file
+/// when the thread is outdated or the checkout is not at the pull
+/// request's head, since GitHub's line numbers are the head's: a root
+/// ahead of the pull request, or a checkout left stale, would put the
+/// comment's number on another line. The window is then the hunk's: the
+/// commented line and the few above it.
 fn anchor_block(
     state: ReviewState,
     backend: Rc<Backend>,
     open_file: OpenFile,
     anchor: Anchor,
     outdated: bool,
+    hunk: Option<String>,
+    trailing: floem::AnyView,
 ) -> impl IntoView {
     let path = anchor.path.clone();
     let loaded = Memo::new(move |_| state.files.with(|m| m.contains_key(&path)));
-    if !loaded.get_untracked() && !state.is_loading(&anchor.path) {
+    let hunk = hunk.map(|h| hunk_tail(&h, theme::HUNK_LINES)).filter(|h| !h.is_empty());
+    let at_head = Memo::new(move |_| {
+        let checkout = state.item.with(|i| {
+            i.as_ref()
+                .and_then(|i| i.checkout.as_ref())
+                .map(|c| c.head_sha.clone())
+        });
+        let pr = state
+            .pull_request
+            .with(|p| p.as_ref().map(|p| p.head_sha.clone()));
+        checkout.is_some() && checkout == pr && state.stale_head.with(Option::is_none)
+    });
+    // The file's lines are wanted when there is no hunk to fall back on,
+    // or when the file is where the hunk's numbers count.
+    let has_hunk = hunk.is_some();
+    let from_file = move || !has_hunk || (!outdated && at_head.get());
+    if from_file() && !loaded.get_untracked() && !state.is_loading(&anchor.path) {
         state.loading.update(|m| {
             m.insert(anchor.path.clone(), ());
         });
         backend.open_file(&anchor.path);
     }
-    let lines_anchor = anchor.clone();
+    // A comment from GitHub on one line is shown with the few above it,
+    // as its hunk would show them, so the line is not alone.
+    let lines_anchor = if has_hunk && anchor.start_line == anchor.line {
+        Anchor {
+            start_line: anchor.line.saturating_sub(theme::HUNK_LINES as u32 - 1).max(1),
+            ..anchor.clone()
+        }
+    } else {
+        anchor.clone()
+    };
     Stack::vertical((
         location_row(
             state,
@@ -1753,20 +1556,26 @@ fn anchor_block(
             Some(anchor.start_line as u64),
             anchor.label(),
             outdated,
+            trailing,
         ),
         dyn_container(
-            move || loaded.get(),
-            move |loaded| {
-                if !loaded {
-                    return Empty::new().into_any();
+            move || (loaded.get(), from_file()),
+            move |(loaded, from_file)| {
+                let file = (loaded && from_file)
+                    .then(|| state.file(&lines_anchor.path))
+                    .flatten()
+                    .filter(|f| !has_hunk || f.scope == perch_git::Scope::Branch);
+                match (file, &hunk) {
+                    (Some(file), _) => {
+                        let (lines, more) =
+                            anchored_lines(&file, &lines_anchor, theme::ANCHOR_LINES);
+                        Stack::vertical((code_lines(lines), more_row(more)))
+                            .style(|s| s.flex_col().width_full())
+                            .into_any()
+                    }
+                    (None, Some(hunk)) => code_lines(hunk.clone()).into_any(),
+                    (None, None) => Empty::new().into_any(),
                 }
-                let Some(file) = state.file(&lines_anchor.path) else {
-                    return Empty::new().into_any();
-                };
-                let (lines, more) = anchored_lines(&file, &lines_anchor, theme::ANCHOR_LINES);
-                Stack::vertical((code_lines(lines), more_row(more)))
-                    .style(|s| s.flex_col().width_full())
-                    .into_any()
             },
         )
         .style(|s| s.width_full()),

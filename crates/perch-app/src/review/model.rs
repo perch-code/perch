@@ -971,6 +971,11 @@ pub struct ReviewState {
     /// The cards drawn as one row. Kept for the app's life and not per
     /// item, as `expanded_runs` is: a card's ids are unique across items.
     pub collapsed_cards: RwSignal<HashSet<CardId>>,
+    /// The resolved threads whose cards the reader opened. A resolved
+    /// thread is drawn as one row until it is here, the reverse of
+    /// `collapsed_cards`, so a thread resolved on GitHub folds away
+    /// without a write.
+    pub opened_cards: RwSignal<HashSet<CardId>>,
     /// Every card that has arrived since launch. A thread's card starts
     /// collapsed when the thread is outdated, and that default is applied
     /// once, when the thread first arrives; after that the reader's own
@@ -1164,6 +1169,7 @@ impl ReviewState {
             expanded_runs: RwSignal::new(std::collections::HashSet::new()),
             card_rows: RwSignal::new(HashMap::new()),
             collapsed_cards: RwSignal::new(HashSet::new()),
+            opened_cards: RwSignal::new(HashSet::new()),
             known_cards: RwSignal::new(HashSet::new()),
             agent_last: RwSignal::new(None),
             hovered_line: RwSignal::new(None),
@@ -2209,9 +2215,7 @@ impl ReviewState {
                 .filter(|thread| !thread.outdated && self.thread_visible(&thread.id))
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut out = self
-                .discussion
-                .with(|d| anchors_of(&visible, d.as_deref(), path));
+            let mut out = anchors_of(&visible, path);
             if let Some(file) = file.as_deref() {
                 out.extend(
                     visible
@@ -2244,18 +2248,16 @@ impl ReviewState {
         out
     }
 
-    /// The cards of a file: the reader's current threads anchored in it, GitHub's
-    /// review threads on it, and the composer when it is a card in it,
-    /// each with the rows it has now. Tracked on the threads, the
-    /// discussion, the composer, the rows and which cards are collapsed,
-    /// so a document built from them follows them all; the file itself is
-    /// read as it is, since a file's content is fixed for the editor
-    /// built over it.
+    /// The cards of a file: the current threads anchored in it, the
+    /// reader's own and GitHub's, and the composer when it is a card in
+    /// it, each with the rows it has now. Tracked on the threads, the
+    /// composer, the rows and which cards are collapsed, so a document
+    /// built from them follows them all; the file itself is read as it
+    /// is, since a file's content is fixed for the editor built over it.
     pub fn cards_in(&self, path: &str) -> Vec<Card> {
         let Some(file) = self.files.with_untracked(|m| m.get(path).cloned()) else {
             return Vec::new();
         };
-        let github = self.github_threads_in(path);
         let composer = self.composer_card_anchor(path);
         self.comment_threads.with(|threads| {
             let visible = threads
@@ -2263,11 +2265,13 @@ impl ReviewState {
                 .filter(|thread| !thread.outdated && self.thread_visible(&thread.id))
                 .cloned()
                 .collect::<Vec<_>>();
-            self.collapsed_cards.with(|collapsed| {
-                self.card_rows.with(|rows| {
-                    cards_of(&visible, &github, composer.as_ref(), &file, collapsed, rows)
-                })
-            })
+            let collapsed: HashSet<CardId> = visible
+                .iter()
+                .map(|thread| CardId::Thread(thread.id.clone()))
+                .filter(|card| self.is_collapsed(card))
+                .collect();
+            self.card_rows
+                .with(|rows| cards_of(&visible, composer.as_ref(), &file, &collapsed, rows))
         })
     }
 
@@ -2333,6 +2337,21 @@ impl ReviewState {
     /// Open a card drawn as one row, so what is inside it can be seen.
     /// Nothing is written for a card that is open already.
     pub fn expand_card(&self, card: &CardId) {
+        if self.thread_resolved(card) {
+            if !self.opened_cards.with_untracked(|c| c.contains(card)) {
+                self.opened_cards.update(|c| {
+                    c.insert(card.clone());
+                });
+            }
+            self.forget_collapsed(card);
+            return;
+        }
+        self.forget_collapsed(card);
+    }
+
+    /// A card the reader opened is no longer one they collapsed: a
+    /// resolved thread opened and then unresolved on GitHub stays open.
+    fn forget_collapsed(&self, card: &CardId) {
         if self.collapsed_cards.with_untracked(|c| c.contains(card)) {
             self.collapsed_cards.update(|c| {
                 c.remove(card);
@@ -2340,9 +2359,23 @@ impl ReviewState {
         }
     }
 
-    /// Whether a card is drawn as one row.
+    /// Whether a card is drawn as one row. A resolved thread's is, unless
+    /// the reader opened it; any other's is when the reader collapsed it.
     pub fn is_collapsed(&self, card: &CardId) -> bool {
+        if self.thread_resolved(card) {
+            return !self.opened_cards.with(|c| c.contains(card));
+        }
         self.collapsed_cards.with(|c| c.contains(card))
+    }
+
+    /// Whether the card is a thread's that GitHub says is resolved.
+    /// Tracked on the threads.
+    fn thread_resolved(&self, card: &CardId) -> bool {
+        let CardId::Thread(id) = card else {
+            return false;
+        };
+        self.comment_threads
+            .with(|threads| threads.iter().any(|t| &t.id == id && t.resolved))
     }
 
     /// A card has been laid out, and its height takes `rows`: what the
@@ -2364,6 +2397,18 @@ impl ReviewState {
     /// The chevron was clicked: a collapsed card opens, an open one
     /// collapses.
     pub fn toggle_card(&self, card: &CardId) {
+        if self.thread_resolved(card) {
+            let opened = self.opened_cards.with_untracked(|c| !c.contains(card));
+            self.opened_cards.update(|c| {
+                if !c.remove(card) {
+                    c.insert(card.clone());
+                }
+            });
+            if opened {
+                self.forget_collapsed(card);
+            }
+            return;
+        }
         self.collapsed_cards.update(|c| {
             if !c.remove(card) {
                 c.insert(card.clone());
@@ -2380,7 +2425,9 @@ impl ReviewState {
     /// A sent question's card gives up its rows here, in the same pass
     /// as the threads land, so the thread's card takes the rows in the
     /// one edit rather than the code closing over them and opening
-    /// again.
+    /// again. Only a thread new since launch can be the question's, and
+    /// the threads are sent after every store of the discussion too, so
+    /// a batch with nothing new leaves the rows where they are.
     pub fn set_comment_threads(&self, threads: Arc<Vec<CommentThread>>) {
         let new: Vec<(CardId, bool)> = self.known_cards.with_untracked(|known| {
             threads
@@ -2390,7 +2437,8 @@ impl ReviewState {
                 .filter(|(id, _)| !known.contains(id))
                 .collect()
         });
-        if !new.is_empty() {
+        let arrived = !new.is_empty();
+        if arrived {
             let collapsed: Vec<CardId> = new
                 .iter()
                 .filter(|(_, outdated)| *outdated)
@@ -2403,7 +2451,7 @@ impl ReviewState {
                 .update(|k| k.extend(new.into_iter().map(|(id, _)| id)));
         }
         floem::reactive::Effect::batch(|| {
-            if self.sent_composer.with_untracked(Option::is_some) {
+            if arrived && self.sent_composer.with_untracked(Option::is_some) {
                 self.sent_composer.set(None);
                 self.forget_composer_rows();
             }
@@ -2756,28 +2804,6 @@ impl ReviewState {
         })
     }
 
-    /// GitHub's review comments on a file, each with its replies, in time
-    /// order. Only those on the head side with a line GitHub still places:
-    /// one on a removed line, or outdated, has nowhere in the file to be.
-    pub fn github_threads_in(&self, path: &str) -> Vec<crate::review::timeline::LineThread> {
-        self.discussion
-            .with(|d| github_threads_of(d.as_deref(), path))
-    }
-
-    /// The GitHub review comment that starts on a display line of the open
-    /// file, for the gutter's hollow marker.
-    pub fn github_comment_starting_at(
-        &self,
-        file: &LoadedFile,
-        display_line: usize,
-    ) -> Option<u64> {
-        let head = file.buffer.head_line(display_line)? as u64 + 1;
-        self.github_threads_in(&file.path)
-            .into_iter()
-            .find(|t| t.comment.line == Some(head))
-            .map(|t| t.comment.id)
-    }
-
     pub fn thread_visible(&self, thread_id: &str) -> bool {
         !self
             .hidden_review_threads
@@ -2807,39 +2833,17 @@ impl ReviewState {
     }
 }
 
-/// GitHub's review comment threads on a file that the head places: on
-/// the head side, with a line. See `ReviewState::github_threads_in`.
-pub fn github_threads_of(
-    discussion: Option<&Discussion>,
-    path: &str,
-) -> Vec<crate::review::timeline::LineThread> {
-    let Some(d) = discussion else {
-        return Vec::new();
-    };
-    let on_file: Vec<perch_github::ReviewComment> = d
-        .review_comments
-        .iter()
-        .filter(|c| c.path == path)
-        .cloned()
-        .collect();
-    crate::review::timeline::line_threads(&on_file)
-        .into_iter()
-        .filter(|t| t.comment.side == perch_github::Side::Right && t.comment.line.is_some())
-        .collect()
-}
-
-/// A file's cards: the reader's current threads anchored in it, oldest first, so
-/// two under one line stack in the order they were asked; then GitHub's
-/// review threads on it, `github`, by their first comment's id; then the
-/// composer, when `composer` is the anchor of its card in the file. A
-/// card sits under the last line of its anchor, after any ghost spliced
-/// under that line, and takes the rows in `rows` when the card has been
-/// laid out, else the estimate, and one row when collapsed. A thread
-/// whose last line the file does not have, because its anchor has gone
-/// stale past the end, has nowhere to sit and gets no card.
+/// A file's cards: the current threads anchored in it, the reader's own
+/// and GitHub's alike, oldest first, so two under one line stack in the
+/// order they were made; then the composer, when `composer` is the anchor
+/// of its card in the file. A card sits under the last line of its
+/// anchor, after any ghost spliced under that line, and takes the rows in
+/// `rows` when the card has been laid out, else the estimate, and one row
+/// when collapsed. A thread whose last line the file does not have,
+/// because its anchor has gone stale past the end, has nowhere to sit and
+/// gets no card.
 pub fn cards_of(
     threads: &[CommentThread],
-    github: &[crate::review::timeline::LineThread],
     composer: Option<&Anchor>,
     file: &LoadedFile,
     collapsed: &HashSet<CardId>,
@@ -2876,20 +2880,6 @@ pub fn cards_of(
             })
         })
         .collect();
-
-    let mut github: Vec<&crate::review::timeline::LineThread> = github.iter().collect();
-    github.sort_by_key(|t| t.comment.id);
-    out.extend(github.into_iter().filter_map(|t| {
-        let line = t.comment.line?.saturating_sub(1) as usize;
-        let after_display_line = display_line_with_ghosts(&file.buffer, line)?;
-        let id = CardId::GitHub(t.comment.id);
-        let rows = rows_for(&id, &|collapsed| doc::estimate_github_rows(t, collapsed));
-        Some(Card {
-            id,
-            after_display_line,
-            rows,
-        })
-    }));
 
     if let Some(after_display_line) = composer.and_then(|a| card_line(file, a)) {
         let rows = rows
@@ -2999,17 +2989,11 @@ fn display_line_with_ghosts(buffer: &DisplayBuffer, head_line: usize) -> Option<
 }
 
 /// The head lines current threads are anchored on in a file, as inclusive
-/// zero-based ranges, which the folds keep in view: the reader's own from
-/// their first line to their last, and GitHub's review
-/// comments on the head side that still have a line. One on the base
-/// side, or without a line, has nowhere in the head to be and does not
-/// count.
-pub fn anchors_of(
-    threads: &[CommentThread],
-    discussion: Option<&Discussion>,
-    path: &str,
-) -> Vec<(usize, usize)> {
-    let mut out: Vec<(usize, usize)> = threads
+/// zero-based ranges, which the folds keep in view: each from its first
+/// line to its last, the reader's own and GitHub's alike. One on the base
+/// side has nowhere in the head to be and does not count.
+pub fn anchors_of(threads: &[CommentThread], path: &str) -> Vec<(usize, usize)> {
+    threads
         .iter()
         .filter(|t| !t.outdated)
         .filter_map(|t| t.anchor.as_ref())
@@ -3021,19 +3005,7 @@ pub fn anchors_of(
                 last.saturating_sub(1) as usize,
             )
         })
-        .collect();
-    out.extend(
-        github_threads_of(discussion, path)
-            .into_iter()
-            .filter_map(|t| t.comment.line)
-            .map(|line| {
-                (
-                    line.saturating_sub(1) as usize,
-                    line.saturating_sub(1) as usize,
-                )
-            }),
-    );
-    out
+        .collect()
 }
 
 #[cfg(test)]
@@ -3230,82 +3202,46 @@ mod tests {
     }
 
     #[test]
-    fn the_anchors_in_a_file_are_its_threads_lines_and_githubs_head_side_comments() {
-        use perch_github::{CommentThread, Discussion, ReviewComment, Side, ThreadOrigin};
+    fn the_anchors_in_a_file_are_its_threads_head_side_lines() {
+        use perch_github::{CommentThread, Side, ThreadOrigin};
         let at = "2026-09-18T09:59:00Z".parse().unwrap();
-        let thread =
-            |id: &str, path: &str, start_line: u32, line: u32, outdated: bool| CommentThread {
-                id: id.into(),
-                worktree_id: "wt".into(),
-                origin: ThreadOrigin::Local,
-                anchor: Some(Anchor {
-                    path: path.into(),
-                    start_line,
-                    line,
-                    side: Side::Right,
-                    commit_sha: "h".into(),
-                }),
-                outdated,
-                resolved: false,
-                created_at: at,
-                messages: Vec::new(),
-            };
-        let comment = |id: u64, path: &str, line: Option<u64>, side: Side| ReviewComment {
-            node_id: String::new(),
-            reactions: Default::default(),
-            id,
-            pull_request_review_id: None,
-            in_reply_to_id: None,
-            user: "chris".into(),
-            body: String::new(),
-            path: path.into(),
-            line,
-            original_line: None,
-            diff_hunk: String::new(),
-            side,
+        let thread = |id: &str, path: &str, start_line: u32, line: u32, side: Side, outdated: bool| CommentThread {
+            id: id.into(),
+            worktree_id: "wt".into(),
+            origin: if id.starts_with("gh-") { ThreadOrigin::GitHub } else { ThreadOrigin::Local },
+            github_id: id.strip_prefix("gh-").and_then(|n| n.parse().ok()),
+            anchor: Some(Anchor {
+                path: path.into(),
+                start_line,
+                line,
+                side,
+                commit_sha: "h".into(),
+            }),
+            outdated,
+            resolved: false,
             created_at: at,
-            updated_at: None,
-            html_url: String::new(),
+            messages: Vec::new(),
         };
-        let mut worktree = thread("w", "", 0, 0, false);
+        let mut worktree = thread("w", "", 0, 0, Side::Right, false);
         worktree.anchor = None;
         let threads = vec![
-            thread("a", "src/x.rs", 41, 58, false),
-            thread("b", "src/x.rs", 7, 7, true),
-            thread("c", "src/y.rs", 1, 3, false),
+            thread("a", "src/x.rs", 41, 58, Side::Right, false),
+            thread("b", "src/x.rs", 7, 7, Side::Right, true),
+            thread("c", "src/y.rs", 1, 3, Side::Right, false),
+            thread("gh-1", "src/x.rs", 100, 100, Side::Right, false),
+            thread("gh-2", "src/x.rs", 200, 200, Side::Left, false),
+            thread("gh-3", "src/x.rs", 300, 300, Side::Right, true),
+            thread("gh-4", "src/y.rs", 9, 9, Side::Right, false),
             worktree,
         ];
-        let discussion = Discussion {
-            node_id: String::new(),
-            reactions: Default::default(),
-            opened_at: None,
-            body: String::new(),
-            comments: Vec::new(),
-            reviews: Vec::new(),
-            review_comments: vec![
-                comment(1, "src/x.rs", Some(100), Side::Right),
-                comment(2, "src/x.rs", Some(200), Side::Left),
-                comment(3, "src/x.rs", None, Side::Right),
-                comment(4, "src/y.rs", Some(9), Side::Right),
-            ],
-            events: Vec::new(),
-        };
         // Zero based and inclusive: the current thread over 41 to 58 and
-        // GitHub's on 100. Not the outdated thread, the base side, the one
-        // without a line, or anything from the other file or worktree.
-        assert_eq!(
-            anchors_of(&threads, Some(&discussion), "src/x.rs"),
-            vec![(40, 57), (99, 99)]
-        );
-        assert_eq!(anchors_of(&threads, None, "src/x.rs"), vec![(40, 57)]);
-        assert_eq!(
-            anchors_of(&threads, Some(&discussion), "src/z.rs"),
-            Vec::<(usize, usize)>::new()
-        );
+        // GitHub's on 100. Not the outdated threads, the base side, or
+        // anything from the other file or the worktree.
+        assert_eq!(anchors_of(&threads, "src/x.rs"), vec![(40, 57), (99, 99)]);
+        assert_eq!(anchors_of(&threads, "src/z.rs"), Vec::<(usize, usize)>::new());
 
         let state = ReviewState::new();
         state.comment_threads.set(Arc::new(threads));
-        state.discussion.set(Some(Arc::new(discussion)));
         assert_eq!(state.anchors_in("src/y.rs"), vec![(0, 2), (8, 8)]);
     }
 
@@ -3318,6 +3254,7 @@ mod tests {
             id: id.into(),
             worktree_id: "wt".into(),
             origin: ThreadOrigin::Local,
+            github_id: None,
             anchor: Some(Anchor {
                 path: "src/x.rs".into(),
                 start_line: start,
@@ -3336,6 +3273,11 @@ mod tests {
                 body: "why?".into(),
                 created_at: at,
                 run: None,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
             }],
         }
     }
@@ -3371,7 +3313,7 @@ mod tests {
         worktree.anchor = None;
         let threads = [threads, vec![elsewhere, worktree]].concat();
 
-        let cards = cards_of(&threads, &[], None, &file, &HashSet::new(), &HashMap::new());
+        let cards = cards_of(&threads, None, &file, &HashSet::new(), &HashMap::new());
         let estimate = doc::estimate_rows(&threads[0], false);
         assert_eq!(
             cards,
@@ -3405,7 +3347,7 @@ mod tests {
         );
         let on_a = [anchored("end", 1, 1, "2026-09-18T10:00:00Z", false)];
         assert_eq!(
-            cards_of(&on_a, &[], None, &cut, &HashSet::new(), &HashMap::new())[0]
+            cards_of(&on_a, None, &cut, &HashSet::new(), &HashMap::new())[0]
                 .after_display_line,
             2
         );
@@ -3419,7 +3361,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let cards = cards_of(&threads, &[], None, &file, &collapsed, &rows);
+        let cards = cards_of(&threads, None, &file, &collapsed, &rows);
         assert_eq!(cards[0].rows, doc::COLLAPSED_ROWS);
         assert_eq!(cards[1].rows, 7);
 
@@ -3458,7 +3400,7 @@ mod tests {
             on_side("left-shifted", 7, Side::Left, "2026-09-18T12:00:00Z"),
         ];
 
-        let cards = cards_of(&threads, &[], None, &file, &HashSet::new(), &HashMap::new());
+        let cards = cards_of(&threads, None, &file, &HashSet::new(), &HashMap::new());
         let placed: Vec<(CardId, usize)> = cards
             .iter()
             .map(|card| (card.id.clone(), card.after_display_line))
@@ -3494,7 +3436,6 @@ mod tests {
         assert_eq!(
             cards_of(
                 &left_on_a,
-                &[],
                 None,
                 &cut,
                 &HashSet::new(),
@@ -3563,10 +3504,10 @@ mod tests {
             anchored("current", 3, 3, "2026-09-18T10:00:00Z", false),
         ];
 
-        let cards = cards_of(&threads, &[], None, &file, &HashSet::new(), &HashMap::new());
+        let cards = cards_of(&threads, None, &file, &HashSet::new(), &HashMap::new());
         let card_ids: Vec<CardId> = cards.iter().map(|card| card.id.clone()).collect();
         assert_eq!(card_ids, vec![CardId::Thread("current".into())]);
-        assert_eq!(anchors_of(&threads, None, "src/x.rs"), vec![(2, 2)]);
+        assert_eq!(anchors_of(&threads, "src/x.rs"), vec![(2, 2)]);
 
         let state = ReviewState::new();
         state.files.update(|files| {
@@ -3612,30 +3553,43 @@ mod tests {
         assert_eq!(state.composer_draft.get(), "reply");
     }
 
-    /// A review comment from GitHub on head line `line` of `src/x.rs`,
-    /// one-based, with a reply.
-    fn github_comment(
-        id: u64,
-        line: Option<u64>,
-        side: perch_github::Side,
-        reply_to: Option<u64>,
-    ) -> perch_github::ReviewComment {
-        perch_github::ReviewComment {
-            node_id: String::new(),
-            reactions: Default::default(),
-            id,
-            pull_request_review_id: None,
-            in_reply_to_id: reply_to,
-            user: "octocat".into(),
-            body: "nit".into(),
-            path: "src/x.rs".into(),
-            line,
-            original_line: None,
-            diff_hunk: String::new(),
-            side,
-            created_at: "2026-09-18T09:59:00Z".parse().unwrap(),
-            updated_at: None,
-            html_url: String::new(),
+    /// One of GitHub's threads on head line `line` of `src/x.rs`,
+    /// one-based, with `replies` comments under its first.
+    fn github_thread(id: u64, line: u32, side: perch_github::Side, at: &str, replies: usize) -> CommentThread {
+        use perch_github::{Author, CommentMessage, ThreadOrigin};
+        let at = at.parse().unwrap();
+        let thread_id = format!("gh-{id}");
+        CommentThread {
+            id: thread_id.clone(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::GitHub,
+            github_id: Some(id),
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: line,
+                line,
+                side,
+                commit_sha: "h".into(),
+            }),
+            outdated: false,
+            resolved: false,
+            created_at: at,
+            messages: (0..=replies)
+                .map(|i| CommentMessage {
+                    id: format!("gh-{}", id + i as u64),
+                    thread_id: thread_id.clone(),
+                    origin: ThreadOrigin::GitHub,
+                    author: Author::GitHubUser("octocat".into()),
+                    body: "nit".into(),
+                    created_at: at,
+                    run: None,
+                    github_id: Some(id + i as u64),
+                    node_id: None,
+                    html_url: None,
+                    diff_hunk: None,
+                    reactions: Default::default(),
+                })
+                .collect(),
         }
     }
 
@@ -3653,30 +3607,18 @@ mod tests {
     }
 
     #[test]
-    fn githubs_threads_and_the_composer_are_cards_after_the_readers_under_the_same_line() {
+    fn githubs_threads_and_the_composer_are_cards_with_the_readers_under_the_same_line() {
         use perch_github::Side;
         let file = spliced_file();
-        let threads = vec![anchored("mine", 3, 3, "2026-09-18T10:00:00Z", false)];
-        // Two of GitHub's on c, the later by id first in the list, one on
-        // e, and one on the base side, which has nowhere in the head to be.
-        let discussion = Discussion {
-            node_id: String::new(),
-            reactions: Default::default(),
-            opened_at: None,
-            body: String::new(),
-            comments: Vec::new(),
-            reviews: Vec::new(),
-            review_comments: vec![
-                github_comment(20, Some(3), Side::Right, None),
-                github_comment(10, Some(3), Side::Right, None),
-                github_comment(11, Some(3), Side::Right, Some(10)),
-                github_comment(30, Some(4), Side::Right, None),
-                github_comment(40, Some(2), Side::Left, None),
-            ],
-            events: Vec::new(),
-        };
-        let github = github_threads_of(Some(&discussion), "src/x.rs");
-        assert_eq!(github.len(), 3, "the base side's is not placed");
+        // The reader's on c, two of GitHub's on c around it in time, one
+        // on e, and one on the base side, which sits on the ghost.
+        let threads = vec![
+            anchored("mine", 3, 3, "2026-09-18T10:00:00Z", false),
+            github_thread(20, 3, Side::Right, "2026-09-18T11:00:00Z", 0),
+            github_thread(10, 3, Side::Right, "2026-09-18T09:00:00Z", 1),
+            github_thread(30, 4, Side::Right, "2026-09-18T09:30:00Z", 0),
+            github_thread(40, 2, Side::Left, "2026-09-18T09:40:00Z", 0),
+        ];
         let composer = Anchor {
             path: "src/x.rs".into(),
             start_line: 1,
@@ -3686,7 +3628,6 @@ mod tests {
         };
         let cards = cards_of(
             &threads,
-            &github,
             Some(&composer),
             &file,
             &HashSet::new(),
@@ -3696,57 +3637,49 @@ mod tests {
             .iter()
             .map(|c| (c.id.clone(), c.after_display_line))
             .collect();
-        // Under c, past the ghost of d at display line 4: the reader's,
-        // then GitHub's by id, then the composer on the last selected
-        // line; GitHub's on e is under e alone.
+        // Under c, past the ghost of d at display line 4, in time order
+        // whoever made them, then the composer on the last selected line;
+        // GitHub's on e is under e alone, and the base side's on b's ghost.
         assert_eq!(
             ids,
             vec![
+                (CardId::Thread("gh-10".into()), 4),
+                (CardId::Thread("gh-30".into()), 5),
+                (CardId::Thread("gh-40".into()), 1),
                 (CardId::Thread("mine".into()), 4),
-                (CardId::GitHub(10), 4),
-                (CardId::GitHub(20), 4),
-                (CardId::GitHub(30), 5),
+                (CardId::Thread("gh-20".into()), 4),
                 (CardId::Composer, 4),
             ]
         );
-        let two_messages = github.iter().find(|t| t.comment.id == 10).unwrap();
-        assert_eq!(two_messages.replies.len(), 1);
-        assert_eq!(
-            cards[1].rows,
-            doc::estimate_github_rows(two_messages, false)
-        );
-        let one_message = github.iter().find(|t| t.comment.id == 20).unwrap();
-        assert_eq!(cards[2].rows, doc::estimate_github_rows(one_message, false));
+        assert_eq!(cards[0].rows, doc::estimate_rows(&threads[2], false));
         assert!(
-            cards[2].rows < cards[1].rows,
+            cards[4].rows < cards[0].rows,
             "a comment without a reply is shorter"
         );
         assert_eq!(
-            cards[4].rows,
+            cards[5].rows,
             doc::COMPOSER_ROWS,
             "the composer's estimate until it is laid out"
         );
 
         // Laid out and collapsed, as the reader's cards are.
-        let collapsed: HashSet<CardId> = [CardId::GitHub(10)].into_iter().collect();
-        let rows: HashMap<CardId, usize> = [(CardId::GitHub(20), 6), (CardId::Composer, 12)]
+        let collapsed: HashSet<CardId> = [CardId::Thread("gh-10".into())].into_iter().collect();
+        let rows: HashMap<CardId, usize> = [(CardId::Thread("gh-20".into()), 6), (CardId::Composer, 12)]
             .into_iter()
             .collect();
-        let cards = cards_of(&threads, &github, Some(&composer), &file, &collapsed, &rows);
-        assert_eq!(cards[1].rows, doc::COLLAPSED_ROWS);
-        assert_eq!(cards[2].rows, 6);
-        assert_eq!(cards[4].rows, 12);
+        let cards = cards_of(&threads, Some(&composer), &file, &collapsed, &rows);
+        assert_eq!(cards[0].rows, doc::COLLAPSED_ROWS);
+        assert_eq!(cards[4].rows, 6);
+        assert_eq!(cards[5].rows, 12);
 
-        // Through the state: the discussion and the composer are read
-        // with the threads.
+        // Through the state: the composer is read with the threads.
         let state = ReviewState::new();
         state.files.update(|m| {
             m.insert("src/x.rs".into(), Arc::new(file));
         });
         state.active.set(Some("src/x.rs".into()));
         state.comment_threads.set(Arc::new(threads));
-        state.discussion.set(Some(Arc::new(discussion)));
-        assert_eq!(state.cards_in("src/x.rs").len(), 4);
+        assert_eq!(state.cards_in("src/x.rs").len(), 5);
         assert!(!state.composer_is_inline());
         let choice = (
             perch_agent::Backend::ClaudeCode,
@@ -3762,7 +3695,7 @@ mod tests {
             Some(composer.clone())
         );
         assert_eq!(state.composer_card_anchor("src/y.rs"), None);
-        assert_eq!(state.cards_in("src/x.rs").len(), 5);
+        assert_eq!(state.cards_in("src/x.rs").len(), 6);
         // A follow-up is inside its thread's card, not a card of its own,
         // and stays on Files when that card is in the open file. A question
         // about the item as a whole moves to Conversation.
@@ -3780,13 +3713,13 @@ mod tests {
         );
         assert!(state.composer_in_code());
         assert_eq!(state.tab.get(), ItemTab::Files);
-        assert_eq!(state.cards_in("src/x.rs").len(), 4);
+        assert_eq!(state.cards_in("src/x.rs").len(), 5);
         state.open_composer(None, None, "whole item".into(), choice.clone());
         assert!(!state.composer_is_inline());
         assert!(!state.composer_in_code());
         assert_eq!(state.tab.get(), ItemTab::Conversation);
         assert_eq!(state.composer_draft.get(), "whole item");
-        assert_eq!(state.cards_in("src/x.rs").len(), 4);
+        assert_eq!(state.cards_in("src/x.rs").len(), 5);
 
         // A follow-up on a thread whose card is collapsed opens the card,
         // so the box it sits inside is seen.
@@ -3795,6 +3728,66 @@ mod tests {
         state.open_composer(Some("mine".into()), Some(composer), String::new(), choice);
         assert!(!state.is_collapsed(&CardId::Thread("mine".into())));
         assert_eq!(state.tab.get(), ItemTab::Files);
+    }
+
+    #[test]
+    fn a_resolved_thread_starts_collapsed_and_opens_when_the_reader_asks() {
+        use perch_github::Side;
+        let file = spliced_file();
+        let mut resolved = github_thread(10, 3, Side::Right, "2026-09-18T09:00:00Z", 1);
+        resolved.resolved = true;
+        let open = github_thread(20, 4, Side::Right, "2026-09-18T09:30:00Z", 0);
+        let state = ReviewState::new();
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(file));
+        });
+        state.active.set(Some("src/x.rs".into()));
+        state.comment_threads.set(Arc::new(vec![resolved, open]));
+        let card = CardId::Thread("gh-10".into());
+        let other = CardId::Thread("gh-20".into());
+        assert!(state.is_collapsed(&card));
+        assert!(!state.is_collapsed(&other));
+        assert_eq!(state.cards_in("src/x.rs")[0].rows, doc::COLLAPSED_ROWS);
+
+        state.toggle_card(&card);
+        assert!(!state.is_collapsed(&card));
+        assert!(state.collapsed_cards.get().is_empty(), "opening a resolved thread is its own set");
+        assert_ne!(state.cards_in("src/x.rs")[0].rows, doc::COLLAPSED_ROWS);
+        state.toggle_card(&card);
+        assert!(state.is_collapsed(&card));
+        state.expand_card(&card);
+        assert!(!state.is_collapsed(&card));
+
+        // Any other thread collapses the way it always has.
+        state.toggle_card(&other);
+        assert!(state.is_collapsed(&other));
+        assert!(state.collapsed_cards.get().contains(&other));
+    }
+
+    #[test]
+    fn a_thread_collapsed_then_resolved_and_opened_stays_open_when_unresolved() {
+        use perch_github::Side;
+        let state = ReviewState::new();
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(spliced_file()));
+        });
+        state.active.set(Some("src/x.rs".into()));
+        let thread = github_thread(10, 3, Side::Right, "2026-09-18T09:00:00Z", 1);
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let card = CardId::Thread("gh-10".into());
+
+        state.toggle_card(&card);
+        assert!(state.is_collapsed(&card), "collapsed by the reader");
+        let mut resolved = thread.clone();
+        resolved.resolved = true;
+        state.comment_threads.set(Arc::new(vec![resolved]));
+        assert!(state.is_collapsed(&card));
+        state.toggle_card(&card);
+        assert!(!state.is_collapsed(&card), "opened by the reader");
+
+        // Unresolved on GitHub, it is as the reader last left it.
+        state.comment_threads.set(Arc::new(vec![thread]));
+        assert!(!state.is_collapsed(&card));
     }
 
     #[test]
@@ -4140,6 +4133,11 @@ mod tests {
                 rows: 10
             }]
         );
+
+        // Threads with nothing new, as a reaction's store sends them,
+        // leave the rows waiting.
+        state.set_comment_threads(Arc::new(vec![]));
+        assert_eq!(state.sent_composer.get(), Some(anchor.clone()));
 
         // The thread arrives, and its card takes the place of the rows.
         state.set_comment_threads(Arc::new(vec![anchored(

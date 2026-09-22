@@ -65,7 +65,6 @@ use crate::review::picture;
 use crate::review::references;
 use crate::review::styling::PerchStyling;
 use crate::review::threads::{self, ThreadFace};
-use crate::review::timeline::LineThread;
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
@@ -101,7 +100,6 @@ pub fn editor_pane(
     find::wire(state);
 
     let code_backend = backend.clone();
-    let code_open = open_file.clone();
 
     Stack::vertical((
         Stack::new((
@@ -152,7 +150,6 @@ pub fn editor_pane(
                                         epoch,
                                         layout,
                                         code_backend.clone(),
-                                        code_open.clone(),
                                     )
                                     .into_any(),
                                 }
@@ -236,7 +233,6 @@ fn code_view(
     epoch: u64,
     layout: Layout,
     backend: Rc<Backend>,
-    open_file: OpenFile,
 ) -> impl IntoView {
     let memos = Memos::new(state, &file);
     let split = Effect::untrack(|| match layout {
@@ -253,10 +249,8 @@ fn code_view(
         Layout::Stacked => None,
     });
     match split {
-        Some(split) => {
-            split_view(app, state, file, memos, split, epoch, backend, open_file).into_any()
-        }
-        None => stacked_view(app, state, file, memos, epoch, backend, open_file).into_any(),
+        Some(split) => split_view(app, state, file, memos, split, epoch, backend).into_any(),
+        None => stacked_view(app, state, file, memos, epoch, backend).into_any(),
     }
 }
 
@@ -268,7 +262,6 @@ fn stacked_view(
     memos: Memos,
     epoch: u64,
     backend: Rc<Backend>,
-    open_file: OpenFile,
 ) -> impl IntoView {
     let built = Effect::untrack(|| {
         let inputs = memos.inputs(state, &file);
@@ -359,7 +352,6 @@ fn stacked_view(
                 app,
                 state,
                 backend,
-                open_file,
                 path,
                 doc,
                 viewport,
@@ -904,14 +896,13 @@ fn records_hover(state: ReviewState, row: usize, part: impl IntoView + 'static) 
     .style(|s| s.pointer_events_auto())
 }
 
-/// What a card in the layer is built from: a thread of the reader's own,
+/// What a card in the layer is built from: a thread, the reader's own or
 /// one of GitHub's, or the composer while it is open on lines of the
 /// file. A sent question's card has no item: its rows stay in the
 /// document, blank, until its thread arrives.
 #[derive(Clone)]
 enum CardItem {
     Thread(CommentThread),
-    GitHub(LineThread),
     Composer(Composer),
 }
 
@@ -919,7 +910,6 @@ impl CardItem {
     fn id(&self) -> CardId {
         match self {
             CardItem::Thread(t) => CardId::Thread(t.id.clone()),
-            CardItem::GitHub(t) => CardId::GitHub(t.comment.id),
             CardItem::Composer(_) => CardId::Composer,
         }
     }
@@ -928,19 +918,16 @@ impl CardItem {
     /// built from. A thread's messages are read live inside its card, so
     /// a streaming answer redraws in place, and the key carries whether
     /// the thread is outdated, which its first row and its starting
-    /// state show, and how many messages it has. GitHub's carries the
-    /// replies and the last edit. The composer's carries which opening
-    /// it is and nothing else: picking a model writes the composer, and
-    /// a rebuild on that would throw the typed question away.
+    /// state show, its anchor, which GitHub moves under a thread of its
+    /// own, how many messages it has, which is last and what the first
+    /// says, which the collapsed row shows. The composer's carries which
+    /// opening it is and nothing else: picking a model writes the
+    /// composer, and a rebuild on that would throw the typed question
+    /// away.
     fn key(&self) -> String {
         match self {
-            CardItem::Thread(t) => format!("thread:{}:{}:{}", t.id, t.outdated, t.messages.len()),
-            CardItem::GitHub(t) => {
-                let edited = std::iter::once(&t.comment)
-                    .chain(t.replies.iter())
-                    .filter_map(|c| c.updated_at)
-                    .max();
-                format!("github:{}:{}:{edited:?}", t.comment.id, t.replies.len())
+            CardItem::Thread(t) => {
+                format!("thread:{}:{}:{}", t.id, t.outdated, cards::thread_key_tail(t))
             }
             CardItem::Composer(c) => format!("composer:{}", c.opening),
         }
@@ -950,27 +937,25 @@ impl CardItem {
     fn name(&self) -> String {
         match self {
             CardItem::Thread(t) => format!("inline-card:{}", t.id),
-            CardItem::GitHub(t) => format!("inline-card:github:{}", t.comment.id),
             CardItem::Composer(_) => "inline-card:composer".to_string(),
         }
     }
 }
 
 /// The cards of the open file, drawn over the rows the document reserves
-/// for them: the reader's threads anchored in it, GitHub's review threads
-/// on it, and the composer when it is open on lines of it, as the
-/// document has them. A layer over the editor, or over both panes of a
-/// split, that takes no pointer events itself; each card does, and is
-/// placed at its first spacer row from the live document and the
-/// viewport in its own style closure, as the divider bars are, because
-/// the cards are sparse and a card outlives the scroll. `left` is where a
-/// card's edge sits: the first code column, past the gutter in a split.
+/// for them: the threads anchored in it, the reader's own and GitHub's,
+/// and the composer when it is open on lines of it, as the document has
+/// them. A layer over the editor, or over both panes of a split, that
+/// takes no pointer events itself; each card does, and is placed at its
+/// first spacer row from the live document and the viewport in its own
+/// style closure, as the divider bars are, because the cards are sparse
+/// and a card outlives the scroll. `left` is where a card's edge sits:
+/// the first code column, past the gutter in a split.
 #[allow(clippy::too_many_arguments)]
 fn card_layer(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
-    open_file: OpenFile,
     path: String,
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
@@ -980,10 +965,9 @@ fn card_layer(
 ) -> impl IntoView {
     let cards = move || {
         // The document says which cards have rows: a thread whose line is
-        // not shown has no card. The threads, the discussion and the
-        // composer are read tracked so a card's key follows them.
+        // not shown has no card. The threads and the composer are read
+        // tracked so a card's key follows them.
         let ids: Vec<CardId> = doc.with(|d| d.cards().iter().map(|(id, _)| id.clone()).collect());
-        let github = state.github_threads_in(&path);
         let composer = state.composer.with(|c| {
             c.as_ref()
                 .filter(|c| {
@@ -999,11 +983,6 @@ fn card_layer(
                         .find(|t| t.id == *thread_id && state.thread_visible(&t.id))
                         .cloned()
                         .map(CardItem::Thread),
-                    CardId::GitHub(comment_id) => github
-                        .iter()
-                        .find(|t| t.comment.id == *comment_id)
-                        .cloned()
-                        .map(CardItem::GitHub),
                     CardId::Composer => composer.clone().map(CardItem::Composer),
                 })
                 .collect::<Vec<_>>()
@@ -1014,7 +993,6 @@ fn card_layer(
             app,
             state,
             backend.clone(),
-            open_file.clone(),
             doc,
             viewport,
             scroll_delta,
@@ -1056,7 +1034,6 @@ fn inline_card(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
-    open_file: OpenFile,
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
@@ -1089,9 +1066,6 @@ fn inline_card(
 
     let view = match item {
         CardItem::Thread(thread) => threads::thread_card(app, state, backend, thread).into_any(),
-        CardItem::GitHub(thread) => {
-            cards::line_thread_block(app, state, backend, open_file, thread, ThreadFace::Inline)
-        }
         CardItem::Composer(composer) => {
             threads::composer_view(app, state, backend, composer, ThreadFace::Inline).into_any()
         }
@@ -1191,7 +1165,6 @@ fn split_view(
     split: (Doc, Doc),
     epoch: u64,
     backend: Rc<Backend>,
-    open_file: OpenFile,
 ) -> impl IntoView {
     let (left_text, right_text) = (split.0.text.clone(), split.1.text.clone());
     let (left_doc, right_doc) = (
@@ -1388,7 +1361,6 @@ fn split_view(
             app,
             state,
             backend,
-            open_file,
             path,
             right_doc,
             right_viewport,
@@ -3235,11 +3207,17 @@ mod window {
                 body: body.into(),
                 created_at,
                 run,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
             };
         CommentThread {
             id: id.into(),
             worktree_id: "wt".into(),
             origin: ThreadOrigin::Local,
+            github_id: None,
             anchor: Some(Anchor {
                 path: "src/x.rs".into(),
                 start_line: start,
@@ -3280,6 +3258,7 @@ mod window {
             id: id.into(),
             worktree_id: "wt".into(),
             origin: ThreadOrigin::Local,
+            github_id: None,
             anchor: Some(Anchor {
                 path: "src/x.rs".into(),
                 start_line: start,
@@ -3308,6 +3287,11 @@ mod window {
                     body: body.to_string(),
                     created_at,
                     run: None,
+                    github_id: None,
+                    node_id: None,
+                    html_url: None,
+                    diff_hunk: None,
+                    reactions: Default::default(),
                 })
                 .collect(),
         }
@@ -3509,13 +3493,10 @@ mod window {
         };
 
         // GitHub's thread on head line 7, collapsed to its row.
-        let comments = vec![github_comment(100, 7, None, "nit: name this")];
-        state
-            .discussion
-            .set(Some(Arc::new(discussion_of(comments))));
+        state.set_comment_threads(Arc::new(vec![github_thread(100, 7, &["nit: name this"])]));
         harness.rebuild();
         harness.paint();
-        let card = CardId::GitHub(100);
+        let card = CardId::Thread("gh-100".into());
         state.toggle_card(&card);
         harness.rebuild();
         harness.paint();
@@ -3528,7 +3509,6 @@ mod window {
         );
 
         // The reader's own thread on the same lines, collapsed.
-        state.discussion.set(None);
         state.set_comment_threads(Arc::new(vec![thread_on("t1", 5, 7, false)]));
         harness.rebuild();
         harness.paint();
@@ -4057,51 +4037,51 @@ mod window {
 
     // GitHub's threads and the composer as cards.
 
-    /// A review comment from GitHub on head line `line` of the open file,
-    /// one-based, on the head side.
-    fn github_comment(
-        id: u64,
-        line: u64,
-        reply_to: Option<u64>,
-        body: &str,
-    ) -> perch_github::ReviewComment {
-        perch_github::ReviewComment {
-            node_id: String::new(),
-            reactions: Default::default(),
-            id,
-            pull_request_review_id: None,
-            in_reply_to_id: reply_to,
-            user: "octocat".into(),
-            body: body.into(),
-            path: "src/x.rs".into(),
-            line: Some(line),
-            original_line: None,
-            diff_hunk: String::new(),
-            side: perch_github::Side::Right,
-            created_at: "2026-09-18T09:59:00Z".parse().unwrap(),
-            updated_at: None,
-            html_url: String::new(),
-        }
-    }
-
-    /// A discussion holding the given review comments and nothing else.
-    fn discussion_of(
-        review_comments: Vec<perch_github::ReviewComment>,
-    ) -> perch_github::Discussion {
-        perch_github::Discussion {
-            node_id: String::new(),
-            reactions: Default::default(),
-            opened_at: None,
-            body: String::new(),
-            comments: Vec::new(),
-            reviews: Vec::new(),
-            review_comments,
-            events: Vec::new(),
+    /// One of GitHub's threads on head line `line` of the open file,
+    /// one-based, on the head side: a comment by octocat and, for each
+    /// body after the first, a reply by hubot.
+    fn github_thread(id: u64, line: u32, bodies: &[&str]) -> perch_github::CommentThread {
+        use perch_github::{Anchor, Author, CommentMessage, CommentThread, Side, ThreadOrigin};
+        let created_at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
+        let thread_id = format!("gh-{id}");
+        CommentThread {
+            id: thread_id.clone(),
+            worktree_id: "wt".into(),
+            origin: ThreadOrigin::GitHub,
+            github_id: Some(id),
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: line,
+                line,
+                side: Side::Right,
+                commit_sha: "h".into(),
+            }),
+            outdated: false,
+            resolved: false,
+            created_at,
+            messages: bodies
+                .iter()
+                .enumerate()
+                .map(|(i, body)| CommentMessage {
+                    id: format!("gh-{}", id + i as u64),
+                    thread_id: thread_id.clone(),
+                    origin: ThreadOrigin::GitHub,
+                    author: Author::GitHubUser(if i == 0 { "octocat" } else { "hubot" }.into()),
+                    body: body.to_string(),
+                    created_at: created_at + jiff::SignedDuration::from_secs(60 * i as i64),
+                    run: None,
+                    github_id: Some(id + i as u64),
+                    node_id: Some(format!("PRRC_{}", id + i as u64)),
+                    html_url: Some(format!("https://github.com/o/r/pull/1#discussion_r{}", id + i as u64)),
+                    diff_hunk: (i == 0).then(|| "@@ -5,3 +5,3 @@\n a\n b\n c".to_string()),
+                    reactions: Default::default(),
+                })
+                .collect(),
         }
     }
 
     #[test]
-    fn a_github_thread_in_the_discussion_is_a_card_under_its_line_that_the_hollow_marker_focuses() {
+    fn a_github_thread_is_a_card_under_its_line_that_the_hollow_marker_focuses() {
         use crate::review::doc::{CardId, DocRow};
         let (mut harness, state) = harness();
         let live = stacked(state);
@@ -4112,34 +4092,21 @@ mod window {
         assert_eq!(live.doc.get().len(), 120);
 
         // A comment and a reply on head line 7, display line 8, arrive
-        // with the discussion: the card goes under the line, before the
+        // with the threads: the card goes under the line, before the
         // ghost of the rewritten line after it, as the reader's does.
-        let comments = vec![
-            github_comment(100, 7, None, "nit: name this"),
-            github_comment(101, 7, Some(100), "done"),
-        ];
-        let card = CardId::GitHub(100);
-        let thread = crate::review::model::github_threads_of(
-            Some(&discussion_of(comments.clone())),
-            "src/x.rs",
-        )
-        .remove(0);
-        let estimate = crate::review::doc::estimate_github_rows(&thread, false);
-        state
-            .discussion
-            .set(Some(Arc::new(discussion_of(comments))));
+        let thread = github_thread(100, 7, &["nit: name this", "done"]);
+        let card = CardId::Thread("gh-100".into());
+        let estimate = crate::review::doc::estimate_rows(&thread, false);
+        state.set_comment_threads(Arc::new(vec![thread]));
         assert_eq!(
             live.doc.get().card_span(&card),
             Some(9..9 + estimate),
             "the estimate, until the card is laid out"
         );
-        assert!(
-            !state.is_collapsed(&card),
-            "nothing says GitHub has it resolved, so it starts open"
-        );
+        assert!(!state.is_collapsed(&card), "not resolved, so it starts open");
         harness.rebuild();
         harness.paint();
-        let rows = laid_out_rows(&harness, "github:100");
+        let rows = laid_out_rows(&harness, "gh-100");
         let doc = live.doc.get();
         assert_eq!(doc.len(), 120 + rows);
         assert_eq!(doc.card_span(&card), Some(9..9 + rows));
@@ -4158,10 +4125,21 @@ mod window {
             "the code goes on under the card"
         );
         assert_eq!(laid_out_text(&live), doc.text);
-        let rect = card_rect(&harness, "github:100");
+        let rect = card_rect(&harness, "gh-100");
         assert_eq!(rect.y0, 9.0 * line_height + crate::theme::CARD_INSET);
         assert_eq!(rect.x0, crate::theme::CODE_GUTTER_GAP);
         assert!(rect.height() > line_height);
+
+        // The comment carries its author's name, and the reply, its own
+        // author's, draws under it.
+        let root = find(harness.root_id(), "name label - Label: \"octocat\"")
+            .expect("the comment's byline names octocat");
+        let reply = find(harness.root_id(), "name label - Label: \"hubot\"")
+            .expect("the reply's byline names hubot");
+        assert!(
+            reply.get_visual_rect_no_clip().y0 > root.get_visual_rect_no_clip().y0,
+            "the reply is under the comment"
+        );
 
         // The hollow marker on the comment's line focuses the card.
         let (left, top) = pane_origin();
@@ -4196,7 +4174,7 @@ mod window {
         assert_eq!(doc.len(), 120 + 1);
         assert_eq!(doc.card_span(&card), Some(9..10));
         assert_eq!(laid_out_text(&live), doc.text);
-        let rect = card_rect(&harness, "github:100");
+        let rect = card_rect(&harness, "gh-100");
         assert_eq!(rect.y0, 9.0 * line_height);
         assert_eq!(rect.height(), line_height);
         state.toggle_card(&card);
@@ -4208,8 +4186,11 @@ mod window {
             "open again at the rows the layout gave it"
         );
 
-        // A thread of the reader's own on the same line goes before it.
-        state.set_comment_threads(Arc::new(vec![thread_with("t1", 5, 7, &["why?"])]));
+        // A thread of the reader's own on the same line, asked earlier,
+        // goes before it.
+        let mut mine = thread_with("t1", 5, 7, &["why?"]);
+        mine.created_at = "2026-09-18T09:00:00Z".parse().unwrap();
+        state.set_comment_threads(Arc::new(vec![mine, github_thread(100, 7, &["nit: name this", "done"])]));
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
@@ -4220,12 +4201,69 @@ mod window {
         assert_eq!(doc.card_span(&card), Some(mine.end..mine.end + rows));
         assert_eq!(laid_out_text(&live), doc.text);
 
-        // The discussion going takes the card and its rows with it.
-        state.discussion.set(None);
+        // The thread going takes the card and its rows with it.
+        state.set_comment_threads(Arc::new(Vec::new()));
         harness.rebuild();
         harness.paint();
         assert_eq!(live.doc.get().card_span(&card), None);
-        assert!(find(harness.root_id(), "inline-card:github").is_none());
+        assert!(find(harness.root_id(), "inline-card:gh-").is_none());
+    }
+
+    #[test]
+    fn ask_about_this_on_a_github_comment_opens_the_composer_under_its_thread() {
+        let (mut harness, state) = harness();
+        state.set_comment_threads(Arc::new(vec![github_thread(100, 7, &["nit: name this"])]));
+        harness.rebuild();
+        harness.paint();
+
+        // The Ask is drawn while the card is under the pointer.
+        let rect = card_rect(&harness, "gh-100");
+        let (left, top) = pane_origin();
+        let inside = (left + crate::theme::GUTTER_WIDTH + rect.center().x, top + rect.center().y);
+        harness.pointer_move(inside.0, inside.1);
+        harness.rebuild();
+        harness.paint();
+        let ask = find(harness.root_id(), "ask-about").expect("the comment offers Ask about this");
+        let c = ask.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+        let composer = state.composer.get().expect("the composer opened");
+        assert_eq!(composer.thread_id.as_deref(), Some("gh-100"));
+        assert_eq!(
+            composer.anchor.as_ref().map(|a| (a.start_line, a.line)),
+            Some((7, 7)),
+            "on the thread's own lines"
+        );
+        assert_eq!(state.composer_draft.get(), "", "nothing is quoted; the thread carries the comment");
+        assert!(state.follow_up_is_inline("gh-100"));
+    }
+
+    #[test]
+    fn a_resolved_github_thread_starts_collapsed_and_opens_when_toggled() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        let live = stacked(state);
+        let mut thread = github_thread(100, 7, &["nit: name this", "done"]);
+        thread.resolved = true;
+        state.set_comment_threads(Arc::new(vec![thread]));
+        let card = CardId::Thread("gh-100".into());
+        assert!(state.is_collapsed(&card), "resolved on GitHub, so folded away");
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(live.doc.get().card_span(&card), Some(9..10));
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        assert_eq!(card_rect(&harness, "gh-100").height(), line_height);
+
+        state.toggle_card(&card);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.is_collapsed(&card));
+        assert!(card_rect(&harness, "gh-100").height() > line_height);
+        assert!(
+            find(harness.root_id(), "name label - Label: \"hubot\"").is_some(),
+            "open, the reply shows"
+        );
     }
 
     #[test]

@@ -19,7 +19,6 @@ use perch_git::{DisplayBuffer, LineStatus, Row};
 use perch_github::CommentThread;
 
 use crate::review::hover;
-use crate::review::timeline::LineThread;
 
 /// How many lines of context stay in view on each side of a change or an
 /// anchor. A run that is not longer than twice this is shown whole: a
@@ -75,10 +74,8 @@ pub enum Tint {
 /// Which thread a card is for.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CardId {
-    /// The reader's own, by thread id.
+    /// A thread, the reader's own or one of GitHub's, by thread id.
     Thread(String),
-    /// One of GitHub's review comment threads, by its first comment's id.
-    GitHub(u64),
     /// The one being written.
     Composer,
 }
@@ -92,15 +89,6 @@ pub enum CardId {
 /// jump, and the card's laid-out height corrects it.
 pub fn estimate_rows(thread: &CommentThread, collapsed: bool) -> usize {
     estimate_rows_of(thread.messages.iter().map(|m| m.body.as_str()), collapsed)
-}
-
-/// The same estimate for one of GitHub's threads: the comment and its
-/// replies are the messages. The card has no follow-up line, and the row
-/// charged for one stands in for the room the comments take that the
-/// two rows per message do not.
-pub fn estimate_github_rows(thread: &LineThread, collapsed: bool) -> usize {
-    let bodies = std::iter::once(&thread.comment).chain(thread.replies.iter()).map(|c| c.body.as_str());
-    estimate_rows_of(bodies, collapsed)
 }
 
 /// The estimate over the bodies of a card's messages.
@@ -1073,15 +1061,15 @@ mod tests {
         let b = two_changes(4);
         let cards = [
             Card { id: CardId::Thread("t1".into()), after_display_line: 2, rows: 2 },
-            Card { id: CardId::GitHub(7), after_display_line: 2, rows: 3 },
+            Card { id: CardId::Thread("gh-7".into()), after_display_line: 2, rows: 3 },
             Card { id: CardId::Composer, after_display_line: 2, rows: 1 },
         ];
         let doc = build(&b, &[], &cards);
         assert_eq!(doc.len(), b.len() + 6);
         assert_eq!(doc.rows[2], line(2, Tint::Plain));
-        assert_eq!(doc.cards(), &[(CardId::Thread("t1".into()), 3), (CardId::GitHub(7), 5), (CardId::Composer, 8)]);
+        assert_eq!(doc.cards(), &[(CardId::Thread("t1".into()), 3), (CardId::Thread("gh-7".into()), 5), (CardId::Composer, 8)]);
         assert_eq!(doc.card_span(&CardId::Thread("t1".into())), Some(3..5));
-        assert_eq!(doc.card_span(&CardId::GitHub(7)), Some(5..8));
+        assert_eq!(doc.card_span(&CardId::Thread("gh-7".into())), Some(5..8));
         assert_eq!(doc.card_span(&CardId::Composer), Some(8..9));
         for row in 3..9 {
             assert!(matches!(doc.rows[row], DocRow::Spacer { .. }), "row {row} is a spacer");
@@ -1096,7 +1084,7 @@ mod tests {
         let alignment = perch_git::alignment(&diff, &base, &head);
         let (left, right) = build_split(&alignment, &base, &b, &[], &cards);
         assert_eq!(left.len(), right.len());
-        assert_eq!(right.cards(), &[(CardId::Thread("t1".into()), 2), (CardId::GitHub(7), 4), (CardId::Composer, 7)]);
+        assert_eq!(right.cards(), &[(CardId::Thread("t1".into()), 2), (CardId::Thread("gh-7".into()), 4), (CardId::Composer, 7)]);
         assert_eq!(left.cards(), right.cards());
     }
 
@@ -1111,6 +1099,7 @@ mod tests {
             id: "t1".into(),
             worktree_id: "wt".into(),
             origin: ThreadOrigin::Local,
+            github_id: None,
             anchor: None,
             outdated: false,
             resolved: false,
@@ -1126,6 +1115,11 @@ mod tests {
                     body: body.to_string(),
                     created_at: at,
                     run: None,
+                    github_id: None,
+                    node_id: None,
+                    html_url: None,
+                    diff_hunk: None,
+                    reactions: Default::default(),
                 })
                 .collect(),
         }
@@ -1162,50 +1156,24 @@ mod tests {
         assert_eq!(estimate_rows(&thread_of(&[]), true), 1);
     }
 
-    /// One of GitHub's threads: a comment and its replies, with nothing
-    /// else about them mattering to the estimate.
-    fn github_thread_of(bodies: &[&str]) -> LineThread {
-        use perch_github::{ReviewComment, Side};
-        let at = "2026-09-18T09:59:00Z".parse().unwrap();
-        let comment = |i: usize, body: &str| ReviewComment {
-            node_id: String::new(),
-            reactions: Default::default(),
-            id: 100 + i as u64,
-            pull_request_review_id: None,
-            in_reply_to_id: (i > 0).then_some(100),
-            user: "octocat".into(),
-            body: body.into(),
-            path: "src/x.rs".into(),
-            line: Some(7),
-            original_line: None,
-            diff_hunk: String::new(),
-            side: Side::Right,
-            created_at: at,
-            updated_at: None,
-            html_url: String::new(),
-        };
-        let mut comments = bodies.iter().enumerate().map(|(i, body)| comment(i, body));
-        let first = comments.next().expect("a thread has a comment");
-        LineThread { comment: first, replies: comments.collect() }
-    }
-
     #[test]
     fn a_github_thread_is_estimated_as_a_readers_thread_of_the_same_messages_is() {
-        // The comment alone: its line, the byline and the gap, and the
-        // chrome.
-        assert_eq!(estimate_github_rows(&github_thread_of(&["nit"]), false), 1 + 2 + 2);
-        // A reply is a message: its lines and its own two rows.
-        assert_eq!(estimate_github_rows(&github_thread_of(&["nit", "done\n\nthanks"]), false), (1 + 2) + (3 + 2) + 2);
+        use perch_github::{Author, ThreadOrigin};
+        let mut thread = thread_of(&["nit", "done\n\nthanks"]);
+        thread.origin = ThreadOrigin::GitHub;
+        thread.github_id = Some(100);
+        for (i, m) in thread.messages.iter_mut().enumerate() {
+            m.origin = ThreadOrigin::GitHub;
+            m.author = Author::GitHubUser("octocat".into());
+            m.github_id = Some(100 + i as u64);
+        }
+        assert_eq!(estimate_rows(&thread, false), (1 + 2) + (3 + 2) + 2);
         assert_eq!(
-            estimate_github_rows(&github_thread_of(&["nit", "done\n\nthanks"]), false),
+            estimate_rows(&thread, false),
             estimate_rows(&thread_of(&["nit", "done\n\nthanks"]), false),
             "the same messages are the same rows whoever wrote them"
         );
-        let long_line = "x".repeat(200);
-        assert_eq!(estimate_github_rows(&github_thread_of(&[&long_line]), false), 3 + 2 + 2, "wrapped at eighty columns");
-        let hundred_lines = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        assert_eq!(estimate_github_rows(&github_thread_of(&["nit", &hundred_lines]), false), CARD_MAX_ROWS);
-        assert_eq!(estimate_github_rows(&github_thread_of(&["nit", &hundred_lines]), true), COLLAPSED_ROWS);
+        assert_eq!(estimate_rows(&thread, true), COLLAPSED_ROWS);
     }
 
     #[test]
@@ -1218,14 +1186,14 @@ mod tests {
         // Display: ghost(old), new, l1..l10, ghost(old end), new end. Fold
         // l4 to l7, and put a card under l2.
         let fold = Run::new(5, 8, 4);
-        let card = Card { id: CardId::GitHub(7), after_display_line: 3, rows: 2 };
+        let card = Card { id: CardId::Thread("gh-7".into()), after_display_line: 3, rows: 2 };
         let (left, right) = build_split(&alignment, base, &b, &[fold], &[card]);
         assert_eq!(left.len(), right.len());
         let divider = right.rows.iter().position(|r| matches!(r, DocRow::Divider { .. })).unwrap();
         assert_eq!(left.rows[divider], DocRow::Divider { run: 0 });
         let spacer = right.rows.iter().position(|r| matches!(r, DocRow::Spacer { .. })).unwrap();
-        assert_eq!(left.rows[spacer], DocRow::Spacer { card: CardId::GitHub(7), row: 0 });
-        assert_eq!(left.rows[spacer + 1], DocRow::Spacer { card: CardId::GitHub(7), row: 1 });
+        assert_eq!(left.rows[spacer], DocRow::Spacer { card: CardId::Thread("gh-7".into()), row: 0 });
+        assert_eq!(left.rows[spacer + 1], DocRow::Spacer { card: CardId::Thread("gh-7".into()), row: 1 });
         assert_eq!(right.rows[spacer - 1], line(3, Tint::Plain), "the card is under l2");
         // The folded lines are on no row, and the ones around them are.
         assert_eq!(right.row_of_head(5), None);
@@ -1270,11 +1238,11 @@ mod tests {
         let alignment = perch_git::alignment(&diff, base, head);
         let b = DisplayBuffer::unified(head, base, &diff);
         let under_ghost = Card { id: CardId::Thread("t1".into()), after_display_line: 1, rows: 2 };
-        let under_line = Card { id: CardId::GitHub(9), after_display_line: 2, rows: 1 };
+        let under_line = Card { id: CardId::Thread("gh-9".into()), after_display_line: 2, rows: 1 };
         let spacers = [
             DocRow::Spacer { card: CardId::Thread("t1".into()), row: 0 },
             DocRow::Spacer { card: CardId::Thread("t1".into()), row: 1 },
-            DocRow::Spacer { card: CardId::GitHub(9), row: 0 },
+            DocRow::Spacer { card: CardId::Thread("gh-9".into()), row: 0 },
         ];
         let (left, right) = build_split(&alignment, base, &b, &[], &[under_ghost.clone(), under_line.clone()]);
         assert_eq!(left.rows[..2], [line(0, Tint::Plain), line(1, Tint::Deleted)]);

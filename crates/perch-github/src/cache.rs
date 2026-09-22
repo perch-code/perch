@@ -19,6 +19,7 @@ use crate::comments::{
 use crate::discussion::Discussion;
 use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
 use crate::model::Thread;
+use crate::reactions::Reactions;
 use crate::workflow_runs::Checks;
 
 mod review_store;
@@ -27,9 +28,11 @@ mod review_store;
 /// and repeat-review reconciliation records on top of the run schema. Version
 /// 19 persists the exact finding cohort used by verifier attempts. Version 20
 /// remembers notifications marked Done in Perch until their next revision.
-/// Schemas 13 through 19 migrate in place so local conversations and agent
-/// history are never discarded.
-pub const SCHEMA_VERSION: u32 = 20;
+/// Version 21 keeps GitHub's review threads as comment threads, with the
+/// node id, link, hunk and reactions of each comment, and fills them from
+/// the discussions already kept. Schemas 13 through 20 migrate in place so
+/// local conversations and agent history are never discarded.
+pub const SCHEMA_VERSION: u32 = 21;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -265,10 +268,18 @@ CREATE TABLE comment_messages (
     author_model   TEXT,
     body           TEXT NOT NULL,
     run_id         TEXT REFERENCES runs(id) ON DELETE SET NULL,
-    created_at     TEXT NOT NULL
+    created_at     TEXT NOT NULL,
+    node_id        TEXT,
+    html_url       TEXT,
+    diff_hunk      TEXT,
+    reactions_json TEXT
 );
 CREATE INDEX comment_messages_thread ON comment_messages(thread_id);
 "#;
+
+/// The columns schema 21 adds to a comment message: what a comment from
+/// GitHub carries besides its text.
+const GITHUB_MESSAGE_COLUMNS: [&str; 4] = ["node_id", "html_url", "diff_hunk", "reactions_json"];
 
 fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
     let objects: i64 = conn.query_row(
@@ -331,6 +342,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             17 => review_store::migrate_17_to_18(&tx)?,
             18 => review_store::migrate_18_to_19(&tx)?,
             19 => tx.execute_batch(NOTIFICATION_DISMISSAL_SCHEMA)?,
+            20 => migrate_20_to_21(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -413,6 +425,198 @@ fn migrate_16_to_17(tx: &Transaction<'_>) -> Result<(), CacheError> {
         )?;
     }
     Ok(())
+}
+
+/// GitHub's review threads become comment threads. The columns a comment
+/// from GitHub needs are added, and every discussion already kept is
+/// ingested so an upgraded install shows its threads before its first
+/// fetch. A discussion row that no longer reads is passed over.
+fn migrate_20_to_21(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    for column in GITHUB_MESSAGE_COLUMNS {
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM pragma_table_info('comment_messages') WHERE name=?1
+             )",
+            params![column],
+            |row| row.get(0),
+        )?;
+        if !present {
+            tx.execute(
+                &format!("ALTER TABLE comment_messages ADD COLUMN {column} TEXT"),
+                [],
+            )?;
+        }
+    }
+    let discussions = {
+        let mut stmt = tx.prepare("SELECT item_id, json FROM discussions")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (item_id, json) in discussions {
+        let Ok(discussion) = serde_json::from_str::<Discussion>(&json) else {
+            tracing::warn!(item_id, "skipping an unreadable cached discussion");
+            continue;
+        };
+        let head_sha = item_head_sha_on(tx, &item_id)?;
+        let threads = comments::review_threads_of(&discussion, &item_id, &head_sha);
+        ingest_review_threads(tx, &item_id, &threads)?;
+    }
+    Ok(())
+}
+
+/// The head of an item's pull request, or nothing when the item has none.
+fn item_head_sha_on(conn: &Connection, item_id: &str) -> Result<String, CacheError> {
+    let item = conn
+        .query_row(
+            &format!("SELECT {ITEM_COLUMNS} FROM items WHERE id = ?1"),
+            params![item_id],
+            read_item,
+        )
+        .optional()?;
+    Ok(item
+        .and_then(|item| item.pull_request().map(|pr| pr.head_sha.clone()))
+        .unwrap_or_default())
+}
+
+/// Put GitHub's review threads into the cache beside Perch's own,
+/// replacing what was kept of them before. A thread keeps its id, and so
+/// everything local under it: the reader's questions to an agent and the
+/// answers, and a draft not yet posted. Only comments that are on GitHub
+/// are replaced. A thread no longer on GitHub keeps its row while anything
+/// else is under it, and goes when nothing is. The one that stays has no
+/// comment on GitHub to point at any more, so it loses its `github_id`
+/// and is a thread on its way there, as a draft's is.
+pub(crate) fn ingest_review_threads(
+    conn: &Connection,
+    item_id: &str,
+    incoming: &[CommentThread],
+) -> Result<(), CacheError> {
+    for thread in incoming {
+        let anchor = thread.anchor.as_ref();
+        conn.execute(
+            "INSERT INTO comment_threads
+             (id, worktree_id, origin, github_id, path, start_line, line, side, commit_sha,
+              outdated, resolved, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+                worktree_id=excluded.worktree_id, origin=excluded.origin,
+                github_id=excluded.github_id, path=excluded.path,
+                start_line=excluded.start_line, line=excluded.line, side=excluded.side,
+                commit_sha=excluded.commit_sha, outdated=excluded.outdated,
+                resolved=excluded.resolved, created_at=excluded.created_at",
+            params![
+                thread.id,
+                item_id,
+                thread.origin.name(),
+                thread.github_id.map(|id| id.to_string()),
+                anchor.map(|a| a.path.as_str()),
+                anchor.map(|a| a.start_line as i64),
+                anchor.map(|a| a.line as i64),
+                anchor.map(|a| a.side.name()),
+                anchor.map(|a| a.commit_sha.as_str()),
+                thread.outdated as i64,
+                thread.resolved as i64,
+                thread.created_at.to_string(),
+            ],
+        )?;
+        for message in &thread.messages {
+            let (kind, author) = comments::sql::author_columns(&message.author);
+            conn.execute(
+                "INSERT INTO comment_messages
+                 (id, thread_id, origin, github_id, author_kind, author, author_model, body,
+                  run_id, created_at, node_id, html_url, diff_hunk, reactions_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(id) DO UPDATE SET
+                    thread_id=excluded.thread_id, origin=excluded.origin,
+                    github_id=excluded.github_id, author_kind=excluded.author_kind,
+                    author=excluded.author, body=excluded.body, created_at=excluded.created_at,
+                    node_id=excluded.node_id, html_url=excluded.html_url,
+                    diff_hunk=excluded.diff_hunk, reactions_json=excluded.reactions_json",
+                params![
+                    message.id,
+                    thread.id,
+                    message.origin.name(),
+                    message.github_id.map(|id| id.to_string()),
+                    kind,
+                    author,
+                    message.body,
+                    message.created_at.to_string(),
+                    message.node_id,
+                    message.html_url,
+                    message.diff_hunk,
+                    reactions_json(&message.reactions),
+                ],
+            )?;
+        }
+    }
+
+    let keep: HashSet<&str> = incoming
+        .iter()
+        .flat_map(|t| t.messages.iter().map(|m| m.id.as_str()))
+        .collect();
+    let stale = {
+        let mut stmt = conn.prepare(
+            "SELECT m.id FROM comment_messages m
+             JOIN comment_threads t ON t.id = m.thread_id
+             WHERE t.worktree_id = ?1 AND m.origin = 'github' AND m.github_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![item_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|id| !keep.contains(id.as_str()))
+            .collect::<Vec<_>>()
+    };
+    for id in stale {
+        conn.execute("DELETE FROM comment_messages WHERE id = ?1", params![id])?;
+    }
+    conn.execute(
+        "DELETE FROM comment_threads
+         WHERE worktree_id = ?1 AND origin = 'github'
+           AND NOT EXISTS (SELECT 1 FROM comment_messages WHERE thread_id = comment_threads.id)",
+        params![item_id],
+    )?;
+
+    let keep: HashSet<&str> = incoming.iter().map(|t| t.id.as_str()).collect();
+    let orphaned = {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM comment_threads
+             WHERE worktree_id = ?1 AND origin = 'github' AND github_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![item_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|id| !keep.contains(id.as_str()))
+            .collect::<Vec<_>>()
+    };
+    for id in orphaned {
+        conn.execute(
+            "UPDATE comment_threads SET github_id = NULL WHERE id = ?1",
+            params![id],
+        )?;
+    }
+    Ok(())
+}
+
+/// The reactions column: the groups as JSON, or nothing when there are
+/// none.
+fn reactions_json(reactions: &Reactions) -> Option<String> {
+    if reactions.is_empty() {
+        return None;
+    }
+    serde_json::to_string(reactions).ok()
+}
+
+/// The reactions a column holds; a value that does not read is none.
+fn reactions_of(json: Option<String>) -> Reactions {
+    json.and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+/// A GitHub id as the column keeps it, and back.
+fn github_id_of(column: Option<String>) -> Option<u64> {
+    column.and_then(|id| id.parse().ok())
 }
 
 #[derive(Debug)]
@@ -1577,18 +1781,24 @@ fn insert_comment_message_row(
     };
     conn.execute(
         "INSERT INTO comment_messages
-         (id, thread_id, origin, author_kind, author, author_model, body, run_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (id, thread_id, origin, github_id, author_kind, author, author_model, body, run_id,
+          created_at, node_id, html_url, diff_hunk, reactions_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             message.id,
             message.thread_id,
             message.origin.name(),
+            message.github_id.map(|id| id.to_string()),
             kind,
             author,
             model,
             message.body,
             message.run.as_ref().map(|run| run.id.as_str()),
             message.created_at.to_string(),
+            message.node_id,
+            message.html_url,
+            message.diff_hunk,
+            reactions_json(&message.reactions),
         ],
     )?;
     Ok(())
@@ -1673,6 +1883,11 @@ fn link_admitted_discussion_run(conn: &Connection, run: &RunRecord) -> Result<()
                     // rather than appending it after newer conversation.
                     created_at: previous.ended_at.unwrap_or(previous.queued_at),
                     run: Some(previous),
+                    github_id: None,
+                    node_id: None,
+                    html_url: None,
+                    diff_hunk: None,
+                    reactions: Reactions::default(),
                 },
             )?;
         }
@@ -1926,7 +2141,8 @@ impl Cache {
         worktree_id: &str,
     ) -> Result<Vec<CommentThread>, CacheError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, origin, path, start_line, line, side, commit_sha, outdated, resolved, created_at
+            "SELECT id, origin, path, start_line, line, side, commit_sha, outdated, resolved,
+                    created_at, github_id
              FROM comment_threads WHERE worktree_id = ?1 ORDER BY created_at",
         )?;
         let rows = stmt.query_map(params![worktree_id], |r| {
@@ -1941,12 +2157,14 @@ impl Cache {
                 r.get::<_, i64>(7)?,
                 r.get::<_, i64>(8)?,
                 r.get::<_, String>(9)?,
+                r.get::<_, Option<String>>(10)?,
             ))
         })?;
 
         let mut threads = Vec::new();
         for row in rows {
-            let (id, origin, path, start, line, side, sha, outdated, resolved, created) = row?;
+            let (id, origin, path, start, line, side, sha, outdated, resolved, created, github_id) =
+                row?;
             let Ok(created_at) = created.parse::<Timestamp>() else {
                 continue;
             };
@@ -1965,6 +2183,7 @@ impl Cache {
                 id,
                 worktree_id: worktree_id.to_string(),
                 origin: comments::sql::origin(&origin),
+                github_id: github_id_of(github_id),
                 anchor,
                 outdated: outdated != 0,
                 resolved: resolved != 0,
@@ -1977,7 +2196,8 @@ impl Cache {
 
     fn load_messages(&self, thread_id: &str) -> Result<Vec<CommentMessage>, CacheError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, origin, author_kind, author, author_model, body, run_id, created_at
+            "SELECT id, origin, author_kind, author, author_model, body, run_id, created_at,
+                    github_id, node_id, html_url, diff_hunk, reactions_json
              FROM comment_messages WHERE thread_id = ?1 ORDER BY created_at, rowid",
         )?;
         let rows = stmt.query_map(params![thread_id], |r| {
@@ -1990,11 +2210,30 @@ impl Cache {
                 r.get::<_, String>(5)?,
                 r.get::<_, Option<String>>(6)?,
                 r.get::<_, String>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<String>>(12)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, origin, kind, author, model, body, run_id, created) = row?;
+            let (
+                id,
+                origin,
+                kind,
+                author,
+                model,
+                body,
+                run_id,
+                created,
+                github_id,
+                node_id,
+                html_url,
+                diff_hunk,
+                reactions,
+            ) = row?;
             let Ok(created_at) = created.parse::<Timestamp>() else {
                 continue;
             };
@@ -2010,6 +2249,11 @@ impl Cache {
                 body,
                 created_at,
                 run,
+                github_id: github_id_of(github_id),
+                node_id,
+                html_url,
+                diff_hunk,
+                reactions: reactions_of(reactions),
             });
         }
         Ok(out)
@@ -2022,12 +2266,14 @@ impl Cache {
     pub fn insert_comment_thread(&self, t: &CommentThread) -> Result<(), CacheError> {
         self.conn.execute(
             "INSERT INTO comment_threads
-             (id, worktree_id, origin, path, start_line, line, side, commit_sha, outdated, resolved, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             (id, worktree_id, origin, github_id, path, start_line, line, side, commit_sha,
+              outdated, resolved, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 t.id,
                 t.worktree_id,
                 t.origin.name(),
+                t.github_id.map(|id| id.to_string()),
                 t.anchor.as_ref().map(|a| a.path.clone()),
                 t.anchor.as_ref().map(|a| a.start_line as i64),
                 t.anchor.as_ref().map(|a| a.line as i64),
@@ -2479,6 +2725,31 @@ impl Cache {
         Ok(())
     }
 
+    /// Delete what Perch put under a thread of GitHub's: the messages no
+    /// one on GitHub can see, and their runs. Every message that went to
+    /// GitHub, or is on its way, stays, and the thread with it. A thread
+    /// whose root had already left GitHub, with only Perch's messages under
+    /// it, has nothing left, and goes too rather than draw as an empty card.
+    pub fn delete_private_messages(&self, thread_id: &str) -> Result<(), CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE owner_thread_id=?1)",
+            params![thread_id],
+        )?;
+        tx.execute("DELETE FROM runs WHERE owner_thread_id = ?1", params![thread_id])?;
+        tx.execute(
+            "DELETE FROM comment_messages WHERE thread_id = ?1 AND origin = 'local'",
+            params![thread_id],
+        )?;
+        tx.execute(
+            "DELETE FROM comment_threads WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM comment_messages WHERE thread_id = ?1)",
+            params![thread_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Compatibility wrapper for the old startup call.
     pub fn fail_running_runs(&self, reason: &str) -> Result<usize, CacheError> {
         self.interrupt_active_runs(TerminalReason::AppRestart, reason)
@@ -2675,14 +2946,16 @@ impl Cache {
     // What was fetched for an item, and what the reader marked on it
     // -----------------------------------------------------------------
 
-    /// Keep the discussion, replacing whatever was kept before. One row per
+    /// Keep the discussion, replacing whatever was kept before, and its
+    /// review threads as comment threads beside Perch's own. One row per
     /// item, so Conversation can paint before the network answers.
     pub fn store_discussion(
         &self,
         item_id: &str,
         discussion: &Discussion,
     ) -> Result<(), CacheError> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT OR REPLACE INTO discussions (item_id, fetched_at, json) VALUES (?1, ?2, ?3)",
             params![
                 item_id,
@@ -2690,6 +2963,10 @@ impl Cache {
                 serde_json::to_string(discussion)?
             ],
         )?;
+        let head_sha = item_head_sha_on(&tx, item_id)?;
+        let threads = comments::review_threads_of(discussion, item_id, &head_sha);
+        ingest_review_threads(&tx, item_id, &threads)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3155,6 +3432,7 @@ mod tests {
             id: id.into(),
             worktree_id: worktree.into(),
             origin: ThreadOrigin::Local,
+            github_id: None,
             anchor: Some(Anchor {
                 path: "src/x.rs".into(),
                 start_line: 41,
@@ -3174,6 +3452,11 @@ mod tests {
                     body: "why?".into(),
                     created_at: stamp("2026-09-18T09:59:00Z"),
                     run: None,
+                    github_id: None,
+                    node_id: None,
+                    html_url: None,
+                    diff_hunk: None,
+                    reactions: Reactions::default(),
                 },
                 CommentMessage {
                     id: format!("{id}-m2"),
@@ -3186,6 +3469,11 @@ mod tests {
                     body: "because".into(),
                     created_at: stamp("2026-09-18T10:00:14Z"),
                     run: Some(run(&format!("{id}-r1"), id, RunStatus::Completed)),
+                    github_id: None,
+                    node_id: None,
+                    html_url: None,
+                    diff_hunk: None,
+                    reactions: Reactions::default(),
                 },
             ],
         }
@@ -3392,6 +3680,11 @@ mod tests {
             body: "because".into(),
             created_at: stamp("2026-09-18T10:00:14Z"),
             run: Some(completed.clone()),
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
         };
 
         c.insert_completed_reply("reply-m1", &reply).unwrap();
@@ -3424,6 +3717,11 @@ mod tests {
             body: "because".into(),
             created_at: stamp("2026-09-18T10:00:14Z"),
             run: Some(completed),
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
         };
 
         assert!(matches!(
@@ -3537,6 +3835,11 @@ mod tests {
             body: "a later question".into(),
             created_at: stamp("2026-09-18T11:00:00Z"),
             run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
         })
         .unwrap();
 
@@ -4695,7 +4998,7 @@ mod tests {
     }
 
     fn discussion() -> Discussion {
-        use crate::discussion::{IssueComment, PullEvent, PullEventKind, Review, ReviewComment};
+        use crate::discussion::{IssueComment, PullEvent, PullEventKind, Review};
         Discussion {
             node_id: "PR_7".into(),
             opened_at: Some(stamp_of("2026-09-14T14:02:00Z")),
@@ -4722,23 +5025,7 @@ mod tests {
                 html_url: String::new(),
                 reactions: Default::default(),
             }],
-            review_comments: vec![ReviewComment {
-                id: 3,
-                node_id: "PRRC_3".into(),
-                pull_request_review_id: Some(9),
-                in_reply_to_id: None,
-                user: "rohan".into(),
-                body: "epoch".into(),
-                path: "src/manifest.rs".into(),
-                line: Some(41),
-                original_line: None,
-                diff_hunk: "@@ -40,3 +40,3 @@".into(),
-                side: Side::Right,
-                created_at: stamp_of("2026-09-16T11:38:00Z"),
-                updated_at: None,
-                html_url: String::new(),
-                reactions: Default::default(),
-            }],
+            review_comments: vec![review_comment(3, None, "2026-09-16T11:38:00Z")],
             events: vec![
                 PullEvent {
                     kind: PullEventKind::Opened,
@@ -4751,6 +5038,35 @@ mod tests {
                     at: stamp_of("2026-09-17T15:00:00Z"),
                 },
             ],
+            review_threads: Vec::new(),
+        }
+    }
+
+    fn review_comment(id: u64, reply_to: Option<u64>, at: &str) -> crate::discussion::ReviewComment {
+        let mut thumbs = Reactions::default();
+        thumbs.toggle(crate::reactions::ReactionKind::ThumbsUp, true);
+        crate::discussion::ReviewComment {
+            id,
+            node_id: format!("PRRC_{id}"),
+            pull_request_review_id: Some(9),
+            in_reply_to_id: reply_to,
+            user: "rohan".into(),
+            user_avatar_url: "https://avatars/2".into(),
+            body: format!("epoch {id}"),
+            path: "src/manifest.rs".into(),
+            line: Some(41),
+            original_line: None,
+            start_line: None,
+            original_start_line: None,
+            diff_hunk: "@@ -40,3 +40,3 @@".into(),
+            side: Side::Right,
+            start_side: None,
+            commit_id: String::new(),
+            original_commit_id: String::new(),
+            created_at: stamp_of(at),
+            updated_at: None,
+            html_url: format!("https://github.com/acme/widgets/pull/7#discussion_r{id}"),
+            reactions: thumbs,
         }
     }
 
@@ -4775,6 +5091,346 @@ mod tests {
         newer.comments.clear();
         c.store_discussion("item-pr-7", &newer).unwrap();
         assert_eq!(c.load_discussion("item-pr-7").unwrap().unwrap().1, newer);
+    }
+
+    #[test]
+    fn storing_a_discussion_keeps_its_review_threads_as_comment_threads() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        let mut d = discussion();
+        d.review_comments.push(review_comment(4, Some(3), "2026-09-16T11:39:00Z"));
+        c.store_discussion("item-pr-7", &d).unwrap();
+
+        let threads = c.load_comment_threads("item-pr-7").unwrap();
+        assert_eq!(threads.len(), 1);
+        let t = &threads[0];
+        assert_eq!((t.id.as_str(), t.origin, t.github_id), ("gh-3", ThreadOrigin::GitHub, Some(3)));
+        assert_eq!(
+            t.anchor.as_ref().map(|a| a.commit_sha.as_str()),
+            Some("abc123"),
+            "a comment without a commit anchors at the item's head"
+        );
+        assert_eq!(t.created_at, stamp_of("2026-09-16T11:38:00Z"));
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-3", "gh-4"]);
+        let root = &t.messages[0];
+        assert_eq!(root.author, Author::GitHubUser("rohan".into()));
+        assert_eq!(root.github_id, Some(3));
+        assert_eq!(root.node_id.as_deref(), Some("PRRC_3"));
+        assert_eq!(root.html_url.as_deref(), Some("https://github.com/acme/widgets/pull/7#discussion_r3"));
+        assert_eq!(root.diff_hunk.as_deref(), Some("@@ -40,3 +40,3 @@"));
+        assert_eq!(root.reactions, d.review_comments[0].reactions);
+
+        // Storing the same discussion again changes nothing.
+        c.store_discussion("item-pr-7", &d).unwrap();
+        assert_eq!(c.load_comment_threads("item-pr-7").unwrap(), threads);
+
+        // An edit on GitHub reaches the row; a reply gone from GitHub goes.
+        d.review_comments[0].body = "epoch, revised".into();
+        d.review_comments.pop();
+        c.store_discussion("item-pr-7", &d).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        assert_eq!(t.messages.len(), 1);
+        assert_eq!(t.messages[0].body, "epoch, revised");
+    }
+
+    #[test]
+    fn re_ingesting_keeps_what_perch_put_under_a_github_thread() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        let local = CommentMessage {
+            id: "q1".into(),
+            thread_id: "gh-3".into(),
+            origin: ThreadOrigin::Local,
+            author: Author::User,
+            body: "what does this mean?".into(),
+            created_at: stamp_of("2026-09-16T12:00:00Z"),
+            run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
+        };
+        let draft = CommentMessage {
+            id: "d1".into(),
+            origin: ThreadOrigin::GitHub,
+            body: "I will fix it".into(),
+            created_at: stamp_of("2026-09-16T12:01:00Z"),
+            ..local.clone()
+        };
+        c.insert_comment_message(&local).unwrap();
+        c.insert_comment_message(&draft).unwrap();
+
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-3", "q1", "d1"]);
+        assert!(t.messages[1].is_private());
+        assert!(t.messages[2].is_draft());
+
+        // The thread left GitHub. With Perch's messages under it, it stays.
+        let mut gone = discussion();
+        gone.review_comments.clear();
+        c.store_discussion("item-pr-7", &gone).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        assert_eq!(t.id, "gh-3");
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["q1", "d1"]);
+        assert_eq!(
+            (t.origin, t.github_id),
+            (ThreadOrigin::GitHub, None),
+            "nothing on GitHub to reply to any more"
+        );
+
+        // It comes back as a thread of its own, and is not deleted for
+        // being empty of GitHub's comments.
+        c.store_discussion("item-pr-7", &gone).unwrap();
+        assert_eq!(c.load_comment_threads("item-pr-7").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_perchs_messages_under_a_github_thread_leaves_the_thread_and_githubs() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        let question = CommentMessage {
+            id: "q1".into(),
+            thread_id: "gh-3".into(),
+            origin: ThreadOrigin::Local,
+            author: Author::User,
+            body: "what does this mean?".into(),
+            created_at: stamp_of("2026-09-16T12:00:00Z"),
+            run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
+        };
+        let mut answer_run = run("gh-3-r1", "gh-3", RunStatus::Completed);
+        answer_run.owner = RunOwner::Discussion {
+            item_id: "item-pr-7".into(),
+            thread_id: "gh-3".into(),
+            request_id: "q1".into(),
+        };
+        let answer = CommentMessage {
+            id: "a1".into(),
+            author: Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+            body: "it means this".into(),
+            created_at: stamp_of("2026-09-16T12:01:00Z"),
+            run: Some(answer_run.clone()),
+            ..question.clone()
+        };
+        let draft = CommentMessage {
+            id: "d1".into(),
+            origin: ThreadOrigin::GitHub,
+            body: "I will fix it".into(),
+            created_at: stamp_of("2026-09-16T12:02:00Z"),
+            ..question.clone()
+        };
+        c.insert_comment_message(&question).unwrap();
+        c.insert_run(&answer_run).unwrap();
+        c.insert_comment_message(&answer).unwrap();
+        c.insert_comment_message(&draft).unwrap();
+
+        c.delete_private_messages("gh-3").unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-3", "d1"], "GitHub's comment and the draft stay");
+        assert_eq!(c.load_run("gh-3-r1").unwrap(), None, "the answer's run goes with it");
+
+        // Nothing of Perch's under it is nothing to do.
+        c.delete_private_messages("gh-3").unwrap();
+        assert_eq!(c.load_comment_threads("item-pr-7").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_perchs_messages_under_a_thread_whose_root_left_github_deletes_the_thread() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        c.insert_comment_message(&CommentMessage {
+            id: "q1".into(),
+            thread_id: "gh-3".into(),
+            origin: ThreadOrigin::Local,
+            author: Author::User,
+            body: "what does this mean?".into(),
+            created_at: stamp_of("2026-09-16T12:00:00Z"),
+            run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
+        })
+        .unwrap();
+        let mut gone = discussion();
+        gone.review_comments.clear();
+        c.store_discussion("item-pr-7", &gone).unwrap();
+        let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
+        assert_eq!((t.id.as_str(), t.github_id), ("gh-3", None));
+
+        c.delete_private_messages("gh-3").unwrap();
+        assert!(
+            c.load_comment_threads("item-pr-7").unwrap().is_empty(),
+            "nothing was left under it"
+        );
+    }
+
+    #[test]
+    fn a_thread_whose_root_left_github_stops_pointing_at_it() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        let mut d = discussion();
+        d.review_comments.push(review_comment(4, Some(3), "2026-09-16T11:39:00Z"));
+        c.store_discussion("item-pr-7", &d).unwrap();
+        c.insert_comment_message(&CommentMessage {
+            id: "q1".into(),
+            thread_id: "gh-3".into(),
+            origin: ThreadOrigin::Local,
+            author: Author::User,
+            body: "what does this mean?".into(),
+            created_at: stamp_of("2026-09-16T12:00:00Z"),
+            run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Reactions::default(),
+        })
+        .unwrap();
+
+        // The root is deleted on GitHub; the reply is now a root of its own.
+        d.review_comments.remove(0);
+        c.store_discussion("item-pr-7", &d).unwrap();
+        let threads = c.load_comment_threads("item-pr-7").unwrap();
+        let by_id = |id: &str| threads.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(by_id("gh-4").github_id, Some(4));
+        assert_eq!(by_id("gh-3").github_id, None, "comment 3 is gone");
+        let ids: Vec<_> = by_id("gh-3").messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["q1"]);
+    }
+
+    #[test]
+    fn a_thread_gone_from_github_with_nothing_else_under_it_is_deleted() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        assert_eq!(c.load_comment_threads("item-pr-7").unwrap().len(), 1);
+        let mut gone = discussion();
+        gone.review_comments.clear();
+        c.store_discussion("item-pr-7", &gone).unwrap();
+        assert!(c.load_comment_threads("item-pr-7").unwrap().is_empty());
+    }
+
+    #[test]
+    fn ingestion_is_scoped_to_its_item() {
+        let c = Cache::open_in_memory().unwrap();
+        c.insert_item(&pr_item(7)).unwrap();
+        c.insert_item(&pr_item(8)).unwrap();
+        c.store_discussion("item-pr-7", &discussion()).unwrap();
+        let mut other = discussion();
+        other.review_comments = vec![review_comment(5, None, "2026-09-16T11:38:00Z")];
+        c.store_discussion("item-pr-8", &other).unwrap();
+        let mut gone = discussion();
+        gone.review_comments.clear();
+        c.store_discussion("item-pr-8", &gone).unwrap();
+        assert_eq!(c.load_comment_threads("item-pr-7").unwrap().len(), 1);
+        assert!(c.load_comment_threads("item-pr-8").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_message_from_github_round_trips_its_columns() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut t = comment_thread("t1", "w");
+        t.origin = ThreadOrigin::GitHub;
+        t.github_id = Some(77);
+        let mut hooray = Reactions::default();
+        hooray.toggle(crate::reactions::ReactionKind::Hooray, true);
+        t.messages[0] = CommentMessage {
+            origin: ThreadOrigin::GitHub,
+            author: Author::GitHubUser("rohan".into()),
+            github_id: Some(77),
+            node_id: Some("PRRC_77".into()),
+            html_url: Some("https://github.com/acme/widgets/pull/7#discussion_r77".into()),
+            diff_hunk: Some("@@ -1 +1 @@".into()),
+            reactions: hooray,
+            ..t.messages[0].clone()
+        };
+        c.insert_comment_thread(&t).unwrap();
+        let loaded = c.load_comment_threads("w").unwrap().pop().unwrap();
+        assert_eq!(loaded.github_id, Some(77));
+        assert_eq!(loaded.messages[0], t.messages[0]);
+        assert_eq!(loaded.messages[1].github_id, None);
+        assert!(loaded.messages[1].reactions.is_empty());
+        let stored: Option<String> = c
+            .conn
+            .query_row(
+                "SELECT reactions_json FROM comment_messages WHERE id = ?1",
+                params![t.messages[1].id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, None, "no reactions is no column value");
+    }
+
+    #[test]
+    fn schema_20_gains_the_github_message_columns_and_the_threads_of_kept_discussions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let item = pr_item(20);
+        let local = comment_thread("local-20", &item.id);
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&item).unwrap();
+            cache.insert_comment_thread(&local).unwrap();
+            for column in GITHUB_MESSAGE_COLUMNS {
+                cache
+                    .conn
+                    .execute(&format!("ALTER TABLE comment_messages DROP COLUMN {column}"), [])
+                    .unwrap();
+            }
+            cache
+                .conn
+                .execute(
+                    "INSERT INTO discussions (item_id, fetched_at, json) VALUES (?1, ?2, ?3)",
+                    params![
+                        item.id,
+                        "2026-09-18T09:00:00Z",
+                        serde_json::to_string(&discussion()).unwrap()
+                    ],
+                )
+                .unwrap();
+            cache
+                .conn
+                .execute(
+                    "INSERT INTO discussions (item_id, fetched_at, json) VALUES ('broken', ?1, '{')",
+                    params!["2026-09-18T09:00:00Z"],
+                )
+                .unwrap();
+            cache.set_meta("schema_version", "20").unwrap();
+        }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 20,
+                to: SCHEMA_VERSION,
+            }
+        );
+        let threads = cache.load_comment_threads(&item.id).unwrap();
+        let ids: Vec<_> = threads.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-3", "local-20"]);
+        assert_eq!(threads[0].messages[0].node_id.as_deref(), Some("PRRC_3"));
+        assert_eq!(
+            threads[0].anchor.as_ref().map(|a| a.commit_sha.as_str()),
+            Some("abc123")
+        );
+        assert_eq!(threads[1].messages.len(), 2);
+        assert!(cache.load_comment_threads("broken").unwrap().is_empty());
     }
 
     #[test]

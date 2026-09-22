@@ -357,6 +357,12 @@ pub enum Command {
     DeleteCommentThread {
         id: String,
     },
+    /// Delete what Perch put under a thread of GitHub's: the questions
+    /// asked there and their answers. The thread and GitHub's comments
+    /// stay.
+    DeletePrivateMessages {
+        thread_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -2039,6 +2045,12 @@ impl Backend {
             .send(Command::DeleteCommentThread { id: id.to_string() });
     }
 
+    pub fn delete_private_messages(&self, thread_id: &str) {
+        let _ = self.commands.send(Command::DeletePrivateMessages {
+            thread_id: thread_id.to_string(),
+        });
+    }
+
     pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
         let _ = self.commands.send(Command::Hover {
             token,
@@ -2924,6 +2936,10 @@ async fn run(
             Command::DeleteCommentThread { id } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { delete_comment_thread(&ctx, &id).await });
+            }
+            Command::DeletePrivateMessages { thread_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { delete_private_messages(&ctx, &thread_id).await });
             }
             Command::OpenFile {
                 path,
@@ -5352,7 +5368,7 @@ async fn finish_open(
                     open.body = Some(d.body.clone());
                 }
             }
-            ctx.want_avatars(d.comments.iter().map(|c| c.user_avatar_url.clone()));
+            ctx.want_avatars(discussion_avatars(&d));
             let _ = ctx.events.send(Event::DiscussionReady {
                 item_id: item.id.clone(),
                 discussion: Arc::new(d),
@@ -6238,6 +6254,9 @@ fn upsert_cached_reactions(ctx: &Ctx, item_id: &str, node_id: &str, reactions: &
     if let Some(Err(error)) = ctx.with_cache(|cache| cache.store_discussion(item_id, &discussion)) {
         tracing::warn!(item = item_id, %error, "could not cache the reaction");
     }
+    if ctx.is_open(item_id) {
+        ctx.send_threads(item_id);
+    }
 }
 
 /// Add or replace the review returned by GitHub in the durable conversation.
@@ -6279,6 +6298,9 @@ fn upsert_cached_review(
         .sort_by_key(|review| (review.submitted_at, review.id));
     if let Some(Err(error)) = ctx.with_cache(|cache| cache.store_discussion(item_id, &discussion)) {
         tracing::warn!(item = item_id, %error, "could not cache the submitted review");
+    }
+    if ctx.is_open(item_id) {
+        ctx.send_threads(item_id);
     }
 }
 
@@ -7322,6 +7344,9 @@ fn keep_issue_comments(
     comments: &[perch_github::IssueComment],
 ) {
     ctx.with_cache(|c| c.store_discussion(item_id, &issue_discussion(issue, comments)));
+    if ctx.is_open(item_id) {
+        ctx.send_threads(item_id);
+    }
 }
 
 /// An issue and its comments in the shape a pull request's discussion
@@ -7339,6 +7364,7 @@ pub(super) fn issue_discussion(
         reviews: Vec::new(),
         review_comments: Vec::new(),
         events: Vec::new(),
+        review_threads: Vec::new(),
     }
 }
 
@@ -8503,6 +8529,10 @@ async fn fetch_discussion(
     if committed.is_none() {
         return;
     }
+    // The review threads are comment threads now; the cards follow them.
+    if ctx.is_open(item_id) {
+        ctx.send_threads(item_id);
+    }
 
     // Shown now if the item is still the one open. The state layer also
     // retains an accepted review if navigation changes after the cache
@@ -8513,12 +8543,7 @@ async fn fetch_discussion(
         }
     }
     if ctx.is_open(item_id) {
-        ctx.want_avatars(
-            discussion
-                .comments
-                .iter()
-                .map(|c| c.user_avatar_url.clone()),
-        );
+        ctx.want_avatars(discussion_avatars(&discussion));
         let _ = ctx.events.send(Event::DiscussionReady {
             item_id: item_id.to_string(),
             discussion: Arc::new(discussion.clone()),
@@ -8526,15 +8551,35 @@ async fn fetch_discussion(
     }
 }
 
+/// The faces a discussion shows: whoever commented on the conversation
+/// or on a line.
+fn discussion_avatars(discussion: &perch_github::Discussion) -> Vec<String> {
+    discussion
+        .comments
+        .iter()
+        .map(|c| c.user_avatar_url.clone())
+        .chain(
+            discussion
+                .review_comments
+                .iter()
+                .map(|c| c.user_avatar_url.clone()),
+        )
+        .collect()
+}
+
 /// A thread whose file changed since its anchor was made may have moved.
 ///
 /// `git diff --quiet <sha> <head> -- <path>` per thread whose sha differs
-/// from the head; the common case, same sha, costs nothing.
+/// from the head; the common case, same sha, costs nothing. GitHub's own
+/// threads are left alone: GitHub says when those are outdated.
 async fn mark_outdated_threads(ctx: &Ctx, item_id: &str, head: &str, worktree: &Path) {
     let Some(Ok(threads)) = ctx.with_cache(|c| c.load_comment_threads(item_id)) else {
         return;
     };
     for thread in threads {
+        if thread.origin == ThreadOrigin::GitHub {
+            continue;
+        }
         let Some(anchor) = &thread.anchor else {
             continue;
         };
@@ -8940,6 +8985,7 @@ async fn ask(
             id: perch_github::comments::new_id(),
             worktree_id: item_id.clone(),
             origin: ThreadOrigin::Local,
+            github_id: None,
             anchor: anchor.clone(),
             outdated: false,
             resolved: false,
@@ -9073,6 +9119,11 @@ async fn ask(
         body: question.clone(),
         created_at: now,
         run: None,
+        github_id: None,
+        node_id: None,
+        html_url: None,
+        diff_hunk: None,
+        reactions: Default::default(),
     };
     let written = ctx.with_cache(|c| {
         if is_new {
@@ -9448,6 +9499,11 @@ async fn execute_question(
             body: final_text,
             created_at: Timestamp::now(),
             run: Some(final_run.clone()),
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Default::default(),
         };
         match ctx.with_cache(|cache| cache.insert_completed_reply(&request_id, &reply)) {
             Some(Ok(())) => {}
@@ -9799,6 +9855,35 @@ async fn delete_comment_thread(ctx: &Ctx, id: &str) {
     if let Some(item_id) = item_id {
         ctx.send_threads(&item_id);
     }
+}
+
+/// Delete Perch's messages under a thread of GitHub's, and their runs,
+/// the way a whole thread is deleted: stopped and reaped first, so a late
+/// process event cannot put an answer back. The thread stays while
+/// anything on GitHub, or on its way there, is under it.
+async fn delete_private_messages(ctx: &Ctx, thread_id: &str) {
+    let Some(item_id) = ctx
+        .with_cache(|cache| cache.comment_thread_item_id(thread_id).ok().flatten())
+        .flatten()
+    else {
+        return;
+    };
+    let deletion = match ctx.runs.block_owner(&item_id, Some(thread_id)) {
+        Ok(deletion) => deletion,
+        Err(message) => {
+            ctx.notice(message);
+            return;
+        }
+    };
+    ctx.runs.cancel_owner(&item_id, Some(thread_id)).await;
+    if let Some(Err(e)) = ctx.with_cache(|c| c.delete_private_messages(thread_id)) {
+        let _ = ctx
+            .events
+            .send(Event::Notice(format!("Could not delete the messages: {e}")));
+        return;
+    }
+    drop(deletion);
+    ctx.send_threads(&item_id);
 }
 
 /// A checkout for a worktree already on disk, without touching the network.
@@ -10670,6 +10755,7 @@ mod tests {
             id: id.into(),
             worktree_id: "item".into(),
             origin: ThreadOrigin::Local,
+            github_id: None,
             anchor: None,
             outdated: false,
             resolved: false,
@@ -11819,6 +11905,114 @@ mod tests {
             .unwrap();
     }
 
+    /// A kept discussion with one review comment on a line, `PRRC_31`,
+    /// which the cache keeps as the thread `gh-31`.
+    fn store_line_commented_discussion(ctx: &Ctx, item: &Item) {
+        let discussion = perch_github::Discussion {
+            review_comments: vec![perch_github::ReviewComment {
+                id: 31,
+                node_id: "PRRC_31".into(),
+                pull_request_review_id: Some(9),
+                in_reply_to_id: None,
+                user: "rohan".into(),
+                user_avatar_url: String::new(),
+                body: "epoch".into(),
+                path: "src/x.rs".into(),
+                line: Some(41),
+                original_line: None,
+                start_line: None,
+                original_start_line: None,
+                start_side: None,
+                commit_id: String::new(),
+                original_commit_id: String::new(),
+                diff_hunk: String::new(),
+                side: perch_github::Side::Right,
+                created_at: "2026-09-16T11:38:00Z".parse().unwrap(),
+                updated_at: None,
+                html_url: String::new(),
+                reactions: Default::default(),
+            }],
+            ..Default::default()
+        };
+        ctx.with_cache(|c| c.store_discussion(&item.id, &discussion))
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn deleting_perchs_messages_under_a_github_thread_keeps_the_thread_and_sends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        store_line_commented_discussion(&ctx, &item);
+        open_in_slot(&ctx, &item);
+        let question = CommentMessage {
+            id: "q1".into(),
+            thread_id: "gh-31".into(),
+            origin: ThreadOrigin::Local,
+            author: Author::User,
+            body: "why?".into(),
+            created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
+            run: None,
+            github_id: None,
+            node_id: None,
+            html_url: None,
+            diff_hunk: None,
+            reactions: Default::default(),
+        };
+        ctx.with_cache(|c| c.insert_comment_message(&question)).unwrap().unwrap();
+
+        delete_private_messages(&ctx, "gh-31").await;
+
+        let threads = ctx.with_cache(|c| c.load_comment_threads(&item.id)).unwrap().unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "gh-31");
+        let ids: Vec<_> = threads[0].messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gh-31"], "GitHub's comment stays; the question goes");
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(&events[..], [Event::CommentThreads { item_id, threads, .. }]
+                if item_id == &item.id && threads.len() == 1 && threads[0].messages.len() == 1),
+            "{events:?}"
+        );
+
+        // A thread that is not there is nothing to do, and nothing said.
+        delete_private_messages(&ctx, "nowhere").await;
+        assert!(received.try_iter().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn keeping_an_issues_comments_sends_the_items_threads_while_it_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        let issue = perch_github::Issue {
+            node_id: String::new(),
+            reactions: Default::default(),
+            number: 7,
+            title: "t".into(),
+            body: String::new(),
+            state: "open".into(),
+            state_reason: None,
+            author_login: "rohan".into(),
+            author_avatar_url: String::new(),
+            labels: vec![],
+            assignees: vec![],
+            comments: 0,
+            created_at: None,
+            updated_at: "2026-09-16T11:40:00Z".parse().unwrap(),
+            repo_full_name: "a/b".into(),
+        };
+        keep_issue_comments(&ctx, &item.id, &issue, &[]);
+        assert!(received.try_iter().next().is_none(), "nobody is looking");
+        open_in_slot(&ctx, &item);
+        keep_issue_comments(&ctx, &item.id, &issue, &[]);
+        assert!(matches!(
+            received.try_iter().next(),
+            Some(Event::CommentThreads { item_id, .. }) if item_id == item.id
+        ));
+    }
+
     #[tokio::test]
     async fn a_reaction_github_takes_is_shown_kept_and_fences_older_reads() {
         let dir = tempfile::tempdir().unwrap();
@@ -11839,11 +12033,17 @@ mod tests {
 
         assert_eq!(paths.lock().unwrap().as_slice(), ["/graphql"]);
         let events: Vec<Event> = received.try_iter().collect();
+        // The kept discussion's threads are sent again with it, ahead of
+        // the reaction.
         assert!(
             matches!(
                 &events[..],
-                [Event::ReactionsUpdated { item_id, node_id, kind: ReactionKind::ThumbsUp, reactions }]
-                    if item_id == &item.id
+                [
+                    Event::CommentThreads { item_id: threads_item, .. },
+                    Event::ReactionsUpdated { item_id, node_id, kind: ReactionKind::ThumbsUp, reactions },
+                ]
+                    if threads_item == &item.id
+                        && item_id == &item.id
                         && node_id == "IC_1"
                         && reactions.count(ReactionKind::ThumbsUp) == 2
                         && reactions.viewer_reacted(ReactionKind::ThumbsUp)
@@ -11946,6 +12146,7 @@ mod tests {
             reviews: Vec::new(),
             review_comments: Vec::new(),
             events: Vec::new(),
+            review_threads: Vec::new(),
         };
         ctx.with_cache(|c| c.store_discussion(&item.id, &discussion))
             .unwrap()

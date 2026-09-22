@@ -768,6 +768,7 @@ mod tests {
                     id: thread_id.into(),
                     worktree_id: "item".into(),
                     origin: perch_github::ThreadOrigin::Local,
+                    github_id: None,
                     anchor: None,
                     outdated: false,
                     resolved: false,
@@ -785,6 +786,11 @@ mod tests {
                 body: "Why?".into(),
                 created_at: Timestamp::now(),
                 run: None,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
             })
             .unwrap();
     }

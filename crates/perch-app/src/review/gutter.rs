@@ -36,7 +36,7 @@ use floem::style::Position;
 use floem::views::{dyn_container, dyn_stack, ClipExt, Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
 use perch_git::Row;
-use perch_github::Side as AnchorSide;
+use perch_github::{Side as AnchorSide, ThreadOrigin};
 
 use crate::icons::{self, SidebarIcon};
 use crate::review::cards::tip;
@@ -558,17 +558,12 @@ fn anchor_slot(
     key: usize,
     anchor: AnchorRow,
 ) -> impl IntoView {
-    let github_display = match anchor {
-        AnchorRow::Stacked(display) | AnchorRow::Head { display, .. } => Some(display),
-        AnchorRow::Base(_) => None,
-    };
     let plus_display = match anchor {
         AnchorRow::Stacked(display) if file.buffer.head_line(display).is_some() => Some(display),
         AnchorRow::Head { display, .. } => Some(display),
         AnchorRow::Stacked(_) | AnchorRow::Base(_) => None,
     };
     let marker_file = file.clone();
-    let github_file = file.clone();
     let plus_file = file;
 
     dyn_container(
@@ -582,58 +577,33 @@ fn anchor_slot(
                     state.thread_starting_on(&marker_file, AnchorSide::Right, head)
                 }
             }
-            .map(|t| (t.id, t.outdated));
-            let github = github_display
-                .and_then(|display| state.github_comment_starting_at(&github_file, display));
+            .map(|t| (t.id, t.origin, t.outdated));
             let hovered = state.hovered_line.get() == Some(key);
-            (thread, github, hovered)
+            (thread, hovered)
         },
-        move |(thread, github, hovered)| match (
-            thread,
-            github,
-            hovered.then_some(plus_display).flatten(),
-        ) {
-            // A review comment from GitHub on this line, hollow where a
-            // thread of the reader's own is solid. Click scrolls the
-            // editor to its card and flashes it, as it does for the
-            // reader's own.
-            (None, Some(id), _) => Container::new(
-                sidebar_glyph(SidebarIcon::ThreadHollow, theme::FG_MUTED)
-                    .style(|s| s.size(12.0, 12.0)),
-            )
-            .on_event_stop(el::Click, move |_, _| {
-                state.focus_card.set(Some(CardId::GitHub(id)))
-            })
-            .style(|s| {
-                crate::ui::widgets::clickable(s)
-                    .size(16.0, 16.0)
-                    .items_center()
-                    .justify_center()
-            })
-            .into_any(),
-            // Click scrolls the editor to the thread's card and flashes it.
-            (Some((id, outdated)), _, _) => Container::new(
-                sidebar_glyph(
-                    SidebarIcon::Thread,
-                    if outdated {
-                        theme::FG_SUBTLE
-                    } else {
-                        theme::ACCENT
-                    },
-                )
-                .style(|s| s.size(12.0, 12.0)),
-            )
-            .on_event_stop(el::Click, move |_, _| {
-                state.focus_card.set(Some(CardId::Thread(id.clone())))
-            })
-            .style(|s| {
-                crate::ui::widgets::clickable(s)
-                    .size(16.0, 16.0)
-                    .items_center()
-                    .justify_center()
-            })
-            .into_any(),
-            (None, None, Some(display_line)) => {
+        move |(thread, hovered)| match (thread, hovered.then_some(plus_display).flatten()) {
+            // A thread on this line: solid for the reader's own, hollow and
+            // muted for one of GitHub's. Click scrolls the editor to its
+            // card and flashes it.
+            (Some((id, origin, outdated)), _) => {
+                let (icon, color) = match origin {
+                    ThreadOrigin::GitHub => (SidebarIcon::ThreadHollow, theme::FG_MUTED),
+                    ThreadOrigin::Local if outdated => (SidebarIcon::Thread, theme::FG_SUBTLE),
+                    ThreadOrigin::Local => (SidebarIcon::Thread, theme::ACCENT),
+                };
+                Container::new(sidebar_glyph(icon, color).style(|s| s.size(12.0, 12.0)))
+                    .on_event_stop(el::Click, move |_, _| {
+                        state.focus_card.set(Some(CardId::Thread(id.clone())))
+                    })
+                    .style(|s| {
+                        crate::ui::widgets::clickable(s)
+                            .size(16.0, 16.0)
+                            .items_center()
+                            .justify_center()
+                    })
+                    .into_any()
+            }
+            (None, Some(display_line)) => {
                 let plus_file = plus_file.clone();
                 Container::new(
                     sidebar_glyph(SidebarIcon::Plus, theme::CANVAS).style(|s| s.size(11.0, 11.0)),
@@ -662,7 +632,7 @@ fn anchor_slot(
                 })
                 .into_any()
             }
-            (None, None, None) => Empty::new().into_any(),
+            (None, None) => Empty::new().into_any(),
         },
     )
 }
