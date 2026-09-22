@@ -1024,6 +1024,7 @@ async fn execute_attempt(
         head_sha: captured.manifest.range.head.clone(),
         output_schema: schema,
         instructions: None,
+        transcript: Some(transcript(captured.root(), &attempt.id, "review")),
     };
 
     transition_attempt(ctx, &attempt_id, ReviewerPhase::Reviewing);
@@ -1047,6 +1048,10 @@ async fn execute_attempt(
     run = ctx.runs.load(&run.id).unwrap_or(run);
 
     let mut raw = Vec::new();
+    // The report the reviewer filed through its tool, and whether a
+    // subagent filed it. A top-level report outranks a subagent's; among
+    // equals the last one filed stands.
+    let mut report: Option<(bool, serde_json::Value)> = None;
     let mut event_index = 0_u64;
     let mut persistence_error = None;
     while let Some(event) = rx.recv().await {
@@ -1058,6 +1063,16 @@ async fn execute_attempt(
                 | perch_agent::RunEvent::Stopped { .. }
         );
         if terminal {
+            continue;
+        }
+        if let perch_agent::RunEvent::Report {
+            input, parent_id, ..
+        } = &event
+        {
+            let delegated = parent_id.is_some();
+            if !(delegated && matches!(report, Some((false, _)))) {
+                report = Some((delegated, input.clone()));
+            }
             continue;
         }
         let stored = stored_process_event(&event);
@@ -1113,7 +1128,10 @@ async fn execute_attempt(
             cost_usd: native_cost,
             duration_ms: native_duration,
         } => {
-            let native_raw = raw.join("\n\n");
+            let native_raw = perch_agent::preserve_native_response(
+                &raw.join("\n\n"),
+                report.as_ref().map(|(_, input)| input),
+            );
             transition_attempt(ctx, &attempt_id, ReviewerPhase::Extracting);
             send_group(ctx, &group_id);
             let manifest = match extraction_manifest(&captured).await {
@@ -1668,9 +1686,22 @@ fn stored_process_event(event: &perch_agent::RunEvent) -> Option<StoredRunEvent>
             cost_usd: None,
             duration_ms: None,
         }),
-        perch_agent::RunEvent::Finished { .. }
+        // The matching tool call is the stored activity; the report itself
+        // goes into the preserved native response.
+        perch_agent::RunEvent::Report { .. }
+        | perch_agent::RunEvent::Finished { .. }
         | perch_agent::RunEvent::Failed { .. }
         | perch_agent::RunEvent::Stopped { .. } => None,
+    }
+}
+
+/// Where an attempt's raw CLI output is kept: beside the snapshot it
+/// reviewed, named for the attempt and the pass, so an odd result can be
+/// read back line for line. Nothing in Perch reads these.
+fn transcript(root: &std::path::Path, attempt_id: &str, pass: &str) -> perch_agent::Transcript {
+    perch_agent::Transcript {
+        stdout: root.join(format!("{attempt_id}.{pass}.stream.jsonl")),
+        stderr: root.join(format!("{attempt_id}.{pass}.stderr.log")),
     }
 }
 
@@ -1837,6 +1868,7 @@ async fn run_verification(
         effort,
         cwd: snapshot.checkout(),
         prompt,
+        transcript: Some(transcript(snapshot.root(), &attempt.id, "verification")),
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let handle = match perch_agent::Run::spawn_review_verification(spec, tx) {

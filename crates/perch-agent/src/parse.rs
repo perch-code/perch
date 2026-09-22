@@ -5,6 +5,9 @@ use serde_json::Value;
 
 use crate::RunEvent;
 
+/// Claude Code's tool for filing review findings as data rather than prose.
+pub const REPORT_TOOL: &str = "ReportFindings";
+
 /// The events on one line of `--output-format stream-json`. Usually one,
 /// sometimes none, and a message with several content blocks yields one
 /// per block.
@@ -29,23 +32,36 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
         }],
         ("assistant", _) => blocks(&v)
             .iter()
-            .filter_map(|b| match b.get("type").and_then(Value::as_str) {
-                Some("text") if delegated => None,
+            .flat_map(|b| match b.get("type").and_then(Value::as_str) {
+                Some("text") if delegated => Vec::new(),
                 Some("text") => {
                     let text = str_of(b, "text");
-                    (!text.trim().is_empty()).then_some(RunEvent::Text(text))
+                    (!text.trim().is_empty())
+                        .then_some(RunEvent::Text(text))
+                        .into_iter()
+                        .collect()
                 }
                 Some("tool_use") => {
                     let name = str_of(b, "name");
                     let input = b.get("input").cloned().unwrap_or(Value::Null);
-                    Some(RunEvent::ToolCall {
+                    let mut events = vec![RunEvent::ToolCall {
                         id: str_of(b, "id"),
                         summary: summarize_tool_call(&name, &input),
-                        name,
+                        name: name.clone(),
                         parent_id: parent_id.clone(),
-                    })
+                    }];
+                    // The call is the report: its input is the findings,
+                    // and the prose that follows is only a summary.
+                    if name == REPORT_TOOL {
+                        events.push(RunEvent::Report {
+                            tool: name,
+                            input,
+                            parent_id: parent_id.clone(),
+                        });
+                    }
+                    events
                 }
-                _ => None,
+                _ => Vec::new(),
             })
             .collect(),
         ("user", _) => blocks(&v)
@@ -229,6 +245,16 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
         },
         // The input is a whole script; the line says only that one ran.
         "Workflow" => "Ran a workflow".to_string(),
+        REPORT_TOOL => match input
+            .get("findings")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+        {
+            Some(0) => "Reported no findings".to_string(),
+            Some(1) => "Reported 1 finding".to_string(),
+            Some(count) => format!("Reported {count} findings"),
+            None => "Reported findings".to_string(),
+        },
         other => match field("file_path")
             .or_else(|| field("path"))
             .or_else(|| field("pattern"))
@@ -413,6 +439,42 @@ mod tests {
             vec![RunEvent::Failed {
                 message: "error max turns".into()
             }]
+        );
+    }
+
+    #[test]
+    fn a_filed_report_arrives_as_its_call_and_as_the_report() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"ReportFindings","input":{"findings":[{"file":"src/lib.rs","line":4,"summary":"s","failure_scenario":"f"}],"level":"low"}}]},"parent_tool_use_id":null,"session_id":"s"}"#;
+        let events = parse_line(line);
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0],
+            RunEvent::ToolCall {
+                id: "toolu_1".into(),
+                name: "ReportFindings".into(),
+                summary: "Reported 1 finding".into(),
+                parent_id: None,
+            }
+        );
+        let RunEvent::Report {
+            tool,
+            input,
+            parent_id,
+        } = &events[1]
+        else {
+            panic!("no report: {events:?}");
+        };
+        assert_eq!(tool, "ReportFindings");
+        assert_eq!(input["findings"][0]["line"], 4);
+        assert!(parent_id.is_none());
+
+        let empty = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"ReportFindings","input":{"findings":[],"level":"low"}}]},"parent_tool_use_id":"toolu_parent","session_id":"s"}"#;
+        let events = parse_line(empty);
+        assert!(
+            matches!(&events[0], RunEvent::ToolCall { summary, parent_id: Some(_), .. } if summary == "Reported no findings")
+        );
+        assert!(
+            matches!(&events[1], RunEvent::Report { parent_id: Some(parent), .. } if parent == "toolu_parent")
         );
     }
 

@@ -13,10 +13,13 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    claude_settings, denied_tools, toml_string, Backend, ORCHESTRATION_TOOLS, READ_ONLY_TOOLS,
+    claude_settings, denied_tools, toml_string, Backend, Transcript, ORCHESTRATION_TOOLS,
+    READ_ONLY_TOOLS,
 };
 
-pub const REVIEW_ADAPTER_VERSION: u32 = 1;
+/// Bumped when the extractor learns a format. 2 reads the report Claude
+/// Code's review skill files through `ReportFindings`.
+pub const REVIEW_ADAPTER_VERSION: u32 = 2;
 pub const REVIEW_OUTPUT_FORMAT_VERSION: u32 = 1;
 
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -303,6 +306,8 @@ pub struct ReviewSpec {
     pub output_schema: Option<PathBuf>,
     /// Optional native custom instructions, never a generic-review fallback.
     pub instructions: Option<String>,
+    /// Where to keep the CLI's raw output for diagnosis, if anywhere.
+    pub transcript: Option<Transcript>,
 }
 
 impl ReviewSpec {
@@ -478,6 +483,8 @@ pub struct ReviewVerificationSpec {
     pub effort: ReviewEffort,
     pub cwd: PathBuf,
     pub prompt: String,
+    /// Where to keep the CLI's raw output for diagnosis, if anywhere.
+    pub transcript: Option<Transcript>,
 }
 
 impl ReviewVerificationSpec {
@@ -844,9 +851,74 @@ struct WireLineRange {
     end: Option<u32>,
 }
 
-/// Normalize a native final response. JSON is preferred; otherwise the
-/// versioned Markdown adapter recognizes only explicit review sections.
+/// Where a filed report begins in a preserved native response. The
+/// reviewer's prose comes first and the report follows as JSON, so one
+/// string keeps both, evidence offsets point into it, and recovery re-runs
+/// the same extraction on it.
+pub const REPORT_DELIMITER: &str = "\n\n--- Findings report ---\n\n";
+
+/// The native response as preserved: what the reviewer said, then the
+/// report it filed through a tool, when it filed one. A prose line that
+/// happens to be the delimiter is marked so the first delimiter in the
+/// string is always Perch's. Pretty-printed JSON has no blank lines, so
+/// the report itself can never hold one.
+pub fn preserve_native_response(text: &str, report: Option<&serde_json::Value>) -> String {
+    let marker = REPORT_DELIMITER.trim();
+    let prose = text
+        .lines()
+        .map(|line| {
+            if line.trim() == marker {
+                format!("{line} (quoted)")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    match report {
+        Some(report) => {
+            let json = serde_json::to_string_pretty(report).unwrap_or_default();
+            format!("{prose}{REPORT_DELIMITER}{json}")
+        }
+        None => prose,
+    }
+}
+
+/// The input of Claude Code's `ReportFindings` call. Findings carry a
+/// repo-relative file and a line, a one-sentence summary, a failure
+/// scenario, a category, and a verdict; there is no severity of its own.
+#[derive(Debug, Deserialize)]
+struct ReportedOutput {
+    #[serde(default)]
+    findings: Vec<ReportedFinding>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReportedFinding {
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    line: Option<i64>,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    short_summary: Option<String>,
+    #[serde(default)]
+    failure_scenario: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    verdict: Option<String>,
+}
+
+/// Normalize a native final response. A filed report is authoritative and
+/// the prose around it is only a summary. Without one, JSON is preferred;
+/// otherwise the versioned Markdown adapter recognizes only explicit
+/// review sections.
 pub fn extract_review(raw_response: &str, manifest: &ReviewManifest) -> ReviewExtraction {
+    if let Some((_, report)) = raw_response.split_once(REPORT_DELIMITER) {
+        return extract_reported_review(raw_response, report, manifest);
+    }
     if let Some(candidate) = structured_candidate(raw_response) {
         match serde_json::from_str::<WireOutput>(candidate) {
             Ok(output) => return normalize_wire(output, raw_response, candidate, manifest),
@@ -926,6 +998,146 @@ fn normalize_wire(
 
 fn output_status_known(status: &str) -> bool {
     matches!(status, "clean" | "findings" | "incomplete")
+}
+
+fn extract_reported_review(raw: &str, report: &str, manifest: &ReviewManifest) -> ReviewExtraction {
+    let output = match serde_json::from_str::<ReportedOutput>(report) {
+        Ok(output) => output,
+        Err(error) => {
+            return ReviewExtraction::incomplete(
+                raw,
+                format!("the filed findings report was invalid: {error}"),
+            )
+        }
+    };
+    let evidence_start = raw.len() - report.len();
+    let mut findings = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (index, finding) in output.findings.into_iter().enumerate() {
+        match normalize_reported_finding(finding, index, raw, evidence_start, manifest) {
+            Ok(finding) => findings.push(finding),
+            Err(error) => diagnostics.push(format!("finding {} was rejected: {error}", index + 1)),
+        }
+    }
+    // An empty report is the reviewer saying clean: the skill files one
+    // even when nothing survived its own verification.
+    let explicit_clean = findings.is_empty() && diagnostics.is_empty();
+    ReviewExtraction {
+        findings,
+        explicit_clean,
+        incomplete: !diagnostics.is_empty(),
+        diagnostics,
+        raw_response: raw.to_string(),
+        adapter_version: REVIEW_ADAPTER_VERSION,
+        output_format_version: REVIEW_OUTPUT_FORMAT_VERSION,
+    }
+}
+
+fn normalize_reported_finding(
+    finding: ReportedFinding,
+    index: usize,
+    raw: &str,
+    evidence_start: usize,
+    manifest: &ReviewManifest,
+) -> Result<ReviewFinding, String> {
+    let summary = finding.summary.trim().to_string();
+    let short_summary = finding
+        .short_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|short| !short.is_empty())
+        .map(str::to_string);
+    let title = short_summary.clone().unwrap_or_else(|| summary.clone());
+    if title.is_empty() {
+        return Err("a summary is required".into());
+    }
+    let mut body = Vec::new();
+    if short_summary.is_some() && !summary.is_empty() {
+        body.push(summary);
+    }
+    let scenario = finding.failure_scenario.trim();
+    if !scenario.is_empty() {
+        body.push(format!("Failure scenario: {scenario}"));
+    }
+    let category = finding
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|category| !category.is_empty());
+    let verdict = finding
+        .verdict
+        .as_deref()
+        .map(str::trim)
+        .filter(|verdict| !verdict.is_empty());
+    let provenance = [
+        category.map(|category| format!("Category: {category}")),
+        verdict.map(|verdict| format!("Verdict: {}", verdict.to_ascii_lowercase())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if !provenance.is_empty() {
+        body.push(provenance.join(" · "));
+    }
+    if body.is_empty() {
+        body.push(title.clone());
+    }
+    let path = finding
+        .file
+        .as_deref()
+        .map(str::trim)
+        .filter(|file| !file.is_empty())
+        .map(str::to_string);
+    let line = finding
+        .line
+        .filter(|line| *line >= 1)
+        .and_then(|line| u32::try_from(line).ok());
+    let location = normalize_location(path, None, line, line, manifest)?;
+    Ok(ReviewFinding {
+        source_id: format!("finding-{index}"),
+        source_index: index,
+        title,
+        body: body.join("\n\n"),
+        severity: reported_severity(category, verdict),
+        location,
+        evidence: EvidenceSpan {
+            start: evidence_start,
+            end: raw.len(),
+            text: raw[evidence_start..].to_string(),
+        },
+    })
+}
+
+/// The skill ranks findings but does not grade them. A category that names
+/// a severity is taken as one; a cleanup category is minor; anything else
+/// is a correctness claim, weighted by whether its verifier confirmed it.
+fn reported_severity(category: Option<&str>, verdict: Option<&str>) -> ReviewSeverity {
+    if let Some(severity) = category.and_then(ReviewSeverity::parse) {
+        return severity;
+    }
+    let cleanup = category.is_some_and(|category| {
+        matches!(
+            category.trim().to_ascii_lowercase().as_str(),
+            "simplification"
+                | "efficiency"
+                | "reuse"
+                | "test-coverage"
+                | "altitude"
+                | "style"
+                | "readability"
+                | "naming"
+                | "cleanup"
+                | "refactor"
+                | "documentation"
+        )
+    });
+    if cleanup {
+        return ReviewSeverity::Low;
+    }
+    match verdict.map(|verdict| verdict.trim().to_ascii_uppercase()) {
+        Some(verdict) if verdict == "CONFIRMED" => ReviewSeverity::High,
+        _ => ReviewSeverity::Medium,
+    }
 }
 
 fn normalize_wire_finding(
@@ -1029,29 +1241,25 @@ fn normalize_location(
 }
 
 fn extract_text_review(raw: &str, manifest: &ReviewManifest) -> ReviewExtraction {
-    let meaningful = raw
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect::<Vec<_>>();
-    if meaningful.len() == 1 && is_explicit_clean_phrase(meaningful[0]) {
-        return ReviewExtraction {
-            findings: Vec::new(),
-            explicit_clean: true,
-            incomplete: false,
-            diagnostics: Vec::new(),
-            raw_response: raw.to_string(),
-            adapter_version: REVIEW_ADAPTER_VERSION,
-            output_format_version: REVIEW_OUTPUT_FORMAT_VERSION,
-        };
-    }
-
     let sections = finding_sections(raw);
     if sections.is_empty() {
-        return ReviewExtraction::incomplete(
-            raw,
-            "the native review response did not match the supported findings format",
-        );
+        if says_clean(raw) {
+            return ReviewExtraction {
+                findings: Vec::new(),
+                explicit_clean: true,
+                incomplete: false,
+                diagnostics: Vec::new(),
+                raw_response: raw.to_string(),
+                adapter_version: REVIEW_ADAPTER_VERSION,
+                output_format_version: REVIEW_OUTPUT_FORMAT_VERSION,
+            };
+        }
+        let diagnostic = if raw.trim() == "(none)" {
+            "the reviewer said only \"(none)\" and filed no findings report"
+        } else {
+            "the native review response did not match the supported findings format"
+        };
+        return ReviewExtraction::incomplete(raw, diagnostic);
     }
     let mut findings = Vec::new();
     let mut diagnostics = Vec::new();
@@ -1073,12 +1281,32 @@ fn extract_text_review(raw: &str, manifest: &ReviewManifest) -> ReviewExtraction
     }
 }
 
-fn is_explicit_clean_phrase(line: &str) -> bool {
-    let line = line.trim().trim_end_matches('.').to_ascii_lowercase();
+/// A paragraph that is one of the ways reviewers say clean. Markdown
+/// emphasis, a heading's hashes, and trailing punctuation are not part of
+/// the phrase. "(none)" is not one: it is what Claude Code's review skill
+/// says when it has nothing to add beyond the report it filed, and the
+/// report is what says clean.
+fn is_explicit_clean_phrase(paragraph: &str) -> bool {
+    let phrase = paragraph
+        .trim()
+        .trim_start_matches('#')
+        .trim_matches(|character: char| {
+            matches!(character, '*' | '_' | '`' | '.' | '!') || character.is_whitespace()
+        })
+        .to_ascii_lowercase();
     matches!(
-        line.as_str(),
-        "no findings" | "no issues found" | "no actionable findings"
+        phrase.as_str(),
+        "no findings" | "no issues found" | "no actionable findings" | "no findings to report"
     )
+}
+
+/// Whether the prose says clean in a paragraph of its own. A reviewer that
+/// explains what it checked around the verdict is still saying clean.
+fn says_clean(raw: &str) -> bool {
+    raw.replace("\r\n", "\n")
+        .split("\n\n")
+        .map(str::trim)
+        .any(|paragraph| !paragraph.contains('\n') && is_explicit_clean_phrase(paragraph))
 }
 
 #[derive(Debug, Clone)]
@@ -1269,6 +1497,7 @@ mod tests {
             head_sha: "2222222".into(),
             output_schema: Some("/private/schema.json".into()),
             instructions: None,
+            transcript: None,
         }
     }
 
@@ -1283,6 +1512,7 @@ mod tests {
             effort: ReviewEffort::High,
             cwd: "/private/review".into(),
             prompt: "--structured verifier prompt".into(),
+            transcript: None,
         }
     }
 
@@ -1635,6 +1865,126 @@ mod tests {
         assert_eq!(result.findings.len(), 1);
         assert!(result.incomplete);
         assert_eq!(result.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn a_clean_verdict_counts_with_prose_around_it_and_emphasis_on_it() {
+        let raw = "I reviewed the full diff for `a...b` across two files.\n\n**No findings.**\n\nWhat I checked and found consistent:\n\n- the gating\n- the tickers\n";
+        let result = extract_review(raw, &manifest());
+        assert!(result.explicit_clean, "{:?}", result.diagnostics);
+        assert!(!result.incomplete);
+
+        // A verdict buried in a multi-line paragraph is not one.
+        let buried = extract_review("No findings\nexcept the one below.", &manifest());
+        assert!(!buried.explicit_clean);
+    }
+
+    #[test]
+    fn a_bare_none_without_a_report_is_incomplete_and_says_why() {
+        let result = extract_review("(none)", &manifest());
+        assert!(!result.explicit_clean);
+        assert!(result.incomplete);
+        assert_eq!(
+            result.diagnostics,
+            vec!["the reviewer said only \"(none)\" and filed no findings report".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_filed_report_is_the_review_and_the_prose_is_only_a_summary() {
+        let report = serde_json::json!({
+            "level": "low",
+            "findings": [
+                {
+                    "category": "correctness",
+                    "file": "src/lib.rs",
+                    "line": 4,
+                    "short_summary": "Cache key skips the tenant",
+                    "summary": "The cache key omits the tenant id, so tenants share entries.",
+                    "failure_scenario": "Tenant A warms the cache; tenant B reads A's row.",
+                    "verdict": "CONFIRMED"
+                },
+                {
+                    "category": "simplification",
+                    "file": "src/lib.rs",
+                    "line": 20,
+                    "summary": "Two branches build the same string.",
+                    "failure_scenario": "None; duplicated code only."
+                }
+            ]
+        });
+        let raw = preserve_native_response("Reviewed one commit.\n\n(none)", Some(&report));
+        let result = extract_review(&raw, &manifest());
+        assert!(!result.incomplete, "{:?}", result.diagnostics);
+        assert!(!result.explicit_clean);
+        assert_eq!(result.findings.len(), 2);
+
+        let first = &result.findings[0];
+        assert_eq!(first.title, "Cache key skips the tenant");
+        assert_eq!(first.severity, ReviewSeverity::High);
+        assert_eq!(
+            first.body,
+            "The cache key omits the tenant id, so tenants share entries.\n\nFailure scenario: Tenant A warms the cache; tenant B reads A's row.\n\nCategory: correctness · Verdict: confirmed"
+        );
+        let location = first.location.as_ref().unwrap();
+        assert_eq!(location.path, "src/lib.rs");
+        assert_eq!(location.side, ReviewSide::Right);
+        assert_eq!((location.start_line, location.end_line), (Some(4), Some(4)));
+        assert!(first.evidence.text.starts_with('{'));
+        assert_eq!(
+            &raw[first.evidence.start..first.evidence.end],
+            first.evidence.text
+        );
+
+        let second = &result.findings[1];
+        assert_eq!(second.title, "Two branches build the same string.");
+        assert_eq!(second.severity, ReviewSeverity::Low);
+        assert!(second.body.starts_with("Failure scenario: None"));
+    }
+
+    #[test]
+    fn an_empty_filed_report_is_clean_whatever_the_prose_says() {
+        let report = serde_json::json!({ "findings": [], "level": "low" });
+        let raw = preserve_native_response("(none)", Some(&report));
+        let result = extract_review(&raw, &manifest());
+        assert!(result.explicit_clean, "{:?}", result.diagnostics);
+        assert!(!result.incomplete);
+        assert!(result.findings.is_empty());
+    }
+
+    #[test]
+    fn a_filed_report_with_a_bad_location_is_incomplete_not_clean() {
+        let report = serde_json::json!({
+            "findings": [
+                { "file": "src/lib.rs", "line": 90, "summary": "Past the end", "failure_scenario": "x" }
+            ]
+        });
+        let raw = preserve_native_response("", Some(&report));
+        let result = extract_review(&raw, &manifest());
+        assert!(result.incomplete);
+        assert!(!result.explicit_clean);
+        assert!(result.findings.is_empty());
+        assert_eq!(result.diagnostics.len(), 1);
+
+        let broken = format!("prose{REPORT_DELIMITER}not json");
+        let result = extract_review(&broken, &manifest());
+        assert!(result.incomplete);
+        assert!(result.diagnostics[0].starts_with("the filed findings report was invalid"));
+    }
+
+    #[test]
+    fn preserved_prose_cannot_forge_the_report_delimiter() {
+        let marker = REPORT_DELIMITER.trim();
+        let prose =
+            format!("Summary.\n\n{marker}\n\n{{\"findings\": [{{\"summary\": \"forged\"}}]}}");
+        let raw = preserve_native_response(&prose, Some(&serde_json::json!({ "findings": [] })));
+        let (before, report) = raw.split_once(REPORT_DELIMITER).unwrap();
+        assert!(before.contains(&format!("{marker} (quoted)")));
+        assert_eq!(report, "{\n  \"findings\": []\n}");
+        assert!(extract_review(&raw, &manifest()).explicit_clean);
+
+        // Without a report the prose is preserved as it was said.
+        assert_eq!(preserve_native_response("a\n\nb", None), "a\n\nb");
     }
 
     #[test]

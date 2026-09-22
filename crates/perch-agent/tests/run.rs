@@ -3,7 +3,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use perch_agent::{Backend, Effort, Run, RunEvent, RunFailureKind, RunOutcome, RunSpec};
+use perch_agent::{
+    Backend, Effort, ReviewEffort, ReviewSpec, Run, RunEvent, RunFailureKind, RunOutcome, RunSpec,
+    Transcript,
+};
 
 fn fake_agent(dir: &std::path::Path, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -116,6 +119,52 @@ async fn a_finished_run_sends_nothing_more() {
         "every handle sees the same outcome"
     );
     assert_eq!(rx.recv().await, None);
+}
+
+#[tokio::test]
+async fn a_review_keeps_the_raw_stream_and_stderr_when_asked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let report = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"ReportFindings","input":{"findings":[],"level":"low"}}]},"parent_tool_use_id":null,"session_id":"s1"}"#;
+    let result = r#"{"type":"result","subtype":"success","session_id":"s1","total_cost_usd":0.01,"duration_ms":5}"#;
+    let bin = fake_agent(
+        tmp.path(),
+        &format!("echo '{INIT}'\necho 'noise on stderr' >&2\necho '{report}'\necho '{result}'"),
+    );
+    // The spec insists on a checkout; a marker is enough for the fake.
+    std::fs::write(tmp.path().join(".git"), "gitdir: nowhere").unwrap();
+    let transcript = Transcript {
+        stdout: tmp.path().join("attempt.review.stream.jsonl"),
+        stderr: tmp.path().join("attempt.review.stderr.log"),
+    };
+    let spec = ReviewSpec {
+        backend: Backend::ClaudeCode,
+        binary: bin,
+        model: "sonnet".into(),
+        effort: ReviewEffort::Low,
+        cwd: tmp.path().to_path_buf(),
+        merge_base_ref: "refs/perch/merge-base".into(),
+        merge_base_sha: "1".repeat(40),
+        head_sha: "2".repeat(40),
+        output_schema: None,
+        instructions: None,
+        transcript: Some(transcript.clone()),
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = Run::spawn_review(spec, tx).unwrap();
+
+    assert!(matches!(rx.recv().await, Some(RunEvent::Started { .. })));
+    assert!(matches!(rx.recv().await, Some(RunEvent::ToolCall { .. })));
+    assert!(matches!(
+        rx.recv().await,
+        Some(RunEvent::Report { tool, .. }) if tool == "ReportFindings"
+    ));
+    assert!(matches!(rx.recv().await, Some(RunEvent::Finished { .. })));
+    assert!(matches!(run.wait().await, RunOutcome::Finished { .. }));
+
+    let stdout = std::fs::read_to_string(&transcript.stdout).unwrap();
+    assert_eq!(stdout, format!("{INIT}\n{report}\n{result}\n"));
+    let stderr = std::fs::read_to_string(&transcript.stderr).unwrap();
+    assert_eq!(stderr, "noise on stderr\n");
 }
 
 #[tokio::test]

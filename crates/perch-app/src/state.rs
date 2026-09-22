@@ -642,7 +642,8 @@ impl AppState {
                     message: message.clone(),
                 }
             }
-            perch_agent::RunEvent::Finished { .. }
+            perch_agent::RunEvent::Report { .. }
+            | perch_agent::RunEvent::Finished { .. }
             | perch_agent::RunEvent::Failed { .. }
             | perch_agent::RunEvent::Stopped { .. } => return,
         };

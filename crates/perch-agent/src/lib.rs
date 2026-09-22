@@ -32,10 +32,11 @@ pub use discover::{
 };
 pub use parse::{parse_line, summarize_tool_call};
 pub use review::{
-    assess_review_capability, detect_review_capability, extract_review, review_output_schema,
-    CliVersion, EvidenceSpan, ReviewCapability, ReviewEffort, ReviewExtraction, ReviewFinding,
-    ReviewLocation, ReviewManifest, ReviewManifestEntry, ReviewSeverity, ReviewSide, ReviewSpec,
-    ReviewVerificationSpec, REVIEW_ADAPTER_VERSION, REVIEW_OUTPUT_FORMAT_VERSION,
+    assess_review_capability, detect_review_capability, extract_review, preserve_native_response,
+    review_output_schema, CliVersion, EvidenceSpan, ReviewCapability, ReviewEffort,
+    ReviewExtraction, ReviewFinding, ReviewLocation, ReviewManifest, ReviewManifestEntry,
+    ReviewSeverity, ReviewSide, ReviewSpec, ReviewVerificationSpec, REPORT_DELIMITER,
+    REVIEW_ADAPTER_VERSION, REVIEW_OUTPUT_FORMAT_VERSION,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,7 +425,7 @@ pub fn toml_string(s: &str) -> String {
 /// One parser per backend. Claude associates an explicit permission denial
 /// with the terminal result it caused; Codex remembers the thread and which
 /// commands have begun.
-enum Parser {
+enum ParserKind {
     Claude {
         pending_permission_denial: bool,
         terminal_permission_denial: Option<bool>,
@@ -432,25 +433,77 @@ enum Parser {
     Codex(CodexParser),
 }
 
+/// Where a run's raw protocol output is kept, line for line, beside the
+/// events made from it. Diagnostic only: nothing reads it back, and a
+/// file that cannot be opened costs a warning, never the run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transcript {
+    /// Every stdout line, the CLI's own JSON, as it arrived.
+    pub stdout: PathBuf,
+    /// Every stderr line.
+    pub stderr: PathBuf,
+}
+
+/// One transcript file, flushed after every line so a crash keeps what
+/// came before it. The writes are small and local; they run inline.
+struct LineLog(std::io::BufWriter<std::fs::File>);
+
+impl LineLog {
+    fn create(path: &std::path::Path) -> Option<Self> {
+        match std::fs::File::create(path) {
+            Ok(file) => Some(Self(std::io::BufWriter::new(file))),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "could not open a run transcript");
+                None
+            }
+        }
+    }
+
+    fn line(&mut self, line: &str) {
+        use std::io::Write;
+        let written = self
+            .0
+            .write_all(line.as_bytes())
+            .and_then(|()| self.0.write_all(b"\n"))
+            .and_then(|()| self.0.flush());
+        if let Err(error) = written {
+            tracing::warn!(%error, "could not write a run transcript line");
+        }
+    }
+}
+
+struct Parser {
+    kind: ParserKind,
+    /// Every stdout line, copied before it is parsed, when asked for.
+    transcript: Option<LineLog>,
+}
+
 impl Parser {
     fn for_backend(backend: Backend) -> Self {
-        match backend {
-            Backend::ClaudeCode => Parser::Claude {
+        let kind = match backend {
+            Backend::ClaudeCode => ParserKind::Claude {
                 pending_permission_denial: false,
                 terminal_permission_denial: None,
             },
-            Backend::Codex => Parser::Codex(CodexParser::new()),
+            Backend::Codex => ParserKind::Codex(CodexParser::new()),
+        };
+        Self {
+            kind,
+            transcript: None,
         }
     }
 
     fn parse_line(&mut self, line: &str) -> Result<Vec<RunEvent>, String> {
+        if let Some(transcript) = &mut self.transcript {
+            transcript.line(line);
+        }
         if line.trim().is_empty() {
             return Ok(Vec::new());
         }
         let value = serde_json::from_str::<serde_json::Value>(line)
             .map_err(|error| format!("The agent emitted malformed JSON: {error}"))?;
-        Ok(match self {
-            Parser::Claude {
+        Ok(match &mut self.kind {
+            ParserKind::Claude {
                 pending_permission_denial,
                 terminal_permission_denial,
             } => {
@@ -483,14 +536,14 @@ impl Parser {
                 }
                 events
             }
-            Parser::Codex(p) => p.parse_line(line),
+            ParserKind::Codex(p) => p.parse_line(line),
         })
     }
 
     fn permission_denied(&self) -> bool {
         matches!(
-            self,
-            Parser::Claude {
+            self.kind,
+            ParserKind::Claude {
                 terminal_permission_denial: Some(true),
                 ..
             }
@@ -524,6 +577,16 @@ pub enum RunEvent {
     PermissionDenied {
         tool: Option<String>,
         message: String,
+    },
+    /// A report the agent filed through a tool instead of saying it. Claude
+    /// Code's review skill hands its findings to `ReportFindings` and keeps
+    /// them out of the prose, so the prose alone says "(none)". The value
+    /// is the call's input, verbatim; the matching `ToolCall` still arrives
+    /// as activity. `parent_id` is set when a subagent filed it.
+    Report {
+        tool: String,
+        input: serde_json::Value,
+        parent_id: Option<String>,
     },
     /// Token counts reported by the CLI for this turn. Missing counters stay
     /// `None` rather than being mistaken for zero.
@@ -847,7 +910,7 @@ impl Run {
     /// `Failed`, and `Stopped` is the last event sent.
     pub fn spawn(spec: RunSpec, events: UnboundedSender<RunEvent>) -> Result<Run, Error> {
         let args = spec.args();
-        Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, events)
+        Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, None, events)
     }
 
     /// Start an installed CLI's native local code-review operation using
@@ -856,7 +919,15 @@ impl Run {
     pub fn spawn_review(spec: ReviewSpec, events: UnboundedSender<RunEvent>) -> Result<Run, Error> {
         spec.validate().map_err(Error::InvalidReview)?;
         let args = spec.args();
-        Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, events)
+        let transcript = spec.transcript.clone();
+        Self::spawn_process(
+            spec.backend,
+            spec.binary,
+            spec.cwd,
+            args,
+            transcript,
+            events,
+        )
     }
 
     /// Start a structured prior-finding verification pass without inheriting
@@ -867,7 +938,15 @@ impl Run {
     ) -> Result<Run, Error> {
         spec.validate().map_err(Error::InvalidReview)?;
         let args = spec.args();
-        Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, events)
+        let transcript = spec.transcript.clone();
+        Self::spawn_process(
+            spec.backend,
+            spec.binary,
+            spec.cwd,
+            args,
+            transcript,
+            events,
+        )
     }
 
     fn spawn_process(
@@ -875,6 +954,7 @@ impl Run {
         binary: PathBuf,
         cwd: PathBuf,
         args: Vec<String>,
+        transcript: Option<Transcript>,
         events: UnboundedSender<RunEvent>,
     ) -> Result<Run, Error> {
         let started_at = Instant::now();
@@ -926,8 +1006,16 @@ impl Run {
 
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
-            let mut stderr_task = tokio::spawn(read_stderr_tail(stderr));
+            let (stdout_log, stderr_log) = match &transcript {
+                Some(transcript) => (
+                    LineLog::create(&transcript.stdout),
+                    LineLog::create(&transcript.stderr),
+                ),
+                None => (None, None),
+            };
+            let mut stderr_task = tokio::spawn(read_stderr_tail(stderr, stderr_log));
             let mut parser = Parser::for_backend(backend);
+            parser.transcript = stdout_log;
             let exit = drive_until_exit(
                 &mut child,
                 process_group,
@@ -1297,11 +1385,17 @@ fn terminal_event(outcome: &RunOutcome) -> RunEvent {
     }
 }
 
-async fn read_stderr_tail(stderr: tokio::process::ChildStderr) -> String {
+async fn read_stderr_tail(
+    stderr: tokio::process::ChildStderr,
+    mut transcript: Option<LineLog>,
+) -> String {
     use std::collections::VecDeque;
     let mut tail = VecDeque::with_capacity(3);
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(mut line)) = lines.next_line().await {
+        if let Some(transcript) = &mut transcript {
+            transcript.line(&line);
+        }
         if line.chars().count() > 512 {
             line = line.chars().take(511).collect::<String>() + "…";
         }

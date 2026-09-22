@@ -150,6 +150,8 @@ pub fn apply_run_event(
             run.error = Some("Stopped by the reader".into());
             run.ended_at = Some(jiff::Timestamp::now());
         }
+        // The tool call that carried it is already a step.
+        RunEvent::Report { .. } => {}
     }
     if run.status.is_terminal() {
         LIVE_TOOL_STEPS.with(|tools| {
@@ -461,6 +463,7 @@ async fn ask(target: &str, anchor: Option<&str>, question: &str) -> Result<(), S
             | perch_agent::RunEvent::ToolCall { .. }
             | perch_agent::RunEvent::ToolResult { .. }
             | perch_agent::RunEvent::PermissionDenied { .. }
+            | perch_agent::RunEvent::Report { .. }
             | perch_agent::RunEvent::Usage { .. }
             | perch_agent::RunEvent::Finished { .. }
             | perch_agent::RunEvent::Failed { .. }

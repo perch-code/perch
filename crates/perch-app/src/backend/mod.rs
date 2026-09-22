@@ -9289,6 +9289,9 @@ async fn execute_question(
                 cost_usd: None,
                 duration_ms: None,
             }),
+            // A filed report is review data; a discussion keeps only the
+            // tool call that carried it.
+            perch_agent::RunEvent::Report { .. } => None,
             // Terminal state is committed only after `wait` proves the child
             // and its process group have been reaped.
             perch_agent::RunEvent::Finished { .. }

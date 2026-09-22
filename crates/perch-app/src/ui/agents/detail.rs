@@ -709,6 +709,18 @@ fn usage_label(run: &AgentRunSummary) -> String {
     {
         return "Usage unavailable".to_string();
     }
+    // Claude Code bills work it did somewhere the parent's counters do not
+    // see, such as a subagent, as a cost against zero tokens. Zero tokens
+    // with a real cost is that, not a free run: show the cost alone.
+    let counted = [run.input_tokens, run.output_tokens, run.cached_input_tokens]
+        .iter()
+        .flatten()
+        .any(|tokens| *tokens > 0);
+    if let (false, Some(cost)) = (counted, run.cost_usd) {
+        if cost > 0.0 {
+            return format!("${cost:.2} · token counts unavailable");
+        }
+    }
     [
         run.input_tokens
             .map(|tokens| format!("{tokens} input tokens"))
@@ -789,6 +801,21 @@ mod tests {
         assert!(rows[1].ok);
         assert_eq!(rows[2].text, "Read: outside the checkout");
         assert!(!rows[2].ok);
+    }
+
+    #[test]
+    fn a_cost_against_zero_tokens_shows_the_cost_alone() {
+        let mut run = summary();
+        run.input_tokens = Some(0);
+        run.output_tokens = Some(0);
+        run.cached_input_tokens = Some(0);
+        run.cost_usd = Some(0.791728);
+        assert_eq!(usage_label(&run), "$0.79 · token counts unavailable");
+
+        // A zero cost against zero tokens is a run that did nothing, and
+        // says so with its numbers.
+        run.cost_usd = Some(0.0);
+        assert!(usage_label(&run).starts_with("0 input tokens"));
     }
 
     #[test]
