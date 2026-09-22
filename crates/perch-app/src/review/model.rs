@@ -1933,6 +1933,7 @@ impl ReviewState {
     ///
     /// Returns true when the caller should ask the backend to load the file.
     pub fn open_tab(&self, path: &str) -> bool {
+        let composer_was_in_code = self.composer_in_code_untracked();
         let already_open = self.tabs.with(|t| t.iter().any(|x| x.path == path));
         if !already_open {
             let mut dropped = None;
@@ -1955,7 +1956,7 @@ impl ReviewState {
         // The tint was another file's, or another caret's.
         self.clear_highlights();
         self.editor_epoch.update(|e| *e += 1);
-        self.keep_composer_in_view();
+        self.keep_composer_in_view(composer_was_in_code);
 
         let needs_load = self.file(path).is_none() && !self.is_loading(path);
         if needs_load {
@@ -1966,16 +1967,23 @@ impl ReviewState {
         needs_load
     }
 
-    /// The open file changed under an open composer. One drawn in the code
-    /// of the file that was open would now be hidden, so show Conversation,
-    /// where new questions and follow-ups always have a home.
-    fn keep_composer_in_view(&self) {
-        let hidden = floem::reactive::Effect::untrack(|| {
-            self.composer.with(Option::is_some) && !self.composer_in_code()
-        });
+    /// The open file changed under an open composer. One that was drawn in
+    /// the code of the file that was open, `was_in_code`, would now be
+    /// hidden, so show Conversation, where new questions and follow-ups
+    /// always have a home. One that was not, a question about the item as
+    /// a whole say, or a card in a file other than the open one, is not
+    /// hidden by the change: the reader chose Files over it, and keeps it.
+    fn keep_composer_in_view(&self, was_in_code: bool) {
+        let hidden = was_in_code && !self.composer_in_code_untracked();
         if hidden && self.tab.get_untracked() != ItemTab::Conversation {
             self.show_tab(ItemTab::Conversation);
         }
+    }
+
+    /// `composer_in_code` for a caller that may be an effect, which is not
+    /// to depend on the file or the composer merely for having checked.
+    fn composer_in_code_untracked(&self) -> bool {
+        floem::reactive::Effect::untrack(|| self.composer_in_code())
     }
 
     /// Show a file just opened in the rail's tree: open the directories
@@ -2018,6 +2026,7 @@ impl ReviewState {
 
     pub fn close_tab(&self, path: &str) {
         let was_active = self.active.with(|a| a.as_deref() == Some(path));
+        let composer_was_in_code = self.composer_in_code_untracked();
         let mut neighbour = None;
 
         self.tabs.update(|tabs| {
@@ -2037,7 +2046,7 @@ impl ReviewState {
             self.active.set(neighbour);
             self.cursor_line.set(0);
             self.editor_epoch.update(|e| *e += 1);
-            self.keep_composer_in_view();
+            self.keep_composer_in_view(composer_was_in_code);
         }
     }
 
@@ -2640,9 +2649,7 @@ impl ReviewState {
                 opening,
             }));
         });
-        // A caller can be an effect; do not make it depend on the file or
-        // composer merely because placement was checked here.
-        let in_code = floem::reactive::Effect::untrack(|| self.composer_in_code());
+        let in_code = self.composer_in_code_untracked();
         if !in_code && self.tab.get_untracked() != ItemTab::Conversation {
             self.show_tab(ItemTab::Conversation);
         } else if let Some(id) = self
@@ -3988,6 +3995,64 @@ mod tests {
         state.show_tab(ItemTab::Files);
         state.open_tab("src/y.rs");
         assert_eq!(state.tab.get(), ItemTab::Files);
+    }
+
+    #[test]
+    fn a_composer_that_was_not_in_the_code_stays_put_when_the_open_file_changes() {
+        use perch_github::Side;
+        let state = ReviewState::new();
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(spliced_file()));
+        });
+        state.open_tab("src/x.rs");
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+
+        // A question about the item as a whole opens on Conversation. The
+        // reader who then picks Files and opens a file there was not shown
+        // the composer in the code, so nothing is hidden: Files stays, and
+        // the draft with it.
+        state.open_composer(None, None, "what does this do?".into(), choice.clone());
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
+        state.show_tab(ItemTab::Files);
+        state.open_tab("src/y.rs");
+        assert_eq!(state.tab.get(), ItemTab::Files);
+        state.open_tab("src/x.rs");
+        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.composer_draft.get(), "what does this do?");
+
+        // Closing a tab likewise.
+        state.close_tab("src/x.rs");
+        assert_eq!(state.active.get().as_deref(), Some("src/y.rs"));
+        assert_eq!(state.tab.get(), ItemTab::Files);
+
+        // A composer on lines of a file other than the open one is not in
+        // the code either, so opening a third file over it leaves Files
+        // too; opening its own file draws it in the code again.
+        state.close_composer();
+        state.open_tab("src/x.rs");
+        state.show_tab(ItemTab::Files);
+        let anchor = Anchor {
+            path: "src/x.rs".into(),
+            start_line: 3,
+            line: 3,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        };
+        state.open_composer(None, Some(anchor), "why?".into(), choice);
+        assert!(state.composer_in_code());
+        state.open_tab("src/y.rs");
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
+        state.show_tab(ItemTab::Files);
+        state.open_tab("src/z.rs");
+        assert_eq!(state.tab.get(), ItemTab::Files);
+        state.open_tab("src/x.rs");
+        assert!(state.composer_in_code());
+        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.composer_draft.get(), "why?");
     }
 
     #[test]
