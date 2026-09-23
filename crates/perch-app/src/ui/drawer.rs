@@ -1,12 +1,13 @@
 //! The drawer on the right.
 //!
 //! One drawer, holding the open item's files as a tree or the app-wide
-//! Agents inspector, one at a time. It is a column of the window beside
-//! the main pane, so opening it moves the pane over rather than covering
-//! what is being read; only when the window has no room for both does it
-//! lie over the pane's edge instead. The pane's content is keyed elsewhere,
-//! so the open file, its scroll and a composer survive the drawer opening,
-//! shutting, and changing what it holds.
+//! Agents inspector, one at a time. It is part of the main pane, under
+//! the item's bar and tabs and beside what they show, so opening it moves
+//! the body over rather than covering what is being read; only when the
+//! window has no room for both does it lie over the body's edge instead.
+//! The body is keyed elsewhere, so the open file, its scroll and a
+//! composer survive the drawer opening, shutting, and changing what it
+//! holds.
 //!
 //! Two tiles at the right end of the item's tabs open it, one for each
 //! thing it holds, as Codex has its folder there; the Agents control in
@@ -28,7 +29,6 @@ use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::titlebar::title_bar;
 
 /// What the drawer holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,14 +159,13 @@ fn restore_opener(state: AppState) {
     }
 }
 
-/// The drawer, in the window's row after the main pane. Shut, it takes no
+/// The drawer, in the main pane's row after its body. Shut, it takes no
 /// room at all. What it holds is rebuilt when that changes, and no more:
 /// a memo, since the signals under it are written more often than they
 /// change.
 pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let shown = Memo::new(move |_| state.drawer_shown());
     let placement = Memo::new(move |_| current_placement(state));
-    crate::ui::agents::wire(state, backend.clone());
 
     let content_backend = backend.clone();
     let content = dyn_container(
@@ -199,8 +198,8 @@ pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
             .position(Position::Relative);
         match placement.get() {
             Placement::Docked(width) => s.width(width),
-            // Over the pane's right edge, from the top of the window to
-            // the status bar, with a shadow to say so.
+            // Over the body's right edge, from under the tabs to the
+            // status bar, with a shadow to say so.
             Placement::Overlay(width) => s
                 .width(width)
                 .max_width_full()
@@ -217,46 +216,35 @@ pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
     .debug_name("right-drawer")
 }
 
-/// The bar at the top of the drawer, on the line of the bars beside it:
-/// what the drawer holds, and the way to shut it. The window drags from
-/// it, as from the others.
+/// The bar at the top of the drawer: what the drawer holds, and the way
+/// to shut it.
 pub fn header_bar(
     leading: impl IntoView + 'static,
     title: impl Fn() -> String + 'static,
     trailing: impl IntoView + 'static,
     close: impl IntoView + 'static,
 ) -> impl IntoView {
-    title_bar(
-        Stack::horizontal((
-            leading,
-            Label::derived(title).style(|s| {
-                s.font_size(theme::TEXT_TITLE)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
-                    .selectable(false)
-                    .pointer_events_none()
-            }),
-            trailing,
-            Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
-            close,
-        ))
-        .style(|s| {
-            s.items_center()
-                .width_full()
-                .gap(8.0)
-                .padding_left(12.0)
-                .padding_right(8.0)
+    Stack::horizontal((
+        leading,
+        Label::derived(title).style(|s| {
+            s.font_size(theme::TEXT_TITLE)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG)
+                .selectable(false)
+                .pointer_events_none()
         }),
-    )
+        trailing,
+        Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
+        close,
+    ))
     .style(|s| {
-        // The border comes out of the height; a pixel of padding at the
-        // top balances it, as the item bar's does, so the two bars'
-        // contents centre on one line.
-        s.height(theme::TITLEBAR_HEIGHT)
+        s.height(theme::DRAWER_HEADER_HEIGHT)
             .width_full()
             .flex_shrink(0.0_f32)
             .items_center()
-            .padding_top(1.0)
+            .gap(8.0)
+            .padding_left(12.0)
+            .padding_right(8.0)
             .background(theme::CANVAS)
             .border_bottom(1.0)
             .border_color(theme::BORDER_MUTED)

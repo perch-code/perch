@@ -35,7 +35,7 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
-use floem::views::{dyn_container, Decorators, Stack};
+use floem::views::{dyn_container, Decorators, Empty, Stack};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -85,6 +85,7 @@ pub fn review_view(
 ) -> impl IntoView {
     let open_file = open_file(state, backend.clone());
     let body_backend = backend.clone();
+    let tabs_backend = backend.clone();
 
     Stack::vertical((
         header::header(app, state, backend.clone())
@@ -92,40 +93,74 @@ pub fn review_view(
             // not let a descendant's z-index escape its parent's sibling
             // context.
             .style(|s| s.width_full().flex_shrink(0.0_f32).z_index(1)),
+        // The tabs, once there is an item to have them. They run the
+        // pane's width, over the drawer too, so its tiles sit over what
+        // they open.
         dyn_container(
             move || state.phase.get(),
             move |phase| match phase {
-                Phase::Preparing => header::preparing_card(
-                    move || match state.preparing.get() {
-                        Preparing::Working { message, .. } => message,
-                        _ => String::new(),
-                    },
-                    move || match state.preparing.get() {
-                        Preparing::Working { percent, .. } => percent,
-                        _ => None,
-                    },
-                )
-                .into_any(),
-                Phase::Failed => centered_message(
-                    SidebarIcon::Warning,
-                    || "Could not open this pull request".to_string(),
-                    move || match state.preparing.get() {
-                        Preparing::Failed { message } => message,
-                        _ => String::new(),
-                    },
-                )
-                .into_any(),
-                Phase::Issue | Phase::Ready => item_view(
-                    app,
-                    state,
-                    open_file.clone(),
-                    body_backend.clone(),
-                    open_item.clone(),
-                )
-                .into_any(),
+                Phase::Issue | Phase::Ready => {
+                    tabs::tab_bar(app, state, tabs_backend.clone()).into_any()
+                }
+                Phase::Preparing | Phase::Failed => Empty::new().into_any(),
             },
         )
-        .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
+        .style(|s| s.width_full().flex_shrink(0.0_f32)),
+        Stack::horizontal((
+            dyn_container(
+                move || state.phase.get(),
+                move |phase| match phase {
+                    Phase::Preparing => header::preparing_card(
+                        move || match state.preparing.get() {
+                            Preparing::Working { message, .. } => message,
+                            _ => String::new(),
+                        },
+                        move || match state.preparing.get() {
+                            Preparing::Working { percent, .. } => percent,
+                            _ => None,
+                        },
+                    )
+                    .into_any(),
+                    Phase::Failed => centered_message(
+                        SidebarIcon::Warning,
+                        || "Could not open this pull request".to_string(),
+                        move || match state.preparing.get() {
+                            Preparing::Failed { message } => message,
+                            _ => String::new(),
+                        },
+                    )
+                    .into_any(),
+                    Phase::Issue | Phase::Ready => item_view(
+                        app,
+                        state,
+                        open_file.clone(),
+                        body_backend.clone(),
+                        open_item.clone(),
+                    )
+                    .into_any(),
+                },
+            )
+            // A zero basis, so the body takes what the drawer leaves.
+            .debug_name("pane-body")
+            .style(|s| {
+                s.flex_grow(1.0_f32)
+                    .flex_basis(0.0)
+                    .min_width(0.0)
+                    .height_full()
+            }),
+            // The drawer on the right, under the tabs. Outside the keyed
+            // body, so the open file, its scroll and a composer survive it
+            // opening and shutting; over the body's edge when the window
+            // is too narrow to dock it, which is why the row is its
+            // positioning box.
+            crate::ui::drawer::panel(app, state, backend),
+        ))
+        .style(|s| {
+            s.flex_grow(1.0_f32)
+                .min_height(0.0)
+                .width_full()
+                .position(floem::style::Position::Relative)
+        }),
     ))
     .style(|s| {
         s.size_full()
@@ -145,10 +180,9 @@ enum Showing {
     Nothing,
 }
 
-/// The tabs, Conversation's and the files', over what the one showing
-/// holds. Threads anchored in the open file are drawn inline in the code;
-/// the whole conversation is Conversation's, and the files are a tree in
-/// the drawer on the right.
+/// What the tab showing holds, under the tabs. Threads anchored in the
+/// open file are drawn inline in the code; the whole conversation is
+/// Conversation's, and the files are a tree in the drawer on the right.
 fn item_view(
     app: AppState,
     state: ReviewState,
@@ -163,35 +197,29 @@ fn item_view(
         ItemTab::Files if state.has_files() => Showing::Code,
         ItemTab::Files => Showing::Nothing,
     });
-    let pane_backend = backend.clone();
-    Stack::vertical((
-        tabs::tab_bar(app, state, backend),
-        dyn_container(
-            move || showing.get(),
-            move |showing| match showing {
-                Showing::Conversation => conversation::view(
-                    app,
-                    state,
-                    pane_backend.clone(),
-                    open_file.clone(),
-                    open_item.clone(),
-                )
-                .into_any(),
-                Showing::Code => {
-                    editor::editor_pane(app, state, pane_backend.clone(), open_file.clone())
-                        .into_any()
-                }
-                Showing::Nothing => centered_message(
-                    SidebarIcon::Chat,
-                    || "Nothing open".to_string(),
-                    || "Press ⇧⌘1 to show the conversation.".to_string(),
-                )
-                .into_any(),
-            },
-        )
-        .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
-    ))
-    .style(|s| s.size_full().min_height(0.0).flex_col())
+    dyn_container(
+        move || showing.get(),
+        move |showing| match showing {
+            Showing::Conversation => conversation::view(
+                app,
+                state,
+                backend.clone(),
+                open_file.clone(),
+                open_item.clone(),
+            )
+            .into_any(),
+            Showing::Code => {
+                editor::editor_pane(app, state, backend.clone(), open_file.clone()).into_any()
+            }
+            Showing::Nothing => centered_message(
+                SidebarIcon::Chat,
+                || "Nothing open".to_string(),
+                || "Press ⇧⌘1 to show the conversation.".to_string(),
+            )
+            .into_any(),
+        },
+    )
+    .style(|s| s.size_full().min_height(0.0))
 }
 
 /// The separator between the status line's parts.

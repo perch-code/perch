@@ -661,9 +661,10 @@ mod tests {
     use crate::review::model::ItemTab;
 
     /// The drawer's two tiles, after the layout tiles: a click opens the
-    /// drawer on the files or on the agents, and the pane moves over to
-    /// make room; a click on the filled one shuts it, and the other swaps
-    /// what it holds. The pane keeps the tab it was on through all of it.
+    /// drawer on the files or on the agents, under the tabs, and the body
+    /// moves over to make room; a click on the filled one shuts it, and
+    /// the other swaps what it holds. The tiles stay put over it, and the
+    /// pane keeps the tab it was on through all of it.
     #[test]
     fn the_drawer_tiles_open_swap_and_shut_the_drawer_beside_the_pane() {
         let (mut harness, app, state) = pull_request_harness();
@@ -690,27 +691,27 @@ mod tests {
         let drawer = rect(&harness, "right-drawer");
         assert_eq!(drawer.x1, 1400.0);
         assert_eq!(drawer.width(), theme::DRAWER_WIDTH);
-        assert_eq!(drawer.y0, 0.0, "the drawer starts at the window's top");
+        assert_eq!(drawer.y0, tabs.y1, "the drawer starts under the tabs");
+        assert_eq!(rect(&harness, "tab strip"), tabs, "the tabs run over the drawer");
+        assert_eq!(rect(&harness, "agents tile"), agents, "the tiles stay put");
         assert_eq!(
-            rect(&harness, "tab strip").x1,
+            rect(&harness, "pane-body").x1,
             drawer.x0,
-            "the pane stops where the drawer starts"
+            "the body stops where the drawer starts"
         );
         assert!(named(harness.root_id(), "files-panel").is_some(), "the drawer holds the files");
         let close = rect(&harness, "files-close");
         assert!(within(close, drawer));
         assert!(
-            close.y1 <= theme::TITLEBAR_HEIGHT,
-            "the drawer's bar is on the title bar's line: {close:?}"
+            close.y1 <= drawer.y0 + theme::DRAWER_HEADER_HEIGHT,
+            "the close control is in the drawer's bar: {close:?}"
         );
         // The rail's tree is there, from the drawer's bar down.
         let row = rect(&harness, "tree-row:README.md");
         assert!(within(row, drawer));
-        assert!(row.y0 >= theme::TITLEBAR_HEIGHT + theme::SCOPE_BUTTON_HEIGHT);
+        assert!(row.y0 >= drawer.y0 + theme::DRAWER_HEADER_HEIGHT + theme::SCOPE_BUTTON_HEIGHT);
 
-        // Agents: the drawer swaps what it holds, and stays put. The
-        // tiles moved over with the strip.
-        let agents = rect(&harness, "agents tile");
+        // Agents: the drawer swaps what it holds, and stays put.
         harness.click(agents.center().x, agents.center().y);
         harness.rebuild();
         harness.paint();
@@ -725,7 +726,7 @@ mod tests {
         harness.paint();
         assert_eq!(app.drawer_shown(), None);
         assert!(named(harness.root_id(), "agents-panel").is_none());
-        assert_eq!(rect(&harness, "tab strip").x1, 1400.0);
+        assert_eq!(rect(&harness, "pane-body").x1, 1400.0);
         assert_eq!(state.tab.get(), ItemTab::Files);
     }
 
@@ -740,14 +741,15 @@ mod tests {
         harness.paint();
         assert!(!app.files_available());
         assert_eq!(app.drawer_shown(), None);
-        assert_eq!(rect(&harness, "item bar").x1, 1400.0, "the pane has the window");
+        assert_eq!(rect(&harness, "pane-body").x1, 1400.0, "the body has the window");
 
         // Agents can still be shown, and the wish for Files is replaced.
         drawer::show(app, &crate::backend::Backend::detached(), DrawerView::Agents, None);
         harness.rebuild();
         harness.paint();
         assert_eq!(app.drawer_shown(), Some(DrawerView::Agents));
-        assert_eq!(rect(&harness, "item bar").x1, 1400.0 - theme::DRAWER_WIDTH);
+        assert_eq!(rect(&harness, "item bar").x1, 1400.0, "the bar runs over the drawer");
+        assert_eq!(rect(&harness, "pane-body").x1, 1400.0 - theme::DRAWER_WIDTH);
 
         // While another item is on its way the drawer's column stays, so
         // opening one pull request after another does not move the pane

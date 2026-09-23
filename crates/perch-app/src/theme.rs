@@ -189,6 +189,8 @@ pub const AGENT_ROW_MIN_HEIGHT: f64 = 88.0;
 /// The lights and the scope controls share this strip, and the bar over
 /// the item is the same height so the two read as one title bar.
 pub const TITLEBAR_HEIGHT: f64 = 56.0;
+/// The bar at the top of the drawer on the right, under the item's tabs.
+pub const DRAWER_HEADER_HEIGHT: f64 = 40.0;
 pub const RADIUS: f64 = 6.0;
 pub const RADIUS_LG: f64 = 10.0;
 /// The room inside a text box, between its border and its lines.

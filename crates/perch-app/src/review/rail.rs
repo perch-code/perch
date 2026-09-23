@@ -618,10 +618,16 @@ mod tests {
         (harness, state)
     }
 
-    /// The top of the tree: the drawer's bar, scope button, viewed row,
-    /// then the list's 4px of padding.
+    /// The top of the drawer's rail: under the item bar and the tabs, and
+    /// the drawer's own bar.
+    fn rail_top() -> f64 {
+        theme::REVIEW_HEADER_HEIGHT + theme::TAB_HEIGHT + theme::DRAWER_HEADER_HEIGHT
+    }
+
+    /// The top of the tree: the scope button, viewed row, then the list's
+    /// 4px of padding.
     fn list_top() -> f64 {
-        theme::TITLEBAR_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT + 4.0
+        rail_top() + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT + 4.0
     }
 
     /// The centre of a row's name, `row` rows down the tree.
@@ -642,7 +648,7 @@ mod tests {
     /// row, the same 26 square against the same 4px.
     fn filter_center() -> (f64, f64) {
         let x = 1400.0 - 4.0 - 13.0;
-        let y = theme::TITLEBAR_HEIGHT + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT / 2.0;
+        let y = rail_top() + theme::SCOPE_BUTTON_HEIGHT + theme::VIEWED_ROW_HEIGHT / 2.0;
         (x, y)
     }
 

@@ -668,8 +668,8 @@ mod tests {
     }
 
     /// The inspector fills the drawer, top to status bar and edge to
-    /// edge, whether the drawer is docked beside the pane or, in a window
-    /// too narrow for both, over it.
+    /// edge, whether the drawer is docked beside the pane's body or, in a
+    /// window too narrow for both, over it.
     #[test]
     fn the_inspector_fills_the_drawer_docked_and_over_the_pane() {
         let root = TestRoot::new();
@@ -708,8 +708,8 @@ mod tests {
             "the pane still has the whole width under the drawer"
         );
 
-        // Shut the sidebar and there is: the drawer docks, and the pane
-        // stops where it starts.
+        // Shut the sidebar and there is: the drawer docks under the bare
+        // bar that now has the lights, and the body stops where it starts.
         app.sidebar_open.set(false);
         harness.rebuild();
         harness.paint();
@@ -718,8 +718,13 @@ mod tests {
             .get_visual_rect_no_clip();
         assert_eq!(drawer.width(), theme::DRAWER_WIDTH);
         assert_eq!(drawer.x1, 1200.0);
-        let pane = named(harness.root_id(), "main-pane").unwrap();
-        assert_eq!(pane.get_visual_rect_no_clip().x1, drawer.x0);
+        assert_eq!(
+            drawer.y0,
+            theme::TITLEBAR_HEIGHT,
+            "the drawer is the pane's, under its bar"
+        );
+        let body = named(harness.root_id(), "pane-body").unwrap();
+        assert_eq!(body.get_visual_rect_no_clip().x1, drawer.x0);
     }
 
     #[test]

@@ -154,6 +154,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     // and the container builds its child again on each: the status is
     // written on every poll, and a page built again is a scroll back at
     // the top.
+    // The Agents inspector's list, loaded as the drawer opens on it. Wired
+    // once, here, since the drawer is built again with the pane.
+    agents::wire(state, backend.clone());
+    let empty_backend = backend.clone();
     let pane = dyn_container(
         move || main_pane.get(),
         move |(open, no_token)| {
@@ -166,10 +170,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 )
                 .into_any()
             } else if no_token {
-                empty_pane(state, token_help(state)).into_any()
+                empty_pane(state, review, empty_backend.clone(), token_help(state)).into_any()
             } else {
                 empty_pane(
                     state,
+                    review,
+                    empty_backend.clone(),
                     widgets::centered_message(
                         SidebarIcon::Branch,
                         || "Nothing open".to_string(),
@@ -219,13 +225,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 },
             ),
+            // The drawer on the right, the open item's files or the Agents
+            // inspector, is the pane's: under its bars, beside its body.
             pane,
-            // The drawer on the right: the open item's files, or the
-            // Agents inspector. Outside the review's keyed content, so the
-            // open file, its scroll and a composer survive it opening and
-            // shutting; over the pane's edge, when the window is too narrow
-            // to dock it, which is why the row is its positioning box.
-            drawer::panel(state, review, backend.clone()),
         ))
         .style(|s| {
             s.flex_grow(1.0_f32)
@@ -697,8 +699,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
 /// The main pane with nothing open in it. While the drawer is shut the
 /// lights and the drawer control have nowhere else to be, so a bare bar
 /// carries them; while it is open the drawer's strip has them and the
-/// message runs to the top.
-fn empty_pane(state: AppState, message: impl IntoView + 'static) -> impl IntoView {
+/// message runs to the top. The drawer on the right can still show the
+/// agents, beside the message.
+fn empty_pane(
+    state: AppState,
+    review: ReviewState,
+    backend: Rc<Backend>,
+    message: impl IntoView + 'static,
+) -> impl IntoView {
     Stack::vertical((
         dyn_container(
             move || state.sidebar_open.get(),
@@ -719,7 +727,21 @@ fn empty_pane(state: AppState, message: impl IntoView + 'static) -> impl IntoVie
             },
         )
         .style(|s| s.width_full().flex_shrink(0.0_f32)),
-        Container::new(message).style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
+        Stack::horizontal((
+            Container::new(message).debug_name("pane-body").style(|s| {
+                s.flex_grow(1.0_f32)
+                    .flex_basis(0.0)
+                    .min_width(0.0)
+                    .height_full()
+            }),
+            drawer::panel(state, review, backend),
+        ))
+        .style(|s| {
+            s.width_full()
+                .flex_grow(1.0_f32)
+                .min_height(0.0)
+                .position(floem::style::Position::Relative)
+        }),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0))
 }
