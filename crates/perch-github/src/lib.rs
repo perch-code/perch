@@ -29,7 +29,7 @@ pub use client::{Error, GitHub, ListResult, PullLookup};
 pub use comments::{
     Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,
     RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunHistoryPage, RunLabels, RunOwner,
-    RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, RunUsage, Side, TerminalReason,
+    RunMode, RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, RunUsage, Side, TerminalReason,
     ThreadOrigin,
 };
 pub use config::{

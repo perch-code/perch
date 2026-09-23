@@ -463,6 +463,26 @@ pub fn visible_items(items: &[Item], filters: &ItemFilters, viewer: Option<&str>
     pinned.into_iter().chain(rows).cloned().collect()
 }
 
+/// Whether a Work run may be sent on an item: a branch of the reader's
+/// own, or a pull request the reader opened, with its checkout on disk.
+/// Someone else's pull request, an issue, and anything archived are
+/// Ask-only: their text and code are other people's.
+pub fn work_allowed(item: &Item, viewer: Option<&str>) -> bool {
+    if item.is_archived() {
+        return false;
+    }
+    if !item.checkout.as_ref().is_some_and(|c| c.on_disk) {
+        return false;
+    }
+    match &item.subject {
+        None => true,
+        Some(ItemSubject::PullRequest(pr)) => viewer
+            .filter(|login| !login.is_empty())
+            .is_some_and(|login| pr.author_login.eq_ignore_ascii_case(login)),
+        Some(ItemSubject::Issue(_)) => false,
+    }
+}
+
 /// Repository identities from config and the cache, including repositories
 /// without visible rows. A declared spelling wins over the cache's spelling.
 pub fn repository_options(declared: &[DeclaredRepo], items: &[Item]) -> Vec<String> {
@@ -694,6 +714,48 @@ mod tests {
         assert_eq!(full_reference(&items[0]), "chris/perch #57 · fence");
         let filters = ItemFilters { repository: Some("missing/repo".into()), ..Default::default() };
         assert!(visible_items(&items, &filters, None).is_empty());
+    }
+
+    #[test]
+    fn work_is_for_the_reader_s_own_branches_and_pull_requests() {
+        let (_, items) = fixture();
+        let mut branch = items
+            .iter()
+            .find(|i| i.subject.is_none() && i.checkout.is_some())
+            .cloned()
+            .expect("a branch in the fixture");
+        branch.archived_at = None;
+        branch.checkout.as_mut().unwrap().on_disk = true;
+        assert!(work_allowed(&branch, None));
+        branch.checkout.as_mut().unwrap().on_disk = false;
+        assert!(!work_allowed(&branch, None), "nothing on disk to work in");
+        branch.checkout.as_mut().unwrap().on_disk = true;
+        branch.archived_at = Some(at("2026-09-18T10:00:00Z"));
+        assert!(!work_allowed(&branch, None), "archived");
+
+        let mut pull = items
+            .iter()
+            .find(|i| matches!(i.subject, Some(ItemSubject::PullRequest(_))))
+            .cloned()
+            .unwrap();
+        pull.archived_at = None;
+        pull.checkout = branch.checkout.clone();
+        let author = match &pull.subject {
+            Some(ItemSubject::PullRequest(pr)) => pr.author_login.clone(),
+            _ => unreachable!(),
+        };
+        assert!(work_allowed(&pull, Some(&author.to_uppercase())), "the reader's own");
+        assert!(!work_allowed(&pull, Some("someone-else")));
+        assert!(!work_allowed(&pull, None), "nobody signed in");
+
+        let mut issue = items
+            .iter()
+            .find(|i| matches!(i.subject, Some(ItemSubject::Issue(_))))
+            .cloned()
+            .unwrap();
+        issue.archived_at = None;
+        issue.checkout = branch.checkout.clone();
+        assert!(!work_allowed(&issue, Some(&author)));
     }
 
     #[test]

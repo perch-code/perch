@@ -328,7 +328,11 @@ pub(super) fn metadata(run: &AgentRunSummary) -> String {
     let effort = perch_agent::Effort::parse(&run.effort)
         .map(|effort| effort.label().to_string())
         .unwrap_or_else(|| run.effort.clone());
-    format!("{} · {model} · {effort}", run.backend_label())
+    let work = match run.mode {
+        perch_github::RunMode::Work => "Work · ",
+        perch_github::RunMode::Ask => "",
+    };
+    format!("{work}{} · {model} · {effort}", run.backend_label())
 }
 
 pub(super) fn navigate_to_source(

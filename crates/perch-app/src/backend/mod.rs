@@ -20,7 +20,7 @@ use perch_github::{
     MergeableState, NewRunEvent, PullRequest, PullRequestOverview, PullReviewEvent,
     ReactionKind, Reactions, RepositoryPermission, Review, ReviewCommentDraft, RevisionContext,
     RunEvent as StoredRunEvent, RunEventRecord,
-    RunHistoryFilter, RunLabels, RunOwner, RunPurpose, RunRecord, RunStatus, RunSummary,
+    RunHistoryFilter, RunLabels, RunMode, RunOwner, RunPurpose, RunRecord, RunStatus, RunSummary,
     SubjectKind, TerminalReason, Thread, ThreadOrigin,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -337,6 +337,7 @@ pub enum Command {
     /// Ask the agent a question in an item's checkout. `thread_id` of `None`
     /// starts a thread; the anchor is ignored on a follow-up.
     Ask {
+        mode: RunMode,
         item_id: String,
         thread_id: Option<String>,
         anchor: Option<Anchor>,
@@ -446,6 +447,17 @@ pub struct NewWork {
     /// The reader typed `branch`, so a taken name is an error rather than
     /// quietly becoming `-2`.
     pub typed: bool,
+    /// What to set an agent to in the new worktree, as its first Work run.
+    pub run: Option<FirstRun>,
+}
+
+/// The message the new-work view was given, and who it goes to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FirstRun {
+    pub text: String,
+    pub backend: perch_agent::Backend,
+    pub model: String,
+    pub effort: perch_agent::Effort,
 }
 
 /// What archiving or deleting an item would lose that git keeps no copy
@@ -2196,8 +2208,10 @@ impl Backend {
         backend: perch_agent::Backend,
         model: &str,
         effort: perch_agent::Effort,
+        mode: RunMode,
     ) {
         let _ = self.commands.send(Command::Ask {
+            mode,
             item_id: item_id.to_string(),
             thread_id,
             anchor,
@@ -3194,6 +3208,28 @@ async fn run(
                     match create_worktree(&ctx, &work, navigation_id).await {
                         Ok(id) => {
                             if open_item(&ctx, &id, navigation_id).await {
+                                // The message goes as the item's first Work
+                                // run, now that it is open to run in. On a
+                                // task of its own: a run lasts as long as
+                                // the agent does.
+                                if let Some(run) = work.run.clone() {
+                                    let ctx = ctx.clone();
+                                    let id = id.clone();
+                                    tokio::spawn(async move {
+                                        ask(
+                                            &ctx,
+                                            id,
+                                            None,
+                                            None,
+                                            run.text,
+                                            run.backend,
+                                            run.model,
+                                            run.effort,
+                                            RunMode::Work,
+                                        )
+                                        .await;
+                                    });
+                                }
                                 start_language_server(
                                     ctx.slot,
                                     ctx.language_server,
@@ -3249,6 +3285,7 @@ async fn run(
                 ctx.with_cache(|c| c.set_meta(&key, &value));
             }
             Command::Ask {
+                mode,
                 item_id,
                 thread_id,
                 anchor,
@@ -3260,7 +3297,7 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     ask(
-                        &ctx, item_id, thread_id, anchor, question, backend, model, effort,
+                        &ctx, item_id, thread_id, anchor, question, backend, model, effort, mode,
                     )
                     .await;
                 });
@@ -10494,6 +10531,7 @@ async fn ask(
     backend: perch_agent::Backend,
     model: String,
     effort: perch_agent::Effort,
+    mode: RunMode,
 ) {
     let open = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref().filter(|c| c.item_id == item_id).map(|c| {
@@ -10594,6 +10632,23 @@ async fn ask(
         ctx.notice("There is no checkout to ask in");
         return;
     }
+    // Work is checked here, not only by the switch that offers it: a
+    // finding's snapshot and a retained review are never worked in.
+    let work = if mode == RunMode::Work {
+        if finding_followup.is_some() || snapshot_id.is_some() {
+            ctx.notice("Work runs only in the live worktree, not a review's snapshot");
+            return;
+        }
+        match work_setup(ctx, &item, backend) {
+            Ok(work) => Some(work),
+            Err(message) => {
+                ctx.notice(message);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let (prompt_anchor, prompt_outdated, review_context) = match finding_followup.as_ref() {
         Some(context) => (
             context.anchor.as_ref(),
@@ -10659,6 +10714,9 @@ async fn ask(
         final_result_truncated: false,
         latest_activity: Some("Waiting for an execution slot".into()),
         last_event_sequence: 0,
+        mode,
+        work_before: None,
+        work_after: None,
     };
     // The request is one durable message. Each retry points a new run at
     // this same id rather than adding another copy of what the reader asked.
@@ -10709,7 +10767,11 @@ async fn ask(
     // checkout, so do not make it the only source of truth.
     let resume = finding_followup
         .is_none()
-        .then(|| thread.resumable_session(backend.name()))
+        .then(|| {
+            thread
+                .resumable_run_in(backend.name(), mode)
+                .and_then(|run| run.session_id.clone())
+        })
         .flatten();
     // The discussion on GitHub: all of it as files in a directory of the
     // run's own, and what fits of it in the prompt. A follow-up that
@@ -10767,11 +10829,14 @@ async fn ask(
         discussion: discussion_text.as_deref(),
         since: since_text.as_deref(),
     };
-    let prompt = if is_new {
+    let mut prompt = if is_new {
         crate::ask::first_prompt(&input)
     } else {
         crate::ask::follow_up_prompt(&input)
     };
+    if let (Some((_, framing)), Some(system)) = (&work, prompt.system.as_mut()) {
+        *system = framing.clone();
+    }
     // `original_request` stays suitable for a compact row label. The full
     // constructed user prompt captures the source and conversation context
     // which this exact attempt was admitted with.
@@ -10784,7 +10849,7 @@ async fn ask(
         checkout.worktree.clone(),
         &prompt,
         resume,
-        perch_agent::Mode::Ask,
+        work.map(|(mode, _)| mode).unwrap_or_default(),
     );
     // Queue time begins at admission, after local prompt preparation. This
     // keeps the displayed FIFO order aligned with the scheduler's order.
@@ -10820,6 +10885,51 @@ async fn ask(
         admission,
     )
     .await;
+}
+
+/// What a Work run on `item` needs: the sandbox its `[repo.work]`
+/// grants, and the framing that says so. Refused for an item that is not
+/// the reader's own work (see `items::work_allowed`).
+fn work_setup(
+    ctx: &Ctx,
+    item: &Item,
+    backend: perch_agent::Backend,
+) -> Result<(perch_agent::Mode, String), String> {
+    let viewer = ctx
+        .with_cache(|c| c.meta("viewer.login").ok().flatten())
+        .flatten();
+    if !crate::items::work_allowed(item, viewer.as_deref()) {
+        return Err("Work runs only on your own branches and pull requests".into());
+    }
+    let config = ctx.config();
+    let repo = config
+        .repo
+        .iter()
+        .find(|r| r.identity().is_some_and(|i| i.eq_ignore_ascii_case(&item.repo_full_name)));
+    let grant = perch_agent::WorkGrant {
+        write: repo.map(|r| r.work.write_paths()).unwrap_or_default(),
+        network: repo.map(|r| r.work.network.clone()).unwrap_or_default(),
+    };
+    // Codex's sandbox has no allowlist, so it gets no network whatever
+    // the grant says.
+    let network = match backend {
+        perch_agent::Backend::ClaudeCode if !grant.network.is_empty() => {
+            format!("reaches only {}", grant.network.join(", "))
+        }
+        _ => "has no network at all".to_string(),
+    };
+    let (branch, base) = item
+        .checkout
+        .as_ref()
+        .map(|c| (c.branch.clone(), c.base_ref.clone()))
+        .unwrap_or_default();
+    let framing = crate::ask::work_framing(
+        &config.display_name(&item.repo_full_name),
+        &branch,
+        &base,
+        &network,
+    );
+    Ok((perch_agent::Mode::Work(grant), framing))
 }
 
 /// The item's discussion as the cache has it, in the shape the files and
@@ -11317,6 +11427,7 @@ fn retry_conversation_context(
     request_id: &str,
     backend: &str,
     purpose: RunPurpose,
+    mode: RunMode,
 ) -> Option<RetryConversationContext> {
     let request_index = thread
         .messages
@@ -11335,7 +11446,7 @@ fn retry_conversation_context(
         .rev()
         .filter_map(|message| message.run.as_ref())
         .find(|run| run.status == RunStatus::Completed)
-        .filter(|run| run.backend == backend)
+        .filter(|run| run.backend == backend && run.mode == mode)
         .and_then(|run| run.session_id.clone());
     let history = if resume.is_some() {
         Vec::new()
@@ -11452,8 +11563,19 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         ctx.notice("The owning discussion is gone");
         return;
     };
+    let work = if old.mode == RunMode::Work {
+        match work_setup(ctx, &item, backend) {
+            Ok(work) => Some(work),
+            Err(message) => {
+                ctx.notice(message);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let Some((history, resume)) =
-        retry_conversation_context(&thread, &request_id, backend.name(), old.purpose)
+        retry_conversation_context(&thread, &request_id, backend.name(), old.purpose, old.mode)
     else {
         ctx.notice("The original request is gone");
         return;
@@ -11478,7 +11600,10 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
     } else {
         crate::ask::follow_up_prompt(&input)
     };
-    let prompt = captured_retry_prompt(reconstructed_prompt, old.prompt_snapshot.as_deref());
+    let mut prompt = captured_retry_prompt(reconstructed_prompt, old.prompt_snapshot.as_deref());
+    if let (Some((_, framing)), Some(system)) = (&work, prompt.system.as_mut()) {
+        *system = framing.clone();
+    }
     let spec = crate::ask::run_spec(
         &ctx.config().agent,
         backend,
@@ -11487,7 +11612,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         directory.to_path_buf(),
         &prompt,
         resume,
-        perch_agent::Mode::Ask,
+        work.map(|(mode, _)| mode).unwrap_or_default(),
     );
     let now = Timestamp::now();
     let run = RunRecord {
@@ -11530,6 +11655,9 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         final_result_truncated: false,
         latest_activity: Some("Waiting for an execution slot".into()),
         last_event_sequence: 0,
+        mode: old.mode,
+        work_before: None,
+        work_after: None,
     };
     let admission = match ctx.runs.admit(run.clone()) {
         Ok(admission) => admission,
@@ -14044,6 +14172,112 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
+    /// `fake_claude`, keeping each run's arguments, one to a line, in a
+    /// file of its own: `args-1`, `args-2`, ...
+    fn recording_claude(dir: &Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("claude");
+        std::fs::write(
+            &path,
+            format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "n=$(ls {dir}/args-* 2>/dev/null | wc -l | tr -d ' ')\n",
+                    "printf '%s\\n' \"$@\" > {dir}/args-$((n + 1))\n",
+                    "echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"model\":\"sonnet\"}}'\n",
+                    "echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done.\",\"session_id\":\"s1\"}}'\n",
+                ),
+                dir = dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn work_runs_only_on_the_reader_s_own_work_and_never_resumes_a_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = recording_claude(dir.path());
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let ask_it = |item: &Item, thread: Option<String>, mode: RunMode| {
+            ask(
+                &ctx,
+                item.id.clone(),
+                thread,
+                None,
+                "Do it".to_string(),
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+                mode,
+            )
+        };
+
+        // Someone else's pull request: refused, and nothing runs.
+        let pull = store_pull(&ctx, 7);
+        open_in_slot(&ctx, &pull);
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
+        ask_it(&pull, None, RunMode::Work).await;
+        assert!(
+            notices(&received).iter().any(|n| n == "Work runs only on your own branches and pull requests"),
+        );
+        assert!(!dir.path().join("args-1").exists(), "no agent ran");
+
+        // A branch of the reader's own.
+        let mut branch = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        branch.checkout = Some(ItemCheckout {
+            branch: "chris/readme".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: worktree.clone(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            source: None,
+        });
+        ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
+        open_in_slot(&ctx, &branch);
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
+        ask_it(&branch, None, RunMode::Work).await;
+        let thread = ctx
+            .with_cache(|c| c.load_comment_threads(&branch.id).unwrap())
+            .unwrap()
+            .remove(0);
+        let runs = ctx
+            .with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].mode, RunMode::Work);
+        assert_eq!(runs[0].status, RunStatus::Completed, "{:?}", runs[0].error);
+        let args = std::fs::read_to_string(dir.path().join("args-1")).unwrap();
+        assert!(args.contains("\"autoAllowBashIfSandboxed\":true"), "{args}");
+        assert!(args.contains("Do not commit, push, or switch branches"), "{args}");
+        assert!(args.contains("on the branch chris/readme, which started from main"), "{args}");
+        assert!(!args.contains("Do not change any file"), "{args}");
+
+        // A question in the same thread starts over, as a switch of
+        // backend does, with what was said folded in; so does Work after
+        // it. Work after Work resumes.
+        ask_it(&branch, Some(thread.id.clone()), RunMode::Ask).await;
+        let args = std::fs::read_to_string(dir.path().join("args-2")).unwrap();
+        assert!(!args.contains("--resume"), "{args}");
+        assert!(args.contains("\"autoAllowBashIfSandboxed\":false"), "{args}");
+        assert!(args.contains("Do not change any file"), "{args}");
+        ask_it(&branch, Some(thread.id.clone()), RunMode::Work).await;
+        let args = std::fs::read_to_string(dir.path().join("args-3")).unwrap();
+        assert!(!args.contains("--resume"), "{args}");
+        assert!(args.contains("Do not commit, push, or switch branches"), "{args}");
+        ask_it(&branch, Some(thread.id.clone()), RunMode::Work).await;
+        let args = std::fs::read_to_string(dir.path().join("args-4")).unwrap();
+        assert!(args.contains("--resume"), "the Work session is resumed: {args}");
+    }
+
     #[tokio::test]
     async fn a_question_is_given_the_discussion_and_a_resumed_follow_up_what_changed() {
         let dir = tempfile::tempdir().unwrap();
@@ -14075,6 +14309,7 @@ mod tests {
                 perch_agent::Backend::ClaudeCode,
                 "sonnet".into(),
                 perch_agent::Effort::Medium,
+                RunMode::Ask,
             )
         };
         ask_it(None, "Why?").await;
@@ -16230,6 +16465,7 @@ mod tests {
             base,
             branch: branch.map(str::to_string),
             typed,
+            run: None,
         }
     }
 

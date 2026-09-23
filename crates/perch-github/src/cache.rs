@@ -14,7 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use crate::comments::{
     self, Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,
     RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunHistoryPage, RunLabels, RunOwner,
-    RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, TerminalReason, ThreadOrigin,
+    RunMode, RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, TerminalReason, ThreadOrigin,
 };
 use crate::discussion::Discussion;
 use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
@@ -1139,6 +1139,9 @@ fn migrate_13_to_14(tx: &Transaction<'_>) -> Result<(), CacheError> {
             final_result,
             final_result_truncated: false,
             latest_activity: steps.last().map(|step| step.summary.clone()),
+            mode: crate::comments::RunMode::Ask,
+            work_before: None,
+            work_after: None,
         };
         insert_run_row(tx, &record)?;
         for (index, step) in steps.into_iter().enumerate() {
@@ -1179,7 +1182,7 @@ const RUN_COLUMNS: &str = "id, owner_kind, owner_item_id, owner_thread_id, owner
     prompt_snapshot, working_directory, revision_json, repository_label, item_label, branch_label,
     status, terminal_reason, cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at,
     started_at, ended_at, final_result, final_result_truncated, latest_activity,
-    last_event_sequence";
+    last_event_sequence, mode, work_before, work_after";
 
 #[derive(Debug)]
 struct RunDbRow {
@@ -1219,6 +1222,9 @@ struct RunDbRow {
     final_result_truncated: bool,
     latest_activity: Option<String>,
     last_event_sequence: i64,
+    mode: String,
+    work_before: Option<String>,
+    work_after: Option<String>,
 }
 
 fn read_run_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunDbRow> {
@@ -1259,6 +1265,9 @@ fn read_run_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunDbRow> {
         final_result_truncated: row.get::<_, i64>(33)? != 0,
         latest_activity: row.get(34)?,
         last_event_sequence: row.get(35)?,
+        mode: row.get(36)?,
+        work_before: row.get(37)?,
+        work_after: row.get(38)?,
     })
 }
 
@@ -1350,6 +1359,9 @@ fn run_from_db(row: RunDbRow, steps: Vec<RunStep>) -> Result<RunRecord, CacheErr
         final_result_truncated: row.final_result_truncated,
         latest_activity: row.latest_activity,
         last_event_sequence: row.last_event_sequence.max(0) as u64,
+        mode: RunMode::parse(&row.mode).ok_or_else(|| CacheError::Corrupt("run mode".into()))?,
+        work_before: row.work_before,
+        work_after: row.work_after,
     })
 }
 
@@ -1357,7 +1369,7 @@ const RUN_SUMMARY_COLUMNS: &str = "id, owner_kind, owner_item_id, owner_thread_i
     owner_request_id, owner_reviewer_run_id, purpose, backend, effective_model,
     effective_effort, original_request, repository_label, item_label, branch_label, status,
     terminal_reason, cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at,
-    started_at, ended_at, latest_activity, last_event_sequence";
+    started_at, ended_at, latest_activity, last_event_sequence, mode, work_before, work_after";
 
 #[derive(Debug)]
 struct RunSummaryDbRow {
@@ -1387,6 +1399,9 @@ struct RunSummaryDbRow {
     ended_at: Option<String>,
     latest_activity: Option<String>,
     last_event_sequence: i64,
+    mode: String,
+    work_before: Option<String>,
+    work_after: Option<String>,
 }
 
 fn read_run_summary_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummaryDbRow> {
@@ -1417,6 +1432,9 @@ fn read_run_summary_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSumma
         ended_at: row.get(23)?,
         latest_activity: row.get(24)?,
         last_event_sequence: row.get(25)?,
+        mode: row.get(26)?,
+        work_before: row.get(27)?,
+        work_after: row.get(28)?,
     })
 }
 
@@ -1488,6 +1506,9 @@ fn summary_from_db(row: RunSummaryDbRow) -> Result<RunSummary, CacheError> {
         ended_at: parse_optional_timestamp(row.ended_at, "run ended_at")?,
         latest_activity: row.latest_activity,
         last_event_sequence: row.last_event_sequence.max(0) as u64,
+        mode: RunMode::parse(&row.mode).ok_or_else(|| CacheError::Corrupt("run mode".into()))?,
+        work_before: row.work_before,
+        work_after: row.work_after,
     })
 }
 
@@ -1543,10 +1564,10 @@ fn insert_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
           working_directory, revision_json, repository_label, item_label, branch_label, status,
           terminal_reason, cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at,
           started_at, ended_at, final_result, final_result_truncated, latest_activity,
-          last_event_sequence)
+          last_event_sequence, mode, work_before, work_after)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
                  ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,
-                 ?35,?36)",
+                 ?35,?36,?37,?38,?39)",
         params![
             run.id,
             owner_kind,
@@ -1584,6 +1605,9 @@ fn insert_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
             (run.final_result_truncated || result_was_truncated) as i64,
             latest_activity,
             run.last_event_sequence as i64,
+            run.mode.name(),
+            run.work_before,
+            run.work_after,
         ],
     )?;
     Ok(())
@@ -1605,7 +1629,8 @@ fn update_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
         "UPDATE runs SET effective_model=?2, effective_effort=?3, session_id=?4,
          prompt_snapshot=?5, status=?6, terminal_reason=?7, cost_usd=?8, duration_ms=?9,
          usage_json=?10, error=?11, started_at=?12, ended_at=?13, final_result=?14,
-         final_result_truncated=?15, latest_activity=?16, last_event_sequence=?17 WHERE id=?1",
+         final_result_truncated=?15, latest_activity=?16, last_event_sequence=?17,
+         work_before=?18, work_after=?19 WHERE id=?1",
         params![
             run.id,
             run.model,
@@ -1624,6 +1649,8 @@ fn update_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
             (run.final_result_truncated || result_was_truncated) as i64,
             latest_activity,
             run.last_event_sequence as i64,
+            run.work_before,
+            run.work_after,
         ],
     )?;
     Ok(())
@@ -4196,6 +4223,9 @@ mod tests {
             final_result_truncated: false,
             latest_activity: None,
             last_event_sequence: 0,
+            mode: crate::comments::RunMode::Ask,
+            work_before: None,
+            work_after: None,
         }
     }
 

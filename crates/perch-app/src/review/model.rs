@@ -1005,6 +1005,8 @@ pub struct Composer {
     /// thing with a new draft. In the composer rather than beside it so
     /// opening is one write.
     pub opening: u64,
+    /// Ask or Work, where the item allows Work; see `composer_mode`.
+    pub mode: perch_github::RunMode,
 }
 
 /// One open editor tab. The origin is here as well as on the loaded
@@ -1357,6 +1359,9 @@ pub struct ReviewState {
     /// The backend, model and effort last sent, which the next composer
     /// starts on.
     pub agent_last: RwSignal<Option<AgentChoice>>,
+    /// Ask or Work, as last picked on each item, by item id. A new
+    /// question on the item starts on it.
+    pub work_modes: RwSignal<HashMap<String, perch_github::RunMode>>,
     /// The destination last sent from each face, by `ThreadFace::index`:
     /// inline in the code, and on Conversation. A new composer on lines
     /// starts on its face's. Kept for the app's life, as `agent_last` is.
@@ -1606,6 +1611,7 @@ impl ReviewState {
             shown_resolved: RwSignal::new(HashSet::new()),
             known_cards: RwSignal::new(HashSet::new()),
             agent_last: RwSignal::new(None),
+            work_modes: RwSignal::new(HashMap::new()),
             last_destination: [RwSignal::new(None), RwSignal::new(None)],
             agent: RwSignal::new(perch_github::AgentConfig::default()),
             hovered_line: RwSignal::new(None),
@@ -3562,6 +3568,7 @@ impl ReviewState {
                 self.sent_composer.set(None);
             }
             self.forget_composer_rows();
+            let mode = self.composer_mode(thread_id.as_deref());
             self.composer.set(Some(Composer {
                 thread_id,
                 anchor,
@@ -3569,6 +3576,7 @@ impl ReviewState {
                 draft,
                 opening,
                 editing,
+                mode,
             }));
         });
         let in_code = self.composer_in_code_untracked();
@@ -3623,6 +3631,55 @@ impl ReviewState {
 
     /// Change where the composer's text goes. The confirm, if one was up,
     /// was about the old destination and goes.
+    /// What a composer starts on: a follow-up on its thread's last run;
+    /// a new question on what was last picked on the item, else Work on
+    /// a branch Perch made, which is there to be worked on, and Ask on
+    /// anything else. Whether Work is allowed at all is the view's and the
+    /// backend's to say.
+    fn composer_mode(&self, thread_id: Option<&str>) -> perch_github::RunMode {
+        use perch_github::RunMode;
+        let last = thread_id.and_then(|id| {
+            self.comment_threads.with_untracked(|threads| {
+                threads
+                    .iter()
+                    .find(|t| t.id == id)
+                    .and_then(|t| t.last_mode())
+            })
+        });
+        if let Some(mode) = last {
+            return mode;
+        }
+        self.item.with_untracked(|item| {
+            let Some(item) = item else {
+                return RunMode::Ask;
+            };
+            if let Some(mode) = self.work_modes.with_untracked(|m| m.get(&item.id).copied()) {
+                return mode;
+            }
+            let made_here = item.subject.is_none() && item.checkout.as_ref().is_some_and(|c| c.owned);
+            if made_here {
+                RunMode::Work
+            } else {
+                RunMode::Ask
+            }
+        })
+    }
+
+    /// Switch the open composer between Ask and Work, and remember it for
+    /// the item.
+    pub fn set_composer_mode(&self, mode: perch_github::RunMode) {
+        self.composer.update(|c| {
+            if let Some(c) = c {
+                c.mode = mode;
+            }
+        });
+        if let Some(id) = self.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) {
+            self.work_modes.update(|m| {
+                m.insert(id, mode);
+            });
+        }
+    }
+
     pub fn set_destination(&self, destination: Destination) {
         self.composer.update(|c| {
             if let Some(c) = c {
@@ -4791,6 +4848,56 @@ mod tests {
         state.open_composer(Some("mine".into()), Some(composer), String::new(), choice);
         assert!(!state.is_collapsed(&CardId::Thread("mine".into())));
         assert_eq!(state.tab.get(), ItemTab::Files);
+    }
+
+    #[test]
+    fn a_composer_starts_on_work_where_perch_made_the_branch_and_follows_its_thread() {
+        use perch_github::RunMode;
+        let state = ReviewState::new();
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        let mode = || state.composer.with_untracked(|c| c.as_ref().unwrap().mode);
+        let mut item = perch_github::Item::new("a/b", "2026-09-18T10:00:00Z".parse().unwrap());
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: "chris/readme".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: "/x".into(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            source: None,
+        });
+        state.item.set(Some(Arc::new(item.clone())));
+        state.open_composer(None, None, String::new(), choice.clone());
+        assert_eq!(mode(), RunMode::Work, "a branch Perch made is there to be worked on");
+
+        // Picked, it is what the next question on the item starts on.
+        state.set_composer_mode(RunMode::Ask);
+        state.open_composer(None, None, String::new(), choice.clone());
+        assert_eq!(mode(), RunMode::Ask);
+
+        // A follow-up goes on as its thread's last run went.
+        let mut thread = github_thread(1, 3, perch_github::Side::Right, "2026-09-18T09:00:00Z", 0);
+        thread.messages[0].run = Some(perch_github::RunRecord {
+            mode: RunMode::Work,
+            ..Default::default()
+        });
+        let thread_id = thread.id.clone();
+        state.comment_threads.set(Arc::new(vec![thread]));
+        state.open_composer(Some(thread_id), None, String::new(), choice.clone());
+        assert_eq!(mode(), RunMode::Work);
+
+        // A root's branch, not one Perch made, starts on Ask.
+        item.id = "other".into();
+        item.checkout.as_mut().unwrap().owned = false;
+        state.item.set(Some(Arc::new(item)));
+        state.open_composer(None, None, String::new(), choice);
+        assert_eq!(mode(), RunMode::Ask);
     }
 
     #[test]

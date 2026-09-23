@@ -141,6 +141,23 @@ impl CommentThread {
             .filter(|r| r.backend == backend && r.session_id.is_some())
     }
 
+    /// [`resumable_run`](Self::resumable_run), when it was of `mode`: a
+    /// session begun as a question was told not to change a file, and
+    /// one begun as work was told it may, so neither is continued as the
+    /// other.
+    pub fn resumable_run_in(&self, backend: &str, mode: RunMode) -> Option<&RunRecord> {
+        self.resumable_run(backend).filter(|r| r.mode == mode)
+    }
+
+    /// The mode of the thread's latest run, which a follow-up starts on.
+    pub fn last_mode(&self) -> Option<RunMode> {
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|m| m.run.as_ref())
+            .map(|r| r.mode)
+    }
+
     pub fn running_run(&self) -> Option<&RunRecord> {
         self.messages
             .iter()
@@ -421,6 +438,41 @@ impl RunPurpose {
     }
 }
 
+/// What a run was allowed to do: answer a question, or change the
+/// worktree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunMode {
+    #[default]
+    Ask,
+    Work,
+}
+
+impl RunMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Work => "work",
+        }
+    }
+
+    /// What the card and the inspector call it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "Ask",
+            Self::Work => "Work",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ask" => Some(Self::Ask),
+            "work" => Some(Self::Work),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
@@ -623,6 +675,11 @@ pub struct RunRecord {
     pub final_result_truncated: bool,
     pub latest_activity: Option<String>,
     pub last_event_sequence: u64,
+    pub mode: RunMode,
+    /// A Work run's worktree recorded as a commit as it left the queue,
+    /// and as it ended; `None` until then, and for Ask.
+    pub work_before: Option<String>,
+    pub work_after: Option<String>,
 }
 
 impl RunRecord {
@@ -667,6 +724,9 @@ impl Default for RunRecord {
             final_result_truncated: false,
             latest_activity: None,
             last_event_sequence: 0,
+            mode: crate::comments::RunMode::Ask,
+            work_before: None,
+            work_after: None,
         }
     }
 }
@@ -807,6 +867,9 @@ pub struct RunSummary {
     pub ended_at: Option<Timestamp>,
     pub latest_activity: Option<String>,
     pub last_event_sequence: u64,
+    pub mode: RunMode,
+    pub work_before: Option<String>,
+    pub work_after: Option<String>,
 }
 
 impl RunSummary {
@@ -838,6 +901,9 @@ impl From<&RunRecord> for RunSummary {
             ended_at: run.ended_at,
             latest_activity: run.latest_activity.clone(),
             last_event_sequence: run.last_event_sequence,
+            mode: run.mode,
+            work_before: run.work_before.clone(),
+            work_after: run.work_after.clone(),
         }
     }
 }
@@ -953,6 +1019,9 @@ mod tests {
             final_result_truncated: false,
             latest_activity: None,
             last_event_sequence: 0,
+            mode: crate::comments::RunMode::Ask,
+            work_before: None,
+            work_after: None,
         }
     }
 

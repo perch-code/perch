@@ -351,6 +351,7 @@ pub fn composer_view(
                         *agent,
                         model,
                         *effort,
+                        sending_mode(app, state, composer.mode),
                     );
                     state
                         .agent_last
@@ -780,6 +781,7 @@ fn composer_footer(
     };
     dyn_container(mode, move |mode| match mode {
         FooterMode::Ready => Stack::horizontal((
+            mode_switch(app, state),
             destination_picker(app, state),
             // No effort to pick for GitHub.
             dyn_container(
@@ -848,6 +850,86 @@ fn composer_footer(
 /// What the send does, on its button: `Send` to an agent, `Add to
 /// review` for a draft, `Comment` for an issue comment that posts at
 /// once. Tracked over the composer.
+/// Whether the open item takes Work runs: a branch of the reader's own,
+/// or a pull request they opened, on disk.
+fn work_offered(app: AppState, state: ReviewState) -> bool {
+    let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    state.item.with(|item| {
+        item.as_ref()
+            .is_some_and(|item| crate::items::work_allowed(item, viewer.as_deref()))
+    })
+}
+
+/// The mode a send goes with: the composer's, where the item takes Work.
+fn sending_mode(
+    app: AppState,
+    state: ReviewState,
+    mode: perch_github::RunMode,
+) -> perch_github::RunMode {
+    if floem::reactive::Effect::untrack(|| work_offered(app, state)) {
+        mode
+    } else {
+        perch_github::RunMode::Ask
+    }
+}
+
+/// Ask or Work, before the model, on an item that takes Work and while
+/// the text is bound for an agent. Absent anywhere else, where every
+/// message is a question.
+fn mode_switch(app: AppState, state: ReviewState) -> impl IntoView {
+    use perch_github::RunMode;
+
+    let shown = move || {
+        work_offered(app, state)
+            && state
+                .composer
+                .with(|c| c.as_ref().is_some_and(|c| !c.destination.is_github()))
+    };
+    let segment = move |mode: RunMode| {
+        let current = move || {
+            state
+                .composer
+                .with(|c| c.as_ref().map(|c| c.mode) == Some(mode))
+        };
+        Label::derived(move || mode.label().to_string())
+            .on_event_stop(el::Click, move |_, _| state.set_composer_mode(mode))
+            .debug_name(format!("composer-mode:{}", mode.name()))
+            .style(move |s| {
+                let on = current();
+                clickable(s)
+                    .height(24.0)
+                    .padding_horiz(9.0)
+                    .items_center()
+                    .font_size(theme::TEXT_BADGE)
+                    .border_radius(6.0)
+                    .color(if on { theme::FG } else { theme::FG_MUTED })
+                    .apply_if(on, |s| {
+                        s.background(theme::CANVAS)
+                            .font_weight(theme::weight_emphasis())
+                    })
+                    .apply_if(!on, |s| s.hover(|s| s.color(theme::FG)))
+            })
+    };
+    dyn_container(shown, move |shown| {
+        if shown {
+            Stack::horizontal((segment(RunMode::Ask), segment(RunMode::Work)))
+                .debug_name("composer-mode")
+                .style(|s| {
+                    s.items_center()
+                        .padding(2.0)
+                        .gap(2.0)
+                        .background(theme::CANVAS_SUBTLE)
+                        .border(1.0)
+                        .border_color(theme::BORDER)
+                        .border_radius(8.0)
+                })
+                .into_any()
+        } else {
+            Empty::new().into_any()
+        }
+    })
+}
+
 fn send_label(state: ReviewState) -> String {
     state.composer.with(|c| match c.as_ref() {
         Some(c) if c.destination.is_github() => {
@@ -990,7 +1072,7 @@ pub fn destination_label(destination: &Destination) -> String {
 /// first. Each entry names the backend the model runs on, which is
 /// config's call, not the section's, so a model listed under both stays
 /// with Claude Code wherever it appears.
-fn model_groups(agent: &perch_github::AgentConfig) -> Vec<Vec<(perch_agent::Backend, String)>> {
+pub(crate) fn model_groups(agent: &perch_github::AgentConfig) -> Vec<Vec<(perch_agent::Backend, String)>> {
     let entry = |m: &String| (crate::ask::backend_for(agent, m), m.clone());
     let claude: Vec<_> = agent.models.iter().map(entry).collect();
     let codex: Vec<_> = agent.codex_models().iter().map(entry).collect();
@@ -2789,9 +2871,14 @@ fn run_footer(backend: Rc<Backend>, run: RunRecord) -> floem::AnyView {
             let effort = perch_agent::Effort::parse(&run.effort)
                 .map(|e| e.label().to_string())
                 .unwrap_or_else(|| run.effort.clone());
-            // The answer's byline names the model; the run says how hard
-            // it thought, how long it took and what it cost.
-            format!("{effort} \u{00b7} {secs:.0}s{cost}")
+            // The answer's byline names the model; the run says whether
+            // it worked in the worktree, how hard it thought, how long it
+            // took and what it cost.
+            let work = match run.mode {
+                perch_github::RunMode::Work => "Work \u{00b7} ",
+                perch_github::RunMode::Ask => "",
+            };
+            format!("{work}{effort} \u{00b7} {secs:.0}s{cost}")
         })
         .style(|s| {
             s.font_size(theme::TEXT_SECTION)

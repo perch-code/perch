@@ -954,6 +954,9 @@ async fn queue_attempt(
         final_result_truncated: false,
         latest_activity: Some("Waiting for an execution slot".into()),
         last_event_sequence: 0,
+        mode: perch_github::RunMode::Ask,
+        work_before: None,
+        work_after: None,
     };
     let admission = match ctx.runs.admit(run.clone()) {
         Ok(admission) => admission,

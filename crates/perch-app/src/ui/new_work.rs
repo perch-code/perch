@@ -10,13 +10,14 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::menu::Menu;
 use floem::prelude::*;
-use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{
     dyn_container, text_editor, Container, Decorators, Empty, Label, Stack, TextInput,
 };
 use perch_git::BaseBranch;
 
-use crate::backend::{Backend, NewWork};
+use crate::backend::{Backend, FirstRun, NewWork};
+use crate::review::model::{AgentChoice, Destination};
 use crate::review::review_launch::{action_button, menu_button};
 use crate::state::{AppState, Checked};
 use crate::theme;
@@ -60,6 +61,9 @@ pub struct NewWorkState {
     pub prefix: RwSignal<String>,
     /// Why the last Start did not go.
     pub error: RwSignal<Option<String>>,
+    /// Who the message goes to; `None` until picked, when the composers'
+    /// default is used.
+    pub agent: RwSignal<Option<AgentChoice>>,
 }
 
 impl NewWorkState {
@@ -75,6 +79,7 @@ impl NewWorkState {
             text: RwSignal::new(String::new()),
             prefix: RwSignal::new(String::new()),
             error: RwSignal::new(None),
+            agent: RwSignal::new(None),
         }
     }
 
@@ -204,12 +209,86 @@ fn request(state: AppState) -> Result<NewWork, String> {
     } else {
         None
     };
+    let text = nw.text.get();
+    let run = (!text.trim().is_empty()).then(|| {
+        let (backend, model, effort) = chosen_agent(state);
+        FirstRun {
+            text: text.trim().to_string(),
+            backend,
+            model,
+            effort,
+        }
+    });
     Ok(NewWork {
         repo,
         base,
         branch,
         typed: nw.name_typed.get(),
+        run,
     })
+}
+
+/// The agent the message goes to: the one picked here, else what a new
+/// composer starts on.
+fn chosen_agent(state: AppState) -> AgentChoice {
+    state
+        .new_work
+        .agent
+        .get()
+        .unwrap_or_else(|| crate::review::threads::defaults(state))
+}
+
+/// `Claude · Opus`, and the effort, as the composers pick them; never
+/// GitHub, since new work has nothing on GitHub yet.
+fn agent_chips(state: AppState) -> impl IntoView {
+    let nw = state.new_work;
+    let model = menu_button(
+        move || crate::review::threads::destination_label(&Destination::agent(chosen_agent(state))),
+        move || {
+            let (_, selected, effort) = floem::reactive::Effect::untrack(|| chosen_agent(state));
+            let agent = state.agent.get_untracked();
+            let mut menu = Menu::new();
+            for (i, group) in crate::review::threads::model_groups(&agent).into_iter().enumerate() {
+                if i > 0 {
+                    menu = menu.separator();
+                }
+                for (backend, model) in group {
+                    let checked = model == selected;
+                    let label = crate::review::threads::model_label(&model);
+                    let agent = agent.clone();
+                    menu = menu.item(label, move |item| {
+                        let model = model.clone();
+                        let effort = crate::review::threads::nearest_effort(&agent, &model, effort);
+                        item.checked(checked)
+                            .action(move || nw.agent.set(Some((backend, model.clone(), effort))))
+                    });
+                }
+            }
+            menu
+        },
+        "new-work-agent".into(),
+    );
+    let effort = menu_button(
+        move || chosen_agent(state).2.label().to_string(),
+        move || {
+            let (backend, model, selected) = floem::reactive::Effect::untrack(|| chosen_agent(state));
+            let agent = state.agent.get_untracked();
+            let mut menu = Menu::new();
+            for effort in perch_agent::Effort::ALL {
+                let takes = agent.effort_supported(&model, effort.name());
+                let model = model.clone();
+                menu = menu.item(effort.label(), move |item| {
+                    let model = model.clone();
+                    item.checked(effort == selected)
+                        .enabled(takes)
+                        .action(move || nw.agent.set(Some((backend, model.clone(), effort))))
+                });
+            }
+            menu
+        },
+        "new-work-effort".into(),
+    );
+    Stack::horizontal((model, effort)).style(|s| s.items_center().gap(6.0))
 }
 
 /// Make the worktree. The draft is cleared once it has gone.
@@ -244,6 +323,10 @@ pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 
     let start_backend = backend.clone();
     let start: Rc<dyn Fn()> = Rc::new(move || start(state, &start_backend));
+    // Whether there is a message, as a memo: the text changes with every
+    // key, and a container keyed on the signal would be built again on
+    // each.
+    let empty = Memo::new(move |_| nw.text.with(|t| t.trim().is_empty()));
 
     let column = Stack::vertical((
         Label::derived(|| "New work".to_string()).style(|s| {
@@ -266,6 +349,16 @@ pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         }),
         Stack::horizontal((
             dyn_container(
+                move || empty.get(),
+                move |empty| {
+                    if empty {
+                        Empty::new().into_any()
+                    } else {
+                        agent_chips(state).into_any()
+                    }
+                },
+            ),
+            dyn_container(
                 move || nw.error.get(),
                 |error| match error {
                     Some(error) => Label::derived(move || error.clone())
@@ -283,7 +376,7 @@ pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             {
                 let start = start.clone();
                 dyn_container(
-                    move || nw.text.with(|t| t.trim().is_empty()),
+                    move || empty.get(),
                     move |empty| {
                         let start = start.clone();
                         action_button(

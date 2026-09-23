@@ -5,13 +5,14 @@
 //! while this module owns only the process and the right to execute it.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use jiff::Timestamp;
-use perch_github::{NewRunEvent, RunEvent, RunOwner, RunRecord, RunStatus, TerminalReason};
-use tokio::sync::{watch, Notify, OwnedSemaphorePermit, Semaphore};
+use perch_github::{NewRunEvent, RunEvent, RunMode, RunOwner, RunRecord, RunStatus, TerminalReason};
+use tokio::sync::{watch, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 
 use super::{Event, SharedCache};
 
@@ -22,6 +23,10 @@ pub(crate) struct RunManager {
 
 struct Inner {
     limit: Arc<Semaphore>,
+    /// One Work run at a time in a worktree, in the order they came. A
+    /// Work run takes its worktree's lock before a slot, so one waiting
+    /// on another Work run does not hold a slot from anyone else.
+    worktrees: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     admission: Mutex<AdmissionGate>,
     entries: Mutex<HashMap<String, Arc<Entry>>>,
     cache: SharedCache,
@@ -43,6 +48,8 @@ enum OwnerFence {
 struct Entry {
     id: String,
     owner: RunOwner,
+    /// For a Work run, the worktree it changes, as the disk resolves it.
+    worktree: Option<PathBuf>,
     cancelled: AtomicBool,
     /// The task which owned the spawn lease has finished. If its terminal
     /// database write failed, keep the entry registered and retry that
@@ -73,6 +80,7 @@ pub(crate) struct Admission {
 pub(crate) struct RunLease {
     entry: Arc<Entry>,
     _permit: OwnedSemaphorePermit,
+    _worktree: Option<OwnedMutexGuard<()>>,
 }
 
 /// Prevents a new run for an owner while its durable records are being
@@ -91,6 +99,7 @@ impl RunManager {
         Self {
             inner: Arc::new(Inner {
                 limit: Arc::new(Semaphore::new(limit.max(1))),
+                worktrees: Mutex::new(HashMap::new()),
                 admission: Mutex::new(AdmissionGate::default()),
                 entries: Mutex::new(HashMap::new()),
                 cache,
@@ -176,9 +185,14 @@ impl RunManager {
             run
         };
         let (done, _) = watch::channel(false);
+        let worktree = (run.mode == RunMode::Work)
+            .then(|| run.working_directory.as_deref().map(PathBuf::from))
+            .flatten()
+            .map(|path| path.canonicalize().unwrap_or(path));
         let entry = Arc::new(Entry {
             id: run.id.clone(),
             owner: run.owner.clone(),
+            worktree,
             cancelled: AtomicBool::new(false),
             execution_done: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -232,6 +246,34 @@ impl RunManager {
             self.finish_cancelled_queue(&entry);
             return None;
         }
+        let worktree = match &entry.worktree {
+            None => None,
+            Some(path) => {
+                let lock = self.worktree_lock(path);
+                match lock.clone().try_lock_owned() {
+                    Ok(guard) => Some(guard),
+                    Err(_) => {
+                        self.set_activity(&entry.id, "Waiting for the Work run in this worktree");
+                        let wait = lock.lock_owned();
+                        tokio::pin!(wait);
+                        let guard = tokio::select! {
+                            biased;
+                            _ = entry.cancel.notified() => {
+                                self.finish_cancelled_queue(&entry);
+                                return None;
+                            }
+                            guard = &mut wait => guard,
+                        };
+                        if entry.cancelled.load(Ordering::Acquire) {
+                            self.finish_cancelled_queue(&entry);
+                            return None;
+                        }
+                        self.set_activity(&entry.id, "Waiting for an execution slot");
+                        Some(guard)
+                    }
+                }
+            }
+        };
         let acquire = self.inner.limit.clone().acquire_owned();
         tokio::pin!(acquire);
         let permit = tokio::select! {
@@ -282,7 +324,39 @@ impl RunManager {
         Some(RunLease {
             entry,
             _permit: permit,
+            _worktree: worktree,
         })
+    }
+
+    /// The lock Work runs in `path` take turns on.
+    fn worktree_lock(&self, path: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .inner
+            .worktrees
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.entry(path.to_path_buf()).or_default().clone()
+    }
+
+    /// Say what a queued run is waiting for, in its row.
+    fn set_activity(&self, id: &str, activity: &str) {
+        let Some(cache) = self.inner.cache.as_ref() else {
+            return;
+        };
+        let Ok(guard) = cache.lock() else {
+            return;
+        };
+        let Some(mut run) = guard.load_run(id).ok().flatten() else {
+            return;
+        };
+        if run.status != RunStatus::Queued {
+            return;
+        }
+        run.latest_activity = Some(activity.to_string());
+        if guard.update_run(&run).is_ok() {
+            drop(guard);
+            let _ = self.inner.events.send(Event::AgentRunUpdated { run });
+        }
     }
 
     /// Attach the process before publishing Running. A stop that arrived in
@@ -906,6 +980,58 @@ mod tests {
         assert_eq!(fourth.entry.id, "four");
 
         for lease in [third, fourth] {
+            manager.transition(
+                &lease.entry.id,
+                RunStatus::Failed,
+                Some(TerminalReason::Other),
+                Some("fixture complete".into()),
+            );
+            manager.finish(lease);
+        }
+    }
+
+    #[tokio::test]
+    async fn one_work_run_at_a_time_in_a_worktree_and_questions_go_on_beside_it() {
+        let manager = manager(4);
+        let work = |id: &str| RunRecord {
+            mode: RunMode::Work,
+            working_directory: Some("/tmp/perch-run-manager-test".into()),
+            ..run(id, &format!("thread-{id}"), &format!("request-{id}"))
+        };
+        let first = manager.start(admit(&manager, work("one"))).await.unwrap();
+
+        let second = admit(&manager, work("two"));
+        let second_waiter = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.start(second).await.unwrap() })
+        };
+        tokio::task::yield_now().await;
+        assert!(!second_waiter.is_finished(), "slots are free, but the worktree is not");
+        assert_eq!(
+            manager.load("two").unwrap().latest_activity.as_deref(),
+            Some("Waiting for the Work run in this worktree")
+        );
+
+        // A question in the same worktree is not held back.
+        let ask = manager
+            .start(admit(&manager, run("ask", "thread-ask", "request-ask")))
+            .await
+            .expect("an Ask run starts beside a Work run");
+
+        manager.transition(
+            "one",
+            RunStatus::Failed,
+            Some(TerminalReason::Other),
+            Some("fixture complete".into()),
+        );
+        manager.finish(first);
+        let second = tokio::time::timeout(Duration::from_secs(1), second_waiter)
+            .await
+            .expect("the waiting Work run did not start when the first finished")
+            .unwrap();
+        assert_eq!(second.entry.id, "two");
+
+        for lease in [ask, second] {
             manager.transition(
                 &lease.entry.id,
                 RunStatus::Failed,
