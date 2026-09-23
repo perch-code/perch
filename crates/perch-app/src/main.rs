@@ -5,6 +5,7 @@ mod agents_cli;
 mod app_icon;
 mod ask;
 mod backend;
+mod context;
 mod icons;
 mod items;
 mod items_cli;

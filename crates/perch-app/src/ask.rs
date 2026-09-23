@@ -730,7 +730,7 @@ fn user_message(input: &PromptInput<'_>, with_context: bool) -> String {
 /// the text that could pass for a marker, with or without the backslash
 /// [`clean`] puts before a bracket, is spoiled with a space, so the block
 /// ends where Perch ends it, whatever the text says.
-fn untrusted_block(label: &str, text: &str) -> String {
+pub(crate) fn untrusted_block(label: &str, text: &str) -> String {
     let mut out = format!("{UNTRUSTED_BEGIN}: {label}]\n");
     // Every line break a model might honour starts a line here, so a
     // marker after a lone carriage return or a Unicode line separator is
