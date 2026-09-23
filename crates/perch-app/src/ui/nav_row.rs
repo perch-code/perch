@@ -185,6 +185,26 @@ pub fn byline(
     .style(|s| s.items_center().width_full().min_width(0.0).margin_top(3.0))
 }
 
+/// A few words after the chips, in the byline's size: how a worktree
+/// stands against its pull request, or what an agent last did there.
+/// Nothing when there's nothing to say.
+pub fn note(text: Option<String>, color: floem::peniko::Color) -> impl IntoView {
+    match text {
+        Some(text) => Label::derived(move || text.clone())
+            .debug_name("row note")
+            .style(move |s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .color(color)
+                    .margin_left(8.0)
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .flex_shrink(1.0_f32)
+            })
+            .into_any(),
+        None => Empty::new().into_any(),
+    }
+}
+
 /// "1d", at the title's right end, following the app's clock.
 pub fn age(state: AppState, at: Timestamp) -> impl IntoView {
     Label::derived(move || timefmt::short(at, state.now.get()))

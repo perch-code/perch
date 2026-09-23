@@ -38,6 +38,9 @@ pub(crate) fn is_available(state: ReviewState) -> bool {
     state.ready.get()
         && !state.offline.get()
         && state.stale_head.with(Option::is_none)
+        && state
+            .item
+            .with(|item| item.as_ref().is_none_or(|item| item.divergence().is_none()))
         && state.historical_review.with(Option::is_none)
         && state
             .pull_request
@@ -1052,6 +1055,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            divergence: None,
             source: None,
         });
         state.item.set(Some(Arc::new(item)));
@@ -1203,6 +1207,24 @@ mod tests {
         harness.paint();
         assert!(named(harness.root_id(), "submit-review").is_some());
         assert!(named(harness.root_id(), "submit-review-held").is_none());
+    }
+
+    #[test]
+    fn a_worktree_at_another_commit_than_its_pull_request_cannot_submit() {
+        let _root = TestRoot::new();
+        let state = review_state();
+        let with_pr_head = |head: &str| {
+            let mut item = state.item.get_untracked().unwrap().as_ref().clone();
+            let mut pr = pull();
+            pr.head_sha = head.into();
+            item.subject = Some(perch_github::ItemSubject::PullRequest(pr));
+            state.item.set(Some(Arc::new(item)));
+        };
+        with_pr_head("head-42");
+        assert!(is_available(state));
+        // The reader's worktree has a commit the pull request hasn't.
+        with_pr_head("head-41");
+        assert!(!is_available(state));
     }
 
     #[test]

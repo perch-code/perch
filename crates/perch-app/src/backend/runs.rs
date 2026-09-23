@@ -822,6 +822,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            divergence: None,
             source: None,
         });
         cache.insert_item(&item).unwrap();

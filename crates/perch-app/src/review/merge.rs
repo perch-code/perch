@@ -520,7 +520,13 @@ fn merge_section(
             merge_error: state.merge_error.get(),
             offline: state.offline.get(),
             historical: state.historical_review.with(Option::is_some),
-            stale: state.stale_head.with(Option::is_some),
+            // A worktree of the reader's own is never moved to the pull
+            // request's head, so its files can be ahead of, behind, or
+            // beside what GitHub would merge.
+            stale: state.stale_head.with(Option::is_some)
+                || state
+                    .item
+                    .with(|item| item.as_ref().is_some_and(|item| item.divergence().is_some())),
             selected_method: selected_method.get(),
             bypass_requirements: bypass_requirements.get(),
             confirmation: confirmation.get(),
@@ -550,7 +556,7 @@ fn merge_content(
         return Empty::new().into_any();
     };
     let decision = merge_decision(&snapshot, pull, item);
-    let status = merge_status(decision, snapshot.overview.as_deref());
+    let status = merge_status(decision, snapshot.overview.as_deref(), item.divergence());
     let controls = merge_controls(
         state,
         backend,
@@ -580,7 +586,11 @@ fn merge_content(
     .into_any()
 }
 
-fn merge_status(decision: MergeDecision, overview: Option<&PullRequestOverview>) -> impl IntoView {
+fn merge_status(
+    decision: MergeDecision,
+    overview: Option<&PullRequestOverview>,
+    diverged: Option<perch_github::Diverged>,
+) -> impl IntoView {
     let (icon, color, title, detail) = match decision {
         MergeDecision::Loading => (
             SidebarIcon::Refresh,
@@ -607,7 +617,7 @@ fn merge_status(decision: MergeDecision, overview: Option<&PullRequestOverview>)
             blocker_detail(overview),
         ),
         MergeDecision::Disabled(reason) => {
-            let (title, detail) = disabled_copy(reason, overview);
+            let (title, detail) = disabled_copy(reason, overview, diverged);
             (SidebarIcon::Warning, theme::FG_SUBTLE, title, detail)
         }
     };
@@ -1222,8 +1232,18 @@ fn blocker_detail(overview: Option<&PullRequestOverview>) -> String {
 fn disabled_copy(
     reason: DisabledReason,
     overview: Option<&PullRequestOverview>,
+    diverged: Option<perch_github::Diverged>,
 ) -> (String, String) {
     let title = "Merging is unavailable".to_string();
+    if let (DisabledReason::StaleCheckout, Some(diverged)) = (reason, diverged) {
+        return (
+            title,
+            format!(
+                "The worktree isn't at the pull request's head: {}.",
+                diverged.label()
+            ),
+        );
+    }
     let detail = match reason {
         DisabledReason::Offline => "Reconnect to GitHub to check and merge this pull request.",
         DisabledReason::Historical => "Return to the current review before merging.",
@@ -1362,6 +1382,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            divergence: None,
             source: None,
         });
         state.item.set(Some(Arc::new(item)));
@@ -1442,6 +1463,15 @@ mod tests {
             conflicts_url("https://github.com/acme/repo/pull/42/"),
             Some("https://github.com/acme/repo/pull/42/conflicts".to_string())
         );
+    }
+
+    #[test]
+    fn a_diverged_worktree_says_how_in_the_reason() {
+        let diverged = perch_github::Diverged { ahead: Some(1), behind: Some(0) };
+        let (_, detail) = disabled_copy(DisabledReason::StaleCheckout, None, Some(diverged));
+        assert_eq!(detail, "The worktree isn't at the pull request's head: 1 unpushed.");
+        let (_, detail) = disabled_copy(DisabledReason::StaleCheckout, None, None);
+        assert_eq!(detail, "The files on screen do not match GitHub's current pull request head.");
     }
 
     #[test]

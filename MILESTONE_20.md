@@ -228,11 +228,10 @@ the PR had. Your worktrees, the ones `open_own_checkout` opens, are
 never moved, reset or fetched into, as now.
 
 **Gating.** `open_own_checkout` sets `stale: None` today. So a pushed
-branch whose worktree has moved on can be merged as if the diff on
-screen were the PR, and nothing stops it. It now sets `stale` when the
-worktree's head isn't the PR's head, as the owned path does. Merge and
-Submit review then refuse, as they do for a stale owned checkout, with
-the divergence status as the reason.
+branch whose worktree has moved on can be submitted as a review as if
+the diff on screen were the PR. Merge and Submit review now refuse
+whenever the item's checkout isn't at the PR's head, as they do for a
+stale owned checkout, with the divergence status as the reason.
 
 "Since you last looked" keeps following the worktree's head.
 `last_seen_head` is the worktree head at the last open, since that's
@@ -240,12 +239,17 @@ what Code shows.
 
 ## Model
 
-- `Checkout.stale: Option<String>` becomes `divergence:
-  Option<Divergence>`, where `Divergence { pr_head: String, ahead:
-  Option<u32>, behind: Option<u32> }`. `None` means the heads match. A
-  count is `None` when the PR's head isn't local. Every `stale_head`
-  check that asks "are the heads different" keeps working on
-  `divergence.is_some()`.
+- The item's checkout gains `divergence: Option<Divergence>`, where
+  `Divergence { head, pr_head, ahead: u32, behind: u32 }` is the last
+  count, persisted in an `items.divergence` column (schema 28).
+  `Item::divergence()` returns `Diverged { ahead: Option<u32>, behind:
+  Option<u32> }` when the checkout and the open PR are at different
+  commits, with counts only while the stored count is for those two
+  heads. `perch_git::Checkout.stale` stays as it is: on an owned
+  checkout it also means "left at an older head because the tree was
+  dirty", which greys the uncommitted cuts and stops the head
+  following commits. Merge and Submit review refuse on `stale` or on
+  `Item::divergence()`.
 - `ItemActivity { item_id, at: Timestamp, event: ActivityEvent,
   read_at: Option<Timestamp>, done_at: Option<Timestamp>,
   local_unread: bool }`, where `ActivityEvent` is one of:
@@ -266,7 +270,7 @@ what Code shows.
 
 ## Backend
 
-- Schema 28: an `item_activity` table, one row per item, keyed by
+- Schema 29: an `item_activity` table, one row per item, keyed by
   `item_id` with `ON DELETE CASCADE`, holding the fields above with the
   event as JSON. The migration creates it empty.
 - `record_activity(item_id, event)`, called from:

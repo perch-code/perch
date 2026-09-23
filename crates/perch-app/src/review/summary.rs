@@ -91,7 +91,7 @@ pub fn summary(
             SidebarIcon::Branch,
             "Branch",
             move || !branches_text(state).is_empty(),
-            Stack::horizontal((branches(state), churn(state)))
+            Stack::horizontal((branches(state), churn(state), divergence(state)))
                 .style(|s| s.items_center().min_width(0.0).col_gap(theme::SUMMARY_GAP)),
         ),
         dyn_row(
@@ -659,6 +659,28 @@ fn churn(state: ReviewState) -> impl IntoView {
     })
 }
 
+/// How the worktree stands against the pull request when they're at
+/// different commits: `3 unpushed`, `2 behind PR`, both, or that the
+/// pull request's head isn't here. Absent when they match.
+fn divergence_of(state: ReviewState) -> Option<String> {
+    state
+        .item
+        .with(|i| i.as_ref().and_then(|i| i.divergence()).map(|d| d.label()))
+}
+
+fn divergence(state: ReviewState) -> impl IntoView {
+    Label::derived(move || divergence_of(state).unwrap_or_default())
+        .debug_name("divergence")
+        .style(move |s| {
+            s.font_size(theme::TEXT_BADGE)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::DRAFT_YELLOW)
+                .flex_shrink(0.0_f32)
+                .selectable(false)
+                .apply_if(divergence_of(state).is_none(), |s| s.hide())
+        })
+}
+
 fn churn_labels(
     additions: impl Fn() -> u32 + 'static,
     deletions: impl Fn() -> u32 + 'static,
@@ -1222,6 +1244,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            divergence: None,
             source: None,
         });
         item

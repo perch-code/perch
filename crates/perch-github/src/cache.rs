@@ -36,7 +36,7 @@ mod review_store;
 /// whether the reader may resolve it. Version 24 keeps the instructions a
 /// worktree review was run with. Schemas 13 through 23 migrate in place so
 /// local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 27;
+pub const SCHEMA_VERSION: u32 = 28;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -186,6 +186,7 @@ CREATE TABLE items (
     deletions        INTEGER,
     last_seen_head   TEXT,
     source_path      TEXT,
+    divergence       TEXT,
     CHECK (subject_kind IS NOT NULL OR branch IS NOT NULL)
 );
 CREATE UNIQUE INDEX items_subject ON items(subject_repo, subject_kind, subject_number)
@@ -427,6 +428,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             24 => add_run_context_columns(&tx)?,
             25 => add_work_columns(&tx)?,
             26 => tx.execute_batch(GRANT_SCHEMA)?,
+            27 => add_divergence_column(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -612,6 +614,20 @@ fn add_work_columns(tx: &Transaction<'_>) -> Result<(), CacheError> {
         if !present {
             tx.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"), [])?;
         }
+    }
+    Ok(())
+}
+
+/// An item's checkout remembers how its head stood against its pull
+/// request's. Nothing is filled in: the next scan or open counts it.
+fn add_divergence_column(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    let present: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('items') WHERE name='divergence')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !present {
+        tx.execute("ALTER TABLE items ADD COLUMN divergence TEXT", [])?;
     }
     Ok(())
 }
@@ -3623,8 +3639,8 @@ impl Cache {
              (id, repo_full_name, subject_kind, subject_number, subject_json,
               branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name,
               saved, pinned_at, archived_at, created_at, last_opened_at, additions, deletions,
-              subject_repo, last_seen_head, source_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+              subject_repo, last_seen_head, source_path, divergence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             params![
                 item.id, item.repo_full_name,
                 c.subject_kind, c.subject_number, c.subject_json,
@@ -3640,6 +3656,7 @@ impl Cache {
                 c.subject_repo,
                 c.last_seen_head,
                 c.source_path,
+                c.divergence,
             ],
         )?;
         Ok(())
@@ -3660,7 +3677,7 @@ impl Cache {
                 owned = ?10, on_disk = ?11, from_item_id = ?12, name = ?13, saved = ?14,
                 pinned_at = ?15, archived_at = ?16, last_opened_at = ?17,
                 additions = ?18, deletions = ?19, subject_repo = ?20, last_seen_head = ?21,
-                source_path = ?22
+                source_path = ?22, divergence = ?23
              WHERE id = ?1",
             params![
                 item.id,
@@ -3685,6 +3702,7 @@ impl Cache {
                 c.subject_repo,
                 c.last_seen_head,
                 c.source_path,
+                c.divergence,
             ],
         )?;
         Ok(())
@@ -4037,7 +4055,7 @@ fn hash(s: &str) -> String {
 const ITEM_COLUMNS: &str = "id, repo_full_name, subject_kind, subject_number, subject_json,
     branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name, saved,
     pinned_at, archived_at, created_at, last_opened_at, additions, deletions, last_seen_head,
-    source_path";
+    source_path, divergence";
 
 /// An item's optional parts as columns.
 struct ItemColumns {
@@ -4055,6 +4073,7 @@ struct ItemColumns {
     subject_repo: Option<String>,
     last_seen_head: Option<String>,
     source_path: Option<String>,
+    divergence: Option<String>,
 }
 
 impl ItemColumns {
@@ -4084,6 +4103,10 @@ impl ItemColumns {
             source_path: c
                 .and_then(|c| c.source.as_ref())
                 .map(|p| p.to_string_lossy().into_owned()),
+            divergence: match c.and_then(|c| c.divergence.as_ref()) {
+                Some(d) => Some(serde_json::to_string(d)?),
+                None => None,
+            },
         })
     }
 }
@@ -4131,6 +4154,12 @@ fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
             .ok()
             .flatten()
             .map(PathBuf::from),
+        // A count an older build wrote in another shape is counted again.
+        divergence: r
+            .get::<_, Option<String>>(22)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok()),
     });
     let created: String = r.get(16)?;
     let opened: String = r.get(17)?;
@@ -5324,6 +5353,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            divergence: None,
             source: None,
         });
         i
@@ -5755,6 +5785,7 @@ mod tests {
             on_disk: false,
             churn: None,
             last_seen_head: None,
+            divergence: None,
             source: None,
         });
         i.name = Some("the fence".into());
@@ -5913,6 +5944,43 @@ mod tests {
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
         assert_eq!(outcome, CacheOpen::Migrated { from: 26, to: SCHEMA_VERSION });
         assert!(cache.grants_for("a/b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_checkout_remembers_its_divergence_count() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut i = branch_item("feature");
+        c.insert_item(&i).unwrap();
+        assert_eq!(c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().divergence, None);
+
+        let counted = crate::items::Divergence {
+            head: "abc".into(),
+            pr_head: "def".into(),
+            ahead: 3,
+            behind: 2,
+        };
+        i.checkout.as_mut().unwrap().divergence = Some(counted.clone());
+        c.update_item(&i).unwrap();
+        assert_eq!(
+            c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().divergence,
+            Some(counted)
+        );
+    }
+
+    #[test]
+    fn schema_27_gains_the_divergence_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let item = branch_item("feature");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.conn.execute_batch("ALTER TABLE items DROP COLUMN divergence").unwrap();
+            cache.set_meta("schema_version", "27").unwrap();
+        }
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 27, to: SCHEMA_VERSION });
+        cache.insert_item(&item).unwrap();
+        assert_eq!(cache.load_item(&item.id).unwrap().unwrap().checkout.unwrap().divergence, None);
     }
 
     #[test]

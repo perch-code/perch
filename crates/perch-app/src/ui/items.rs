@@ -251,7 +251,11 @@ fn byline(state: AppState, item: &Item) -> impl IntoView {
         login,
         item.repo_full_name.clone(),
         nav_row::reference(item.subject.as_ref().map(|subject| subject.number())),
-        nav_row::chips(state, checks, review),
+        Stack::horizontal((
+            nav_row::chips(state, checks, review),
+            nav_row::note(item.divergence().map(|d| d.label()), theme::DRAFT_YELLOW),
+        ))
+        .style(|s| s.items_center().min_width(0.0)),
         nav_row::churn(churn),
     )
 }

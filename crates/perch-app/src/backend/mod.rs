@@ -6160,6 +6160,11 @@ async fn finish_open(
     .await
     .unwrap_or_default();
 
+    let mut item = item;
+    if count_divergence(ctx.preparer.git(), &mut item).await {
+        ctx.with_cache(|c| c.update_item(&item));
+        ctx.send_items();
+    }
     let stale_head = checkout.stale.clone();
     let head = checkout.head_sha.clone();
     let merge_base = checkout.merge_base.clone();
@@ -6653,6 +6658,7 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revis
             if let Some(c) = item.checkout.as_mut() {
                 c.head_sha = head.clone();
             }
+            count_divergence(ctx.preparer.git(), &mut item).await;
             ctx.with_cache(|c| c.update_item(&item));
             ctx.send_items();
         }
@@ -8329,6 +8335,7 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Resul
         on_disk: true,
         churn: Some((0, 0)),
         last_seen_head: None,
+        divergence: None,
         source: None,
     });
     item.from_item_id = Some(issue_item.id.clone());
@@ -8643,6 +8650,7 @@ async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Resul
         on_disk: true,
         churn: Some((0, 0)),
         last_seen_head: None,
+        divergence: None,
         source,
     });
     // Named for what it is for, as Rename would name it; the branch
@@ -8782,6 +8790,7 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         on_disk: true,
         churn: Some((0, 0)),
         last_seen_head: None,
+        divergence: None,
         source: root,
     });
     item.from_item_id = Some(source.id.clone());
@@ -9534,6 +9543,10 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                             ctx.with_cache(|cache| cache.update_item(&item));
                             changed = true;
                         }
+                        if count_divergence(git, &mut item).await {
+                            ctx.with_cache(|cache| cache.update_item(&item));
+                            changed = true;
+                        }
                     }
                     None => {
                         // The entry's identity, not the scan's slug: the
@@ -9549,6 +9562,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                             on_disk: true,
                             churn,
                             last_seen_head: None,
+                            divergence: None,
                             source: None,
                         });
                         if let Some(Err(e)) = ctx.with_cache(|c| c.insert_item(&item)) {
@@ -10339,6 +10353,7 @@ async fn open_pull_request(
         // The head being opened now, which the next open will look back
         // to. What the row held until now is this open's "since".
         last_seen_head: Some(checkout.head_sha.clone()).filter(|h| !h.is_empty()),
+        divergence: None,
         source: None,
     });
     let since = kept.as_ref().and_then(|c| c.last_seen_head.clone());
@@ -10425,6 +10440,54 @@ async fn open_owned_branch_for_pull(
         checkout.stale = Some(pr_head_sha.to_string());
     }
     Ok(checkout)
+}
+
+/// Count the item's checkout head against its open pull request's, when
+/// the two differ and the row hasn't counted this pair yet. Runs in the
+/// checkout's own directory and fetches nothing: a pull request head that
+/// isn't there stays uncounted, and the row says so. Whether the row
+/// changed.
+async fn count_divergence(git: &perch_git::cmd::Git, item: &mut Item) -> bool {
+    if item.divergence().is_none_or(|d| d.ahead.is_some()) {
+        return false;
+    }
+    let (Some(checkout), Some(pr)) = (item.checkout.as_ref(), item.pull_request()) else {
+        return false;
+    };
+    let (dir, head, pr_head) = (checkout.path.clone(), checkout.head_sha.clone(), pr.head_sha.clone());
+    if !dir.join(".git").exists() {
+        return false;
+    }
+    let timeout = Duration::from_secs(30);
+    let present = git
+        .run(
+            Some(&dir),
+            ["cat-file", "-e", &format!("{pr_head}^{{commit}}")],
+            timeout,
+        )
+        .await
+        .is_ok();
+    if !present {
+        return false;
+    }
+    let Ok(counts) = git
+        .run(
+            Some(&dir),
+            ["rev-list", "--left-right", "--count", &format!("{head}...{pr_head}")],
+            timeout,
+        )
+        .await
+    else {
+        return false;
+    };
+    let mut parts = counts.split_whitespace().map(str::parse::<u32>);
+    let (Some(Ok(ahead)), Some(Ok(behind))) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    if let Some(checkout) = item.checkout.as_mut() {
+        checkout.divergence = Some(perch_github::Divergence { head, pr_head, ahead, behind });
+    }
+    true
 }
 
 /// A checkout under one of the reader's roots, opened where it is.
@@ -14939,6 +15002,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            divergence: None,
             source: None,
         });
         ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
@@ -14978,6 +15042,51 @@ mod tests {
         ask_it(&branch, Some(thread.id.clone()), RunMode::Work).await;
         let args = std::fs::read_to_string(dir.path().join("args-4")).unwrap();
         assert!(args.contains("--resume"), "the Work session is resumed: {args}");
+    }
+
+    #[tokio::test]
+    async fn the_scan_counts_a_root_branch_against_its_pull_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        assert!(scan_roots(&ctx).await);
+        let load = || ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        let set_pr_head = |head: &str| {
+            let mut item = load();
+            let mut pr = pull_request(7);
+            pr.head_sha = head.to_string();
+            item.subject = Some(perch_github::ItemSubject::PullRequest(pr));
+            ctx.with_cache(|c| c.update_item(&item).unwrap());
+        };
+        let pushed = git(&worktree, &["rev-parse", "HEAD"]);
+        set_pr_head(&pushed);
+        assert!(!scan_roots(&ctx).await, "nothing to count while the heads match");
+        assert_eq!(load().divergence(), None);
+
+        // An agent commits and nobody pushes.
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "three"]);
+        assert!(scan_roots(&ctx).await);
+        assert_eq!(load().divergence().unwrap().label(), "2 unpushed");
+
+        // Someone else pushed a commit this repository has, off the old
+        // head: both sides.
+        git(&worktree, &["branch", "elsewhere", &pushed]);
+        git(&worktree, &["checkout", "-q", "elsewhere"]);
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "theirs"]);
+        let theirs = git(&worktree, &["rev-parse", "HEAD"]);
+        git(&worktree, &["checkout", "-q", "feature"]);
+        set_pr_head(&theirs);
+        assert!(scan_roots(&ctx).await);
+        assert_eq!(load().divergence().unwrap().label(), "2 unpushed \u{b7} 1 behind PR");
+
+        // A head that was never fetched here is not fetched to count it.
+        set_pr_head("0123456789012345678901234567890123456789");
+        assert!(!scan_roots(&ctx).await);
+        assert_eq!(load().divergence().unwrap().label(), "PR head not fetched");
     }
 
     #[tokio::test]
@@ -15196,6 +15305,7 @@ read eof || true
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            divergence: None,
             source: None,
         });
         ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
@@ -17420,6 +17530,7 @@ read eof || true
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            divergence: None,
             source: None,
         });
         ctx.with_cache(|cache| cache.update_item(&item))
@@ -17893,6 +18004,7 @@ read eof || true
             on_disk: true,
             churn: Some((3, 1)),
             last_seen_head: None,
+            divergence: None,
             source: None,
         }
     }

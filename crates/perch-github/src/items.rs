@@ -270,6 +270,49 @@ pub struct Checkout {
     /// branch lives, and where removing it prunes. `None` for the bare
     /// clone, and for a checkout that is not owned.
     pub source: Option<PathBuf>,
+    /// How the checkout's head stood against its pull request's the last
+    /// time both commits were here to count: set by the root scan and by
+    /// opening the item. Read through `Item::divergence`, which checks it
+    /// still describes the two heads the row has now.
+    pub divergence: Option<Divergence>,
+}
+
+/// Commits on one head and not the other, counted in the checkout's
+/// repository for a pair of heads.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Divergence {
+    /// The checkout's head the counts were taken at.
+    pub head: String,
+    /// The pull request's head they were taken against.
+    pub pr_head: String,
+    /// Commits on the checkout that the pull request doesn't have.
+    pub ahead: u32,
+    /// Commits on the pull request that the checkout doesn't have.
+    pub behind: u32,
+}
+
+/// An item whose checkout and open pull request are at different
+/// commits. The counts are `None` when the pull request's head isn't in
+/// the checkout's repository, or hasn't been counted for these heads yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Diverged {
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+}
+
+impl Diverged {
+    /// What the Branch row and the bylines say: `3 unpushed`,
+    /// `2 behind PR`, both, or that the pull request's head isn't here.
+    pub fn label(&self) -> String {
+        match (self.ahead, self.behind) {
+            (Some(ahead), Some(behind)) if ahead > 0 && behind > 0 => {
+                format!("{ahead} unpushed \u{b7} {behind} behind PR")
+            }
+            (Some(ahead), Some(_)) if ahead > 0 => format!("{ahead} unpushed"),
+            (Some(_), Some(behind)) if behind > 0 => format!("{behind} behind PR"),
+            _ => "PR head not fetched".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -380,6 +423,26 @@ impl Item {
             .unwrap_or(self.created_at)
     }
 
+    /// Whether the checkout and the open pull request are at different
+    /// commits, and by how much when that has been counted. `None` when
+    /// they match, when either head is unknown, and on an item with no
+    /// checkout or no open pull request.
+    pub fn divergence(&self) -> Option<Diverged> {
+        let checkout = self.checkout.as_ref()?;
+        let pr = self.pull_request().filter(|pr| pr.is_open() && !pr.merged)?;
+        if checkout.head_sha.is_empty() || pr.head_sha.is_empty() || checkout.head_sha == pr.head_sha {
+            return None;
+        }
+        let counted = checkout
+            .divergence
+            .as_ref()
+            .filter(|d| d.head == checkout.head_sha && d.pr_head == pr.head_sha);
+        Some(Diverged {
+            ahead: counted.map(|d| d.ahead),
+            behind: counted.map(|d| d.behind),
+        })
+    }
+
     /// Whether the record is one the cache will take: a subject, a checkout,
     /// or both, never neither.
     pub fn is_valid(&self) -> bool {
@@ -411,6 +474,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            divergence: None,
             source: None,
         });
         assert_eq!(i.title(), "perch/issue-42");
@@ -439,6 +503,61 @@ mod tests {
         assert_eq!(i.title(), "Fence the manifest", "a blank name is no name");
     }
 
+    fn pr_with_checkout(checkout_head: &str, pr_head: &str) -> Item {
+        let mut i = item();
+        i.checkout = Some(Checkout {
+            branch: "fix".into(),
+            base_ref: "main".into(),
+            head_sha: checkout_head.into(),
+            path: "/x".into(),
+            owned: false,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        let pr: PullRequest = serde_json::from_value(serde_json::json!({
+            "number": 7, "title": "t", "html_url": "", "author_login": "a",
+            "author_avatar_url": "", "head_sha": pr_head, "head_ref": "fix",
+            "base_sha": "", "base_ref": "main", "draft": false, "merged": false,
+            "state": "open", "additions": 0, "deletions": 0, "changed_files": 0,
+            "repo_full_name": "criccomini/perch"
+        }))
+        .unwrap();
+        i.subject = Some(Subject::PullRequest(pr));
+        i
+    }
+
+    #[test]
+    fn divergence_is_counted_only_for_the_heads_the_row_has_now() {
+        assert_eq!(pr_with_checkout("h", "h").divergence(), None);
+        let mut i = pr_with_checkout("h2", "h1");
+        assert_eq!(i.divergence(), Some(Diverged { ahead: None, behind: None }));
+        assert_eq!(i.divergence().unwrap().label(), "PR head not fetched");
+        i.checkout.as_mut().unwrap().divergence =
+            Some(Divergence { head: "h2".into(), pr_head: "h1".into(), ahead: 3, behind: 0 });
+        assert_eq!(i.divergence().unwrap().label(), "3 unpushed");
+        // A count for heads the row no longer has is not used.
+        i.checkout.as_mut().unwrap().head_sha = "h3".into();
+        assert_eq!(i.divergence().unwrap().label(), "PR head not fetched");
+        // No open pull request, nothing to diverge from.
+        if let Some(Subject::PullRequest(pr)) = &mut i.subject {
+            pr.merged = true;
+        }
+        assert_eq!(i.divergence(), None);
+        i.subject = None;
+        assert_eq!(i.divergence(), None);
+    }
+
+    #[test]
+    fn the_divergence_label_names_each_side() {
+        let label = |ahead, behind| Diverged { ahead: Some(ahead), behind: Some(behind) }.label();
+        assert_eq!(label(3, 0), "3 unpushed");
+        assert_eq!(label(0, 2), "2 behind PR");
+        assert_eq!(label(3, 2), "3 unpushed \u{b7} 2 behind PR");
+    }
+
     #[test]
     fn closed_means_the_subject_is_closed() {
         let mut i = item();
@@ -462,7 +581,7 @@ mod tests {
         assert!(i.is_closed());
         assert!(!i.is_active());
         let mut j = item();
-        j.checkout = Some(Checkout { branch: "b".into(), base_ref: "main".into(), head_sha: "h".into(), path: "/x".into(), owned: false, on_disk: true, churn: None, last_seen_head: None, source: None });
+        j.checkout = Some(Checkout { branch: "b".into(), base_ref: "main".into(), head_sha: "h".into(), path: "/x".into(), owned: false, on_disk: true, churn: None, last_seen_head: None, source: None, divergence: None });
         assert!(j.is_active());
         j.archived_at = Some(at("2026-09-18T12:00:00Z"));
         assert!(j.is_archived());

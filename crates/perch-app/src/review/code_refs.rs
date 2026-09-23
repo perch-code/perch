@@ -937,6 +937,7 @@ pub(crate) fn review_of(files: &[&str]) -> ReviewState {
         on_disk: true,
         churn: None,
         last_seen_head: None,
+        divergence: None,
         source: None,
     });
     state.item.set(Some(Arc::new(item)));
