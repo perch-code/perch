@@ -174,14 +174,20 @@ impl ItemScope {
             // Notifications are GitHub Thread rows, rendered separately
             // from the durable Items this module filters.
             ItemScope::Notifications => false,
-            ItemScope::Authored => viewer.filter(|login| !login.is_empty()).is_some_and(|viewer| {
+            // A branch with no pull request is always the reader's: Perch
+            // made it, or the root scan found it under one of their roots,
+            // which never makes a row for the base branch. One with someone
+            // else's pull request goes by that author once it attaches.
+            ItemScope::Authored => {
                 let author = match &item.subject {
                     Some(ItemSubject::PullRequest(pr)) => &pr.author_login,
                     Some(ItemSubject::Issue(issue)) => &issue.author_login,
-                    None => return false,
+                    None => return item.checkout.is_some(),
                 };
-                author.eq_ignore_ascii_case(viewer)
-            }),
+                viewer
+                    .filter(|login| !login.is_empty())
+                    .is_some_and(|viewer| author.eq_ignore_ascii_case(viewer))
+            }
         }
     }
 
@@ -781,21 +787,35 @@ mod tests {
     }
 
     #[test]
-    fn authored_uses_pr_and_issue_authors() {
+    fn authored_uses_pr_and_issue_authors_and_takes_every_branch() {
         let (_, mut items) = fixture();
         if let Some(ItemSubject::Issue(issue)) = &mut items[3].subject {
             issue.author_login = "A".into();
         }
-        // A local branch owned by the reader has no subject author to match.
         if let Some(ItemSubject::PullRequest(pr)) = &mut items[6].subject {
             pr.author_login = "someone-else".into();
         }
         items[6].pinned_at = Some(at("2026-09-18T10:00:00Z"));
         let filters = ItemFilters { scope: ItemScope::Authored, ..Default::default() };
-        assert_eq!(ids(&visible_items(&items, &filters, Some("a"))), ["pr-wanted", "issue"]);
-        assert_eq!(ids(&visible_items(&items, &filters, Some("A"))), ["pr-wanted", "issue"]);
-        assert!(visible_items(&items, &filters, None).is_empty());
-        assert!(visible_items(&items, &filters, Some("")).is_empty());
+        assert_eq!(ids(&visible_items(&items, &filters, Some("a"))), ["pr-wanted", "issue", "branch"]);
+        assert_eq!(ids(&visible_items(&items, &filters, Some("A"))), ["pr-wanted", "issue", "branch"]);
+        // A branch is the reader's whether or not GitHub has said who
+        // they are.
+        assert_eq!(ids(&visible_items(&items, &filters, None)), ["branch"]);
+        assert_eq!(ids(&visible_items(&items, &filters, Some(""))), ["branch"]);
+    }
+
+    #[test]
+    fn a_branch_that_gains_someone_elses_pull_request_leaves_authored() {
+        let (_, mut items) = fixture();
+        let filters = ItemFilters { scope: ItemScope::Authored, ..Default::default() };
+        assert!(ids(&visible_items(&items, &filters, Some("a"))).contains(&"branch"));
+        let mut pr = items[0].subject.clone();
+        if let Some(ItemSubject::PullRequest(pr)) = &mut pr {
+            pr.author_login = "someone-else".into();
+        }
+        items[5].subject = pr;
+        assert!(!ids(&visible_items(&items, &filters, Some("a"))).contains(&"branch"));
     }
 
     #[test]

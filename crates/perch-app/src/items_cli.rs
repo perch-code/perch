@@ -245,16 +245,18 @@ mod tests {
     }
 
     #[test]
-    fn authored_scope_uses_the_viewer_and_excludes_local_branches() {
+    fn authored_scope_uses_the_viewer_and_takes_local_branches() {
         let filters = ItemFilters::parse("scope=authored").unwrap();
         assert_eq!(
             text(&filters),
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested\n"
+            "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested\n"
         );
 
+        // With no viewer, only the branches, which are the reader's
+        // whoever they are.
         let visible = items::visible_items(&fixture(), &filters, None);
         let mut out = String::new();
         render(&mut out, &visible, &filters);
-        assert_eq!(out, "");
+        assert_eq!(out, "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n");
     }
 }
