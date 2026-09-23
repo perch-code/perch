@@ -19,7 +19,7 @@ use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::{BorderBottomLeftRadius, BorderBottomRightRadius, CursorStyle};
 use floem::views::{
-    dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, ScrollExt, Stack,
+    dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack,
 };
 use perch_github::{Author, CommentMessage, CommentThread, RunRecord, RunStatus, ThreadOrigin};
 
@@ -472,10 +472,7 @@ pub fn composer_view(
     // A composer laid in place on Conversation also leaves its box where
     // `a` can find it and scrolls the page to itself: it sits at the end of
     // the conversation, or under a thread, and may have opened off screen.
-    // One editing a draft inside an inline card sits among the messages,
-    // in the card's own scroll, so it scrolls that to itself too.
     let inner = editor.editor().editor_view_id;
-    let editing = composer.editing.is_some();
     let asked = std::rc::Rc::new(std::cell::Cell::new(false));
     let registered = std::rc::Rc::new(std::cell::Cell::new(None));
     let unregister = registered.clone();
@@ -493,8 +490,6 @@ pub fn composer_view(
             if face == ThreadFace::Card {
                 registered.set(Some(id));
                 state.composer_box.set(Some(id));
-                id.scroll_to(None);
-            } else if editing {
                 id.scroll_to(None);
             }
             if state.composer_autofocus.get_untracked() {
@@ -1280,8 +1275,7 @@ pub(crate) fn wire_flash(state: ReviewState, card_id: CardId, flashing: RwSignal
 
 /// A thread's card open: its header, a finding's controls and the delete
 /// confirmation when one is asked for, the comments, and the foot. The
-/// comments scroll inside the card once it is as tall as a card may be,
-/// so a long thread cannot push the code off the screen.
+/// card is as tall as its thread, however long: nothing in it scrolls.
 fn open_inline_card(
     app: AppState,
     state: ReviewState,
@@ -1295,9 +1289,7 @@ fn open_inline_card(
         backend.clone(),
         thread.id.clone(),
         ThreadFace::Inline,
-    )
-    .scroll()
-    .style(card_scroll);
+    );
     Stack::vertical((
         inline_header(app, state, &thread, menu).style(|s| s.flex_shrink(0.0_f32)),
         notices(app, state, backend.clone(), &thread, ThreadFace::Inline)
@@ -1306,32 +1298,7 @@ fn open_inline_card(
         follow_up(app, state, backend, thread.id.clone(), ThreadFace::Inline)
             .style(|s| s.flex_shrink(0.0_f32)),
     ))
-    .style(|s| {
-        s.flex_col()
-            .width_full()
-            .max_height(inline_card_max_height())
-    })
-}
-
-/// How tall a card in the code may be: its rows at the cap, less the
-/// inset inside its first and last rows and its border.
-pub(crate) fn inline_card_max_height() -> f64 {
-    crate::review::doc::CARD_MAX_ROWS as f64 * theme::CODE_LINE_HEIGHT as f64
-        - 2.0 * theme::CARD_INSET
-        - 2.0
-}
-
-/// The scroll a card's comments sit in, for the cap. floem keeps the
-/// bar's width whether or not anything overflows, off the right of the
-/// content for the vertical bar and under it for the horizontal one. The
-/// comments never scroll sideways, so nothing is kept under them, and
-/// the bar's room comes out of the inset at their right, where it draws
-/// at the cap.
-pub(crate) fn card_scroll(s: floem::style::Style) -> floem::style::Style {
-    s.flex_shrink(1.0_f32)
-        .min_height(0.0)
-        .overflow_x(floem::taffy::Overflow::Hidden)
-        .scrollbar_width(theme::CARD_SCROLLBAR)
+    .style(|s| s.flex_col().width_full())
 }
 
 /// The header across a thread in the code, as Files changed has it: the
@@ -1986,9 +1953,7 @@ pub fn messages_view(
         let s = s.flex_col().width_full();
         match face {
             ThreadFace::Card => s.padding_horiz(theme::THREAD_INSET),
-            ThreadFace::Inline => s
-                .padding_left(theme::INLINE_THREAD_INSET)
-                .padding_right(theme::INLINE_THREAD_INSET - theme::CARD_SCROLLBAR),
+            ThreadFace::Inline => s.padding_horiz(theme::INLINE_THREAD_INSET),
         }
     })
 }

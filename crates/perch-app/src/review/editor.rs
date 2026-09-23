@@ -1108,9 +1108,7 @@ fn inline_card(
 /// How many rows a card laid out `height` tall takes: the height with the
 /// inset the card sits inside its first and last rows put back, in whole
 /// rows, rounded up, so the border never touches the line after the
-/// card. Never fewer than one, and never more than a card may take: the
-/// card scrolls inside itself at that height, so the rows it is given
-/// stop where the estimate's cap does.
+/// card. Never fewer than one.
 ///
 /// The height is read to a hundredth of a pixel first. It comes from the
 /// layout's single-precision sum of the card's lines, whose fractional
@@ -1118,8 +1116,7 @@ fn inline_card(
 /// that step up would give the card a blank row under it.
 fn rows_for_height(height: f64, line_height: f64, inset: f64) -> usize {
     let height = (height * 100.0).round() / 100.0;
-    let rows = ((height + 2.0 * inset) / line_height).ceil().max(1.0) as usize;
-    rows.min(doc::CARD_MAX_ROWS)
+    ((height + 2.0 * inset) / line_height).ceil().max(1.0) as usize
 }
 
 /// Where the editor scrolls to so that a card from `top` to `bottom` is
@@ -1888,15 +1885,8 @@ mod tests {
         // Never fewer than one, however little is there.
         assert_eq!(rows_for_height(0.0, lh, inset), 1);
         assert_eq!(rows_for_height(lh - 2.0 * inset, lh, inset), 1);
-        // A card as tall as its rows at the cap allow is the cap, not a
-        // row over it, and nothing taller is more.
-        let cap = doc::CARD_MAX_ROWS as f64 * lh - 2.0 * inset;
-        assert_eq!(rows_for_height(cap, lh, inset), doc::CARD_MAX_ROWS);
-        assert_eq!(rows_for_height(cap - lh, lh, inset), doc::CARD_MAX_ROWS - 1);
-        assert_eq!(
-            rows_for_height(cap + 100.0 * lh, lh, inset),
-            doc::CARD_MAX_ROWS
-        );
+        // Nothing caps a tall card.
+        assert_eq!(rows_for_height(140.0 * lh - 2.0 * inset, lh, inset), 140);
     }
 }
 
@@ -4000,41 +3990,27 @@ mod window {
     }
 
     #[test]
-    fn a_card_is_never_taller_than_the_cap_and_the_estimate_agrees_with_it_there() {
-        use crate::review::doc::{CardId, CARD_MAX_ROWS};
+    fn a_long_card_is_as_tall_as_its_thread_and_takes_the_rows_for_it() {
+        use crate::review::doc::CardId;
         let (mut harness, state) = harness();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
         let card = CardId::Thread("t1".into());
 
-        // A hundred-line answer is far more than forty rows of card, so
-        // the estimate is the cap, and so is the card: its messages
-        // scroll inside it, and its box stops where the rows do.
+        // A hundred-line answer does not scroll inside its card: the card
+        // is as tall as every line, and the document gives it the rows.
         let answer = (0..100)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let thread = thread_with("t1", 5, 7, &["why?", &answer]);
-        assert_eq!(
-            crate::review::doc::estimate_rows(&thread, false),
-            CARD_MAX_ROWS
-        );
         state.set_comment_threads(Arc::new(vec![thread]));
         harness.rebuild();
         harness.paint();
-        let rect = card_rect(&harness, "t1");
-        assert_eq!(
-            rect.height(),
-            CARD_MAX_ROWS as f64 * line_height - 2.0 * crate::theme::CARD_INSET
-        );
-        assert_eq!(laid_out_rows(&harness, "t1"), CARD_MAX_ROWS);
+        let rows = laid_out_rows(&harness, "t1");
+        assert!(rows > 100, "every line has room: {rows} rows");
         let doc = live.doc.get();
-        assert_eq!(doc.card_span(&card), Some(9..9 + CARD_MAX_ROWS));
-        assert_eq!(doc.len(), 120 + CARD_MAX_ROWS);
-        assert!(
-            !state.card_rows.get().contains_key(&card),
-            "the estimate was right, so nothing was written"
-        );
+        assert_eq!(doc.card_span(&card), Some(9..9 + rows));
+        assert_eq!(doc.len(), 120 + rows);
         assert_eq!(laid_out_text(&live), doc.text);
     }
 

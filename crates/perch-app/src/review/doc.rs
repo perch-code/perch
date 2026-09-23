@@ -32,11 +32,6 @@ pub const REVEAL_STEP: usize = 20;
 /// since two clicks would do it anyway.
 pub const REVEAL_ALL_AT: usize = 40;
 
-/// The most rows a card takes. A thread longer than that scrolls inside
-/// its card, so a long conversation cannot push the code off the screen;
-/// Conversation is there for reading one at length.
-pub const CARD_MAX_ROWS: usize = 40;
-
 /// A collapsed card is one row: the first author, the first line, and how
 /// many messages follow.
 pub const COLLAPSED_ROWS: usize = 1;
@@ -83,7 +78,7 @@ pub enum CardId {
 /// How many rows a thread's card is given before it has been laid out:
 /// one per line of every message body, wrapped at eighty columns, plus
 /// the byline and the gap for each message, the header, the Follow up
-/// box and the foot, and never more than `CARD_MAX_ROWS`. Collapsed, it is
+/// box and the foot. Collapsed, it is
 /// one row whatever the thread holds. The estimate can be wrong by a few
 /// rows; it only has to be near enough that the first paint is not a
 /// jump, and the card's laid-out height corrects it.
@@ -99,7 +94,7 @@ fn estimate_rows_of<'a>(bodies: impl Iterator<Item = &'a str>, collapsed: bool) 
     let lines: usize = bodies
         .map(|body| body.lines().map(|l| l.chars().count().div_ceil(ESTIMATE_COLUMNS).max(1)).sum::<usize>() + ROWS_PER_MESSAGE)
         .sum();
-    (lines + CARD_CHROME_ROWS).min(CARD_MAX_ROWS)
+    lines + CARD_CHROME_ROWS
 }
 
 /// A card's place in the document: the display line it sits under, and how
@@ -1163,14 +1158,11 @@ mod tests {
     }
 
     #[test]
-    fn a_long_thread_is_capped_at_forty_rows() {
+    fn a_long_thread_is_all_its_lines() {
         let hundred_lines = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        assert_eq!(estimate_rows(&thread_of(&["why?", &hundred_lines]), false), CARD_MAX_ROWS);
-        let thirty = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
         assert_eq!(
-            estimate_rows(&thread_of(&["why?", &thirty]), false),
-            (1 + ROWS_PER_MESSAGE) + (30 + ROWS_PER_MESSAGE) + CARD_CHROME_ROWS,
-            "under the cap it is what it is"
+            estimate_rows(&thread_of(&["why?", &hundred_lines]), false),
+            (1 + ROWS_PER_MESSAGE) + (100 + ROWS_PER_MESSAGE) + CARD_CHROME_ROWS,
         );
     }
 
