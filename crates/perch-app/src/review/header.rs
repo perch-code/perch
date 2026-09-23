@@ -39,9 +39,8 @@ pub fn header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
         ))
         .debug_name("item bar"),
     )
-    // Floem bounds z-index to sibling stacking contexts. Submit review, the
-    // review launcher and the Agents dropdown open from this bar, so the
-    // bar sits above the item.
+    // Floem bounds z-index to sibling stacking contexts. Review and the
+    // Agents dropdown open from this bar, so the bar sits above the item.
     .style(|s| bar_style(s).z_index(2))
 }
 
@@ -131,13 +130,11 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
-/// What is reached for from anywhere in an item: GitHub, an agent's
-/// review, every item's agents, the item's one action, and the whole
-/// window.
+/// What is reached for from anywhere in an item: GitHub, every item's
+/// agents, the item's one action, and the whole window.
 fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         github_button(state),
-        launcher(app, state, backend.clone()),
         crate::ui::agents::dropdown::button(app, state, backend.clone()),
         primary_action(app, state, backend),
         expand_button(app),
@@ -149,20 +146,6 @@ fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
             .justify_end()
             .apply_if(state.has_files(), |s| s.flex_grow(1.0_f32).flex_basis(0.0))
     })
-}
-
-/// The agent review launcher. An issue has no files to review until
-/// Start work gives it some, and then it is a branch.
-fn launcher(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let reviewable = move || state.phase.get() != Phase::Issue;
-    dyn_container(reviewable, move |reviewable| {
-        if reviewable {
-            crate::review::review_launch::control(app, state, backend.clone()).into_any()
-        } else {
-            Empty::new().into_any()
-        }
-    })
-    .style(move |s| control(s).apply_if(!reviewable(), |s| s.hide()))
 }
 
 /// Open the pull request or the issue on github.com. A branch of the
@@ -187,22 +170,18 @@ fn github_button(state: ReviewState) -> impl IntoView {
     .style(move |s| control(s).apply_if(url().is_none(), |s| s.hide()))
 }
 
-/// Submit review for a pull request, Start work for an issue. A branch of
-/// the reader's own has neither, and neither does a pull request that is
-/// no longer open. Submit review stays while drafts are kept for it.
+/// Review for anything with files: a pull request, or a branch of the
+/// reader's own. Start work for an issue, which has none until it starts.
 fn primary_action(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let is_issue = move || state.phase.get() == Phase::Issue;
     dyn_container(is_issue, move |is_issue| {
         if is_issue {
             crate::review::issue::start_work_button(app, state, backend.clone()).into_any()
         } else {
-            crate::review::submit_review::control(app, state, backend.clone()).into_any()
+            crate::review::review_menu::control(app, state, backend.clone()).into_any()
         }
     })
-    .style(move |s| {
-        let present = is_issue() || crate::review::submit_review::is_shown(state);
-        control(s).apply_if(!present, |s| s.hide())
-    })
+    .style(control)
 }
 
 /// The pane to the whole window, and the drawer back.
@@ -431,7 +410,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_bar_is_the_title_the_switch_and_five_controls_in_a_row() {
+    fn the_bar_is_the_title_the_switch_and_four_controls_in_a_row() {
         let (mut harness, app, _) = pull_request_harness();
         let bar = rect(&harness, "item bar");
         assert_eq!(bar.height(), theme::REVIEW_HEADER_HEIGHT);
@@ -442,23 +421,20 @@ pub(crate) mod tests {
         );
         assert_eq!(bar.y0, 0.0, "and at the window's top: it is the title bar");
 
-        // Left to right: the title, the switch, then GitHub, Review,
-        // Agents, Submit review and the expand control against the right
-        // edge.
+        // Left to right: the title, the switch, then GitHub, Agents,
+        // Review and the expand control against the right edge.
         let title = rect(&harness, "item title");
         let switch = rect(&harness, "item switch");
         let github = rect(&harness, "github button");
-        let review = rect(&harness, "review-launch-control");
         let agents = rect(&harness, "agents-button");
-        let submit = rect(&harness, "submit-review-control");
+        let review = rect(&harness, "review-control");
         let expand = rect(&harness, "expand button");
         for (name, r) in [
             ("title", title),
             ("switch", switch),
             ("github", github),
-            ("review", review),
             ("agents", agents),
-            ("submit", submit),
+            ("review", review),
             ("expand", expand),
         ] {
             assert!(within(r, bar), "{name} at {r:?} is not in the bar {bar:?}");
@@ -466,15 +442,9 @@ pub(crate) mod tests {
         }
         assert!(title.x1 <= switch.x0);
         assert!(switch.x1 <= github.x0);
-        assert!(github.x1 <= review.x0);
-        assert!(review.x1 <= agents.x0);
-        assert!(agents.x1 <= submit.x0);
-        assert!(submit.x1 <= expand.x0);
-        assert_eq!(
-            review.height(),
-            submit.height(),
-            "Review and Submit review are buttons of one height"
-        );
+        assert!(github.x1 <= agents.x0);
+        assert!(agents.x1 <= review.x0);
+        assert!(review.x1 <= expand.x0);
         assert_eq!(
             expand.x1,
             bar.x1 - theme::REVIEW_HEADER_PADDING,
@@ -483,18 +453,18 @@ pub(crate) mod tests {
         // With the drawer open there is no lane before the title: the
         // state glyph and its gap are all that is.
         assert_eq!(title.x0, bar.x0 + theme::REVIEW_HEADER_PADDING + 16.0 + 8.0);
-        // The controls take more than half this bar, so the switch gives
-        // way to them, right beside them. With the room, it is at the
-        // bar's centre.
-        assert_eq!(switch.x1 + 12.0, github.x0);
-        app.sidebar_open.set(false);
-        harness.rebuild();
-        harness.paint();
-        let (bar, switch) = (rect(&harness, "item bar"), rect(&harness, "item switch"));
-        assert!(
-            (switch.center().x - bar.center().x).abs() <= 1.0,
-            "the switch at {switch:?} is not at the bar's centre {bar:?}"
-        );
+        // The switch is at the bar's centre, with the drawer open and
+        // with it shut.
+        for open in [true, false] {
+            app.sidebar_open.set(open);
+            harness.rebuild();
+            harness.paint();
+            let (bar, switch) = (rect(&harness, "item bar"), rect(&harness, "item switch"));
+            assert!(
+                (switch.center().x - bar.center().x).abs() <= 1.0,
+                "the switch at {switch:?} is not at the bar's centre {bar:?}"
+            );
+        }
     }
 
     #[test]
@@ -560,32 +530,40 @@ pub(crate) mod tests {
         }
     }
 
+    /// On a pull request, Review is the agents folded to a line over the
+    /// reader's own review; Settings unfolds them and folds the review.
     #[test]
-    fn submit_review_opens_from_the_bar_over_the_item() {
+    fn review_opens_from_the_bar_over_the_item() {
         let (mut harness, _, state) = pull_request_harness();
-        let control = rect(&harness, "submit-review-control").center();
+        let control = rect(&harness, "review-control").center();
         harness.click(control.x, control.y);
         harness.rebuild();
         harness.paint();
-        assert!(state.submit_review_open.get(), "the click did not open it");
-        let popover = named(harness.root_id(), "submit-review-popover").unwrap();
+        assert!(state.review_open.get(), "the click did not open it");
+        let popover = named(harness.root_id(), "review-popover").unwrap();
         popover_covers_the_item(&harness, popover);
-    }
+        let agents = rect(&harness, "review-agents");
+        let submit = rect(&harness, "submit-review");
+        assert!(agents.y1 <= submit.y0, "the agents are not over the review");
+        assert!(rect(&harness, "review-agents-summary").width() > 0.0);
+        assert_eq!(rect(&harness, "review-instructions").height(), 0.0);
 
-    #[test]
-    fn the_review_launcher_opens_from_the_bar_over_the_item() {
-        let (mut harness, _, state) = pull_request_harness();
-        let control = rect(&harness, "review-launch-control").center();
-        harness.click(control.x, control.y);
+        let settings = rect(&harness, "review-agents-toggle").center();
+        harness.click(settings.x, settings.y);
         harness.rebuild();
         harness.paint();
-        assert!(state.review_launcher_open.get(), "the click did not open it");
-        let popover = named(harness.root_id(), "review-launch-popover").unwrap();
-        popover_covers_the_item(&harness, popover);
+        assert!(rect(&harness, "review-instructions").height() > 0.0);
+        assert!(named(harness.root_id(), "submit-review-editor").is_none());
+        let unfold = rect(&harness, "submit-review-unfold").center();
+        harness.click(unfold.x, unfold.y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(rect(&harness, "review-instructions").height(), 0.0);
+        assert!(named(harness.root_id(), "submit-review-editor").is_some());
 
-        let close = rect(&harness, "review-launch-close").center();
+        let close = rect(&harness, "review-close").center();
         harness.click(close.x, close.y);
-        assert!(!state.review_launcher_open.get());
+        assert!(!state.review_open.get());
     }
 
     /// Conversation starts under the bar, with no tabs between; Code's
@@ -690,12 +668,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_issue_has_start_work_where_a_pull_request_has_submit_review() {
+    fn an_issue_has_start_work_where_a_pull_request_has_review() {
         let (harness, ..) = issue_harness();
         let bar = rect(&harness, "item bar");
-        assert!(named(harness.root_id(), "submit-review-control").is_none());
-        // An issue has no files for an agent to review.
-        assert!(named(harness.root_id(), "review-launch-control").is_none());
+        // An issue has no files to review.
+        assert!(named(harness.root_id(), "review-control").is_none());
         let github = rect(&harness, "github button");
         let start = rect(&harness, "start work button");
         let expand = rect(&harness, "expand button");

@@ -1130,22 +1130,27 @@ pub struct ReviewState {
     pub opening: RwSignal<bool>,
     pub phase: RwSignal<Phase>,
     pub preparing: RwSignal<Preparing>,
-    /// The header's review launcher and the immutable history selection are
+    /// The bar's Review popover: the agents' review of the branch and,
+    /// on an open pull request, the reader's own review for GitHub. What
+    /// to give the keyboard back to when it shuts.
+    pub review_open: RwSignal<bool>,
+    pub review_opener: RwSignal<Option<floem::ViewId>>,
+    /// Whether the popover shows the agents' settings. On a pull request
+    /// they fold to one line under the reader's review; a branch has
+    /// nothing else to show, and always shows them.
+    pub review_agents_expanded: RwSignal<bool>,
+    /// The agent launcher and the immutable history selection are
     /// view-local; durable preferences and groups live on `AppState`.
-    pub review_launcher_open: RwSignal<bool>,
     pub review_launcher_draft: RwSignal<Option<ReviewLaunchDraft>>,
-    pub review_launcher_opener: RwSignal<Option<floem::ViewId>>,
     /// The launcher's instructions box. Apart from the draft, which is
     /// rebuilt whenever a reviewer's support changes while it is open, and
     /// kept across closing it until another checkout opens.
     pub review_launcher_instructions: RwSignal<String>,
-    /// GitHub's review submission surface is separate from the native agent
-    /// review launcher above. Its draft stays with the open pull request so a
-    /// cancelled or failed submission can be resumed without retyping it.
-    pub submit_review_open: RwSignal<bool>,
+    /// The reader's review for GitHub, under the agents' in the same
+    /// popover. Its draft stays with the open pull request so a cancelled
+    /// or failed submission can be resumed without retyping it.
     pub submit_review_draft: RwSignal<String>,
     pub submit_review_event: RwSignal<PullReviewEvent>,
-    pub submit_review_opener: RwSignal<Option<floem::ViewId>>,
     /// The Agents dropdown under the bar's button, and what to give the
     /// keyboard back to when it shuts.
     pub agents_dropdown_open: RwSignal<bool>,
@@ -1559,14 +1564,13 @@ impl ReviewState {
             opening: RwSignal::new(false),
             phase: RwSignal::new(Phase::Preparing),
             preparing: RwSignal::new(Preparing::Idle),
-            review_launcher_open: RwSignal::new(false),
+            review_open: RwSignal::new(false),
+            review_opener: RwSignal::new(None),
+            review_agents_expanded: RwSignal::new(false),
             review_launcher_draft: RwSignal::new(None),
-            review_launcher_opener: RwSignal::new(None),
             review_launcher_instructions: RwSignal::new(String::new()),
-            submit_review_open: RwSignal::new(false),
             submit_review_draft: RwSignal::new(String::new()),
             submit_review_event: RwSignal::new(PullReviewEvent::Comment),
-            submit_review_opener: RwSignal::new(None),
             agents_dropdown_open: RwSignal::new(false),
             agents_dropdown_opener: RwSignal::new(None),
             submit_review_focused: RwSignal::new(false),
@@ -1737,14 +1741,13 @@ impl ReviewState {
         self.issue_events.set(Arc::new(Vec::new()));
         self.stale_head.set(None);
         self.offline.set(false);
-        self.review_launcher_open.set(false);
+        self.review_open.set(false);
+        self.review_opener.set(None);
+        self.review_agents_expanded.set(false);
         self.review_launcher_draft.set(None);
-        self.review_launcher_opener.set(None);
         self.review_launcher_instructions.set(String::new());
-        self.submit_review_open.set(false);
         self.submit_review_draft.set(String::new());
         self.submit_review_event.set(PullReviewEvent::Comment);
-        self.submit_review_opener.set(None);
         self.submit_review_focused.set(false);
         self.submit_review_pending.set(None);
         self.submit_review_error.set(None);
@@ -2072,7 +2075,8 @@ impl ReviewState {
                 }
                 None => {
                     self.submit_review_outcome.set(None);
-                    self.submit_review_open.set(false);
+                    self.review_open.set(false);
+                    self.review_agents_expanded.set(false);
                     self.submit_review_focused.set(false);
                 }
             }
@@ -2099,11 +2103,11 @@ impl ReviewState {
             });
         }
 
-        if owns_surface && !self.submit_review_open.get_untracked() {
-            if let Some(opener) = self.submit_review_opener.get_untracked() {
+        if owns_surface && !self.review_open.get_untracked() {
+            if let Some(opener) = self.review_opener.get_untracked() {
                 opener.request_focus();
             }
-            self.submit_review_opener.set(None);
+            self.review_opener.set(None);
         }
         owns_surface
     }

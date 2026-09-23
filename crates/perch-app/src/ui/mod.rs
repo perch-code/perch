@@ -373,8 +373,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // screen. A file with no editor, a picture or one too big
                 // to show, has nowhere to go.
                 let boxed = state.search_focused.get()
-                    || review.submit_review_open.get()
-                    || review.review_launcher_open.get()
+                    || review.review_open.get()
                     || review.find_focused.get();
                 if matches!(key.code, Code::PageUp | Code::PageDown)
                     && key.modifiers.is_empty()
@@ -395,8 +394,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 let typing = state.search_focused.get()
                     || review.composer_focused.get()
-                    || review.submit_review_open.get()
-                    || review.review_launcher_open.get();
+                    || review.review_open.get();
                 // The find bar's keys, from the code and from the bar alike:
                 // Cmd-F puts the bar up over the code, or gives it the
                 // keyboard again; Cmd-G and Cmd-Shift-G walk the matches,
@@ -677,8 +675,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             if key.modifiers.is_empty()
                 && !state.search_focused.get()
                 && !review.composer_focused.get()
-                && !review.submit_review_open.get()
-                && !review.review_launcher_open.get()
+                && !review.review_open.get()
                 && !review.find_focused.get()
                 && key.code == Code::KeyS
             {
@@ -1289,18 +1286,18 @@ mod tests {
         assert!(named(harness.root_id(), "conversation-title").is_some());
     }
 
-    /// The review launcher's instructions are a text box: `a` typed there
+    /// The agents' instructions in Review are a text box: `a` typed there
     /// is an `a`, not the key that opens a composer and takes the keyboard.
     #[test]
     fn the_review_launchers_box_keeps_the_keys_the_window_would_take() {
         let (mut harness, review) = window_with_a_file_open();
-        let control = named(harness.root_id(), "review-launch-control")
-            .expect("no review launcher in the bar")
+        let control = named(harness.root_id(), "review-control")
+            .expect("no Review in the bar")
             .get_visual_rect_no_clip();
         harness.click(control.center().x, control.center().y);
         harness.rebuild();
         harness.paint();
-        assert!(review.review_launcher_open.get(), "the click did not open it");
+        assert!(review.review_open.get(), "the click did not open it");
 
         let rect = named(harness.root_id(), "review-instructions")
             .expect("no instructions box")

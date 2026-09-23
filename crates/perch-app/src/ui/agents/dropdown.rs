@@ -3,8 +3,8 @@
 //! finished last. A run goes to its item's Conversation, with the Agents
 //! row unfolded and the run open in it.
 //!
-//! The button sits before the item's one action, where Submit review and
-//! the review launcher open theirs, and on the pane with nothing open, so
+//! The button sits before the item's one action, where Review opens its
+//! popover, and on the pane with nothing open, so
 //! the runs can be reached from anywhere. Its count is every item's
 //! running and queued work, and a dot says a run is waiting on the reader.
 
@@ -170,8 +170,7 @@ pub fn toggle(
 /// Open the dropdown over whatever else hangs from the bar, and ask for
 /// the runs it lists.
 pub fn open(app: AppState, review: ReviewState, backend: &Backend, opener: Option<floem::ViewId>) {
-    crate::review::submit_review::close(review, false);
-    crate::review::review_launch::close_launcher(review, false);
+    crate::review::review_menu::close(review, false);
     review.agents_dropdown_opener.set(opener);
     review.agents_dropdown_open.set(true);
     request_agent_runs(app, backend, RECENT_RUNS);
@@ -712,21 +711,20 @@ mod tests {
         assert!(!review.agents_dropdown_open.get());
     }
 
-    /// The dropdown and Submit review shut each other, as Submit review
-    /// and the review launcher do.
+    /// The dropdown and Review shut each other.
     #[test]
-    fn the_dropdown_and_submit_review_shut_each_other() {
+    fn the_dropdown_and_review_shut_each_other() {
         let (mut harness, _app, review) = window();
         open(&mut harness);
-        let submit = rect(&harness, "submit-review-control").center();
+        let submit = rect(&harness, "review-control").center();
         harness.click(submit.x, submit.y);
         settle(&mut harness);
-        assert!(review.submit_review_open.get());
+        assert!(review.review_open.get());
         assert!(!review.agents_dropdown_open.get());
 
         open(&mut harness);
         assert!(review.agents_dropdown_open.get());
-        assert!(!review.submit_review_open.get());
+        assert!(!review.review_open.get());
     }
 
     /// The notice a run leaves as it finishes goes to it as a row does.

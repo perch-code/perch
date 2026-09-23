@@ -9,8 +9,8 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::menu::Menu;
 use floem::prelude::*;
-use floem::reactive::{Effect, SignalGet, SignalUpdate, SignalWith};
-use floem::style::{CursorStyle, Position};
+use floem::reactive::{Effect, Memo, SignalGet, SignalUpdate, SignalWith};
+use floem::style::CursorStyle;
 use floem::views::{
     dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack,
 };
@@ -25,195 +25,56 @@ use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{clickable, editor_box, lay_out_every_line, sidebar_glyph};
 
-/// The bar's entry point, drawn as Codex draws Chat beside Submit review:
-/// a quiet button of the same height. An active review opens Agents;
-/// otherwise it opens the launch surface without changing the review's
-/// current tab or file.
-pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// Keep the open item's reviews loaded, and the launcher's choices in step
+/// with what the reviewers support while the Review popover is open.
+pub(crate) fn watch(app: AppState, state: ReviewState, backend: Rc<Backend>) {
     // History and an in-flight group's progress belong in the worktree view,
-    // not behind the launcher's first click. Reload when the open item changes;
-    // opening the popover below still performs an explicit refresh.
-    let dashboard_backend = backend.clone();
+    // not behind the popover's first click. Reload when the open item
+    // changes; opening the popover performs an explicit refresh.
     Effect::new(move |previous: Option<Option<String>>| {
         let item_id = current_item_id(state);
         if previous.as_ref() != Some(&item_id) {
             if let Some(item_id) = item_id.as_deref() {
                 app.begin_review_dashboard_load(item_id);
-                dashboard_backend.load_review_dashboard(item_id);
+                backend.load_review_dashboard(item_id);
             }
         }
         item_id
     });
 
-    let sync_app = app;
     Effect::new(move |_| {
-        let open = state.review_launcher_open.get();
-        let _capabilities = sync_app.review_capabilities.get();
-        let _preferences = sync_app.review_preferences.get();
-        let _agent = sync_app.agent.get();
+        let open = state.review_open.get();
+        let _capabilities = app.review_capabilities.get();
+        let _preferences = app.review_preferences.get();
+        let _agent = app.agent.get();
         let item_id = state
             .item
             .with(|item| item.as_ref().map(|item| item.id.clone()));
         let _base_refs = item_id
             .as_deref()
-            .map(|item_id| sync_app.review_base_refs_for(item_id));
+            .map(|item_id| app.review_base_refs_for(item_id));
         if open {
             if let Some(item_id) = item_id {
                 state
                     .review_launcher_draft
-                    .set(build_draft(sync_app, state, &item_id));
+                    .set(build_draft(app, state, &item_id));
             }
         }
     });
-
-    let label = move || {
-        active_group(app, state)
-            .map(|group| progress_label(&group))
-            .unwrap_or_else(|| "Review".to_string())
-    };
-    let inner = Stack::horizontal((
-        sidebar_glyph(SidebarIcon::Agents, theme::FG_MUTED)
-            .style(|s| s.size(13.0, 13.0).margin_right(6.0).pointer_events_none()),
-        Label::derived(label).style(|s| {
-            s.font_size(theme::TEXT_META)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
-                .selectable(false)
-                .pointer_events_none()
-        }),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
-            .style(|s| s.size(9.0, 9.0).margin_left(6.0).pointer_events_none()),
-    ))
-    .style(|s| s.items_center().pointer_events_none());
-    let button = Container::new(inner);
-    let button_id = button.view_id();
-    let click_backend = backend.clone();
-    let click: Rc<dyn Fn()> = Rc::new(move || {
-        if let Some(group) = active_group(app, state) {
-            show_in_agents(app, state, &group);
-        } else if state.review_launcher_open.get_untracked() {
-            close_launcher(state, true);
-        } else {
-            open_launcher(app, state, &click_backend, Some(button_id));
-        }
-    });
-    let keyboard = click.clone();
-    let button = button
-        .on_event_stop(el::Click, move |_, _| click())
-        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-            if matches!(key.code, Code::Enter | Code::Space) {
-                keyboard();
-                EventPropagation::Stop
-            } else {
-                EventPropagation::Continue
-            }
-        })
-        .style(move |s| {
-            let base = clickable(s)
-                .height(30.0)
-                .padding_horiz(12.0)
-                .items_center()
-                .border_radius(9.0)
-                .background(theme::BADGE_BG)
-                .keyboard_navigable()
-                .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-                .hover(|s| s.background(theme::BORDER));
-            if state.review_launcher_open.get() {
-                base.background(theme::BORDER)
-            } else {
-                base
-            }
-        })
-        .debug_name("review-launch-control");
-
-    let popover_backend = backend.clone();
-    Stack::new((
-        button,
-        dyn_container(
-            move || state.review_launcher_open.get(),
-            move |open| {
-                if open {
-                    launcher(app, state, popover_backend.clone()).into_any()
-                } else {
-                    Empty::new().into_any()
-                }
-            },
-        )
-        .style(|s| {
-            s.position(Position::Absolute)
-                .inset_top(34.0)
-                .inset_right(0.0)
-                .z_index(100)
-        }),
-    ))
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if key.code == Code::Escape
-            && key.modifiers.is_empty()
-            && state.review_launcher_open.get_untracked()
-        {
-            close_launcher(state, true);
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(|s| s.position(Position::Relative).flex_shrink(0.0_f32))
 }
 
-pub fn open_launcher(
+/// The agents' part of the Review popover. Over the reader's own review
+/// on a pull request it is one line, the reviewers chosen and Run, with
+/// Settings to unfold the rest, which folds the reader's review in turn;
+/// on a branch it is all there is, unfolded.
+/// Under the line, what the agents are doing or last found.
+pub(crate) fn agents_section(
     app: AppState,
     state: ReviewState,
-    backend: &Backend,
-    opener: Option<floem::ViewId>,
-) {
-    let Some(item_id) = state
-        .item
-        .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
-    else {
-        return;
-    };
-    crate::review::submit_review::close(state, false);
-    crate::ui::agents::dropdown::close(state, false);
-    state.review_launcher_opener.set(opener);
-    state
-        .review_launcher_draft
-        .set(build_draft(app, state, &item_id));
-    state.review_launcher_open.set(true);
-    app.begin_review_dashboard_load(&item_id);
-    backend.load_review_dashboard(&item_id);
-}
-
-pub(crate) fn close_launcher(state: ReviewState, restore_focus: bool) {
-    state.review_launcher_open.set(false);
-    if restore_focus {
-        let opener = state.review_launcher_opener.get_untracked();
-        state.review_launcher_opener.set(None);
-        if let Some(opener) = opener {
-            opener.request_focus();
-        }
-    } else {
-        state.review_launcher_opener.set(None);
-    }
-}
-
-fn launcher(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let close = icon_action(
-        SidebarIcon::Close,
-        "review-launch-close Close review launcher",
-        move || close_launcher(state, true),
-    );
-    let close_id = close.view_id();
-    let asked = Rc::new(Cell::new(false));
-    let close = close.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
-        if !asked.replace(true) {
-            close_id.request_focus();
-        }
-    });
-
-    let title = state
-        .item
-        .with_untracked(|item| item.as_ref().map(|item| item.title().to_string()))
-        .unwrap_or_else(|| "branch".into());
+    backend: Rc<Backend>,
+    submitting: Memo<bool>,
+) -> impl IntoView {
+    let expanded = Memo::new(move |_| !submitting.get() || state.review_agents_expanded.get());
     let rows_backend = backend.clone();
     let run_backend = backend.clone();
     let run: Rc<dyn Fn()> = Rc::new(move || {
@@ -223,29 +84,96 @@ fn launcher(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
         };
         app.begin_review_dashboard_load(&request.item_id);
         run_backend.start_review(request);
-        close_launcher(state, true);
+        crate::review::review_menu::close(state, true);
     });
-    let button_run = run.clone();
-    let content = Stack::vertical((
-        Stack::horizontal((
-            Stack::vertical((
-                Label::derived(|| "Review branch".to_string()).style(|s| {
-                    s.font_size(theme::TEXT_BODY)
-                        .font_weight(theme::weight_emphasis())
-                        .color(theme::FG)
-                }),
-                Label::derived(move || title.clone()).style(|s| {
-                    s.font_size(theme::TEXT_META)
-                        .font_family(theme::CODE_FONT_STACK.to_string())
-                        .color(theme::FG_SUBTLE)
-                        .text_ellipsis()
-                        .max_width(280.0)
-                }),
-            ))
-            .style(|s| s.flex_col().gap(3.0).min_width(0.0).flex_grow(1.0_f32)),
-            close,
-        ))
-        .style(|s| s.items_start().width_full().gap(8.0)),
+    let head_run = run.clone();
+    let foot_run = run.clone();
+
+    let head = Stack::horizontal((
+        Label::derived(|| "Agents".to_string()).style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG)
+                .flex_shrink(0.0_f32)
+        }),
+        Label::derived(move || reviewers_summary(app, state))
+            .debug_name("review-agents-summary")
+            .style(move |s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG_MUTED)
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .flex_grow(1.0_f32)
+                    .apply_if(expanded.get(), |s| s.hide())
+            }),
+        Empty::new().style(move |s| s.flex_grow(1.0_f32).apply_if(!expanded.get(), |s| s.hide())),
+        dyn_container(
+            move || submitting.get(),
+            move |submitting| {
+                if !submitting {
+                    return Empty::new().into_any();
+                }
+                Container::new(
+                    Label::derived(move || {
+                        if state.review_agents_expanded.get() {
+                            "Hide".to_string()
+                        } else {
+                            "Settings".to_string()
+                        }
+                    })
+                    .style(|s| {
+                        s.font_size(theme::TEXT_BADGE)
+                            .color(theme::FG_MUTED)
+                            .selectable(false)
+                            .pointer_events_none()
+                    }),
+                )
+                .on_event_stop(el::Click, move |_, _| {
+                    state.review_agents_expanded.update(|open| *open = !*open)
+                })
+                .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+                    if matches!(key.code, Code::Enter | Code::Space) {
+                        state.review_agents_expanded.update(|open| *open = !*open);
+                        EventPropagation::Stop
+                    } else {
+                        EventPropagation::Continue
+                    }
+                })
+                .style(|s| {
+                    clickable(s)
+                        .height(28.0)
+                        .items_center()
+                        .padding_horiz(8.0)
+                        .border_radius(theme::RADIUS)
+                        .keyboard_navigable()
+                        .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+                        .hover(|s| s.background(theme::CANVAS_HOVER))
+                })
+                .debug_name("review-agents-toggle")
+                .into_any()
+            },
+        ),
+        dyn_container(
+            move || expanded.get(),
+            move |expanded| {
+                if expanded {
+                    return Empty::new().into_any();
+                }
+                let run = head_run.clone();
+                action_button(
+                    "Run",
+                    "run-review",
+                    false,
+                    move || launch_validation(app, state).request.is_some(),
+                    move || run(),
+                )
+                .into_any()
+            },
+        ),
+    ))
+    .style(|s| s.items_center().width_full().gap(8.0));
+
+    let settings = Stack::vertical((
         scope_note(state),
         dyn_container(
             move || (app.review_capabilities.get(), app.agent.get()),
@@ -286,32 +214,134 @@ fn launcher(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
                 },
             )
             .style(|s| s.min_width(0.0).flex_grow(1.0_f32)),
+            // Unfolded, the settings are all the popover shows, so Run
+            // review is its one action.
             action_button(
                 "Run review",
                 "run-review",
                 true,
                 move || launch_validation(app, state).request.is_some(),
-                move || button_run(),
+                move || foot_run(),
             ),
         ))
         .style(|s| s.items_center().width_full().gap(12.0)),
     ))
-    .style(|s| s.flex_col().width_full().gap(14.0));
+    .style(move |s| {
+        s.flex_col()
+            .width_full()
+            .gap(14.0)
+            .apply_if(!expanded.get(), |s| s.hide())
+    });
 
-    Container::new(content)
-        .style(|s| {
-            s.width(390.0)
-                .max_width_full()
-                .padding(14.0)
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(10.0)
-                .box_shadow_blur(22.0)
-                .box_shadow_v_offset(7.0)
-                .box_shadow_color(theme::SHADOW)
-        })
-        .debug_name("review-launch-popover")
+    Stack::vertical((head, agents_status(app, state, expanded), settings))
+        .style(|s| s.flex_col().width_full().gap(8.0))
+        .debug_name("review-agents")
+}
+
+/// The reviewers the next run would start, `Claude · opus · High`, one
+/// after another; or why there are none.
+fn reviewers_summary(app: AppState, state: ReviewState) -> String {
+    let chosen = state.review_launcher_draft.with(|draft| {
+        draft
+            .as_ref()
+            .map(|draft| {
+                draft
+                    .choices
+                    .iter()
+                    .filter_map(|choice| effective_choice(app, choice))
+                    .map(|choice| {
+                        format!(
+                            "{} \u{b7} {} \u{b7} {}",
+                            backend_label(choice.backend),
+                            choice.model,
+                            choice.effort.label()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    if chosen.is_empty() {
+        "No reviewer chosen".to_string()
+    } else {
+        chosen.join(", ")
+    }
+}
+
+/// What the agents are doing, with Show to go to them in the Agents row;
+/// else, folded, why Run cannot go; else what the last review found.
+fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> impl IntoView {
+    #[derive(Clone, PartialEq)]
+    enum Status {
+        Active(String),
+        Note(String),
+        Nothing,
+    }
+    let status = move || {
+        if let Some(group) = active_group(app, state) {
+            return Status::Active(progress_label(&group));
+        }
+        if !expanded.get() {
+            if let Some(reason) = launch_validation(app, state).reason {
+                return Status::Note(reason);
+            }
+        }
+        let latest = current_item_id(state).and_then(|item_id| {
+            app.review_groups_for(&item_id)
+                .iter()
+                .max_by_key(|summary| summary.group.number)
+                .cloned()
+        });
+        match latest {
+            Some(summary) => Status::Note(format!(
+                "Review #{} \u{b7} {}",
+                summary.group.number,
+                count_summary(&summary)
+            )),
+            None => Status::Nothing,
+        }
+    };
+    dyn_container(status, move |status| {
+        let text = |text: String| {
+            Label::derived(move || text.clone()).style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG_SUBTLE)
+                    .text_wrap()
+                    .min_width(0.0)
+                    .flex_grow(1.0_f32)
+            })
+        };
+        match status {
+            Status::Active(progress) => Stack::horizontal((
+                text(progress),
+                Container::new(Label::derived(|| "Show".to_string()).style(|s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .color(theme::ACCENT)
+                        .selectable(false)
+                        .pointer_events_none()
+                }))
+                .on_event_stop(el::Click, move |_, _| {
+                    if let Some(group) = active_group(app, state) {
+                        show_in_agents(app, state, &group);
+                    }
+                })
+                .style(|s| {
+                    clickable(s)
+                        .padding_horiz(6.0)
+                        .padding_vert(3.0)
+                        .border_radius(theme::RADIUS)
+                        .hover(|s| s.background(theme::CANVAS_HOVER))
+                })
+                .debug_name("review-show-agents"),
+            ))
+            .style(|s| s.items_center().width_full().gap(8.0))
+            .debug_name("review-agents-status")
+            .into_any(),
+            Status::Note(note) => text(note).debug_name("review-agents-status").into_any(),
+            Status::Nothing => Empty::new().into_any(),
+        }
+    })
+    .style(|s| s.width_full())
 }
 
 fn scope_note(state: ReviewState) -> impl IntoView {
@@ -542,8 +572,8 @@ fn base_row(app: AppState, state: ReviewState) -> impl IntoView {
 }
 
 /// What the reviewers should focus on, such as one file of a branch that
-/// carries more. Cmd-Enter runs the review and Escape closes the launcher,
-/// as in the Submit review box.
+/// carries more. Cmd-Enter runs the review and Escape closes the popover,
+/// as in the summary box.
 fn instructions_box(state: ReviewState, run: Rc<dyn Fn()>) -> impl IntoView {
     use floem::views::editor::command::CommandExecuted;
 
@@ -575,7 +605,7 @@ fn instructions_box(state: ReviewState, run: Rc<dyn Fn()>) -> impl IntoView {
             },
             move |_, key: &KeyboardEvent| {
                 if key.code == Code::Escape && key.modifiers.is_empty() {
-                    close_launcher(state, true);
+                    crate::review::review_menu::cancel(state, true);
                     EventPropagation::Stop
                 } else {
                     EventPropagation::Continue
@@ -706,15 +736,12 @@ pub fn history(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             }
             let opener = Rc::new(Cell::new(None));
             let action_opener = opener.clone();
-            let latest_backend = backend.clone();
             let latest = action_button(
                 "Review latest",
                 "review-latest",
                 false,
                 move || active_group(app, state).is_none(),
-                move || {
-                    open_launcher(app, state, &latest_backend, action_opener.get());
-                },
+                move || crate::review::review_menu::open_agents(state, action_opener.get()),
             );
             let latest_id = latest.view_id();
             opener.set(Some(latest_id));
@@ -1180,7 +1207,7 @@ fn effective_unavailable_reason(
     None
 }
 
-fn active_group(app: AppState, state: ReviewState) -> Option<ReviewGroupSummary> {
+pub(crate) fn active_group(app: AppState, state: ReviewState) -> Option<ReviewGroupSummary> {
     let item_id = current_item_id(state)?;
     app.review_groups_for(&item_id)
         .iter()
@@ -1188,7 +1215,7 @@ fn active_group(app: AppState, state: ReviewState) -> Option<ReviewGroupSummary>
         .cloned()
 }
 
-fn progress_label(summary: &ReviewGroupSummary) -> String {
+pub(crate) fn progress_label(summary: &ReviewGroupSummary) -> String {
     let total = summary.attempts.len();
     let complete = summary
         .attempts
@@ -1198,11 +1225,11 @@ fn progress_label(summary: &ReviewGroupSummary) -> String {
     format!("Reviewing · {complete} of {total} complete")
 }
 
-/// While a review runs, Review goes to it in the item's Agents row: the
-/// row unfolds, and the review's first attempt with a run opens at the
-/// top of the page.
+/// While a review runs, Show in the Review popover goes to it in the
+/// item's Agents row: the row unfolds, and the review's first attempt with
+/// a run opens at the top of the page.
 fn show_in_agents(app: AppState, state: ReviewState, summary: &ReviewGroupSummary) {
-    close_launcher(state, false);
+    crate::review::review_menu::close(state, false);
     let run = app.agent_runs.with_untracked(|runs| {
         runs.iter()
             .find(|run| {
@@ -1436,35 +1463,6 @@ pub(crate) fn action_button(
                     })
                 })
             })
-    })
-    .debug_name(debug)
-    .into_view()
-}
-
-fn icon_action(icon: SidebarIcon, debug: &'static str, action: impl Fn() + 'static) -> impl View {
-    let action: Rc<dyn Fn()> = Rc::new(action);
-    let click = action.clone();
-    Container::new(
-        sidebar_glyph(icon, theme::FG_MUTED).style(|s| s.size(14.0, 14.0).pointer_events_none()),
-    )
-    .on_event_stop(el::Click, move |_, _| click())
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) {
-            action();
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(|s| {
-        clickable(s)
-            .size(28.0, 28.0)
-            .items_center()
-            .justify_center()
-            .border_radius(theme::RADIUS)
-            .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-            .hover(|s| s.background(theme::CANVAS_HOVER))
     })
     .debug_name(debug)
     .into_view()
@@ -1793,11 +1791,12 @@ mod tests {
     fn launcher_moves_focus_in_and_escape_returns_it_to_the_control() {
         let (app, state) = item_state();
         let root = TestRoot::new();
-        let view = control(app, state, Rc::new(Backend::detached()));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 500.0);
+        let view =
+            crate::review::review_menu::control(app, state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 800.0);
         harness.rebuild();
         harness.paint();
-        let control = named(harness.root_id(), "review-launch-control").unwrap();
+        let control = named(harness.root_id(), "review-control").unwrap();
         control.request_focus();
         harness.rebuild();
         assert!(harness.is_focused(control));
@@ -1805,15 +1804,15 @@ mod tests {
         harness.dispatch_event(key(Code::Enter, Key::Named(NamedKey::Enter)));
         harness.rebuild();
         harness.paint();
-        assert!(state.review_launcher_open.get());
-        let close = named(harness.root_id(), "review-launch-close").unwrap();
+        assert!(state.review_open.get());
+        let close = named(harness.root_id(), "review-close").unwrap();
         assert!(harness.is_focused(close));
         assert!(named(harness.root_id(), "review-instructions").is_some());
 
         harness.dispatch_event(key(Code::Escape, Key::Named(NamedKey::Escape)));
         harness.rebuild();
         harness.paint();
-        assert!(!state.review_launcher_open.get());
+        assert!(!state.review_open.get());
         assert!(harness.is_focused(control));
     }
 }

@@ -126,7 +126,7 @@ shorter, between two lines and about twenty-four; a box that has been dragged
 keeps that height whatever is typed into it, and every composer opens at it
 until Perch is restarted.
 
-Typing `@` in a composer, or in the Submit review summary, puts a list under
+Typing `@` in a composer, or in the review summary under **Review**, puts a list under
 it, as GitHub's comment box does. People come first: the item's author and
 whoever has written on it, then anyone else in the repository GitHub finds
 for the letters typed, never you. The worktree's files follow, ranked as
@@ -144,8 +144,9 @@ On a line of a file, or under a thread that is on GitHub, a message to GitHub
 is a draft: it is kept in Perch's cache the moment it is sent, drawn with a
 `Draft` pill, marked in the gutter in GitHub's blue, and can be edited in
 place or deleted on hover. Drafts survive a restart and being offline, and
-github.com does not show them. **Submit review** lists them above the summary,
-counts them on the button, and posts them with the verdict: a comment on the
+github.com does not show them. **Review**, in the bar, counts them on its
+button, lists them above the summary in its popover, and posts them with the
+verdict: a comment on the
 head rides in the review, a comment written against an older commit is posted
 against that commit, and a reply is posted under its thread. A `Comment`
 review with drafts needs no summary. A draft that GitHub refuses, or that
@@ -367,16 +368,16 @@ stopped, queued ones cancelled, and failed, stopped, or interrupted attempts
 retried without replacing their history. Whether the row is unfolded, and
 which runs are open, are kept with the item.
 
-Every item's runs are behind the **Agents** button in the bar, before Submit
-review or Start work, and in the bar of the pane with nothing open. It counts
+Every item's runs are behind the **Agents** button in the bar, before Review
+or Start work, and in the bar of the pane with nothing open. It counts
 the running and queued work, and has a dot while a run waits on you. Its
 dropdown lists the working runs under their items' titles, then the fifteen
 that finished last. A run there goes to its item on Conversation, with the
 Agents row unfolded and the run open at the top. `Cmd-Shift-A` opens and
 shuts the dropdown from anywhere, the arrows move through it, `Enter` goes,
 and `Escape` shuts it. The notice a run leaves as it finishes has a **View**
-that goes to it the same way, and **Review** in the bar, while a review runs,
-goes to it in the Agents row. Work continues while another item is open.
+that goes to it the same way, and **Show** in the Review popover, while a
+review runs, goes to it in the Agents row. Work continues while another item is open.
 
 Perch executes at most four top-level agents by default and queues the rest in
 FIFO order. Stopping a run terminates and reaps its process group. Closing
@@ -552,8 +553,19 @@ next such run as it finishes. Deleting the run's thread or item drops the refs.
 
 ## Worktree reviews
 
-**Review** runs Claude Code and/or Codex's native review workflow against the
-full committed branch diff from the selected base's merge base to `HEAD`. It
+**Review** in the bar opens one popover for the whole review. On top are the
+agents: on a pull request, one line naming the reviewers the next run starts,
+with **Run**, and **Settings** to choose them, their models and efforts, the
+base and the instructions. Under them is your own review for GitHub: the
+drafts, a summary, and a verdict to send them with. Unfolding the settings folds
+your review to a line, and **Open** brings it back. A branch without a pull
+request has only the agents, their settings showing. The button is dark while
+there is a pull request to review, counts your drafts, and says how far a
+running review has got.
+
+Running the agents starts Claude Code and/or Codex's native review workflow
+against the full committed branch diff from the selected base's merge base to
+`HEAD`. It
 works for Perch-managed and registered external worktrees, with or without a
 pull request. A dirty worktree is reviewable, but staged and unstaged edits are
 not part of the snapshot; Perch labels this `Committed changes only; local
@@ -561,7 +573,7 @@ edits are excluded`. Staged-only, individual-commit, and incremental-only
 review scopes are not supported. If the committed diff is empty, Perch records
 that result without launching an agent.
 
-The launcher's instructions box tells the reviewers what to focus on, such as
+The instructions box in the settings tells the reviewers what to focus on, such as
 "review rfcs/multi_get.md only" on a branch that also carries a prototype. The
 range reviewed stays the same: Claude reads the instructions after the range in
 its `/code-review` argument, and Codex, which refuses a custom prompt beside

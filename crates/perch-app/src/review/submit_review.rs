@@ -1,19 +1,19 @@
-//! Submit a GitHub pull-request review from the title bar.
+//! The reader's review for GitHub, under the agents' in the bar's Review
+//! popover (`review_menu`).
 //!
-//! This is deliberately separate from `review_launch`, which starts native
-//! agent reviews of a branch. Here "review" is GitHub's COMMENT / APPROVE /
-//! REQUEST_CHANGES mutation and the compact surface mirrors GitHub's finish-
-//! review form without taking over the whole window. The drafts written
-//! on lines are listed above the summary and go with it; the backend
-//! reads them from the cache, so nothing here is passed on submit.
+//! Here "review" is GitHub's COMMENT / APPROVE / REQUEST_CHANGES mutation,
+//! and the section mirrors GitHub's finish-review form. The drafts written
+//! on lines, the agents' findings among them, are listed above the summary
+//! and go with it; the backend reads them from the cache, so nothing here
+//! is passed on submit.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use floem::event::EventPropagation;
 use floem::prelude::*;
-use floem::reactive::{Effect, Memo, SignalGet, SignalUpdate, SignalWith};
-use floem::style::{CursorStyle, Position};
+use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
+use floem::style::CursorStyle;
 use floem::views::{
     dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack,
 };
@@ -22,6 +22,7 @@ use perch_github::PullReviewEvent;
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::model::{drafts_summary, Draft, ReviewState};
+use crate::review::review_menu;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
@@ -31,34 +32,8 @@ use crate::ui::widgets::{
 /// How much of a draft's text its row shows.
 const EXCERPT_CHARS: usize = 60;
 
-/// The upper-right action. It is live for a current pull request;
-/// branches, issues, stale/offline checkouts and historical snapshots
-/// cannot safely submit a remote verdict. While drafts exist it stays,
-/// with their count, so the reader can see they are kept through a head
-/// move or a spell offline, and does nothing until it is live again.
-pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    Effect::new(move |_| {
-        if !is_available(state) && state.submit_review_open.get() {
-            close(state, false);
-        }
-    });
-
-    // A Memo, so the threads changing under a button that is only held
-    // does not build it again.
-    let shown = Memo::new(move |_| is_shown(state));
-    dyn_container(
-        move || shown.get(),
-        move |shown| {
-            if shown {
-                available_control(app, state, backend.clone()).into_any()
-            } else {
-                Empty::new().into_any()
-            }
-        },
-    )
-    .style(|s| s.flex_shrink(0.0_f32))
-}
-
+/// Whether a verdict can go to GitHub now: a current pull request, open,
+/// online, and not a historical snapshot. Branches and issues have none.
 pub(crate) fn is_available(state: ReviewState) -> bool {
     state.ready.get()
         && !state.offline.get()
@@ -69,8 +44,9 @@ pub(crate) fn is_available(state: ReviewState) -> bool {
             .with(|pull| pull.as_ref().is_some_and(|pull| pull.is_open()))
 }
 
-/// Whether the button is drawn: live, or holding drafts for a pull
-/// request that is still open.
+/// Whether the section is drawn: live, or holding drafts for a pull
+/// request that is still open, so the reader can see they are kept
+/// through a head move or a spell offline.
 pub(crate) fn is_shown(state: ReviewState) -> bool {
     is_available(state)
         || (state.ready.get()
@@ -84,213 +60,58 @@ pub(crate) fn is_shown(state: ReviewState) -> bool {
             }))
 }
 
-fn available_control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let count = Memo::new(move |_| state.drafts().len());
-    let inner = Stack::horizontal((
-        Label::derived(move || {
-            if state.submit_review_pending.with(Option::is_some) {
-                "Submitting…".to_string()
-            } else {
-                match count.get() {
-                    0 => "Submit review".to_string(),
-                    n => format!("Submit review \u{b7} {n}"),
-                }
-            }
-        })
-        .style(|s| {
-            s.font_size(theme::TEXT_META)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::CANVAS)
-                .selectable(false)
-                .pointer_events_none()
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-        }),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::CANVAS)
-            .style(|s| s.size(9.0, 9.0).margin_left(7.0).pointer_events_none()),
-    ))
-    .style(|s| s.items_center().pointer_events_none());
-    let button = Container::new(inner);
-    let button_id = button.view_id();
-    let toggle: Rc<dyn Fn()> = Rc::new(move || {
-        if state.submit_review_pending.with_untracked(Option::is_some) || !is_available(state) {
-            return;
-        }
-        if state.submit_review_open.get_untracked() {
-            cancel(state, true);
-        } else {
-            open(state, Some(button_id));
-        }
-    });
-    let click = toggle.clone();
-    let keyboard = toggle.clone();
-    let button = button
-        .on_event_stop(el::Click, move |_, _| click())
-        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-            if matches!(key.code, Code::Enter | Code::Space) {
-                keyboard();
-                EventPropagation::Stop
-            } else {
-                EventPropagation::Continue
-            }
-        })
-        .style(move |s| {
-            let pending = state.submit_review_pending.with(Option::is_some);
-            let held = pending || !is_available(state);
-            clickable(s)
-                .height(30.0)
-                .padding_horiz(12.0)
-                .items_center()
-                .background(theme::FG)
-                .border_radius(9.0)
-                .keyboard_navigable()
-                .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-                .set_disabled(held)
-                .apply_if(held, |s| {
-                    s.opacity(0.75_f32).cursor(CursorStyle::Default)
-                })
-                .apply_if(!held, |s| s.hover(|s| s.background(theme::ACTION_HOVER)))
-        })
-        .debug_name("submit-review-control");
-
-    let popover_backend = backend.clone();
-    // Built anew on each submission that comes back with something left
-    // to say, so the summary box starts empty: what was in it posted.
-    let shown = Memo::new(move |_| {
-        (
-            state.submit_review_open.get(),
-            state.submit_review_generation.get(),
-        )
-    });
-    Stack::new((
-        button,
-        dyn_container(
-            move || shown.get(),
-            move |(open, _)| {
-                if open {
-                    popover(app, state, popover_backend.clone()).into_any()
-                } else {
-                    Empty::new().into_any()
-                }
-            },
-        )
-        .style(|s| {
-            s.position(Position::Absolute)
-                .inset_top(34.0)
-                .inset_right(0.0)
-                .z_index(100)
-        }),
-    ))
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if key.code == Code::Escape
-            && key.modifiers.is_empty()
-            && state.submit_review_open.get_untracked()
-        {
-            cancel(state, true);
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(|s| s.position(Position::Relative).flex_shrink(0.0_f32))
-}
-
-fn open(state: ReviewState, opener: Option<floem::ViewId>) {
-    if !is_available(state) {
-        return;
-    }
-    crate::review::review_launch::close_launcher(state, false);
-    crate::ui::agents::dropdown::close(state, false);
-    state.submit_review_opener.set(opener);
-    state.submit_review_open.set(true);
-}
-
-/// A visible dismissal never pretends to cancel a mutation already sent to
-/// GitHub. External navigation can still force-close the surface through
-/// `close`; reopening it preserves any eventual failure.
-fn cancel(state: ReviewState, restore_focus: bool) {
-    if state.submit_review_pending.with_untracked(Option::is_none) {
-        close(state, restore_focus);
-    }
-}
-
-pub(crate) fn close(state: ReviewState, restore_focus: bool) {
-    state.submit_review_open.set(false);
-    state.submit_review_focused.set(false);
-    state.submit_review_confirm_discard.set(false);
-    state.submit_review_outcome.set(None);
-    if restore_focus {
-        if let Some(opener) = state.submit_review_opener.get_untracked() {
-            opener.request_focus();
-        }
-    }
-    state.submit_review_opener.set(None);
-}
-
-fn popover(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// The drafts, the summary, the verdict and Submit, under a rule. While
+/// drafts are held for a pull request that cannot take them now, it says
+/// why and submits nothing.
+pub(crate) fn section(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let submit_backend = backend.clone();
     let submit: Rc<dyn Fn()> = Rc::new(move || submit(state, &submit_backend));
     let editor = review_editor(app, state, backend.clone(), submit.clone());
     let drafts = drafts_list(state, backend);
+    let message = |text: Option<String>, debug: &'static str| match text {
+        Some(text) => Label::derived(move || text.clone())
+            .style(|s| {
+                s.width_full()
+                    .font_size(theme::TEXT_BADGE)
+                    .color(theme::CLOSED)
+                    .text_wrap()
+            })
+            .debug_name(debug)
+            .into_any(),
+        None => Empty::new().into_any(),
+    };
 
-    let close_button = icon_action(
-        SidebarIcon::Close,
-        "submit-review-close",
-        move || state.submit_review_pending.with(Option::is_none),
-        move || cancel(state, true),
-    );
-
-    let content = Stack::vertical((
-        Stack::horizontal((
-            Stack::vertical((
-                Label::derived(|| "Submit review".to_string()).style(|s| {
-                    s.font_size(theme::TEXT_BODY)
-                        .font_weight(theme::weight_emphasis())
-                        .color(theme::FG)
-                }),
-                Label::derived(|| "Leave a summary and choose an outcome.".to_string()).style(
-                    |s| {
-                        s.font_size(theme::TEXT_META)
+    Stack::vertical((
+        Label::derived(|| "Your review".to_string()).style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG)
+        }),
+        dyn_container(
+            move || unavailable_note(state),
+            |note| match note {
+                Some(note) => Label::derived(move || note.to_string())
+                    .style(|s| {
+                        s.width_full()
+                            .font_size(theme::TEXT_META)
                             .color(theme::FG_SUBTLE)
-                            .margin_top(2.0)
-                    },
-                ),
-            ))
-            .style(|s| s.flex_col().min_width(0.0).flex_grow(1.0_f32)),
-            close_button,
-        ))
-        .style(|s| s.items_start().width_full().gap(8.0)),
+                            .text_wrap()
+                    })
+                    .debug_name("submit-review-held")
+                    .into_any(),
+                None => Empty::new().into_any(),
+            },
+        ),
         drafts,
         editor,
         outcome_group(state),
         dyn_container(
             move || state.submit_review_outcome.get(),
-            |outcome| match outcome {
-                Some(outcome) => Label::derived(move || outcome.clone())
-                    .style(|s| {
-                        s.width_full()
-                            .font_size(theme::TEXT_BADGE)
-                            .color(theme::CLOSED)
-                            .text_wrap()
-                    })
-                    .debug_name("submit-review-outcome")
-                    .into_any(),
-                None => Empty::new().into_any(),
-            },
+            move |outcome| message(outcome, "submit-review-outcome"),
         ),
         dyn_container(
             move || state.submit_review_error.get(),
-            |error| match error {
-                Some(error) => Label::derived(move || error.clone())
-                    .style(|s| {
-                        s.width_full()
-                            .font_size(theme::TEXT_BADGE)
-                            .color(theme::CLOSED)
-                            .text_wrap()
-                    })
-                    .debug_name("submit-review-error")
-                    .into_any(),
-                None => Empty::new().into_any(),
-            },
+            move |error| message(error, "submit-review-error"),
         ),
         Stack::horizontal((
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
@@ -299,7 +120,7 @@ fn popover(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
                 "submit-review-cancel",
                 false,
                 move || state.submit_review_pending.with(Option::is_none),
-                move || cancel(state, true),
+                move || review_menu::cancel(state, true),
             ),
             action_button(
                 move || {
@@ -317,22 +138,72 @@ fn popover(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
         ))
         .style(|s| s.items_center().width_full().gap(8.0)),
     ))
-    .style(|s| s.flex_col().width_full().gap(12.0));
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .gap(12.0)
+            .padding_top(14.0)
+            .border_top(1.0)
+            .border_color(theme::BORDER_MUTED)
+    })
+    .debug_name("submit-review")
+}
 
-    Container::new(content)
-        .style(|s| {
-            s.width(430.0)
-                .max_width_full()
-                .padding(14.0)
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(10.0)
-                .box_shadow_blur(22.0)
-                .box_shadow_v_offset(7.0)
-                .box_shadow_color(theme::SHADOW)
+/// The section folded to a line while the agents' settings are unfolded
+/// over it: what it holds, and Open to go back to it.
+pub(crate) fn folded(state: ReviewState) -> impl IntoView {
+    let drafts = Memo::new(move |_| state.drafts());
+    Stack::horizontal((
+        Label::derived(|| "Your review".to_string()).style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG)
+                .flex_shrink(0.0_f32)
+        }),
+        Label::derived(move || {
+            drafts.with(|d| {
+                if d.is_empty() {
+                    "No drafts".to_string()
+                } else {
+                    drafts_summary(d)
+                }
+            })
         })
-        .debug_name("submit-review-popover")
+        .style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::FG_MUTED)
+                .text_ellipsis()
+                .min_width(0.0)
+                .flex_grow(1.0_f32)
+        }),
+        action_button(
+            || "Open".to_string(),
+            "submit-review-unfold",
+            false,
+            || true,
+            move || state.review_agents_expanded.set(false),
+        ),
+    ))
+    .style(|s| {
+        s.items_center()
+            .width_full()
+            .gap(8.0)
+            .padding_top(14.0)
+            .border_top(1.0)
+            .border_color(theme::BORDER_MUTED)
+    })
+    .debug_name("submit-review-folded")
+}
+
+/// Why drafts held for an open pull request cannot go now.
+fn unavailable_note(state: ReviewState) -> Option<&'static str> {
+    if is_available(state) {
+        None
+    } else if state.offline.get() {
+        Some("Offline. The drafts are kept until GitHub can be reached.")
+    } else {
+        Some("The pull request has new commits. Update it to submit; the drafts are kept.")
+    }
 }
 
 /// The drafts going with the review, one row each, with what they add up
@@ -633,7 +504,7 @@ fn review_editor(
                     return EventPropagation::Stop;
                 }
                 if key.code == Code::Escape && key.modifiers.is_empty() {
-                    cancel(state, true);
+                    review_menu::cancel(state, true);
                     EventPropagation::Stop
                 } else {
                     EventPropagation::Continue
@@ -987,7 +858,7 @@ fn action_button(
     .into_view()
 }
 
-fn icon_action(
+pub(crate) fn icon_action(
     icon: SidebarIcon,
     debug: &'static str,
     enabled: impl Fn() -> bool + 'static,
@@ -1071,6 +942,7 @@ fn event_slug(event: PullReviewEvent) -> &'static str {
 mod tests {
     use super::*;
     use crate::backend::Command;
+    use crate::review::review_menu::{cancel, close, control, open};
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::prelude::{Key, KeyState, Modifiers, NamedKey};
     use perch_github::{
@@ -1086,6 +958,19 @@ mod tests {
         id.children()
             .into_iter()
             .find_map(|child| named(child, name))
+    }
+
+    /// The next command other than the dashboard load opening Review asks
+    /// for.
+    fn next_command(
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) -> Result<Command, tokio::sync::mpsc::error::TryRecvError> {
+        loop {
+            match commands.try_recv() {
+                Ok(Command::LoadReviewDashboard { .. }) => continue,
+                other => return other,
+            }
+        }
     }
 
     fn key(code: Code) -> floem::event::Event {
@@ -1278,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn the_button_counts_the_drafts_and_stays_while_they_are_kept() {
+    fn the_button_counts_the_drafts_and_keeps_them_while_they_cannot_go() {
         let root = TestRoot::new();
         let state = review_state();
         state.comment_threads.set(Arc::new(vec![
@@ -1286,34 +1171,38 @@ mod tests {
             draft_thread("t2", "head-42", Some(31), "two"),
         ]));
         let view = control(AppState::new(), state, Rc::new(Backend::detached()));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 700.0);
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "Submit review \u{b7} 2").is_some());
+        assert!(find(harness.root_id(), "Review \u{b7} 2").is_some());
 
-        // The head moved: the button stays, with the count, and does not
-        // open the form.
+        // The head moved: the count stays, and the form under the agents
+        // lists the drafts, says why they cannot go, and submits nothing.
         state.stale_head.set(Some("new-head".into()));
         harness.rebuild();
         harness.paint();
         assert!(is_shown(state));
-        let control = named(harness.root_id(), "submit-review-control").unwrap();
-        assert!(shown(&harness, control));
-        assert!(find(harness.root_id(), "Submit review \u{b7} 2").is_some());
-        click(&mut harness, "submit-review-control");
-        assert!(!state.submit_review_open.get(), "unavailable while the head is stale");
+        assert!(find(harness.root_id(), "Review \u{b7} 2").is_some());
+        click(&mut harness, "review-control");
+        assert!(state.review_open.get());
+        let held = named(harness.root_id(), "submit-review-held").expect("no word on why");
+        assert!(shown(&harness, held));
+        assert!(!can_submit(state));
 
-        // Without drafts a stale head hides it, as before.
+        // Without drafts a stale head leaves the agents alone.
         state.comment_threads.set(Arc::new(Vec::new()));
         harness.rebuild();
         harness.paint();
         assert!(!is_shown(state));
-        assert!(named(harness.root_id(), "submit-review-control").is_none());
+        assert!(named(harness.root_id(), "submit-review").is_none());
+        assert!(named(harness.root_id(), "review-agents").is_some());
+        assert!(find(harness.root_id(), "Label: \"Review\"").is_some());
 
         state.stale_head.set(None);
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "Label: \"Submit review\"").is_some());
+        assert!(named(harness.root_id(), "submit-review").is_some());
+        assert!(named(harness.root_id(), "submit-review-held").is_none());
     }
 
     #[test]
@@ -1333,7 +1222,7 @@ mod tests {
         open(state, None);
         let (backend, mut commands) = Backend::recording();
         let view = control(AppState::new(), state, Rc::new(backend));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
         harness.rebuild();
         harness.paint();
 
@@ -1392,7 +1281,7 @@ mod tests {
         harness.paint();
         assert!(shown(&harness, delete), "the pointer on it keeps it");
         harness.click(at.x, at.y);
-        match commands.try_recv() {
+        match next_command(&mut commands) {
             Ok(Command::DeleteDraft { item_id, message_id }) => {
                 assert_eq!(item_id, "item-42");
                 assert_eq!(message_id, "t2-d1");
@@ -1410,14 +1299,14 @@ mod tests {
         open(state, None);
         let (backend, mut commands) = Backend::recording();
         let view = control(AppState::new(), state, Rc::new(backend));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
         harness.rebuild();
         harness.paint();
         assert!(can_submit(state));
 
         harness.dispatch_event(enter(Modifiers::META));
         harness.rebuild();
-        match commands.try_recv() {
+        match next_command(&mut commands) {
             Ok(Command::SubmitPullRequestReview { body, event, .. }) => {
                 assert_eq!(body, "", "the drafts are the content; the backend reads them");
                 assert_eq!(event, PullReviewEvent::Comment);
@@ -1442,18 +1331,18 @@ mod tests {
         open(state, None);
         let (backend, mut commands) = Backend::recording();
         let view = control(AppState::new(), state, Rc::new(backend));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
         harness.rebuild();
         harness.paint();
 
         click(&mut harness, "discard-all");
         assert!(state.submit_review_confirm_discard.get());
         assert!(find(harness.root_id(), "Discard all drafts?").is_some());
-        assert!(commands.try_recv().is_err(), "asking discards nothing");
+        assert!(next_command(&mut commands).is_err(), "asking discards nothing");
 
         click(&mut harness, "discard-all-confirm");
         assert!(!state.submit_review_confirm_discard.get());
-        match commands.try_recv() {
+        match next_command(&mut commands) {
             Ok(Command::DiscardDrafts { item_id }) => assert_eq!(item_id, "item-42"),
             other => panic!("Discard did not reach the backend: {other:?}"),
         }
@@ -1482,13 +1371,13 @@ mod tests {
         open(state, None);
         let (backend, mut commands) = Backend::recording();
         let view = control(AppState::new(), state, Rc::new(backend));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
         harness.rebuild();
         harness.paint();
 
         harness.dispatch_event(enter(Modifiers::META));
         harness.rebuild();
-        assert!(commands.try_recv().is_ok());
+        assert!(next_command(&mut commands).is_ok());
         let attempt = state.submit_review_pending.get_untracked().unwrap();
 
         let accepted = perch_github::Review {
@@ -1509,7 +1398,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
-        assert!(state.submit_review_open.get_untracked());
+        assert!(state.review_open.get_untracked());
         assert!(named(harness.root_id(), "submit-review-outcome").is_some());
         assert!(named(harness.root_id(), "submit-review-error").is_none());
 
@@ -1539,7 +1428,7 @@ mod tests {
         state.comment_threads.set(Arc::new(vec![draft_thread("t1", "head-42", None, "first")]));
         open(state, None);
         let view = control(AppState::new(), state, Rc::new(Backend::detached()));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
         harness.rebuild();
         harness.paint();
         let mut excerpts = Vec::new();
@@ -1572,7 +1461,7 @@ mod tests {
         )]));
         open(state, None);
         let view = control(AppState::new(), state, Rc::new(Backend::detached()));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
         harness.rebuild();
         harness.paint();
         let mut notes = Vec::new();
@@ -1601,22 +1490,15 @@ mod tests {
     }
 
     #[test]
-    fn review_popovers_are_mutually_exclusive_and_pending_cannot_be_dismissed() {
+    fn a_review_sent_to_github_cannot_be_dismissed() {
         let state = review_state();
-        state.review_launcher_open.set(true);
         open(state, None);
-        assert!(state.submit_review_open.get_untracked());
-        assert!(!state.review_launcher_open.get_untracked());
-
         state.submit_review_pending.set(Some(3));
         cancel(state, false);
-        assert!(state.submit_review_open.get_untracked());
+        assert!(state.review_open.get_untracked());
         state.submit_review_pending.set(None);
-
-        let backend = Backend::detached();
-        crate::review::review_launch::open_launcher(AppState::new(), state, &backend, None);
-        assert!(!state.submit_review_open.get_untracked());
-        assert!(state.review_launcher_open.get_untracked());
+        cancel(state, false);
+        assert!(!state.review_open.get_untracked());
     }
 
     /// Enter breaks the line and Cmd-Enter submits, through the box's
@@ -1630,7 +1512,7 @@ mod tests {
         open(state, None);
         let (backend, mut commands) = Backend::recording();
         let view = control(AppState::new(), state, Rc::new(backend));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
         harness.rebuild();
         harness.paint();
 
@@ -1641,11 +1523,11 @@ mod tests {
             "\nLooks good",
             "Enter is a new line at the caret, which starts at the top"
         );
-        assert!(commands.try_recv().is_err(), "Enter submitted the review");
+        assert!(next_command(&mut commands).is_err(), "Enter submitted the review");
 
         harness.dispatch_event(enter(Modifiers::META));
         harness.rebuild();
-        match commands.try_recv() {
+        match next_command(&mut commands) {
             Ok(Command::SubmitPullRequestReview { body, event, .. }) => {
                 assert_eq!(body, "Looks good");
                 assert_eq!(event, PullReviewEvent::Comment);
@@ -1660,19 +1542,19 @@ mod tests {
         let root = TestRoot::new();
         let state = review_state();
         let view = control(AppState::new(), state, Rc::new(Backend::detached()));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
         harness.rebuild();
         harness.paint();
 
-        let control = named(harness.root_id(), "submit-review-control").unwrap();
+        let control = named(harness.root_id(), "review-control").unwrap();
         control.request_focus();
         harness.rebuild();
         harness.dispatch_event(key(Code::Enter));
         harness.rebuild();
         harness.paint();
 
-        assert!(state.submit_review_open.get_untracked());
-        assert!(named(harness.root_id(), "submit-review-popover").is_some());
+        assert!(state.review_open.get_untracked());
+        assert!(named(harness.root_id(), "review-popover").is_some());
         let approve = named(harness.root_id(), "submit-review-option:approve").unwrap();
         approve.request_focus();
         harness.rebuild();
@@ -1687,14 +1569,14 @@ mod tests {
         harness.dispatch_event(key(Code::Escape));
         harness.rebuild();
         assert!(
-            state.submit_review_open.get_untracked(),
+            state.review_open.get_untracked(),
             "Escape cannot cancel a review already sent to GitHub"
         );
 
         state.submit_review_pending.set(None);
         harness.dispatch_event(key(Code::Escape));
         harness.rebuild();
-        assert!(!state.submit_review_open.get_untracked());
+        assert!(!state.review_open.get_untracked());
     }
 
     #[test]
@@ -1702,11 +1584,11 @@ mod tests {
         let root = TestRoot::new();
         let state = review_state();
         let view = control(AppState::new(), state, Rc::new(Backend::detached()));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
         harness.rebuild();
         harness.paint();
 
-        let control = named(harness.root_id(), "submit-review-control").unwrap();
+        let control = named(harness.root_id(), "review-control").unwrap();
         control.request_focus();
         harness.rebuild();
         harness.dispatch_event(key(Code::Enter));
@@ -1789,7 +1671,7 @@ mod tests {
         state.submit_review_draft.set(summary);
         open(state, None);
         let view = control(AppState::new(), state, Rc::new(Backend::detached()));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
         harness.rebuild();
         harness.paint();
 

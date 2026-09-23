@@ -23,6 +23,7 @@ pub mod picture;
 pub mod rail;
 pub mod references;
 pub mod review_launch;
+pub mod review_menu;
 pub mod scope;
 pub mod styling;
 pub mod submit_review;

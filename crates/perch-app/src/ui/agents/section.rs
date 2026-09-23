@@ -1014,7 +1014,8 @@ mod tests {
         assert!(shown(&harness, "agent-run:q"));
     }
 
-    /// While a review runs, the bar's Review goes to it in the Agents row.
+    /// While a review runs, the bar's Review says so, and Show in its
+    /// popover goes to it in the Agents row.
     #[test]
     fn review_goes_to_a_running_review_in_the_agents_row() {
         let (mut harness, app, review) = pull_request_harness();
@@ -1036,11 +1037,11 @@ mod tests {
         review.show_tab(crate::review::model::ItemTab::Code);
         settle(&mut harness);
 
-        click(&mut harness, "review-launch-control");
-        assert!(
-            !review.review_launcher_open.get(),
-            "the launcher opened over a running review"
-        );
+        assert!(named(harness.root_id(), "Reviewing \u{b7} 1 of 1 complete").is_some());
+        click(&mut harness, "review-control");
+        assert!(review.review_open.get());
+        click(&mut harness, "review-show-agents");
+        assert!(!review.review_open.get(), "Show left the popover open");
         assert_eq!(
             review.tab.get(),
             crate::review::model::ItemTab::Conversation

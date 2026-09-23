@@ -183,7 +183,7 @@ pub const DRAWER_MAX_WIDTH: f64 = 620.0;
 /// room from it and lies over it instead: enough for the item bar's
 /// controls and the tab strip's, with the title given way.
 pub const MAIN_MIN_WIDTH: f64 = 620.0;
-/// The Agents dropdown under the bar's button: as wide as Submit review's,
+/// The Agents dropdown under the bar's button: as wide as Review's popover,
 /// and as tall as this before it scrolls.
 pub const AGENTS_DROPDOWN_WIDTH: f64 = 430.0;
 pub const AGENTS_DROPDOWN_MAX_HEIGHT: f64 = 460.0;

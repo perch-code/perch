@@ -3590,7 +3590,7 @@ mod tests {
         let app = AppState::new();
         let review = review_of_pull("wt", 7, "head");
         review.ready.set(true);
-        review.submit_review_open.set(true);
+        review.review_open.set(true);
         review
             .submit_review_draft
             .set("The summary I wrote".into());
@@ -3642,7 +3642,7 @@ mod tests {
             review,
         );
         assert_eq!(review.submit_review_pending.get(), Some(10));
-        assert!(review.submit_review_open.get());
+        assert!(review.review_open.get());
         assert_eq!(
             review.discussion.get().unwrap().reviews,
             vec![accepted.clone()],
@@ -3665,7 +3665,7 @@ mod tests {
             review,
         );
         assert!(review.submit_review_pending.with(Option::is_none));
-        assert!(!review.submit_review_open.get());
+        assert!(!review.review_open.get());
         assert!(review.submit_review_draft.get().is_empty());
         assert_eq!(
             review.submit_review_event.get(),
@@ -3689,7 +3689,7 @@ mod tests {
     fn a_review_whose_drafts_did_not_all_post_keeps_the_form_open_to_say_so() {
         let app = AppState::new();
         let review = review_of_pull("wt", 7, "head");
-        review.submit_review_open.set(true);
+        review.review_open.set(true);
         review.submit_review_draft.set("Some thoughts".into());
         review.submit_review_event.set(PullReviewEvent::Approve);
         review.begin_submit_review(5);
@@ -3720,7 +3720,7 @@ mod tests {
             review,
         );
         assert!(review.submit_review_pending.with(Option::is_none));
-        assert!(review.submit_review_open.get(), "stays open to say what did not post");
+        assert!(review.review_open.get(), "stays open to say what did not post");
         assert!(review.submit_review_draft.get().is_empty(), "the summary posted");
         assert_eq!(review.submit_review_event.get(), PullReviewEvent::Comment);
         assert_eq!(review.submit_review_error.get(), None);
@@ -3744,7 +3744,7 @@ mod tests {
         review
             .discussion
             .set(Some(Arc::new(perch_github::Discussion::default())));
-        review.submit_review_open.set(true);
+        review.review_open.set(true);
         review.begin_submit_review(6);
 
         app.apply_with_review(
@@ -3763,7 +3763,7 @@ mod tests {
             review,
         );
         assert!(review.submit_review_pending.with(Option::is_none));
-        assert!(!review.submit_review_open.get(), "the reply posted; nothing to say");
+        assert!(!review.review_open.get(), "the reply posted; nothing to say");
         assert!(review.submitted_reviews.get().is_empty());
         assert!(review.discussion.get().unwrap().reviews.is_empty());
 
@@ -3849,7 +3849,7 @@ mod tests {
     fn review_submission_failure_keeps_the_draft_and_selected_outcome() {
         let app = AppState::new();
         let review = review_of_pull("wt", 7, "head");
-        review.submit_review_open.set(true);
+        review.review_open.set(true);
         review.submit_review_draft.set("Needs a test".into());
         review
             .submit_review_event
@@ -3869,7 +3869,7 @@ mod tests {
         );
 
         assert!(review.submit_review_pending.with(Option::is_none));
-        assert!(review.submit_review_open.get());
+        assert!(review.review_open.get());
         assert_eq!(review.submit_review_draft.get(), "Needs a test");
         assert_eq!(
             review.submit_review_event.get(),
@@ -3886,7 +3886,7 @@ mod tests {
         let app = AppState::new();
         let review = review_of_pull("wt", 7, "head");
         review.ready.set(true);
-        review.submit_review_open.set(true);
+        review.review_open.set(true);
         review.submit_review_draft.set("Original submission".into());
         review.begin_submit_review(12);
 
@@ -3898,7 +3898,7 @@ mod tests {
         review.item.set(item);
         review.pull_request.set(pull_request);
         review.ready.set(true);
-        review.submit_review_open.set(true);
+        review.review_open.set(true);
         review.submit_review_draft.set("A second thought".into());
         review
             .discussion
@@ -3917,7 +3917,7 @@ mod tests {
             review,
         );
         assert!(review.submit_review_pending.with(Option::is_none));
-        assert!(review.submit_review_open.get());
+        assert!(review.review_open.get());
         assert_eq!(review.submit_review_draft.get(), "A second thought");
 
         // The durable result is still relevant to this pull request and
@@ -3948,7 +3948,7 @@ mod tests {
             review,
         );
 
-        assert!(review.submit_review_open.get());
+        assert!(review.review_open.get());
         assert_eq!(review.submit_review_draft.get(), "A second thought");
         assert_eq!(
             review.discussion.get().unwrap().reviews[0].id,
