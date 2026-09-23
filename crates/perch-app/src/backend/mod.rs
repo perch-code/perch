@@ -552,6 +552,37 @@ pub enum LossAction {
     Delete,
 }
 
+/// The meta key the scope the reader last picked from the menu is kept
+/// under. An item opens on it; see `opening_scope`.
+pub const SCOPE_META_KEY: &str = "review.scope";
+
+/// What the scope menu's Last run shows: the newest finished Work run on
+/// the item that changed something. A run that changed nothing is passed
+/// over for the one before it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LastRun {
+    /// No Work run on the item has finished.
+    #[default]
+    None,
+    /// Work runs finished, and none of them changed anything; the sides
+    /// are the newest one's, for the greyed entry.
+    Unchanged { before: String, after: String },
+    Changed { before: String, after: String },
+}
+
+impl LastRun {
+    /// The scope to show it under, when there is anything to show.
+    pub fn scope(&self) -> Option<perch_git::Scope> {
+        match self {
+            LastRun::Changed { before, after } => Some(perch_git::Scope::Run {
+                before: before.clone(),
+                after: after.clone(),
+            }),
+            LastRun::None | LastRun::Unchanged { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     Avatar {
@@ -757,6 +788,9 @@ pub enum Event {
         item: Arc<Item>,
         /// `None` for a branch of the reader's own with no pull request.
         pull_request: Option<Arc<PullRequest>>,
+        /// What `files` is over: the scope the reader last picked, where
+        /// this item has it, else the branch.
+        scope: perch_git::Scope,
         files: Arc<Vec<perch_git::ChangedFile>>,
         tree: Arc<Vec<perch_git::TreeEntry>>,
         /// The head the pull request moved to while the worktree had
@@ -940,6 +974,7 @@ pub enum Event {
         commits: Arc<Vec<perch_git::Commit>>,
         dirt: perch_git::Dirt,
         since: Option<String>,
+        last_run: LastRun,
     },
     /// The changed list under a scope, after `SetScope`.
     ScopeReady {
@@ -5804,6 +5839,7 @@ fn show_retained_review_owner(ctx: &Ctx, item: Item, navigation_id: u64) -> bool
                 scope_gen,
                 item: Arc::new(item),
                 pull_request,
+                scope: perch_git::Scope::Branch,
                 files: Arc::new(Vec::new()),
                 tree: Arc::new(Vec::new()),
                 stale_head: None,
@@ -6103,7 +6139,7 @@ async fn finish_open(
         },
     );
 
-    let scope = perch_git::Scope::Branch;
+    let scope = opening_scope(ctx, &item.id, &checkout, since.as_deref()).await;
     let files = match scoped_files(&ctx.preparer, &checkout, &scope).await {
         Ok(f) => Arc::new(f),
         Err(e) => {
@@ -6148,7 +6184,7 @@ async fn finish_open(
             *guard = Some(ReviewContext {
                 checkout,
                 files: files.clone(),
-                scope,
+                scope: scope.clone(),
                 since: since.clone(),
                 scope_gen,
                 navigation_id,
@@ -6165,6 +6201,7 @@ async fn finish_open(
                 scope_gen,
                 item: item.clone(),
                 pull_request: pull_request.clone(),
+                scope,
                 files,
                 tree: Arc::new(tree),
                 stale_head,
@@ -6284,6 +6321,131 @@ async fn scoped_files(
     .await
 }
 
+/// The scope an item opens on: the one the reader last picked from the
+/// menu, where this item has something under it, else the branch. A
+/// commit is never remembered; it is one item's.
+async fn opening_scope(
+    ctx: &Ctx,
+    item_id: &str,
+    checkout: &perch_git::Checkout,
+    since: Option<&str>,
+) -> perch_git::Scope {
+    use perch_git::Scope;
+    let picked = ctx
+        .with_cache(|c| c.meta(SCOPE_META_KEY).ok().flatten())
+        .flatten();
+    let dirt = || async move {
+        // The uncommitted cuts are greyed while the head is stale, and
+        // there is no work to show in a checkout that is not on disk.
+        if checkout.stale.is_some() || !checkout.worktree.join(".git").exists() {
+            return perch_git::Dirt::default();
+        }
+        perch_git::dirt(ctx.preparer.git(), &checkout.worktree)
+            .await
+            .unwrap_or_default()
+    };
+    let scope = match picked.as_deref() {
+        Some("last-run") => last_run(ctx, item_id, None).await.scope(),
+        Some("since") => since
+            .filter(|from| *from != checkout.head_sha)
+            .map(|from| Scope::SinceLastLooked { from: from.to_string() }),
+        Some("uncommitted") => dirt().await.any().then_some(Scope::Uncommitted),
+        Some("unstaged") => dirt().await.unstaged.then_some(Scope::Unstaged),
+        Some("staged") => dirt().await.staged.then_some(Scope::Staged),
+        _ => None,
+    };
+    scope.unwrap_or(Scope::Branch)
+}
+
+/// The newest finished Work run on an item that changed something, for
+/// Last run. `skip` leaves one run out, to find the one before it.
+async fn last_run(ctx: &Ctx, item_id: &str, skip: Option<&str>) -> LastRun {
+    let runs = ctx
+        .with_cache(|c| c.runs_for_item(item_id).ok())
+        .flatten()
+        .unwrap_or_default();
+    let mut found = LastRun::None;
+    // Oldest first as they come, so newest first here.
+    for run in runs
+        .iter()
+        .rev()
+        .filter(|run| run.mode == RunMode::Work && Some(run.id.as_str()) != skip)
+    {
+        let (Some(before), Some(after)) = (run.work_before.as_deref(), run.work_after.as_deref()) else {
+            continue;
+        };
+        if found == LastRun::None {
+            found = LastRun::Unchanged {
+                before: before.to_string(),
+                after: after.to_string(),
+            };
+        }
+        // Each side is a commit of its own, so equal trees are told by
+        // the diff, not by the shas.
+        let Some(repo) = run_repository(ctx, run) else {
+            continue;
+        };
+        if let Ok((files, _, _)) = ctx.preparer.change_count(&repo, before, after).await {
+            if files > 0 {
+                return LastRun::Changed {
+                    before: before.to_string(),
+                    after: after.to_string(),
+                };
+            }
+        }
+    }
+    found
+}
+
+/// A Work run on the open item finished. Last run moves on to it when
+/// that is what is showing, and the menu learns of it either way.
+async fn follow_last_run(ctx: &Ctx, run: &RunRecord) {
+    let item_id = match &run.owner {
+        RunOwner::Discussion { item_id, .. } | RunOwner::Review { item_id, .. } => item_id.clone(),
+        RunOwner::Unavailable { .. } => return,
+    };
+    let live = |open: &ReviewContext| {
+        open.item_id == item_id
+            && open.review_snapshot_id.is_none()
+            && open.review_group_id.is_none()
+            && open.review_request_id.is_none()
+    };
+    let Some((navigation_id, scope)) = ctx.slot.lock().ok().and_then(|g| {
+        g.as_ref()
+            .filter(|open| live(open))
+            .map(|open| (open.navigation_id, open.scope.clone()))
+    }) else {
+        return;
+    };
+    let now = last_run(ctx, &item_id, None).await;
+    if let Some(now) = now.scope().filter(|now| *now != scope) {
+        let before = last_run(ctx, &item_id, Some(&run.id)).await;
+        if before.scope().as_ref() == Some(&scope) {
+            let request_id = ctx.scope_requests.begin(&item_id);
+            set_scope(ctx, &item_id, now, request_id, navigation_id).await;
+        }
+    }
+    let Some((checkout, since, scope_gen)) = ctx.slot.lock().ok().and_then(|g| {
+        g.as_ref()
+            .filter(|open| live(open) && open.navigation_id == navigation_id)
+            .map(|open| (open.checkout.clone(), open.since.clone(), open.scope_gen))
+    }) else {
+        return;
+    };
+    send_commits(
+        ctx,
+        &item_id,
+        &checkout.worktree,
+        &checkout.merge_base,
+        &checkout.head_sha,
+        since,
+        navigation_id,
+        scope_gen,
+        None,
+    )
+    .await;
+}
+
 /// What the reader marked on an item's files: every (path, blob) viewed,
 /// and on the open, every reveal, in one pass over the cache. After a
 /// write only the viewed set is sent; see `ViewedReady`.
@@ -6334,6 +6496,7 @@ async fn send_commits(
         }
     };
     let dirt = perch_git::dirt(git, worktree).await.unwrap_or_default();
+    let last_run = last_run(ctx, item_id, None).await;
     let event = Event::CommitsReady {
         navigation_id,
         scope_gen,
@@ -6341,6 +6504,7 @@ async fn send_commits(
         commits: Arc::new(commits),
         dirt,
         since,
+        last_run,
     };
     let publish = || {
         let matches = ctx.slot.lock().ok().is_some_and(|slot| {
@@ -8636,7 +8800,8 @@ struct ReviewContext {
     checkout: perch_git::Checkout,
     /// The changed list under `scope`.
     files: Arc<Vec<perch_git::ChangedFile>>,
-    /// What the diff is over. Branch when the item opens.
+    /// What the diff is over. The reader's last pick when the item
+    /// opens; see `opening_scope`.
     scope: perch_git::Scope,
     /// The head at the previous open, for "Since you last looked".
     since: Option<String>,
@@ -11756,6 +11921,8 @@ async fn execute_question(
     // And as it leaves it, however it ended.
     if run.mode == RunMode::Work {
         record_work(ctx, &run, WorkSide::After).await;
+        let (ctx, run) = (ctx.clone(), run.clone());
+        tokio::spawn(async move { follow_last_run(&ctx, &run).await });
     }
     let (mut status, mut reason, error, session, cost, duration) =
         if let Some(message) = persistence_error {
@@ -14881,6 +15048,114 @@ mod tests {
             git(&root, &["for-each-ref", "refs/perch/runs/"]).is_empty(),
             "the run's refs went with its thread"
         );
+    }
+
+    #[tokio::test]
+    async fn an_item_opens_on_the_last_pick_and_last_run_follows_new_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (mut ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry.clone()]);
+        // An agent that does whatever `step` says, where it runs.
+        let step = dir.path().join("step");
+        let agent = dir.path().join("claude");
+        std::fs::write(
+            &agent,
+            format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "sh '{}'\n",
+                    "echo '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"model\":\"sonnet\"}}'\n",
+                    "echo '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Done.\",\"session_id\":\"s1\"}}'\n",
+                ),
+                step.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = Config::default();
+        config.repo = vec![entry];
+        config.agent.binary = agent.to_string_lossy().into_owned();
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        assert!(scan_roots(&ctx).await);
+        let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        open_in_slot(&ctx, &item);
+        let navigation_id = ctx.navigation_requests.begin_item(&item.id);
+        {
+            let mut slot = ctx.slot.lock().unwrap();
+            let open = slot.as_mut().unwrap();
+            open.checkout.worktree = worktree.clone();
+            open.navigation_id = navigation_id;
+        }
+        let work = |script: &'static str| {
+            let (ctx, item_id, step) = (ctx.clone(), item.id.clone(), step.clone());
+            async move {
+                std::fs::write(&step, script).unwrap();
+                ask(
+                    &ctx,
+                    item_id.clone(),
+                    None,
+                    None,
+                    "Work".into(),
+                    perch_agent::Backend::ClaudeCode,
+                    "sonnet".into(),
+                    perch_agent::Effort::Medium,
+                    RunMode::Work,
+                )
+                .await;
+                let run = ctx.with_cache(|c| c.runs_for_item(&item_id).unwrap()).unwrap().pop().unwrap();
+                assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error);
+                run
+            }
+        };
+        let checkout = || ctx.slot.lock().unwrap().as_ref().unwrap().checkout.clone();
+        let pick = |name: &str| ctx.with_cache(|c| c.set_meta(SCOPE_META_KEY, name).unwrap());
+
+        assert_eq!(last_run(&ctx, &item.id, None).await, LastRun::None);
+        let first = work("printf 'made\\n' > made.txt").await;
+        let first_scope = LastRun::Changed {
+            before: first.work_before.clone().unwrap(),
+            after: first.work_after.clone().unwrap(),
+        }
+        .scope()
+        .unwrap();
+        assert_eq!(last_run(&ctx, &item.id, None).await.scope(), Some(first_scope.clone()));
+
+        // With no pick, and with a pick this item has nothing under, the
+        // branch; else the pick.
+        assert_eq!(opening_scope(&ctx, &item.id, &checkout(), None).await, perch_git::Scope::Branch);
+        pick("staged");
+        assert_eq!(opening_scope(&ctx, &item.id, &checkout(), None).await, perch_git::Scope::Branch);
+        pick("uncommitted");
+        assert_eq!(opening_scope(&ctx, &item.id, &checkout(), None).await, perch_git::Scope::Uncommitted);
+        pick("last-run");
+        assert_eq!(opening_scope(&ctx, &item.id, &checkout(), None).await, first_scope);
+
+        // A run that changes nothing is passed over.
+        ctx.slot.lock().unwrap().as_mut().unwrap().scope = first_scope.clone();
+        let idle = work("true").await;
+        follow_last_run(&ctx, &idle).await;
+        assert_eq!(last_run(&ctx, &item.id, None).await.scope(), Some(first_scope.clone()));
+        assert_eq!(ctx.slot.lock().unwrap().as_ref().unwrap().scope, first_scope);
+
+        // One that changes something is shown in its place.
+        let second = work("printf 'more\\n' >> made.txt").await;
+        follow_last_run(&ctx, &second).await;
+        let second_scope = perch_git::Scope::Run {
+            before: second.work_before.clone().unwrap(),
+            after: second.work_after.clone().unwrap(),
+        };
+        assert_eq!(last_run(&ctx, &item.id, None).await.scope(), Some(second_scope.clone()));
+        assert_eq!(ctx.slot.lock().unwrap().as_ref().unwrap().scope, second_scope);
+
+        // Under any other scope the reader's pick stays.
+        ctx.slot.lock().unwrap().as_mut().unwrap().scope = perch_git::Scope::Branch;
+        let third = work("printf 'again\\n' >> made.txt").await;
+        follow_last_run(&ctx, &third).await;
+        assert_eq!(ctx.slot.lock().unwrap().as_ref().unwrap().scope, perch_git::Scope::Branch);
     }
 
     /// A Claude Code that asks its host about `$PERCH_ASK` (a

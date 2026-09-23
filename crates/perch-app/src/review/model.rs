@@ -1222,6 +1222,9 @@ pub struct ReviewState {
     /// The head at the previous open of this item, which "Since you last
     /// looked" ranges from. `None` before the first.
     pub since_head: RwSignal<Option<String>>,
+    /// The newest Work run on the item that changed something, for the
+    /// scope menu's Last run.
+    pub last_run: RwSignal<crate::backend::LastRun>,
     /// Everything said on the pull request on GitHub, once fetched or read
     /// back from the cache.
     pub discussion: RwSignal<Option<Arc<Discussion>>>,
@@ -1592,6 +1595,7 @@ impl ReviewState {
             commits: RwSignal::new(Arc::new(Vec::new())),
             dirty: RwSignal::new(Dirt::default()),
             since_head: RwSignal::new(None),
+            last_run: RwSignal::new(crate::backend::LastRun::None),
             discussion: RwSignal::new(None),
             reactions: RwSignal::new(HashMap::new()),
             reacting: RwSignal::new(HashSet::new()),
@@ -1754,6 +1758,7 @@ impl ReviewState {
         self.commits.set(Arc::new(Vec::new()));
         self.dirty.set(Dirt::default());
         self.since_head.set(None);
+        self.last_run.set(crate::backend::LastRun::None);
         self.discussion.set(None);
         self.reactions.set(HashMap::new());
         self.reacting.set(HashSet::new());

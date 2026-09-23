@@ -17,7 +17,7 @@ use floem::views::{Decorators, Empty, Label, Stack, dyn_container};
 use jiff::Timestamp;
 use perch_git::{Commit, Dirt, Scope};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, LastRun, SCOPE_META_KEY};
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::theme;
@@ -51,6 +51,7 @@ pub struct Facts {
     pub stale_head: bool,
     /// Newest first, as the log gives them.
     pub commits: Arc<Vec<Commit>>,
+    pub last_run: LastRun,
     pub now: Timestamp,
 }
 
@@ -67,17 +68,47 @@ impl Facts {
             dirty: state.dirty.get_untracked(),
             stale_head: state.stale_head.with_untracked(Option::is_some),
             commits: state.commits.get_untracked(),
+            last_run: state.last_run.get_untracked(),
             now: Timestamp::now(),
         })
     }
 }
 
+/// What the menu and the button call the newest run's changes.
+const LAST_RUN: &str = "Last run";
+
+/// What the button names a scope: Last run for the newest run's changes,
+/// else the scope's own label.
+pub fn title(scope: &Scope, last_run: &LastRun) -> String {
+    if last_run.scope().as_ref() == Some(scope) {
+        LAST_RUN.into()
+    } else {
+        scope.label()
+    }
+}
+
+/// What a pick from the menu is remembered as, for the next item to open
+/// on: `None` for one commit, or an older run, which are that item's
+/// alone. `opening_scope` in the backend reads it back.
+pub fn remembered(scope: &Scope, last_run: &LastRun) -> Option<&'static str> {
+    Some(match scope {
+        Scope::Branch => "branch",
+        Scope::SinceLastLooked { .. } => "since",
+        Scope::Uncommitted => "uncommitted",
+        Scope::Unstaged => "unstaged",
+        Scope::Staged => "staged",
+        Scope::Run { .. } if last_run.scope().as_ref() == Some(scope) => "last-run",
+        Scope::Run { .. } | Scope::Commit { .. } => return None,
+    })
+}
+
 /// How much of a commit's subject a menu row shows.
 const SUBJECT_CHARS: usize = 60;
 
-/// The entries in menu order: since you last looked, the uncommitted
-/// cuts, one per commit, then the branch. The uncommitted cuts are left
-/// out, not greyed, when the checkout is not on disk.
+/// The entries in menu order: the last run, since you last looked, the
+/// uncommitted cuts, one per commit, then the branch. The last run is
+/// left out before any Work run has finished, and the uncommitted cuts,
+/// not greyed, when the checkout is not on disk.
 pub fn entries(facts: &Facts) -> Vec<Entry> {
     let entry = |scope: Scope, title: String, enabled: bool| Entry {
         checked: facts.current == scope,
@@ -87,9 +118,21 @@ pub fn entries(facts: &Facts) -> Vec<Entry> {
     };
     let mut out = Vec::new();
 
-    // A run's changes are picked from its card; while they are shown, the
-    // menu lists them first, checked, to come back to.
-    if let Scope::Run { .. } = &facts.current {
+    match &facts.last_run {
+        LastRun::None => {}
+        LastRun::Unchanged { before, after } => out.push(entry(
+            Scope::Run { before: before.clone(), after: after.clone() },
+            format!("{LAST_RUN} (changed nothing)"),
+            false,
+        )),
+        changed @ LastRun::Changed { .. } => {
+            out.extend(changed.scope().map(|scope| entry(scope, LAST_RUN.into(), true)));
+        }
+    }
+
+    // An older run's changes are picked from its card; while they are
+    // shown, the menu lists them next, checked, to come back to.
+    if matches!(facts.current, Scope::Run { .. }) && facts.last_run.scope().as_ref() != Some(&facts.current) {
         out.push(entry(facts.current.clone(), facts.current.label(), true));
     }
 
@@ -161,10 +204,16 @@ pub fn menu(state: ReviewState, backend: Rc<Backend>, item_id: String) -> Menu {
     };
     let (commits, rest): (Vec<Entry>, Vec<Entry>) =
         entries(&facts).into_iter().partition(|e| matches!(e.scope, Scope::Commit { .. }));
-    let pick: Rc<dyn Fn(Scope)> = Rc::new(move |scope| backend.set_scope(&item_id, scope));
+    let last_run = facts.last_run.clone();
+    let pick: Rc<dyn Fn(Scope)> = Rc::new(move |scope| {
+        if let Some(name) = remembered(&scope, &last_run) {
+            backend.set_meta(SCOPE_META_KEY, name);
+        }
+        backend.set_scope(&item_id, scope);
+    });
 
-    // Three groups: the range since the last look, the work on the
-    // branch in its cuts, and the branch they add up to.
+    // Three groups: the last run and the range since the last look, the
+    // work on the branch in its cuts, and the branch they add up to.
     let mut menu = Menu::new();
     for e in rest.iter().filter(|e| e.scope != Scope::Branch) {
         if e.scope == Scope::Uncommitted {
@@ -209,7 +258,8 @@ pub fn button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             }
             _ => None,
         };
-        (scope, subject)
+        let name = state.last_run.with(|last_run| title(&scope, last_run));
+        (name, subject)
     });
     let churn = move || {
         state.changed_files.with(|files| {
@@ -220,9 +270,9 @@ pub fn button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         dyn_container(
             move || named.get(),
-            move |(scope, subject)| match subject {
+            move |(name, subject)| match subject {
                 Some(subject) => Stack::horizontal((
-                    Label::derived(move || scope.label()).style(|s| {
+                    Label::derived(move || name.clone()).style(|s| {
                         s.font_size(theme::TEXT_BADGE)
                             .font_family(theme::CODE_FONT_STACK.to_string())
                             .color(theme::FG_MUTED)
@@ -238,7 +288,7 @@ pub fn button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 ))
                 .style(|s| s.items_center().min_width(0.0).pointer_events_none())
                 .into_any(),
-                None => Label::derived(move || scope.label())
+                None => Label::derived(move || name.clone())
                     .style(|s| s.font_size(theme::TEXT_META).color(theme::FG).text_ellipsis().min_width(0.0))
                     .into_any(),
             },
@@ -327,8 +377,13 @@ mod tests {
                 commit("bbbbbbb2", "Fence the manifest", 3600, now),
                 commit("ccccccc3", "Add the fence", 2 * 86_400, now),
             ]),
+            last_run: LastRun::None,
             now,
         }
+    }
+
+    fn changed(before: &str, after: &str) -> LastRun {
+        LastRun::Changed { before: before.into(), after: after.into() }
     }
 
     fn find<'a>(entries: &'a [Entry], scope: &Scope) -> &'a Entry {
@@ -390,13 +445,66 @@ mod tests {
     }
 
     #[test]
-    fn a_run_s_changes_are_listed_first_while_they_are_shown() {
+    fn an_older_run_s_changes_are_listed_after_the_last_run_while_they_are_shown() {
         let run = Scope::Run { before: "a".into(), after: "b".into() };
         let listed = entries(&Facts { current: run.clone(), ..facts() });
         assert_eq!(listed[0].scope, run);
         assert!(listed[0].checked && listed[0].enabled);
         assert_eq!(listed[0].title, "What the run changed");
         assert!(!entries(&facts()).iter().any(|e| matches!(e.scope, Scope::Run { .. })));
+
+        let listed = entries(&Facts { current: run.clone(), last_run: changed("c", "d"), ..facts() });
+        assert_eq!(listed[0].title, "Last run");
+        assert!(!listed[0].checked);
+        assert_eq!(listed[1].scope, run);
+        assert!(listed[1].checked);
+    }
+
+    #[test]
+    fn the_last_run_heads_the_menu_once_a_run_has_finished() {
+        let listed = entries(&Facts { last_run: changed("a", "b"), ..facts() });
+        assert_eq!(listed[0].scope, Scope::Run { before: "a".into(), after: "b".into() });
+        assert_eq!(listed[0].title, "Last run");
+        assert!(listed[0].enabled && !listed[0].checked);
+        assert!(!listed[1..].iter().any(|e| matches!(e.scope, Scope::Run { .. })));
+
+        // Showing it checks it, and does not list it a second time as a
+        // run picked from its card.
+        let showing = Facts {
+            current: Scope::Run { before: "a".into(), after: "b".into() },
+            last_run: changed("a", "b"),
+            ..facts()
+        };
+        let listed = entries(&showing);
+        assert!(listed[0].checked);
+        assert_eq!(listed.iter().filter(|e| matches!(e.scope, Scope::Run { .. })).count(), 1);
+
+        let unchanged = LastRun::Unchanged { before: "a".into(), after: "a2".into() };
+        let listed = entries(&Facts { last_run: unchanged, ..facts() });
+        assert!(!listed[0].enabled);
+        assert_eq!(listed[0].title, "Last run (changed nothing)");
+    }
+
+    #[test]
+    fn the_button_names_the_newest_run_s_changes_last_run() {
+        let run = Scope::Run { before: "a".into(), after: "b".into() };
+        assert_eq!(title(&run, &changed("a", "b")), "Last run");
+        assert_eq!(title(&run, &changed("c", "d")), "What the run changed");
+        assert_eq!(title(&Scope::Branch, &changed("a", "b")), "Branch");
+    }
+
+    #[test]
+    fn a_pick_is_remembered_unless_it_is_one_item_s_own() {
+        let last = changed("a", "b");
+        let run = |before: &str, after: &str| Scope::Run { before: before.into(), after: after.into() };
+        assert_eq!(remembered(&Scope::Branch, &last), Some("branch"));
+        assert_eq!(remembered(&Scope::Uncommitted, &last), Some("uncommitted"));
+        assert_eq!(remembered(&Scope::Unstaged, &last), Some("unstaged"));
+        assert_eq!(remembered(&Scope::Staged, &last), Some("staged"));
+        assert_eq!(remembered(&Scope::SinceLastLooked { from: "x".into() }, &last), Some("since"));
+        assert_eq!(remembered(&run("a", "b"), &last), Some("last-run"));
+        assert_eq!(remembered(&run("c", "d"), &last), None);
+        assert_eq!(remembered(&Scope::Commit { sha: "x".into() }, &last), None);
     }
 
     #[test]

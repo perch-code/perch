@@ -545,7 +545,9 @@ As a Work run starts and as it ends, however it ends, Perch records the
 worktree as a commit under `refs/perch/runs/<run>/` in the repository, without
 touching the worktree, its index or `HEAD`. The run's card says `Work` and how
 many files it changed; a click shows the change on Code as the **What the run
-changed** scope. Deleting the run's thread or item drops the refs.
+changed** scope. The scope menu's **Last run** is the newest Work run that
+changed something, passing over runs that changed nothing, and moves on to the
+next such run as it finishes. Deleting the run's thread or item drops the refs.
 
 ## Worktree reviews
 
@@ -630,7 +632,10 @@ with Code. Whether it is open and how wide it is are remembered between
 launches.
 
 The tree is the changed files until its filter is turned off, with the scope
-button and the viewed count above it. A file opened from the tree opens on
+button and the viewed count above it. An item opens on the scope last picked
+from that button, as Codex does, when the item has something under it, and on
+the branch otherwise; a single commit, or a run's changes opened from its card,
+is not remembered. A file opened from the tree opens on
 Code, and a file opened from anywhere else, a card or a definition, is shown
 in the tree: the way to it opens, the filter comes off when the file is not a
 change, and the tree scrolls to its row. During a retained snapshot the tree

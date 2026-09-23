@@ -920,6 +920,7 @@ impl AppState {
                 scope_gen,
                 item,
                 pull_request,
+                scope,
                 files,
                 tree,
                 stale_head,
@@ -940,6 +941,7 @@ impl AppState {
                 // A normal item open restores the live checkout after a
                 // retained review snapshot was being inspected.
                 review.clear_historical_review();
+                review.scope.set(scope);
                 review.set_changed_files(files);
                 review.tree.set(tree);
                 self.open_item.set(Some(item.id.clone()));
@@ -1810,6 +1812,7 @@ impl AppState {
                 commits,
                 dirt,
                 since,
+                last_run,
             } => {
                 if self.accepts_navigation(navigation_id)
                     && review.is_item(&item_id)
@@ -1818,6 +1821,7 @@ impl AppState {
                     review.commits.set(commits);
                     review.dirty.set(dirt);
                     review.since_head.set(since);
+                    review.last_run.set(last_run);
                 }
             }
             Event::ScopeReady {
@@ -2453,6 +2457,7 @@ mod tests {
             scope_gen,
             item: Arc::new(item),
             pull_request: None,
+            scope: perch_git::Scope::Branch,
             files: Arc::new(Vec::new()),
             tree: Arc::new(Vec::new()),
             stale_head: None,
@@ -3019,6 +3024,7 @@ mod tests {
                 commits: Arc::new(Vec::new()),
                 dirt: perch_git::Dirt::default(),
                 since: Some("stale-generation".into()),
+                last_run: crate::backend::LastRun::None,
             },
             review,
         );
@@ -3030,6 +3036,7 @@ mod tests {
                 commits: Arc::new(Vec::new()),
                 dirt: perch_git::Dirt::default(),
                 since: Some("stale-navigation".into()),
+                last_run: crate::backend::LastRun::None,
             },
             review,
         );
@@ -3043,6 +3050,7 @@ mod tests {
                 commits: Arc::new(Vec::new()),
                 dirt: perch_git::Dirt::default(),
                 since: Some("current".into()),
+                last_run: crate::backend::LastRun::None,
             },
             review,
         );
