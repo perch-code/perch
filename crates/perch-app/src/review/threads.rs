@@ -2822,15 +2822,122 @@ pub fn run_block(state: ReviewState, backend: Rc<Backend>, run: RunRecord) -> im
         None => Empty::new().into_any(),
     };
     let changes = work_changes(state, backend.clone(), &run);
+    let asks = approval_cards(state, backend.clone(), run.id.clone());
     run_surface(
         Stack::vertical((
             steps_view(state, run.clone()),
+            asks,
             response,
             changes,
             run_footer(backend, run),
         ))
         .style(|s| s.flex_col().width_full().gap(6.0)),
     )
+}
+
+/// What a Work run is waiting on the reader for, a card each, with the
+/// three answers. The card goes as soon as it is answered; the run's
+/// steps say what was asked and what was said.
+fn approval_cards(state: ReviewState, backend: Rc<Backend>, run_id: String) -> impl IntoView {
+    let pending = floem::reactive::Memo::new(move |_| {
+        state.approvals.with(|all| {
+            all.iter()
+                .filter(|a| a.run_id == run_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    });
+    floem::views::dyn_stack(
+        move || pending.get(),
+        |view| view.id.clone(),
+        move |view| approval_card(state, backend.clone(), view),
+    )
+    .style(|s| s.flex_col().gap(8.0).width_full())
+}
+
+fn approval_card(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    view: crate::backend::ApprovalView,
+) -> impl IntoView {
+    use crate::backend::ApprovalAnswer;
+    use crate::review::review_launch::action_button;
+
+    let answer = {
+        let (run_id, id) = (view.run_id.clone(), view.id.clone());
+        Rc::new(move |how: ApprovalAnswer| {
+            // Gone from the card at once, so a second click has nothing
+            // to answer; the backend settles it once either way.
+            state
+                .approvals
+                .update(|pending| pending.retain(|p| !(p.run_id == run_id && p.id == id)));
+            backend.answer_approval(&run_id, &id, how);
+        })
+    };
+    let title = view.title.clone();
+    let command = view.command.clone();
+    let detail = view.detail.clone();
+    let (once, always, deny) = (answer.clone(), answer.clone(), answer);
+    Stack::vertical((
+        Stack::horizontal((
+            sidebar_glyph(SidebarIcon::Warning, theme::DRAFT_YELLOW)
+                .style(|s| s.size(14.0, 14.0).margin_right(6.0).flex_shrink(0.0_f32)),
+            Label::derived(move || title.clone()).style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .font_weight(theme::weight_emphasis())
+                    .color(theme::FG)
+                    .min_width(0.0)
+                    .text_wrap()
+            }),
+        ))
+        .style(|s| s.items_center()),
+        match command {
+            Some(command) => Label::derived(move || command.clone())
+                .style(|s| {
+                    s.font_family(theme::CODE_FONT_STACK.to_string())
+                        .font_size(theme::TEXT_BADGE)
+                        .color(theme::FG)
+                        .text_wrap()
+                        .width_full()
+                        .padding(6.0)
+                        .background(theme::CANVAS)
+                        .border_radius(theme::RADIUS)
+                })
+                .debug_name("approval-command")
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
+        match detail {
+            Some(detail) => Label::derived(move || detail.clone())
+                .style(|s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .color(theme::FG_MUTED)
+                        .text_wrap()
+                        .width_full()
+                })
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
+        Stack::horizontal((
+            action_button("Allow once", "approval-once", true, || true, move || once(ApprovalAnswer::Once)),
+            action_button(&view.always, "approval-always", false, || true, move || {
+                always(ApprovalAnswer::Always)
+            }),
+            action_button("Deny", "approval-deny", false, || true, move || deny(ApprovalAnswer::Deny)),
+        ))
+        .style(|s| s.items_center().gap(6.0).flex_wrap(floem::style::FlexWrap::Wrap)),
+    ))
+    .debug_name("approval-card")
+    .style(|s| {
+        s.flex_col()
+            .gap(6.0)
+            .width_full()
+            .padding(10.0)
+            .background(theme::NOTICE_BG)
+            .border(1.0)
+            .border_color(theme::NOTICE_BORDER)
+            .border_radius(theme::RADIUS)
+    })
 }
 
 /// What a finished Work run changed, `4 files changed, +120 −30`: a
@@ -3148,6 +3255,62 @@ pub fn reply_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_work_run_s_request_has_a_card_whose_buttons_answer_it() {
+        use floem::headless::{HeadlessHarness, TestRoot};
+
+        let state = ReviewState::new();
+        state.approvals.set(vec![crate::backend::ApprovalView {
+            run_id: "run-1".into(),
+            id: "a1".into(),
+            item_id: "i".into(),
+            thread_id: "t".into(),
+            title: "Run outside the sandbox".into(),
+            command: Some("git commit -m x".into()),
+            detail: Some("The sandbox blocked .git/index.lock".into()),
+            always: "Always let Work commit here".into(),
+        }]);
+        let run = perch_github::RunRecord {
+            id: "run-1".into(),
+            status: perch_github::RunStatus::Running,
+            mode: perch_github::RunMode::Work,
+            ..Default::default()
+        };
+        let (backend, mut commands) = Backend::recording();
+        let root = TestRoot::new();
+        let view = run_block(state, Rc::new(backend), run);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let find = |harness: &HeadlessHarness, name: &str| {
+            fn walk(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
+                if id.debug_name().split_whitespace().any(|part| part == name) {
+                    return Some(id);
+                }
+                id.children().into_iter().find_map(|child| walk(child, name))
+            }
+            walk(harness.root_id(), name)
+        };
+        assert!(find(&harness, "approval-card").is_some());
+        assert!(find(&harness, "approval-command").is_some());
+        let always = find(&harness, "approval-always").unwrap().get_visual_rect_no_clip().center();
+        harness.click(always.x, always.y);
+        harness.rebuild();
+        harness.paint();
+        let mut answered = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let crate::backend::Command::AnswerApproval { run_id, approval_id, answer } = command {
+                answered.push((run_id, approval_id, answer));
+            }
+        }
+        assert_eq!(
+            answered,
+            [("run-1".to_string(), "a1".to_string(), crate::backend::ApprovalAnswer::Always)]
+        );
+        assert!(state.approvals.with(Vec::is_empty));
+        assert!(find(&harness, "approval-card").is_none(), "answered, the card goes");
+    }
     use crate::backend::Command;
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::prelude::{Code, Key, KeyState, KeyboardEvent, NamedKey};

@@ -1365,6 +1365,11 @@ pub struct ReviewState {
     /// What each Work run changed, by run id, as the backend counted it:
     /// files, lines added, lines removed.
     pub run_changes: RwSignal<HashMap<String, (u32, u32, u32)>>,
+    /// Requests Work runs are waiting on the reader for, oldest first,
+    /// whichever item they are on.
+    pub approvals: RwSignal<Vec<crate::backend::ApprovalView>>,
+    /// Each repository's grants, by its identity in lower case.
+    pub grants: RwSignal<HashMap<String, Vec<perch_github::WorkGrantRecord>>>,
     /// The destination last sent from each face, by `ThreadFace::index`:
     /// inline in the code, and on Conversation. A new composer on lines
     /// starts on its face's. Kept for the app's life, as `agent_last` is.
@@ -1616,6 +1621,8 @@ impl ReviewState {
             agent_last: RwSignal::new(None),
             work_modes: RwSignal::new(HashMap::new()),
             run_changes: RwSignal::new(HashMap::new()),
+            approvals: RwSignal::new(Vec::new()),
+            grants: RwSignal::new(HashMap::new()),
             last_destination: [RwSignal::new(None), RwSignal::new(None)],
             agent: RwSignal::new(perch_github::AgentConfig::default()),
             hovered_line: RwSignal::new(None),

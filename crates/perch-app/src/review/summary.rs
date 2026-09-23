@@ -46,6 +46,34 @@ pub fn summary(
             || data.with(|d| !d.is_empty())
     });
     let directory_backend = backend.clone();
+    // The repository's grants, on an item that takes Work runs: asked for
+    // as the item opens, and kept as the backend sends them.
+    let work_repo = Memo::new(move |_| {
+        let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+        state.item.with(|item| {
+            item.as_ref()
+                .filter(|item| crate::items::work_allowed(item, viewer.as_deref()))
+                .map(|item| item.repo_full_name.clone())
+        })
+    });
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            if let Some(repo) = work_repo.get() {
+                backend.list_grants(&repo);
+            }
+        });
+    }
+    let grants = Memo::new(move |_| {
+        work_repo
+            .get()
+            .map(|repo| state.grants.with(|all| all.get(&repo.to_lowercase()).cloned().unwrap_or_default()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|grant| (grant.id, grant.label))
+            .collect::<Vec<_>>()
+    });
+    let grants_backend = backend.clone();
     Stack::vertical((
         notices(app, state, backend.clone()),
         dyn_row(
@@ -84,6 +112,16 @@ pub fn summary(
             "Worktree",
             move || checkout_on_disk(state).is_some(),
             directory(state, directory_backend),
+        ),
+        dyn_row(
+            SidebarIcon::Check,
+            "Work may",
+            move || grants.get(),
+            |g| !g.is_empty(),
+            move |grants| {
+                let backend = grants_backend.clone();
+                chips(grants, move |(id, label)| grant_chip(backend.clone(), id, label))
+            },
         ),
         dyn_row(
             SidebarIcon::Tag,
@@ -1095,6 +1133,40 @@ fn chip(
     })
 }
 
+/// A grant: what it allows, and a × that takes it back.
+fn grant_chip(backend: Rc<Backend>, id: String, label: String) -> impl IntoView {
+    Stack::horizontal((
+        Label::derived(move || label.clone()).style(|s| {
+            s.font_size(theme::TEXT_SECTION)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG_MUTED)
+                .selectable(false)
+                .text_ellipsis()
+                .max_width(220.0)
+                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
+        }),
+        sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE)
+            .on_event_stop(el::Click, move |_, _| backend.revoke_grant(&id))
+            .debug_name("revoke-grant")
+            .style(|s| {
+                clickable(s)
+                    .size(12.0, 12.0)
+                    .margin_left(5.0)
+                    .flex_shrink(0.0_f32)
+                    .hover(|s| s.color(theme::FG))
+            }),
+    ))
+    .debug_name("grant-chip")
+    .style(|s| {
+        s.height(theme::CHIP_HEIGHT)
+            .padding_horiz(7.0)
+            .items_center()
+            .background(theme::BADGE_BG)
+            .border_radius(theme::CHIP_HEIGHT / 2.0)
+            .flex_shrink(0.0_f32)
+    })
+}
+
 /// A label as GitHub draws it: its colour as a tint behind darker text.
 /// Shared with the timeline's label lines, which draw the same pill.
 pub(crate) fn label_chip(name: String, color: String) -> impl IntoView {
@@ -1521,6 +1593,51 @@ mod tests {
         let mut pull = branch_item("slatedb/slatedb");
         pull.subject = Some(ItemSubject::PullRequest(pull_request(812)));
         assert_eq!(repo_line(&pull), "slatedb/slatedb #812");
+    }
+
+    #[test]
+    fn the_repository_s_grants_are_listed_on_a_work_item_and_can_be_revoked() {
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut item = branch_item("slatedb/slatedb");
+        item.id = "branch".into();
+        state.item.set(Some(Arc::new(item)));
+        state.ready.set(true);
+        state.phase.set(crate::review::model::Phase::Ready);
+        state.composer_autofocus.set(false);
+        let grant = |id: &str, label: &str| perch_github::WorkGrantRecord {
+            id: id.into(),
+            repo: "slatedb/slatedb".into(),
+            key: label.into(),
+            label: label.into(),
+            created_at: "2026-09-22T10:00:00Z".parse().unwrap(),
+        };
+        state.grants.update(|all| {
+            all.insert("slatedb/slatedb".into(), vec![grant("g1", "example.com"), grant("g2", "commit")]);
+        });
+        let (backend, mut commands) = Backend::recording();
+        let root = floem::headless::TestRoot::new();
+        let view = crate::ui::app_view(app, state, Rc::new(backend));
+        let mut harness = floem::headless::HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(rows_shown(&harness), ["Branch", "Repository", "Worktree", "Work may"]);
+        let mut asked = false;
+        while let Ok(command) = commands.try_recv() {
+            asked |= matches!(command, crate::backend::Command::ListGrants { ref repo } if repo == "slatedb/slatedb");
+        }
+        assert!(asked, "the grants are asked for as the item opens");
+
+        let revoke = named(harness.root_id(), "revoke-grant").expect("a × on the grant");
+        let center = revoke.get_visual_rect_no_clip().center();
+        harness.click(center.x, center.y);
+        let mut revoked = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let crate::backend::Command::RevokeGrant { id } = command {
+                revoked.push(id);
+            }
+        }
+        assert_eq!(revoked, ["g1"]);
     }
 
     #[test]
