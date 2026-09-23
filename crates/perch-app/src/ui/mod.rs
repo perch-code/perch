@@ -333,7 +333,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 let typing = state.search_focused.get()
                     || review.composer_focused.get()
-                    || review.submit_review_open.get();
+                    || review.submit_review_open.get()
+                    || review.review_launcher_open.get();
                 // The find bar's keys, from the code and from the bar alike:
                 // Cmd-F puts the bar up over the code, or gives it the
                 // keyboard again; Cmd-G and Cmd-Shift-G walk the matches,
@@ -623,6 +624,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 && !state.search_focused.get()
                 && !review.composer_focused.get()
                 && !review.submit_review_open.get()
+                && !review.review_launcher_open.get()
                 && !review.find_focused.get()
                 && key.code == Code::KeyS
             {
@@ -1156,5 +1158,48 @@ mod tests {
         harness.dispatch_event(cmd_w());
         harness.rebuild();
         assert!(review.tabs.with(Vec::is_empty), "the file's tab is still there");
+    }
+
+    /// The review launcher's instructions are a text box: `a` typed there
+    /// is an `a`, not the key that opens a composer and takes the keyboard.
+    #[test]
+    fn the_review_launchers_box_keeps_the_keys_the_window_would_take() {
+        let (mut harness, review) = window_with_a_file_open();
+        let control = named(harness.root_id(), "review-launch-control")
+            .expect("no review launcher in the bar")
+            .get_visual_rect_no_clip();
+        harness.click(control.center().x, control.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert!(review.review_launcher_open.get(), "the click did not open it");
+
+        let rect = named(harness.root_id(), "review-instructions")
+            .expect("no instructions box")
+            .get_visual_rect_no_clip();
+        harness.click(rect.center().x, rect.center().y);
+        harness.rebuild();
+        harness.paint();
+        let editor = harness
+            .element_id_at(rect.center().x, rect.center().y)
+            .expect("nothing under the click")
+            .owning_id();
+        assert!(harness.is_focused(editor));
+
+        for (ch, code) in [
+            ("P", Code::KeyP),
+            ("l", Code::KeyL),
+            ("e", Code::KeyE),
+            ("a", Code::KeyA),
+            ("s", Code::KeyS),
+            ("e", Code::KeyE),
+        ] {
+            let modifiers = if ch == "P" { Modifiers::SHIFT } else { Modifiers::empty() };
+            harness.dispatch_event(key(code, Key::Character(ch.into()), modifiers));
+            harness.rebuild();
+            harness.paint();
+        }
+        assert!(review.composer.with(Option::is_none), "`a` opened a composer");
+        assert!(harness.is_focused(editor), "the box lost the keyboard");
+        assert_eq!(review.review_launcher_instructions.get(), "Please");
     }
 }
