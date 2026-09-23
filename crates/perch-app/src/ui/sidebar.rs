@@ -457,15 +457,32 @@ fn notification_filter_menu(state: AppState) -> Menu {
 
 /// Notifications are GitHub's ordered thread list. The other scopes are
 /// views over Perch's local items.
+///
+/// A poll that would move the rows is held back, and the pill over the
+/// list says so until the reader asks for it.
 fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
-    dyn_container(
-        move || state.item_filters.with(|filters| filters.scope),
-        move |scope| match scope {
-            ItemScope::Notifications => crate::ui::notifications::notification_list(state, backend.clone()).into_any(),
-            ItemScope::All | ItemScope::Authored => local_item_list(state, backend.clone(), on_open.clone()).into_any(),
-        },
-    )
-    .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
+    Stack::vertical((
+        dyn_container(
+            move || state.item_filters.with(|filters| filters.scope),
+            move |scope| match scope {
+                ItemScope::Notifications => crate::ui::notifications::notification_list(state, backend.clone()).into_any(),
+                ItemScope::All | ItemScope::Authored => local_item_list(state, backend.clone(), on_open.clone()).into_any(),
+            },
+        )
+        .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
+        crate::ui::widgets::news_pill(
+            move || state.held_back_news().unwrap_or_default(),
+            move || state.held_back_news().is_some(),
+            move || state.show_held_back(),
+        ),
+    ))
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .flex_grow(1.0_f32)
+            .min_height(0.0)
+            .position(floem::style::Position::Relative)
+    })
 }
 
 /// One scrolling local-item list. Pinning changes order and the row's pin
@@ -849,6 +866,37 @@ mod tests {
         harness.paint();
         assert!(find(harness.root_id(), "No matching items").is_some());
         assert!(find(harness.root_id(), "Issue mine").is_none());
+    }
+
+    /// A poll with a new row floats a pill over the list and moves
+    /// nothing; Refresh puts the row in.
+    #[test]
+    fn a_held_back_poll_floats_a_pill_and_refresh_shows_it() {
+        let (mut harness, state) = harness();
+        let row = find(harness.root_id(), "Issue mine").unwrap();
+        let before = row.get_visual_rect_no_clip();
+        let pill = find(harness.root_id(), "news pill").unwrap();
+        assert!(pill.get_visual_rect_no_clip().is_zero_area(), "hidden with nothing held");
+
+        let mut polled = state.items.get();
+        polled.push(issue("new", "org/one", "ME"));
+        state.apply(crate::backend::Event::ItemsPolled(polled));
+        harness.rebuild();
+        harness.paint();
+
+        assert!(find(harness.root_id(), "Issue new").is_none());
+        assert_eq!(row.get_visual_rect_no_clip(), before, "the rows stay put");
+        let shown = pill.get_visual_rect_no_clip();
+        assert!(shown.width() > 0.0 && shown.height() > 0.0);
+        assert!(shown.y1 < before.y1 + 40.0, "the pill is at the top of the list: {shown:?}");
+
+        let refresh = find(harness.root_id(), "news refresh").unwrap();
+        let center = refresh.get_visual_rect_no_clip().center();
+        harness.click(center.x, center.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Issue new").is_some());
+        assert!(state.pending_items.get().is_none());
     }
 
     /// Every row of the drawer has Codex's shape: the title with the age

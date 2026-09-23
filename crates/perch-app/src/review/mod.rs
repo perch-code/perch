@@ -198,29 +198,52 @@ fn item_view(
         ItemTab::Files if state.has_files() => Showing::Code,
         ItemTab::Files => Showing::Nothing,
     });
-    dyn_container(
-        move || showing.get(),
-        move |showing| match showing {
-            Showing::Conversation => conversation::view(
-                app,
-                state,
-                backend.clone(),
-                open_file.clone(),
-                open_item.clone(),
-            )
-            .into_any(),
-            Showing::Code => {
-                editor::editor_pane(app, state, backend.clone(), open_file.clone()).into_any()
-            }
-            Showing::Nothing => centered_message(
-                SidebarIcon::Chat,
-                || "Nothing open".to_string(),
-                || "Press ⇧⌘1 to show the conversation.".to_string(),
-            )
-            .into_any(),
-        },
-    )
-    .style(|s| s.size_full().min_height(0.0))
+    let refresh_backend = backend.clone();
+    Stack::vertical((
+        dyn_container(
+            move || showing.get(),
+            move |showing| match showing {
+                Showing::Conversation => conversation::view(
+                    app,
+                    state,
+                    backend.clone(),
+                    open_file.clone(),
+                    open_item.clone(),
+                )
+                .into_any(),
+                Showing::Code => {
+                    editor::editor_pane(app, state, backend.clone(), open_file.clone()).into_any()
+                }
+                Showing::Nothing => centered_message(
+                    SidebarIcon::Chat,
+                    || "Nothing open".to_string(),
+                    || "Press ⇧⌘1 to show the conversation.".to_string(),
+                )
+                .into_any(),
+            },
+        )
+        .style(|s| s.size_full().min_height(0.0)),
+        // GitHub has news about the item: offered, not applied, so what is
+        // being read stays put.
+        crate::ui::widgets::news_pill(
+            || "New activity on GitHub".to_string(),
+            move || state.upstream_changed.get(),
+            move || {
+                state.upstream_changed.set(false);
+                if let Some(item_id) = state
+                    .item
+                    .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
+                {
+                    refresh_backend.refresh_open_item(&item_id);
+                }
+            },
+        ),
+    ))
+    .style(|s| {
+        s.size_full()
+            .min_height(0.0)
+            .position(floem::style::Position::Relative)
+    })
 }
 
 /// The separator between the status line's parts.

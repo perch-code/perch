@@ -70,6 +70,15 @@ pub struct AppState {
     /// Perch's visible notification list, in GitHub response order after local
     /// Done watermarks have been applied.
     pub notifications: RwSignal<Vec<Thread>>,
+    /// A poll's items the drawer is holding back because they would move
+    /// its rows, until the reader asks for them or does something that
+    /// sends the list again.
+    pub pending_items: RwSignal<Option<Vec<Item>>>,
+    /// The same for the notification list.
+    pub pending_notifications: RwSignal<Option<Vec<Thread>>>,
+    /// Whether a poll's notifications have arrived since launch. The first
+    /// replaces the cached list outright rather than waiting to be asked.
+    notifications_polled: RwSignal<bool>,
     /// GitHub's wire name for the notification reason currently shown.
     /// Separate from local item filters because notifications are not items.
     pub notification_reason: RwSignal<Option<String>>,
@@ -233,6 +242,9 @@ impl AppState {
             repos: RwSignal::new(Vec::new()),
             items: RwSignal::new(Vec::new()),
             notifications: RwSignal::new(Vec::new()),
+            pending_items: RwSignal::new(None),
+            pending_notifications: RwSignal::new(None),
+            notifications_polled: RwSignal::new(false),
             notification_reason: RwSignal::new(None),
             open_item: RwSignal::new(None),
             notice: RwSignal::new(None),
@@ -916,6 +928,7 @@ impl AppState {
                 review.item.set(Some(item));
                 review.stale_head.set(stale_head);
                 review.offline.set(offline);
+                review.upstream_changed.set(false);
                 review.pull_request.set(pull_request);
                 review.pull_request_overview_loading.set(overview_loading);
                 review.issue.set(None);
@@ -959,6 +972,7 @@ impl AppState {
                 review.pull_request.set(None);
                 review.stale_head.set(None);
                 review.offline.set(offline);
+                review.upstream_changed.set(false);
                 review.install_issue_reactions(&issue, &comments);
                 review.issue.set(Some(issue));
                 review.issue_comments.set(comments);
@@ -1300,6 +1314,18 @@ impl AppState {
                     }
                 }
                 self.apply(Event::Items(items));
+            }
+            Event::ItemsPolled(items) => {
+                if self.holds_items(&items) {
+                    self.pending_items.set(Some(items));
+                } else {
+                    self.apply_with_review(Event::Items(items), review);
+                }
+            }
+            Event::OpenItemChanged { item_id } => {
+                if review.is_item(&item_id) {
+                    review.upstream_changed.set(true);
+                }
             }
             Event::ReviewFailed {
                 navigation_id,
@@ -1855,8 +1881,32 @@ impl AppState {
                     m.insert(url, Arc::new(bytes));
                 });
             }
-            Event::Items(items) => self.items.set(items),
-            Event::Notifications(notifications) => self.notifications.set(notifications),
+            // What the reader did sends the whole list, so whatever a poll
+            // was holding back is in it.
+            Event::Items(items) => {
+                self.items.set(items);
+                self.pending_items.set(None);
+            }
+            Event::ItemsPolled(items) => {
+                if self.holds_items(&items) {
+                    self.pending_items.set(Some(items));
+                } else {
+                    self.apply(Event::Items(items));
+                }
+            }
+            Event::Notifications(notifications) => {
+                self.notifications.set(notifications);
+                self.pending_notifications.set(None);
+            }
+            Event::NotificationsPolled(notifications) => {
+                let first = !self.notifications_polled.get_untracked();
+                self.notifications_polled.set(true);
+                if !first && self.holds_notifications(&notifications) {
+                    self.pending_notifications.set(Some(notifications));
+                } else {
+                    self.apply(Event::Notifications(notifications));
+                }
+            }
             Event::Repos(repos) => self.repos.set(repos),
             Event::Meta { key, value } => match key.as_str() {
                 "item_filters" => match crate::items::ItemFilters::parse(&value) {
@@ -1949,6 +1999,7 @@ impl AppState {
             | Event::ReviewLaunchFailed { .. }
             | Event::HistoricalReviewReady { .. }
             | Event::HistoricalReviewFailed { .. }
+            | Event::OpenItemChanged { .. }
             | Event::IssueReady { .. } => {}
             Event::ReviewProgress { .. }
             | Event::ReviewReady { .. }
@@ -1986,6 +2037,13 @@ impl AppState {
             | Event::ViewedReady { .. }
             | Event::LspReferences { .. } => {}
             Event::Status(status) => {
+                // Polls are quiet once one has gone through: the line keeps
+                // saying when the list was last current.
+                if status == Status::Refreshing
+                    && self.status.with_untracked(|s| matches!(s, Status::Idle { .. }))
+                {
+                    return;
+                }
                 if let Status::Idle { at, .. } = &status {
                     self.now.set(*at);
                 }
@@ -2112,6 +2170,112 @@ impl AppState {
     }
 
     /// The flat sidebar under the current scope, filters and search.
+    /// Whether a poll's items would change which rows the drawer shows,
+    /// or their order. Changes inside a row go straight in; so does
+    /// anything while the drawer shows notifications, or nothing yet.
+    fn holds_items(&self, incoming: &[Item]) -> bool {
+        self.item_filters.with_untracked(|f| f.scope) != crate::items::ItemScope::Notifications
+            && !self.items.with_untracked(Vec::is_empty)
+            && self.items.with_untracked(|shown| self.visible_item_ids(shown))
+                != self.visible_item_ids(incoming)
+    }
+
+    /// The same for notifications, while the drawer shows them.
+    fn holds_notifications(&self, incoming: &[Thread]) -> bool {
+        self.item_filters.with_untracked(|f| f.scope) == crate::items::ItemScope::Notifications
+            && !self.notifications.with_untracked(Vec::is_empty)
+            && self.notifications.with_untracked(|shown| self.visible_thread_ids(shown))
+                != self.visible_thread_ids(incoming)
+    }
+
+    /// The ids of the rows `items` would give under the drawer's filters,
+    /// in order.
+    fn visible_item_ids(&self, items: &[Item]) -> Vec<String> {
+        let mut filters = self.item_filters.get_untracked();
+        filters.query = self.item_query.get_untracked();
+        self.viewer.with_untracked(|viewer| {
+            let viewer = viewer.as_ref().map(|(login, _)| login.as_str());
+            crate::items::visible_items(items, &filters, viewer)
+                .into_iter()
+                .map(|item| item.id)
+                .collect()
+        })
+    }
+
+    fn visible_thread_ids(&self, threads: &[Thread]) -> Vec<String> {
+        let repository = self.item_filters.with_untracked(|f| f.repository.clone());
+        let reason = self.notification_reason.get_untracked();
+        let query = self.item_query.get_untracked();
+        crate::ui::notifications::filter_notifications(
+            threads,
+            repository.as_deref(),
+            reason.as_deref(),
+            &query,
+        )
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect()
+    }
+
+    /// What the drawer's pill says while a poll is held back for the list
+    /// it shows: how many rows are new, or that there is activity when
+    /// the rows only moved. `None` when nothing is held back.
+    pub fn held_back_news(&self) -> Option<String> {
+        let (new, noun) =
+            if self.item_filters.with(|f| f.scope) == crate::items::ItemScope::Notifications {
+                let incoming = self.pending_notifications.get()?;
+                let shown: HashSet<String> = self
+                    .notifications
+                    .with_untracked(|shown| self.visible_thread_ids(shown))
+                    .into_iter()
+                    .collect();
+                let ids = self.visible_thread_ids(&incoming);
+                (ids.iter().filter(|id| !shown.contains(*id)).count(), "notification")
+            } else {
+                let incoming = self.pending_items.get()?;
+                let shown: HashSet<String> = self
+                    .items
+                    .with_untracked(|shown| self.visible_item_ids(shown))
+                    .into_iter()
+                    .collect();
+                let ids = self.visible_item_ids(&incoming);
+                (ids.iter().filter(|id| !shown.contains(*id)).count(), "item")
+            };
+        Some(match new {
+            0 => "New activity".to_string(),
+            1 => format!("1 new {noun}"),
+            n => format!("{n} new {noun}s"),
+        })
+    }
+
+    /// Put up whatever the drawer's pill is holding back for the list it
+    /// shows.
+    pub fn show_held_back(&self) {
+        if self.item_filters.with_untracked(|f| f.scope) == crate::items::ItemScope::Notifications {
+            self.show_pending_notifications();
+        } else {
+            self.show_pending_items();
+        }
+    }
+
+    /// Put up the items a poll was holding back.
+    fn show_pending_items(&self) {
+        let Some(items) = self.pending_items.get_untracked() else {
+            return;
+        };
+        match self.review.get_untracked() {
+            Some(review) => self.apply_with_review(Event::Items(items), review),
+            None => self.apply(Event::Items(items)),
+        }
+    }
+
+    /// Put up the notifications a poll was holding back.
+    fn show_pending_notifications(&self) {
+        if let Some(threads) = self.pending_notifications.get_untracked() {
+            self.apply(Event::Notifications(threads));
+        }
+    }
+
     pub fn visible_items(&self) -> Vec<Item> {
         let mut filters = self.item_filters.get();
         filters.query = self.item_query.get();
@@ -2328,6 +2492,162 @@ mod tests {
         );
         assert!(!notifications[0].unread);
         assert!(notifications[1].unread);
+    }
+
+    fn showing_notifications(app: &AppState) {
+        app.item_filters.update(|f| f.scope = crate::items::ItemScope::Notifications);
+    }
+
+    fn ids(threads: &[Thread]) -> Vec<&str> {
+        threads.iter().map(|thread| thread.id.as_str()).collect()
+    }
+
+    #[test]
+    fn the_first_poll_replaces_the_cached_inbox_outright() {
+        let app = AppState::new();
+        showing_notifications(&app);
+        app.apply(Event::Notifications(vec![notification("1", true)]));
+        app.apply(Event::NotificationsPolled(vec![
+            notification("2", true),
+            notification("1", true),
+        ]));
+        assert_eq!(ids(&app.notifications.get()), ["2", "1"]);
+        assert_eq!(app.held_back_news(), None);
+    }
+
+    #[test]
+    fn a_poll_that_would_move_the_inbox_waits_to_be_asked_for() {
+        let app = AppState::new();
+        showing_notifications(&app);
+        app.apply(Event::NotificationsPolled(vec![notification("1", true)]));
+
+        app.apply(Event::NotificationsPolled(vec![
+            notification("3", true),
+            notification("2", true),
+            notification("1", true),
+        ]));
+        assert_eq!(ids(&app.notifications.get()), ["1"]);
+        assert_eq!(app.held_back_news().as_deref(), Some("2 new notifications"));
+
+        app.show_held_back();
+        assert_eq!(ids(&app.notifications.get()), ["3", "2", "1"]);
+        assert_eq!(app.held_back_news(), None);
+    }
+
+    #[test]
+    fn a_poll_that_only_changes_rows_in_place_goes_straight_in() {
+        let app = AppState::new();
+        showing_notifications(&app);
+        app.apply(Event::NotificationsPolled(vec![notification("1", true)]));
+        app.apply(Event::NotificationsPolled(vec![notification("1", false)]));
+        assert!(!app.notifications.get()[0].unread);
+        assert_eq!(app.held_back_news(), None);
+    }
+
+    #[test]
+    fn a_reordered_inbox_is_news_without_new_rows() {
+        let app = AppState::new();
+        showing_notifications(&app);
+        app.apply(Event::NotificationsPolled(vec![
+            notification("1", true),
+            notification("2", true),
+        ]));
+        app.apply(Event::NotificationsPolled(vec![
+            notification("2", true),
+            notification("1", true),
+        ]));
+        assert_eq!(ids(&app.notifications.get()), ["1", "2"]);
+        assert_eq!(app.held_back_news().as_deref(), Some("New activity"));
+    }
+
+    #[test]
+    fn what_the_reader_does_sends_the_whole_inbox_and_ends_the_wait() {
+        let app = AppState::new();
+        showing_notifications(&app);
+        app.apply(Event::NotificationsPolled(vec![notification("1", true)]));
+        app.apply(Event::NotificationsPolled(vec![
+            notification("2", true),
+            notification("1", true),
+        ]));
+        app.apply(Event::Notifications(vec![
+            notification("2", true),
+            notification("1", false),
+        ]));
+        assert_eq!(ids(&app.notifications.get()), ["2", "1"]);
+        assert_eq!(app.held_back_news(), None);
+    }
+
+    #[test]
+    fn a_poll_of_a_list_not_on_screen_goes_straight_in() {
+        let app = AppState::new();
+        app.apply(Event::NotificationsPolled(vec![notification("1", true)]));
+        app.apply(Event::NotificationsPolled(vec![
+            notification("2", true),
+            notification("1", true),
+        ]));
+        assert_eq!(ids(&app.notifications.get()), ["2", "1"]);
+    }
+
+    #[test]
+    fn a_poll_with_new_items_waits_to_be_asked_for() {
+        let item = |id: &str| {
+            let mut item = Item::new("a/b", "2026-09-18T09:59:00Z".parse().unwrap());
+            item.id = id.into();
+            item
+        };
+        let app = AppState::new();
+        app.apply(Event::Items(vec![item("a")]));
+
+        app.apply(Event::ItemsPolled(vec![item("a"), item("b")]));
+        assert_eq!(app.items.get().len(), 1);
+        assert_eq!(app.held_back_news().as_deref(), Some("1 new item"));
+
+        app.show_held_back();
+        assert_eq!(app.items.get().len(), 2);
+        assert_eq!(app.held_back_news(), None);
+
+        // A change inside a row moves nothing.
+        let mut renamed = item("a");
+        renamed.name = Some("renamed".into());
+        app.apply(Event::ItemsPolled(vec![renamed, item("b")]));
+        assert_eq!(app.items.get()[0].name.as_deref(), Some("renamed"));
+        assert_eq!(app.held_back_news(), None);
+    }
+
+    #[test]
+    fn news_about_the_open_item_is_flagged_until_it_opens_again() {
+        let app = AppState::new();
+        let review = review_of("open");
+        app.apply_with_review(
+            Event::OpenItemChanged {
+                item_id: "other".into(),
+            },
+            review,
+        );
+        assert!(!review.upstream_changed.get());
+        app.apply_with_review(
+            Event::OpenItemChanged {
+                item_id: "open".into(),
+            },
+            review,
+        );
+        assert!(review.upstream_changed.get());
+        app.begin_item_review(review, "Reading the discussion", "open", 3);
+        app.apply_with_review(review_ready("open", 3), review);
+        assert!(!review.upstream_changed.get());
+    }
+
+    #[test]
+    fn a_poll_after_one_has_gone_through_leaves_the_status_line_alone() {
+        let app = AppState::new();
+        let at = "2026-09-19T12:00:00Z".parse().unwrap();
+        let idle = Status::Idle {
+            at,
+            source: "gh".into(),
+        };
+        app.apply(Event::Status(idle.clone()));
+        app.apply(Event::Status(Status::Refreshing));
+        assert_eq!(app.status.get(), idle);
     }
 
     #[test]

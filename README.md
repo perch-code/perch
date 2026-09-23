@@ -12,11 +12,22 @@ API's order and unread state, and caches the latest response locally so the
 sidebar can paint immediately. Perch requests `all=true` so read threads remain
 visible alongside unread ones.
 
-Polling respects GitHub's `X-Poll-Interval` and paginates the full response.
-Perch performs an unconditional reconciliation at startup, on manual refresh,
-and on the first scheduled poll after 15 minutes; polls between reconciliations
-use `Last-Modified`. The full fetch repairs the sidebar when GitHub's validator
-does not change with the notification list.
+Polling runs in the background, respects GitHub's `X-Poll-Interval`, and
+paginates the full response. Perch performs an unconditional reconciliation at
+startup and on the first scheduled poll after 15 minutes; polls between
+reconciliations use `Last-Modified`. The full fetch repairs the sidebar when
+GitHub's validator does not change with the notification list. Without a
+token, each poll looks for one again, so a `gh auth login` after launch is
+picked up.
+
+A poll never moves what is on screen. When it would add, remove, or reorder
+the rows the sidebar shows, the rows stay as they are and a pill over the list
+says how many are new, with Refresh to show them. Changes inside a row, such
+as read state, go straight in, and anything you do in the sidebar shows the
+latest list. When a notification arrives about the open pull request or
+issue, a pill over the pane offers to fetch it. A CI notification for the open
+pull request updates its checks directly, as long as the head on screen is
+still GitHub's.
 
 - Viewing a pull request or an issue marks its GitHub thread read, from
   whichever row it was opened: the notification's, or the item's in All or

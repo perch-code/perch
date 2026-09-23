@@ -499,6 +499,67 @@ pub fn spacer() -> impl IntoView {
     Empty::new().style(|s| s.flex_grow(1.0_f32))
 }
 
+/// A pill over the top of a list or a pane, saying GitHub has something
+/// newer than what is on screen, with Refresh to show it. It floats, so
+/// nothing moves until the reader asks; the parent is its positioning box.
+pub fn news_pill(
+    label: impl Fn() -> String + 'static,
+    shown: impl Fn() -> bool + 'static,
+    on_refresh: impl Fn() + 'static,
+) -> impl IntoView {
+    Container::new(
+        Stack::horizontal((
+            Label::derived(label).style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG)
+                    .selectable(false)
+                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
+            }),
+            Label::new("Refresh")
+                .on_event_stop(floem::event::listener::Click, move |_, _| on_refresh())
+                .debug_name("news refresh")
+                .style(|s| {
+                    clickable(s)
+                        .height(22.0)
+                        .items_center()
+                        .padding_horiz(9.0)
+                        .font_size(theme::TEXT_META)
+                        .font_weight(theme::weight_emphasis())
+                        .color(theme::FG)
+                        .background(theme::BADGE_BG)
+                        .border_radius(11.0)
+                        .hover(|s| s.background(theme::ACCENT_SUBTLE))
+                }),
+        ))
+        .style(|s| {
+            s.items_center()
+                .gap(10.0)
+                .height(30.0)
+                .padding_left(13.0)
+                .padding_right(4.0)
+                .background(theme::CANVAS)
+                .border(1.0)
+                .border_color(theme::BORDER)
+                .border_radius(15.0)
+                .box_shadow_blur(18.0)
+                .box_shadow_v_offset(5.0)
+                .box_shadow_color(theme::SHADOW)
+                .pointer_events_auto()
+        }),
+    )
+    .debug_name("news pill")
+    .style(move |s| {
+        s.position(floem::style::Position::Absolute)
+            .inset_top(10.0)
+            .inset_left(0.0)
+            .inset_right(0.0)
+            .justify_center()
+            .pointer_events_none()
+            .z_index(50)
+            .apply_if(!shown(), |s| s.hide())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_browser_url, profile_url, Name};

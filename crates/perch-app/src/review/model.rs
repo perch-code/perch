@@ -1120,6 +1120,9 @@ pub struct ReviewState {
     /// The pull request could not be fetched; this is the checkout as it
     /// was last left.
     pub offline: RwSignal<bool>,
+    /// GitHub has news about the item that the view has not fetched. Set
+    /// by a notification, cleared by opening the item or asking for it.
+    pub upstream_changed: RwSignal<bool>,
     /// True from the click until the review view is left, so the progress
     /// card can show before the pull request itself has resolved.
     pub opening: RwSignal<bool>,
@@ -1538,6 +1541,7 @@ impl ReviewState {
             issue_events: RwSignal::new(Arc::new(Vec::new())),
             stale_head: RwSignal::new(None),
             offline: RwSignal::new(false),
+            upstream_changed: RwSignal::new(false),
             opening: RwSignal::new(false),
             phase: RwSignal::new(Phase::Preparing),
             preparing: RwSignal::new(Preparing::Idle),
@@ -1707,6 +1711,7 @@ impl ReviewState {
     fn reset_checkout(&self) {
         self.remember_pane();
         self.pull_request.set(None);
+        self.upstream_changed.set(false);
         self.ready.set(false);
         self.issue.set(None);
         self.issue_comments.set(Arc::new(Vec::new()));

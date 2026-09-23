@@ -1,17 +1,16 @@
-//! One-line footer: refresh state, token source, and any error.
+//! One-line footer: when the list was last current, the token source,
+//! and any error.
 
 use floem::peniko::Color;
 use floem::prelude::*;
-use floem::style::CursorStyle;
-use floem::views::{dyn_container, Container, Decorators, Label, Stack};
+use floem::views::{dyn_container, Decorators, Label, Stack};
 
 use crate::backend::{Backend, Status};
-use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
-use crate::ui::widgets::{sidebar_glyph, spacer};
+use crate::ui::widgets::spacer;
 
 pub fn status_bar(
     state: AppState,
@@ -56,8 +55,7 @@ pub fn status_bar(
             },
         )
         .style(|s| s.min_width(0.0).margin_right(12.0)),
-        crate::ui::agents::control(state, backend.clone()),
-        refresh_button(backend),
+        crate::ui::agents::control(state, backend),
     ))
     .debug_name("status bar")
     .style(|s| {
@@ -126,23 +124,6 @@ pub(crate) fn with_thousands(n: usize) -> String {
         out.push(c);
     }
     out
-}
-
-/// The refresh glyph, in a square at the one radius everything else on
-/// the sidebar's side is drawn at.
-fn refresh_button(backend: std::rc::Rc<Backend>) -> impl IntoView {
-    Container::new(sidebar_glyph(SidebarIcon::Refresh, theme::FG_MUTED))
-        .on_event_stop(el::Click, move |_, _| backend.refresh())
-        .style(|s| {
-            s.size(22.0, 22.0)
-                .items_center()
-                .justify_center()
-                .border_radius(theme::RADIUS)
-                .hover(|s| {
-                    s.background(theme::CANVAS_HOVER)
-                        .cursor(CursorStyle::Pointer)
-                })
-        })
 }
 
 #[cfg(test)]

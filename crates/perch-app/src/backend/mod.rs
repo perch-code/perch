@@ -171,6 +171,11 @@ pub enum Command {
         request_id: u64,
         navigation_id: u64,
     },
+    /// Fetch again what the open item shows from GitHub, as the reader
+    /// asked after hearing it changed.
+    RefreshOpenItem {
+        item_id: String,
+    },
     /// Look at the checkout again: its head, its dirt and its commits, and
     /// the changed list if the head moved. Sent as the scope menu is about
     /// to open, and on every poll, so terminal work shows up.
@@ -574,10 +579,21 @@ pub enum Event {
     },
     /// Every item, active and archived. Whole, for the same reason.
     Items(Vec<Item>),
+    /// The items again, as a poll found them rather than something the
+    /// reader did. The drawer may hold these back until asked.
+    ItemsPolled(Vec<Item>),
     /// Perch's visible notification list, in GitHub response order. Read
     /// threads remain; revisions marked Done in Perch stay hidden until newer
     /// activity arrives.
     Notifications(Vec<Thread>),
+    /// The notification list again, from a poll or a look at its subjects
+    /// rather than something the reader did.
+    NotificationsPolled(Vec<Thread>),
+    /// GitHub has news about the open item that is not on screen yet.
+    /// The view offers to fetch it rather than moving under the reader.
+    OpenItemChanged {
+        item_id: String,
+    },
     /// A remembered setting, sent once at startup for each key the UI
     /// asked to keep.
     Meta {
@@ -1879,8 +1895,11 @@ impl PullRequestReviewAttempts {
 }
 
 impl Backend {
-    pub fn refresh(&self) {
-        let _ = self.commands.send(Command::Refresh);
+    /// Fetch the open item again, after the view said GitHub has news.
+    pub fn refresh_open_item(&self, item_id: &str) {
+        let _ = self.commands.send(Command::RefreshOpenItem {
+            item_id: item_id.to_string(),
+        });
     }
 
     /// Open a pull request or an issue by number, making its item if it has
@@ -2643,7 +2662,7 @@ async fn run(
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "could not reconcile runs"),
             }
-            initial_items = send_items(&guard, &events).unwrap_or_default();
+            initial_items = send_items(&guard, &events, Event::Items).unwrap_or_default();
             match guard.load_threads() {
                 Ok(threads) => {
                     initial_notifications = threads.clone();
@@ -2851,20 +2870,18 @@ async fn run(
     }
 
     // A refresh happens immediately, then on whatever cadence the server
-    // asks for. Other commands do not restart that clock, and a manual
-    // refresh never polls earlier than GitHub's X-Poll-Interval permits.
+    // asks for. Other commands do not restart that clock. Without a token
+    // the clock still runs, so a `gh auth login` since launch is found
+    // without the reader asking.
     let mut next_auto_poll = tokio::time::Instant::now();
-    let mut next_allowed_poll = next_auto_poll;
     let mut next_notification_reconcile = next_auto_poll;
     let mut pending_notification_reconcile = false;
 
     loop {
-        let (command, automatic) = tokio::select! {
-            _ = tokio::time::sleep_until(next_auto_poll), if ctx.github().is_some() => {
-                (Command::Refresh, true)
-            },
+        let command = tokio::select! {
+            _ = tokio::time::sleep_until(next_auto_poll) => Command::Refresh,
             cmd = commands.recv() => match cmd {
-                Some(cmd) => (cmd, false),
+                Some(cmd) => cmd,
                 // The UI is gone.
                 None => {
                     ctx.runs.shutdown().await;
@@ -2883,16 +2900,6 @@ async fn run(
         match command {
             Command::Refresh => {
                 let now = tokio::time::Instant::now();
-                if !automatic {
-                    pending_notification_reconcile = true;
-                }
-                if !automatic && now < next_allowed_poll {
-                    // Remember the click. GitHub forbids polling before its
-                    // advertised minimum, so wake at that boundary instead
-                    // of silently dropping the manual refresh.
-                    queue_manual_refresh(&mut next_auto_poll, next_allowed_poll);
-                    continue;
-                }
                 let mode = if pending_notification_reconcile
                     || now >= next_notification_reconcile
                 {
@@ -2902,8 +2909,7 @@ async fn run(
                 };
                 let poll_after = refresh(&ctx, mode).await;
                 let now = tokio::time::Instant::now();
-                next_auto_poll = now + poll_after.automatic;
-                next_allowed_poll = now + poll_after.manual;
+                next_auto_poll = now + poll_after.wait;
                 if mode == NotificationPollMode::Reconcile {
                     if poll_after.completed {
                         pending_notification_reconcile = false;
@@ -2967,7 +2973,6 @@ async fn run(
                                 defer_polls_for_error(
                                     &e,
                                     &mut next_auto_poll,
-                                    &mut next_allowed_poll,
                                 );
                                 tracing::warn!(thread = %thread.id, error = %e, "could not mark notification read");
                                 ctx.notice(format!("Could not mark the notification read: {e}"));
@@ -3010,7 +3015,7 @@ async fn run(
                     match github.mark_thread_done(&thread_id).await {
                         Ok(()) => ctx.dismiss_notification(&thread_id),
                         Err(e) => {
-                            defer_polls_for_error(&e, &mut next_auto_poll, &mut next_allowed_poll);
+                            defer_polls_for_error(&e, &mut next_auto_poll);
                             tracing::warn!(thread = %thread_id, error = %e, "could not mark notification done");
                             ctx.notice(format!("Could not mark the notification done: {e}"));
                         }
@@ -3029,7 +3034,7 @@ async fn run(
                     match result {
                         Ok(()) => ctx.dismiss_notification(&thread_id),
                         Err(e) => {
-                            defer_polls_for_error(&e, &mut next_auto_poll, &mut next_allowed_poll);
+                            defer_polls_for_error(&e, &mut next_auto_poll);
                             tracing::warn!(thread = %thread_id, error = %e, "could not unsubscribe from notification");
                             ctx.notice(format!("Could not unsubscribe from the notification: {e}"));
                         }
@@ -3617,6 +3622,10 @@ async fn run(
                 tokio::spawn(async move {
                     set_scope(&ctx, &item_id, scope, request_id, navigation_id).await
                 });
+            }
+            Command::RefreshOpenItem { item_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { refresh_open_item(&ctx, &item_id).await });
             }
             Command::RefreshScope {
                 item_id,
@@ -4414,7 +4423,20 @@ impl Ctx {
     }
 
     fn send_items(&self) {
-        if let Some(items) = self.with_cache(|c| send_items(c, &self.events)).flatten() {
+        if let Some(items) = self
+            .with_cache(|c| send_items(c, &self.events, Event::Items))
+            .flatten()
+        {
+            self.want_avatars(author_avatars(&items));
+        }
+    }
+
+    /// The same, for what a poll found rather than what the reader did.
+    fn send_polled_items(&self) {
+        if let Some(items) = self
+            .with_cache(|c| send_items(c, &self.events, Event::ItemsPolled))
+            .flatten()
+        {
             self.want_avatars(author_avatars(&items));
         }
     }
@@ -4523,13 +4545,26 @@ impl Ctx {
             *current = threads.clone();
         }
         self.want_avatars(notification_avatars(&threads));
-        let _ = self.events.send(Event::Notifications(threads.clone()));
+        let _ = self.events.send(Event::NotificationsPolled(threads.clone()));
         threads
     }
 
     /// Apply a notification mutation without touching the item, checkout,
     /// or conversation it may refer to.
     fn edit_notifications(&self, edit: impl FnOnce(&mut Vec<Thread>)) {
+        self.edit_notifications_as(edit, Event::Notifications);
+    }
+
+    /// The same, for what a look found rather than what the reader did.
+    fn edit_polled_notifications(&self, edit: impl FnOnce(&mut Vec<Thread>)) {
+        self.edit_notifications_as(edit, Event::NotificationsPolled);
+    }
+
+    fn edit_notifications_as(
+        &self,
+        edit: impl FnOnce(&mut Vec<Thread>),
+        event: fn(Vec<Thread>) -> Event,
+    ) {
         let threads = match self.notifications.lock() {
             Ok(mut current) => {
                 edit(&mut current);
@@ -4543,7 +4578,7 @@ impl Ctx {
         {
             tracing::warn!(error = %e, "could not cache changed notifications");
         }
-        let _ = self.events.send(Event::Notifications(threads));
+        let _ = self.events.send(event(threads));
     }
 
     /// GitHub has taken the thread as read: its row follows, and stays
@@ -4673,10 +4708,14 @@ impl Ctx {
 
 /// Publish the rows, and hand them back so the caller can ask for the
 /// faces on them.
-fn send_items(cache: &Cache, events: &EventSender<Event>) -> Option<Vec<Item>> {
+fn send_items(
+    cache: &Cache,
+    events: &EventSender<Event>,
+    event: fn(Vec<Item>) -> Event,
+) -> Option<Vec<Item>> {
     match cache.load_items() {
         Ok(items) => {
-            let _ = events.send(Event::Items(items.clone()));
+            let _ = events.send(event(items.clone()));
             Some(items)
         }
         Err(e) => {
@@ -5430,7 +5469,7 @@ async fn retire_archived_checkout_from_cache(
     guard
         .update_item(&item)
         .map_err(|error| error.to_string())?;
-    send_items(&guard, events);
+    send_items(&guard, events, Event::Items);
     Ok(())
 }
 
@@ -6479,21 +6518,22 @@ fn begin_pull_request_status(ctx: &Ctx, item_id: &str, pr: &PullRequest) -> u64 
     status_generation
 }
 
+/// Returns whether GitHub's head has moved past the one asked about.
 async fn fetch_checks(
     ctx: &Ctx,
     item_id: &str,
     pr: &PullRequest,
     status_generation: u64,
-) {
+) -> bool {
     let Some(github) = ctx.github() else {
-        return;
+        return false;
     };
     let head = pr.head_sha.as_str();
     let result = github
         .fetch_pull_request_overview(&pr.repo_full_name, pr.number)
         .await;
     if !ctx.status_requests.is_current(item_id, status_generation) {
-        return;
+        return false;
     }
     match result {
         Ok(overview) if overview.head_sha == head => {
@@ -6515,6 +6555,7 @@ async fn fetch_checks(
                     overview: Arc::new(overview),
                 });
             }
+            false
         }
         Ok(overview) => {
             let message = format!(
@@ -6533,6 +6574,7 @@ async fn fetch_checks(
                     message,
                 });
             }
+            true
         }
         Err(error) => {
             tracing::info!(item = item_id, error = %error, "could not fetch pull request status");
@@ -6546,6 +6588,7 @@ async fn fetch_checks(
                     message: format!("Could not refresh checks and merge status: {error}"),
                 });
             }
+            false
         }
     }
 }
@@ -8543,11 +8586,10 @@ struct ReviewContext {
     review_request_id: Option<u64>,
 }
 
-/// The server's minimum delay for a manual refresh and the (possibly longer)
-/// configured delay before the next automatic refresh.
+/// How long until the next poll: the server's minimum or the configured
+/// interval, whichever is longer.
 struct PollAfter {
-    automatic: Duration,
-    manual: Duration,
+    wait: Duration,
     /// Whether GitHub returned a usable response. A requested full
     /// reconciliation remains pending after an error.
     completed: bool,
@@ -8559,20 +8601,7 @@ enum NotificationPollMode {
     Reconcile,
 }
 
-fn queue_manual_refresh(
-    next_auto_poll: &mut tokio::time::Instant,
-    next_allowed_poll: tokio::time::Instant,
-) {
-    if next_allowed_poll < *next_auto_poll {
-        *next_auto_poll = next_allowed_poll;
-    }
-}
-
-fn defer_polls_for_error(
-    error: &perch_github::Error,
-    next_auto_poll: &mut tokio::time::Instant,
-    next_allowed_poll: &mut tokio::time::Instant,
-) {
+fn defer_polls_for_error(error: &perch_github::Error, next_auto_poll: &mut tokio::time::Instant) {
     let perch_github::Error::RateLimited {
         reset_epoch,
         retry_after_secs,
@@ -8582,7 +8611,6 @@ fn defer_polls_for_error(
     };
     let deadline = tokio::time::Instant::now() + backoff_until(*reset_epoch, *retry_after_secs);
     *next_auto_poll = (*next_auto_poll).max(deadline);
-    *next_allowed_poll = (*next_allowed_poll).max(deadline);
 }
 
 /// Look for the token again and take it up if it is not the one in use:
@@ -8626,8 +8654,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
     let config = ctx.config();
     let wait = Duration::from_secs(config.poll_interval_secs.max(30));
     let no_poll = PollAfter {
-        automatic: wait,
-        manual: wait,
+        wait,
         completed: false,
     };
     // A launch without a token is not the last word: a `gh auth login`
@@ -8666,8 +8693,9 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
     }
     match result {
         Ok(result) => {
-            let manual = result.poll_interval;
-            let automatic = manual.max(Duration::from_secs(config.poll_interval_secs.max(1)));
+            let wait = result
+                .poll_interval
+                .max(Duration::from_secs(config.poll_interval_secs.max(1)));
             if result.unchanged {
                 tracing::info!("notifications unchanged");
             } else {
@@ -8693,8 +8721,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
                 source: session.source,
             }));
             PollAfter {
-                automatic,
-                manual,
+                wait,
                 completed: true,
             }
         }
@@ -8712,8 +8739,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
             };
             let _ = events.send(Event::Status(status));
             PollAfter {
-                automatic: wait,
-                manual: wait,
+                wait,
                 completed: false,
             }
         }
@@ -8748,8 +8774,9 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
             .filter(|i| !i.is_archived());
         let Some(item) = item else { continue };
 
-        // Something was said about the item that is open: its Conversation
-        // follows, whatever the reason. Once per notification, as with CI.
+        // Something was said about the item that is open. The view offers
+        // to fetch it rather than moving under the reader. Once per
+        // notification, as with CI.
         if ctx.is_open(&item.id) {
             let key = (thread.id.clone(), thread.updated_at);
             let fresh = ctx
@@ -8758,9 +8785,9 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
                 .map(|mut s| s.insert(key))
                 .unwrap_or(false);
             if fresh {
-                let ctx = ctx.clone();
-                let item_id = item.id.clone();
-                tokio::spawn(async move { refresh_open_item(&ctx, &item_id).await });
+                let _ = ctx.events.send(Event::OpenItemChanged {
+                    item_id: item.id.clone(),
+                });
             }
         }
     }
@@ -8820,7 +8847,7 @@ async fn look_at_subjects(ctx: &Ctx) {
                 .iter()
                 .map(|(_, snapshot)| snapshot.author_avatar_url.clone()),
         );
-        ctx.edit_notifications(|threads| {
+        ctx.edit_polled_notifications(|threads| {
             for (id, snapshot) in found {
                 if let Some(thread) = threads.iter_mut().find(|thread| thread.id == id) {
                     thread.subject_snapshot = Some(snapshot);
@@ -8925,7 +8952,7 @@ async fn look_for_runs(ctx: &Ctx) {
     if found.is_empty() {
         return;
     }
-    ctx.edit_notifications(|threads| {
+    ctx.edit_polled_notifications(|threads| {
         for (id, run) in found {
             if let Some(thread) = threads.iter_mut().find(|thread| thread.id == id) {
                 thread.run_snapshot = Some(run);
@@ -9115,8 +9142,9 @@ async fn refresh_open_checks(ctx: &Ctx, thread: &Thread) {
     {
         return;
     }
-    // The snapshot is refetched on the way, so the checks are for the head
-    // the run was on, not the one the item opened at. Once per
+    // Only the checks, and only for the head on screen: they are status,
+    // not something being read, so they follow. A run on a newer head is
+    // news about the item, which the view offers to fetch. Once per
     // notification, not once per poll GitHub still returns it, and off
     // the poll, which the command loop waits on.
     let key = (thread.id.clone(), thread.updated_at);
@@ -9129,16 +9157,21 @@ async fn refresh_open_checks(ctx: &Ctx, thread: &Thread) {
         return;
     }
     let ctx = ctx.clone();
-    tokio::spawn(async move { refresh_open_item(&ctx, &item_id).await });
+    tokio::spawn(async move {
+        let status_generation = begin_pull_request_status(&ctx, &item_id, &pr);
+        if fetch_checks(&ctx, &item_id, &pr, status_generation).await && ctx.is_open(&item_id) {
+            let _ = ctx.events.send(Event::OpenItemChanged { item_id });
+        }
+    });
 }
 
 /// Rescan roots, then ask GitHub about subject-less branches.
 async fn refresh_items(ctx: &Ctx) {
     if scan_roots(ctx).await {
-        ctx.send_items();
+        ctx.send_polled_items();
     }
     if attach_pull_requests(ctx).await {
-        ctx.send_items();
+        ctx.send_polled_items();
     }
 }
 
@@ -13268,34 +13301,17 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_limited_action_defers_automatic_and_manual_polls() {
+    fn a_rate_limited_action_defers_the_next_poll() {
         let now = tokio::time::Instant::now();
-        let mut automatic = now + Duration::from_secs(10);
-        let mut manual = now + Duration::from_secs(10);
+        let mut next = now + Duration::from_secs(10);
         defer_polls_for_error(
             &perch_github::Error::RateLimited {
                 reset_epoch: None,
                 retry_after_secs: Some(3_600),
             },
-            &mut automatic,
-            &mut manual,
+            &mut next,
         );
-        assert!(automatic >= now + Duration::from_secs(3_600));
-        assert!(manual >= now + Duration::from_secs(3_600));
-    }
-
-    #[test]
-    fn an_early_manual_refresh_is_queued_for_the_server_deadline() {
-        let now = tokio::time::Instant::now();
-        let allowed = now + Duration::from_secs(60);
-        let mut automatic = now + Duration::from_secs(300);
-        queue_manual_refresh(&mut automatic, allowed);
-        assert_eq!(automatic, allowed);
-
-        let already_sooner = now + Duration::from_secs(30);
-        automatic = already_sooner;
-        queue_manual_refresh(&mut automatic, allowed);
-        assert_eq!(automatic, already_sooner);
+        assert!(next >= now + Duration::from_secs(3_600));
     }
 
     #[test]
@@ -13702,7 +13718,7 @@ mod tests {
         let published = received
             .try_iter()
             .filter_map(|event| match event {
-                Event::Notifications(threads) => Some(threads),
+                Event::Notifications(threads) | Event::NotificationsPolled(threads) => Some(threads),
                 _ => None,
             })
             .last()
@@ -13766,7 +13782,7 @@ mod tests {
         let published = received
             .try_iter()
             .filter_map(|event| match event {
-                Event::Notifications(threads) => Some(threads),
+                Event::Notifications(threads) | Event::NotificationsPolled(threads) => Some(threads),
                 _ => None,
             })
             .last()
@@ -16195,7 +16211,7 @@ read eof || true
     fn items_sent(received: &Receiver<Event>) -> usize {
         received
             .try_iter()
-            .filter(|e| matches!(e, Event::Items(_)))
+            .filter(|e| matches!(e, Event::Items(_) | Event::ItemsPolled(_)))
             .count()
     }
 
@@ -16354,7 +16370,7 @@ read eof || true
         let told = received
             .try_iter()
             .filter_map(|event| match event {
-                Event::Notifications(threads) => Some(threads),
+                Event::Notifications(threads) | Event::NotificationsPolled(threads) => Some(threads),
                 _ => None,
             })
             .last()
@@ -16474,7 +16490,7 @@ read eof || true
         let told = received
             .try_iter()
             .filter_map(|event| match event {
-                Event::Notifications(threads) => Some(threads),
+                Event::Notifications(threads) | Event::NotificationsPolled(threads) => Some(threads),
                 _ => None,
             })
             .last()
@@ -16748,6 +16764,34 @@ read eof || true
         assert!(
             paths.lock().unwrap().is_empty(),
             "and nothing was asked to find out"
+        );
+    }
+
+    #[tokio::test]
+    async fn news_about_the_open_item_is_offered_not_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        // A GitHub that would answer, so a fetch would be seen.
+        let (base, paths) = serve("200 OK", PULL_7);
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        open_in_slot(&ctx, &item);
+        let news = [with_reason(thread("7", "seven"), Reason::Mention)];
+
+        attend(&ctx, &news).await;
+        // The same revision on the next poll is not news again.
+        attend(&ctx, &news).await;
+        tokio::task::yield_now().await;
+
+        let offered = received
+            .try_iter()
+            .filter(|event| {
+                matches!(event, Event::OpenItemChanged { item_id } if *item_id == item.id)
+            })
+            .count();
+        assert_eq!(offered, 1);
+        assert!(
+            paths.lock().unwrap().is_empty(),
+            "nothing is fetched until the reader asks"
         );
     }
 
