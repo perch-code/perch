@@ -1,8 +1,8 @@
 //! The summary under Conversation's title: what the item is, in rows.
 //!
 //! Each row is a name and a value, as Codex's summary has them: Author,
-//! Branch, Reviewers, Checks, Status, Worktree, then what GitHub says about the
-//! item. A row is absent when it has nothing, and the block with them.
+//! Branch, Reviewers, Checks, Agents, Status, Worktree, then what GitHub
+//! says about the item. A row is absent when it has nothing, and the block with them.
 //! The notices, and the way back from a retained snapshot, sit over the
 //! rows; on Code the notice is in the tab bar and the way back in the
 //! rail, since the summary is Conversation's alone.
@@ -44,6 +44,7 @@ pub fn summary(
             || state.historical_review.with(Option::is_some)
             || notice_text(state).is_some()
             || data.with(|d| !d.is_empty())
+            || crate::ui::agents::section::present(app, state)
     });
     let directory_backend = backend.clone();
     // The repository's grants, on an item that takes Work runs: asked for
@@ -105,6 +106,12 @@ pub fn summary(
             "Checks",
             move || has_checks(state),
             checks_pill(state),
+        ),
+        row(
+            SidebarIcon::Agents,
+            "Agents",
+            move || crate::ui::agents::section::present(app, state),
+            crate::ui::agents::section::pill(app, state, backend.clone()),
         ),
         status_row(state),
         row(

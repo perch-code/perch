@@ -701,11 +701,11 @@ fn review_group_row(
     Stack::vertical((header, children)).style(|s| s.flex_col().width_full())
 }
 
-fn short_sha(sha: &str) -> String {
+pub(super) fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
-fn title_case_status(status: &str) -> String {
+pub(super) fn title_case_status(status: &str) -> String {
     let mut chars = status.chars();
     chars
         .next()
@@ -971,7 +971,7 @@ fn row_actions(
         .style(|s| s.items_center().gap(2.0).flex_shrink(0.0_f32))
 }
 
-fn queue_position(state: AppState, id: &str) -> Option<usize> {
+pub(super) fn queue_position(state: AppState, id: &str) -> Option<usize> {
     state.agent_runs.with(|runs| {
         let mut queued: Vec<_> = runs
             .iter()

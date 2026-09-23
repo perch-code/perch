@@ -91,7 +91,8 @@ pub fn view(
     Container::new(
         Stack::vertical((
             conversation_title(state),
-            crate::review::summary::summary(app, state, summary_backend, open_item),
+            crate::review::summary::summary(app, state, summary_backend.clone(), open_item),
+            crate::ui::agents::section::list(app, state, summary_backend),
             finding_filters(app, state),
             dyn_stack(
                 cards,
@@ -309,7 +310,19 @@ fn card_view(
             cards::event_row(app, event, pull.map(|p| p.author_login.clone())).into_any()
         }
         Card::Thread(thread) => {
-            cards::thread_card(app, state, backend, open_file, thread).into_any()
+            let card_id = crate::review::doc::CardId::Thread(thread.id.clone());
+            let view = cards::thread_card(app, state, backend, open_file, thread).into_any();
+            // Asked for from elsewhere on the page, the Agents row's Show
+            // in thread say, the card comes into view as it flashes. The
+            // first run only subscribes, as the flash's does.
+            let id = view.view_id();
+            floem::reactive::Effect::new(move |first: Option<()>| {
+                let focused = state.focus_card.with(|f| f.as_ref() == Some(&card_id));
+                if first.is_some() && focused {
+                    id.scroll_to(None);
+                }
+            });
+            view
         }
     };
     view.debug_name(format!("card:{debug}"))

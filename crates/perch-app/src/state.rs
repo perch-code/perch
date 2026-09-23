@@ -25,6 +25,15 @@ pub enum Checked {
     Full,
 }
 
+/// Where an item's history stands on its Agents row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ItemRunsPage {
+    /// Older runs are left to load.
+    pub has_more: bool,
+    /// A page is on its way.
+    pub loading: bool,
+}
+
 /// A View action waits for its item to finish opening before focusing the
 /// discussion.  The token prevents an older, slower open from stealing a
 /// newer request's focus.
@@ -150,6 +159,9 @@ pub struct AppState {
     /// authoritative page clears this again.
     pub agent_history_load_failed: RwSignal<bool>,
     pub agent_history_load_token: RwSignal<u64>,
+    /// Each item's history for its Agents row, by item: whether older runs
+    /// are left to load, and whether a page is on its way.
+    pub item_runs: RwSignal<HashMap<String, ItemRunsPage>>,
     /// Returning from detail rebuilds the list, so the run id—not the old
     /// row's transient ViewId—is the durable focus target.
     pub pending_agent_row_focus: RwSignal<Option<String>>,
@@ -271,6 +283,7 @@ impl AppState {
             drawer_opener: RwSignal::new(None),
             agent_history_loading: RwSignal::new(false),
             agent_history_has_more: RwSignal::new(false),
+            item_runs: RwSignal::new(HashMap::new()),
             agent_history_load_failed: RwSignal::new(false),
             agent_history_load_token: RwSignal::new(0),
             pending_agent_row_focus: RwSignal::new(None),
@@ -317,6 +330,46 @@ impl AppState {
         runs: impl IntoIterator<Item = perch_github::RunSummary>,
         has_more: bool,
     ) {
+        self.merge_run_summaries(runs);
+        self.agent_history_has_more.set(has_more);
+        self.agent_history_loading.set(false);
+        self.agent_history_load_failed.set(false);
+    }
+
+    /// Ask for a page of an item's runs for its Agents row: the first, or
+    /// the one after the oldest it has.
+    pub fn load_item_runs(&self, backend: &crate::backend::Backend, item_id: &str, older: bool) {
+        const PAGE: usize = 20;
+        let before = older
+            .then(|| {
+                self.agent_runs.with_untracked(|runs| {
+                    runs.iter()
+                        .filter(|run| run.item_id.as_deref() == Some(item_id) && !run.status.is_active())
+                        .filter_map(|run| run.ended_at.map(|ended_at| (ended_at, run.id.clone())))
+                        .min()
+                        .map(|(ended_at, id)| perch_github::RunHistoryCursor { ended_at, id })
+                })
+            })
+            .flatten();
+        self.item_runs.update(|all| {
+            all.entry(item_id.to_string()).or_default().loading = true;
+        });
+        backend.load_item_runs(item_id, before, PAGE);
+    }
+
+    fn merge_item_runs(
+        &self,
+        item_id: String,
+        runs: impl IntoIterator<Item = perch_github::RunSummary>,
+        has_more: bool,
+    ) {
+        self.merge_run_summaries(runs);
+        self.item_runs.update(|all| {
+            all.insert(item_id, ItemRunsPage { has_more, loading: false });
+        });
+    }
+
+    fn merge_run_summaries(&self, runs: impl IntoIterator<Item = perch_github::RunSummary>) {
         self.agent_runs.update(|current| {
             let mut merged = current.as_ref().clone();
             for run in runs {
@@ -338,9 +391,6 @@ impl AppState {
             }
             *current = Arc::new(merged);
         });
-        self.agent_history_has_more.set(has_more);
-        self.agent_history_loading.set(false);
-        self.agent_history_load_failed.set(false);
     }
 
     pub fn begin_review_dashboard_load(&self, item_id: &str) {
@@ -1060,6 +1110,11 @@ impl AppState {
                 review.apply_run_event(&run_id, &event);
             }
             Event::AgentRuns { runs, has_more } => self.merge_agent_runs(runs, has_more),
+            Event::ItemRuns {
+                item_id,
+                runs,
+                has_more,
+            } => self.merge_item_runs(item_id, runs, has_more),
             Event::AgentRunUpdated { run } => self.update_agent_run(&run),
             Event::AgentRunDetail {
                 run,
@@ -1986,6 +2041,7 @@ impl AppState {
             Event::CommentThreads { .. }
             | Event::AgentStep { .. }
             | Event::AgentRuns { .. }
+            | Event::ItemRuns { .. }
             | Event::AgentRunUpdated { .. }
             | Event::AgentRunDetail { .. }
             | Event::AgentRunEvents { .. }

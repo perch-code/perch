@@ -413,6 +413,13 @@ pub enum Command {
     LoadAgentRuns {
         history_limit: usize,
     },
+    /// One item's runs: its active ones, and a page of its history after
+    /// `before`, the last row of the page before, or from the newest.
+    LoadItemRuns {
+        item_id: String,
+        before: Option<perch_github::RunHistoryCursor>,
+        limit: usize,
+    },
     LoadAgentRunDetail {
         run_id: String,
     },
@@ -635,6 +642,12 @@ pub enum Event {
     /// App-wide run summaries. Every active run is included; terminal
     /// history is the requested newest-first prefix.
     AgentRuns {
+        runs: Vec<RunSummary>,
+        has_more: bool,
+    },
+    /// One item's active runs and a page of its history, newest first.
+    ItemRuns {
+        item_id: String,
         runs: Vec<RunSummary>,
         has_more: bool,
     },
@@ -2419,6 +2432,19 @@ impl Backend {
         let _ = self.commands.send(Command::LoadAgentRuns { history_limit });
     }
 
+    pub fn load_item_runs(
+        &self,
+        item_id: &str,
+        before: Option<perch_github::RunHistoryCursor>,
+        limit: usize,
+    ) {
+        let _ = self.commands.send(Command::LoadItemRuns {
+            item_id: item_id.to_string(),
+            before,
+            limit,
+        });
+    }
+
     pub fn load_agent_run_detail(&self, run_id: &str) {
         let _ = self.commands.send(Command::LoadAgentRunDetail {
             run_id: run_id.to_string(),
@@ -3484,6 +3510,14 @@ async fn run(
             }
             Command::LoadAgentRuns { history_limit } => {
                 send_agent_runs(&ctx, history_limit);
+            }
+            Command::LoadItemRuns {
+                item_id,
+                before,
+                limit,
+            } => {
+                ctx.runs.reconcile_finished();
+                send_item_runs(&ctx.cache, &ctx.events, &item_id, before.as_ref(), limit);
             }
             Command::LoadAgentRunDetail { run_id } => {
                 send_agent_run_detail(&ctx, &run_id);
@@ -5027,6 +5061,52 @@ fn send_agent_runs_from_cache(
         }
     }
     let _ = events.send(Event::AgentRuns { runs, has_more });
+}
+
+/// One item's runs for its Agents row: the active ones, on the first
+/// page only, since they are not paged, then a page of its history.
+fn send_item_runs(
+    cache: &SharedCache,
+    events: &EventSender<Event>,
+    item_id: &str,
+    before: Option<&perch_github::RunHistoryCursor>,
+    limit: usize,
+) {
+    let Some(cache) = cache.as_ref() else {
+        return;
+    };
+    let Ok(guard) = cache.lock() else { return };
+    let mut runs = if before.is_none() {
+        match guard.active_run_summaries() {
+            Ok(runs) => runs
+                .into_iter()
+                .filter(|run| run.owner.item_id() == Some(item_id))
+                .collect(),
+            Err(error) => {
+                tracing::warn!(%error, "could not load an item's active agents");
+                return;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let filter = RunHistoryFilter {
+        item_id: Some(item_id.to_string()),
+        ..RunHistoryFilter::default()
+    };
+    let page = match guard.run_history_page(&filter, before, limit) {
+        Ok(page) => page,
+        Err(error) => {
+            tracing::warn!(%error, "could not load an item's agent history");
+            return;
+        }
+    };
+    runs.extend(page.runs);
+    let _ = events.send(Event::ItemRuns {
+        item_id: item_id.to_string(),
+        runs,
+        has_more: page.next_cursor.is_some(),
+    });
 }
 
 const AGENT_EVENT_PAGE: usize = 100;
@@ -16730,6 +16810,75 @@ read eof || true
             event,
             Event::AgentRunDetail { run: stored, .. } if stored.id == run.id
         )));
+    }
+
+    /// An item's runs are its own, active ones and a review's attempts
+    /// included, a page of its history at a time from the newest.
+    #[tokio::test]
+    async fn an_items_runs_are_its_own_a_page_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let at = |minute: u32| -> Timestamp { format!("2026-09-19T10:{minute:02}:00Z").parse().unwrap() };
+        let discussion = |item: &str, id: &str| RunOwner::Discussion {
+            item_id: item.into(),
+            thread_id: format!("t-{id}"),
+            request_id: format!("r-{id}"),
+        };
+        let run = |id: &str, owner: RunOwner, status: RunStatus, minute: u32| RunRecord {
+            id: id.into(),
+            owner,
+            backend: "codex".into(),
+            status,
+            queued_at: at(minute),
+            ended_at: (status != RunStatus::Running).then(|| at(minute)),
+            ..RunRecord::default()
+        };
+        let runs = [
+            run("old", discussion("one", "old"), RunStatus::Completed, 1),
+            run(
+                "review",
+                RunOwner::Review {
+                    item_id: "one".into(),
+                    reviewer_run_id: "attempt".into(),
+                },
+                RunStatus::Failed,
+                2,
+            ),
+            run("new", discussion("one", "new"), RunStatus::Completed, 3),
+            run("working", discussion("one", "working"), RunStatus::Running, 4),
+            run("elsewhere", discussion("two", "elsewhere"), RunStatus::Completed, 5),
+        ];
+        for run in &runs {
+            ctx.with_cache(|cache| cache.insert_run(run)).unwrap().unwrap();
+        }
+        let sent = |received: &std::sync::mpsc::Receiver<Event>| {
+            received
+                .try_iter()
+                .find_map(|event| match event {
+                    Event::ItemRuns { item_id, runs, has_more } => Some((
+                        item_id,
+                        runs.into_iter().map(|run| run.id).collect::<Vec<_>>(),
+                        has_more,
+                    )),
+                    _ => None,
+                })
+                .expect("no runs were sent")
+        };
+
+        send_item_runs(&ctx.cache, &ctx.events, "one", None, 2);
+        let (item, ids, more) = sent(&received);
+        assert_eq!(item, "one");
+        assert_eq!(ids, ["working", "new", "review"]);
+        assert!(more);
+
+        let cursor = perch_github::RunHistoryCursor {
+            ended_at: at(2),
+            id: "review".into(),
+        };
+        send_item_runs(&ctx.cache, &ctx.events, "one", Some(&cursor), 2);
+        let (_, ids, more) = sent(&received);
+        assert_eq!(ids, ["old"], "a later page has no active runs again");
+        assert!(!more);
     }
 
     /// `a/b#7` as `GET /repos/a/b/pulls/7` sends it, so an `attend` that

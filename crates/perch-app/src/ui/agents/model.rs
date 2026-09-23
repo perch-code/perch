@@ -660,6 +660,110 @@ pub fn history_runs_with_reviews(
     rows
 }
 
+/// One item's runs as its Agents row lists them: what is working first,
+/// in the order it was admitted with queued work last, then what has
+/// finished, newest first. A reviewer attempt whose review is still going
+/// counts as working, so a review's attempts stay together.
+pub fn item_runs(
+    runs: &[AgentRunSummary],
+    item_id: &str,
+    review_groups: &[crate::review::model::ReviewGroupSummary],
+) -> Vec<AgentRunSummary> {
+    let active_review_attempts = review_groups
+        .iter()
+        .filter(|summary| summary.group.status.is_active())
+        .flat_map(|summary| summary.attempts.iter().map(|attempt| attempt.id.as_str()))
+        .collect::<HashSet<_>>();
+    let working = |run: &AgentRunSummary| {
+        run.status.is_active()
+            || run
+                .review_attempt_id
+                .as_deref()
+                .is_some_and(|attempt| active_review_attempts.contains(attempt))
+    };
+    let (mut active, mut finished): (Vec<_>, Vec<_>) = runs
+        .iter()
+        .filter(|run| run.item_id.as_deref() == Some(item_id))
+        .cloned()
+        .partition(|run| working(run));
+    active.sort_by_key(|run| (run.status.is_queued(), run.queued_at));
+    finished.sort_by_key(|run| std::cmp::Reverse(run.ended_at.unwrap_or(run.queued_at)));
+    active.extend(finished);
+    active
+}
+
+/// What an item's runs are doing, for the pill on its Agents row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RunCounts {
+    pub running: usize,
+    pub queued: usize,
+    /// Running, and waiting on the reader to answer a request.
+    pub waiting: usize,
+    pub done: usize,
+    pub failed: usize,
+    /// Whether the run that finished last failed.
+    pub last_failed: bool,
+}
+
+impl RunCounts {
+    /// Counted over `runs`, one item's; `waiting` is the ids of runs
+    /// with a request pending.
+    pub fn of(runs: &[AgentRunSummary], waiting: &HashSet<String>) -> Self {
+        let mut counts = Self::default();
+        for run in runs {
+            match run.status {
+                _ if run.status.is_active() && waiting.contains(&run.id) => counts.waiting += 1,
+                AgentRunStatus::Queued => counts.queued += 1,
+                AgentRunStatus::Starting | AgentRunStatus::Running | AgentRunStatus::Stopping => {
+                    counts.running += 1
+                }
+                AgentRunStatus::Completed | AgentRunStatus::Stopped => counts.done += 1,
+                AgentRunStatus::Failed | AgentRunStatus::Interrupted => counts.failed += 1,
+            }
+        }
+        counts.last_failed = runs
+            .iter()
+            .filter(|run| !run.status.is_active())
+            .max_by_key(|run| run.ended_at.unwrap_or(run.queued_at))
+            .is_some_and(|run| matches!(run.status, AgentRunStatus::Failed | AgentRunStatus::Interrupted));
+        counts
+    }
+
+    pub fn total(&self) -> usize {
+        self.running + self.queued + self.waiting + self.done + self.failed
+    }
+
+    pub fn active(&self) -> bool {
+        self.running + self.queued + self.waiting > 0
+    }
+
+    /// The pill's words: while anything works, each state that has runs,
+    /// the busiest first; after, how many there were, or that the last
+    /// one failed.
+    pub fn label(&self) -> String {
+        if self.active() {
+            [
+                (self.running, "running"),
+                (self.queued, "queued"),
+                (self.waiting, "waiting"),
+                (self.done, "done"),
+                (self.failed, "failed"),
+            ]
+            .iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, word)| format!("{n} {word}"))
+            .collect::<Vec<_>>()
+            .join(" · ")
+        } else if self.last_failed {
+            "Last run failed".to_string()
+        } else if self.total() == 1 {
+            "1 run".to_string()
+        } else {
+            format!("{} runs", self.total())
+        }
+    }
+}
+
 fn seconds_between(start: Timestamp, end: Timestamp) -> u64 {
     let start = start.as_nanosecond();
     let end = end.as_nanosecond();
@@ -701,8 +805,76 @@ pub fn elapsed_label(run: &AgentRunSummary, now: Timestamp) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A finished review of item `pr`, `Review #3` of `head` against
+    /// `main`, with an attempt for each of `attempts`.
+    pub(crate) fn review_summary(
+        group_id: &str,
+        attempts: &[&str],
+    ) -> crate::review::model::ReviewGroupSummary {
+        let created_at: Timestamp = "2026-09-19T10:00:00Z".parse().unwrap();
+        let attempt = |id: &str| perch_github::ReviewerAttempt {
+            id: id.into(),
+            group_id: group_id.into(),
+            run_id: None,
+            backend: "claude-code".into(),
+            executable: None,
+            executable_version: None,
+            model: "model".into(),
+            effort: "high".into(),
+            adapter_version: "1".into(),
+            output_format_version: "1".into(),
+            attempt_number: 1,
+            retry_of: None,
+            phase: perch_github::ReviewerPhase::Completed,
+            ingestion_state: perch_github::ReviewIngestionState::Complete,
+            result_kind: Some(perch_github::ReviewResultKind::Clean),
+            output_id: None,
+            raw_result: None,
+            diagnostics: None,
+            verification_input: perch_github::ReviewVerificationInput::default(),
+            output_saved_at: Some(created_at),
+            created_at,
+            started_at: Some(created_at),
+            ended_at: Some(created_at),
+        };
+        crate::review::model::ReviewGroupSummary {
+            group: perch_github::ReviewGroup {
+                id: group_id.into(),
+                item_id: "pr".into(),
+                snapshot_id: "snapshot".into(),
+                number: 3,
+                status: perch_github::ReviewGroupStatus::Completed,
+                new_findings: 0,
+                still_present: 0,
+                verified_fixed: 0,
+                not_verified: 0,
+                created_at,
+                started_at: Some(created_at),
+                ended_at: Some(created_at),
+                instructions: None,
+            },
+            snapshot: perch_github::ReviewSnapshot {
+                id: "snapshot".into(),
+                item_id: "pr".into(),
+                repository: "slatedb/slatedb".into(),
+                branch_label: Some("feature".into()),
+                requested_base_ref: "main".into(),
+                base_tip_sha: "base".into(),
+                merge_base_sha: "merge".into(),
+                head_sha: "head".into(),
+                dirty_edits_excluded: false,
+                retention_key: "retained".into(),
+                retained_ref: None,
+                manifest_path: Some("manifest".into()),
+                diff_path: Some("diff".into()),
+                created_at,
+            },
+            attempts: attempts.iter().map(|id| attempt(id)).collect(),
+        }
+    }
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -840,6 +1012,59 @@ mod tests {
         );
         assert!(OutcomeFilter::Interrupted.includes(interrupted.status));
         assert!(!OutcomeFilter::Failed.includes(interrupted.status));
+    }
+
+    /// An item's runs: its own only, working first with queued work
+    /// last, then finished, newest first.
+    #[test]
+    fn an_items_runs_are_its_own_working_first_then_newest_finished() {
+        let runs = vec![
+            run("a", "one", AgentRunStatus::Completed, "2026-09-19T10:00:00Z"),
+            run("b", "one", AgentRunStatus::Queued, "2026-09-19T10:01:00Z"),
+            run("c", "two", AgentRunStatus::Running, "2026-09-19T10:02:00Z"),
+            run("d", "one", AgentRunStatus::Running, "2026-09-19T10:03:00Z"),
+            run("e", "one", AgentRunStatus::Failed, "2026-09-19T10:04:00Z"),
+        ];
+        let ids = item_runs(&runs, "one", &[])
+            .into_iter()
+            .map(|run| run.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["d", "b", "e", "a"]);
+    }
+
+    /// The pill says what is working, the busiest first, and after, how
+    /// many there were or that the last one failed.
+    #[test]
+    fn the_pill_names_each_state_while_work_goes_and_the_total_after() {
+        let none = HashSet::new();
+        let at = "2026-09-19T10:00:00Z";
+        let mut runs = vec![
+            run("a", "one", AgentRunStatus::Running, at),
+            run("b", "one", AgentRunStatus::Completed, "2026-09-19T09:00:00Z"),
+            run("c", "one", AgentRunStatus::Completed, "2026-09-19T09:10:00Z"),
+            run("d", "one", AgentRunStatus::Stopped, "2026-09-19T09:20:00Z"),
+            run("e", "one", AgentRunStatus::Completed, "2026-09-19T09:30:00Z"),
+        ];
+        assert_eq!(RunCounts::of(&runs, &none).label(), "1 running · 4 done");
+
+        let waiting = HashSet::from(["a".to_string()]);
+        runs.push(run("q", "one", AgentRunStatus::Queued, at));
+        runs.push(run("f", "one", AgentRunStatus::Failed, "2026-09-19T08:00:00Z"));
+        assert_eq!(
+            RunCounts::of(&runs, &waiting).label(),
+            "1 queued · 1 waiting · 4 done · 1 failed"
+        );
+
+        runs.retain(|run| !run.status.is_active());
+        assert_eq!(RunCounts::of(&runs, &none).label(), "5 runs");
+        runs.truncate(1);
+        assert_eq!(RunCounts::of(&runs, &none).label(), "1 run");
+
+        // The one that finished last failed.
+        runs.push(run("g", "one", AgentRunStatus::Interrupted, "2026-09-19T11:00:00Z"));
+        let counts = RunCounts::of(&runs, &none);
+        assert!(counts.last_failed);
+        assert_eq!(counts.label(), "Last run failed");
     }
 
     #[test]

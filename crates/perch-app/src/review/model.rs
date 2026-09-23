@@ -134,8 +134,8 @@ pub enum ItemTab {
 }
 
 /// An item's pane as it was left: which of Conversation and Code was
-/// showing, the file tabs, the files shown whole, and where
-/// the reader was on each tab. The item opens on it again; the first time,
+/// showing, the file tabs, the files shown whole, where the reader was on
+/// each tab, and the Agents row, unfolded or not and the runs open in it. The item opens on it again; the first time,
 /// on Conversation alone.
 #[derive(Debug, Clone)]
 pub struct Pane {
@@ -145,6 +145,8 @@ pub struct Pane {
     whole: HashSet<String>,
     conversation_scroll: f64,
     file_places: HashMap<String, FilePlace>,
+    agents_unfolded: bool,
+    agents_open_runs: HashSet<String>,
 }
 
 impl Default for Pane {
@@ -156,6 +158,8 @@ impl Default for Pane {
             whole: HashSet::new(),
             conversation_scroll: 0.0,
             file_places: HashMap::new(),
+            agents_unfolded: false,
+            agents_open_runs: HashSet::new(),
         }
     }
 }
@@ -1174,6 +1178,14 @@ pub struct ReviewState {
     /// Each item's pane as it was last left, by item, for the life of the
     /// app.
     pub panes: RwSignal<HashMap<String, Pane>>,
+    /// Whether the Agents row on Conversation is unfolded into the item's
+    /// runs.
+    pub agents_unfolded: RwSignal<bool>,
+    /// The runs open in the Agents row, showing what they did.
+    pub agents_open_runs: RwSignal<HashSet<String>>,
+    /// A run to bring into view in the Agents row, once its row is laid
+    /// out: unfolded, open, and at the top of the page.
+    pub pending_run_reveal: RwSignal<Option<String>>,
     /// How far down Conversation was scrolled, kept as it scrolls, so the
     /// page shows where it was left when it is built again: after a file's
     /// tab has shown in its place, or when the item comes back. Written
@@ -1562,6 +1574,9 @@ impl ReviewState {
             historical_review_rollback: RwSignal::new(None),
             tab: RwSignal::new(ItemTab::Conversation),
             panes: RwSignal::new(HashMap::new()),
+            agents_unfolded: RwSignal::new(false),
+            agents_open_runs: RwSignal::new(HashSet::new()),
+            pending_run_reveal: RwSignal::new(None),
             conversation_scroll: RwSignal::new(0.0),
             file_places: RwSignal::new(HashMap::new()),
             layout: RwSignal::new(Layout::Stacked),
@@ -1944,6 +1959,8 @@ impl ReviewState {
             active: self.active.get_untracked(),
             whole: self.whole.get_untracked(),
             conversation_scroll: self.conversation_scroll.get_untracked(),
+            agents_unfolded: self.agents_unfolded.get_untracked(),
+            agents_open_runs: self.agents_open_runs.get_untracked(),
             file_places: self.file_places.get_untracked(),
         };
         self.panes.update(|panes| {
@@ -1982,6 +1999,8 @@ impl ReviewState {
                 self.whole.set(pane.whole);
             }
             self.conversation_scroll.set(pane.conversation_scroll);
+            self.agents_unfolded.set(pane.agents_unfolded);
+            self.agents_open_runs.set(pane.agents_open_runs);
             self.file_places.set(pane.file_places);
             if !paths.is_empty() {
                 self.loading.update(|loading| {
@@ -5372,6 +5391,37 @@ mod tests {
         assert_eq!(tabs(), ["src/z.rs"]);
         assert_eq!(state.active.get().as_deref(), Some("src/z.rs"));
         assert!(state.whole.get().is_empty());
+    }
+
+    /// The Agents row, unfolded or not and the runs open in it, waits with
+    /// the item's pane while another item is open.
+    #[test]
+    fn the_agents_row_waits_with_the_items_pane() {
+        let state = ReviewState::new();
+        let open = |id: &str| {
+            let mut item = perch_github::Item::new(
+                "slatedb/slatedb",
+                "2026-09-18T09:59:00Z".parse().unwrap(),
+            );
+            item.id = id.into();
+            state.begin("Reading the branch");
+            state.item.set(Some(Arc::new(item)));
+            state.restore_pane()
+        };
+        open("a");
+        assert!(!state.agents_unfolded.get(), "folded the first time");
+        state.agents_unfolded.set(true);
+        state.agents_open_runs.update(|open| {
+            open.insert("run".into());
+        });
+
+        open("b");
+        assert!(!state.agents_unfolded.get());
+        assert!(state.agents_open_runs.with(HashSet::is_empty));
+
+        open("a");
+        assert!(state.agents_unfolded.get());
+        assert!(state.agents_open_runs.with(|open| open.contains("run")));
     }
 
     /// Where the reader was, on Conversation and in each file, waits with

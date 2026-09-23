@@ -9,6 +9,7 @@ pub mod model;
 
 mod detail;
 mod list;
+pub mod section;
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -110,21 +111,24 @@ pub fn control(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 }
 
 /// What follows the inspector opening: the first page of history is
-/// asked for, and the clock that keeps the elapsed times moving is
-/// started while there is running work to time. Once, from the drawer.
+/// asked for. And the clock that keeps the elapsed times moving, on an
+/// item's Agents row as in the inspector, runs while there is work to
+/// time. Once, from the window.
 pub fn wire(state: AppState, backend: Rc<Backend>) {
-    Effect::new(move |previous: Option<(bool, bool)>| {
+    Effect::new(move |previous: Option<bool>| {
         let open = state.agents_open();
+        if open && previous != Some(true) {
+            request_agent_runs(state, &backend, FIRST_HISTORY_PAGE);
+        }
+        open
+    });
+    Effect::new(move |_| {
         let active = state
             .agent_runs
             .with(|runs| runs.iter().any(|run| run.status.is_active()));
-        if open && !previous.is_some_and(|(was_open, _)| was_open) {
-            request_agent_runs(state, &backend, FIRST_HISTORY_PAGE);
-        }
-        if open && active && !state.agents_clock_armed.get_untracked() {
+        if active && !state.agents_clock_armed.get_untracked() {
             arm_clock(state);
         }
-        (open, active)
     });
 }
 
@@ -405,7 +409,7 @@ fn tick_clock(state: AppState) {
         let active = state
             .agent_runs
             .with_untracked(|runs| runs.iter().any(|run| run.status.is_active()));
-        if floem::reactive::Effect::untrack(|| state.agents_open()) && active {
+        if active {
             state.now.set(jiff::Timestamp::now());
             tick_clock(state);
         } else {

@@ -40,10 +40,23 @@ pub fn view(
             move || current_run(state, &header_id, &header_initial),
             move |run| summary_bar(state, review, summary_backend.clone(), run).into_any(),
         ),
-        detail_body(state, backend, id, initial),
+        detail_body(state, backend, id, initial, None),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0))
     .debug_name("agent-run-detail")
+}
+
+/// What a run did, as its row in an item's Agents list opens to: the
+/// detail's sections without its bar, which the row is, and no taller
+/// than `cap`, scrolling inside that.
+pub(super) fn inline(
+    state: AppState,
+    backend: Rc<Backend>,
+    initial: AgentRunSummary,
+    cap: f64,
+) -> impl IntoView {
+    let id = Arc::new(initial.id.clone());
+    detail_body(state, backend, id, Arc::new(initial), Some(cap)).debug_name("agent-run-inline")
 }
 
 fn current_run(state: AppState, id: &str, initial: &AgentRunSummary) -> AgentRunSummary {
@@ -57,11 +70,15 @@ fn current_events(state: AppState, id: &str) -> Arc<Vec<RunEventRecord>> {
         .unwrap_or_else(|| Arc::new(Vec::new()))
 }
 
+/// The sections, in a scroll that follows the end while the run goes.
+/// It fills the drawer's column, or, with a `cap`, is as tall as what it
+/// holds up to that.
 fn detail_body(
     state: AppState,
     backend: Rc<Backend>,
     id: Arc<String>,
     initial: Arc<AgentRunSummary>,
+    cap: Option<f64>,
 ) -> impl IntoView {
     let activity_id = id.clone();
     let activity_initial = initial.clone();
@@ -113,11 +130,12 @@ fn detail_body(
                 }
             },
         )
-        .style(|s| {
-            s.size_full()
-                .min_height(0.0)
-                .width_full()
-                .background(theme::CANVAS_SUBTLE)
+        .style(move |s| {
+            let s = s.width_full().background(theme::CANVAS_SUBTLE);
+            match cap {
+                Some(cap) => s.max_height(cap),
+                None => s.size_full().min_height(0.0),
+            }
         });
     let jump = dyn_container(
         move || !follow.get(),
@@ -140,11 +158,12 @@ fn detail_body(
             .inset_bottom(12.0)
             .z_index(3)
     });
-    Stack::new((scroller, jump)).style(|s| {
-        s.flex_grow(1.0_f32)
-            .min_height(0.0)
-            .width_full()
-            .position(Position::Relative)
+    Stack::new((scroller, jump)).style(move |s| {
+        let s = s.width_full().position(Position::Relative);
+        match cap {
+            Some(_) => s.flex_col(),
+            None => s.flex_grow(1.0_f32).min_height(0.0),
+        }
     })
 }
 
