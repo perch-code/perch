@@ -84,14 +84,20 @@ codegen-units = 4
 # first use in the process, and counts a press and a release on different
 # views as a click only within 100ms, so the first click in a process
 # always passed and a long first press widened the window for every click
-# after it. Last, one that sends a pointer move's PointerLeave events
+# after it. Then one that sends a pointer move's PointerLeave events
 # before its PointerEnter events, and neither to a view the pointer stays
 # on. floem routed them newest first, so a move from one row to the next
 # entered the new row before it left the old one; and a hover path holds
 # only the ancestors whose own box holds the pointer, so crossing the edge
 # of a box a view hangs out of left and re-entered every view inside it,
 # the Leave last. A draft's Delete in the Submit review form hid under the
-# pointer that way. Drop a
+# pointer that way. Then one that sends FocusLost before FocusGained:
+# floem sent them the other way round, so a view that turns something on
+# when focus arrives and off when it leaves ended off (the two search
+# boxes share `search_focused`, and a text box's IME input), and a view
+# refocused by Tab ended on FocusLost. Last, one that sends a drag no
+# DragTargetLeave and DragTargetEnter for a target that stays under the
+# pointer as it crosses the edge of a view the target hangs out of. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
