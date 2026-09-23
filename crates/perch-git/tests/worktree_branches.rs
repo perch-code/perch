@@ -78,6 +78,19 @@ impl Fixture {
             .expect("prepare")
     }
 
+    /// Prepare against `base`, saying whether it fetched.
+    async fn prepare_on(&self, head: &str, base: &str) -> (perch_git::Checkout, bool) {
+        let mut fetched = false;
+        let checkout = self
+            .preparer
+            .prepare(&self.id, 7, head, base, "perch/pr-7", |step| {
+                fetched |= step == perch_git::Step::Fetching;
+            })
+            .await
+            .expect("prepare");
+        (checkout, fetched)
+    }
+
     fn bare(&self) -> PathBuf {
         self.store.bare_path(&self.id)
     }
@@ -120,6 +133,39 @@ async fn opening_again_reuses_the_directory() {
     let second = f.prepare(&head).await;
     assert_eq!(first.worktree, second.worktree);
     assert!(marker.exists(), "the directory was recreated, not reused");
+}
+
+#[tokio::test]
+async fn opening_a_head_already_fetched_does_not_fetch_again() {
+    let f = Fixture::new();
+    let head = f.push_commit("pr");
+    let (_, fetched) = f.prepare_on(&head, "main").await;
+    assert!(fetched, "the first open fetches");
+
+    // With the remote gone, a fetch would fail.
+    std::fs::rename(&f.remote, f.remote.with_extension("gone")).unwrap();
+    let (checkout, fetched) = f.prepare_on(&head, "main").await;
+    assert!(!fetched);
+    assert_eq!(checkout.head_sha, head);
+}
+
+#[tokio::test]
+async fn a_retargeted_pull_request_fetches_its_new_base() {
+    let f = Fixture::new();
+    let first = git(&f.remote, &["rev-parse", "HEAD"]);
+    git(&f.remote, &["branch", "old", &first]);
+    let head = f.push_commit("pr");
+
+    let (on_main, _) = f.prepare_on(&head, "main").await;
+    assert_eq!(on_main.merge_base, head, "main has the head");
+
+    let (on_old, fetched) = f.prepare_on(&head, "old").await;
+    assert!(fetched, "a new base is fetched though the head is the same");
+    assert_eq!(on_old.merge_base, first);
+
+    let (back, fetched) = f.prepare_on(&head, "main").await;
+    assert!(fetched, "the old base's ref is not what refs/perch/base holds now");
+    assert_eq!(back.merge_base, head);
 }
 
 #[tokio::test]

@@ -58,6 +58,15 @@ pub fn home_ref(branch: &str) -> String {
     format!("refs/perch/home/{branch}")
 }
 
+/// Where `fetch_pull` also puts a pull request's base, under a name that
+/// says which branch it was fetched from. The branch name is hex so that
+/// `release` and `release/1.0` never make a ref and a directory of one
+/// path.
+fn base_of_ref(number: u64, base_ref: &str) -> String {
+    let hex: String = base_ref.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("refs/perch/base-of/{number}/{hex}")
+}
+
 /// The branch `git ls-remote --symref <remote> HEAD` says HEAD points at.
 ///
 /// The line is `ref: refs/heads/<name>\tHEAD`; the sha line after it is not
@@ -109,8 +118,14 @@ impl Preparer {
     ) -> Result<Checkout, Error> {
         let bare = self.ensure_bare(id, &mut on_step).await?;
 
-        on_step(Step::Fetching);
-        self.fetch_pull(&bare, "origin", number, base_ref).await?;
+        // A fetch is a round trip to GitHub, most of the time an open takes.
+        // When the last one already brought this head, of this base, there
+        // is nothing new the diff needs: the base's tip may have moved on,
+        // but with the head where it was, the merge base has not.
+        if !self.has_pull(&bare, number, head_sha, base_ref).await {
+            on_step(Step::Fetching);
+            self.fetch_pull(&bare, "origin", number, base_ref).await?;
+        }
         let base_local = format!("refs/perch/base/{number}");
 
         let merge_base = self
@@ -402,6 +417,10 @@ impl Preparer {
     /// user's: `refs/perch/pull/N/head` and `refs/perch/base/N`. `from` is
     /// `origin`, or the URL of the repository the pull request is on when
     /// the clone is of a fork.
+    ///
+    /// The base is also written under a ref that names the branch it came
+    /// from, which is how `has_pull` knows a retargeted pull request needs
+    /// fetching again.
     pub async fn fetch_pull(&self, bare: &Path, from: &str, number: u64, base_ref: &str) -> Result<(), Error> {
         self.git
             .run(
@@ -412,11 +431,40 @@ impl Preparer {
                     from.to_string(),
                     format!("+refs/pull/{number}/head:refs/perch/pull/{number}/head"),
                     format!("+refs/heads/{base_ref}:refs/perch/base/{number}"),
+                    format!("+refs/heads/{base_ref}:{}", base_of_ref(number, base_ref)),
                 ],
                 FETCH_TIMEOUT,
             )
             .await?;
         Ok(())
+    }
+
+    /// Whether the last `fetch_pull` for this pull request saw `head_sha`
+    /// as its head and fetched its base from `base_ref`. One local git
+    /// call; anything missing or unreadable is a no.
+    async fn has_pull(&self, bare: &Path, number: u64, head_sha: &str, base_ref: &str) -> bool {
+        let Ok(out) = self
+            .git
+            .run(
+                Some(bare),
+                [
+                    "rev-parse".to_string(),
+                    format!("refs/perch/pull/{number}/head"),
+                    format!("refs/perch/base/{number}"),
+                    base_of_ref(number, base_ref),
+                    "--".to_string(),
+                ],
+                QUERY_TIMEOUT,
+            )
+            .await
+        else {
+            return false;
+        };
+        let mut shas = out.lines().map(str::trim);
+        match (shas.next(), shas.next(), shas.next()) {
+            (Some(head), Some(base), Some(base_of)) => head == head_sha && base == base_of,
+            _ => false,
+        }
     }
 
     /// Whether a worktree has uncommitted changes, untracked files included.
