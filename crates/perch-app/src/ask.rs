@@ -252,8 +252,9 @@ pub fn binary_hint(backend: perch_agent::Backend) -> &'static str {
 
 /// The spec a run takes, from config, the prompt, and where to run it.
 ///
-/// The tool list goes along whatever the backend; Claude Code reads it
-/// and Codex ignores it in favour of its sandbox.
+/// The mode picks the tools and the sandbox: Claude Code reads the tool
+/// lists, and Codex has only its sandbox.
+#[allow(clippy::too_many_arguments)]
 pub fn run_spec(
     agent: &perch_github::AgentConfig,
     backend: perch_agent::Backend,

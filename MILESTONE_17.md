@@ -54,7 +54,8 @@ where it is allowed.
   agent, so `git commit` fails like any other write outside the
   worktree. Committing needs write access to the repository's git
   directory without its `config` and `hooks`. That is an approval-shaped
-  grant, and it isn't clear Codex's sandbox can express it. Milestone 18.
+  grant. Milestone 18. (As built, Codex lets a bare `git commit` through
+  whatever its profile says; see The Work sandbox.)
 - Pushing, opening a pull request, or any GitHub write from a Work run.
   The agent has no token and no route to GitHub.
 - A commit or push action in Perch. The reader commits in a terminal.
@@ -84,13 +85,14 @@ picker Milestone 15 gave every composer (`Claude · Opus · High`, `Codex
 
     [▢ perch]  [⑂ main]  [☑ New branch  chris/fix-the-thing]
 
-The **repository** chip opens a searchable list of the `[[repo]]`
-entries, most recently used first. Each row gives the display name, and
+The **repository** chip opens a menu of the `[[repo]]` entries, in
+the file's order. Each row gives the display name, and
 a GitHub entry its `owner/repo`. A local one is marked `local`. The
 list ends in **Add repository…** (see below). It opens on the repository
 of the item that was open, or else the last one used.
 
-The **base** chip opens a searchable list of branches (see Where the
+The **base** chip opens a menu of branches, which the system menu
+lets the reader type to jump in (see Where the
 worktree comes from for what each kind of repository lists). It opens
 on the repository's base branch as the root scan finds it: the remote's
 HEAD, else `base`, else `main` or `master`.
@@ -99,7 +101,7 @@ The **branch** chip holds a checkbox and a name. With **New branch**
 ticked, Perch cuts a new branch off the base under that name. The name
 fills in as the message is typed. It is `branch_prefix` from `[work]`,
 then a slug of the message's first five words (lowercase ASCII,
-hyphens), or `work-<n>` for an empty message. A name the reader edits
+hyphens), or `work` for an empty message. A name the reader edits
 stays as typed. A typed name that is taken is an error under the chip.
 A name Perch filled in gets `-2`, `-3` instead, as `cut_branch` does
 today.
@@ -203,8 +205,13 @@ Ask, exactly as today.
 The switch is remembered per item. It opens on Work on an item the
 new-work view made and on Ask everywhere else. A follow-up in a thread
 follows the thread's last run, so a Work thread continues as Work
-unless it is flipped. The run card says `Work` or `Ask` beside the
-model, and the Agents inspector says the same on the row.
+unless it is flipped. A Work run's card says `Work` before its effort,
+and the Agents inspector says so on the row; a question's says nothing
+new.
+
+A session is resumed only by a run of its own mode, since a question's
+was told not to change a file and Work's was told it may. Switching
+starts over with the thread folded in, as switching agents does.
 
 Ask is Milestone 16's run, unchanged. Work is a different permission
 set on the same machinery: the same queue, prompt building, discussion
@@ -217,18 +224,29 @@ A Work run's working directory is the worktree. What it can do:
 
 - **Edit files.** Claude Code gets `Edit`, `Write` and `MultiEdit`,
   scoped by permission rules to paths under the worktree, and
-  `NotebookEdit` the same way. Codex runs in `workspace-write`, whose
-  writable root is the worktree.
+  `NotebookEdit` the same way. Codex runs under a permission profile
+  Perch defines on its command line (`default_permissions` and
+  `permissions.perch_work.filesystem`), whose writable paths include
+  the worktree. Not `workspace-write`: for a linked worktree Codex
+  makes the repository's git directory writable there.
 - **Run commands.** Claude Code gets `Bash` without a command list. The
   sandbox is now the boundary: `autoAllowBashIfSandboxed: true`,
   `allowUnsandboxedCommands: false`, `failIfUnavailable: true`. Codex
-  runs any command inside its sandbox as it does in `workspace-write`.
+  runs any command inside its profile, with `approval_policy="never"`.
 - **Write** the worktree, the system temporary directory, and the paths
   in the repository's `[repo.work] write` list, and nothing else. Both
   sandboxes deny writes to `<worktree>/.git` (the file that points at
   the git directory), `.claude/`, `.codex/` and `.mcp.json` in the
-  worktree. The git directory itself is outside the worktree and not
-  in any list, so it is read-only.
+  worktree, and to the git directories a linked worktree uses, named
+  explicitly since a test repository in the temporary directory showed
+  that leaving them out of every list is not enough.
+
+  Checked against the real CLIs: Claude Code refuses the commit. Codex
+  refuses `touch` in the git directory and `git config`, but lets a bare
+  `git add && git commit` write the objects, index and refs whatever the
+  profile says, so a Codex Work run can commit. It cannot touch
+  `config` or `hooks` that way, nor push, so nothing it does there runs
+  outside the sandbox. The README says so.
 - **Reach the network** only for the domains in `[repo.work] network`.
   The default list is empty. Claude Code takes the list as
   `allowedDomains` with `strictAllowlist`. Codex's stable sandbox has
@@ -320,11 +338,11 @@ Perch does today assume the work can be fetched again, and each
 changes. The first two apply to every owned item, not only new ones.
 
 - **Delete.** Before `branch -D`, Perch counts the branch's commits
-  that no remote-tracking branch and no base holds: `git rev-list
-  --count <branch> --not --remotes <base>`, and for a local repository
-  `--not <base>`. A nonzero count turns Delete's confirmation into
-  `chris/fix-the-thing has 3 commits that are on no remote. Delete
-  them?`. A dirty worktree still refuses, as today.
+  that no other ref holds: `git rev-list --count <branch> --not
+  --exclude=<branch> --branches --tags --remotes --glob=refs/perch/*`.
+  Worktrees' `HEAD`s are left out, since the branch's own would hold
+  them all. A nonzero count stops the delete and asks again, naming the
+  count. A dirty worktree still refuses, as today.
 - **A pull request's worktree when its head moves.** `prepare` resets
   a clean worktree to the new head. That now happens only when the
   worktree's `HEAD` is an ancestor of the new head (`merge-base
@@ -334,10 +352,11 @@ changes. The first two apply to every owned item, not only new ones.
   lose it.
 - **Archive.** Archive removes the directory. `git status --porcelain`
   doesn't see ignored files, so a `.env` or a notes file goes with it.
-  Archive's confirmation on a branch item now names the top-level
-  ignored entries it will delete (`status --porcelain --ignored`,
-  first ten, then `and N more`). The 14-day sweep no longer archives
-  branch items. It goes on archiving pull request checkouts.
+  Archiving a branch item with ignored entries asks first and names
+  them (`status --porcelain --ignored=matching`, first ten, then `and
+  N more`); with none it goes ahead as today. The 14-day sweep no
+  longer archives branch items. It goes on archiving pull request
+  checkouts.
 
 ## Model
 
@@ -368,12 +387,12 @@ In `perch_agent`:
   `network.allowedDomains` from the grant, and `permissions.allow`
   with `Edit`, `Write`, `MultiEdit` and `NotebookEdit` rules on the
   worktree in Claude Code's absolute-path form.
-- `codex_args` for Work: `-s workspace-write`, `--add-dir` for each
-  grant path, `-c sandbox_workspace_write.network_access=false`. On
-  resume, which rejects `-s`, the sandbox mode and
-  `sandbox_workspace_write.writable_roots` go in as config, as Ask
-  repeats `sandbox_mode` today. Check by hand whether `exec resume`
-  takes `--add-dir`.
+- `codex_args` for Work: no `-s`, since Codex refuses a sandbox mode
+  beside a profile; `-c default_permissions="perch_work"` and one `-c`
+  defining `permissions.perch_work.filesystem` as an inline table
+  (`":root"="read"`, `":workspace_roots"="write"`, `":tmpdir"="write"`,
+  the grant `"write"`, the protected paths and linked git directories
+  `"read"`), and `approval_policy="never"`. The same on resume.
 
 In `perch_github::cache`, `runs` gains `mode TEXT NOT NULL DEFAULT
 'ask'`, one migration with the item's.
@@ -424,7 +443,7 @@ Pure tests:
   `danger-full-access`.
 - Eligibility over the item shapes: own branch, scanned branch, own
   pull request, someone else's, issue, archived, off disk.
-- Branch naming: the slug, the prefix, `work-<n>`, a taken filled-in
+- Branch naming: the slug, the prefix, `work`, a taken filled-in
   name getting `-2`, a taken typed name refused.
 - `append_repo` on a missing file, an empty one, and one with comments
   and top-level keys. The result parses, and the old text is
@@ -585,9 +604,10 @@ the card, cleaned like any agent text.
   worktree came from and to its `worktrees/<name>/` entry, but not
   `config`, `config.worktree` or `hooks`, where one write becomes code
   the reader later runs outside any sandbox. Claude Code can express
-  that with `allowWrite` and `denyWrite`. Codex's writable roots have
-  no documented way to exclude a subpath. Check again then; if there
-  still isn't one, Codex commits go through app-server approvals.
+  that with `allowWrite` and `denyWrite`. Codex already lets a bare
+  `git commit` through (see The Work sandbox); what a grant would add
+  there is a question of saying so, and of stopping it when not
+  granted, which may need app-server approvals.
 - **Repository trust.** A per-repository `trust = true` that loads the
   repository's `.claude/`, `.mcp.json` and `.codex/` for Work runs. MCP
   servers and hooks run outside the sandbox. That is why it is opt-in,

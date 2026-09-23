@@ -8045,6 +8045,19 @@ async fn list_bases(ctx: &Ctx, identity: &str) -> Result<Vec<perch_git::BaseBran
         .map_err(|e| e.to_string())
 }
 
+/// A row's name from a new-work message: its first line, cut at a word
+/// before 80 characters.
+fn work_title(text: &str) -> Option<String> {
+    const MAX: usize = 80;
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    if line.chars().count() <= MAX {
+        return Some(line.to_string());
+    }
+    let cut: String = line.chars().take(MAX).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    Some(format!("{}\u{2026}", cut.trim_end()))
+}
+
 /// Make the worktree the new-work view asked for, and the branch item
 /// for it, or find the item that already has the branch.
 ///
@@ -8076,7 +8089,10 @@ async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Resul
         .flatten()
     {
         match &work.branch {
-            None => return Ok(existing.id),
+            None => {
+                ctx.notice(format!("{wanted} already has a row; opened it"));
+                return Ok(existing.id);
+            }
             Some(_) if work.typed => return Err(format!("{wanted} is taken")),
             // A name Perch filled in: the cut takes the next one.
             Some(_) => {}
@@ -8234,6 +8250,9 @@ async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Resul
         last_seen_head: None,
         source,
     });
+    // Named for what it is for, as Rename would name it; the branch
+    // when there is no message.
+    item.name = work.run.as_ref().and_then(|run| work_title(&run.text));
     ctx.with_cache(|c| c.insert_item(&item))
         .transpose()
         .map_err(|e| e.to_string())?;
@@ -16706,6 +16725,16 @@ mod tests {
         let filled = new_work(perch_git::BaseBranch::local("main"), Some("chris/readme"), false);
         let id = create_worktree(&ctx, &filled, 3).await.unwrap();
         assert_eq!(ctx.item(&id).unwrap().checkout.unwrap().branch, "chris/readme-2");
+    }
+
+    #[test]
+    fn a_new_work_row_is_named_for_the_first_line_of_its_message() {
+        assert_eq!(work_title("\n  Add a README\nwith more").as_deref(), Some("Add a README"));
+        assert_eq!(work_title("  \n "), None);
+        let long = format!("{} tail", "word ".repeat(20));
+        let title = work_title(&long).unwrap();
+        assert!(title.ends_with("word\u{2026}"), "{title}");
+        assert!(title.chars().count() <= 81, "{title}");
     }
 
     #[tokio::test]

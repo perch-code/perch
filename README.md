@@ -189,6 +189,29 @@ roots = ["~/Code/slatedb"]
 
 `name` is only the sidebar label. `roots` lets Perch discover existing local
 branches and worktrees. Neither setting causes a repository-wide GitHub crawl.
+A repository with roots and no GitHub remote is `local/<name>`: it has no pull
+requests or issues, and everything else works.
+
+New work (see [Starting work](#starting-work)) reads two more tables:
+
+```toml
+[work]
+branch_prefix = "chris/"       # before a branch name Perch fills in
+
+[[repo]]
+roots = ["~/Code/perch"]
+
+[repo.work]                    # what a Work run here may reach
+write = ["~/.cargo/registry", "~/.cargo/git", "~/.cargo/.package-cache"]
+network = ["index.crates.io", "static.crates.io"]
+```
+
+Both lists are empty unless given. A `write` entry is a place the agent can
+leave something for the next program that reads it, which is why the example
+names cargo's caches and not `~/.cargo`: `~/.cargo/config.toml` and
+`~/.cargo/bin` would let a run change what `cargo` does when you run it. An
+entry that is or holds the home directory or `~/.perch`, or that is in or
+holds a root's `.git`, is left out, with a notice at startup.
 
 Perch's database, avatars, managed clones, worktrees, and agent state live
 under `~/.perch`. The database also holds local items, conversations, and
@@ -200,12 +223,69 @@ agent attempts, session IDs, and activity history survive. Perch refuses an
 unsupported or newer schema without deleting it, and a failed migration leaves
 the original database in place.
 
+## Starting work
+
+`+` at the top of the sidebar, or `Cmd-N` from anywhere, opens the new-work
+view: a box for what the work is, and under it three chips.
+
+- **Repository**: the `[[repo]]` entries in the file's order, a local one
+  marked `(local)`. It opens on the open item's repository, else the last
+  one picked. **Add repository…** picks a folder and appends a
+  `[[repo]]` naming its repository to `config.toml`, without rewriting the
+  file; Perch takes it up at once.
+- **Base**: the branch to start from. For a repository with a root, the
+  root's local branches and its remote's, with no network; for a GitHub
+  repository without one, GitHub's. It opens on the repository's base
+  branch.
+- **New branch**: ticked, the name of the branch to cut, filled in from the
+  message (`branch_prefix`, then its first five words) until you type in it.
+  A name you typed that is taken is an error; one Perch filled in gets `-2`.
+  Unticked, the base branch itself is checked out, and a branch that is
+  already a row opens that row.
+
+With a message, **Start** makes the worktree, opens it as a branch item named
+for the message's first line, and sends the message to the agent picked beside
+it as the item's first Work run.
+Without one, **Create worktree** makes the worktree alone. `Escape` leaves the
+view and keeps what was typed until Perch quits.
+
+Worktrees go under `~/.perch/worktrees/`, named for the repository and the
+branch. A repository with a root is cut in the root, your own clone: the
+branch is its branch, with your remotes and config, and `git worktree list`
+there shows the worktree. Perch writes exactly this much in a root: the new
+branch, git's record of the worktree, a fetch of the one base branch from its
+remote, and on Delete that branch. The fetch uses your own credentials and
+never Perch's token, and cannot prompt: a key that wants a passphrase fails it,
+and the cut goes ahead from what the clone had, with a notice saying how old
+that is. A GitHub repository with no root is cut in Perch's own clone, as
+**Start Work** on an issue is. **Fork** of a branch in a local repository cuts
+in that repository.
+
+### Keeping work safe
+
+A worktree made for work can hold the only copy of it.
+
+- **Delete** asks again, naming the count, when the branch has commits no
+  other branch, tag, remote-tracking branch or ref of Perch's holds. A branch
+  pushed from Perch's own clone is not seen as pushed until a pull request
+  brings its head back.
+- **Archive** of a branch asks first when the directory holds files git
+  ignores, such as a `.env`, and names them: archiving removes the
+  directory, and git keeps no copy of those. The branch and its commits stay.
+  Branches are never archived for age; pull request checkouts still are,
+  after 14 days unopened.
+- A pull request's worktree follows its head when the head moves only if
+  the commit on disk is one the pull request had. A commit you made there
+  and have not pushed keeps the worktree where it is, reported stale, as
+  uncommitted changes do.
+
 ## Agents
 
 Questions about an item or selected lines in its Files view run through Claude
 Code or Codex in that item's worktree. Follow-ups remain attached to the local
-conversation, and the agents retain their read-only permissions. Nothing an
-agent writes reaches GitHub unless you post it (see Posting).
+conversation. A run is a question (**Ask**), which reads and answers, or, on
+your own work, **Work**, which changes the worktree (see [Work](#work)).
+Nothing an agent writes reaches GitHub unless you post it (see Posting).
 
 ### What the agent is told about the discussion
 
@@ -319,6 +399,47 @@ What remains: the CLIs still read the repository's `CLAUDE.md` and
 `AGENTS.md` as instructions, along with your own user-level configuration,
 and the agent can read any file your user can, not only the worktree. What
 it reads can reach you only through its answer.
+
+### Work
+
+A composer on your own work, a branch with its checkout on disk or a pull
+request you opened, has an **Ask / Work** switch before the model. Anything
+else, someone else's pull request, an issue, a review's snapshot, is Ask-only,
+and the backend refuses Work there whatever the switch says. A new question
+starts on what you last picked on the item, else Work on a branch Perch made
+and Ask elsewhere; a follow-up starts on its thread's last run. A session is
+resumed only by a run of its own kind: a switch starts over with the thread
+folded in, as a switch of agent does.
+
+A Work run edits files and runs commands in the worktree, and is told it may.
+It keeps everything under [What the agent can and cannot do](#what-the-agent-can-and-cannot-do)
+except the first two points:
+
+- **Claude Code** may use `Edit`, `Write`, `MultiEdit` and `NotebookEdit`
+  under the worktree only, and `Bash` with no command list: every command
+  runs in its sandbox, which is the boundary now, and runs without asking.
+  The sandbox writes the worktree, the temporary directory and
+  `[repo.work] write`, never the worktree's `.git`, `.claude`, `.codex` or
+  `.mcp.json`, nor the git directories a linked worktree uses; so
+  `git commit` fails. It reaches `[repo.work] network` and nothing else.
+- **Codex** runs under a permission profile Perch defines on its command
+  line: everything readable, the worktree, the temporary directory and
+  `[repo.work] write` writable, the same paths read-only, no network at all
+  (its sandbox has no domain allowlist, so `network` does not apply), and no
+  approvals. Codex lets a bare `git commit` write the repository's objects
+  and refs whatever the profile says, so a Codex Work run can commit; it
+  cannot change git's config or hooks, and it cannot push.
+
+Neither is given a token or a route to GitHub, and neither is told to commit:
+you commit. A machine without the sandbox refuses the run. One Work run at a
+time runs in a worktree; another waits, saying so, without taking a slot, and
+questions go on beside it.
+
+As a Work run starts and as it ends, however it ends, Perch records the
+worktree as a commit under `refs/perch/runs/<run>/` in the repository, without
+touching the worktree, its index or `HEAD`. The run's card says `Work` and how
+many files it changed; a click shows the change on Files as the **What the run
+changed** scope. Deleting the run's thread or item drops the refs.
 
 ## Worktree reviews
 
