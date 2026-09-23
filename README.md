@@ -184,7 +184,8 @@ use it, and the click changes github.com at once, with no confirmation, as
 the button there does. The thread shows the change before GitHub answers
 and goes back if GitHub refuses. On a thread of Perch's own, a question to
 an agent and its answers, the button is always there and the change stays
-in Perch. A review finding has **Dismiss** and **Reopen** instead.
+in Perch. A review finding has **Dismiss** and **Reopen** instead, and
+once published it is on GitHub and has **Resolve** too.
 Resolved, a thread folds, in Code to one row and on Conversation to its
 header, as one resolved on github.com arrives; **Show resolved** opens it
 again and **Hide resolved** folds it. Conversation and Code each keep their

@@ -2141,17 +2141,18 @@ pub fn follow_up(
 }
 
 /// Whether a thread's foot offers Resolve: on one of GitHub's where
-/// GitHub lets the reader, on any other always, and never on a
-/// finding's, which has Dismiss and Reopen instead.
+/// GitHub lets the reader, a published finding's too, on any other
+/// always, and never on a finding's still in Perch, which has Dismiss and
+/// Reopen instead.
 fn resolve_offered(app: AppState, state: ReviewState, thread_id: String) -> Memo<bool> {
     Memo::new(move |_| {
-        let resolvable = state.comment_threads.with(|threads| {
+        let (resolvable, on_github) = state.comment_threads.with(|threads| {
             threads
                 .iter()
                 .find(|t| t.id == thread_id)
-                .is_some_and(CommentThread::resolvable)
+                .map_or((false, false), |t| (t.resolvable(), t.on_github()))
         });
-        resolvable && cards::finding_of(app, state, &thread_id).is_none()
+        resolvable && (on_github || cards::finding_of(app, state, &thread_id).is_none())
     })
 }
 
@@ -4960,7 +4961,8 @@ mod tests {
 
     /// A thread of Perch's own, the reader's question and an agent's
     /// answer, resolves too, in Perch. A finding's has Dismiss and Reopen
-    /// instead, and no Resolve.
+    /// instead, and no Resolve, until it is published: then it is one of
+    /// GitHub's and resolves there.
     #[test]
     fn a_thread_of_perchs_own_resolves_in_perch_and_a_findings_does_not() {
         let root = TestRoot::new();
@@ -5024,6 +5026,16 @@ mod tests {
         harness.paint();
         assert!(!shown(&harness, "thread-resolve"));
         assert!(!shown(&harness, "thread-unresolve"));
+
+        // Published, the finding's thread is GitHub's to resolve.
+        let mut published = thread;
+        published.github_id = Some(4077107818);
+        published.node_id = Some("PRRT_1".into());
+        published.can_resolve = true;
+        state.comment_threads.set(Arc::new(vec![published]));
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "thread-resolve"), "GitHub lets the reader");
     }
 
     /// The words of every label under `id`, in tree order.
