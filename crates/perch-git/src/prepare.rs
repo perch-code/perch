@@ -121,6 +121,19 @@ fn order_bases(refs: &[String], remote: Option<&str>, base: &str) -> Vec<BaseBra
     out
 }
 
+/// A path for an index of Perch's own beside nothing of the reader's: in
+/// the temporary directory, named for the worktree and the moment.
+fn tempfile_path(worktree: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    worktree.hash(&mut hasher);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!("perch-index-{:x}-{nanos}", hasher.finish()))
+}
+
 /// Where `ensure_home` fetches a default branch's tip to in the bare clone.
 pub fn home_ref(branch: &str) -> String {
     format!("refs/perch/home/{branch}")
@@ -858,6 +871,81 @@ impl Preparer {
         entries.sort();
         entries.dedup();
         Ok(entries)
+    }
+
+    /// Record a worktree as it is, as a commit, without touching it: an
+    /// index of Perch's own is filled from `HEAD` and then with every
+    /// tracked and untracked file that is not ignored, written as a tree,
+    /// and committed with `HEAD` as its parent. The commit is kept at
+    /// `reference`, a ref under `refs/perch/`, so `gc` keeps it; the
+    /// worktree's own index, `HEAD` and files are as they were.
+    pub async fn record_worktree(&self, worktree: &Path, reference: &str, message: &str) -> Result<String, Error> {
+        let index = tempfile_path(worktree);
+        let result = self.record_with_index(worktree, &index, reference, message).await;
+        let _ = std::fs::remove_file(&index);
+        result
+    }
+
+    async fn record_with_index(
+        &self,
+        worktree: &Path,
+        index: &Path,
+        reference: &str,
+        message: &str,
+    ) -> Result<String, Error> {
+        let env: [(&str, &std::ffi::OsStr); 5] = [
+            ("GIT_INDEX_FILE", index.as_os_str()),
+            ("GIT_AUTHOR_NAME", "Perch".as_ref()),
+            ("GIT_AUTHOR_EMAIL", "perch@localhost".as_ref()),
+            ("GIT_COMMITTER_NAME", "Perch".as_ref()),
+            ("GIT_COMMITTER_EMAIL", "perch@localhost".as_ref()),
+        ];
+        let git = &self.git;
+        git.run_env(Some(worktree), ["read-tree", "HEAD"], &env, QUERY_TIMEOUT).await?;
+        git.run_env(Some(worktree), ["add", "-A", "--", "."], &env, WORKTREE_TIMEOUT)
+            .await?;
+        let tree = git.run_env(Some(worktree), ["write-tree"], &env, QUERY_TIMEOUT).await?;
+        let commit = git
+            .run_env(
+                Some(worktree),
+                ["commit-tree", tree.trim(), "-p", "HEAD", "-m", message],
+                &env,
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        let commit = commit.trim().to_string();
+        git.run(Some(worktree), ["update-ref", reference, &commit], QUERY_TIMEOUT)
+            .await?;
+        Ok(commit)
+    }
+
+    /// Drop refs a run recorded, where they are still there to drop.
+    pub async fn drop_refs(&self, repo: &Path, references: &[String]) {
+        for reference in references {
+            let _ = self
+                .git
+                .run(Some(repo), ["update-ref", "-d", reference], QUERY_TIMEOUT)
+                .await;
+        }
+    }
+
+    /// `(files, added, removed)` between two commits, binary files
+    /// counted as files with no lines.
+    pub async fn change_count(&self, repo: &Path, from: &str, to: &str) -> Result<(u32, u32, u32), Error> {
+        let out = self
+            .git
+            .run(Some(repo), ["diff", "--numstat", "--no-renames", from, to], QUERY_TIMEOUT)
+            .await?;
+        let mut counts = (0, 0, 0);
+        for line in out.lines() {
+            let mut parts = line.split('\t');
+            let added = parts.next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
+            let removed = parts.next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
+            counts.0 += 1;
+            counts.1 += added;
+            counts.2 += removed;
+        }
+        Ok(counts)
     }
 
     /// Every directory under the worktrees root, whether or not a record

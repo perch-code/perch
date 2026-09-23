@@ -752,6 +752,11 @@ fn notice_text(state: ReviewState) -> Option<String> {
             perch_git::Scope::Staged => {
                 return Some("Showing the index; rust-analyzer sees the working tree".to_string());
             }
+            perch_git::Scope::Run { .. } => {
+                return Some(
+                    "Showing what a run changed; rust-analyzer sees the working tree".to_string(),
+                );
+            }
             _ => {}
         }
     }

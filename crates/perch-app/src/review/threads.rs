@@ -2821,14 +2821,68 @@ pub fn run_block(state: ReviewState, backend: Rc<Backend>, run: RunRecord) -> im
             .into_any(),
         None => Empty::new().into_any(),
     };
+    let changes = work_changes(state, backend.clone(), &run);
     run_surface(
         Stack::vertical((
             steps_view(state, run.clone()),
             response,
+            changes,
             run_footer(backend, run),
         ))
         .style(|s| s.flex_col().width_full().gap(6.0)),
     )
+}
+
+/// What a finished Work run changed, `4 files changed, +120 −30`: a
+/// click shows it on Files as the Run scope. Nothing for a question, for
+/// a run still going, or for one that changed nothing.
+fn work_changes(state: ReviewState, backend: Rc<Backend>, run: &RunRecord) -> floem::AnyView {
+    let (Some(before), Some(after)) = (run.work_before.clone(), run.work_after.clone()) else {
+        return Empty::new().into_any();
+    };
+    if run.mode != perch_github::RunMode::Work || before == after {
+        return Empty::new().into_any();
+    }
+    let id = run.id.clone();
+    if !state.run_changes.with_untracked(|m| m.contains_key(&id)) {
+        backend.run_changes(&id);
+    }
+    let counts = floem::reactive::Memo::new(move |_| state.run_changes.with(|m| m.get(&id).copied()));
+    dyn_container(
+        move || counts.get(),
+        move |counts| {
+            let Some((files, added, removed)) = counts.filter(|(files, _, _)| *files > 0) else {
+                return Empty::new().into_any();
+            };
+            let (before, after) = (before.clone(), after.clone());
+            let backend = backend.clone();
+            let noun = if files == 1 { "file" } else { "files" };
+            Label::derived(move || format!("{files} {noun} changed, +{added} \u{2212}{removed}"))
+                .on_event_stop(el::Click, move |_, _| {
+                    let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+                    else {
+                        return;
+                    };
+                    backend.set_scope(
+                        &item_id,
+                        perch_git::Scope::Run {
+                            before: before.clone(),
+                            after: after.clone(),
+                        },
+                    );
+                    state.show_tab(crate::review::ItemTab::Files);
+                })
+                .debug_name("run-changes")
+                .style(|s| {
+                    clickable(s)
+                        .font_size(theme::TEXT_BADGE)
+                        .color(theme::ACCENT)
+                        .hover(|s| s.color(theme::FG))
+                })
+                .into_any()
+        },
+    )
+    .into_any()
 }
 
 /// The box a run's lines sit in. Tool activity is an inset neutral surface,

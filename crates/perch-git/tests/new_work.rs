@@ -286,3 +286,78 @@ async fn a_fetch_that_wants_a_password_fails_rather_than_asking() {
         "it failed at once: {err}"
     );
 }
+
+#[tokio::test]
+async fn a_worktree_is_recorded_as_a_commit_without_being_touched() {
+    let l = Local::new();
+    commit(&l.root, "gone");
+    let cut = l
+        .preparer
+        .cut_branch(&l.root, &l.id, "work", "main", &[])
+        .await
+        .unwrap();
+    let wt = &cut.worktree;
+    std::fs::write(wt.join("staged"), "staged").unwrap();
+    git(wt, &["add", "staged"]);
+    let head = git(wt, &["rev-parse", "HEAD"]);
+    let index_before = git(wt, &["diff", "--cached", "--name-status"]);
+
+    let before = l
+        .preparer
+        .record_worktree(wt, "refs/perch/runs/r1/before", "before r1")
+        .await
+        .unwrap();
+    std::fs::write(wt.join("one"), "one\nchanged\n").unwrap();
+    std::fs::write(wt.join("new.txt"), "new\n").unwrap();
+    std::fs::remove_file(wt.join("gone")).unwrap();
+    std::fs::write(wt.join(".gitignore"), "target/\n").unwrap();
+    std::fs::create_dir_all(wt.join("target")).unwrap();
+    std::fs::write(wt.join("target/big"), "ignored").unwrap();
+    let after = l
+        .preparer
+        .record_worktree(wt, "refs/perch/runs/r1/after", "after r1")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        git(wt, &["rev-parse", "HEAD"]),
+        head,
+        "HEAD is where it was"
+    );
+    assert_eq!(
+        git(wt, &["diff", "--cached", "--name-status"]),
+        index_before,
+        "the worktree's own index is as it was"
+    );
+    assert_eq!(
+        git(&l.root, &["rev-parse", "refs/perch/runs/r1/before"]),
+        before
+    );
+    assert_eq!(git(&l.root, &["rev-parse", &format!("{before}^")]), head);
+    let changed = git(
+        &l.root,
+        &["diff", "--name-status", "--no-renames", &before, &after],
+    );
+    let mut lines: Vec<&str> = changed.lines().collect();
+    lines.sort();
+    assert_eq!(lines, ["A\t.gitignore", "A\tnew.txt", "D\tgone", "M\tone"]);
+    // `one` had no newline at its end, so its one line is replaced.
+    assert_eq!(
+        l.preparer
+            .change_count(&l.root, &before, &after)
+            .await
+            .unwrap(),
+        (4, 4, 2)
+    );
+
+    l.preparer
+        .drop_refs(
+            &l.root,
+            &[
+                "refs/perch/runs/r1/before".into(),
+                "refs/perch/runs/r1/after".into(),
+            ],
+        )
+        .await;
+    assert!(git(&l.root, &["for-each-ref", "refs/perch/"]).is_empty());
+}

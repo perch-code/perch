@@ -308,6 +308,10 @@ pub enum Command {
     AddRepository {
         path: PathBuf,
     },
+    /// How much a Work run changed, for its card.
+    RunChanges {
+        run_id: String,
+    },
     /// The branches new work in a repository can start from.
     ListBases {
         repo: String,
@@ -496,6 +500,11 @@ pub enum Event {
     WorkDefaults(perch_github::WorkDefaults),
     /// Add repository put this one in the config.
     RepositoryAdded(String),
+    /// A Work run's changes: files, lines added, lines removed.
+    RunChanges {
+        run_id: String,
+        counts: (u32, u32, u32),
+    },
     /// Every item, active and archived. Whole, for the same reason.
     Items(Vec<Item>),
     /// Perch's visible notification list, in GitHub response order. Read
@@ -2165,6 +2174,12 @@ impl Backend {
         let _ = self.commands.send(Command::AddRepository { path });
     }
 
+    pub fn run_changes(&self, run_id: &str) {
+        let _ = self.commands.send(Command::RunChanges {
+            run_id: run_id.to_string(),
+        });
+    }
+
     pub fn list_bases(&self, repo: &str) {
         let _ = self.commands.send(Command::ListBases {
             repo: repo.to_string(),
@@ -3188,6 +3203,14 @@ async fn run(
                         Err(message) => {
                             let _ = ctx.events.send(Event::Notice(message));
                         }
+                    }
+                });
+            }
+            Command::RunChanges { run_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    if let Some(counts) = run_changes(&ctx, &run_id).await {
+                        let _ = ctx.events.send(Event::RunChanges { run_id, counts });
                     }
                 });
             }
@@ -5346,6 +5369,12 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
     }
     let _deletion = ctx.runs.block_owner(id, None)?;
     ctx.runs.cancel_owner(id, None).await;
+    // While the worktree is still there to reach its repository through.
+    let runs = ctx
+        .with_cache(|c| c.runs_for_item(id))
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    drop_work_refs(ctx, &runs).await;
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned) {
         if let Some(bare) = owned_repo(ctx.preparer.store(), &item) {
             if checkout.path.join(".git").exists() {
@@ -10887,6 +10916,95 @@ async fn ask(
     .await;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkSide {
+    Before,
+    After,
+}
+
+impl WorkSide {
+    fn name(self) -> &'static str {
+        match self {
+            WorkSide::Before => "before",
+            WorkSide::After => "after",
+        }
+    }
+}
+
+/// The ref a Work run's worktree is recorded at, in the repository the
+/// worktree belongs to.
+fn work_ref(run_id: &str, side: WorkSide) -> String {
+    format!("refs/perch/runs/{run_id}/{}", side.name())
+}
+
+/// Record a Work run's worktree as a commit and note it on the run. A
+/// failure is a log line: the run goes on, and its card has nothing to
+/// show for what it changed.
+async fn record_work(ctx: &Ctx, run: &RunRecord, side: WorkSide) {
+    let Some(worktree) = run.working_directory.as_deref().map(Path::new) else {
+        return;
+    };
+    let message = format!("Perch: the worktree {} run {}", side.name(), run.id);
+    let commit = match ctx
+        .preparer
+        .record_worktree(worktree, &work_ref(&run.id, side), &message)
+        .await
+    {
+        Ok(commit) => commit,
+        Err(error) => {
+            tracing::warn!(run = %run.id, side = side.name(), %error, "could not record the worktree");
+            return;
+        }
+    };
+    let updated = ctx.with_cache(|cache| {
+        let mut run = cache.load_run(&run.id).ok().flatten()?;
+        match side {
+            WorkSide::Before => run.work_before = Some(commit.clone()),
+            WorkSide::After => run.work_after = Some(commit.clone()),
+        }
+        cache.update_run(&run).ok()?;
+        Some(run)
+    });
+    if let Some(Some(run)) = updated {
+        let _ = ctx.events.send(Event::AgentRunUpdated { run });
+    }
+}
+
+/// Files changed, lines added and removed by a Work run, for its card.
+async fn run_changes(ctx: &Ctx, run_id: &str) -> Option<(u32, u32, u32)> {
+    let run = ctx.runs.load(run_id)?;
+    let (before, after) = (run.work_before.as_deref()?, run.work_after.as_deref()?);
+    let repo = run_repository(ctx, &run)?;
+    ctx.preparer.change_count(&repo, before, after).await.ok()
+}
+
+/// A repository a run's recorded commits are in: its worktree while it
+/// is there, else the repository the item's checkout came from.
+fn run_repository(ctx: &Ctx, run: &RunRecord) -> Option<PathBuf> {
+    if let Some(dir) = run.working_directory.as_deref().map(PathBuf::from) {
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+    }
+    let item_id = match &run.owner {
+        RunOwner::Discussion { item_id, .. } | RunOwner::Review { item_id, .. } => item_id,
+        RunOwner::Unavailable { .. } => return None,
+    };
+    let item = ctx.item(item_id)?;
+    owned_repo(ctx.preparer.store(), &item).filter(|repo| repo.exists())
+}
+
+/// Drop the refs Work runs recorded, as their runs are deleted.
+async fn drop_work_refs(ctx: &Ctx, runs: &[RunRecord]) {
+    for run in runs.iter().filter(|run| run.mode == RunMode::Work) {
+        let Some(repo) = run_repository(ctx, run) else {
+            continue;
+        };
+        let refs = [work_ref(&run.id, WorkSide::Before), work_ref(&run.id, WorkSide::After)];
+        ctx.preparer.drop_refs(&repo, &refs).await;
+    }
+}
+
 /// What a Work run on `item` needs: the sandbox its `[repo.work]`
 /// grants, and the framing that says so. Refused for an item that is not
 /// the reader's own work (see `items::work_allowed`).
@@ -11080,6 +11198,11 @@ async fn execute_question(
         send_agent_runs(ctx, 50);
         return;
     };
+    // The worktree as the Work run finds it: taken as it leaves the queue,
+    // so a run that waited behind another sees that one's work as before.
+    if run.mode == RunMode::Work {
+        record_work(ctx, &run, WorkSide::Before).await;
+    }
     run = ctx.runs.load(&run.id).unwrap_or(run);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let handle = match perch_agent::Run::spawn(spec, tx) {
@@ -11214,6 +11337,10 @@ async fn execute_question(
     }
 
     let outcome = handle.wait().await;
+    // And as it leaves it, however it ended.
+    if run.mode == RunMode::Work {
+        record_work(ctx, &run, WorkSide::After).await;
+    }
     let (mut status, mut reason, error, session, cost, duration) =
         if let Some(message) = persistence_error {
             (
@@ -11720,6 +11847,11 @@ async fn delete_comment_thread(ctx: &Ctx, id: &str) {
     if let Some(item_id) = item_id.as_deref() {
         ctx.runs.cancel_owner(item_id, Some(id)).await;
     }
+    let runs = ctx
+        .with_cache(|c| c.runs_for_discussion(id))
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    drop_work_refs(ctx, &runs).await;
     let context_before = context_dirs(ctx);
     if let Some(Err(e)) = ctx.with_cache(|c| c.delete_comment_thread(id)) {
         let _ = ctx
@@ -14276,6 +14408,76 @@ mod tests {
         ask_it(&branch, Some(thread.id.clone()), RunMode::Work).await;
         let args = std::fs::read_to_string(dir.path().join("args-4")).unwrap();
         assert!(args.contains("--resume"), "the Work session is resumed: {args}");
+    }
+
+    #[tokio::test]
+    async fn a_work_run_records_what_it_changed_and_its_refs_go_with_its_thread() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (mut ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry.clone()]);
+        // An agent that writes a file where it runs.
+        let agent = dir.path().join("claude");
+        std::fs::write(
+            &agent,
+            concat!(
+                "#!/bin/sh\n",
+                "printf 'made\\n' > made.txt\n",
+                "echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"model\":\"sonnet\"}'\n",
+                "echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Made.\",\"session_id\":\"s1\"}'\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = Config::default();
+        config.repo = vec![entry];
+        config.agent.binary = agent.to_string_lossy().into_owned();
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        assert!(scan_roots(&ctx).await);
+        let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        open_in_slot(&ctx, &item);
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
+
+        ask(
+            &ctx,
+            item.id.clone(),
+            None,
+            None,
+            "Make a file".into(),
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".into(),
+            perch_agent::Effort::Medium,
+            RunMode::Work,
+        )
+        .await;
+
+        let thread = ctx
+            .with_cache(|c| c.load_comment_threads(&item.id).unwrap())
+            .unwrap()
+            .remove(0);
+        let run = ctx
+            .with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+            .unwrap()
+            .remove(0);
+        assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error);
+        let (before, after) = (run.work_before.clone().unwrap(), run.work_after.clone().unwrap());
+        assert_ne!(before, after);
+        assert_eq!(git(&root, &["rev-parse", &format!("refs/perch/runs/{}/after", run.id)]), after);
+        assert_eq!(run_changes(&ctx, &run.id).await, Some((1, 1, 0)));
+        assert_eq!(
+            git(&worktree, &["status", "--porcelain"]),
+            "?? made.txt",
+            "the worktree's own index was not touched"
+        );
+
+        delete_comment_thread(&ctx, &thread.id).await;
+        assert!(
+            git(&root, &["for-each-ref", "refs/perch/runs/"]).is_empty(),
+            "the run's refs went with its thread"
+        );
     }
 
     #[tokio::test]

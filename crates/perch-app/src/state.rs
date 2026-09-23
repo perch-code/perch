@@ -1896,6 +1896,13 @@ impl AppState {
             Event::Bases { repo, bases } => self.new_work.take_bases(repo, bases),
             Event::WorkDefaults(work) => self.new_work.prefix.set(work.branch_prefix),
             Event::RepositoryAdded(identity) => self.added_repo.set(Some(identity)),
+            Event::RunChanges { run_id, counts } => {
+                if let Some(review) = self.review.get_untracked() {
+                    review.run_changes.update(|changes| {
+                        changes.insert(run_id, counts);
+                    });
+                }
+            }
             Event::ConfirmLoss(prompt) => {
                 self.renaming.set(None);
                 self.confirm_delete.set(None);

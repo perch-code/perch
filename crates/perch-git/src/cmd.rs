@@ -110,6 +110,41 @@ impl Git {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// [`run`](Self::run) with variables added to git's environment, such
+    /// as `GIT_INDEX_FILE` for work on an index of Perch's own.
+    pub async fn run_env<I, S>(
+        &self,
+        cwd: Option<&Path>,
+        args: I,
+        env: &[(&str, &OsStr)],
+        timeout: Duration,
+    ) -> Result<String, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = self.command(cwd);
+        command.args(args);
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let output = tokio::time::timeout(timeout, command.output())
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|e| Error::Spawn(e.to_string()))?;
+
+        if !output.status.success() {
+            return Err(Error::Git {
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     /// Run git and preserve stdout byte-for-byte. Review snapshot diffs and
     /// blobs may be binary and must not pass through lossy UTF-8 conversion.
     pub async fn run_bytes<I, S>(

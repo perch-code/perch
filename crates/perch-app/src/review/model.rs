@@ -1362,6 +1362,9 @@ pub struct ReviewState {
     /// Ask or Work, as last picked on each item, by item id. A new
     /// question on the item starts on it.
     pub work_modes: RwSignal<HashMap<String, perch_github::RunMode>>,
+    /// What each Work run changed, by run id, as the backend counted it:
+    /// files, lines added, lines removed.
+    pub run_changes: RwSignal<HashMap<String, (u32, u32, u32)>>,
     /// The destination last sent from each face, by `ThreadFace::index`:
     /// inline in the code, and on Conversation. A new composer on lines
     /// starts on its face's. Kept for the app's life, as `agent_last` is.
@@ -1612,6 +1615,7 @@ impl ReviewState {
             known_cards: RwSignal::new(HashSet::new()),
             agent_last: RwSignal::new(None),
             work_modes: RwSignal::new(HashMap::new()),
+            run_changes: RwSignal::new(HashMap::new()),
             last_destination: [RwSignal::new(None), RwSignal::new(None)],
             agent: RwSignal::new(perch_github::AgentConfig::default()),
             hovered_line: RwSignal::new(None),
@@ -3460,6 +3464,7 @@ impl ReviewState {
         })?;
         let commit_sha = match self.scope.get_untracked() {
             Scope::Commit { sha } => sha,
+            Scope::Run { after, .. } => after,
             _ => head,
         };
         Some(Anchor {

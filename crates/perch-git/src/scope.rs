@@ -49,6 +49,9 @@ pub enum Scope {
     Unstaged,
     /// The index against `HEAD`.
     Staged,
+    /// What one Work run changed: the worktree as it was recorded when
+    /// the run started, against it as it was when the run ended.
+    Run { before: String, after: String },
 }
 
 impl Scope {
@@ -65,6 +68,7 @@ impl Scope {
             Scope::Uncommitted => (Rev::Sha("HEAD".to_string()), Rev::Worktree),
             Scope::Unstaged => (Rev::Index, Rev::Worktree),
             Scope::Staged => (Rev::Sha("HEAD".to_string()), Rev::Index),
+            Scope::Run { before, after } => (Rev::Sha(before.clone()), Rev::Sha(after.clone())),
         }
     }
 
@@ -77,11 +81,13 @@ impl Scope {
             Scope::Uncommitted => "Uncommitted".to_string(),
             Scope::Unstaged => "Unstaged".to_string(),
             Scope::Staged => "Staged".to_string(),
+            Scope::Run { .. } => "What the run changed".to_string(),
         }
     }
 
     /// The inverse of `Display`, for the command line: `branch`,
-    /// `since:<sha>`, `commit:<sha>`, `uncommitted`, `unstaged`, `staged`.
+    /// `since:<sha>`, `commit:<sha>`, `uncommitted`, `unstaged`, `staged`,
+    /// `run:<before>..<after>`.
     pub fn parse(s: &str) -> Option<Scope> {
         Some(match s.trim() {
             "branch" => Scope::Branch,
@@ -96,6 +102,13 @@ impl Scope {
                 match kind {
                     "since" => Scope::SinceLastLooked { from: sha.to_string() },
                     "commit" => Scope::Commit { sha: sha.to_string() },
+                    "run" => {
+                        let (before, after) = sha.split_once("..")?;
+                        if before.is_empty() || after.is_empty() {
+                            return None;
+                        }
+                        Scope::Run { before: before.to_string(), after: after.to_string() }
+                    }
                     _ => return None,
                 }
             }
@@ -112,6 +125,7 @@ impl fmt::Display for Scope {
             Scope::Uncommitted => f.write_str("uncommitted"),
             Scope::Unstaged => f.write_str("unstaged"),
             Scope::Staged => f.write_str("staged"),
+            Scope::Run { before, after } => write!(f, "run:{before}..{after}"),
         }
     }
 }
@@ -596,6 +610,7 @@ mod tests {
             Scope::Uncommitted,
             Scope::Unstaged,
             Scope::Staged,
+            Scope::Run { before: "aaa111".into(), after: "bbb222".into() },
         ];
         for scope in scopes {
             assert_eq!(Scope::parse(&scope.to_string()), Some(scope.clone()), "{scope}");
@@ -607,7 +622,7 @@ mod tests {
 
     #[test]
     fn a_scope_that_is_not_one_does_not_parse() {
-        for s in ["", "Branch", "commit", "commit:", "since:", "tag:v1", "head"] {
+        for s in ["", "Branch", "commit", "commit:", "since:", "tag:v1", "head", "run:a", "run:..b", "run:a.."] {
             assert_eq!(Scope::parse(s), None, "{s:?}");
         }
     }

@@ -87,6 +87,12 @@ pub fn entries(facts: &Facts) -> Vec<Entry> {
     };
     let mut out = Vec::new();
 
+    // A run's changes are picked from its card; while they are shown, the
+    // menu lists them first, checked, to come back to.
+    if let Scope::Run { .. } = &facts.current {
+        out.push(entry(facts.current.clone(), facts.current.label(), true));
+    }
+
     out.push(match &facts.last_seen_head {
         Some(from) if *from != facts.head_sha => {
             entry(Scope::SinceLastLooked { from: from.clone() }, "Since you last looked".into(), true)
@@ -381,6 +387,16 @@ mod tests {
         assert!(!uncommitted.enabled);
         assert_eq!(uncommitted.title, "Uncommitted (clean)");
         assert_eq!(find(&clean, &Scope::Unstaged).title, "   Unstaged (nothing unstaged)");
+    }
+
+    #[test]
+    fn a_run_s_changes_are_listed_first_while_they_are_shown() {
+        let run = Scope::Run { before: "a".into(), after: "b".into() };
+        let listed = entries(&Facts { current: run.clone(), ..facts() });
+        assert_eq!(listed[0].scope, run);
+        assert!(listed[0].checked && listed[0].enabled);
+        assert_eq!(listed[0].title, "What the run changed");
+        assert!(!entries(&facts()).iter().any(|e| matches!(e.scope, Scope::Run { .. })));
     }
 
     #[test]
