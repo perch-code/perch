@@ -1311,7 +1311,7 @@ fn phase_label(phase: perch_github::ReviewerPhase) -> &'static str {
     }
 }
 
-fn menu_button(
+pub(crate) fn menu_button(
     label: impl Fn() -> String + 'static,
     menu: impl Fn() -> Menu + 'static,
     debug: String,
@@ -1360,7 +1360,7 @@ fn disabled_selector(label: &'static str) -> impl IntoView {
     })
 }
 
-fn action_button(
+pub(crate) fn action_button(
     label: &str,
     debug: &'static str,
     prominent: bool,

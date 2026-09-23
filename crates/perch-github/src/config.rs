@@ -1,7 +1,7 @@
 //! Config file and on-disk paths.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -22,6 +22,9 @@ pub struct Config {
     /// `[[repo]]` entries: the repositories Perch knows about.
     #[serde(default)]
     pub repo: Vec<RepoConfig>,
+    /// `[work]`: how new work is set up in every repository.
+    #[serde(default)]
+    pub work: WorkDefaults,
     /// The old `[[project]]` key. Read only so `load` can refuse the file
     /// by name: with no field for it, toml would drop the table without a
     /// word and the reader would see an empty sidebar and no reason.
@@ -195,6 +198,112 @@ pub fn is_local(identity: &str) -> bool {
     }
 }
 
+/// `[work]`: settings for new work in any repository.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct WorkDefaults {
+    /// Put before a branch name the new-work view fills in, such as
+    /// `chris/`. A name the reader types is taken as typed.
+    #[serde(default)]
+    pub branch_prefix: String,
+}
+
+/// `[repo.work]`: what a Work run may reach outside its worktree, in one
+/// repository. Both lists are empty unless the file fills them.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RepoWork {
+    /// Directories the run may write, such as a package manager's cache.
+    /// A leading `~` is the home directory.
+    #[serde(default)]
+    pub write: Vec<String>,
+    /// Domains the run may reach, such as `index.crates.io`.
+    #[serde(default)]
+    pub network: Vec<String>,
+}
+
+impl RepoWork {
+    pub fn write_paths(&self) -> Vec<PathBuf> {
+        self.write.iter().map(|w| expand_home(w)).collect()
+    }
+}
+
+/// Why a `[repo.work] write` entry is refused, if it is: it is, or holds,
+/// the home directory or Perch's own, or it is in or holds a root's git
+/// directory. A run that could write any of those could change what runs
+/// outside its sandbox: a shell profile, Perch's database, a hook.
+fn refused_write(path: &Path, roots: &[PathBuf]) -> Option<String> {
+    let path = normalize(path);
+    let covers = |other: &Path| other.starts_with(&path);
+    let home = home_dir();
+    if covers(&home) {
+        return Some("it is or holds the home directory".into());
+    }
+    let perch = perch_home();
+    if covers(&perch) || path.starts_with(&perch) {
+        return Some(format!("it is or is in {}", perch.display()));
+    }
+    for root in roots {
+        let git = root.join(".git");
+        if covers(&git) || path.starts_with(&git) {
+            return Some(format!("it is or is in {}", git.display()));
+        }
+    }
+    None
+}
+
+/// `.` and `..` taken out of a path without asking the disk, so
+/// `~/Code/../` reads as the home directory it is.
+fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Add a `[[repo]]` with one root to the end of the config file, making
+/// the file when there is none. The file's text is appended to, never
+/// rewritten, so its comments and order stay as the reader left them. A
+/// root under the home directory is written with `~`.
+pub fn append_repo(config: &Path, root: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let home = home_dir();
+    let shown = match root.strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => root.display().to_string(),
+    };
+    let roots = toml::Value::Array(vec![toml::Value::String(shown)]);
+    let existing = match std::fs::read_to_string(config) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let mut add = String::new();
+    if !existing.is_empty() {
+        if !existing.ends_with('\n') {
+            add.push('\n');
+        }
+        add.push('\n');
+    }
+    add.push_str(&format!("[[repo]]\nroots = {roots}\n"));
+    if let Some(parent) = config.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(config)?
+        .write_all(add.as_bytes())
+}
+
 /// A repository the reader follows. Its identity is `owner/repo` on
 /// GitHub, or `local/<name>` for one that lives only on this machine;
 /// either way it is compared without regard to case, and everything
@@ -217,6 +326,10 @@ pub struct RepoConfig {
     /// The base branch, used when no remote HEAD says which it is.
     #[serde(default)]
     pub base: Option<String>,
+    /// `[repo.work]`: what a Work run in this repository may reach beyond
+    /// its worktree.
+    #[serde(default)]
+    pub work: RepoWork,
     /// The identity once known: `github` when given, else set by `resolve`
     /// from the first root's scan.
     #[serde(skip)]
@@ -396,7 +509,12 @@ impl Config {
         let Some(path) = config_path() else {
             return Self::fallback();
         };
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        Self::load_from(&path)
+    }
+
+    /// The config in `path`, or the defaults when it cannot be read.
+    pub fn load_from(path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
             return Self::fallback();
         };
         match Self::parse(&text) {
@@ -492,6 +610,18 @@ impl Config {
                 ));
                 continue;
             }
+            let roots = r.root_paths();
+            let label = r.label();
+            let warnings = &mut self.warnings;
+            r.work.write.retain(|entry| match refused_write(&expand_home(entry), &roots) {
+                Some(why) => {
+                    warnings.push(format!(
+                        "config.toml: {label} [repo.work] write = {entry:?} was left out: {why}"
+                    ));
+                    false
+                }
+                None => true,
+            });
             kept.push(r);
         }
         self.repo = kept;
@@ -504,6 +634,7 @@ impl Config {
             agent: AgentConfig::default(),
             github_host: None,
             repo: Vec::new(),
+            work: WorkDefaults::default(),
             project: Vec::new(),
             warnings: Vec::new(),
         }
@@ -546,6 +677,52 @@ pub fn avatar_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repository_is_appended_and_the_file_before_it_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch").join("config.toml");
+
+        append_repo(&path, Path::new("/srv/notes")).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(first, "[[repo]]\nroots = [\"/srv/notes\"]\n");
+
+        let mine = "# mine\npoll_interval_secs = 30\n\n[agent]\nmodel = \"opus\"";
+        std::fs::write(&path, mine).unwrap();
+        append_repo(&path, &home_dir().join("Code").join("wid\"gets")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(mine), "{text}");
+        assert!(text.ends_with("\n\n[[repo]]\nroots = ['~/Code/wid\"gets']\n"), "{text}");
+        let config = Config::parse(&text).unwrap();
+        assert_eq!(config.poll_interval_secs, 30);
+        assert_eq!(config.agent.model, "opus");
+        assert_eq!(config.repo.len(), 1);
+        assert_eq!(config.repo[0].root_paths(), [home_dir().join("Code").join("wid\"gets")]);
+    }
+
+    #[test]
+    fn work_settings_are_read_and_a_dangerous_write_left_out() {
+        let text = r#"
+[work]
+branch_prefix = "chris/"
+
+[[repo]]
+roots = ["/srv/notes"]
+
+[repo.work]
+write = ["~/.cargo/registry", "~", "/", "/srv/notes/.git/hooks", "/srv/notes/.git/..", "~/Code/../.perch"]
+network = ["index.crates.io"]
+"#;
+        let config = Config::parse(text).unwrap();
+        assert_eq!(config.work.branch_prefix, "chris/");
+        let work = &config.repo[0].work;
+        assert_eq!(work.write, ["~/.cargo/registry"]);
+        assert_eq!(work.write_paths(), [home_dir().join(".cargo/registry")]);
+        assert_eq!(work.network, ["index.crates.io"]);
+        assert_eq!(config.warnings.len(), 5, "{:?}", config.warnings);
+        assert!(config.warnings[0].contains("write = \"~\" was left out: it is or holds the home directory"), "{:?}", config.warnings);
+        assert!(config.warnings[2].contains("/srv/notes/.git"), "{:?}", config.warnings);
+    }
 
     #[test]
     fn the_home_follows_the_variable_and_holds_everything() {

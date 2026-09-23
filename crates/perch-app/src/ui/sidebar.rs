@@ -25,7 +25,7 @@ use perch_github::Item;
 /// The drawer, open.
 pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
     Stack::vertical((
-        lights_strip(state),
+        lights_strip(state, backend.clone()),
         items_nav(state, backend, on_open)
             .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0).flex_col()),
     ))
@@ -40,14 +40,15 @@ pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl
     })
 }
 
-/// The strip the traffic lights sit over, followed by the drawer control and
-/// the three scopes.
-fn lights_strip(state: AppState) -> impl IntoView {
+/// The strip the traffic lights sit over, followed by the drawer control,
+/// the three scopes, and `+` for new work.
+fn lights_strip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     title_bar(
         Stack::horizontal((
             lights_lane(state, 0.0),
             scope_tabs(state).style(|s| s.margin_left(8.0)),
             Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
+            new_work_button(state, backend),
         ))
         .debug_name("drawer strip")
         .style(|s| s.items_center().width_full().padding_right(12.0)),
@@ -74,6 +75,26 @@ pub fn lights_lane(state: AppState, inset: f64) -> impl IntoView {
         toggle_button(state),
     ))
     .style(|s| s.items_center().flex_shrink(0.0_f32).pointer_events_none())
+}
+
+/// `+`: the new-work view, as `Cmd-N` opens it.
+fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+    Container::new(
+        sidebar_glyph(SidebarIcon::Plus, theme::NAV_MUTED).style(|s| s.size(16.0, 16.0)),
+    )
+    .on_event_stop(el::Click, move |_, _| crate::ui::new_work::open(state, &backend))
+    .debug_name("new work")
+    .style(move |s| {
+        let open = state.new_work.open.get();
+        crate::ui::widgets::clickable(s)
+            .size(26.0, 26.0)
+            .items_center()
+            .justify_center()
+            .border_radius(8.0)
+            .pointer_events_auto()
+            .apply_if(open, |s| s.background(theme::NAV_SELECTED))
+            .hover(|s| s.background(theme::NAV_HOVER))
+    })
 }
 
 /// Show or hide the drawer. The same glyph either way, as the system's

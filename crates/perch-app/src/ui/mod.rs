@@ -4,6 +4,7 @@ pub mod agents;
 pub mod drawer;
 pub mod items;
 pub mod nav_row;
+pub mod new_work;
 pub mod notifications;
 pub mod sidebar;
 pub mod status;
@@ -145,8 +146,20 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         (
             review.is_showing(),
             state.status.with(|s| matches!(s, Status::NoToken { .. })),
+            state.new_work.open.get(),
         )
     });
+    // A repository Add repository put in the config is chosen for new
+    // work once the backend has it.
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            if let Some(identity) = state.added_repo.get() {
+                state.added_repo.set(None);
+                new_work::choose_repo(state, &backend, &identity);
+            }
+        });
+    }
 
     // The main area: the review view over the sidebar, or the empty
     // state, which on a fresh install with no token is what to do about
@@ -160,8 +173,16 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let empty_backend = backend.clone();
     let pane = dyn_container(
         move || main_pane.get(),
-        move |(open, no_token)| {
-            if open {
+        move |(open, no_token, new_work)| {
+            if new_work {
+                empty_pane(
+                    state,
+                    review,
+                    empty_backend.clone(),
+                    new_work::new_work_view(state, empty_backend.clone()),
+                )
+                .into_any()
+            } else if open {
                 crate::review::review_view(
                     state,
                     review,
@@ -288,6 +309,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // box's.
                 if review.go_to.open.get() {
                     return crate::review::go_to::key(review, &go_to_file, key);
+                }
+                // Cmd-N opens the new-work view, from anywhere.
+                if key.code == Code::KeyN && key.modifiers == OS_MOD {
+                    new_work::open(state, key_backend);
+                    return EventPropagation::Stop;
                 }
                 // Cmd-P puts it up, app-wide, as the drawer keys are; Escape
                 // gives the keyboard back to whatever had it.

@@ -185,6 +185,11 @@ pub struct AppState {
     /// An archive or delete the backend stopped before it lost something,
     /// open under its row until the reader answers.
     pub confirm_loss: RwSignal<Option<crate::backend::LossPrompt>>,
+    /// The new-work view and what it holds between visits.
+    pub new_work: crate::ui::new_work::NewWorkState,
+    /// A repository Add repository just put in the config, for the
+    /// new-work view to choose once something with the backend sees it.
+    pub added_repo: RwSignal<Option<String>>,
     /// The sidebar's search box, so Cmd-1 can focus it.
     pub search_box: RwSignal<Option<floem::ViewId>>,
     /// Cmd-1 was pressed with the drawer shut. The box does not exist
@@ -278,6 +283,8 @@ impl AppState {
             renaming: RwSignal::new(None),
             confirm_delete: RwSignal::new(None),
             confirm_loss: RwSignal::new(None),
+            new_work: crate::ui::new_work::NewWorkState::new(),
+            added_repo: RwSignal::new(None),
             search_box: RwSignal::new(None),
             focus_search: RwSignal::new(false),
             item_query: RwSignal::new(String::new()),
@@ -1886,6 +1893,9 @@ impl AppState {
             // An empty notice is the backend saying the last one has been
             // read: the reader has moved on to something else.
             Event::Notice(message) => self.notice.set(Some(message).filter(|m| !m.is_empty())),
+            Event::Bases { repo, bases } => self.new_work.take_bases(repo, bases),
+            Event::WorkDefaults(work) => self.new_work.prefix.set(work.branch_prefix),
+            Event::RepositoryAdded(identity) => self.added_repo.set(Some(identity)),
             Event::ConfirmLoss(prompt) => {
                 self.renaming.set(None);
                 self.confirm_delete.set(None);
@@ -1902,7 +1912,6 @@ impl AppState {
             | Event::AgentReviewNavigationFailed { .. }
             | Event::NavigationCancelled { .. }
             | Event::ItemArchived { .. }
-            | Event::Bases { .. }
             | Event::ReviewDashboard { .. }
             | Event::ReviewGroupUpdated { .. }
             | Event::ReviewFindingUpdated { .. }
@@ -1961,6 +1970,7 @@ impl AppState {
     /// Put the progress card up with `message` until the backend says what
     /// it opened.
     pub fn begin_review(&self, review: crate::review::model::ReviewState, message: &str) {
+        self.new_work.open.set(false);
         review.begin(message);
     }
 
@@ -1977,6 +1987,7 @@ impl AppState {
         self.open_expectation
             .set(OpenExpectation::Item(item_id.to_string()));
         self.open_item.set(Some(item_id.to_string()));
+        self.new_work.open.set(false);
         review.begin(message);
     }
 
@@ -1988,6 +1999,7 @@ impl AppState {
         self.agent_archived_owner.set(None);
         self.open_expectation.set(OpenExpectation::Any);
         self.open_item.set(None);
+        self.new_work.open.set(false);
         if let Some(review) = self.review.get_untracked() {
             review.begin(message);
         }

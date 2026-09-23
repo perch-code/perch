@@ -304,6 +304,10 @@ pub enum Command {
         id: String,
         name: Option<String>,
     },
+    /// Add a `[[repo]]` for the repository a folder is in.
+    AddRepository {
+        path: PathBuf,
+    },
     /// The branches new work in a repository can start from.
     ListBases {
         repo: String,
@@ -473,8 +477,13 @@ pub enum Event {
         bytes: Vec<u8>,
     },
     /// Declared repository identities and display names for filters and
-    /// item context. Sent once at startup; the file is read once.
+    /// item context. Sent at startup, and again when Add repository adds
+    /// one.
     Repos(Vec<perch_github::DeclaredRepo>),
+    /// `[work]` from the config, for the new-work view.
+    WorkDefaults(perch_github::WorkDefaults),
+    /// Add repository put this one in the config.
+    RepositoryAdded(String),
     /// Every item, active and archived. Whole, for the same reason.
     Items(Vec<Item>),
     /// Perch's visible notification list, in GitHub response order. Read
@@ -2140,6 +2149,10 @@ impl Backend {
         navigation_id
     }
 
+    pub fn add_repository(&self, path: PathBuf) {
+        let _ = self.commands.send(Command::AddRepository { path });
+    }
+
     pub fn list_bases(&self, repo: &str) {
         let _ = self.commands.send(Command::ListBases {
             repo: repo.to_string(),
@@ -2503,6 +2516,7 @@ async fn run(
         let _ = events.send(Event::Notice(warning.clone()));
     }
     let _ = events.send(Event::Repos(config.declared_repos()));
+    let _ = events.send(Event::WorkDefaults(config.work.clone()));
     let mut initial_notifications = Vec::new();
     let mut initial_items = Vec::new();
     if let Some(cache) = cache.as_ref() {
@@ -2623,7 +2637,7 @@ async fn run(
         }),
         preparer: preparer.clone(),
         cache: cache.clone(),
-        config: config.clone(),
+        config: Arc::new(std::sync::RwLock::new(config.clone())),
         slot: checkout.clone(),
         language_server: language_server.clone(),
         events: events.clone(),
@@ -3141,6 +3155,24 @@ async fn run(
                                     message,
                                 },
                             );
+                        }
+                    }
+                });
+            }
+            Command::AddRepository { path } => {
+                ctx.clear_notice();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let Some(config) = perch_github::config::config_path() else {
+                        let _ = ctx.events.send(Event::Notice("There is no place for config.toml".into()));
+                        return;
+                    };
+                    match add_repository(&ctx, &path, &config).await {
+                        Ok(identity) => {
+                            let _ = ctx.events.send(Event::RepositoryAdded(identity));
+                        }
+                        Err(message) => {
+                            let _ = ctx.events.send(Event::Notice(message));
                         }
                     }
                 });
@@ -3872,7 +3904,9 @@ struct Ctx {
     credentials: Arc<Credentials>,
     preparer: Arc<Preparer>,
     cache: SharedCache,
-    config: Arc<Config>,
+    /// Read through `config()`. Swapped whole when Add repository changes
+    /// the `[[repo]]` list; nothing else in it changes while Perch runs.
+    config: Arc<std::sync::RwLock<Arc<Config>>>,
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
     events: EventSender<Event>,
@@ -3951,6 +3985,22 @@ type TokenResolver = dyn Fn(&Config) -> Option<perch_github::Token> + Send + Syn
 type ClientBuilder = dyn Fn(&str) -> Result<GitHub, perch_github::Error> + Send + Sync;
 
 impl Ctx {
+    /// The config as it is now.
+    fn config(&self) -> Arc<Config> {
+        self.config
+            .read()
+            .map(|config| config.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
+    /// Put a new `[[repo]]` list in place, keeping everything else.
+    fn replace_repos(&self, repos: Vec<perch_github::RepoConfig>) {
+        let mut guard = self.config.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut config = (**guard).clone();
+        config.repo = repos;
+        *guard = Arc::new(config);
+    }
+
     /// The GitHub client, when there is a token.
     fn github(&self) -> Option<Arc<GitHub>> {
         self.session().map(|session| session.github)
@@ -5523,7 +5573,7 @@ async fn open_branch_item(ctx: &Ctx, item: Item, navigation_id: u64) -> bool {
                     navigation_id,
                     message: format!(
                         "{} is not on GitHub, so there is no clone to put {} back in",
-                        ctx.config.display_name(&item.repo_full_name),
+                        ctx.config().display_name(&item.repo_full_name),
                         checkout.branch
                     ),
                 },
@@ -6220,7 +6270,7 @@ async fn base_revs_for(ctx: &Ctx, item: &Item) -> Vec<String> {
 /// the scan reads it, since the row carries the base's name and not the
 /// remote's.
 async fn root_base_revs(ctx: &Ctx, path: &Path, base: &str) -> Vec<String> {
-    let hosts = ctx.config.github_hosts();
+    let hosts = ctx.config().github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
     let remotes = perch_git::remotes(ctx.preparer.git(), path)
         .await
@@ -7700,7 +7750,7 @@ fn owned_repo(store: &perch_git::Store, item: &Item) -> Option<PathBuf> {
 /// The first of a repository's roots that is a checkout, where a branch
 /// of the reader's own clone is cut.
 fn root_of(ctx: &Ctx, identity: &str) -> Option<PathBuf> {
-    ctx.config
+    ctx.config()
         .roots_for(identity)
         .into_iter()
         .find(|root| root.join(".git").exists())
@@ -7712,7 +7762,7 @@ fn no_root_for_local(ctx: &Ctx, repo_full_name: &str) -> Option<String> {
     (perch_github::is_local(repo_full_name) && root_of(ctx, repo_full_name).is_none()).then(|| {
         format!(
             "{} is not on GitHub and has no root on disk to cut from",
-            ctx.config.display_name(repo_full_name)
+            ctx.config().display_name(repo_full_name)
         )
     })
 }
@@ -7735,7 +7785,7 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Resul
     if perch_github::is_local(&issue_item.repo_full_name) {
         return Err(format!(
             "{} is not on GitHub, so it has no issues to start work on",
-            ctx.config.display_name(&issue_item.repo_full_name)
+            ctx.config().display_name(&issue_item.repo_full_name)
         ));
     }
     let wanted = format!("perch/issue-{}", issue.number);
@@ -7828,9 +7878,69 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Resul
     Ok(item.id)
 }
 
+/// Add a `[[repo]]` for the repository `folder` is in, and take it up
+/// without a restart: the entries are read again and resolved as at
+/// startup, the sidebar told, and the new root scanned. The table names
+/// the repository's main worktree, whichever of its worktrees was picked.
+async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String, String> {
+    let git = ctx.preparer.git();
+    let top = git
+        .run(Some(folder), ["rev-parse", "--show-toplevel"], Duration::from_secs(30))
+        .await
+        .map_err(|_| format!("{} is not in a git repository", folder.display()))?;
+    let root = ctx
+        .preparer
+        .repository_of(Path::new(top.trim()))
+        .await
+        .map_err(|e| e.to_string())?;
+    let root = root.canonicalize().unwrap_or(root);
+    let config = ctx.config();
+    for entry in &config.repo {
+        for existing in entry.root_paths() {
+            let existing = existing.canonicalize().unwrap_or(existing);
+            if existing == root {
+                return Err(format!(
+                    "{} is already a root of {}",
+                    root.display(),
+                    entry.display_name()
+                ));
+            }
+        }
+    }
+    perch_github::append_repo(path, &root).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+
+    let mut reloaded = Config::load_from(path);
+    crate::repos::resolve(&mut reloaded, &perch_git::cmd::Git::new(None)).await;
+    let identity = reloaded
+        .repo
+        .iter()
+        .find(|entry| {
+            entry
+                .root_paths()
+                .into_iter()
+                .any(|r| r.canonicalize().unwrap_or(r) == root)
+        })
+        .and_then(|entry| entry.identity().map(str::to_string))
+        .ok_or_else(|| {
+            // Most likely a repository already declared by its `github`,
+            // which the new entry repeated and so was dropped.
+            reloaded
+                .warnings
+                .last()
+                .cloned()
+                .unwrap_or_else(|| format!("{} was added to {} but not taken up", root.display(), path.display()))
+        })?;
+    ctx.replace_repos(reloaded.repo.clone());
+    let _ = ctx.events.send(Event::Repos(ctx.config().declared_repos()));
+    if scan_roots(ctx).await {
+        ctx.send_items();
+    }
+    Ok(identity)
+}
+
 /// The `base` setting of a repository's `[[repo]]` entry.
 fn configured_base(ctx: &Ctx, identity: &str) -> Option<String> {
-    ctx.config
+    ctx.config()
         .repo
         .iter()
         .find(|r| r.identity().is_some_and(|i| i.eq_ignore_ascii_case(identity)))
@@ -7842,7 +7952,7 @@ fn configured_base(ctx: &Ctx, identity: &str) -> Option<String> {
 /// asks GitHub.
 async fn list_bases(ctx: &Ctx, identity: &str) -> Result<Vec<perch_git::BaseBranch>, String> {
     if let Some(root) = root_of(ctx, identity) {
-        let hosts = ctx.config.github_hosts();
+        let hosts = ctx.config().github_hosts();
         let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
         let base = configured_base(ctx, identity);
         let scan = perch_git::scan_root(ctx.preparer.git(), &root, base.as_deref(), &hosts)
@@ -7879,7 +7989,7 @@ async fn list_bases(ctx: &Ctx, identity: &str) -> Result<Vec<perch_git::BaseBran
 /// clone does it, as Start work does.
 async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Result<String, String> {
     let identity = work.repo.as_str();
-    if !ctx.config.is_declared(identity) {
+    if !ctx.config().is_declared(identity) {
         return Err(format!("{identity} is not a repository in the config"));
     }
     let repo = RepoId::parse(identity).ok_or_else(|| format!("{identity} is not a repository name"))?;
@@ -7962,7 +8072,7 @@ async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Resul
         let base_ref = match &work.branch {
             Some(_) => work.base.name.clone(),
             None => {
-                let hosts = ctx.config.github_hosts();
+                let hosts = ctx.config().github_hosts();
                 let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
                 let base = configured_base(ctx, identity);
                 perch_git::scan_root(ctx.preparer.git(), &repo_dir, base.as_deref(), &hosts)
@@ -8287,7 +8397,7 @@ fn defer_polls_for_error(
 /// when there is none, or it is the one GitHub just refused.
 async fn adopt_new_token(ctx: &Ctx) -> Option<Session> {
     let credentials = ctx.credentials.clone();
-    let config = ctx.config.clone();
+    let config = ctx.config().clone();
     // `gh auth token` is a subprocess, so off the runtime's threads.
     let token = tokio::task::spawn_blocking(move || (credentials.resolve)(&config))
         .await
@@ -8320,7 +8430,7 @@ async fn adopt_new_token(ctx: &Ctx) -> Option<Session> {
 /// One poll of the notifications API.
 async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
     let events = &ctx.events;
-    let config = ctx.config.as_ref();
+    let config = ctx.config();
     let wait = Duration::from_secs(config.poll_interval_secs.max(30));
     let no_poll = PollAfter {
         automatic: wait,
@@ -8854,10 +8964,10 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         std::collections::HashSet::new();
     let mut scanned_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut failed_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let hosts = ctx.config.github_hosts();
+    let hosts = ctx.config().github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
 
-    for declared in &ctx.config.repo {
+    for declared in &ctx.config().repo {
         // Every entry has its identity by the time the backend runs. One
         // without would have nothing to key its rows by, so it is passed
         // over rather than guessed at.
@@ -9063,7 +9173,7 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
         // checkout is a fork of one. The lookups are conditional, so a
         // repository asked every poll is one request that mostly says 304.
         let mut candidates: Vec<String> = vec![item.repo_full_name.clone()];
-        for r in ctx.config.declared() {
+        for r in ctx.config().declared() {
             if !perch_github::is_local(&r) && !candidates.iter().any(|c| c.eq_ignore_ascii_case(&r))
             {
                 candidates.push(r);
@@ -9150,7 +9260,7 @@ async fn head_repo_of(ctx: &Ctx, item: &Item, checkout: &ItemCheckout) -> String
     if checkout.owned {
         return item.repo_full_name.clone();
     }
-    let hosts = ctx.config.github_hosts();
+    let hosts = ctx.config().github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
     let remotes = perch_git::remotes(ctx.preparer.git(), &checkout.path)
         .await
@@ -9228,7 +9338,7 @@ async fn open_subject(
                 navigation_id,
                 message: format!(
                     "{} is not on GitHub, so it has no #{number}",
-                    ctx.config.display_name(&repo_full_name)
+                    ctx.config().display_name(&repo_full_name)
                 ),
             },
         );
@@ -10507,9 +10617,9 @@ async fn ask(
             RunPurpose::FollowUp
         },
         backend: backend.name().into(),
-        executable: Some(ctx.config.agent.binary_for(backend.name()).to_string()),
+        executable: Some(ctx.config().agent.binary_for(backend.name()).to_string()),
         executable_version: ctx
-            .config
+            .config()
             .agent
             .binary_version_for(backend.name())
             .map(str::to_string),
@@ -10667,7 +10777,7 @@ async fn ask(
     // which this exact attempt was admitted with.
     run.prompt_snapshot = Some(prompt.user.clone());
     let spec = crate::ask::run_spec(
-        &ctx.config.agent,
+        &ctx.config().agent,
         backend,
         &model,
         effort,
@@ -11288,13 +11398,13 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
     let model = old.requested_model.clone();
     let configured = match backend {
         perch_agent::Backend::ClaudeCode => ctx
-            .config
+            .config()
             .agent
             .models
             .iter()
             .any(|candidate| candidate == &model),
         perch_agent::Backend::Codex => ctx
-            .config
+            .config()
             .agent
             .codex_models()
             .iter()
@@ -11314,7 +11424,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         ));
         return;
     };
-    if !ctx.config.agent.effort_supported(&model, effort.name()) {
+    if !ctx.config().agent.effort_supported(&model, effort.name()) {
         ctx.notice(format!(
             "{model} does not support {} effort",
             effort.label()
@@ -11369,7 +11479,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
     };
     let prompt = captured_retry_prompt(reconstructed_prompt, old.prompt_snapshot.as_deref());
     let spec = crate::ask::run_spec(
-        &ctx.config.agent,
+        &ctx.config().agent,
         backend,
         &model,
         effort,
@@ -11387,9 +11497,9 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         },
         purpose: old.purpose,
         backend: old.backend.clone(),
-        executable: Some(ctx.config.agent.binary_for(backend.name()).to_string()),
+        executable: Some(ctx.config().agent.binary_for(backend.name()).to_string()),
         executable_version: ctx
-            .config
+            .config()
             .agent
             .binary_version_for(backend.name())
             .map(str::to_string),
@@ -12813,7 +12923,7 @@ mod tests {
             }),
             preparer: Arc::new(Preparer::new(Store::new(dir.join("store")), None)),
             cache,
-            config: Arc::new(config),
+            config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
             slot: Arc::new(std::sync::Mutex::new(None)),
             language_server: Arc::new(tokio::sync::Mutex::new(None)),
             events,
@@ -13938,7 +14048,7 @@ mod tests {
         let (mut ctx, _events) = ctx(dir.path(), &nowhere(), &[]);
         let mut config = Config::default();
         config.agent.binary = fake_claude(dir.path());
-        ctx.config = Arc::new(config);
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
         let item = store_pull(&ctx, 7);
         store_line_commented_discussion(&ctx, &item);
         let worktree = dir.path().join("worktree");
@@ -16010,7 +16120,7 @@ mod tests {
         let mut entry = rooted(None, &root);
         entry.resolve(None);
         let (ctx, received) = ctx_declaring(dir.path(), &base, vec![entry]);
-        assert_eq!(ctx.config.declared(), ["local/notes"]);
+        assert_eq!(ctx.config().declared(), ["local/notes"]);
 
         assert!(scan_roots(&ctx).await, "a row was made");
 
@@ -16210,6 +16320,40 @@ mod tests {
         let notices = notices(&received);
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].starts_with("Could not fetch origin; started from the origin/main"), "{}", notices[0]);
+    }
+
+    #[tokio::test]
+    async fn adding_a_repository_appends_it_and_takes_it_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), Vec::new());
+        let notes = dir.path().join("notes");
+        let worktree = root_with_branch(&notes, "feature");
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "# mine\npoll_interval_secs = 30\n").unwrap();
+
+        // Picked from one of its worktrees: the table names the main one.
+        let identity = add_repository(&ctx, &worktree, &config).await.unwrap();
+
+        assert_eq!(identity, "local/notes");
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(text.starts_with("# mine\npoll_interval_secs = 30\n\n[[repo]]\nroots = ["), "{text}");
+        assert!(text.contains(&notes.canonicalize().unwrap().display().to_string()), "{text}");
+        assert_eq!(ctx.config().declared(), ["local/notes"]);
+        let repos: Vec<_> = received
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::Repos(repos) => Some(repos),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(repos.last().unwrap()[0].identity, "local/notes");
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        assert_eq!(items.len(), 1, "the root was scanned: {items:?}");
+
+        let again = add_repository(&ctx, &notes, &config).await.unwrap_err();
+        assert!(again.contains("is already a root of notes"), "{again}");
+        let elsewhere = add_repository(&ctx, dir.path(), &config).await.unwrap_err();
+        assert!(elsewhere.contains("is not in a git repository"), "{elsewhere}");
     }
 
     #[tokio::test]

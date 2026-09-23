@@ -1135,7 +1135,7 @@ async fn execute_attempt(
             .executable
             .clone()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(ctx.config.agent.binary_for(backend.name()))),
+            .unwrap_or_else(|| PathBuf::from(ctx.config().agent.binary_for(backend.name()))),
         model: attempt.model.clone(),
         effort,
         cwd: checkout,
@@ -1596,9 +1596,10 @@ fn validate_launch(ctx: &Ctx, request: &ReviewLaunchRequest) -> Result<(), Strin
                 reviewer.effort
             ));
         }
+        let config = ctx.config();
         let models = match reviewer.backend {
-            AgentBackend::ClaudeCode => ctx.config.agent.models.as_slice(),
-            AgentBackend::Codex => ctx.config.agent.codex_models(),
+            AgentBackend::ClaudeCode => config.agent.models.as_slice(),
+            AgentBackend::Codex => config.agent.codex_models(),
         };
         if reviewer.model.trim().is_empty() || !models.iter().any(|model| model == &reviewer.model)
         {
@@ -1609,7 +1610,7 @@ fn validate_launch(ctx: &Ctx, request: &ReviewLaunchRequest) -> Result<(), Strin
             ));
         }
         if !ctx
-            .config
+            .config()
             .agent
             .effort_supported(&reviewer.model, reviewer.effort.name())
         {
@@ -1662,7 +1663,7 @@ fn new_attempt(
         run_id,
         backend: choice.backend.name().to_string(),
         executable: Some(
-            ctx.config
+            ctx.config()
                 .agent
                 .binary_for(choice.backend.name())
                 .to_string(),
@@ -1989,7 +1990,7 @@ async fn run_verification(
             .executable
             .clone()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(ctx.config.agent.binary_for(backend.name()))),
+            .unwrap_or_else(|| PathBuf::from(ctx.config().agent.binary_for(backend.name()))),
         model: attempt.model.clone(),
         effort,
         cwd: snapshot.checkout(),
