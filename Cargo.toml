@@ -97,11 +97,16 @@ codegen-units = 4
 # boxes share `search_focused`, and a text box's IME input), and a view
 # refocused by Tab ended on FocusLost. Then one that sends a drag no
 # DragTargetLeave and DragTargetEnter for a target that stays under the
-# pointer as it crosses the edge of a view the target hangs out of. Last,
+# pointer as it crosses the edge of a view the target hangs out of. Then
 # one that scrolls the editor's caret into view only when the caret moves.
 # Working out where the caret is drawn read the editor's style tracked,
 # and every restyle writes the style, so a hover or a resize pulled code
-# the reader had scrolled past the caret back up to it. Drop a
+# the reader had scrolled past the caret back up to it. Last, one that
+# runs a timer whose view was removed before it fired: floem looked up
+# that view's root when the timer fired and panicked ("all view ids are
+# entered into the root map") when there was none, so a scroll closed
+# within a second of being scrolled took the app down with its bars'
+# fade timer. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
