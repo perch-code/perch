@@ -329,8 +329,8 @@ default, or `"ask"` for the behaviour above.
 - Claude Code runs with `--permission-mode auto`. Its classifier
   decides sandbox escapes and host access itself: checked with Sonnet,
   an unsandboxed write to the home directory went through without a
-  `can_use_tool` request. Haiku has no auto mode and falls back to
-  asking. In auto mode `Bash` takes `allowed_domains`, which the
+  `can_use_tool` request. Fable, Opus and Sonnet have auto mode;
+  Haiku has none and falls back to asking. In auto mode `Bash` takes `allowed_domains`, which the
   classifier reviews with the command, and the step shows them.
 - Codex runs with `approvalsReviewer: "auto_review"`. Its
   `item/autoApprovalReview/completed` notifications become steps:

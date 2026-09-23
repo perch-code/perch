@@ -449,9 +449,9 @@ Claude Code runs in its auto permission mode, and Codex with its `auto_review`
 reviewer. What the reviewer decides shows in the run's steps: Codex's as
 `Approved automatically: …` or `Refused automatically: …` with its reason,
 Claude Code's as the command itself, `Ran outside the sandbox: …` or `Ran …
-(network: example.com)`. Claude Code's auto mode needs a model that has it, such
-as Sonnet or Opus; with one that does not, such as Haiku, every request comes to
-you. Anything the reviewer passes on comes to you, and so does everything when
+(network: example.com)`. Claude Code's auto mode needs a model that has it: Fable, Opus and Sonnet do
+(checked with Claude Code 2.1.280); Haiku does not, and with it every request
+comes to you. Anything the reviewer passes on comes to you, and so does everything when
 `approvals = "ask"`.
 
 What comes to you: Claude Code asks
