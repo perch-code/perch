@@ -7,7 +7,7 @@
 //! thread without a runtime context. Events travel back on a std channel,
 //! because that is what floem's `update_signal_from_channel` consumes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender as EventSender;
 use std::sync::Arc;
 use std::time::Duration;
@@ -2573,6 +2573,16 @@ async fn run(
     };
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
+    // A discussion directory no run points at is left by a run whose
+    // admission failed, or by `perch --ask`. A day is long enough for
+    // either to be done with it.
+    {
+        let keep = context_dirs(&ctx);
+        let root = crate::context::root(ctx.preparer.store().root());
+        tokio::task::spawn_blocking(move || {
+            crate::context::sweep(&root, &keep, Duration::from_secs(24 * 60 * 60))
+        });
+    }
     // The faces on the cached rows, from disk where they are there.
     ctx.want_avatars(author_avatars(&initial_items));
     ctx.want_avatars(notification_avatars(&initial_notifications));
@@ -5121,6 +5131,7 @@ async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
         ctx.close_review().await;
     }
 
+    let context_before = context_dirs(ctx);
     // Review rows own retained snapshots outside the item's ordinary
     // worktree. Remove the durable history first so the database remains the
     // reference-counting truth, then release only resources no surviving
@@ -5151,6 +5162,7 @@ async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
     ctx.with_cache(|c| c.delete_item(id))
         .transpose()
         .map_err(|e| e.to_string())?;
+    drop_context_dirs(ctx, &context_before);
     ctx.send_items();
     Ok(())
 }
@@ -10111,6 +10123,45 @@ async fn ask(
         .is_none()
         .then(|| thread.resumable_session(backend.name()))
         .flatten();
+    // The discussion on GitHub: all of it as files in a directory of the
+    // run's own, and what fits of it in the prompt. A follow-up that
+    // resumes a session is told only what changed since the run it
+    // continues.
+    let asked_in = thread.github_id;
+    let archive = discussion_archive(
+        ctx,
+        &item_id,
+        pull_request.as_deref(),
+        issue.as_ref().map(|i| &i.0),
+        &checkout,
+    );
+    let context_dir = match &archive {
+        Some(archive) => write_discussion(ctx, archive, &run.id).await,
+        None => None,
+    };
+    let (discussion_text, since_text, manifest) = match &archive {
+        None => (None, None, None),
+        Some(archive) if resume.is_some() => {
+            let previous = previous_manifest(ctx, &thread, backend.name(), archive);
+            let (since, manifest) = crate::context::for_resumed(
+                archive,
+                &previous,
+                prompt_anchor,
+                asked_in,
+                context_dir.as_deref(),
+            );
+            (None, since, Some(manifest))
+        }
+        Some(archive) => {
+            let (text, manifest) = crate::context::for_first(
+                archive,
+                prompt_anchor,
+                asked_in,
+                context_dir.as_deref(),
+            );
+            (Some(text), None, Some(manifest))
+        }
+    };
     let input = crate::ask::PromptInput {
         pull_request: pull_request.as_deref(),
         issue: issue.as_ref().map(|i| (&i.0, i.1.as_slice())),
@@ -10125,6 +10176,8 @@ async fn ask(
         } else {
             &history
         },
+        discussion: discussion_text.as_deref(),
+        since: since_text.as_deref(),
     };
     let prompt = if is_new {
         crate::ask::first_prompt(&input)
@@ -10157,10 +10210,14 @@ async fn ask(
                     cache.delete_comment_message(&question_message.id)
                 }
             });
+            if let Some(dir) = &context_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
             let _ = ctx.events.send(Event::Notice(message));
             return;
         }
     };
+    record_run_context(ctx, &run.id, context_dir.as_deref(), manifest.as_ref());
     // Admission atomically links this request to the queued run before the
     // manager publishes it. There is no detached-run crash window here.
     ctx.send_threads(&item_id);
@@ -10174,6 +10231,138 @@ async fn ask(
         admission,
     )
     .await;
+}
+
+/// The item's discussion as the cache has it, in the shape the files and
+/// the prompt are made from. `None` for an item with no pull request or
+/// issue, and for one whose discussion has not been fetched yet: a
+/// question does not wait for GitHub.
+fn discussion_archive(
+    ctx: &Ctx,
+    item_id: &str,
+    pull_request: Option<&PullRequest>,
+    issue: Option<&perch_github::Issue>,
+    checkout: &perch_git::Checkout,
+) -> Option<perch_knowledge::discussion::DiscussionArchive> {
+    if pull_request.is_none() && issue.is_none() {
+        return None;
+    }
+    let (_, discussion) = ctx
+        .with_cache(|c| c.load_discussion(item_id))
+        .and_then(Result::ok)
+        .flatten()?;
+    let checks = pull_request.and_then(|pr| {
+        ctx.with_cache(|c| c.load_checks(item_id, &pr.head_sha))
+            .and_then(Result::ok)
+            .flatten()
+    });
+    let opener = pull_request
+        .map(|pr| pr.author_login.as_str())
+        .or(issue.map(|i| i.author_login.as_str()))
+        .unwrap_or_default();
+    let head = pull_request.map_or(checkout.head_sha.as_str(), |pr| pr.head_sha.as_str());
+    Some(crate::context::archive(
+        &discussion,
+        item_id,
+        head,
+        opener,
+        checks.as_ref(),
+    ))
+}
+
+/// Write the discussion's files to `$PERCH_HOME/context/<name>`. A failure
+/// is a notice and the run goes on without the directory.
+async fn write_discussion(
+    ctx: &Ctx,
+    archive: &perch_knowledge::discussion::DiscussionArchive,
+    name: &str,
+) -> Option<PathBuf> {
+    let dir = crate::context::root(ctx.preparer.store().root()).join(name);
+    let archive = archive.clone();
+    let target = dir.clone();
+    let written =
+        tokio::task::spawn_blocking(move || crate::context::write_files(&archive, &target)).await;
+    match written {
+        Ok(Ok(())) => Some(dir),
+        Ok(Err(message)) => {
+            ctx.notice(message);
+            None
+        }
+        Err(error) => {
+            ctx.notice(format!("Could not write the discussion: {error}"));
+            None
+        }
+    }
+}
+
+/// What the session a follow-up resumes has seen of the discussion: the
+/// manifest its run recorded. A session begun before runs recorded one
+/// saw the thread it was asked in, up to its answer, and nothing else.
+fn previous_manifest(
+    ctx: &Ctx,
+    thread: &CommentThread,
+    backend: &str,
+    archive: &perch_knowledge::discussion::DiscussionArchive,
+) -> perch_knowledge::discussion::Manifest {
+    let run = thread.resumable_run(backend);
+    let recorded = run
+        .and_then(|run| {
+            ctx.with_cache(|c| c.run_context(&run.id))
+                .and_then(Result::ok)
+                .flatten()
+        })
+        .and_then(|context| context.manifest)
+        .and_then(|json| serde_json::from_str(&json).ok());
+    recorded.unwrap_or_else(|| {
+        let answered = run
+            .and_then(|run| {
+                thread
+                    .messages
+                    .iter()
+                    .position(|m| m.run.as_ref().is_some_and(|r| r.id == run.id))
+            })
+            .unwrap_or(thread.messages.len());
+        let seen: Vec<u64> = thread.messages[..answered]
+            .iter()
+            .filter_map(|m| m.github_id)
+            .collect();
+        perch_knowledge::discussion::Manifest::of_replies(archive, &seen)
+    })
+}
+
+/// Keep where a run's discussion is and what it was shown, on its row.
+fn record_run_context(
+    ctx: &Ctx,
+    run_id: &str,
+    dir: Option<&Path>,
+    manifest: Option<&perch_knowledge::discussion::Manifest>,
+) {
+    if dir.is_none() && manifest.is_none() {
+        return;
+    }
+    let dir = dir.map(|d| d.to_string_lossy().into_owned());
+    let manifest = manifest.and_then(|m| serde_json::to_string(m).ok());
+    if let Some(Err(error)) =
+        ctx.with_cache(|c| c.set_run_context(run_id, dir.as_deref(), manifest.as_deref()))
+    {
+        tracing::warn!(run = run_id, %error, "could not record the run's discussion");
+    }
+}
+
+/// Every discussion directory a run points at.
+fn context_dirs(ctx: &Ctx) -> std::collections::HashSet<PathBuf> {
+    ctx.with_cache(|c| c.run_context_dirs())
+        .and_then(Result::ok)
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Remove the directories of runs deleted since `before` was read.
+fn drop_context_dirs(ctx: &Ctx, before: &std::collections::HashSet<PathBuf>) {
+    let root = crate::context::root(ctx.preparer.store().root());
+    crate::context::drop_unreferenced(&root, before, &context_dirs(ctx));
 }
 
 /// Execute one admitted attempt. The request and its context have already
@@ -10690,6 +10879,10 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         review_context: None,
         question: &old.original_request,
         history: &history,
+        // The captured prompt replaces the text below; it already carries
+        // the discussion the first attempt was given.
+        discussion: None,
+        since: None,
     };
     let reconstructed_prompt = if old.purpose == RunPurpose::Question {
         crate::ask::first_prompt(&input)
@@ -10755,6 +10948,19 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
             return;
         }
     };
+    // The retry reads the directory the first attempt did, as it sends the
+    // prompt the first attempt did, and leaves the same manifest.
+    if let Some(context) = ctx
+        .with_cache(|c| c.run_context(&old.id))
+        .and_then(Result::ok)
+        .flatten()
+    {
+        if let Some(Err(error)) = ctx.with_cache(|c| {
+            c.set_run_context(&run.id, context.dir.as_deref(), context.manifest.as_deref())
+        }) {
+            tracing::warn!(run = %run.id, %error, "could not carry the discussion to the retry");
+        }
+    }
     // Admission moved the request link and preserved its previous attempt in
     // the same transaction as the queued row and event.
     ctx.send_threads(&item_id);
@@ -10796,12 +11002,14 @@ async fn delete_comment_thread(ctx: &Ctx, id: &str) {
     if let Some(item_id) = item_id.as_deref() {
         ctx.runs.cancel_owner(item_id, Some(id)).await;
     }
+    let context_before = context_dirs(ctx);
     if let Some(Err(e)) = ctx.with_cache(|c| c.delete_comment_thread(id)) {
         let _ = ctx
             .events
             .send(Event::Notice(format!("Could not delete the thread: {e}")));
         return;
     }
+    drop_context_dirs(ctx, &context_before);
     drop(deletion);
     if let Some(item_id) = item_id {
         ctx.send_threads(&item_id);
@@ -10827,12 +11035,14 @@ async fn delete_private_messages(ctx: &Ctx, thread_id: &str) {
         }
     };
     ctx.runs.cancel_owner(&item_id, Some(thread_id)).await;
+    let context_before = context_dirs(ctx);
     if let Some(Err(e)) = ctx.with_cache(|c| c.delete_private_messages(thread_id)) {
         let _ = ctx
             .events
             .send(Event::Notice(format!("Could not delete the messages: {e}")));
         return;
     }
+    drop_context_dirs(ctx, &context_before);
     drop(deletion);
     ctx.send_threads(&item_id);
 }
@@ -13223,6 +13433,146 @@ mod tests {
         ctx.with_cache(|c| c.store_discussion(&item.id, &discussion))
             .unwrap()
             .unwrap();
+    }
+
+    /// A `claude` that answers every question the same way, in session
+    /// `s1`, whatever it is asked.
+    fn fake_claude(dir: &Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("claude");
+        std::fs::write(
+            &path,
+            concat!(
+                "#!/bin/sh\n",
+                "echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"model\":\"sonnet\"}'\n",
+                "echo '{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Because.\"}]},\"session_id\":\"s1\"}'\n",
+                "echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Because.\",\"session_id\":\"s1\"}'\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_question_is_given_the_discussion_and_a_resumed_follow_up_what_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _events) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = fake_claude(dir.path());
+        ctx.config = Arc::new(config);
+        let item = store_pull(&ctx, 7);
+        store_line_commented_discussion(&ctx, &item);
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        open_in_slot_at(&ctx, &item, "h7");
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
+        let anchor = Anchor {
+            path: "src/x.rs".into(),
+            start_line: 45,
+            line: 45,
+            side: perch_github::Side::Right,
+            commit_sha: "h7".into(),
+        };
+        let context_root = crate::context::root(ctx.preparer.store().root());
+        let ask_it = |thread: Option<String>, question: &str| {
+            ask(
+                &ctx,
+                item.id.clone(),
+                thread,
+                Some(anchor.clone()),
+                question.to_string(),
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            )
+        };
+        ask_it(None, "Why?").await;
+        let thread = ctx
+            .with_cache(|c| c.load_comment_threads(&item.id).unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|t| t.origin == ThreadOrigin::Local)
+            .expect("the question's thread");
+        let runs = ctx
+            .with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, RunStatus::Completed, "{:?}", runs[0].error);
+        let first = runs[0].prompt_snapshot.clone().unwrap();
+        let first_dir = context_root.join(&runs[0].id);
+        assert!(
+            first.contains("[BEGIN untrusted text: thread by rohan on src/x.rs:41, unresolved]\nrohan: epoch\n"),
+            "{first}"
+        );
+        assert!(first.contains(&format!(
+            "The whole discussion is in {}/, INDEX.md first.",
+            first_dir.display()
+        )));
+        assert!(first.ends_with("Question: Why?"));
+        assert!(first_dir.join("INDEX.md").is_file());
+        assert!(first_dir.join("threads/r31.md").is_file());
+        assert!(!worktree.join("INDEX.md").exists(), "nothing in the worktree");
+        let recorded = ctx
+            .with_cache(|c| c.run_context(&runs[0].id).unwrap().unwrap())
+            .unwrap();
+        assert_eq!(recorded.dir.as_deref(), Some(first_dir.to_str().unwrap()));
+        let manifest: perch_knowledge::discussion::Manifest =
+            serde_json::from_str(recorded.manifest.as_deref().unwrap()).unwrap();
+        assert!(manifest.spent > 0);
+
+        // Someone comments on the conversation tab; the follow-up resumes
+        // the session and hears of it.
+        let mut discussion = ctx
+            .with_cache(|c| c.load_discussion(&item.id).unwrap().unwrap().1)
+            .unwrap();
+        discussion.comments.push(perch_github::IssueComment {
+            id: 5,
+            node_id: String::new(),
+            user: "carol".into(),
+            user_avatar_url: String::new(),
+            body: "Rebased.".into(),
+            created_at: "2026-09-17T09:00:00Z".parse().unwrap(),
+            updated_at: None,
+            html_url: String::new(),
+            reactions: Default::default(),
+        });
+        ctx.with_cache(|c| c.store_discussion(&item.id, &discussion))
+            .unwrap()
+            .unwrap();
+        ask_it(Some(thread.id.clone()), "And now?").await;
+        let runs = ctx
+            .with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+            .unwrap();
+        assert_eq!(runs.len(), 2);
+        let second = runs[1].prompt_snapshot.clone().unwrap();
+        let second_dir = context_root.join(&runs[1].id);
+        assert_eq!(
+            second,
+            format!(
+                "(About src/x.rs:45)\n\nSince your last answer:\n\
+                 [BEGIN untrusted text: comment by carol]\nRebased.\n[END untrusted text]\n\
+                 New or changed elsewhere: 1 comment.\n\
+                 The whole discussion is now in {}/, INDEX.md first.\n\n\
+                 Question: And now?",
+                second_dir.display()
+            )
+        );
+
+        // Nothing new: the question alone.
+        ask_it(Some(thread.id.clone()), "Sure?").await;
+        let runs = ctx
+            .with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+            .unwrap();
+        assert_eq!(
+            runs[2].prompt_snapshot.as_deref(),
+            Some("(About src/x.rs:45)\n\nQuestion: Sure?")
+        );
+
+        delete_comment_thread(&ctx, &thread.id).await;
+        assert!(!first_dir.exists());
+        assert!(!second_dir.exists());
+        assert!(!context_root.join(&runs[2].id).exists());
     }
 
     /// A kept discussion with one review comment on a line, `PRRC_31`,

@@ -126,13 +126,19 @@ impl CommentThread {
     /// mid-thread starts over rather than looking for an older run of the
     /// right kind, because the history since that run would be lost.
     pub fn resumable_session(&self, backend: &str) -> Option<String> {
+        self.resumable_run(backend)
+            .and_then(|r| r.session_id.clone())
+    }
+
+    /// The run [`resumable_session`](Self::resumable_session) continues,
+    /// by the same rule, so what it recorded comes with its session.
+    pub fn resumable_run(&self, backend: &str) -> Option<&RunRecord> {
         self.messages
             .iter()
             .rev()
             .filter_map(|m| m.run.as_ref())
             .find(|r| r.status == RunStatus::Completed)
-            .filter(|r| r.backend == backend)
-            .and_then(|r| r.session_id.clone())
+            .filter(|r| r.backend == backend && r.session_id.is_some())
     }
 
     pub fn running_run(&self) -> Option<&RunRecord> {

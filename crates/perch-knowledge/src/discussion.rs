@@ -306,9 +306,21 @@ impl Manifest {
         self.entries.contains_key(&key.manifest_key())
     }
 
-    /// Forget a thread comment, so it reads as new.
-    pub fn forget_reply(&mut self, id: u64) {
-        self.entries.remove(&reply_key(id));
+    /// A manifest that has seen only the thread comments `ids`, as they
+    /// are in `archive` now: what a session begun before runs were given
+    /// the discussion knew of it, the thread it was asked in.
+    pub fn of_replies(archive: &DiscussionArchive, ids: &[u64]) -> Self {
+        let entries = archive
+            .threads
+            .iter()
+            .flat_map(|t| &t.messages)
+            .filter(|m| ids.contains(&m.id))
+            .map(|m| (reply_key(m.id), fingerprint(&m.body)))
+            .collect();
+        Self {
+            entries,
+            ..Self::default()
+        }
     }
 }
 

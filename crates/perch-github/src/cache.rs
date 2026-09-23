@@ -36,7 +36,7 @@ mod review_store;
 /// whether the reader may resolve it. Version 24 keeps the instructions a
 /// worktree review was run with. Schemas 13 through 23 migrate in place so
 /// local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 24;
+pub const SCHEMA_VERSION: u32 = 25;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -76,6 +76,15 @@ pub enum CacheError {
     ReviewConflict(String),
     #[error("invalid review transition: {0}")]
     InvalidReviewTransition(String),
+}
+
+/// What a run recorded of the discussion it was given: the directory the
+/// files were written to, and the manifest of what its prompt showed, as
+/// JSON.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunContext {
+    pub dir: Option<String>,
+    pub manifest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -257,6 +266,8 @@ CREATE TABLE runs (
     final_result_truncated INTEGER NOT NULL DEFAULT 0,
     latest_activity        TEXT,
     last_event_sequence    INTEGER NOT NULL DEFAULT 0,
+    context_dir            TEXT,
+    context_manifest       TEXT,
     CHECK (owner_kind IN ('discussion', 'review', 'unavailable')),
     CHECK (
         (owner_kind = 'discussion' AND owner_item_id IS NOT NULL AND owner_thread_id IS NOT NULL
@@ -384,6 +395,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             21 => migrate_21_to_22(&tx)?,
             22 => add_github_thread_columns(&tx)?,
             23 => review_store::add_group_instructions(&tx)?,
+            24 => add_run_context_columns(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -527,6 +539,24 @@ fn add_github_thread_columns(tx: &Transaction<'_>) -> Result<(), CacheError> {
                 &format!("ALTER TABLE comment_threads ADD COLUMN {column} {kind}"),
                 [],
             )?;
+        }
+    }
+    Ok(())
+}
+
+/// The columns schema 25 adds to a run: the directory of the discussion
+/// it was pointed at, and the manifest of what it was shown.
+const RUN_CONTEXT_COLUMNS: [&str; 2] = ["context_dir", "context_manifest"];
+
+fn add_run_context_columns(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    for column in RUN_CONTEXT_COLUMNS {
+        let present: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name=?1)",
+            params![column],
+            |row| row.get(0),
+        )?;
+        if !present {
+            tx.execute(&format!("ALTER TABLE runs ADD COLUMN {column} TEXT"), [])?;
         }
     }
     Ok(())
@@ -2639,6 +2669,53 @@ impl Cache {
 
     pub fn load_run(&self, id: &str) -> Result<Option<RunRecord>, CacheError> {
         load_run_on(&self.conn, id)
+    }
+
+    /// Record where a run's discussion was written and the manifest of what
+    /// its prompt was shown. Either may be absent: a run with no discussion
+    /// has neither, and one whose directory could not be written keeps the
+    /// manifest alone.
+    pub fn set_run_context(
+        &self,
+        run_id: &str,
+        dir: Option<&str>,
+        manifest: Option<&str>,
+    ) -> Result<(), CacheError> {
+        self.conn.execute(
+            "UPDATE runs SET context_dir=?2, context_manifest=?3 WHERE id=?1",
+            params![run_id, dir, manifest],
+        )?;
+        Ok(())
+    }
+
+    /// Where a run's discussion is and what it was shown, if it recorded
+    /// either. `None` for a run that is gone.
+    pub fn run_context(&self, run_id: &str) -> Result<Option<RunContext>, CacheError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT context_dir, context_manifest FROM runs WHERE id=?1",
+                params![run_id],
+                |row| {
+                    Ok(RunContext {
+                        dir: row.get(0)?,
+                        manifest: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Every discussion directory a run still points at, so a sweep leaves
+    /// them alone.
+    pub fn run_context_dirs(&self) -> Result<Vec<String>, CacheError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT context_dir FROM runs WHERE context_dir IS NOT NULL")?;
+        let dirs = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(dirs)
     }
 
     /// Insert a thread with its messages, in one transaction: a failure
@@ -6644,6 +6721,39 @@ mod tests {
             )
             .unwrap();
         assert!(has_column);
+    }
+
+    #[test]
+    fn schema_24_gains_each_run_s_discussion_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_run(&run("run-24", "thread-24", RunStatus::Completed)).unwrap();
+            for column in RUN_CONTEXT_COLUMNS {
+                cache
+                    .conn
+                    .execute(&format!("ALTER TABLE runs DROP COLUMN {column}"), [])
+                    .unwrap();
+            }
+            cache.set_meta("schema_version", "24").unwrap();
+        }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 24, to: SCHEMA_VERSION });
+        assert_eq!(cache.run_context("run-24").unwrap(), Some(RunContext::default()));
+        cache
+            .set_run_context("run-24", Some("/perch/context/run-24"), Some("{}"))
+            .unwrap();
+        assert_eq!(
+            cache.run_context("run-24").unwrap(),
+            Some(RunContext {
+                dir: Some("/perch/context/run-24".into()),
+                manifest: Some("{}".into()),
+            })
+        );
+        assert_eq!(cache.run_context_dirs().unwrap(), ["/perch/context/run-24"]);
+        assert_eq!(cache.run_context("gone").unwrap(), None);
     }
 
     #[test]

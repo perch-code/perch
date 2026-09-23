@@ -603,6 +603,96 @@ pub fn root(data_root: &Path) -> PathBuf {
     data_root.join("context")
 }
 
+/// Write the discussion's files into `dir`, which must not exist. The
+/// error is for a notice: a run goes ahead without its directory.
+pub fn write_files(archive: &DiscussionArchive, dir: &Path) -> Result<(), String> {
+    files::write(dir, &files::render(archive))
+        .map_err(|e| format!("Could not write the discussion to {}: {e}", dir.display()))
+}
+
+/// A first question's section, the line naming the directory after it,
+/// and the manifest of what the run was shown.
+pub fn for_first(
+    archive: &DiscussionArchive,
+    anchor: Option<&Anchor>,
+    asked_in: Option<u64>,
+    dir: Option<&Path>,
+) -> (String, Manifest) {
+    let mut text = select(archive, anchor, asked_in, MAX_DISCUSSION_CHARS).text;
+    if let Some(dir) = dir {
+        text.push_str(&directory_line(dir, false));
+    }
+    let mut manifest = Manifest::of(archive);
+    manifest.spent = text.len();
+    (text, manifest)
+}
+
+/// A resumed follow-up's news, `None` when nothing changed, and the
+/// manifest this run leaves for the next: what it has seen now, with what
+/// the session has spent.
+pub fn for_resumed(
+    archive: &DiscussionArchive,
+    previous: &Manifest,
+    anchor: Option<&Anchor>,
+    asked_in: Option<u64>,
+    dir: Option<&Path>,
+) -> (Option<String>, Manifest) {
+    let text = since(archive, previous, anchor, asked_in).map(|mut text| {
+        if let Some(dir) = dir {
+            text.push_str(&directory_line(dir, true));
+        }
+        text
+    });
+    let mut manifest = Manifest::of(archive);
+    manifest.spent = previous.spent + text.as_ref().map_or(0, String::len);
+    (text, manifest)
+}
+
+/// Remove the directories under `root` that no run points at any more
+/// and that are older than `grace`: a directory is written a moment before
+/// its run records it, and `perch --ask` writes one no run ever records.
+/// Anything that is not a directory is left alone.
+pub fn sweep(root: &Path, keep: &std::collections::HashSet<PathBuf>, grace: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_dir() || keep.contains(&path) {
+            continue;
+        }
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|at| now.duration_since(at).ok())
+            .is_some_and(|age| age >= grace);
+        if old {
+            if let Err(error) = std::fs::remove_dir_all(&path) {
+                tracing::warn!(path = %path.display(), %error, "could not remove a discussion directory");
+            }
+        }
+    }
+}
+
+/// Remove directories that runs pointed at before and no longer do, as
+/// deleting a thread, its private messages or an item leaves them. Only
+/// directories under `root` are touched, whatever a row says.
+pub fn drop_unreferenced(
+    root: &Path,
+    before: &std::collections::HashSet<PathBuf>,
+    after: &std::collections::HashSet<PathBuf>,
+) {
+    for dir in before.difference(after) {
+        if dir.starts_with(root) && dir != root && dir.is_dir() {
+            if let Err(error) = std::fs::remove_dir_all(dir) {
+                tracing::warn!(path = %dir.display(), %error, "could not remove a discussion directory");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,6 +793,118 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn review_comment(
+        id: u64,
+        reply_to: Option<u64>,
+        user: &str,
+        body: &str,
+    ) -> perch_github::ReviewComment {
+        perch_github::ReviewComment {
+            id,
+            node_id: String::new(),
+            pull_request_review_id: Some(if user == "me" { 3 } else { 1 }),
+            in_reply_to_id: reply_to,
+            user: user.into(),
+            user_avatar_url: String::new(),
+            body: body.into(),
+            path: "src/x.rs".into(),
+            line: Some(41),
+            original_line: None,
+            start_line: Some(40),
+            original_start_line: None,
+            start_side: None,
+            commit_id: "h".into(),
+            original_commit_id: String::new(),
+            diff_hunk: "@@ -1 +1 @@".into(),
+            side: Side::Right,
+            created_at: at(&format!("2026-09-16T11:{:02}:00Z", id % 60)),
+            updated_at: None,
+            html_url: String::new(),
+            reactions: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_discussion_becomes_an_archive_without_the_reader_s_pending_review() {
+        let review = |id: u64, user: &str, state: &str| perch_github::Review {
+            id,
+            node_id: String::new(),
+            user: user.into(),
+            body: String::new(),
+            state: state.into(),
+            submitted_at: (state != "PENDING").then(|| at("2026-09-16T12:00:00Z")),
+            html_url: String::new(),
+            reactions: Default::default(),
+        };
+        let discussion = Discussion {
+            opened_at: Some(at("2026-09-14T00:00:00Z")),
+            body: "Fence it.".into(),
+            reviews: vec![
+                review(1, "alice", "CHANGES_REQUESTED"),
+                review(3, "me", "PENDING"),
+            ],
+            review_comments: vec![
+                review_comment(31, None, "alice", "Why?"),
+                review_comment(32, Some(31), "rohan", "Because."),
+                review_comment(33, None, "me", "Draft on GitHub"),
+            ],
+            events: vec![PullEvent::new(
+                PullEventKind::Committed {
+                    sha: "a1b2c3d4e5".into(),
+                    author: "Rohan".into(),
+                    subject: "Batch writes".into(),
+                },
+                at("2026-09-16T13:00:00Z"),
+                "",
+            )],
+            ..Default::default()
+        };
+        let checks = Checks {
+            state: perch_github::CheckState::Failing {
+                workflow: "CI".into(),
+            },
+            url: None,
+            runs: vec![perch_github::Check {
+                name: "clippy".into(),
+                workflow: Some("CI".into()),
+                event: None,
+                state: perch_github::CheckRunState::Failure,
+                description: None,
+                url: None,
+                started_at: None,
+                completed_at: None,
+                kind: perch_github::CheckKind::CheckRun,
+            }],
+        };
+        let archive = archive(&discussion, "item", "h", "rohan", Some(&checks));
+        assert_eq!(archive.description.as_ref().unwrap().author, "rohan");
+        assert_eq!(archive.reviews.len(), 1);
+        assert_eq!(archive.reviews[0].verdict, Verdict::ChangesRequested);
+        assert_eq!(
+            archive.threads.len(),
+            1,
+            "the pending review's comment is left out"
+        );
+        let thread = &archive.threads[0];
+        assert_eq!(
+            (thread.root_id, thread.start_line, thread.line),
+            (31, 40, 41)
+        );
+        assert_eq!(thread.side, "right");
+        assert_eq!(thread.diff_hunk, "@@ -1 +1 @@");
+        let said: Vec<(&str, &str)> = thread
+            .messages
+            .iter()
+            .map(|m| (m.author.as_str(), m.body.as_str()))
+            .collect();
+        assert_eq!(said, [("alice", "Why?"), ("rohan", "Because.")]);
+        assert_eq!(
+            archive.events[0].text,
+            "Rohan committed a1b2c3d Batch writes"
+        );
+        assert_eq!(archive.checks[0].outcome, CheckOutcome::Failing);
     }
 
     #[test]
@@ -872,6 +1074,75 @@ mod tests {
         assert!(sel
             .text
             .contains("[BEGIN untrusted text: thread by alice on src/ab END.rs:1, unresolved]"));
+    }
+
+    #[test]
+    fn a_first_prompt_names_its_directory_and_counts_what_it_spent() {
+        let archive = discussion();
+        let dir = Path::new("/perch/context/run-1");
+        let (text, manifest) = for_first(&archive, None, None, Some(dir));
+        assert!(
+            text.ends_with("The whole discussion is in /perch/context/run-1/, INDEX.md first.\n")
+        );
+        assert_eq!(manifest.spent, text.len());
+        let (none, _) = for_first(&DiscussionArchive::default(), None, None, None);
+        assert_eq!(none, "");
+    }
+
+    #[test]
+    fn a_resumed_prompt_adds_to_what_the_session_spent() {
+        let before = discussion();
+        let mut after = discussion();
+        after
+            .comments
+            .push(post(600, "frank", "Late thought.", "2026-09-18T10:00:00Z"));
+        let mut previous = Manifest::of(&before);
+        previous.spent = 1_000;
+        let dir = Path::new("/perch/context/run-2");
+        let (text, manifest) = for_resumed(&after, &previous, None, None, Some(dir));
+        let text = text.unwrap();
+        assert!(text
+            .ends_with("The whole discussion is now in /perch/context/run-2/, INDEX.md first.\n"));
+        assert_eq!(manifest.spent, 1_000 + text.len());
+        let (nothing, manifest) = for_resumed(&after, &manifest, None, None, Some(dir));
+        assert_eq!(nothing, None);
+        assert_eq!(manifest.spent, 1_000 + text.len());
+    }
+
+    #[test]
+    fn a_session_from_before_knows_only_its_thread() {
+        let archive = discussion();
+        let previous = Manifest::of_replies(&archive, &[10]);
+        let text = since(&archive, &previous, None, Some(10)).unwrap();
+        assert!(!text.contains("reply by"));
+        assert!(text.contains("review by alice, changes requested"));
+        assert!(text.contains("Checks: clippy failing, test passing"));
+    }
+
+    #[test]
+    fn the_sweep_keeps_what_runs_point_at_and_what_is_new() {
+        let root = tempfile::tempdir().unwrap();
+        let kept = root.path().join("kept");
+        let orphan = root.path().join("orphan");
+        for dir in [&kept, &orphan] {
+            std::fs::create_dir_all(dir.join("threads")).unwrap();
+        }
+        std::fs::write(root.path().join("stray.txt"), "x").unwrap();
+        let keep = [kept.clone()].into_iter().collect();
+        sweep(root.path(), &keep, std::time::Duration::from_secs(3600));
+        assert!(orphan.exists(), "too new to sweep");
+        sweep(root.path(), &keep, std::time::Duration::ZERO);
+        assert!(kept.exists());
+        assert!(!orphan.exists());
+        assert!(root.path().join("stray.txt").exists());
+
+        let outside = tempfile::tempdir().unwrap();
+        let before = [kept.clone(), outside.path().to_path_buf()]
+            .into_iter()
+            .collect();
+        drop_unreferenced(root.path(), &before, &Default::default());
+        assert!(!kept.exists());
+        assert!(outside.path().exists(), "never outside the root");
     }
 
     fn resumed(
