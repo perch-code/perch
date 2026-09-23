@@ -8,6 +8,7 @@
 
 mod codex;
 mod discover;
+mod interactive;
 mod parse;
 mod review;
 
@@ -22,11 +23,13 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::process::Command;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio::sync::Notify;
 
 pub use codex::CodexParser;
+pub use interactive::{ApprovalKind, ApprovalRequest, Decision};
+use interactive::{ClaudeHost, CodexServer, CodexThread, Conversation};
 pub use discover::{
     codex_catalog, codex_default_model, find_binary, parse_codex_catalog, CodexModel,
 };
@@ -209,17 +212,25 @@ pub enum Mode {
     Work(WorkGrant),
 }
 
-/// What a Work run may reach beyond its worktree: `[repo.work]`.
+/// What a Work run may reach beyond its worktree: `[repo.work]`, and
+/// what the reader has granted the repository.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkGrant {
     pub write: Vec<PathBuf>,
     pub network: Vec<String>,
+    /// The repository's git directories are writable, all but their
+    /// config and hooks, so the run can commit.
+    pub commit: bool,
+    /// The repository's own agent configuration is loaded.
+    pub trust: bool,
 }
 
 /// The tools a Work run may use without asking, besides editing inside
-/// the worktree (see [`work_edit_rules`]). `Bash` has no command list:
-/// every command runs in the sandbox, which is the boundary.
-pub const WORK_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS", "Bash", "TodoWrite"];
+/// the worktree (see [`work_edit_rules`]). `Bash` is not among them: a
+/// sandboxed command runs through `autoAllowBashIfSandboxed`, and one
+/// asking to leave the sandbox then comes to Perch. Listed, `Bash`
+/// would let it leave without asking.
+pub const WORK_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS", "TodoWrite"];
 
 /// The tools that edit files, allowed to a Work run only under its
 /// worktree. `NotebookEdit` is among them; for Ask it is denied by name.
@@ -274,24 +285,54 @@ pub fn linked_git_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Where a commit writes, and what in there must stay read-only, for a
+/// worktree whose repository the reader lets Work commit in: the
+/// worktree's git directories, and each one's config and hooks.
+fn commit_paths(worktree: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let dirs = match linked_git_dirs(worktree) {
+        dirs if !dirs.is_empty() => dirs,
+        _ => vec![worktree.join(".git")],
+    };
+    let guarded = dirs
+        .iter()
+        .flat_map(|dir| ["config", "config.worktree", "hooks"].map(|name| dir.join(name)))
+        .collect();
+    (dirs, guarded)
+}
+
 /// The `--settings` a Work run starts with. The shell's sandbox is the
-/// boundary now, so a sandboxed command runs without asking; there is
-/// still no unsandboxed retry, and no sandbox means no run. Writes go to
-/// the worktree, the temporary directory and the grant, never to the
-/// protected paths in the worktree nor to the git directories it uses,
-/// wherever they are, so `git commit` fails. The network is the grant's
-/// domains and nothing else.
+/// boundary: a sandboxed command runs without asking, and one that asks
+/// to leave it, or a connection to a host the grant does not list, comes
+/// to Perch as a request rather than being refused. No sandbox means no
+/// run. Writes go to the worktree, the temporary directory and the
+/// grant, never to the protected paths in the worktree nor, unless the
+/// reader lets Work commit, to the git directories it uses; with that,
+/// the git directories are writable but their config and hooks are not.
 pub fn claude_work_settings(cwd: &std::path::Path, grant: &WorkGrant) -> String {
     let real = real_path(cwd);
     let mut allow_write = vec![real.clone(), real_path(&std::env::temp_dir())];
     allow_write.extend(grant.write.iter().map(|p| real_path(p)));
-    let mut deny_write: Vec<PathBuf> = WORK_PROTECTED.iter().map(|name| real.join(name)).collect();
-    deny_write.extend(linked_git_dirs(&real));
+    // A `.git` directory is where a commit writes, so the commit grant
+    // opens it; a linked worktree's `.git` file only points elsewhere,
+    // and stays read-only whatever is granted.
+    let git_is_dir = real.join(".git").is_dir();
+    let mut deny_write: Vec<PathBuf> = WORK_PROTECTED
+        .iter()
+        .filter(|name| !(grant.commit && git_is_dir && **name == ".git"))
+        .map(|name| real.join(name))
+        .collect();
+    if grant.commit {
+        let (dirs, guarded) = commit_paths(&real);
+        allow_write.extend(dirs);
+        deny_write.extend(guarded);
+    } else {
+        deny_write.extend(linked_git_dirs(&real));
+    }
     serde_json::json!({
         "sandbox": {
             "enabled": true,
             "autoAllowBashIfSandboxed": true,
-            "allowUnsandboxedCommands": false,
+            "allowUnsandboxedCommands": true,
             "failIfUnavailable": true,
             "filesystem": {
                 "allowWrite": allow_write,
@@ -299,29 +340,25 @@ pub fn claude_work_settings(cwd: &std::path::Path, grant: &WorkGrant) -> String 
             },
             "network": {
                 "allowedDomains": grant.network,
-                "deniedDomains": [],
-                "strictAllowlist": true,
             },
         },
     })
     .to_string()
 }
 
-/// The permission profile a Codex Work run runs under, defined on its
-/// command line by [`codex_work_filesystem`].
+/// The permission profile a Codex Work run runs under, defined in the
+/// config its thread starts with.
 pub const CODEX_WORK_PROFILE: &str = "perch_work";
 
-/// The `-c` that defines Codex's Work profile: everything readable, the
+/// Codex's Work profile, path by path: everything readable, the
 /// workspace, the temporary directory and the grant writable, and the
 /// protected paths in the worktree and the git directories it uses read
 /// only. Codex's `workspace-write` is not used, because for a linked
-/// worktree it makes the repository's git directory writable, and a
-/// commit would go through; a path named here outranks the workspace it
-/// is in. The profile names no network, and a profile without one has
-/// none: Codex has no allowlist to honour the grant's domains with. A
-/// path cannot be a `-c` key segment, so the whole table goes in as one
-/// inline value.
-pub fn codex_work_filesystem(cwd: &std::path::Path, grant: &WorkGrant) -> String {
+/// worktree it makes the repository's git directory writable; a path
+/// named here outranks the workspace it is in. The profile names no
+/// network, and a profile without one has none: a command that needs it
+/// asks.
+pub fn codex_work_entries(cwd: &std::path::Path, grant: &WorkGrant) -> Vec<(String, &'static str)> {
     let real = real_path(cwd);
     let mut entries = vec![
         (":root".to_string(), "read"),
@@ -337,12 +374,27 @@ pub fn codex_work_filesystem(cwd: &std::path::Path, grant: &WorkGrant) -> String
     for dir in linked_git_dirs(&real) {
         entries.push((dir.to_string_lossy().into_owned(), "read"));
     }
-    let table = entries
-        .iter()
-        .map(|(path, access)| format!("{}=\"{access}\"", toml_string(path)))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("permissions.{CODEX_WORK_PROFILE}.filesystem={{{table}}}")
+    entries
+}
+
+/// The MCP servers the user's own Codex config declares, which a Work
+/// run turns off: `codex app-server` has no `--ignore-user-config`, and
+/// those servers run outside any sandbox.
+pub fn codex_user_mcp_servers() -> Vec<String> {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")));
+    let Some(text) = home.and_then(|h| std::fs::read_to_string(h.join("config.toml")).ok()) else {
+        return Vec::new();
+    };
+    let Ok(value) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    value
+        .get("mcp_servers")
+        .and_then(toml::Value::as_table)
+        .map(|servers| servers.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// The arguments that keep a Claude Code run to the user's own settings:
@@ -350,6 +402,27 @@ pub fn codex_work_filesystem(cwd: &std::path::Path, grant: &WorkGrant) -> String
 /// `.claude/settings*.json` or `.mcp.json`, and no MCP server starts.
 pub fn claude_isolation_args(cwd: &std::path::Path) -> Vec<String> {
     isolation_args_with(claude_settings(cwd))
+}
+
+/// For a repository the reader trusts: its own settings and local
+/// settings are read beside the user's, and its `.mcp.json`, when it has
+/// one, is the MCP config.
+fn trusted_args_with(cwd: &std::path::Path, settings: String) -> Vec<String> {
+    let mcp = cwd.join(".mcp.json");
+    let mcp = if mcp.is_file() {
+        mcp.to_string_lossy().into_owned()
+    } else {
+        r#"{"mcpServers":{}}"#.to_string()
+    };
+    vec![
+        "--setting-sources".into(),
+        "user,project,local".into(),
+        "--strict-mcp-config".into(),
+        "--mcp-config".into(),
+        mcp,
+        "--settings".into(),
+        settings,
+    ]
 }
 
 /// [`claude_isolation_args`] with the sandbox a mode needs.
@@ -475,18 +548,31 @@ impl RunSpec {
     /// The prompt goes last, after `--`, so a question that begins with a
     /// dash is not read as an option. Both CLIs reject one otherwise.
     fn claude_args(&self) -> Vec<String> {
+        let work = matches!(self.mode, Mode::Work(_));
         let mut args = vec![
             "-p".to_string(),
             "--output-format".into(),
             "stream-json".into(),
             "--verbose".into(),
+        ];
+        // A Work run can ask: its prompt and Perch's answers go on stdin,
+        // and anything its permissions would prompt for comes to Perch.
+        if work {
+            args.extend([
+                "--input-format".into(),
+                "stream-json".into(),
+                "--permission-prompt-tool".into(),
+                "stdio".into(),
+            ]);
+        }
+        args.extend([
             "--model".into(),
             self.model.clone(),
             "--effort".into(),
             self.effort.claude_name().into(),
             "--permission-mode".into(),
             "default".into(),
-        ];
+        ]);
         let (allowed, denied): (Vec<String>, Vec<String>) = match &self.mode {
             Mode::Ask => {
                 args.extend(claude_isolation_args(&self.cwd));
@@ -496,7 +582,12 @@ impl RunSpec {
                 )
             }
             Mode::Work(grant) => {
-                args.extend(isolation_args_with(claude_work_settings(&self.cwd, grant)));
+                let settings = claude_work_settings(&self.cwd, grant);
+                if grant.trust {
+                    args.extend(trusted_args_with(&self.cwd, settings));
+                } else {
+                    args.extend(isolation_args_with(settings));
+                }
                 let (edits, protected) = work_edit_rules(&self.cwd);
                 (
                     WORK_TOOLS.iter().map(|t| t.to_string()).chain(edits).collect(),
@@ -519,8 +610,71 @@ impl RunSpec {
         }
         args.push("--disallowedTools".into());
         args.extend(denied);
-        args.push("--".into());
-        args.push(self.prompt.clone());
+        if !work {
+            args.push("--".into());
+            args.push(self.prompt.clone());
+        }
+        args
+    }
+
+    /// The conversation a run that can ask holds with its CLI, or `None`
+    /// for one in print mode.
+    pub(crate) fn conversation(&self) -> Option<Conversation> {
+        let Mode::Work(grant) = &self.mode else {
+            return None;
+        };
+        Some(match self.backend {
+            Backend::ClaudeCode => Conversation::Claude(ClaudeHost::new(self.prompt.clone())),
+            Backend::Codex => Conversation::Codex(CodexServer::new(self.codex_thread(grant))),
+        })
+    }
+
+    /// What a Codex Work thread starts with: the directory, the model and
+    /// effort, the Work profile, the worktree's trust, and the user's MCP
+    /// servers turned off.
+    fn codex_thread(&self, grant: &WorkGrant) -> CodexThread {
+        let filesystem: serde_json::Map<String, serde_json::Value> = codex_work_entries(&self.cwd, grant)
+            .into_iter()
+            .map(|(path, access)| (path, serde_json::json!(access)))
+            .collect();
+        let trust = if grant.trust { "trusted" } else { "untrusted" };
+        let mut projects = serde_json::Map::new();
+        projects.insert(self.cwd.to_string_lossy().into_owned(), serde_json::json!({"trust_level": trust}));
+        projects.insert(real_path(&self.cwd).to_string_lossy().into_owned(), serde_json::json!({"trust_level": trust}));
+        let mcp: serde_json::Map<String, serde_json::Value> = codex_user_mcp_servers()
+            .into_iter()
+            .map(|name| (name, serde_json::json!({"enabled": false})))
+            .collect();
+        CodexThread {
+            cwd: self.cwd.to_string_lossy().into_owned(),
+            model: self.model.clone(),
+            effort: self.effort.name().to_string(),
+            prompt: self.prompt.clone(),
+            developer_instructions: self.system.clone(),
+            resume: self.resume.clone(),
+            config: serde_json::json!({
+                "default_permissions": CODEX_WORK_PROFILE,
+                "permissions": {CODEX_WORK_PROFILE: {"filesystem": filesystem}},
+                "projects": projects,
+                "model_reasoning_effort": self.effort.name(),
+                "mcp_servers": mcp,
+            }),
+        }
+    }
+
+    /// `codex app-server` for a Work run: no plugins, hooks or apps, and
+    /// each of the user's MCP servers off, by name, where the name can be
+    /// a `-c` key; the thread's config turns them all off as well.
+    fn codex_server_args(&self) -> Vec<String> {
+        let mut args: Vec<String> = ["app-server", "--disable", "plugins", "--disable", "hooks", "--disable", "apps"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        for name in codex_user_mcp_servers() {
+            if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                args.extend(["-c".into(), format!("mcp_servers.{name}.enabled=false")]);
+            }
+        }
         args
     }
 
@@ -532,6 +686,9 @@ impl RunSpec {
     /// user's own config, plugins and hooks stay out too: the MCP servers
     /// in it run outside the read-only sandbox, and a prompt can call them.
     fn codex_args(&self) -> Vec<String> {
+        if matches!(self.mode, Mode::Work(_)) {
+            return self.codex_server_args();
+        }
         let mut args = vec!["exec".to_string(), "--json".into()];
         let ask = matches!(self.mode, Mode::Ask);
         match &self.resume {
@@ -559,16 +716,6 @@ impl RunSpec {
         args.extend(["-m".into(), self.model.clone()]);
         if ask && self.resume.is_some() {
             args.extend(["-c".into(), "sandbox_mode=\"read-only\"".into()]);
-        }
-        if let Mode::Work(grant) = &self.mode {
-            args.extend([
-                "-c".into(),
-                format!("default_permissions=\"{CODEX_WORK_PROFILE}\""),
-                "-c".into(),
-                codex_work_filesystem(&self.cwd, grant),
-                "-c".into(),
-                "approval_policy=\"never\"".into(),
-            ]);
         }
         args.extend(["-c".into(), codex_untrusted_project_override(&self.cwd)]);
         args.extend([
@@ -661,6 +808,12 @@ struct Parser {
     kind: ParserKind,
     /// Every stdout line, copied before it is parsed, when asked for.
     transcript: Option<LineLog>,
+    /// For a run that can ask: what to write back, and when to stop.
+    conversation: Option<Conversation>,
+    /// Lines the conversation wants written, drained by the pump.
+    outbox: Vec<String>,
+    /// The conversation is over: close stdin.
+    close: bool,
 }
 
 impl Parser {
@@ -675,6 +828,9 @@ impl Parser {
         Self {
             kind,
             transcript: None,
+            conversation: None,
+            outbox: Vec::new(),
+            close: false,
         }
     }
 
@@ -687,7 +843,22 @@ impl Parser {
         }
         let value = serde_json::from_str::<serde_json::Value>(line)
             .map_err(|error| format!("The agent emitted malformed JSON: {error}"))?;
-        Ok(match &mut self.kind {
+        if let Some(conversation) = self.conversation.as_mut() {
+            let reply = conversation.after_line(&value);
+            self.outbox.extend(reply.writes);
+            self.close |= reply.close;
+            if conversation.parses_everything() {
+                return Ok(reply.events);
+            }
+            let mut events = self.parse_print_line(line, &value);
+            events.extend(reply.events);
+            return Ok(events);
+        }
+        Ok(self.parse_print_line(line, &value))
+    }
+
+    fn parse_print_line(&mut self, line: &str, value: &serde_json::Value) -> Vec<RunEvent> {
+        match &mut self.kind {
             ParserKind::Claude {
                 pending_permission_denial,
                 terminal_permission_denial,
@@ -722,7 +893,7 @@ impl Parser {
                 events
             }
             ParserKind::Codex(p) => p.parse_line(line),
-        })
+        }
     }
 
     fn permission_denied(&self) -> bool {
@@ -756,6 +927,12 @@ pub enum RunEvent {
         id: String,
         ok: bool,
         summary: String,
+    },
+    /// The agent asks to do something its sandbox would not let it. The
+    /// run waits until `Run::answer` is called with `id`.
+    Approval {
+        id: String,
+        request: ApprovalRequest,
     },
     /// A structured denial reported by the CLI. It is activity rather than
     /// necessarily terminal: an agent may recover and complete after it.
@@ -1086,6 +1263,8 @@ unsafe fn watchdog_fork_child(
 pub struct Run {
     cancel: Arc<Cancellation>,
     outcome: watch::Receiver<Option<RunOutcome>>,
+    /// Where answers to approval requests go, for a run that can ask.
+    answers: Option<UnboundedSender<(String, Decision)>>,
 }
 
 impl Run {
@@ -1095,7 +1274,17 @@ impl Run {
     /// `Failed`, and `Stopped` is the last event sent.
     pub fn spawn(spec: RunSpec, events: UnboundedSender<RunEvent>) -> Result<Run, Error> {
         let args = spec.args();
-        Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, None, events)
+        let conversation = spec.conversation();
+        Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, None, conversation, events)
+    }
+
+    /// Answer approval request `id`. False when the run cannot ask, or
+    /// has already ended.
+    pub fn answer(&self, id: &str, decision: Decision) -> bool {
+        match &self.answers {
+            Some(answers) => answers.send((id.to_string(), decision)).is_ok(),
+            None => false,
+        }
     }
 
     /// Start an installed CLI's native local code-review operation using
@@ -1111,6 +1300,7 @@ impl Run {
             spec.cwd,
             args,
             transcript,
+            None,
             events,
         )
     }
@@ -1130,6 +1320,7 @@ impl Run {
             spec.cwd,
             args,
             transcript,
+            None,
             events,
         )
     }
@@ -1140,6 +1331,7 @@ impl Run {
         cwd: PathBuf,
         args: Vec<String>,
         transcript: Option<Transcript>,
+        mut conversation: Option<Conversation>,
         events: UnboundedSender<RunEvent>,
     ) -> Result<Run, Error> {
         let started_at = Instant::now();
@@ -1147,7 +1339,13 @@ impl Run {
         command
             .args(args)
             .current_dir(&cwd)
-            .stdin(std::process::Stdio::null())
+            // A run that can ask is answered on stdin; one that cannot
+            // gets nothing there.
+            .stdin(if conversation.is_some() {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
@@ -1181,9 +1379,16 @@ impl Run {
             wake: Notify::new(),
         });
         let (outcome_tx, outcome) = watch::channel(None);
+        let (answers_tx, answers_rx) = tokio::sync::mpsc::unbounded_channel();
+        let opening = conversation.as_mut().map(Conversation::opening).unwrap_or_default();
+        let mut io = Io {
+            stdin: child.stdin.take(),
+            answers: conversation.is_some().then_some(answers_rx),
+        };
         let run = Run {
             cancel: cancel.clone(),
             outcome,
+            answers: conversation.is_some().then_some(answers_tx),
         };
 
         let stdout = child.stdout.take().expect("piped stdout");
@@ -1201,6 +1406,9 @@ impl Run {
             let mut stderr_task = tokio::spawn(read_stderr_tail(stderr, stderr_log));
             let mut parser = Parser::for_backend(backend);
             parser.transcript = stdout_log;
+            parser.conversation = conversation;
+            parser.outbox = opening;
+            io.flush(&mut parser).await;
             let exit = drive_until_exit(
                 &mut child,
                 process_group,
@@ -1209,6 +1417,7 @@ impl Run {
                 &mut parser,
                 &events,
                 started_at,
+                &mut io,
             )
             .await;
 
@@ -1301,6 +1510,49 @@ impl From<LineFailure> for Exit {
     }
 }
 
+/// A run's stdin and the answers waiting to be written to it. Both are
+/// `None` for a run that cannot ask.
+struct Io {
+    stdin: Option<tokio::process::ChildStdin>,
+    answers: Option<UnboundedReceiver<(String, Decision)>>,
+}
+
+impl Io {
+    /// The next answer, or never for a run with none to wait for.
+    async fn next_answer(&mut self) -> Option<(String, Decision)> {
+        match self.answers.as_mut() {
+            Some(answers) => answers.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Write what the conversation has queued, and close stdin once it is
+    /// over. A write that fails means the process is going; its exit says
+    /// why.
+    async fn flush(&mut self, parser: &mut Parser) {
+        use tokio::io::AsyncWriteExt;
+        for line in std::mem::take(&mut parser.outbox) {
+            if let Some(stdin) = self.stdin.as_mut() {
+                let written = async {
+                    stdin.write_all(line.as_bytes()).await?;
+                    stdin.write_all(b"\n").await?;
+                    stdin.flush().await
+                }
+                .await;
+                if let Err(error) = written {
+                    tracing::warn!(%error, "could not write to the agent");
+                    self.stdin = None;
+                }
+            }
+        }
+        if parser.close {
+            self.stdin = None;
+            self.answers = None;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn drive_until_exit(
     child: &mut Child,
     process_group: Option<u32>,
@@ -1309,6 +1561,7 @@ async fn drive_until_exit(
     parser: &mut Parser,
     events: &UnboundedSender<RunEvent>,
     started_at: Instant,
+    io: &mut Io,
 ) -> Exit {
     let mut terminal = None;
     loop {
@@ -1326,6 +1579,15 @@ async fn drive_until_exit(
                 cleanup_survivors(process_group).await;
                 return Exit::Process { status, terminal, permission_denied: parser.permission_denied() };
             }
+            answer = io.next_answer() => match answer {
+                Some((id, decision)) => {
+                    if let Some(line) = parser.conversation.as_mut().and_then(|c| c.answer(&id, &decision)) {
+                        parser.outbox.push(line);
+                    }
+                    io.flush(parser).await;
+                }
+                None => io.answers = None,
+            },
             line = lines.next_line() => match line {
                 Ok(Some(line)) => {
                     if let Err(failure) = apply_line(parser, &line, events, started_at, &mut terminal) {
@@ -1333,6 +1595,7 @@ async fn drive_until_exit(
                         let _ = stop_and_reap(child, process_group, lines, parser, events, started_at, &mut terminal).await;
                         return exit;
                     }
+                    io.flush(parser).await;
                 }
                 Ok(None) => {
                     // stdout may close before the process does. It still
@@ -1782,127 +2045,147 @@ mod tests {
         WorkGrant {
             write: vec!["/opt/cache".into()],
             network: vec!["index.crates.io".into()],
+            ..WorkGrant::default()
         }
     }
 
-    /// No Work command line ever turns a boundary off.
+    /// No Work command line ever turns a boundary off without asking.
     fn assert_nothing_bypassed(args: &[String]) {
         for arg in args {
-            for bad in [
-                "bypassPermissions",
-                "dangerously",
-                "danger-full-access",
-                "\"allowUnsandboxedCommands\":true",
-            ] {
+            for bad in ["bypassPermissions", "dangerously", "danger-full-access", "acceptEdits"] {
                 assert!(!arg.contains(bad), "{bad} in {arg}");
             }
         }
     }
 
+    fn settings_of(args: &[String]) -> serde_json::Value {
+        let settings = args
+            .windows(2)
+            .find(|w| w[0] == "--settings")
+            .map(|w| w[1].clone())
+            .unwrap();
+        serde_json::from_str(&settings).unwrap()
+    }
+
     #[test]
-    fn a_work_run_edits_the_worktree_and_runs_commands_in_the_sandbox() {
+    fn a_claude_work_run_asks_through_its_host_at_the_sandbox_s_edge() {
         let real = std::fs::canonicalize("/tmp").unwrap();
         let root = real.to_string_lossy().to_string();
         for grant in [WorkGrant::default(), full_grant()] {
             for resume in [None, Some("sess-1")] {
-                let args = work(Backend::ClaudeCode, grant.clone(), resume).args();
+                let spec = work(Backend::ClaudeCode, grant.clone(), resume);
+                let args = spec.args();
                 assert_nothing_bypassed(&args);
+                assert!(args.windows(2).any(|w| w == ["--input-format", "stream-json"]));
+                assert!(args.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]));
+                assert!(!args.contains(&"do it".to_string()), "the prompt goes on stdin");
+                assert!(!args.contains(&"--".to_string()));
+                assert!(spec.conversation().is_some());
                 let allowed = args.iter().position(|a| a == "--allowedTools").unwrap();
                 let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
-                let end = args.iter().position(|a| a == "--").unwrap();
                 let allowed = &args[allowed + 1..denied];
-                let denied = &args[denied + 1..end];
-                assert!(allowed.contains(&"Bash".to_string()), "{allowed:?}");
+                let denied = &args[denied + 1..];
+                assert!(!allowed.contains(&"Bash".to_string()), "Bash listed would skip asking: {allowed:?}");
                 assert!(allowed.contains(&format!("Edit(/{root}/**)")), "{allowed:?}");
-                assert!(allowed.contains(&format!("Write(/{root}/**)")), "{allowed:?}");
-                assert!(!allowed.contains(&"Edit".to_string()), "never unscoped");
                 for tool in ["WebFetch", "WebSearch"] {
                     assert!(denied.contains(&tool.to_string()), "{tool}: {denied:?}");
                 }
                 for name in [".git", ".claude", ".codex", ".mcp.json"] {
-                    assert!(
-                        denied.contains(&format!("Write(/{root}/{name}/**)")),
-                        "{name}: {denied:?}"
-                    );
+                    assert!(denied.contains(&format!("Write(/{root}/{name}/**)")), "{name}: {denied:?}");
                 }
-                let settings = args
-                    .windows(2)
-                    .find(|w| w[0] == "--settings")
-                    .map(|w| w[1].clone())
-                    .unwrap();
-                let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
-                let sandbox = &value["sandbox"];
+                let sandbox = &settings_of(&args)["sandbox"];
                 assert_eq!(sandbox["enabled"], true);
                 assert_eq!(sandbox["autoAllowBashIfSandboxed"], true);
-                assert_eq!(sandbox["allowUnsandboxedCommands"], false);
+                assert_eq!(sandbox["allowUnsandboxedCommands"], true, "it may ask to leave");
                 assert_eq!(sandbox["failIfUnavailable"], true);
+                assert!(sandbox["network"].get("strictAllowlist").is_none(), "an unlisted host asks");
+                assert_eq!(sandbox["network"]["allowedDomains"], serde_json::json!(grant.network));
                 let allow_write = sandbox["filesystem"]["allowWrite"].as_array().unwrap();
                 assert_eq!(allow_write[0], root.as_str(), "the worktree first");
-                assert_eq!(allow_write.len(), 2 + grant.write.len());
-                assert_eq!(
-                    sandbox["filesystem"]["denyWrite"],
-                    serde_json::json!([
-                        format!("{root}/.git"),
-                        format!("{root}/.claude"),
-                        format!("{root}/.codex"),
-                        format!("{root}/.mcp.json"),
-                    ])
-                );
-                assert_eq!(
-                    sandbox["network"]["allowedDomains"],
-                    serde_json::json!(grant.network)
-                );
-                assert_eq!(sandbox["network"]["strictAllowlist"], true);
                 assert!(args.windows(2).any(|w| w == ["--setting-sources", "user"]));
-                assert!(args.contains(&"--strict-mcp-config".to_string()));
                 assert_eq!(args.windows(2).any(|w| w[0] == "--resume"), resume.is_some());
             }
         }
+        let ask = RunSpec { mode: Mode::Ask, ..work(Backend::ClaudeCode, WorkGrant::default(), None) };
+        assert!(ask.conversation().is_none(), "a question stays in print mode");
+        assert!(!ask.args().contains(&"--input-format".to_string()));
     }
 
     #[test]
-    fn a_codex_work_run_writes_the_workspace_and_the_grant_with_no_network() {
+    fn trust_reads_the_repository_s_settings_and_mcp_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        std::fs::write(real.join(".mcp.json"), "{}").unwrap();
+        let spec = RunSpec {
+            cwd: real.clone(),
+            ..work(Backend::ClaudeCode, WorkGrant { trust: true, ..WorkGrant::default() }, None)
+        };
+        let args = spec.args();
+        assert!(args.windows(2).any(|w| w == ["--setting-sources", "user,project,local"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--mcp-config" && w[1] == real.join(".mcp.json").to_string_lossy()));
+    }
+
+    #[test]
+    fn a_codex_work_run_is_an_app_server_thread_with_the_work_profile() {
         let real = std::fs::canonicalize("/tmp").unwrap();
         let root = real.to_string_lossy().to_string();
-        let fresh = work(Backend::Codex, full_grant(), None).args();
-        assert_nothing_bypassed(&fresh);
-        assert!(!fresh.contains(&"-s".to_string()), "a profile, not a sandbox mode");
-        assert!(!fresh.iter().any(|a| a.contains("sandbox_mode")));
-        assert!(fresh
-            .windows(2)
-            .any(|w| w == ["-c", "default_permissions=\"perch_work\""]));
-        let profile = fresh
-            .iter()
-            .find(|a| a.starts_with("permissions.perch_work.filesystem="))
-            .expect("the profile is defined");
-        for entry in [
-            "\":root\"=\"read\"".to_string(),
-            "\":workspace_roots\"=\"write\"".to_string(),
-            "\":tmpdir\"=\"write\"".to_string(),
-            "\"/opt/cache\"=\"write\"".to_string(),
-            format!("\"{root}/.git\"=\"read\""),
-            format!("\"{root}/.claude\"=\"read\""),
-        ] {
-            assert!(profile.contains(&entry), "{entry} in {profile}");
-        }
-        assert!(!profile.contains("network"), "no network in the profile");
-        assert!(fresh.windows(2).any(|w| w == ["-c", "approval_policy=\"never\""]));
-        assert!(fresh.contains(&"--ignore-user-config".to_string()));
+        let spec = work(Backend::Codex, full_grant(), None);
+        let args = spec.args();
+        assert_nothing_bypassed(&args);
+        assert_eq!(&args[..7], ["app-server", "--disable", "plugins", "--disable", "hooks", "--disable", "apps"]);
+        let Some(Conversation::Codex(server)) = spec.conversation() else {
+            panic!("a Codex Work run talks to an app-server");
+        };
+        let config = &server_thread(&server).config;
+        assert_eq!(config["default_permissions"], "perch_work");
+        let filesystem = &config["permissions"]["perch_work"]["filesystem"];
+        assert_eq!(filesystem[":root"], "read");
+        assert_eq!(filesystem[":workspace_roots"], "write");
+        assert_eq!(filesystem["/opt/cache"], "write");
+        assert_eq!(filesystem[format!("{root}/.git")], "read");
+        assert_eq!(filesystem[format!("{root}/.claude")], "read");
+        assert!(filesystem.get("network").is_none());
+        assert_eq!(config["projects"][root.as_str()]["trust_level"], "untrusted");
 
-        let resumed = work(Backend::Codex, WorkGrant::default(), Some("t-1")).args();
-        assert_nothing_bypassed(&resumed);
-        assert!(!resumed.iter().any(|a| a == "-s" || a.contains("sandbox_mode")));
-        assert!(resumed
-            .iter()
-            .any(|a| a.starts_with("permissions.perch_work.filesystem=")));
+        let trusted = work(Backend::Codex, WorkGrant { trust: true, ..WorkGrant::default() }, Some("th-1"));
+        let Some(Conversation::Codex(server)) = trusted.conversation() else { unreachable!() };
+        assert_eq!(server_thread(&server).config["projects"][root.as_str()]["trust_level"], "trusted");
+        assert_eq!(server_thread(&server).resume.as_deref(), Some("th-1"));
 
-        let ask = RunSpec {
-            mode: Mode::Ask,
-            ..work(Backend::Codex, WorkGrant::default(), None)
-        }
-        .args();
+        let ask = RunSpec { mode: Mode::Ask, ..work(Backend::Codex, WorkGrant::default(), None) }.args();
+        assert_eq!(ask[0], "exec", "a question stays on exec");
         assert!(ask.windows(2).any(|w| w == ["-s", "read-only"]));
-        assert!(!ask.iter().any(|a| a.contains("permissions")));
+    }
+
+    fn server_thread(server: &interactive::CodexServer) -> interactive::CodexThread {
+        server.thread_for_tests()
+    }
+
+    #[test]
+    fn the_commit_grant_opens_the_git_directories_but_not_their_config_or_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let common = real.join("repo/.git");
+        let own = common.join("worktrees/wt");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("commondir"), "../..\n").unwrap();
+        let worktree = real.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", own.display())).unwrap();
+
+        let grant = WorkGrant { commit: true, ..WorkGrant::default() };
+        let settings: serde_json::Value = serde_json::from_str(&claude_work_settings(&worktree, &grant)).unwrap();
+        let allow = settings["sandbox"]["filesystem"]["allowWrite"].as_array().unwrap();
+        let deny = settings["sandbox"]["filesystem"]["denyWrite"].as_array().unwrap();
+        let has = |list: &Vec<serde_json::Value>, path: &std::path::Path| list.contains(&serde_json::json!(path.to_string_lossy()));
+        assert!(has(allow, &common) && has(allow, &own), "{allow:?}");
+        assert!(!has(deny, &common) && !has(deny, &own), "{deny:?}");
+        for guarded in [common.join("config"), common.join("hooks"), own.join("config.worktree")] {
+            assert!(has(deny, &guarded), "{} in {deny:?}", guarded.display());
+        }
+        assert!(has(deny, &worktree.join(".git")), "the pointer file itself stays read-only");
     }
 
     #[test]

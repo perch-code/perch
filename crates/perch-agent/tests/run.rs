@@ -478,3 +478,155 @@ async fn a_missing_binary_fails_to_spawn() {
     let err = Run::spawn(spec(tmp.path().join("nope"), tmp.path().to_path_buf()), tx).unwrap_err();
     assert!(err.to_string().contains("nope"));
 }
+
+fn work_spec(backend: Backend, binary: PathBuf, cwd: PathBuf) -> RunSpec {
+    RunSpec {
+        backend,
+        mode: perch_agent::Mode::Work(perch_agent::WorkGrant::default()),
+        ..spec(binary, cwd)
+    }
+}
+
+/// Collect events until an approval arrives, then answer it and collect
+/// the rest.
+async fn answer_first_approval(
+    run: &Run,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<RunEvent>,
+    decision: perch_agent::Decision,
+) -> (perch_agent::ApprovalRequest, Vec<RunEvent>) {
+    let mut request = None;
+    let mut rest = Vec::new();
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("the run went quiet")
+    {
+        match event {
+            RunEvent::Approval { id, request: asked } if request.is_none() => {
+                request = Some(asked);
+                assert!(run.answer(&id, decision.clone()));
+            }
+            other => rest.push(other),
+        }
+    }
+    (request.expect("the run asked"), rest)
+}
+
+#[tokio::test]
+async fn a_claude_work_run_asks_its_host_and_is_answered_on_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("wrote");
+    let body = format!(
+        r#"read init
+read user
+printf '%s\n%s\n' "$init" "$user" > {record}
+echo '{{"type":"system","subtype":"init","session_id":"s1","model":"m"}}'
+echo '{{"type":"control_request","request_id":"r1","request":{{"subtype":"can_use_tool","tool_name":"SandboxNetworkAccess","input":{{"host":"example.com"}}}}}}'
+read answer
+printf '%s\n' "$answer" >> {record}
+echo '{{"type":"result","subtype":"success","result":"Done.","session_id":"s1"}}'
+read eof || true
+"#,
+        record = record.display()
+    );
+    let binary = fake_agent(dir.path(), &body);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = Run::spawn(
+        work_spec(Backend::ClaudeCode, binary, dir.path().to_path_buf()),
+        tx,
+    )
+    .unwrap();
+
+    let (request, rest) = answer_first_approval(
+        &run,
+        &mut rx,
+        perch_agent::Decision::deny("The reader said no"),
+    )
+    .await;
+
+    assert_eq!(request.kind, perch_agent::ApprovalKind::Host);
+    assert_eq!(request.subject, "example.com");
+    assert!(matches!(rest.last(), Some(RunEvent::Finished { .. })), "{rest:?}");
+    assert!(matches!(run.wait().await, RunOutcome::Finished { .. }));
+    let wrote = std::fs::read_to_string(&record).unwrap();
+    let lines: Vec<&str> = wrote.lines().collect();
+    assert!(lines[0].contains("\"subtype\":\"initialize\""), "{wrote}");
+    assert!(lines[1].contains("\"content\":\"hi\""), "the prompt went on stdin: {wrote}");
+    assert!(lines[2].contains("\"behavior\":\"deny\""), "{wrote}");
+    assert!(lines[2].contains("The reader said no"), "{wrote}");
+}
+
+#[tokio::test]
+async fn a_codex_work_run_is_an_app_server_turn_whose_approval_is_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("wrote");
+    let body = format!(
+        r#"read l; echo '{{"id":1,"result":{{"userAgent":"x"}}}}'
+read l
+read l; printf '%s\n' "$l" > {record}
+echo '{{"id":2,"result":{{"thread":{{"id":"th-1"}}}}}}'
+read l; printf '%s\n' "$l" >> {record}
+echo '{{"id":3,"result":{{"turn":{{"id":"tu-1"}}}}}}'
+echo '{{"method":"item/started","params":{{"item":{{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc \"curl https://example.com\""}}}}}}'
+echo '{{"method":"item/commandExecution/requestApproval","id":5,"params":{{"command":"/bin/zsh -lc \"curl https://example.com\"","networkApprovalContext":{{"host":"example.com","protocol":"https"}}}}}}'
+read answer; printf '%s\n' "$answer" >> {record}
+echo '{{"method":"item/completed","params":{{"item":{{"type":"commandExecution","id":"c1","command":"x","exitCode":0}}}}}}'
+echo '{{"method":"item/completed","params":{{"item":{{"type":"agentMessage","id":"m1","text":"Fetched."}}}}}}'
+echo '{{"method":"turn/completed","params":{{"turn":{{"id":"tu-1","status":"completed"}}}}}}'
+read eof || true
+"#,
+        record = record.display()
+    );
+    let binary = fake_agent(dir.path(), &body);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = Run::spawn(
+        work_spec(Backend::Codex, binary, dir.path().to_path_buf()),
+        tx,
+    )
+    .unwrap();
+
+    let (request, rest) = answer_first_approval(&run, &mut rx, perch_agent::Decision::Allow).await;
+
+    assert_eq!(request.kind, perch_agent::ApprovalKind::Host);
+    assert!(matches!(&rest[0], RunEvent::Started { session_id, .. } if session_id == "th-1"), "{rest:?}");
+    assert!(rest.iter().any(|e| matches!(e, RunEvent::Text(t) if t == "Fetched.")));
+    assert!(matches!(rest.last(), Some(RunEvent::Finished { session_id, .. }) if session_id == "th-1"));
+    assert!(matches!(run.wait().await, RunOutcome::Finished { .. }));
+    let wrote = std::fs::read_to_string(&record).unwrap();
+    let lines: Vec<&str> = wrote.lines().collect();
+    assert!(lines[0].contains("\"method\":\"thread/start\""), "{wrote}");
+    assert!(lines[1].contains("\"method\":\"turn/start\""), "{wrote}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(lines[2]).unwrap(),
+        serde_json::json!({"jsonrpc":"2.0","id":5,"result":{"decision":"accept"}})
+    );
+}
+
+#[tokio::test]
+async fn stopping_a_run_that_waits_for_an_answer_stops_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = r#"read init
+read user
+echo '{"type":"system","subtype":"init","session_id":"s1","model":"m"}'
+echo '{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"x","dangerouslyDisableSandbox":true}}}'
+sleep 30
+"#;
+    let binary = fake_agent(dir.path(), body);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = Run::spawn(
+        work_spec(Backend::ClaudeCode, binary, dir.path().to_path_buf()),
+        tx,
+    )
+    .unwrap();
+    loop {
+        match rx.recv().await {
+            Some(RunEvent::Approval { .. }) => break,
+            Some(_) => continue,
+            None => panic!("no approval"),
+        }
+    }
+    let outcome = tokio::time::timeout(Duration::from_secs(10), run.cancel_and_wait())
+        .await
+        .expect("the stop went through");
+    assert!(matches!(outcome, RunOutcome::Stopped { .. }), "{outcome:?}");
+    assert!(!run.answer("r1", perch_agent::Decision::Allow), "nothing to answer now");
+}

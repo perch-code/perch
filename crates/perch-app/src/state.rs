@@ -677,6 +677,7 @@ impl AppState {
                 }
             }
             perch_agent::RunEvent::Report { .. }
+            | perch_agent::RunEvent::Approval { .. }
             | perch_agent::RunEvent::Finished { .. }
             | perch_agent::RunEvent::Failed { .. }
             | perch_agent::RunEvent::Stopped { .. } => return,

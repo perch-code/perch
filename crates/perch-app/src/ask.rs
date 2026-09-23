@@ -151,7 +151,7 @@ pub fn apply_run_event(
             run.ended_at = Some(jiff::Timestamp::now());
         }
         // The tool call that carried it is already a step.
-        RunEvent::Report { .. } => {}
+        RunEvent::Report { .. } | RunEvent::Approval { .. } => {}
     }
     if run.status.is_terminal() {
         LIVE_TOOL_STEPS.with(|tools| {
@@ -526,6 +526,7 @@ async fn ask(
             | perch_agent::RunEvent::ToolResult { .. }
             | perch_agent::RunEvent::PermissionDenied { .. }
             | perch_agent::RunEvent::Report { .. }
+            | perch_agent::RunEvent::Approval { .. }
             | perch_agent::RunEvent::Usage { .. }
             | perch_agent::RunEvent::Finished { .. }
             | perch_agent::RunEvent::Failed { .. }

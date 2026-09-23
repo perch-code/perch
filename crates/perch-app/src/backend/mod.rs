@@ -11046,6 +11046,8 @@ fn work_setup(
     let grant = perch_agent::WorkGrant {
         write: repo.map(|r| r.work.write_paths()).unwrap_or_default(),
         network: repo.map(|r| r.work.network.clone()).unwrap_or_default(),
+        commit: false,
+        trust: false,
     };
     // Codex's sandbox has no allowlist, so it gets no network whatever
     // the grant says.
@@ -11323,7 +11325,7 @@ async fn execute_question(
             }),
             // A filed report is review data; a discussion keeps only the
             // tool call that carried it.
-            perch_agent::RunEvent::Report { .. } => None,
+            perch_agent::RunEvent::Report { .. } | perch_agent::RunEvent::Approval { .. } => None,
             // Terminal state is committed only after `wait` proves the child
             // and its process group have been reaped.
             perch_agent::RunEvent::Finished { .. }

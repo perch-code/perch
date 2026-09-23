@@ -166,7 +166,7 @@ fn failed_step(id: String, message: &str) -> Vec<RunEvent> {
 
 /// The sentence in an error. Codex passes API errors through as their
 /// JSON body, and the reader wants the message inside it, not the body.
-fn human_message(raw: &str) -> String {
+pub(crate) fn human_message(raw: &str) -> String {
     let inner = serde_json::from_str::<Value>(raw.trim())
         .ok()
         .and_then(|v| {
@@ -182,7 +182,7 @@ fn human_message(raw: &str) -> String {
         .join(" ")
 }
 
-fn last_line(output: &str) -> String {
+pub(crate) fn last_line(output: &str) -> String {
     let line = output
         .lines()
         .rev()
@@ -193,7 +193,7 @@ fn last_line(output: &str) -> String {
 
 /// Codex runs every command through a login shell, `/bin/zsh -lc "..."`,
 /// and the reader wants the command, not the shell.
-fn strip_shell(command: &str) -> String {
+pub(crate) fn strip_shell(command: &str) -> String {
     let trimmed = command.trim();
     let mut parts = trimmed.splitn(3, ' ');
     let (Some(shell), Some(flag), Some(script)) = (parts.next(), parts.next(), parts.next()) else {

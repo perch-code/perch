@@ -1819,6 +1819,7 @@ fn stored_process_event(event: &perch_agent::RunEvent) -> Option<StoredRunEvent>
         // The matching tool call is the stored activity; the report itself
         // goes into the preserved native response.
         perch_agent::RunEvent::Report { .. }
+        | perch_agent::RunEvent::Approval { .. }
         | perch_agent::RunEvent::Finished { .. }
         | perch_agent::RunEvent::Failed { .. }
         | perch_agent::RunEvent::Stopped { .. } => None,
