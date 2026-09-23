@@ -889,6 +889,29 @@ impl GitHub {
             .ok_or_else(|| Error::Decode("GitHub answered the reaction without its subject".into()))
     }
 
+    /// The repository's users an `@` can name whose login or name
+    /// matches `query`, at most `first` of them, in GitHub's order: who
+    /// its own comment box suggests.
+    pub async fn fetch_mentionable_users(
+        &self,
+        repo_full_name: &str,
+        query: &str,
+        first: usize,
+    ) -> Result<Vec<crate::MentionableUser>, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        let payload = serde_json::json!({
+            "query": crate::mentions::mentionable_users_query(),
+            "variables": {
+                "owner": owner,
+                "name": name,
+                "query": (!query.is_empty()).then_some(query),
+                "first": first.clamp(1, 100),
+            },
+        });
+        let data: crate::mentions::MentionableUsersData = self.graphql(&payload).await?;
+        Ok(data.into_users())
+    }
+
     /// Fetch an issue by number.
     ///
     /// The issues endpoint answers for pull requests too, because GitHub

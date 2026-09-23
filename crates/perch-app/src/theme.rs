@@ -594,6 +594,10 @@ pub const GO_TO_PADDING: f64 = 6.0;
 pub const GO_TO_BOX_HEIGHT: f64 = 30.0;
 pub const GO_TO_ROW_HEIGHT: f64 = 26.0;
 pub const GO_TO_LIST_HEIGHT: f64 = 16.0 * GO_TO_ROW_HEIGHT;
+/// The list an `@` puts up under a composer's caret: as wide as a path
+/// and a name want, and ten of Cmd-P's rows before it scrolls.
+pub const MENTION_WIDTH: f64 = 440.0;
+pub const MENTION_ROWS: usize = 10;
 /// The letters of a name that a query matched, in Cmd-P's list: blue, as
 /// VS Code draws them, and GitHub's blue so it is one Perch already uses.
 pub const MATCH_FG: Color = Color::from_rgb8(0x09, 0x69, 0xda);

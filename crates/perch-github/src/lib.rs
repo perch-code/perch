@@ -10,6 +10,7 @@ pub mod comments;
 pub mod config;
 pub mod discussion;
 pub mod items;
+pub mod mentions;
 pub mod model;
 pub mod pulls;
 pub mod reactions;
@@ -42,6 +43,7 @@ pub use discussion::{
 pub use items::{
     Checkout as ItemCheckout, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind,
 };
+pub use mentions::MentionableUser;
 pub use model::{
     Reason, Repository, RunSnapshot, Subject, SubjectKind, SubjectSnapshot, SubjectState, Thread,
 };

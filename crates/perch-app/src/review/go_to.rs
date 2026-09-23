@@ -1420,7 +1420,7 @@ fn row_view(state: ReviewState, open_file: OpenFile, row: Row) -> impl IntoView 
 /// A file's row: the tabs' dot for its language, its name, its directory
 /// in the subtle colour, and at the right end the name of the section it
 /// starts and its status letter when it is a change.
-fn file_row(hit: &Hit, heading: Option<Section>) -> impl IntoView {
+pub(crate) fn file_row(hit: &Hit, heading: Option<Section>) -> impl IntoView {
     let color = theme::language_color(perch_syntax::Language::from_path(&hit.name));
     Stack::horizontal((
         Empty::new().style(move |s| {
@@ -1500,7 +1500,7 @@ fn cut(text: &str, matches: &[Range<usize>]) -> Vec<(String, bool)> {
 /// heavier, as a row of labels, one to a run: floem's rich text wraps and
 /// has no ellipsis, and a long directory wants one. The last run takes
 /// it.
-fn highlighted(text: &str, matches: &[Range<usize>], size: f32, color: Color) -> Stack {
+pub(crate) fn highlighted(text: &str, matches: &[Range<usize>], size: f32, color: Color) -> Stack {
     let runs = cut(text, matches);
     let last = runs.len().saturating_sub(1);
     Stack::horizontal_from_iter(runs.into_iter().enumerate().map(move |(i, (run, hit))| {

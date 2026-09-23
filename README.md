@@ -90,6 +90,16 @@ shorter, between two lines and about twenty-four; a box that has been dragged
 keeps that height whatever is typed into it, and every composer opens at it
 until Perch is restarted.
 
+Typing `@` in a composer, or in the Submit review summary, puts a list under
+it, as GitHub's comment box does. People come first: the item's author and
+whoever has written on it, then anyone else in the repository GitHub finds
+for the letters typed, never you. The worktree's files follow, ranked as
+`Cmd-P` ranks them. The arrows or `Ctrl-N` and `Ctrl-P` move the pick, `Enter`
+or `Tab` takes it, a click takes a row, and `Escape` puts the list away until
+the next `@`. A person goes in as `@login`. A file goes to an agent as
+`@path`, as Claude Code and Codex take one, and to GitHub as `` `path` ``,
+since `@` there mentions someone and a code span links to Files.
+
 Every composer in Perch has a destination: Claude, Codex, or GitHub, picked
 from the same menu as the model. What goes to an agent stays in Perch. What
 goes to GitHub goes one of two ways.

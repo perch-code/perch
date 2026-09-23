@@ -116,6 +116,9 @@ pub struct AppState {
     /// from the main pane while there is enough, and lies over it when
     /// there is not.
     pub window_width: RwSignal<f64>,
+    /// The window's height, from its last layout, for a list to know
+    /// whether it fits under what it hangs from.
+    pub window_height: RwSignal<f64>,
     /// The main pane's left and right edges in the window, from its last
     /// layout, for Cmd-P's palette to centre itself over.
     pub main_pane: RwSignal<(f64, f64)>,
@@ -236,6 +239,7 @@ impl AppState {
             drawer_width: RwSignal::new(crate::theme::DRAWER_WIDTH),
             drawer_resizing: RwSignal::new(false),
             window_width: RwSignal::new(0.0),
+            window_height: RwSignal::new(0.0),
             main_pane: RwSignal::new((0.0, 0.0)),
             agents_clock_armed: RwSignal::new(false),
             agents_tab: RwSignal::new(AgentsTab::Active),
@@ -1370,6 +1374,15 @@ impl AppState {
                     review.issue_events.set(events);
                 }
             }
+            Event::MentionableUsers {
+                item_id,
+                query,
+                users,
+            } => {
+                if review.is_item(&item_id) {
+                    review.mentions.install(query, users);
+                }
+            }
             Event::ReactionsUpdated {
                 item_id,
                 node_id,
@@ -1903,6 +1916,7 @@ impl AppState {
             | Event::LspNames { .. }
             | Event::DiscussionReady { .. }
             | Event::IssueComments { .. }
+            | Event::MentionableUsers { .. }
             | Event::ReactionsUpdated { .. }
             | Event::ReactionFailed { .. }
             | Event::ThreadResolveSettled { .. }

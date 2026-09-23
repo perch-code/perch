@@ -1419,6 +1419,8 @@ pub struct ReviewState {
     pub find_focus: RwSignal<bool>,
     /// Cmd-P's palette.
     pub go_to: crate::review::go_to::GoTo,
+    /// The list an `@` in a composer puts up.
+    pub mentions: crate::review::mention::Mentions,
     /// The files each item has had on screen, by item, the most recent
     /// first, for Cmd-P to list before anything is typed: a file moves to
     /// the front whenever it becomes the active one, from a tab, the
@@ -1591,6 +1593,7 @@ impl ReviewState {
             find_box: RwSignal::new(None),
             find_focus: RwSignal::new(false),
             go_to: crate::review::go_to::GoTo::new(),
+            mentions: crate::review::mention::Mentions::new(),
             recent_files: RwSignal::new(HashMap::new()),
             pending_jump: RwSignal::new(None),
             pending_open: RwSignal::new(None),
@@ -1749,6 +1752,9 @@ impl ReviewState {
         }
         // Cmd-P's palette goes too; what each item had open stays.
         self.go_to.reset();
+        // And an `@`'s list, with the people GitHub found in the item's
+        // repository.
+        self.mentions.reset();
     }
 
     /// Prepare to install an accepted live result. Agent history navigation

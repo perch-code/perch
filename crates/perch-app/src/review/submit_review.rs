@@ -22,6 +22,7 @@ use perch_github::PullReviewEvent;
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::model::{drafts_summary, Draft, ReviewState};
+use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
     clickable, editor_box, icon_button, lay_out_every_line, sidebar_glyph, text_button,
@@ -35,7 +36,7 @@ const EXCERPT_CHARS: usize = 60;
 /// cannot safely submit a remote verdict. While drafts exist it stays,
 /// with their count, so the reader can see they are kept through a head
 /// move or a spell offline, and does nothing until it is live again.
-pub fn control(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Effect::new(move |_| {
         if !is_available(state) && state.submit_review_open.get() {
             close(state, false);
@@ -49,7 +50,7 @@ pub fn control(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
         move || shown.get(),
         move |shown| {
             if shown {
-                available_control(state, backend.clone()).into_any()
+                available_control(app, state, backend.clone()).into_any()
             } else {
                 Empty::new().into_any()
             }
@@ -83,7 +84,7 @@ pub(crate) fn is_shown(state: ReviewState) -> bool {
             }))
 }
 
-fn available_control(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+fn available_control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let count = Memo::new(move |_| state.drafts().len());
     let inner = Stack::horizontal((
         Label::derived(move || {
@@ -166,7 +167,7 @@ fn available_control(state: ReviewState, backend: Rc<Backend>) -> impl IntoView 
             move || shown.get(),
             move |(open, _)| {
                 if open {
-                    popover(state, popover_backend.clone()).into_any()
+                    popover(app, state, popover_backend.clone()).into_any()
                 } else {
                     Empty::new().into_any()
                 }
@@ -224,10 +225,10 @@ pub(crate) fn close(state: ReviewState, restore_focus: bool) {
     state.submit_review_opener.set(None);
 }
 
-fn popover(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+fn popover(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let submit_backend = backend.clone();
     let submit: Rc<dyn Fn()> = Rc::new(move || submit(state, &submit_backend));
-    let editor = review_editor(state, submit.clone());
+    let editor = review_editor(app, state, backend.clone(), submit.clone());
     let drafts = drafts_list(state, backend);
 
     let close_button = icon_action(
@@ -562,7 +563,12 @@ fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
-fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
+fn review_editor(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    submit: Rc<dyn Fn()>,
+) -> impl View {
     use floem::views::editor::command::CommandExecuted;
 
     use crate::review::threads::cmd_enter;
@@ -578,6 +584,18 @@ fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
     ));
     // Every line laid out, so a long review does not jump as it is typed.
     lay_out_every_line(editor.editor());
+    // `@` offers people and files, as in a composer; the review goes to
+    // GitHub, so a file goes in as a code span.
+    let mentioner = crate::review::mention::attach(
+        app,
+        state,
+        backend,
+        editor.editor(),
+        |path| format!("`{path}` "),
+    );
+    let focus_mentioner = mentioner.clone();
+    let blur_mentioner = mentioner.clone();
+    let key_mentioner = mentioner.clone();
     let key_submit = submit.clone();
     let editor = editor
         // Cmd-Enter submits, before the editor can take it for a line.
@@ -597,10 +615,12 @@ fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
             }
         })
         .on_event_cont(el::FocusGained, move |_, _| {
-            state.submit_review_focused.set(true)
+            state.submit_review_focused.set(true);
+            focus_mentioner.focus(true);
         })
         .on_event_cont(el::FocusLost, move |_, _| {
-            state.submit_review_focused.set(false)
+            state.submit_review_focused.set(false);
+            blur_mentioner.focus(false);
         })
         .on_event_with_config(
             el::KeyDown,
@@ -608,6 +628,9 @@ fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
                 phases: floem::context::Phases::CAPTURE,
             },
             move |_, key: &KeyboardEvent| {
+                if key_mentioner.key(key) {
+                    return EventPropagation::Stop;
+                }
                 if key.code == Code::Escape && key.modifiers.is_empty() {
                     cancel(state, true);
                     EventPropagation::Stop
@@ -622,7 +645,8 @@ fn review_editor(state: ReviewState, submit: Rc<dyn Fn()>) -> impl View {
                 .font_size(theme::TEXT_BODY)
                 .set_disabled(state.submit_review_pending.with(Option::is_some))
         })
-        .debug_name("submit-review-editor");
+        .debug_name("submit-review-editor")
+        .on_cleanup(move || mentioner.cleanup());
 
     let inner = editor.editor().editor_view_id;
     let asked = Rc::new(Cell::new(false));
@@ -1046,7 +1070,6 @@ fn event_slug(event: PullReviewEvent) -> &'static str {
 mod tests {
     use super::*;
     use crate::backend::Command;
-    use crate::state::AppState;
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::prelude::{Key, KeyState, Modifiers, NamedKey};
     use perch_github::{
@@ -1260,7 +1283,7 @@ mod tests {
             draft_thread("t1", "head-42", None, "one"),
             draft_thread("t2", "head-42", Some(31), "two"),
         ]));
-        let view = control(state, Rc::new(Backend::detached()));
+        let view = control(AppState::new(), state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1307,7 +1330,7 @@ mod tests {
         ]));
         open(state, None);
         let (backend, mut commands) = Backend::recording();
-        let view = control(state, Rc::new(backend));
+        let view = control(AppState::new(), state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1384,7 +1407,7 @@ mod tests {
         state.comment_threads.set(Arc::new(vec![draft_thread("t1", "head-42", None, "one")]));
         open(state, None);
         let (backend, mut commands) = Backend::recording();
-        let view = control(state, Rc::new(backend));
+        let view = control(AppState::new(), state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1416,7 +1439,7 @@ mod tests {
         ]));
         open(state, None);
         let (backend, mut commands) = Backend::recording();
-        let view = control(state, Rc::new(backend));
+        let view = control(AppState::new(), state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1456,7 +1479,7 @@ mod tests {
         state.submit_review_draft.set("Looks good".into());
         open(state, None);
         let (backend, mut commands) = Backend::recording();
-        let view = control(state, Rc::new(backend));
+        let view = control(AppState::new(), state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1513,7 +1536,7 @@ mod tests {
         let state = review_state();
         state.comment_threads.set(Arc::new(vec![draft_thread("t1", "head-42", None, "first")]));
         open(state, None);
-        let view = control(state, Rc::new(Backend::detached()));
+        let view = control(AppState::new(), state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1546,7 +1569,7 @@ mod tests {
             "A reply",
         )]));
         open(state, None);
-        let view = control(state, Rc::new(Backend::detached()));
+        let view = control(AppState::new(), state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1604,7 +1627,7 @@ mod tests {
         state.submit_review_draft.set("Looks good".into());
         open(state, None);
         let (backend, mut commands) = Backend::recording();
-        let view = control(state, Rc::new(backend));
+        let view = control(AppState::new(), state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1634,7 +1657,7 @@ mod tests {
     fn keyboard_opens_selects_and_closes_the_popover() {
         let root = TestRoot::new();
         let state = review_state();
-        let view = control(state, Rc::new(Backend::detached()));
+        let view = control(AppState::new(), state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1676,7 +1699,7 @@ mod tests {
     fn outcome_arrows_select_wrap_and_move_focus_until_pending() {
         let root = TestRoot::new();
         let state = review_state();
-        let view = control(state, Rc::new(Backend::detached()));
+        let view = control(AppState::new(), state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1763,7 +1786,7 @@ mod tests {
             .join(" ");
         state.submit_review_draft.set(summary);
         open(state, None);
-        let view = control(state, Rc::new(Backend::detached()));
+        let view = control(AppState::new(), state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();

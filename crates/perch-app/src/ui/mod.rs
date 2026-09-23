@@ -237,6 +237,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         }),
         status::status_bar(state, review, backend.clone()),
         agents::completion_notice(state, capture_backend.clone()),
+        // An `@`'s list, over the composer it is typed in.
+        crate::review::mention::popup(state, review),
         // Cmd-P's palette, over everything but a drag's cursor.
         crate::review::go_to::palette(state, review, backend.clone()),
         // Over everything, and only while a drawer's edge is being dragged.
@@ -256,6 +258,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             let width = root_id.get_layout_rect().width();
             if width > 0.0 && state.window_width.get_untracked() != width {
                 state.window_width.set(width);
+            }
+            let height = root_id.get_layout_rect().height();
+            if height > 0.0 && state.window_height.get_untracked() != height {
+                state.window_height.set(height);
             }
             // The pane's row starts at the window's left edge, so where
             // the pane is in the row is where it is in the window.

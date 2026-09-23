@@ -125,6 +125,14 @@ pub enum Command {
         body: String,
         event: PullReviewEvent,
     },
+    /// The people of the item's repository whose login or name matches
+    /// `query`, for the `@` a composer is suggesting names for.
+    /// `MentionableUsers` answers.
+    MentionableUsers {
+        item_id: String,
+        repo_full_name: String,
+        query: String,
+    },
     /// Leave the reader's reaction on a comment, a review, or the item's
     /// own description, or take it back. `node_id` is the subject's
     /// GraphQL id, which is how GitHub names a reactable thing.
@@ -606,6 +614,13 @@ pub enum Event {
         comments: Arc<Vec<perch_github::IssueComment>>,
         events: Arc<Vec<perch_github::PullEvent>>,
         body_reactions: Reactions,
+    },
+    /// Who of the item's repository matched `query`, in GitHub's order.
+    /// Nobody when GitHub could not be asked.
+    MentionableUsers {
+        item_id: String,
+        query: String,
+        users: Vec<perch_github::MentionableUser>,
     },
     /// GitHub took the reader's reaction: the subject's reactions as they
     /// stand now.
@@ -1816,6 +1831,17 @@ impl Backend {
         Some(attempt_id)
     }
 
+    /// Ask GitHub who of the item's repository `query` names, for a
+    /// composer's `@`. `MentionableUsers` answers, empty when GitHub
+    /// could not be asked.
+    pub fn mentionable_users(&self, item_id: &str, repo_full_name: &str, query: &str) {
+        let _ = self.commands.send(Command::MentionableUsers {
+            item_id: item_id.to_string(),
+            repo_full_name: repo_full_name.to_string(),
+            query: query.to_string(),
+        });
+    }
+
     /// Leave a reaction on a subject of the open item, or take it back.
     /// The view has already toggled what it shows; `ReactionsUpdated` or
     /// `ReactionFailed` settles it.
@@ -2867,6 +2893,16 @@ async fn run(
                         refresh_open_item_inner(&ctx, &item_id),
                     )
                     .await;
+                });
+            }
+            Command::MentionableUsers {
+                item_id,
+                repo_full_name,
+                query,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    mentionable_users(&ctx, &item_id, &repo_full_name, &query).await;
                 });
             }
             Command::SetReaction {
@@ -6869,6 +6905,35 @@ fn validate_pull_request_review_attempt(
 /// asking; a refusal puts it back. GitHub's answer goes into the kept
 /// discussion under the same fence a review submission uses, so a read
 /// that began before the reaction cannot write the older counts over it.
+/// The most people GitHub is asked for at a time: more than a
+/// composer's list shows, so filtering on as the name is typed still
+/// finds some.
+const MENTIONABLE_USERS: usize = 20;
+
+/// Who of the repository `query` names. A failure is quiet: the list
+/// still has the item's own people, and a notice for a suggestion
+/// nobody asked for would only be in the way.
+async fn mentionable_users(ctx: &Ctx, item_id: &str, repo_full_name: &str, query: &str) {
+    let users = match ctx.github() {
+        Some(github) => github
+            .fetch_mentionable_users(repo_full_name, query, MENTIONABLE_USERS)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::info!(repo = repo_full_name, query, %error, "mentionable users not read");
+                Vec::new()
+            }),
+        None => Vec::new(),
+    };
+    ctx.want_avatars(users.iter().map(|u| u.avatar_url.clone()));
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::MentionableUsers {
+            item_id: item_id.to_string(),
+            query: query.to_string(),
+            users,
+        });
+    }
+}
+
 async fn set_reaction(ctx: &Ctx, item_id: &str, node_id: &str, kind: ReactionKind, add: bool) {
     let refuse = |message: String| {
         tracing::info!(item = item_id, node_id, %message, "reaction not taken");

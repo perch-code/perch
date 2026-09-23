@@ -182,7 +182,7 @@ fn primary_action(app: AppState, state: ReviewState, backend: Rc<Backend>) -> im
         if is_issue {
             crate::review::issue::start_work_button(app, state, backend.clone()).into_any()
         } else {
-            crate::review::submit_review::control(state, backend.clone()).into_any()
+            crate::review::submit_review::control(app, state, backend.clone()).into_any()
         }
     })
     .style(move |s| {

@@ -266,6 +266,28 @@ pub fn composer_view(
     lay_out_every_line(editor.editor());
     let doc_editor = editor.editor().clone();
     let read_text = Rc::new(move || doc_editor.doc().text().to_string());
+    // `@` offers people and files. A file goes to an agent as `@path`, as
+    // Claude Code and Codex take one, and to GitHub as a code span, where
+    // `@` would mention someone.
+    let mentioner = crate::review::mention::attach(
+        app,
+        state,
+        backend.clone(),
+        editor.editor(),
+        move |path| {
+            let github = state
+                .composer
+                .with_untracked(|c| c.as_ref().is_some_and(|c| c.destination.is_github()));
+            if github {
+                format!("`{path}` ")
+            } else {
+                format!("@{path} ")
+            }
+        },
+    );
+    let focus_mentioner = mentioner.clone();
+    let blur_mentioner = mentioner.clone();
+    let key_mentioner = mentioner.clone();
     // A draft the box starts with, a retried question or a quoted comment,
     // is typed under, not into.
     if !draft.is_empty() {
@@ -388,9 +410,13 @@ pub fn composer_view(
             }
         })
         .on_event_cont(el::FocusGained, move |_, _| {
-            state.composer_focused.set(true)
+            state.composer_focused.set(true);
+            focus_mentioner.focus(true);
         })
-        .on_event_cont(el::FocusLost, move |_, _| state.composer_focused.set(false))
+        .on_event_cont(el::FocusLost, move |_, _| {
+            state.composer_focused.set(false);
+            blur_mentioner.focus(false);
+        })
         // Escape closes an empty composer, or one editing a draft: the
         // draft's saved words come back as the message row, and whatever
         // was typed over them since is dropped, as the edit was never
@@ -402,6 +428,11 @@ pub fn composer_view(
                 phases: floem::context::Phases::CAPTURE,
             },
             move |_, key: &KeyboardEvent| {
+                // An `@`'s list has the keys it moves and takes by, and
+                // Escape puts it away before anything else.
+                if key_mentioner.key(key) {
+                    return floem::event::EventPropagation::Stop;
+                }
                 if key.code == Code::Escape && key.modifiers.is_empty() {
                     // Escape takes the question back first, with the
                     // text intact; while posting there is nothing to do.
@@ -470,6 +501,7 @@ pub fn composer_view(
             }
         })
         .on_cleanup(move || {
+            mentioner.cleanup();
             if let Some(id) = unregister.get() {
                 if state.composer_box.get_untracked() == Some(id) {
                     state.composer_box.set(None);
@@ -3284,6 +3316,207 @@ mod tests {
             harness.is_focused(text_box),
             "the box keeps the keyboard at its front too"
         );
+    }
+
+    /// `@` puts up the item's people and the worktree's files under the
+    /// caret. Enter takes the pick, a press on a row takes that row, and
+    /// Escape puts the list away and leaves the composer open.
+    #[test]
+    fn an_at_offers_people_and_files_and_puts_the_pick_in_the_box() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        app.window_width.set(800.0);
+        app.window_height.set(400.0);
+        let state = ReviewState::new();
+        let mut item =
+            perch_github::Item::new("acme/repo", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "item-1".into();
+        state.item.set(Some(Arc::new(item)));
+        let comment = |id: u64, user: &str| perch_github::IssueComment {
+            id,
+            node_id: String::new(),
+            user: user.into(),
+            user_avatar_url: String::new(),
+            body: "hi".into(),
+            created_at: "2026-09-20T09:00:00Z".parse().unwrap(),
+            updated_at: None,
+            html_url: String::new(),
+            reactions: Default::default(),
+        };
+        state
+            .issue_comments
+            .set(Arc::new(vec![comment(1, "cadonna"), comment(2, "agavra")]));
+        let entry = |path: &str| perch_git::TreeEntry {
+            path: path.into(),
+            is_dir: false,
+            depth: path.matches('/').count(),
+        };
+        state
+            .tree
+            .set(Arc::new(vec![entry("src/lib.rs"), entry("src/client.rs")]));
+        state.open_composer(
+            None,
+            None,
+            String::new(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let backend = Rc::new(backend);
+        let composer = composer_view(app, state, backend.clone(), composer, ThreadFace::Card);
+        let view = Stack::vertical((
+            composer,
+            crate::review::mention::popup(app, state),
+        ))
+        .style(|s| s.size_full());
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let text_box = state.composer_box.get().expect("the box registered itself");
+        assert!(harness.is_focused(text_box));
+
+        let typed = |ch: &str| {
+            let code = match ch {
+                "@" => Code::Digit2,
+                _ => Code::KeyA,
+            };
+            key(Key::Character(ch.into()), code, Modifiers::empty())
+        };
+        let named = |name: NamedKey, code: Code| key(Key::Named(name), code, Modifiers::empty());
+        let shown = || {
+            state.mentions.shown.with(|s| {
+                s.as_ref().map(|s| {
+                    s.suggestions
+                        .iter()
+                        .map(|s| match s {
+                            crate::review::mention::Suggestion::Person(p) => {
+                                format!("@{}", p.person.login)
+                            }
+                            crate::review::mention::Suggestion::File(f) => f.path.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+        };
+
+        for ch in ["h", "i", " "] {
+            harness.dispatch_event(typed(ch));
+        }
+        harness.rebuild();
+        assert_eq!(shown(), None, "no list without an @");
+        harness.dispatch_event(typed("@"));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(
+            shown().unwrap(),
+            ["@cadonna", "@agavra"],
+            "the item's people; nothing is open or changed, so no files yet"
+        );
+        // Under the @, inside the window.
+        let list = find_mention_row(&harness, "mentions").get_visual_rect_no_clip();
+        let text = text_box.get_visual_rect_no_clip();
+        assert!(list.y0 > text.y0 && list.x0 > text.x0 + 10.0, "{list:?} {text:?}");
+        assert!(list.x1 <= 800.0 && list.y1 <= 400.0, "{list:?}");
+        assert!(commands.try_recv().is_err(), "nothing typed is not asked of GitHub");
+
+        // Letters ask GitHub once typing rests, about the last of them;
+        // meanwhile the list has who matches here, then the files.
+        harness.dispatch_event(typed("c"));
+        harness.dispatch_event(typed("a"));
+        harness.rebuild();
+        assert!(commands.try_recv().is_err(), "nothing is asked while typing");
+        let ask = |query: &str| crate::review::mention::Ask {
+            item_id: "item-1".into(),
+            repo: "acme/repo".into(),
+            query: query.into(),
+        };
+        // The timer for `c` finds typing moved on, and asks nothing.
+        state.mentions.ask_if_waiting(&backend, &ask("c"));
+        assert!(commands.try_recv().is_err(), "a query typed through is not asked");
+        harness.dispatch_event(named(NamedKey::Backspace, Code::Backspace));
+        harness.rebuild();
+        state.mentions.ask_if_waiting(&backend, &ask("c"));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::MentionableUsers { item_id, repo_full_name, query })
+                if item_id == "item-1" && repo_full_name == "acme/repo" && query == "c"
+        ));
+        assert_eq!(shown().unwrap(), ["@cadonna", "src/client.rs", "src/lib.rs"]);
+
+        // GitHub's answer joins the list after the item's own.
+        state.mentions.install(
+            "c".into(),
+            vec![
+                perch_github::MentionableUser {
+                    login: "calavera".into(),
+                    name: Some("David Calavera".into()),
+                    avatar_url: String::new(),
+                },
+                perch_github::MentionableUser {
+                    login: "cadonna".into(),
+                    name: Some("Bruno Cadonna".into()),
+                    avatar_url: String::new(),
+                },
+            ],
+        );
+        harness.rebuild();
+        assert_eq!(
+            shown().unwrap(),
+            ["@cadonna", "@calavera", "src/client.rs", "src/lib.rs"]
+        );
+
+        // Down to calavera, and Enter puts them in the box, where the
+        // list goes away.
+        harness.dispatch_event(named(NamedKey::ArrowDown, Code::ArrowDown));
+        assert_eq!(state.mentions.selected.get(), 1);
+        harness.dispatch_event(named(NamedKey::Enter, Code::Enter));
+        harness.rebuild();
+        assert_eq!(state.composer_draft.get(), "hi @calavera ");
+        assert_eq!(shown(), None);
+
+        // A path goes to an agent as `@path`; a press on its row takes it.
+        for ch in ["@", "l", "i", "b"] {
+            harness.dispatch_event(typed(ch));
+        }
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(shown().unwrap(), ["src/lib.rs"]);
+        let row = find_mention_row(&harness, "mention-row:src/lib.rs");
+        let at = harness.get_layout_rect(row);
+        assert!(at.width() > 0.0, "the row is drawn");
+        let centre = row.get_visual_rect_no_clip().center();
+        harness.click(centre.x, centre.y);
+        harness.rebuild();
+        assert_eq!(state.composer_draft.get(), "hi @calavera @src/lib.rs ");
+        assert_eq!(shown(), None);
+        assert!(harness.is_focused(text_box), "the box has the keyboard back");
+
+        // Escape puts the list away, not the composer, and it stays away
+        // for this @ as more is typed.
+        harness.dispatch_event(typed("@"));
+        harness.rebuild();
+        assert!(shown().is_some());
+        harness.dispatch_event(named(NamedKey::Escape, Code::Escape));
+        harness.rebuild();
+        assert_eq!(shown(), None);
+        assert!(state.composer.get().is_some(), "the composer is still open");
+        harness.dispatch_event(typed("a"));
+        harness.rebuild();
+        assert_eq!(shown(), None);
+    }
+
+    fn find_mention_row(harness: &HeadlessHarness, name: &str) -> floem::ViewId {
+        fn walk(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
+            if id.debug_name().contains(name) {
+                return Some(id);
+            }
+            id.children().into_iter().find_map(|c| walk(c, name))
+        }
+        walk(harness.root_id(), name).expect("the row is in the tree")
     }
 
     #[test]
