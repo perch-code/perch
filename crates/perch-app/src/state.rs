@@ -182,6 +182,9 @@ pub struct AppState {
     pub renaming: RwSignal<Option<String>>,
     /// The item with a Delete confirmation open under it.
     pub confirm_delete: RwSignal<Option<String>>,
+    /// An archive or delete the backend stopped before it lost something,
+    /// open under its row until the reader answers.
+    pub confirm_loss: RwSignal<Option<crate::backend::LossPrompt>>,
     /// The sidebar's search box, so Cmd-1 can focus it.
     pub search_box: RwSignal<Option<floem::ViewId>>,
     /// Cmd-1 was pressed with the drawer shut. The box does not exist
@@ -274,6 +277,7 @@ impl AppState {
             item_filters: RwSignal::new(crate::items::ItemFilters::default()),
             renaming: RwSignal::new(None),
             confirm_delete: RwSignal::new(None),
+            confirm_loss: RwSignal::new(None),
             search_box: RwSignal::new(None),
             focus_search: RwSignal::new(false),
             item_query: RwSignal::new(String::new()),
@@ -1882,6 +1886,11 @@ impl AppState {
             // An empty notice is the backend saying the last one has been
             // read: the reader has moved on to something else.
             Event::Notice(message) => self.notice.set(Some(message).filter(|m| !m.is_empty())),
+            Event::ConfirmLoss(prompt) => {
+                self.renaming.set(None);
+                self.confirm_delete.set(None);
+                self.confirm_loss.set(Some(prompt));
+            }
             Event::AgentConfig(agent) => self.agent.set(agent),
             Event::CommentThreads { .. }
             | Event::AgentStep { .. }

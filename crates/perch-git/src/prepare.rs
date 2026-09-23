@@ -106,7 +106,9 @@ impl Preparer {
     /// again finds the same directory. When its head has moved since, a
     /// clean worktree is reset to the new head; a dirty one is left alone
     /// and the checkout reports the head it did not take, so nothing
-    /// anyone wrote in there is ever reset away.
+    /// anyone wrote in there is ever reset away. So is a clean one holding
+    /// a commit the pull request never had: one the reader made there and
+    /// has not pushed.
     pub async fn prepare(
         &self,
         id: &RepoId,
@@ -117,6 +119,10 @@ impl Preparer {
         mut on_step: impl FnMut(Step) + Send,
     ) -> Result<Checkout, Error> {
         let bare = self.ensure_bare(id, &mut on_step).await?;
+        // The head the last fetch saw, before this one moves the ref: after
+        // a force push it is the only thing that says the commit on disk
+        // came from the pull request rather than from the reader.
+        let previous = self.resolve(&bare, &format!("refs/perch/pull/{number}/head")).await;
 
         // A fetch is a round trip to GitHub, most of the time an open takes.
         // When the last one already brought this head, of this base, there
@@ -184,7 +190,9 @@ impl Preparer {
 
         let (head_sha, stale) = if on_disk == head_sha {
             (head_sha.to_string(), None)
-        } else if self.is_dirty(&worktree).await? {
+        } else if self.is_dirty(&worktree).await?
+            || !self.came_from_pull(&worktree, &on_disk, head_sha, previous.as_deref()).await
+        {
             (on_disk, Some(head_sha.to_string()))
         } else {
             // HEAD is attached to the branch, so this moves the branch too.
@@ -401,6 +409,39 @@ impl Preparer {
         Ok(Cut { branch, worktree })
     }
 
+    /// Whether the commit on disk is one the pull request had: behind its
+    /// new head, or behind the head the last fetch saw, which a force push
+    /// has since replaced. Anything else was committed here, and resetting
+    /// would leave it reachable from nothing but the reflog.
+    async fn came_from_pull(&self, worktree: &Path, on_disk: &str, head: &str, previous: Option<&str>) -> bool {
+        if self.is_ancestor(worktree, on_disk, head).await {
+            return true;
+        }
+        match previous {
+            Some(previous) => self.is_ancestor(worktree, on_disk, previous).await,
+            None => false,
+        }
+    }
+
+    /// `git merge-base --is-ancestor a b`: whether `a` is `b` or behind it.
+    /// A commit git cannot find is not an ancestor of anything.
+    pub async fn is_ancestor(&self, repo: &Path, a: &str, b: &str) -> bool {
+        self.git
+            .run(Some(repo), ["merge-base", "--is-ancestor", a, b], QUERY_TIMEOUT)
+            .await
+            .is_ok()
+    }
+
+    /// The commit a ref names, or `None` when there is no such ref.
+    async fn resolve(&self, repo: &Path, name: &str) -> Option<String> {
+        self.git
+            .run(Some(repo), ["rev-parse", "--verify", "--quiet", &format!("{name}^{{commit}}")], QUERY_TIMEOUT)
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     async fn branch_exists(&self, bare: &Path, branch: &str) -> bool {
         self.git
             .run(
@@ -502,6 +543,58 @@ impl Preparer {
             .run(Some(bare), ["branch", "-D", branch], WORKTREE_TIMEOUT)
             .await?;
         Ok(())
+    }
+
+    /// How many commits on `branch` no other ref holds: no other branch,
+    /// tag, remote-tracking branch, or ref of Perch's own such as a pull
+    /// request's fetched head. These are what deleting the branch loses.
+    /// Worktrees' `HEAD`s are left out on purpose, since the branch's own
+    /// worktree would otherwise hold every one of them.
+    pub async fn commits_only_on(&self, repo: &Path, branch: &str) -> Result<u64, Error> {
+        let out = self
+            .git
+            .run(
+                Some(repo),
+                [
+                    "rev-list".to_string(),
+                    "--count".to_string(),
+                    format!("refs/heads/{branch}"),
+                    "--not".to_string(),
+                    format!("--exclude={branch}"),
+                    "--branches".to_string(),
+                    "--tags".to_string(),
+                    "--remotes".to_string(),
+                    "--glob=refs/perch/*".to_string(),
+                    "--".to_string(),
+                ],
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        out.trim()
+            .parse()
+            .map_err(|_| Error::Io(format!("git rev-list --count said {:?}", out.trim())))
+    }
+
+    /// What in a worktree git ignores, as `status` names it: a directory
+    /// that is ignored whole is one entry ending in `/`. Removing the
+    /// directory removes these too, and git keeps no copy of them.
+    pub async fn ignored_entries(&self, worktree: &Path) -> Result<Vec<String>, Error> {
+        let out = self
+            .git
+            .run(
+                Some(worktree),
+                ["status", "--porcelain", "-z", "--ignored=matching", "--untracked-files=normal"],
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        let mut entries: Vec<String> = out
+            .split('\0')
+            .filter_map(|entry| entry.strip_prefix("!! "))
+            .map(str::to_string)
+            .collect();
+        entries.sort();
+        entries.dedup();
+        Ok(entries)
     }
 
     /// Every directory under the worktrees root, whether or not a record

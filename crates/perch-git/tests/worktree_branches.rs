@@ -275,3 +275,92 @@ async fn every_directory_is_listed_whether_or_not_it_is_known() {
     expected.sort();
     assert_eq!(dirs, expected);
 }
+
+#[tokio::test]
+async fn a_clean_worktree_with_a_commit_of_its_own_is_not_reset() {
+    let f = Fixture::new();
+    let one = f.push_commit("pr");
+    let checkout = f.prepare(&one).await;
+    std::fs::write(checkout.worktree.join("mine.txt"), "mine").unwrap();
+    git(&checkout.worktree, &["add", "."]);
+    git(&checkout.worktree, &["commit", "-q", "-m", "mine"]);
+    let mine = git(&checkout.worktree, &["rev-parse", "HEAD"]);
+
+    // Nothing moved on GitHub: the reader's commit is still not the head.
+    let same = f.prepare(&one).await;
+    assert_eq!(same.head_sha, mine);
+    assert_eq!(same.stale.as_deref(), Some(one.as_str()));
+
+    let two = f.push_commit("more");
+    let kept = f.prepare(&two).await;
+    assert_eq!(kept.head_sha, mine, "the unpushed commit is still checked out");
+    assert_eq!(kept.stale.as_deref(), Some(two.as_str()));
+    assert_eq!(git(&kept.worktree, &["rev-parse", "HEAD"]), mine);
+}
+
+#[tokio::test]
+async fn a_clean_worktree_follows_a_force_push() {
+    let f = Fixture::new();
+    let base = git(&f.remote, &["rev-parse", "HEAD"]);
+    let one = f.push_commit("pr");
+    f.prepare(&one).await;
+
+    // Rewrite the pull request: the old head is behind nothing new.
+    git(&f.remote, &["reset", "-q", "--hard", &base]);
+    let rewritten = f.push_commit("rewritten");
+    let checkout = f.prepare(&rewritten).await;
+
+    assert_eq!(checkout.head_sha, rewritten);
+    assert_eq!(checkout.stale, None);
+    assert_eq!(git(&checkout.worktree, &["rev-parse", "HEAD"]), rewritten);
+}
+
+#[tokio::test]
+async fn commits_only_on_counts_what_deleting_the_branch_loses() {
+    let f = Fixture::new();
+    let main = git(&f.bare(), &["rev-parse", "refs/heads/main"]);
+    let cut = f
+        .preparer
+        .cut_branch(&f.id, "chris/work", &main, &[])
+        .await
+        .unwrap();
+    assert_eq!(f.preparer.commits_only_on(&f.bare(), &cut.branch).await.unwrap(), 0);
+
+    for name in ["one", "two"] {
+        std::fs::write(cut.worktree.join(name), name).unwrap();
+        git(&cut.worktree, &["add", "."]);
+        git(&cut.worktree, &["commit", "-q", "-m", name]);
+    }
+    assert_eq!(
+        f.preparer.commits_only_on(&f.bare(), &cut.branch).await.unwrap(),
+        2,
+        "the worktree's own HEAD does not count as holding them"
+    );
+
+    // Another branch at the first commit keeps it.
+    git(&cut.worktree, &["branch", "keep", "HEAD~1"]);
+    assert_eq!(f.preparer.commits_only_on(&f.bare(), &cut.branch).await.unwrap(), 1);
+    // So does a ref of Perch's own, such as a pull request's head.
+    let head = git(&cut.worktree, &["rev-parse", "HEAD"]);
+    git(&f.bare(), &["update-ref", "refs/perch/pull/9/head", &head]);
+    assert_eq!(f.preparer.commits_only_on(&f.bare(), &cut.branch).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn ignored_entries_are_what_git_would_not_keep() {
+    let f = Fixture::new();
+    let head = f.push_commit("pr");
+    let checkout = f.prepare(&head).await;
+    assert!(f.preparer.ignored_entries(&checkout.worktree).await.unwrap().is_empty());
+
+    std::fs::write(checkout.worktree.join(".gitignore"), ".env\ntarget/\n").unwrap();
+    std::fs::write(checkout.worktree.join(".env"), "SECRET=1").unwrap();
+    std::fs::create_dir_all(checkout.worktree.join("target/debug")).unwrap();
+    std::fs::write(checkout.worktree.join("target/debug/x"), "x").unwrap();
+    std::fs::write(checkout.worktree.join("notes.txt"), "untracked, not ignored").unwrap();
+
+    assert_eq!(
+        f.preparer.ignored_entries(&checkout.worktree).await.unwrap(),
+        vec![".env".to_string(), "target/".to_string()]
+    );
+}

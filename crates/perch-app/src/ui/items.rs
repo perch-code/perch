@@ -16,11 +16,11 @@ use std::rc::Rc;
 use floem::menu::Menu;
 use floem::muda::accelerator::{Accelerator, Code as KeyCode};
 use floem::prelude::*;
-use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{Container, Decorators, Empty, Label, Stack, TextInput, dyn_container};
 use perch_github::{Item, ItemSubject, SubjectState};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, LossAction, LossPrompt};
 use crate::icons::{self, SidebarIcon};
 use crate::state::AppState;
 use crate::theme;
@@ -113,21 +113,39 @@ pub fn item_row(
         .style(move |s| nav_row::row_style(s, selected()));
     let row = Container::new(row).style(nav_row::row_gutter);
 
-    // What opens under the row: a Delete confirmation.
+    // What opens under the row: a Delete confirmation, or the backend
+    // asking before an archive or delete loses something. Keyed on a
+    // memo: the signals are written for every row, and each write would
+    // otherwise rebuild every row's panel.
     let under_item = item.clone();
+    let under = {
+        let id = item.id.clone();
+        Memo::new(move |_| {
+            if let Some(prompt) = state
+                .confirm_loss
+                .with(|p| p.clone().filter(|p| p.item_id == id))
+            {
+                Under::Loss(prompt)
+            } else if state.confirm_delete.with(|d| d.as_deref() == Some(id.as_str())) {
+                Under::Delete
+            } else {
+                Under::Nothing
+            }
+        })
+    };
     Stack::vertical((
         row,
         dyn_container(
-            {
-                let id = item.id.clone();
-                move || state.confirm_delete.with(|d| d.as_deref() == Some(id.as_str()))
-            },
-            move |deleting| {
-                if deleting {
+            move || under.get(),
+            move |under| match under {
+                Under::Delete => {
                     delete_confirmation(state, under_backend.clone(), under_item.clone()).into_any()
-                } else {
-                    Empty::new().into_any()
                 }
+                Under::Loss(prompt) => {
+                    loss_confirmation(state, under_backend.clone(), under_item.title().to_string(), prompt)
+                        .into_any()
+                }
+                Under::Nothing => Empty::new().into_any(),
             },
         )
         .style(|s| s.width_full()),
@@ -441,7 +459,8 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
                         state.expect_item_navigation(&i, navigation_id);
                     }
                 } else {
-                    b.archive_item(&i);
+                    state.confirm_loss.set(None);
+                    b.archive_item(&i, false);
                 }
             })
         });
@@ -452,6 +471,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
             let i = i.clone();
             m.accelerator(key(KeyCode::KeyD)).action(move || {
                 state.renaming.set(None);
+                state.confirm_loss.set(None);
                 state.confirm_delete.set(Some(i.clone()));
             })
         });
@@ -524,7 +544,7 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
         }),
         Stack::horizontal((
             text_button(|| "Delete".to_string(), SidebarIcon::Trash, move || {
-                backend.delete_item(&id);
+                backend.delete_item(&id, false);
                 state.confirm_delete.set(None);
             }),
             text_button(|| "Cancel".to_string(), SidebarIcon::Close, move || state.confirm_delete.set(None)),
@@ -545,9 +565,123 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
     })
 }
 
+/// What is open under a row.
+#[derive(Clone, PartialEq)]
+enum Under {
+    Nothing,
+    Delete,
+    Loss(LossPrompt),
+}
+
+/// What a loss prompt says: the question, then what goes.
+fn loss_text(title: &str, prompt: &LossPrompt) -> (String, String, &'static str) {
+    match prompt.action {
+        LossAction::Delete => {
+            let commits = match prompt.commits {
+                1 => "1 commit".to_string(),
+                n => format!("{n} commits"),
+            };
+            (
+                format!("Delete {title} and its commits?"),
+                format!(
+                    "{} has {commits} that no other branch, tag or remote Perch knows of holds. \
+                     Deleting the branch loses them.",
+                    prompt.branch
+                ),
+                "Delete anyway",
+            )
+        }
+        LossAction::Archive => {
+            const SHOWN: usize = 10;
+            let mut names = prompt.ignored.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+            if prompt.ignored.len() > SHOWN {
+                names.push_str(&format!(", and {} more", prompt.ignored.len() - SHOWN));
+            }
+            (
+                format!("Archive {title}?"),
+                format!(
+                    "Archiving removes the directory, and with it what git ignores there: {names}. \
+                     The branch and its commits stay."
+                ),
+                "Archive",
+            )
+        }
+    }
+}
+
+/// The backend's question before an archive or delete that would lose
+/// what git cannot bring back.
+fn loss_confirmation(state: AppState, backend: Rc<Backend>, title: String, prompt: LossPrompt) -> impl IntoView {
+    let (question, what, go) = loss_text(&title, &prompt);
+    let id = prompt.item_id.clone();
+    let action = prompt.action;
+    Stack::vertical((
+        Label::derived(move || question.clone()).style(|s| {
+            s.font_size(theme::TEXT_META).font_weight(theme::weight_emphasis()).color(theme::FG).selectable(false)
+        }),
+        Label::derived(move || what.clone()).style(|s| {
+            s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).text_wrap().width_full().margin_top(2.0)
+        }),
+        Stack::horizontal((
+            text_button(
+                move || go.to_string(),
+                match action {
+                    LossAction::Delete => SidebarIcon::Trash,
+                    LossAction::Archive => SidebarIcon::Folder,
+                },
+                move || {
+                    state.confirm_loss.set(None);
+                    match action {
+                        LossAction::Delete => backend.delete_item(&id, true),
+                        LossAction::Archive => {
+                            backend.archive_item(&id, true);
+                        }
+                    }
+                },
+            ),
+            text_button(|| "Cancel".to_string(), SidebarIcon::Close, move || state.confirm_loss.set(None)),
+        ))
+        .style(|s| s.gap(6.0).margin_top(8.0)),
+    ))
+    .on_event_stop(el::Click, |_, _| {})
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .padding(10.0)
+            .margin_horiz(6.0)
+            .margin_bottom(4.0)
+            .background(theme::NOTICE_BG)
+            .border(1.0)
+            .border_color(theme::NOTICE_BORDER)
+            .border_radius(theme::RADIUS)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loss_prompt_names_what_goes() {
+        let mut prompt = LossPrompt {
+            item_id: "i".into(),
+            action: LossAction::Delete,
+            branch: "chris/work".into(),
+            commits: 1,
+            ignored: Vec::new(),
+        };
+        let (question, what, go) = loss_text("Work", &prompt);
+        assert_eq!(question, "Delete Work and its commits?");
+        assert!(what.starts_with("chris/work has 1 commit that"), "{what}");
+        assert_eq!(go, "Delete anyway");
+
+        prompt.action = LossAction::Archive;
+        prompt.ignored = (0..12).map(|n| format!("f{n}")).collect();
+        let (_, what, _) = loss_text("Work", &prompt);
+        assert!(what.contains("f0, f1"), "{what}");
+        assert!(what.contains("f9, and 2 more."), "{what}");
+        assert!(!what.contains("f10"), "{what}");
+    }
 
     #[test]
     fn a_branch_has_no_state_glyph_and_a_closed_issue_has_one() {

@@ -276,6 +276,8 @@ pub enum Command {
     ArchiveItem {
         id: String,
         suspended_navigation: SuspendedNavigation,
+        /// The reader has seen what it loses (see `LossPrompt`) and said go.
+        accept_loss: bool,
     },
     /// Back to Active, and an owned checkout back on disk.
     RestoreItem {
@@ -286,6 +288,8 @@ pub enum Command {
     /// branch go too; anything under a root is not touched.
     DeleteItem {
         id: String,
+        /// The reader has seen what it loses (see `LossPrompt`) and said go.
+        accept_loss: bool,
     },
     /// Keep or remove a local bookmark for an item.
     SetSaved {
@@ -417,6 +421,28 @@ pub enum Command {
     },
 }
 
+/// What archiving or deleting an item would lose that git keeps no copy
+/// of, for the reader to see before it goes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LossPrompt {
+    pub item_id: String,
+    pub action: LossAction,
+    pub branch: String,
+    /// Commits no other branch, tag or remote-tracking ref holds, which
+    /// deleting the branch takes with it. Delete only.
+    pub commits: u64,
+    /// What git ignores in the directory, which removing it takes with
+    /// it. Archive only; Delete removes the directory as well, and says
+    /// so already.
+    pub ignored: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LossAction {
+    Archive,
+    Delete,
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     Avatar {
@@ -515,6 +541,9 @@ pub enum Event {
         item_id: String,
         navigation_id: u64,
     },
+    /// An archive or delete stopped short of losing something git cannot
+    /// bring back, and asks first.
+    ConfirmLoss(LossPrompt),
     /// Archive committed and names the exact pending navigation it fenced.
     ItemArchived {
         item_id: String,
@@ -2014,7 +2043,7 @@ impl Backend {
         navigation_id
     }
 
-    pub fn archive_item(&self, id: &str) -> u64 {
+    pub fn archive_item(&self, id: &str, accept_loss: bool) -> u64 {
         let suspended_navigation = self.navigation_requests.suspend_item(id);
         self.scope_requests.clear_item(id);
         let fence_id = suspended_navigation.fence_id;
@@ -2023,6 +2052,7 @@ impl Backend {
             .send(Command::ArchiveItem {
                 id: id.to_string(),
                 suspended_navigation: suspended_navigation.clone(),
+                accept_loss,
             })
             .is_err()
         {
@@ -2042,11 +2072,12 @@ impl Backend {
         navigation_id
     }
 
-    pub fn delete_item(&self, id: &str) {
+    pub fn delete_item(&self, id: &str, accept_loss: bool) {
         self.scope_requests.clear_item(id);
-        let _ = self
-            .commands
-            .send(Command::DeleteItem { id: id.to_string() });
+        let _ = self.commands.send(Command::DeleteItem {
+            id: id.to_string(),
+            accept_loss,
+        });
     }
 
     pub fn mark_saved(&self, id: &str, saved: bool) {
@@ -2999,23 +3030,24 @@ async fn run(
             Command::ArchiveItem {
                 id,
                 suspended_navigation,
+                accept_loss,
             } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if let Err(message) =
-                        archive_item(&ctx, &id, Some(&suspended_navigation)).await
+                        archive_item(&ctx, &id, Some(&suspended_navigation), accept_loss).await
                     {
                         tracing::warn!(id, %message, "could not archive item");
                         let _ = ctx.events.send(Event::Notice(message));
                     }
                 });
             }
-            Command::DeleteItem { id } => {
+            Command::DeleteItem { id, accept_loss } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if let Err(message) = delete_item(&ctx, &id).await {
+                    if let Err(message) = delete_item(&ctx, &id, accept_loss).await {
                         tracing::warn!(id, %message, "could not delete item");
                         let _ = ctx.events.send(Event::Notice(message));
                     }
@@ -4860,10 +4892,14 @@ async fn sweep_items(ctx: &Ctx) {
 
     for item in &items {
         let owned = item.checkout.as_ref().is_some_and(|c| c.owned && c.on_disk);
-        if !owned || item.is_archived() || item.last_opened_at > cutoff {
+        // A branch with no pull request or issue behind it can hold the
+        // only copy of someone's work, ignored files and all. It is put
+        // away when the reader says so, never by age.
+        let branch = item.subject.is_none();
+        if !owned || branch || item.is_archived() || item.last_opened_at > cutoff {
             continue;
         }
-        match archive_item(ctx, &item.id, None).await {
+        match archive_item(ctx, &item.id, None, false).await {
             Ok(()) => tracing::info!(id = %item.id, "archived a stale checkout"),
             // Dirty, most likely. It stays; the reader has work in it.
             Err(message) => tracing::info!(id = %item.id, %message, "left a stale checkout alone"),
@@ -4877,6 +4913,7 @@ async fn archive_item(
     ctx: &Ctx,
     id: &str,
     suspended_navigation: Option<&SuspendedNavigation>,
+    accept_loss: bool,
 ) -> Result<(), String> {
     let lifecycle = ctx.item_lifecycle.lock().await;
     if suspended_navigation.is_some_and(|suspended| {
@@ -4907,6 +4944,28 @@ async fn archive_item(
                     ctx.navigation_requests.restore_suspended(suspended);
                 }
                 return Err(format!("{} has uncommitted changes", checkout.branch));
+            }
+            // A pull request's checkout can be made again from GitHub; a
+            // branch's ignored files, a `.env` or notes, cannot.
+            if item.subject.is_none() && !accept_loss {
+                let ignored = ctx
+                    .preparer
+                    .ignored_entries(&checkout.path)
+                    .await
+                    .unwrap_or_default();
+                if !ignored.is_empty() {
+                    if let Some(suspended) = suspended_navigation {
+                        ctx.navigation_requests.restore_suspended(suspended);
+                    }
+                    let _ = ctx.events.send(Event::ConfirmLoss(LossPrompt {
+                        item_id: id.to_string(),
+                        action: LossAction::Archive,
+                        branch: checkout.branch.clone(),
+                        commits: 0,
+                        ignored,
+                    }));
+                    return Ok(());
+                }
             }
         }
     }
@@ -5076,7 +5135,7 @@ async fn retire_archived_checkout_from_cache(
 
 /// Remove the row and its threads. An owned checkout's directory and
 /// branch go too; a checkout under a root is not touched.
-async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
+async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), String> {
     let _lifecycle = ctx.item_lifecycle.lock().await;
     let Some(item) = ctx.item(id) else {
         return Err("That item is gone".into());
@@ -5092,6 +5151,29 @@ async fn delete_item(ctx: &Ctx, id: &str) -> Result<(), String> {
                 .map_err(|error| error.to_string())?
         {
             return Err(format!("{} has uncommitted changes", checkout.branch));
+        }
+        if !accept_loss {
+            let commits = match RepoId::parse(&item.repo_full_name) {
+                Some(repo) => {
+                    let bare = ctx.preparer.store().bare_path(&repo);
+                    // No clone, or no such branch in it: nothing to lose.
+                    ctx.preparer
+                        .commits_only_on(&bare, &checkout.branch)
+                        .await
+                        .unwrap_or(0)
+                }
+                None => 0,
+            };
+            if commits > 0 {
+                let _ = ctx.events.send(Event::ConfirmLoss(LossPrompt {
+                    item_id: id.to_string(),
+                    action: LossAction::Delete,
+                    branch: checkout.branch.clone(),
+                    commits,
+                    ignored: Vec::new(),
+                }));
+                return Ok(());
+            }
         }
     }
     let _deletion = ctx.runs.block_owner(id, None)?;
@@ -15453,7 +15535,7 @@ mod tests {
         let admission = ctx.runs.admit(run).unwrap();
         let lease = ctx.runs.start(admission).await.unwrap();
 
-        tokio::time::timeout(Duration::from_secs(2), archive_item(&ctx, &item.id, None))
+        tokio::time::timeout(Duration::from_secs(2), archive_item(&ctx, &item.id, None, false))
             .await
             .expect("archive did not wait on the active run")
             .unwrap();
