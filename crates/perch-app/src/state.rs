@@ -13,10 +13,7 @@ use jiff::Timestamp;
 use perch_github::{AgentConfig, DeclaredRepo, Item, Thread};
 
 use crate::backend::{Event, Status};
-use crate::ui::agents::model::{
-    AgentRunSummary, AgentsTab, BackendFilter, OutcomeFilter, WorktreeFilter,
-};
-use crate::ui::drawer::DrawerView;
+use crate::ui::agents::model::AgentRunSummary;
 
 /// Whether a box is checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +39,6 @@ pub struct PendingAgentNavigation {
     pub token: u64,
     pub navigation_id: u64,
     pub item_id: String,
-    pub thread_id: Option<String>,
     pub review_attempt_id: Option<String>,
     /// A run to open in the item's Agents row once it is there.
     pub run_id: Option<String>,
@@ -59,7 +55,7 @@ enum OpenExpectation {
     Closed,
 }
 
-/// A terminal transition worth surfacing outside the Agents panel. The
+/// A terminal transition worth surfacing wherever the reader is. The
 /// monotonically increasing token keeps an old dismissal timer from clearing
 /// a newer completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,10 +119,9 @@ pub struct AppState {
     /// the reader has opened, and fetched from newest toward oldest.
     pub agent_run_events_has_more: RwSignal<HashMap<String, bool>>,
     pub agent_run_events_loading: RwSignal<HashSet<String>>,
-    /// What the reader asked the drawer on the right to hold: the open
-    /// item's files, or the Agents inspector. What it shows is
-    /// `drawer_shown`: Files only while there is an item with files.
-    pub drawer: RwSignal<Option<DrawerView>>,
+    /// Whether the reader asked for the tree in the drawer on the right.
+    /// Whether it shows is `tree_shown`: only on Code.
+    pub tree_open: RwSignal<bool>,
     /// How wide the drawer is. Dragged, so a signal rather than a constant;
     /// docked, it may be shown narrower than this to leave the main pane
     /// its minimum.
@@ -145,11 +140,6 @@ pub struct AppState {
     /// Guards the one shared elapsed-time ticker; rows never make timers of
     /// their own.
     pub agents_clock_armed: RwSignal<bool>,
-    pub agents_tab: RwSignal<AgentsTab>,
-    pub agents_worktree_filter: RwSignal<WorktreeFilter>,
-    pub agents_backend_filter: RwSignal<BackendFilter>,
-    pub agents_outcome_filter: RwSignal<OutcomeFilter>,
-    pub selected_agent_run: RwSignal<Option<String>>,
     /// The control the drawer was opened from, or whatever had the
     /// keyboard when it was opened by a shortcut, to hand it back to when
     /// the drawer shuts.
@@ -163,9 +153,6 @@ pub struct AppState {
     /// Each item's history for its Agents row, by item: whether older runs
     /// are left to load, and whether a page is on its way.
     pub item_runs: RwSignal<HashMap<String, ItemRunsPage>>,
-    /// Returning from detail rebuilds the list, so the run id—not the old
-    /// row's transient ViewId—is the durable focus target.
-    pub pending_agent_row_focus: RwSignal<Option<String>>,
     /// Review group rows are expanded by default; this records the explicit
     /// collapses so newly admitted reviewer children are immediately visible.
     pub collapsed_agent_review_groups: RwSignal<HashSet<String>>,
@@ -268,25 +255,19 @@ impl AppState {
             agent_run_events: RwSignal::new(HashMap::new()),
             agent_run_events_has_more: RwSignal::new(HashMap::new()),
             agent_run_events_loading: RwSignal::new(HashSet::new()),
-            drawer: RwSignal::new(None),
+            tree_open: RwSignal::new(false),
             drawer_width: RwSignal::new(crate::theme::DRAWER_WIDTH),
             drawer_resizing: RwSignal::new(false),
             window_width: RwSignal::new(0.0),
             window_height: RwSignal::new(0.0),
             main_pane: RwSignal::new((0.0, 0.0)),
             agents_clock_armed: RwSignal::new(false),
-            agents_tab: RwSignal::new(AgentsTab::Active),
-            agents_worktree_filter: RwSignal::new(WorktreeFilter::All),
-            agents_backend_filter: RwSignal::new(BackendFilter::All),
-            agents_outcome_filter: RwSignal::new(OutcomeFilter::All),
-            selected_agent_run: RwSignal::new(None),
             drawer_opener: RwSignal::new(None),
             agent_history_loading: RwSignal::new(false),
             agent_history_has_more: RwSignal::new(false),
             item_runs: RwSignal::new(HashMap::new()),
             agent_history_load_failed: RwSignal::new(false),
             agent_history_load_token: RwSignal::new(0),
-            pending_agent_row_focus: RwSignal::new(None),
             collapsed_agent_review_groups: RwSignal::new(HashSet::new()),
             pending_agent_navigation: RwSignal::new(None),
             agent_navigation_token: RwSignal::new(0),
@@ -678,13 +659,15 @@ impl AppState {
         (has_more, loading)
     }
 
-    /// Keep the open detail live without retaining every transcript in the
-    /// app signal. The same event already committed before AgentStep was
-    /// published; its authoritative sequence comes from AgentRunUpdated.
+    /// Keep an open run's detail live without retaining every transcript
+    /// in the app signal: a run's events are here once its detail has been
+    /// asked for, by opening it in an Agents row. The same event already
+    /// committed before AgentStep was published; its authoritative sequence
+    /// comes from AgentRunUpdated.
     fn append_open_agent_event(&self, run_id: &str, event: &perch_agent::RunEvent) {
-        if self
-            .selected_agent_run
-            .with_untracked(|selected| selected.as_deref() != Some(run_id))
+        if !self
+            .agent_run_events
+            .with_untracked(|events| events.contains_key(run_id))
         {
             return;
         }
@@ -801,12 +784,6 @@ impl AppState {
             .update(|pages| pages.retain(|run_id, _| !removed.contains(run_id)));
         self.agent_run_events_loading
             .update(|runs| runs.retain(|run_id| !removed.contains(run_id)));
-        if self
-            .selected_agent_run
-            .with_untracked(|selected| selected.as_ref().is_some_and(|id| removed.contains(id)))
-        {
-            self.selected_agent_run.set(None);
-        }
         let front = self.current_agent_completion().map(|notice| notice.token);
         self.agent_completion_notices
             .update(|notices| notices.retain(|notice| !removed.contains(&notice.run_id)));
@@ -818,38 +795,23 @@ impl AppState {
         }
     }
 
-    /// Whether the open item has files for the drawer to show: one with
-    /// a checkout, or one still on its way, which keeps the drawer's
-    /// column from going and coming back while a pull request opens after
-    /// another.
-    pub fn files_available(&self) -> bool {
+    /// Whether the open item has a tree to show: it is on Code, or still
+    /// on its way, which keeps the drawer's column from going and coming
+    /// back while a pull request opens after another. Tracked.
+    pub fn tree_available(&self) -> bool {
         self.review.get().is_some_and(|review| {
-            review.is_showing()
-                && review
-                    .item
-                    .with(|item| item.as_ref().is_none_or(|item| item.checkout.is_some()))
+            review.opening.get()
+                || (review.is_open()
+                    && review.tab.get() == crate::review::model::ItemTab::Code
+                    && review.has_files())
         })
     }
 
-    /// What the drawer shows: what was asked for, except Files while there
-    /// are no files to show, when the drawer is shut and the wish is kept
-    /// for the next item that has some.
-    pub fn drawer_shown(&self) -> Option<DrawerView> {
-        match self.drawer.get() {
-            Some(DrawerView::Files) => self.files_available().then_some(DrawerView::Files),
-            other => other,
-        }
-    }
-
-    /// `drawer_shown` for an event handler, which is not to depend on the
-    /// drawer merely for having looked.
-    pub fn drawer_shown_untracked(&self) -> Option<DrawerView> {
-        floem::reactive::Effect::untrack(|| self.drawer_shown())
-    }
-
-    /// Whether the drawer shows the Agents inspector.
-    pub fn agents_open(&self) -> bool {
-        self.drawer_shown() == Some(DrawerView::Agents)
+    /// Whether the drawer shows the tree: asked for, and on Code. Asked
+    /// for on Conversation, or on an item with no files, the wish is kept
+    /// for when there is a tree to show. Tracked.
+    pub fn tree_shown(&self) -> bool {
+        self.tree_open.get() && self.tree_available()
     }
 
     pub fn active_agent_counts(&self) -> (usize, usize) {
@@ -863,15 +825,6 @@ impl AppState {
         })
     }
 
-    pub fn begin_agent_navigation(
-        &self,
-        item_id: String,
-        thread_id: Option<String>,
-        navigation_id: u64,
-    ) -> u64 {
-        self.begin_agent_navigation_to(item_id, thread_id, None, navigation_id)
-    }
-
     /// Open a run's item on Conversation, with the run open in its Agents
     /// row once the item's threads have landed.
     pub fn begin_agent_run_navigation(
@@ -880,7 +833,7 @@ impl AppState {
         run_id: String,
         navigation_id: u64,
     ) -> u64 {
-        let token = self.begin_agent_navigation_to(item_id, None, None, navigation_id);
+        let token = self.begin_agent_navigation_to(item_id, None, navigation_id);
         self.pending_agent_navigation.update(|pending| {
             if let Some(pending) = pending {
                 pending.run_id = Some(run_id);
@@ -897,13 +850,12 @@ impl AppState {
         navigation_id: u64,
     ) -> u64 {
         review.begin_historical_review_rollback(self.expected_navigation_id.get_untracked());
-        self.begin_agent_navigation_to(item_id, None, Some(review_attempt_id), navigation_id)
+        self.begin_agent_navigation_to(item_id, Some(review_attempt_id), navigation_id)
     }
 
     fn begin_agent_navigation_to(
         &self,
         item_id: String,
-        thread_id: Option<String>,
         review_attempt_id: Option<String>,
         navigation_id: u64,
     ) -> u64 {
@@ -923,7 +875,6 @@ impl AppState {
                 token,
                 navigation_id,
                 item_id,
-                thread_id,
                 review_attempt_id,
                 run_id: None,
             }));
@@ -1109,11 +1060,6 @@ impl AppState {
                             && pending.review_attempt_id.is_none()
                     }) {
                         review.show_tab(ItemTab::Conversation);
-                        if let Some(thread_id) = pending.thread_id {
-                            review
-                                .focus_card
-                                .set(Some(crate::review::doc::CardId::Thread(thread_id)));
-                        }
                         if let Some(run_id) = pending.run_id {
                             review.pending_run_reveal.set(Some(run_id));
                         }
@@ -1997,7 +1943,7 @@ impl AppState {
                         review.layout.set(layout);
                     }
                 }
-                "drawer.view" => self.drawer.set(DrawerView::parse(&value)),
+                "drawer.view" => self.tree_open.set(crate::ui::drawer::parse(&value)),
                 "drawer.width" => match value.parse::<f64>() {
                     Ok(width) => self.drawer_width.set(width.clamp(
                         crate::theme::DRAWER_MIN_WIDTH,
@@ -2807,8 +2753,8 @@ mod tests {
         let app = AppState::new();
         let review = ReviewState::new();
 
-        let first = app.begin_agent_navigation("older".into(), Some("thread-old".into()), 11);
-        let latest = app.begin_agent_navigation("latest".into(), Some("thread-new".into()), 12);
+        let first = app.begin_agent_run_navigation("older".into(), "run-old".into(), 11);
+        let latest = app.begin_agent_run_navigation("latest".into(), "run-new".into(), 12);
         assert!(latest > first);
         app.begin_review(review, "Reading the discussion");
 
@@ -2827,10 +2773,7 @@ mod tests {
             review,
         );
         assert!(review.is_item("latest"));
-        assert_eq!(
-            review.focus_card.get(),
-            Some(crate::review::doc::CardId::Thread("thread-new".into()))
-        );
+        assert_eq!(review.pending_run_reveal.get().as_deref(), Some("run-new"));
 
         // The first load can still finish after the latest one. It remains
         // inert, and closing the workspace also fences delayed Ready events.

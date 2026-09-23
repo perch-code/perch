@@ -610,7 +610,7 @@ mod tests {
         ));
         state.composer_autofocus.set(false);
         app.sidebar_open.set(false);
-        app.drawer.set(Some(crate::ui::drawer::DrawerView::Files));
+        app.tree_open.set(true);
         let backend = crate::backend::Backend::detached();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);

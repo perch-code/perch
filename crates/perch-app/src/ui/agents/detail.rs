@@ -15,40 +15,17 @@ use floem::views::{
 use perch_github::comments::{RunEvent, RunEventRecord};
 
 use crate::backend::Backend;
-use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 
 use super::model::{
-    elapsed_label, AgentRetryTarget, AgentRunPurpose, AgentRunStatus, AgentRunSummary,
+    AgentRunPurpose, AgentRunStatus, AgentRunSummary,
 };
-use super::{metadata, navigate_to_source, status_color, text_action};
+use super::{status_color, text_action};
 
-pub fn view(
-    state: AppState,
-    review: ReviewState,
-    backend: Rc<Backend>,
-    initial: AgentRunSummary,
-) -> impl IntoView {
-    let id = Arc::new(initial.id.clone());
-    let initial = Arc::new(initial);
-    let header_id = id.clone();
-    let header_initial = initial.clone();
-    let summary_backend = backend.clone();
-    Stack::vertical((
-        dyn_container(
-            move || current_run(state, &header_id, &header_initial),
-            move |run| summary_bar(state, review, summary_backend.clone(), run).into_any(),
-        ),
-        detail_body(state, backend, id, initial, None),
-    ))
-    .style(|s| s.size_full().flex_col().min_height(0.0))
-    .debug_name("agent-run-detail")
-}
-
-/// What a run did, as its row in an item's Agents list opens to: the
-/// detail's sections without its bar, which the row is, and no taller
-/// than `cap`, scrolling inside that.
+/// What a run did, as its row in an item's Agents list opens to: its
+/// request, its activity, its answer and what it cost, no taller than
+/// `cap` and scrolling inside that, following the end while the run goes.
 pub(super) fn inline(
     state: AppState,
     backend: Rc<Backend>,
@@ -56,7 +33,7 @@ pub(super) fn inline(
     cap: f64,
 ) -> impl IntoView {
     let id = Arc::new(initial.id.clone());
-    detail_body(state, backend, id, Arc::new(initial), Some(cap)).debug_name("agent-run-inline")
+    detail_body(state, backend, id, Arc::new(initial), cap).debug_name("agent-run-inline")
 }
 
 fn current_run(state: AppState, id: &str, initial: &AgentRunSummary) -> AgentRunSummary {
@@ -70,15 +47,14 @@ fn current_events(state: AppState, id: &str) -> Arc<Vec<RunEventRecord>> {
         .unwrap_or_else(|| Arc::new(Vec::new()))
 }
 
-/// The sections, in a scroll that follows the end while the run goes.
-/// It fills the drawer's column, or, with a `cap`, is as tall as what it
-/// holds up to that.
+/// The sections, in a scroll that follows the end while the run goes, as
+/// tall as what they hold up to `cap`.
 fn detail_body(
     state: AppState,
     backend: Rc<Backend>,
     id: Arc<String>,
     initial: Arc<AgentRunSummary>,
-    cap: Option<f64>,
+    cap: f64,
 ) -> impl IntoView {
     let activity_id = id.clone();
     let activity_initial = initial.clone();
@@ -131,11 +107,9 @@ fn detail_body(
             },
         )
         .style(move |s| {
-            let s = s.width_full().background(theme::CANVAS_SUBTLE);
-            match cap {
-                Some(cap) => s.max_height(cap),
-                None => s.size_full().min_height(0.0),
-            }
+            s.width_full()
+                .max_height(cap)
+                .background(theme::CANVAS_SUBTLE)
         });
     let jump = dyn_container(
         move || !follow.get(),
@@ -158,156 +132,8 @@ fn detail_body(
             .inset_bottom(12.0)
             .z_index(3)
     });
-    Stack::new((scroller, jump)).style(move |s| {
-        let s = s.width_full().position(Position::Relative);
-        match cap {
-            Some(_) => s.flex_col(),
-            None => s.flex_grow(1.0_f32).min_height(0.0),
-        }
-    })
-}
-
-fn summary_bar(
-    state: AppState,
-    review: ReviewState,
-    backend: Rc<Backend>,
-    run: AgentRunSummary,
-) -> impl IntoView {
-    let color = status_color(run.status);
-    let meta = metadata(&run);
-    let elapsed_run = run.clone();
-    let source_available = run.source_available
-        && run
-            .item_id
-            .as_deref()
-            .is_some_and(|item_id| state.item(item_id).is_some());
-    let view = if source_available {
-        let view_run = run.clone();
-        let view_backend = backend.clone();
-        text_action(
-            || "View discussion".to_string(),
-            true,
-            move || navigate_to_source(state, review, &view_backend, &view_run),
-        )
-        .into_any()
-    } else {
-        Label::derived(|| "Source unavailable".to_string())
-            .style(|s| {
-                s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
-                    .padding_horiz(8.0)
-                    .selectable(false)
-            })
-            .into_any()
-    };
-    let control = match run.status {
-        AgentRunStatus::Queued => {
-            let id = run.id.clone();
-            text_action(
-                || "Cancel".to_string(),
-                false,
-                move || backend.cancel_run(&id),
-            )
-            .into_any()
-        }
-        status if status.may_stop() => {
-            let id = run.id.clone();
-            text_action(
-                || "Stop".to_string(),
-                false,
-                move || backend.cancel_run(&id),
-            )
-            .into_any()
-        }
-        status if status.may_retry() => match run.retry_target() {
-            AgentRetryTarget::ReviewAttempt(attempt_id) => text_action(
-                || "Retry".to_string(),
-                false,
-                move || backend.retry_review_attempt(&attempt_id),
-            )
-            .into_any(),
-            AgentRetryTarget::Run(id) => text_action(
-                || "Retry".to_string(),
-                false,
-                move || backend.retry_run(&id),
-            )
-            .into_any(),
-        },
-        AgentRunStatus::Stopping => Label::derived(|| "Stopping…".to_string())
-            .style(|s| {
-                s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
-                    .padding_horiz(8.0)
-                    .selectable(false)
-            })
-            .into_any(),
-        _ => Empty::new().into_any(),
-    };
-
-    Stack::vertical((
-        Stack::horizontal((
-            Empty::new().style(move |s| {
-                s.size(8.0, 8.0)
-                    .border_radius(4.0)
-                    .background(color)
-                    .flex_shrink(0.0_f32)
-            }),
-            Label::derived(move || meta.clone()).style(|s| {
-                s.font_size(theme::TEXT_META)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
-                    .text_ellipsis()
-                    .min_width(0.0)
-                    .flex_grow(1.0_f32)
-            }),
-            Label::derived(move || {
-                format!(
-                    "{} · {}",
-                    elapsed_run.status.label(),
-                    elapsed_label(&elapsed_run, state.now.get())
-                )
-            })
-            .style(move |s| {
-                s.font_size(theme::TEXT_SECTION)
-                    .font_weight(theme::weight_emphasis())
-                    .color(color)
-                    .flex_shrink(0.0_f32)
-                    .selectable(false)
-            }),
-        ))
-        .style(|s| s.items_center().width_full().gap(7.0)),
-        Stack::horizontal((
-            Label::derived(move || {
-                let group = run.group_label();
-                if group.is_empty() {
-                    run.purpose.label().to_string()
-                } else {
-                    format!("{} · {group}", run.purpose.label())
-                }
-            })
-            .style(move |s| {
-                s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
-                    .text_ellipsis()
-                    .min_width(0.0)
-                    .flex_grow(1.0_f32)
-            }),
-            view,
-            control,
-        ))
-        .style(|s| s.items_center().width_full().gap(3.0)),
-    ))
-    .style(|s| {
-        s.width_full()
-            .flex_col()
-            .gap(7.0)
-            .padding_left(14.0)
-            .padding_right(10.0)
-            .padding_vert(10.0)
-            .background(theme::CANVAS)
-            .border_bottom(1.0)
-            .border_color(theme::BORDER)
-    })
+    Stack::new((scroller, jump))
+        .style(|s| s.flex_col().width_full().position(Position::Relative))
 }
 
 fn heading(text: &'static str) -> impl IntoView {
@@ -889,7 +715,7 @@ mod tests {
         app.merge_agent_runs([perch_github::RunSummary::from(&record)], false);
         app.set_agent_run_detail(&record, events, false);
         let run = app.agent_run("run").unwrap();
-        let view = view(app, ReviewState::new(), Rc::new(Backend::detached()), run);
+        let view = inline(app, Rc::new(Backend::detached()), run, 100_000.0);
         let mut harness = floem::headless::HeadlessHarness::new_with_size(root, view, width, 800.0);
         harness.rebuild();
         harness.paint();

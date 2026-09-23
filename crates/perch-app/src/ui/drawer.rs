@@ -1,19 +1,15 @@
-//! The drawer on the right.
+//! The drawer on the right: the open item's files, as a tree, on Code.
 //!
-//! One drawer, holding the open item's files as a tree or the app-wide
-//! Agents inspector, one at a time. It is part of the main pane, under
-//! the item's bar and tabs and beside what they show, so opening it moves
-//! the body over rather than covering what is being read; only when the
-//! window has no room for both does it lie over the body's edge instead.
-//! The body is keyed elsewhere, so the open file, its scroll and a
-//! composer survive the drawer opening, shutting, and changing what it
-//! holds.
+//! It is part of the main pane, under Code's tabs and beside the file,
+//! so opening it moves the body over rather than covering what is being
+//! read; only when the window has no room for both does it lie over the
+//! body's edge instead. The body is keyed elsewhere, so the open file,
+//! its scroll and a composer survive the drawer opening and shutting.
 //!
-//! Two tiles at the right end of the item's tabs open it, one for each
-//! thing it holds, as Codex has its folder there; the Agents control in
-//! the status bar and Cmd-Shift-E and Cmd-Shift-A do the same from
-//! anywhere. Each is a toggle: the control for what the drawer shows
-//! shuts it, and the other swaps what it shows.
+//! The tile at the right end of Code's tabs opens it, where Codex has
+//! its folder, and Cmd-Shift-E does from anywhere, going to Code first
+//! from Conversation. Both are toggles on Code. On Conversation the tree
+//! is hidden, and comes back with Code.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -30,46 +26,13 @@ use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 
-/// What the drawer holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DrawerView {
-    Files,
-    Agents,
-}
+/// The word `meta` keeps under `drawer.view` for an open tree. Anything
+/// else, `closed` or the `agents` an older Perch wrote, is a shut one.
+const OPEN: &str = "files";
 
-impl DrawerView {
-    /// The saved name.
-    pub fn name(self) -> &'static str {
-        match self {
-            DrawerView::Files => "files",
-            DrawerView::Agents => "agents",
-        }
-    }
-
-    /// The saved name back; anything else, `closed` say, is a shut drawer.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "files" => Some(DrawerView::Files),
-            "agents" => Some(DrawerView::Agents),
-            _ => None,
-        }
-    }
-
-    /// The word for this in a control's tip and name.
-    pub fn what(self) -> &'static str {
-        match self {
-            DrawerView::Files => "files",
-            DrawerView::Agents => "agents",
-        }
-    }
-
-    /// The glyph on the control that opens the drawer on this.
-    pub fn glyph(self) -> SidebarIcon {
-        match self {
-            DrawerView::Files => SidebarIcon::Folder,
-            DrawerView::Agents => SidebarIcon::Agents,
-        }
-    }
+/// Whether the saved word is an open tree.
+pub fn parse(value: &str) -> bool {
+    value == OPEN
 }
 
 /// Where the drawer goes, and how wide.
@@ -115,34 +78,30 @@ fn current_placement(state: AppState) -> Placement {
     )
 }
 
-/// Show `view` in the drawer. `opener` is what to give the keyboard back
-/// to when the drawer shuts; with none given, whatever was recorded when
-/// the drawer opened stands.
-pub fn show(state: AppState, backend: &Backend, view: DrawerView, opener: Option<floem::ViewId>) {
+/// Open the tree. `opener` is what to give the keyboard back to when it
+/// shuts; with none given, whatever was recorded when it opened stands.
+pub fn show(state: AppState, backend: &Backend, opener: Option<floem::ViewId>) {
     if let Some(opener) = opener {
         state.drawer_opener.set(Some(opener));
     }
-    if state.drawer.get_untracked() != Some(view) {
-        state.drawer.set(Some(view));
+    if !state.tree_open.get_untracked() {
+        state.tree_open.set(true);
     }
-    backend.set_meta("drawer.view", view.name());
+    backend.set_meta("drawer.view", OPEN);
 }
 
-/// A control's press: shut the drawer when it shows `view`, else show it.
-pub fn toggle(state: AppState, backend: &Backend, view: DrawerView, opener: Option<floem::ViewId>) {
-    if state.drawer_shown_untracked() == Some(view) {
+/// A control's press: shut the tree when it shows, else open it.
+pub fn toggle(state: AppState, backend: &Backend, opener: Option<floem::ViewId>) {
+    if floem::reactive::Effect::untrack(|| state.tree_shown()) {
         close(state, backend, true);
     } else {
-        show(state, backend, view, opener);
+        show(state, backend, opener);
     }
 }
 
-/// Shut the drawer. A run open in the Agents inspector is left, so the
-/// next opening starts at the list.
+/// Shut the tree.
 pub fn close(state: AppState, backend: &Backend, restore_focus: bool) {
-    state.drawer.set(None);
-    state.selected_agent_run.set(None);
-    state.pending_agent_row_focus.set(None);
+    state.tree_open.set(false);
     backend.set_meta("drawer.view", "closed");
     if restore_focus {
         restore_opener(state);
@@ -160,23 +119,21 @@ fn restore_opener(state: AppState) {
 }
 
 /// The drawer, in the main pane's row after its body. Shut, it takes no
-/// room at all. What it holds is rebuilt when that changes, and no more:
-/// a memo, since the signals under it are written more often than they
-/// change.
+/// room at all. The tree is built as it comes and dropped as it goes, and
+/// no more: a memo, since the signals under it are written more often
+/// than they change.
 pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let shown = Memo::new(move |_| state.drawer_shown());
+    let shown = Memo::new(move |_| state.tree_shown());
     let placement = Memo::new(move |_| current_placement(state));
 
     let content_backend = backend.clone();
     let content = dyn_container(
         move || shown.get(),
-        move |view| match view {
-            None => Empty::new().into_any(),
-            Some(DrawerView::Files) => {
+        move |shown| {
+            if shown {
                 crate::review::rail::drawer_view(state, review, content_backend.clone()).into_any()
-            }
-            Some(DrawerView::Agents) => {
-                crate::ui::agents::view(state, review, content_backend.clone()).into_any()
+            } else {
+                Empty::new().into_any()
             }
         },
     )
@@ -186,7 +143,7 @@ pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
         Stack::horizontal((resize_handle(state, backend), content)).style(|s| s.size_full()),
     )
     .style(move |s| {
-        if shown.get().is_none() {
+        if !shown.get() {
             return s.hide();
         }
         let s = s
@@ -388,12 +345,13 @@ mod tests {
         );
     }
 
+    /// The tree open is saved as `files`, as the drawer on it was. The
+    /// `agents` an older Perch saved for its inspector is a shut drawer.
     #[test]
-    fn the_saved_name_round_trips_and_anything_else_is_shut() {
-        for view in [DrawerView::Files, DrawerView::Agents] {
-            assert_eq!(DrawerView::parse(view.name()), Some(view));
+    fn the_saved_word_is_an_open_tree_and_anything_else_is_shut() {
+        assert!(parse(OPEN));
+        for shut in ["closed", "agents", ""] {
+            assert!(!parse(shut), "{shut} opened the tree");
         }
-        assert_eq!(DrawerView::parse("closed"), None);
-        assert_eq!(DrawerView::parse(""), None);
     }
 }

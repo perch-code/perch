@@ -26,7 +26,7 @@ pub fn title(request: &ApprovalRequest) -> String {
     }
 }
 
-/// The request in one line, for a step and the inspector: the heading,
+/// The request in one line, for a step and a run's activity: the heading,
 /// and the command when that is what it is about.
 pub fn one_line(request: &ApprovalRequest) -> String {
     match &request.kind {

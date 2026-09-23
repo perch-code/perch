@@ -23,7 +23,7 @@ use crate::review::cards::tip_with;
 use crate::review::model::{ItemTab, Layout, Origin, ReviewState};
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::drawer::{self, DrawerView};
+use crate::ui::drawer;
 use crate::ui::widgets::icon_in;
 
 /// The open files' tabs, then, at the right end, what is about the open
@@ -405,8 +405,8 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 
 /// The tiles at the strip's right end: while a file shows, Source, when
 /// the file is a picture, then Show whole, then Stacked and Split, with a
-/// rule after each group; then the drawer on the right, on the files or
-/// on the agents. A chosen tile is filled;
+/// rule after each group; then the tree in the drawer on the right. A
+/// chosen tile is filled;
 /// the others are only a glyph until the pointer is over one. The last
 /// group is at the strip's end, so its tiles keep their place when the
 /// file's come and go.
@@ -435,10 +435,7 @@ fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoVi
         .debug_name("file tiles")
         .style(move |s| s.items_center().apply_if(!on_file(state), |s| s.hide())),
         Stack::horizontal((
-            // An item with no files has no files for the drawer to hold.
-            drawer_tile(app, backend.clone(), DrawerView::Files)
-                .style(move |s| s.apply_if(!state.has_files(), |s| s.hide())),
-            drawer_tile(app, backend, DrawerView::Agents),
+            tree_tile(app, backend),
         ))
         .style(|s| s.items_center().gap(2.0)),
     ))
@@ -522,22 +519,19 @@ fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: Sidebar
     .debug_name(format!("{} tile", layout.name()))
 }
 
-/// The drawer on the right, on one of the things it holds: filled while
-/// it shows that. A click on the filled tile shuts the drawer; on the
-/// other, the drawer opens on it, or swaps to it. Nothing to give the
+/// The tree in the drawer on the right: filled while it shows, and a
+/// click shuts it; otherwise a click opens it. Nothing to give the
 /// keyboard back to afterwards: a tile is not a control it can rest on.
-fn drawer_tile(app: AppState, backend: std::rc::Rc<Backend>, view: DrawerView) -> impl IntoView {
-    let active = move || app.drawer_shown() == Some(view);
+fn tree_tile(app: AppState, backend: std::rc::Rc<Backend>) -> impl IntoView {
+    let active = move || app.tree_shown();
     tip_with(
-        tile(view.glyph(), active, move || {
-            drawer::toggle(app, &backend, view, None)
-        })
-        .debug_name(format!("{} tile", view.what())),
+        tile(SidebarIcon::Folder, active, move || drawer::toggle(app, &backend, None))
+            .debug_name("files tile"),
         move || {
             if active() {
-                format!("Hide the {}", view.what())
+                "Hide the files".to_string()
             } else {
-                format!("Show the {}", view.what())
+                "Show the files".to_string()
             }
         },
     )
@@ -591,112 +585,101 @@ mod tests {
     };
     use crate::review::model::ItemTab;
 
-    /// The drawer's two tiles, after the layout tiles: a click opens the
-    /// drawer on the files or on the agents, under the tabs, and the body
-    /// moves over to make room; a click on the filled one shuts it, and
-    /// the other swaps what it holds. The tiles stay put over it, and the
-    /// pane keeps the tab it was on through all of it.
+    /// The tree's tile, after the layout tiles: a click opens the tree in
+    /// the drawer, under the tabs, and the body moves over to make room; a
+    /// click on the filled tile shuts it. The tiles stay put over it. On
+    /// Conversation the tree is hidden, and comes back with Code.
     #[test]
-    fn the_drawer_tiles_open_swap_and_shut_the_drawer_beside_the_pane() {
+    fn the_tree_tile_opens_and_shuts_the_tree_beside_the_pane() {
         let (mut harness, app, state) = pull_request_harness();
-        // The sidebar shut, so the window has the room to dock, and
-        // Files, where the tiles are, with a worktree of one file.
-        // A file open, so Code does not open the tree for want of one.
+        // The sidebar shut, so the window has the room to dock, and a file
+        // open on Code, where the tiles are, so Code does not open the tree
+        // for want of one.
         app.sidebar_open.set(false);
         state.open_tab("README.md");
         state.show_tab(ItemTab::Code);
         state.tree.set(Arc::new(vec![perch_git::TreeEntry::new("README.md", false)]));
         harness.rebuild();
         harness.paint();
-        assert_eq!(app.drawer_shown(), None);
+        assert!(!app.tree_shown());
         let tabs = rect(&harness, "tab strip");
         assert_eq!(tabs.x1, 1400.0);
         let split = rect(&harness, "split tile");
         let files = rect(&harness, "files tile");
-        let agents = rect(&harness, "agents tile");
-        assert!(split.x1 <= files.x0 && files.x1 <= agents.x0, "after the layout tiles");
-        assert!(within(files, tabs) && within(agents, tabs));
+        assert!(split.x1 <= files.x0, "after the layout tiles");
+        assert!(within(files, tabs));
+        assert!(named(harness.root_id(), "agents tile").is_none(), "the agents have no tile");
 
         harness.click(files.center().x, files.center().y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(app.drawer_shown(), Some(DrawerView::Files));
+        assert!(app.tree_shown());
         let drawer = rect(&harness, "right-drawer");
         assert_eq!(drawer.x1, 1400.0);
         assert_eq!(drawer.width(), theme::DRAWER_WIDTH);
         assert_eq!(drawer.y0, tabs.y1, "the drawer starts under the tabs");
         assert_eq!(rect(&harness, "tab strip"), tabs, "the tabs run over the drawer");
-        assert_eq!(rect(&harness, "agents tile"), agents, "the tiles stay put");
+        assert_eq!(rect(&harness, "files tile"), files, "the tile stays put");
         assert_eq!(
             rect(&harness, "pane-body").x1,
             drawer.x0,
             "the body stops where the drawer starts"
         );
-        assert!(named(harness.root_id(), "files-panel").is_some(), "the drawer holds the files");
         let close = rect(&harness, "files-close");
         assert!(within(close, drawer));
         assert!(
             close.y1 <= drawer.y0 + theme::DRAWER_HEADER_HEIGHT,
             "the close control is in the drawer's bar: {close:?}"
         );
-        // The rail's tree is there, from the drawer's bar down.
         let row = rect(&harness, "tree-row:README.md");
         assert!(within(row, drawer));
         assert!(row.y0 >= drawer.y0 + theme::DRAWER_HEADER_HEIGHT + theme::SCOPE_BUTTON_HEIGHT);
 
-        // Agents: the drawer swaps what it holds, and stays put.
-        harness.click(agents.center().x, agents.center().y);
+        // Conversation hides it, keeping the wish; Code has it again.
+        state.show_tab(ItemTab::Conversation);
         harness.rebuild();
         harness.paint();
-        assert_eq!(app.drawer_shown(), Some(DrawerView::Agents));
-        assert!(named(harness.root_id(), "files-panel").is_none());
-        assert!(named(harness.root_id(), "agents-panel").is_some());
+        assert!(app.tree_open.get() && !app.tree_shown());
+        assert_eq!(rect(&harness, "right-drawer").width(), 0.0);
+        state.show_tab(ItemTab::Code);
+        harness.rebuild();
+        harness.paint();
         assert_eq!(rect(&harness, "right-drawer"), drawer);
 
         // The filled tile shuts it, and the pane has the window again.
-        harness.click(agents.center().x, agents.center().y);
+        harness.click(files.center().x, files.center().y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(app.drawer_shown(), None);
-        assert!(named(harness.root_id(), "agents-panel").is_none());
+        assert!(!app.tree_open.get());
+        assert!(named(harness.root_id(), "files-panel").is_none());
         assert_eq!(rect(&harness, "pane-body").x1, 1400.0);
         assert_eq!(state.tab.get(), ItemTab::Code);
     }
 
-    /// A drawer asked to show the files stays shut on an issue, which has
-    /// none, and comes back on the next item with some; the wish is kept.
+    /// A tree asked for stays shut on an issue, which has no Code, and
+    /// comes back on the next item that has; the wish is kept. While an
+    /// item is on its way the drawer's column stays, so opening one pull
+    /// request after another does not move the pane twice.
     #[test]
-    fn a_files_drawer_stays_shut_on_an_issue_and_keeps_its_wish() {
+    fn a_tree_stays_shut_on_an_issue_and_keeps_its_wish() {
         let (mut harness, app, state) = issue_harness();
         app.sidebar_open.set(false);
-        app.drawer.set(Some(DrawerView::Files));
+        app.tree_open.set(true);
         harness.rebuild();
         harness.paint();
-        assert!(!app.files_available());
-        assert_eq!(app.drawer_shown(), None);
+        assert!(!app.tree_available());
+        assert!(!app.tree_shown());
         assert_eq!(rect(&harness, "pane-body").x1, 1400.0, "the body has the window");
 
-        // Agents can still be shown, and the wish for Files is replaced.
-        drawer::show(app, &crate::backend::Backend::detached(), DrawerView::Agents, None);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(app.drawer_shown(), Some(DrawerView::Agents));
-        assert_eq!(rect(&harness, "item bar").x1, 1400.0, "the bar runs over the drawer");
-        assert_eq!(rect(&harness, "pane-body").x1, 1400.0 - theme::DRAWER_WIDTH);
-
-        // While another item is on its way the drawer's column stays, so
-        // opening one pull request after another does not move the pane
-        // twice; once it is an issue, the column goes.
-        app.drawer.set(Some(DrawerView::Files));
         state.begin("Reading the issue");
         harness.rebuild();
         harness.paint();
-        assert!(app.files_available(), "an item on its way may have files");
-        assert_eq!(app.drawer_shown(), Some(DrawerView::Files));
+        assert!(app.tree_available(), "an item on its way may have a tree");
+        assert!(app.tree_shown());
     }
 
     /// Code's strip is the files' tabs, the first at its left edge, then
-    /// the file's tiles and the drawer's. Conversation has no tab in it.
+    /// the file's tiles and the tree's. Conversation has no tab in it.
     /// The rule after the tabs runs on from the last one.
     #[test]
     fn codes_strip_is_the_files_tabs_then_the_tiles() {
@@ -712,7 +695,6 @@ mod tests {
         assert!(named(harness.root_id(), "chat").is_none(), "no Conversation in the strip");
         assert!(rect(&harness, "file tiles").width() > 0.0);
         assert!(rect(&harness, "file tiles").x1 <= rect(&harness, "files tile").x0);
-        assert!(rect(&harness, "files tile").x1 <= rect(&harness, "agents tile").x0);
         let rule = rect(&harness, "tabs rule");
         assert_eq!(rule.x0, file.x1);
         assert!(rule.width() > 0.0);

@@ -173,9 +173,9 @@ pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
 /// An item row in the sidebar: two lines of text and the glyph beside them.
 pub const ROW_HEIGHT: f64 = 68.0;
 pub const STATUS_HEIGHT: f64 = 34.0;
-/// The drawer on the right, which holds the open item's files or the
-/// app-wide Agents inspector. Docked beside the main pane while the window
-/// has the room, and over it while it does not.
+/// The drawer on the right, which holds the open item's files as a tree,
+/// on Code. Docked beside the main pane while the window has the room, and
+/// over it while it does not.
 pub const DRAWER_WIDTH: f64 = 408.0;
 pub const DRAWER_MIN_WIDTH: f64 = 336.0;
 pub const DRAWER_MAX_WIDTH: f64 = 620.0;
@@ -183,7 +183,6 @@ pub const DRAWER_MAX_WIDTH: f64 = 620.0;
 /// room from it and lies over it instead: enough for the item bar's
 /// controls and the tab strip's, with the title given way.
 pub const MAIN_MIN_WIDTH: f64 = 620.0;
-pub const AGENT_ROW_MIN_HEIGHT: f64 = 88.0;
 /// The Agents dropdown under the bar's button: as wide as Submit review's,
 /// and as tall as this before it scrolls.
 pub const AGENTS_DROPDOWN_WIDTH: f64 = 430.0;

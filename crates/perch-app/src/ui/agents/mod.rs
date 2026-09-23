@@ -1,15 +1,12 @@
-//! App-wide agent activity.
-//!
-//! The inspector is one of the two things the drawer on the right holds,
-//! so it is a column beside the workspace rather than part of it: opening
-//! it leaves the editor, its selection, the conversation scroll and any
-//! composer exactly where the reader put them.
+//! Agent activity: each item's runs in its Agents row on Conversation
+//! (`section`), every item's in the dropdown from the bar's Agents button
+//! (`dropdown`), what a run did as its row opens to it (`detail`), and the
+//! notice a run leaves as it finishes.
 
 pub mod model;
 
 mod detail;
 pub mod dropdown;
-mod list;
 pub mod section;
 
 use std::rc::Rc;
@@ -24,28 +21,16 @@ use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::model::{ItemTab, ReviewState};
+use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::drawer;
 use crate::ui::widgets::{clickable, sidebar_glyph};
 
 use model::{AgentRunStatus, AgentRunSummary};
 
-const FIRST_HISTORY_PAGE: usize = 50;
-
-/// What follows the inspector opening: the first page of history is
-/// asked for. And the clock that keeps the elapsed times moving, on an
-/// item's Agents row as in the inspector, runs while there is work to
-/// time. Once, from the window.
-pub fn wire(state: AppState, backend: Rc<Backend>) {
-    Effect::new(move |previous: Option<bool>| {
-        let open = state.agents_open();
-        if open && previous != Some(true) {
-            request_agent_runs(state, &backend, FIRST_HISTORY_PAGE);
-        }
-        open
-    });
+/// The clock that keeps the elapsed times moving runs while there is work
+/// to time. Once, from the window.
+pub fn wire(state: AppState) {
     Effect::new(move |_| {
         let active = state
             .agent_runs
@@ -62,102 +47,6 @@ pub(super) fn request_agent_runs(state: AppState, backend: &Backend, history_lim
     floem::action::exec_after(Duration::from_secs(5), move |_| {
         state.time_out_agent_history_load(token);
     });
-}
-
-/// The inspector in the drawer: its bar, then the list of runs or the
-/// one the reader opened.
-pub fn view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let header_backend = backend.clone();
-    Stack::vertical((
-        panel_header(state, header_backend),
-        dyn_container(
-            move || state.selected_agent_run.get(),
-            move |selected| match selected.and_then(|id| state.agent_run(&id)) {
-                Some(run) => detail::view(state, review, backend.clone(), run).into_any(),
-                None => list::view(state, review, backend.clone()).into_any(),
-            },
-        )
-        .style(|s| s.flex_grow(1.0_f32).min_height(0.0).width_full()),
-    ))
-    .style(|s| s.size_full().flex_col().min_width(0.0))
-    .debug_name("agents-panel")
-}
-
-fn panel_header(state: AppState, backend: Rc<Backend>) -> impl IntoView {
-    let back = dyn_container(
-        move || state.selected_agent_run.with(Option::is_some),
-        move |selected| {
-            if !selected {
-                return Empty::new().into_any();
-            }
-            let back = icon_action(
-                SidebarIcon::ChevronLeft,
-                "agents-detail-back Back to agents",
-                move || back_to_list(state),
-            );
-            let id = back.view_id();
-            // The selected row has just left the tree. Put the keyboard on a
-            // stable detail control after Floem installs this replacement.
-            let asked = std::rc::Rc::new(std::cell::Cell::new(false));
-            back.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
-                if !asked.replace(true) {
-                    id.request_focus();
-                }
-            })
-            .into_any()
-        },
-    );
-    let count = Label::derived(move || {
-        let (running, queued) = state.active_agent_counts();
-        let total = running + queued;
-        if total == 0 {
-            String::new()
-        } else {
-            total.to_string()
-        }
-    })
-    .style(move |s| {
-        s.font_size(theme::TEXT_SECTION)
-            .font_weight(theme::weight_emphasis())
-            .color(theme::FG_MUTED)
-            .height(18.0)
-            .padding_horiz(6.0)
-            .border_radius(9.0)
-            .background(theme::BADGE_BG)
-            .items_center()
-            .justify_center()
-            .selectable(false)
-            .pointer_events_none()
-            .apply_if(state.active_agent_counts() == (0, 0), |s| s.hide())
-    });
-    let close_button = drawer::close_button(state, backend, "agents-close Close agents");
-    let close_id = close_button.view_id();
-    let focus_close = state.selected_agent_run.get_untracked().is_none();
-    let asked = std::rc::Rc::new(std::cell::Cell::new(false));
-    let close_button = close_button.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
-        if focus_close && !asked.replace(true) {
-            close_id.request_focus();
-        }
-    });
-
-    drawer::header_bar(
-        back,
-        move || {
-            if state.selected_agent_run.with(Option::is_some) {
-                "Run details".to_string()
-            } else {
-                "Agents".to_string()
-            }
-        },
-        count,
-        close_button,
-    )
-}
-
-pub fn back_to_list(state: AppState) {
-    let selected = state.selected_agent_run.get_untracked();
-    state.pending_agent_row_focus.set(selected);
-    state.selected_agent_run.set(None);
 }
 
 pub(crate) fn icon_action(
@@ -263,61 +152,19 @@ pub(super) fn metadata(run: &AgentRunSummary) -> String {
     format!("{work}{} · {model} · {effort}", run.backend_label())
 }
 
-pub(super) fn navigate_to_source(
-    app: AppState,
-    review: ReviewState,
-    backend: &Backend,
-    run: &AgentRunSummary,
-) {
-    let Some(item_id) = run.item_id.clone().filter(|_| run.source_available) else {
-        app.notice.set(Some(
-            "The source for this run is no longer available".into(),
-        ));
-        return;
-    };
-    if app.item(&item_id).is_none() {
-        app.notice.set(Some(
-            "The source for this run is no longer available".into(),
-        ));
-        return;
-    }
-    let same_item = app
-        .open_item
-        .with_untracked(|open| open.as_deref() == Some(item_id.as_str()))
-        && review.is_showing();
-    let same_live_item = can_focus_loaded_discussion(
-        same_item,
-        review.historical_review.with_untracked(Option::is_some),
-    );
-    drawer::close(app, backend, false);
-    if let Some(attempt_id) = run.review_attempt_id.clone() {
-        let navigation_id = backend.view_review_attempt_owner(&item_id, &attempt_id);
-        app.begin_agent_review_navigation(
-            review,
-            item_id.clone(),
-            attempt_id.clone(),
-            navigation_id,
-        );
-        return;
-    }
-    // Another item shows Conversation once its threads land; the one left
-    // keeps its pane for when it is opened again.
-    if same_live_item {
-        review.show_tab(ItemTab::Conversation);
-        if let Some(thread_id) = &run.thread_id {
-            review
-                .focus_card
-                .set(Some(crate::review::doc::CardId::Thread(thread_id.clone())));
-        }
-        return;
-    }
-    let navigation_id = backend.view_agent_owner(&item_id);
-    app.begin_agent_navigation(item_id.clone(), run.thread_id.clone(), navigation_id);
-    app.begin_review(review, "Reading the discussion");
-}
-
-fn can_focus_loaded_discussion(same_item: bool, historical_review: bool) -> bool {
-    same_item && !historical_review
+/// Where a queued run is in the queue, from one.
+pub(super) fn queue_position(state: AppState, id: &str) -> Option<usize> {
+    state.agent_runs.with(|runs| {
+        let mut queued: Vec<_> = runs
+            .iter()
+            .filter(|run| run.status == AgentRunStatus::Queued)
+            .collect();
+        queued.sort_by_key(|run| run.queued_at);
+        queued
+            .iter()
+            .position(|run| run.id == id)
+            .map(|position| position + 1)
+    })
 }
 
 fn arm_clock(state: AppState) {
@@ -488,9 +335,4 @@ mod tests {
         assert!(app.agents_clock_armed.get());
     }
 
-    #[test]
-    fn ordinary_view_reloads_a_same_item_historical_snapshot() {
-        assert!(can_focus_loaded_discussion(true, false));
-        assert!(!can_focus_loaded_discussion(true, true));
-    }
 }

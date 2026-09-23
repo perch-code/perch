@@ -11268,7 +11268,7 @@ async fn settle_approval(ctx: &Ctx, run_id: &str, id: &str, how: Settle) {
 }
 
 /// A request, or what became of it, as a step of its run, so it is in
-/// the run's history and the inspector's activity line. `ok` closes the
+/// the run's history and its activity line. `ok` closes the
 /// step; `None` leaves it open, as a request waiting is.
 fn record_approval_step(ctx: &Ctx, run_id: &str, step: &str, summary: &str, ok: Option<bool>) {
     let call = StoredRunEvent::ToolCall {

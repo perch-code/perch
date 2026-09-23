@@ -24,12 +24,11 @@ use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{clickable, sidebar_glyph};
 
-use super::list::queue_position;
 use super::model::{
     active_groups_with_reviews, elapsed_label, history_runs_with_reviews, AgentRunStatus,
-    AgentRunSummary, BackendFilter, OutcomeFilter, WorktreeFilter,
+    AgentRunSummary,
 };
-use super::{request_agent_runs, status_color};
+use super::{queue_position, request_agent_runs, status_color};
 
 /// How many finished runs the dropdown lists.
 pub const RECENT_RUNS: usize = 15;
@@ -242,24 +241,11 @@ fn listing(app: AppState) -> Listing {
             .collect::<Vec<_>>()
     });
     app.agent_runs.with(|runs| {
-        let active = active_groups_with_reviews(
-            runs,
-            None,
-            WorktreeFilter::All,
-            BackendFilter::All,
-            &review_groups,
-        )
+        let active = active_groups_with_reviews(runs, None, &review_groups)
         .into_iter()
         .map(|group| (item_title(app, &group.runs[0]), group.runs))
         .collect();
-        let mut recent = history_runs_with_reviews(
-            runs,
-            None,
-            WorktreeFilter::All,
-            BackendFilter::All,
-            OutcomeFilter::All,
-            &review_groups,
-        );
+        let mut recent = history_runs_with_reviews(runs, &review_groups);
         recent.truncate(RECENT_RUNS);
         Listing { active, recent }
     })

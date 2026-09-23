@@ -1,7 +1,7 @@
 //! `perch --agents [limit]`
 //!
-//! A reporting-only view of the same durable summaries the Agents panel
-//! loads. Opening the cache may apply a preserving schema migration, but the
+//! A reporting-only view of the same durable summaries the Agents dropdown
+//! and rows load. Opening the cache may apply a preserving schema migration, but the
 //! command never discovers a CLI or starts work, so it is safe in scripts and
 //! useful when the window cannot be opened.
 

@@ -23,7 +23,6 @@ use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::drawer::DrawerView;
 use crate::ui::widgets::sidebar_glyph;
 
 /// The platform's command modifier.
@@ -167,9 +166,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     // and the container builds its child again on each: the status is
     // written on every poll, and a page built again is a scroll back at
     // the top.
-    // The Agents inspector's list, loaded as the drawer opens on it. Wired
-    // once, here, since the drawer is built again with the pane.
-    agents::wire(state, backend.clone());
+    // The clock that moves the agents' elapsed times. Wired once, here,
+    // since the rows are built again with the pane.
+    agents::wire(state);
     let empty_backend = backend.clone();
     let pane = dyn_container(
         move || main_pane.get(),
@@ -246,8 +245,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 },
             ),
-            // The drawer on the right, the open item's files or the Agents
-            // inspector, is the pane's: under its bars, beside its body.
+            // The drawer on the right, the open item's tree, is the pane's:
+            // under Code's tabs, beside the file.
             pane,
         ))
         .style(|s| {
@@ -315,7 +314,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     new_work::open(state, key_backend);
                     return EventPropagation::Stop;
                 }
-                // Cmd-P puts it up, app-wide, as the drawer keys are; Escape
+                // Cmd-P puts it up, app-wide, as the tree's key is; Escape
                 // gives the keyboard back to whatever had it.
                 if key.code == Code::KeyP
                     && key.modifiers == OS_MOD
@@ -324,13 +323,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     crate::review::go_to::open(review, focused_descendant(cx, root_id));
                     return EventPropagation::Stop;
                 }
-                // Cmd-Shift-E and Cmd-Shift-A are the drawer on the right,
-                // on the files and on the Agents inspector, app-wide,
-                // including while the editor or a composer owns focus.
-                // Whatever had the keyboard gets it back when the drawer
-                // shuts, so it is noted as the drawer opens; a swap from
-                // one to the other keeps the note. Files is not offered
-                // for an item without files.
                 // Cmd-Shift-A opens the Agents dropdown from the bar, and
                 // shuts it, from anywhere; whatever had the keyboard gets it
                 // back as it shuts.
@@ -341,20 +333,29 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     agents::dropdown::toggle(state, review, key_backend, opener);
                     return EventPropagation::Stop;
                 }
-                if key.modifiers == OS_MOD | Modifiers::SHIFT {
-                    let view = match key.code {
-                        Code::KeyE if state.files_available() => Some(DrawerView::Files),
-                        _ => None,
-                    };
-                    if let Some(view) = view {
-                        let opener = state
-                            .drawer_shown_untracked()
-                            .is_none()
-                            .then(|| focused_descendant(cx, root_id))
-                            .flatten();
-                        drawer::toggle(state, key_backend, view, opener);
-                        return EventPropagation::Stop;
+                // Cmd-Shift-E is the tree in the drawer on the right, from
+                // the editor or a composer too. On Code it opens and shuts;
+                // from Conversation it goes to Code with the tree open. An
+                // item without files has none. Whatever had the keyboard
+                // gets it back when the tree shuts, so it is noted as it
+                // opens.
+                if key.modifiers == OS_MOD | Modifiers::SHIFT
+                    && key.code == Code::KeyE
+                    && review.is_open()
+                    && review.has_files()
+                {
+                    let opener = (!floem::reactive::Effect::untrack(|| state.tree_shown()))
+                        .then(|| focused_descendant(cx, root_id))
+                        .flatten();
+                    if review.tab.get_untracked() == crate::review::model::ItemTab::Code {
+                        drawer::toggle(state, key_backend, opener);
+                    } else {
+                        floem::reactive::Effect::batch(|| {
+                            review.show_tab(crate::review::model::ItemTab::Code);
+                            drawer::show(state, key_backend, opener);
+                        });
                     }
+                    return EventPropagation::Stop;
                 }
                 // Escape shuts the Agents dropdown wherever the keyboard is.
                 if key.code == Code::Escape
@@ -362,16 +363,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     && review.agents_dropdown_open.get_untracked()
                 {
                     agents::dropdown::close(review, true);
-                    return EventPropagation::Stop;
-                }
-                // Escape first backs out of a run's details, then shuts the
-                // inspector on the next press.
-                if key.code == Code::Escape && key.modifiers.is_empty() && state.agents_open() {
-                    if state.selected_agent_run.with(Option::is_some) {
-                        agents::back_to_list(state);
-                    } else {
-                        drawer::close(state, key_backend, true);
-                    }
                     return EventPropagation::Stop;
                 }
                 // Page Up and Page Down go to the top and the end of
@@ -771,15 +762,13 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
 
 /// The main pane with nothing open in it: a bar with the Agents button,
 /// and the lights and the drawer control while the drawer is shut, then
-/// the message. The drawer on the right can still show the agents,
-/// beside the message.
+/// the message.
 fn empty_pane(
     state: AppState,
     review: ReviewState,
     backend: Rc<Backend>,
     message: impl IntoView + 'static,
 ) -> impl IntoView {
-    let bar_backend = backend.clone();
     Stack::vertical((
         // A bar like an item's, with nothing open in it: the lights and
         // the drawer control while the drawer is shut, and the Agents
@@ -790,25 +779,13 @@ fn empty_pane(
                 sidebar::lights_lane(state, theme::REVIEW_HEADER_PADDING)
                     .style(move |s| s.apply_if(state.sidebar_open.get(), |s| s.hide())),
                 Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
-                agents::dropdown::button(state, review, bar_backend),
+                agents::dropdown::button(state, review, backend),
             ))
             .debug_name("empty bar"),
         )
         .style(|s| crate::review::header::bar_style(s).z_index(2)),
-        Stack::horizontal((
-            Container::new(message).debug_name("pane-body").style(|s| {
-                s.flex_grow(1.0_f32)
-                    .flex_basis(0.0)
-                    .min_width(0.0)
-                    .height_full()
-            }),
-            drawer::panel(state, review, backend),
-        ))
-        .style(|s| {
-            s.width_full()
-                .flex_grow(1.0_f32)
-                .min_height(0.0)
-                .position(floem::style::Position::Relative)
+        Container::new(message).debug_name("pane-body").style(|s| {
+            s.width_full().flex_grow(1.0_f32).min_height(0.0)
         }),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0))
@@ -1128,6 +1105,24 @@ mod tests {
         assert!(!review.agents_dropdown_open.get());
         assert!(harness.is_focused(editor));
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
+    }
+
+    /// Cmd-Shift-E from Conversation goes to Code with the tree open.
+    #[test]
+    fn the_tree_key_from_conversation_goes_to_code_with_the_tree() {
+        use crate::review::model::ItemTab;
+        let (mut harness, review) = window_with_a_file_open();
+        review.show_tab(ItemTab::Conversation);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "files-panel").is_none());
+
+        harness.dispatch_event(key(Code::KeyE, Key::Character("e".into()), OS_MOD | Modifiers::SHIFT));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(review.tab.get(), ItemTab::Code);
+        assert!(named(harness.root_id(), "files-panel").is_some(), "the tree did not open");
+        assert!(named(harness.root_id(), "tinted editor").is_some());
     }
 
     /// Cmd-W closes the open file from the code too. The editor keeps

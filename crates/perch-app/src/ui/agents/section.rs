@@ -25,12 +25,11 @@ use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{clickable, sidebar_glyph};
 
-use super::list::{queue_position, short_sha, title_case_status};
 use super::model::{
     elapsed_label, group_review_runs, item_runs, AgentRetryTarget, AgentReviewRunGroup,
     AgentRunEntry, AgentRunStatus, AgentRunSummary, RunCounts,
 };
-use super::{detail, metadata, status_color, text_action};
+use super::{detail, metadata, queue_position, status_color, text_action};
 
 /// How tall an open run is before what it did scrolls inside it.
 pub const OPEN_RUN_MAX_HEIGHT: f64 = 480.0;
@@ -605,8 +604,20 @@ fn actions(review: ReviewState, backend: Rc<Backend>, run: AgentRunSummary) -> i
     Stack::horizontal((thread, control)).style(|s| s.items_center().gap(2.0).flex_shrink(0.0_f32))
 }
 
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+fn title_case_status(status: &str) -> String {
+    let mut chars = status.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
+}
+
 /// A review's row, `Review #n · sha · against base` and how far it has
-/// got, over its attempts. It folds as the inspector's did.
+/// got, over its attempts, with the way to the snapshot it read. It folds.
 fn review_group_row(
     app: AppState,
     review: ReviewState,
@@ -655,6 +666,30 @@ fn review_group_row(
         }
     };
     let key_toggle = toggle.clone();
+    // The snapshot the review read, as REVIEW HISTORY's card opens it.
+    let snapshot = match group.runs.first().and_then(|run| {
+        Some((run.item_id.clone()?, run.review_attempt_id.clone()?))
+    }) {
+        Some((item_id, attempt_id)) => {
+            let backend = backend.clone();
+            text_action(
+                || "Open snapshot".to_string(),
+                false,
+                move || {
+                    let navigation_id = backend.view_review_attempt_owner(&item_id, &attempt_id);
+                    app.begin_agent_review_navigation(
+                        review,
+                        item_id.clone(),
+                        attempt_id.clone(),
+                        navigation_id,
+                    );
+                },
+            )
+            .debug_name("agent-review-group open snapshot")
+            .into_any()
+        }
+        None => Empty::new().into_any(),
+    };
     let header = Stack::horizontal((
         dyn_container(
             move || collapsed.get(),
@@ -688,6 +723,7 @@ fn review_group_row(
             }),
         ))
         .style(|s| s.flex_col().gap(2.0).min_width(0.0).flex_grow(1.0_f32)),
+        snapshot,
     ))
     .on_event_stop(el::Click, move |_, _| toggle())
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
@@ -1038,3 +1074,4 @@ mod tests {
         assert_eq!(review.pending_run_reveal.get(), None);
     }
 }
+

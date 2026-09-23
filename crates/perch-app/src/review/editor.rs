@@ -112,14 +112,13 @@ pub fn editor_pane(
 
     // Code with no file open has the tree beside it, to pick one from: as
     // it comes with none, or once the last tab closes. Only as that
-    // happens, so a tree the reader shuts stays shut; and not over the
-    // agents, which the reader asked for.
+    // happens, so a tree the reader shuts stays shut.
     {
         let backend = backend.clone();
         Effect::new(move |_| {
             let none = state.active.with(Option::is_none) && state.pending_open.with(Option::is_none);
-            if none && app.drawer_shown_untracked().is_none() {
-                crate::ui::drawer::show(app, &backend, crate::ui::drawer::DrawerView::Files, None);
+            if none && !app.tree_open.get_untracked() {
+                crate::ui::drawer::show(app, &backend, None);
             }
         });
     }
@@ -2502,14 +2501,14 @@ mod window {
     }
 
     /// The tiles sit at the strip's right end: 8 of padding, then the
-    /// agents' and the files' tiles and their rule, then
+    /// tree's tile and its rule, then
     /// Split then Stacked reading leftwards, each `LAYOUT_TILE` square with
     /// 2 between, in a strip `TAB_HEIGHT` tall under the header's bar.
     fn tile_center(layout: Layout) -> (f64, f64) {
         let tile = crate::theme::LAYOUT_TILE;
         let split_right = 1400.0
             - 8.0
-            - (tile + 2.0 + tile)
+            - tile
             - (crate::theme::TILE_RULE_GAP + 1.0 + crate::theme::TILE_RULE_GAP);
         let x = match layout {
             Layout::Split => split_right - tile / 2.0,

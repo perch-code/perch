@@ -1,4 +1,4 @@
-//! The small, app-wide projection the Agents panel draws.
+//! The small, app-wide projection the Agents row and dropdown draw.
 //!
 //! A durable run remains the backend's record.  These summaries are what the
 //! window needs in order to group, filter and inspect one without loading an
@@ -9,113 +9,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use jiff::Timestamp;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgentsTab {
-    #[default]
-    Active,
-    History,
-}
-
-impl AgentsTab {
-    pub const ALL: [Self; 2] = [Self::Active, Self::History];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Active => "Active",
-            Self::History => "History",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WorktreeFilter {
-    #[default]
-    All,
-    Current,
-}
-
-impl WorktreeFilter {
-    pub const ALL: [Self; 2] = [Self::All, Self::Current];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "All worktrees",
-            Self::Current => "Current worktree",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BackendFilter {
-    #[default]
-    All,
-    Claude,
-    Codex,
-}
-
-impl BackendFilter {
-    pub const ALL: [Self; 3] = [Self::All, Self::Claude, Self::Codex];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "All agents",
-            Self::Claude => "Claude",
-            Self::Codex => "Codex",
-        }
-    }
-
-    pub fn includes(self, backend: &str) -> bool {
-        match self {
-            Self::All => true,
-            Self::Claude => {
-                backend.eq_ignore_ascii_case("claude-code")
-                    || backend.eq_ignore_ascii_case("claude")
-            }
-            Self::Codex => backend.eq_ignore_ascii_case("codex"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OutcomeFilter {
-    #[default]
-    All,
-    Completed,
-    Failed,
-    Stopped,
-    Interrupted,
-}
-
-impl OutcomeFilter {
-    pub const ALL: [Self; 5] = [
-        Self::All,
-        Self::Completed,
-        Self::Failed,
-        Self::Stopped,
-        Self::Interrupted,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "All outcomes",
-            Self::Completed => "Completed",
-            Self::Failed => "Failed",
-            Self::Stopped => "Stopped",
-            Self::Interrupted => "Interrupted",
-        }
-    }
-
-    pub fn includes(self, status: AgentRunStatus) -> bool {
-        match self {
-            Self::All => true,
-            Self::Completed => status == AgentRunStatus::Completed,
-            Self::Failed => status == AgentRunStatus::Failed,
-            Self::Stopped => status == AgentRunStatus::Stopped,
-            Self::Interrupted => status == AgentRunStatus::Interrupted,
-        }
-    }
-}
 
 /// The lifecycle names the panel understands.  `parse` accepts both the
 /// former `finished` spelling and the manager's `completed` spelling so a
@@ -471,15 +364,6 @@ pub enum AgentRunEntry {
     ReviewGroup(AgentReviewRunGroup),
 }
 
-impl AgentRunEntry {
-    pub fn key(&self) -> String {
-        match self {
-            Self::Run(run) => format!("run:{}", run.id),
-            Self::ReviewGroup(group) => format!("review:{}", group.key),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentReviewRunGroup {
     /// The durable group id when its metadata has arrived. A just-admitted
@@ -551,40 +435,18 @@ pub fn group_review_runs(
     entries
 }
 
-/// Filter and group active rows. Groups keep the order in which their first
-/// run was admitted, except that the open worktree is lifted to the front.
-#[cfg(test)]
-pub fn active_groups(
-    runs: &[AgentRunSummary],
-    current_item: Option<&str>,
-    worktrees: WorktreeFilter,
-    backends: BackendFilter,
-) -> Vec<AgentRunGroup> {
-    active_groups_with_reviews(runs, current_item, worktrees, backends, &[])
-}
-
+/// Every item's working runs, grouped by item. Groups keep the order in
+/// which their first run was admitted, except that the open item's is
+/// lifted to the front; in a group, queued work is last. A reviewer
+/// attempt whose review is still going counts as working.
 pub fn active_groups_with_reviews(
     runs: &[AgentRunSummary],
     current_item: Option<&str>,
-    worktrees: WorktreeFilter,
-    backends: BackendFilter,
     review_groups: &[crate::review::model::ReviewGroupSummary],
 ) -> Vec<AgentRunGroup> {
-    let active_review_attempts = review_groups
-        .iter()
-        .filter(|summary| summary.group.status.is_active())
-        .flat_map(|summary| summary.attempts.iter().map(|attempt| attempt.id.as_str()))
-        .collect::<HashSet<_>>();
+    let active_review_attempts = active_attempts(review_groups);
     let mut groups: Vec<AgentRunGroup> = Vec::new();
-    for run in runs.iter().filter(|run| {
-        (run.status.is_active()
-            || run
-                .review_attempt_id
-                .as_deref()
-                .is_some_and(|attempt| active_review_attempts.contains(attempt)))
-            && backends.includes(&run.backend)
-            && (worktrees == WorktreeFilter::All || run.item_id.as_deref() == current_item)
-    }) {
+    for run in runs.iter().filter(|run| working(run, &active_review_attempts)) {
         let index = groups
             .iter()
             .position(|group| group.item_id == run.item_id)
@@ -618,46 +480,37 @@ pub fn active_groups_with_reviews(
     groups
 }
 
-#[cfg(test)]
-pub fn history_runs(
-    runs: &[AgentRunSummary],
-    current_item: Option<&str>,
-    worktrees: WorktreeFilter,
-    backends: BackendFilter,
-    outcomes: OutcomeFilter,
-) -> Vec<AgentRunSummary> {
-    history_runs_with_reviews(runs, current_item, worktrees, backends, outcomes, &[])
-}
-
+/// Every item's finished runs, the last to finish first.
 pub fn history_runs_with_reviews(
     runs: &[AgentRunSummary],
-    current_item: Option<&str>,
-    worktrees: WorktreeFilter,
-    backends: BackendFilter,
-    outcomes: OutcomeFilter,
     review_groups: &[crate::review::model::ReviewGroupSummary],
 ) -> Vec<AgentRunSummary> {
-    let active_review_attempts = review_groups
-        .iter()
-        .filter(|summary| summary.group.status.is_active())
-        .flat_map(|summary| summary.attempts.iter().map(|attempt| attempt.id.as_str()))
-        .collect::<HashSet<_>>();
+    let active_review_attempts = active_attempts(review_groups);
     let mut rows: Vec<_> = runs
         .iter()
-        .filter(|run| {
-            !run.status.is_active()
-                && !run
-                    .review_attempt_id
-                    .as_deref()
-                    .is_some_and(|attempt| active_review_attempts.contains(attempt))
-                && backends.includes(&run.backend)
-                && outcomes.includes(run.status)
-                && (worktrees == WorktreeFilter::All || run.item_id.as_deref() == current_item)
-        })
+        .filter(|run| !working(run, &active_review_attempts))
         .cloned()
         .collect();
     rows.sort_by_key(|run| std::cmp::Reverse(run.ended_at.unwrap_or(run.queued_at)));
     rows
+}
+
+/// The attempts of reviews still going.
+fn active_attempts(review_groups: &[crate::review::model::ReviewGroupSummary]) -> HashSet<&str> {
+    review_groups
+        .iter()
+        .filter(|summary| summary.group.status.is_active())
+        .flat_map(|summary| summary.attempts.iter().map(|attempt| attempt.id.as_str()))
+        .collect()
+}
+
+/// Whether a run is working: active, or an attempt of a review still going.
+fn working(run: &AgentRunSummary, active_review_attempts: &HashSet<&str>) -> bool {
+    run.status.is_active()
+        || run
+            .review_attempt_id
+            .as_deref()
+            .is_some_and(|attempt| active_review_attempts.contains(attempt))
 }
 
 /// One item's runs as its Agents row lists them: what is working first,
@@ -669,23 +522,12 @@ pub fn item_runs(
     item_id: &str,
     review_groups: &[crate::review::model::ReviewGroupSummary],
 ) -> Vec<AgentRunSummary> {
-    let active_review_attempts = review_groups
-        .iter()
-        .filter(|summary| summary.group.status.is_active())
-        .flat_map(|summary| summary.attempts.iter().map(|attempt| attempt.id.as_str()))
-        .collect::<HashSet<_>>();
-    let working = |run: &AgentRunSummary| {
-        run.status.is_active()
-            || run
-                .review_attempt_id
-                .as_deref()
-                .is_some_and(|attempt| active_review_attempts.contains(attempt))
-    };
+    let active_review_attempts = active_attempts(review_groups);
     let (mut active, mut finished): (Vec<_>, Vec<_>) = runs
         .iter()
         .filter(|run| run.item_id.as_deref() == Some(item_id))
         .cloned()
-        .partition(|run| working(run));
+        .partition(|run| working(run, &active_review_attempts));
     active.sort_by_key(|run| (run.status.is_queued(), run.queued_at));
     finished.sort_by_key(|run| std::cmp::Reverse(run.ended_at.unwrap_or(run.queued_at)));
     active.extend(finished);
@@ -941,12 +783,7 @@ pub(crate) mod tests {
                 "2026-09-19T10:02:00Z",
             ),
         ];
-        let groups = active_groups(
-            &runs,
-            Some("current"),
-            WorktreeFilter::All,
-            BackendFilter::All,
-        );
+        let groups = active_groups_with_reviews(&runs, Some("current"), &[]);
         assert_eq!(
             groups
                 .iter()
@@ -965,22 +802,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn filters_do_not_change_the_global_active_count() {
-        let runs = vec![
-            run("a", "one", AgentRunStatus::Running, "2026-09-19T10:00:00Z"),
-            run("c", "two", AgentRunStatus::Running, "2026-09-19T10:01:00Z"),
-        ];
-        let visible = active_groups(
-            &runs,
-            Some("one"),
-            WorktreeFilter::Current,
-            BackendFilter::Claude,
-        );
-        assert_eq!(visible.iter().map(|g| g.runs.len()).sum::<usize>(), 1);
-        assert_eq!(runs.iter().filter(|r| r.status.is_active()).count(), 2);
-    }
-
-    #[test]
     fn history_is_newest_first_and_accepts_the_old_finished_spelling() {
         assert_eq!(AgentRunStatus::parse("finished"), AgentRunStatus::Completed);
         let runs = vec![
@@ -992,26 +813,11 @@ pub(crate) mod tests {
             ),
             run("c", "two", AgentRunStatus::Failed, "2026-09-19T11:00:00Z"),
         ];
-        let rows = history_runs(
-            &runs,
-            None,
-            WorktreeFilter::All,
-            BackendFilter::All,
-            OutcomeFilter::All,
-        );
+        let rows = history_runs_with_reviews(&runs, &[]);
         assert_eq!(
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             ["c", "a"]
         );
-
-        let interrupted = run(
-            "i",
-            "two",
-            AgentRunStatus::Interrupted,
-            "2026-09-19T12:00:00Z",
-        );
-        assert!(OutcomeFilter::Interrupted.includes(interrupted.status));
-        assert!(!OutcomeFilter::Failed.includes(interrupted.status));
     }
 
     /// An item's runs: its own only, working first with queued work
@@ -1244,8 +1050,6 @@ pub(crate) mod tests {
         let active = active_groups_with_reviews(
             &[claude.clone(), codex.clone(), ordinary.clone()],
             None,
-            WorktreeFilter::All,
-            BackendFilter::All,
             &[active_summary.clone()],
         );
         assert_eq!(
@@ -1254,10 +1058,6 @@ pub(crate) mod tests {
         );
         let history = history_runs_with_reviews(
             &[claude.clone(), codex.clone(), ordinary.clone()],
-            None,
-            WorktreeFilter::All,
-            BackendFilter::All,
-            OutcomeFilter::All,
             &[active_summary],
         );
         assert_eq!(
