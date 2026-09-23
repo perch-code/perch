@@ -36,7 +36,7 @@ mod review_store;
 /// whether the reader may resolve it. Version 24 keeps the instructions a
 /// worktree review was run with. Schemas 13 through 23 migrate in place so
 /// local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 26;
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -117,6 +117,30 @@ pub struct Reconciled {
     pub matched: Vec<String>,
     pub unmatched: Vec<String>,
 }
+
+/// Something the reader always allows Work runs in a repository to do,
+/// kept from an approval card's "Always". `key` is what a request is
+/// matched on (`network:example.com`, `command:<text>`, `tool:<name>:<what>`,
+/// `commit`); `label` is what the card said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkGrantRecord {
+    pub id: String,
+    pub repo: String,
+    pub key: String,
+    pub label: String,
+    pub created_at: Timestamp,
+}
+
+const GRANT_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS work_grants (
+    id          TEXT PRIMARY KEY,
+    repo        TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    label       TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS work_grants_key ON work_grants(repo COLLATE NOCASE, key);
+"#;
 
 pub struct Cache {
     conn: Connection,
@@ -345,6 +369,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
         tx.execute_batch(BASE_SCHEMA)?;
         tx.execute_batch(RUN_SCHEMA)?;
         tx.execute_batch(review_store::REVIEW_SCHEMA)?;
+        tx.execute_batch(GRANT_SCHEMA)?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -401,6 +426,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             23 => review_store::add_group_instructions(&tx)?,
             24 => add_run_context_columns(&tx)?,
             25 => add_work_columns(&tx)?,
+            26 => tx.execute_batch(GRANT_SCHEMA)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -3914,6 +3940,57 @@ impl Cache {
         Ok(out)
     }
 
+    /// A repository's grants, oldest first.
+    pub fn grants_for(&self, repo: &str) -> Result<Vec<WorkGrantRecord>, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo, key, label, created_at FROM work_grants
+             WHERE repo = ?1 COLLATE NOCASE ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![repo], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut grants = Vec::new();
+        for row in rows {
+            let (id, repo, key, label, created_at) = row?;
+            grants.push(WorkGrantRecord {
+                id,
+                repo,
+                key,
+                label,
+                created_at: created_at
+                    .parse()
+                    .map_err(|_| CacheError::Corrupt("grant created_at".into()))?,
+            });
+        }
+        Ok(grants)
+    }
+
+    /// Keep a grant. One the repository already has is left as it is.
+    pub fn insert_grant(&self, grant: &WorkGrantRecord) -> Result<(), CacheError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO work_grants (id, repo, key, label, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![grant.id, grant.repo, grant.key, grant.label, grant.created_at.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Take a grant back. Returns the repository it was on, when it was.
+    pub fn delete_grant(&self, id: &str) -> Result<Option<String>, CacheError> {
+        let repo: Option<String> = self
+            .conn
+            .query_row("SELECT repo FROM work_grants WHERE id = ?1", params![id], |row| row.get(0))
+            .optional()?;
+        self.conn.execute("DELETE FROM work_grants WHERE id = ?1", params![id])?;
+        Ok(repo)
+    }
+
     pub fn set_meta(&self, key: &str, value: &str) -> Result<(), CacheError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -5801,6 +5878,41 @@ mod tests {
         let checkout = c.load_item(&i.id).unwrap().unwrap().checkout.unwrap();
         assert_eq!(checkout.last_seen_head.as_deref(), Some("abc"));
         assert_eq!(checkout.head_sha, "def");
+    }
+
+    #[test]
+    fn grants_are_kept_per_repository_once_and_taken_back() {
+        let c = Cache::open_in_memory().unwrap();
+        let grant = |id: &str, repo: &str, key: &str| WorkGrantRecord {
+            id: id.into(),
+            repo: repo.into(),
+            key: key.into(),
+            label: key.into(),
+            created_at: "2026-09-22T10:00:00Z".parse().unwrap(),
+        };
+        c.insert_grant(&grant("g1", "local/notes", "network:example.com")).unwrap();
+        c.insert_grant(&grant("g2", "LOCAL/notes", "network:example.com")).unwrap();
+        c.insert_grant(&grant("g3", "local/notes", "commit")).unwrap();
+        c.insert_grant(&grant("g4", "acme/widgets", "commit")).unwrap();
+        let keys: Vec<String> = c.grants_for("Local/Notes").unwrap().into_iter().map(|g| g.key).collect();
+        assert_eq!(keys, ["network:example.com", "commit"], "one per key, whatever the case");
+        assert_eq!(c.delete_grant("g1").unwrap().as_deref(), Some("local/notes"));
+        assert_eq!(c.grants_for("local/notes").unwrap().len(), 1);
+        assert_eq!(c.delete_grant("gone").unwrap(), None);
+    }
+
+    #[test]
+    fn schema_26_gains_the_grants_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.conn.execute_batch("DROP TABLE work_grants").unwrap();
+            cache.set_meta("schema_version", "26").unwrap();
+        }
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 26, to: SCHEMA_VERSION });
+        assert!(cache.grants_for("a/b").unwrap().is_empty());
     }
 
     #[test]

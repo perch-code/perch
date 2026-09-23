@@ -218,6 +218,11 @@ pub struct RepoWork {
     /// Domains the run may reach, such as `index.crates.io`.
     #[serde(default)]
     pub network: Vec<String>,
+    /// Load the repository's own agent configuration for Work runs: its
+    /// `.claude/` settings, `.mcp.json` and `.codex/`. What is there runs
+    /// as the reader, outside any sandbox.
+    #[serde(default)]
+    pub trust: bool,
 }
 
 impl RepoWork {

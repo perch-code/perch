@@ -23,7 +23,7 @@ pub mod workflow_runs;
 pub use auth::{resolve_token, Token, TokenSource};
 pub use cache::{
     Cache, CacheError, CacheOpen, DraftRow, Reconciled, RunContext, RunEventAppend, StoredReveals,
-    NOTIFICATIONS_LAST_MODIFIED_KEY,
+    WorkGrantRecord, NOTIFICATIONS_LAST_MODIFIED_KEY,
 };
 pub use client::{Error, GitHub, ListResult, PullLookup};
 pub use comments::{

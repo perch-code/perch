@@ -3,6 +3,7 @@
 
 mod agents_cli;
 mod app_icon;
+mod approvals;
 mod ask;
 mod backend;
 mod context;

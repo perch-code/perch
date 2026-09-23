@@ -308,6 +308,20 @@ pub enum Command {
     AddRepository {
         path: PathBuf,
     },
+    /// The reader's answer to a Work run's request.
+    AnswerApproval {
+        run_id: String,
+        approval_id: String,
+        answer: ApprovalAnswer,
+    },
+    /// A repository's grants, for the item's summary.
+    ListGrants {
+        repo: String,
+    },
+    /// Take a grant back.
+    RevokeGrant {
+        id: String,
+    },
     /// How much a Work run changed, for its card.
     RunChanges {
         run_id: String,
@@ -439,6 +453,46 @@ pub enum Command {
     },
 }
 
+/// How the reader answered a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalAnswer {
+    Once,
+    Always,
+    Deny,
+}
+
+/// A request as its card shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalView {
+    pub run_id: String,
+    pub id: String,
+    pub item_id: String,
+    pub thread_id: String,
+    pub title: String,
+    /// The command, in the code font, for a request to run one.
+    pub command: Option<String>,
+    /// The agent's reason.
+    pub detail: Option<String>,
+    /// The Always button's words.
+    pub always: String,
+}
+
+/// A request waiting on the reader, and what answering it needs.
+#[derive(Clone)]
+struct PendingApproval {
+    run: perch_agent::Run,
+    repo: String,
+    request: perch_agent::ApprovalRequest,
+}
+
+/// How a request was settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settle {
+    Answered(ApprovalAnswer),
+    TimedOut,
+    RunEnded,
+}
+
 /// What the new-work view asks for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewWork {
@@ -500,6 +554,19 @@ pub enum Event {
     WorkDefaults(perch_github::WorkDefaults),
     /// Add repository put this one in the config.
     RepositoryAdded(String),
+    /// A Work run asks the reader something.
+    ApprovalRequested(ApprovalView),
+    /// A request was answered, by the reader, a grant, a timeout or the
+    /// run's end: its buttons go.
+    ApprovalSettled {
+        run_id: String,
+        approval_id: String,
+    },
+    /// A repository's grants, oldest first.
+    Grants {
+        repo: String,
+        grants: Vec<perch_github::WorkGrantRecord>,
+    },
     /// A Work run's changes: files, lines added, lines removed.
     RunChanges {
         run_id: String,
@@ -2174,6 +2241,24 @@ impl Backend {
         let _ = self.commands.send(Command::AddRepository { path });
     }
 
+    pub fn answer_approval(&self, run_id: &str, approval_id: &str, answer: ApprovalAnswer) {
+        let _ = self.commands.send(Command::AnswerApproval {
+            run_id: run_id.to_string(),
+            approval_id: approval_id.to_string(),
+            answer,
+        });
+    }
+
+    pub fn list_grants(&self, repo: &str) {
+        let _ = self.commands.send(Command::ListGrants {
+            repo: repo.to_string(),
+        });
+    }
+
+    pub fn revoke_grant(&self, id: &str) {
+        let _ = self.commands.send(Command::RevokeGrant { id: id.to_string() });
+    }
+
     pub fn run_changes(&self, run_id: &str) {
         let _ = self.commands.send(Command::RunChanges {
             run_id: run_id.to_string(),
@@ -2689,6 +2774,8 @@ async fn run(
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         notifications: Arc::new(std::sync::Mutex::new(initial_notifications.clone())),
         asked_subjects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        approvals: Default::default(),
+        approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
     };
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
@@ -3205,6 +3292,22 @@ async fn run(
                         }
                     }
                 });
+            }
+            Command::AnswerApproval {
+                run_id,
+                approval_id,
+                answer,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    settle_approval(&ctx, &run_id, &approval_id, Settle::Answered(answer)).await;
+                });
+            }
+            Command::ListGrants { repo } => send_grants(&ctx, &repo),
+            Command::RevokeGrant { id } => {
+                if let Some(Ok(Some(repo))) = ctx.with_cache(|c| c.delete_grant(&id)) {
+                    send_grants(&ctx, &repo);
+                }
             }
             Command::RunChanges { run_id } => {
                 let ctx = ctx.clone();
@@ -4013,6 +4116,11 @@ struct Ctx {
     seen_notifications: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
     /// Items whose GitHub side is being fetched again right now.
     refreshing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Requests Work runs are waiting on the reader for, by run and
+    /// request id.
+    approvals: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), PendingApproval>>>,
+    /// How long a request waits before it is denied.
+    approval_timeout: Duration,
     /// GitHub's inbox as the last successful poll saw it. This is distinct
     /// from durable items and remains usable when the SQLite cache cannot
     /// be opened.
@@ -10935,6 +11043,152 @@ async fn ask(
     .await;
 }
 
+/// A Work run asks. A grant of the repository's that covers the request
+/// answers it at once; otherwise the reader is asked, and the request is
+/// denied if they have not answered in `approval_timeout`.
+async fn on_approval(
+    ctx: &Ctx,
+    run: &RunRecord,
+    handle: &perch_agent::Run,
+    item_id: &str,
+    thread_id: &str,
+    id: &str,
+    request: &perch_agent::ApprovalRequest,
+) {
+    let repo = ctx.item(item_id).map(|item| item.repo_full_name).unwrap_or_default();
+    let grants = ctx
+        .with_cache(|c| c.grants_for(&repo))
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let line = crate::approvals::one_line(request);
+    if crate::approvals::covering(&grants, request).is_some() {
+        handle.answer(id, perch_agent::Decision::Allow);
+        record_approval_step(ctx, &run.id, &format!("approval-{id}"), &format!("Allowed by a grant: {line}"), Some(true));
+        return;
+    }
+    if let Ok(mut pending) = ctx.approvals.lock() {
+        pending.insert(
+            (run.id.clone(), id.to_string()),
+            PendingApproval {
+                run: handle.clone(),
+                repo,
+                request: request.clone(),
+            },
+        );
+    }
+    record_approval_step(ctx, &run.id, &format!("approval-{id}"), &format!("Asked: {line}"), None);
+    let _ = ctx.events.send(Event::ApprovalRequested(ApprovalView {
+        run_id: run.id.clone(),
+        id: id.to_string(),
+        item_id: item_id.to_string(),
+        thread_id: thread_id.to_string(),
+        title: crate::approvals::title(request),
+        command: matches!(request.kind, perch_agent::ApprovalKind::Command).then(|| request.subject.clone()),
+        detail: request.detail.clone(),
+        always: crate::approvals::always_button(request),
+    }));
+    let ctx = ctx.clone();
+    let (run_id, id) = (run.id.clone(), id.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(ctx.approval_timeout).await;
+        settle_approval(&ctx, &run_id, &id, Settle::TimedOut).await;
+    });
+}
+
+/// Answer a request, once: by the reader, by a timeout, or because its
+/// run ended. A request already settled is left alone.
+async fn settle_approval(ctx: &Ctx, run_id: &str, id: &str, how: Settle) {
+    let key = (run_id.to_string(), id.to_string());
+    let Some(pending) = ctx.approvals.lock().ok().and_then(|mut p| p.remove(&key)) else {
+        return;
+    };
+    let (decision, ok, summary) = match how {
+        Settle::Answered(ApprovalAnswer::Once) => (Some(perch_agent::Decision::Allow), true, "Allowed once".to_string()),
+        Settle::Answered(ApprovalAnswer::Always) => {
+            let (grant_key, label) = crate::approvals::always(&pending.request);
+            let grant = perch_github::WorkGrantRecord {
+                id: perch_github::comments::new_id(),
+                repo: pending.repo.clone(),
+                key: grant_key,
+                label,
+                created_at: Timestamp::now(),
+            };
+            ctx.with_cache(|c| c.insert_grant(&grant));
+            send_grants(ctx, &pending.repo);
+            (Some(perch_agent::Decision::Allow), true, "Always allowed".to_string())
+        }
+        Settle::Answered(ApprovalAnswer::Deny) => (
+            Some(perch_agent::Decision::deny(crate::approvals::DENIED)),
+            false,
+            "Denied".to_string(),
+        ),
+        Settle::TimedOut => {
+            let minutes = ctx.approval_timeout.as_secs() / 60;
+            (
+                Some(perch_agent::Decision::deny(format!(
+                    "The reader did not answer in {minutes} minutes."
+                ))),
+                false,
+                format!("Denied: no answer in {minutes} minutes"),
+            )
+        }
+        Settle::RunEnded => (None, false, "The run ended before an answer".to_string()),
+    };
+    if let Some(decision) = decision {
+        pending.run.answer(id, decision);
+    }
+    // The question's step closes, and the answer is a step of its own, so
+    // the run's history says what was asked and what was said.
+    let ask = format!("approval-{id}");
+    let stored = StoredRunEvent::ToolResult {
+        id: ask.clone(),
+        ok,
+        summary: String::new(),
+    };
+    let _ = append_stored_event(ctx, run_id, &format!("{ask}-closed"), stored);
+    let line = crate::approvals::one_line(&pending.request);
+    record_approval_step(ctx, run_id, &format!("{ask}-answer"), &format!("{summary}: {line}"), Some(ok));
+    let _ = ctx.events.send(Event::ApprovalSettled {
+        run_id: run_id.to_string(),
+        approval_id: id.to_string(),
+    });
+}
+
+/// A request, or what became of it, as a step of its run, so it is in
+/// the run's history and the inspector's activity line. `ok` closes the
+/// step; `None` leaves it open, as a request waiting is.
+fn record_approval_step(ctx: &Ctx, run_id: &str, step: &str, summary: &str, ok: Option<bool>) {
+    let call = StoredRunEvent::ToolCall {
+        id: step.to_string(),
+        name: "approval".into(),
+        summary: summary.to_string(),
+        parent_id: None,
+    };
+    let mut updated = append_stored_event(ctx, run_id, &format!("{step}-call"), call);
+    if let Some(ok) = ok {
+        let result = StoredRunEvent::ToolResult {
+            id: step.to_string(),
+            ok,
+            summary: String::new(),
+        };
+        updated = append_stored_event(ctx, run_id, &format!("{step}-result"), result);
+    }
+    if let Ok(run) = updated {
+        let _ = ctx.events.send(Event::AgentRunUpdated { run });
+    }
+}
+
+fn send_grants(ctx: &Ctx, repo: &str) {
+    let grants = ctx
+        .with_cache(|c| c.grants_for(repo))
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let _ = ctx.events.send(Event::Grants {
+        repo: repo.to_string(),
+        grants,
+    });
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkSide {
     Before,
@@ -11043,19 +11297,23 @@ fn work_setup(
         .repo
         .iter()
         .find(|r| r.identity().is_some_and(|i| i.eq_ignore_ascii_case(&item.repo_full_name)));
+    let grants = ctx
+        .with_cache(|c| c.grants_for(&item.repo_full_name))
+        .and_then(Result::ok)
+        .unwrap_or_default();
     let grant = perch_agent::WorkGrant {
         write: repo.map(|r| r.work.write_paths()).unwrap_or_default(),
         network: repo.map(|r| r.work.network.clone()).unwrap_or_default(),
-        commit: false,
-        trust: false,
+        commit: crate::approvals::commits_granted(&grants),
+        trust: repo.is_some_and(|r| r.work.trust),
     };
-    // Codex's sandbox has no allowlist, so it gets no network whatever
-    // the grant says.
+    // Codex's profile has no allowlist, so it starts with no network
+    // whatever the grant says, and asks for each host.
     let network = match backend {
         perch_agent::Backend::ClaudeCode if !grant.network.is_empty() => {
-            format!("reaches only {}", grant.network.join(", "))
+            format!("reaches only {} without asking", grant.network.join(", "))
         }
-        _ => "has no network at all".to_string(),
+        _ => "reaches no host without asking".to_string(),
     };
     let (branch, base) = item
         .checkout
@@ -11067,6 +11325,7 @@ fn work_setup(
         &branch,
         &base,
         &network,
+        grant.commit,
     );
     Ok((perch_agent::Mode::Work(grant), framing))
 }
@@ -11274,6 +11533,12 @@ async fn execute_question(
     let mut persistence_error = None;
     while let Some(event) = rx.recv().await {
         event_index += 1;
+        if let perch_agent::RunEvent::Approval { id, request } = &event {
+            if persistence_error.is_none() {
+                on_approval(ctx, &run, &handle, &item_id, &thread.id, id, request).await;
+            }
+            continue;
+        }
         let terminal = matches!(
             &event,
             perch_agent::RunEvent::Finished { .. }
@@ -11358,6 +11623,21 @@ async fn execute_question(
     }
 
     let outcome = handle.wait().await;
+    // A request still waiting has nobody left to answer.
+    let waiting: Vec<String> = ctx
+        .approvals
+        .lock()
+        .map(|pending| {
+            pending
+                .keys()
+                .filter(|(owner, _)| owner == &run.id)
+                .map(|(_, id)| id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in waiting {
+        settle_approval(ctx, &run.id, &id, Settle::RunEnded).await;
+    }
     // And as it leaves it, however it ended.
     if run.mode == RunMode::Work {
         record_work(ctx, &run, WorkSide::After).await;
@@ -13229,6 +13509,8 @@ mod tests {
             refreshing: Default::default(),
             notifications: Default::default(),
             asked_subjects: Default::default(),
+            approvals: Default::default(),
+            approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
         };
         (ctx, received)
     }
@@ -14499,6 +14781,196 @@ mod tests {
             git(&root, &["for-each-ref", "refs/perch/runs/"]).is_empty(),
             "the run's refs went with its thread"
         );
+    }
+
+    /// A Claude Code that asks its host about `$PERCH_ASK` (a
+    /// `can_use_tool` request's JSON), appends the answer to `answers`,
+    /// and finishes.
+    fn asking_claude(dir: &Path, request: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("claude");
+        std::fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+read init
+read user
+echo '{{"type":"system","subtype":"init","session_id":"s1","model":"sonnet"}}'
+echo '{{"type":"control_request","request_id":"r1","request":{request}}}'
+read answer
+printf '%s\n' "$answer" >> {answers}
+echo '{{"type":"result","subtype":"success","result":"Done.","session_id":"s1"}}'
+read eof || true
+"#,
+                answers = dir.join("answers").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn work_branch(ctx: &Ctx, worktree: &Path) -> Item {
+        let mut branch = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        branch.checkout = Some(ItemCheckout {
+            branch: "chris/work".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: worktree.to_path_buf(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            source: None,
+        });
+        ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
+        open_in_slot(ctx, &branch);
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.to_path_buf();
+        branch
+    }
+
+    /// Wait for the backend to send an event `pick` recognises.
+    async fn next_event<T>(received: &Receiver<Event>, mut pick: impl FnMut(Event) -> Option<T>) -> T {
+        for _ in 0..200 {
+            for event in received.try_iter() {
+                if let Some(found) = pick(event) {
+                    return found;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("the event never came");
+    }
+
+    fn step_summaries(ctx: &Ctx, item: &Item) -> Vec<String> {
+        let thread = ctx.with_cache(|c| c.load_comment_threads(&item.id).unwrap()).unwrap();
+        let mut out = Vec::new();
+        for thread in thread {
+            for run in ctx.with_cache(|c| c.runs_for_discussion(&thread.id).unwrap()).unwrap() {
+                let run = ctx.runs.load(&run.id).unwrap();
+                for step in run.steps {
+                    out.push(format!("{} [{}]", step.summary, if step.ok { "ok" } else { "no" }));
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_work_run_asks_the_reader_and_always_becomes_a_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = asking_claude(
+            dir.path(),
+            r#"{"subtype":"can_use_tool","tool_name":"SandboxNetworkAccess","input":{"host":"example.com"}}"#,
+        );
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let item = work_branch(&ctx, &worktree);
+        let ask_it = |ctx: Ctx, id: String| async move {
+            ask(
+                &ctx,
+                id,
+                None,
+                None,
+                "Fetch it".into(),
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+                RunMode::Work,
+            )
+            .await
+        };
+
+        let running = tokio::spawn(ask_it(ctx.clone(), item.id.clone()));
+        let view = next_event(&received, |e| match e {
+            Event::ApprovalRequested(view) => Some(view),
+            _ => None,
+        })
+        .await;
+        assert_eq!(view.title, "Connect to example.com");
+        assert_eq!(view.always, "Always allow example.com here");
+        assert_eq!(view.item_id, item.id);
+        settle_approval(&ctx, &view.run_id, &view.id, Settle::Answered(ApprovalAnswer::Always)).await;
+        running.await.unwrap();
+
+        let answers = std::fs::read_to_string(dir.path().join("answers")).unwrap();
+        assert!(answers.lines().next().unwrap().contains("\"behavior\":\"allow\""), "{answers}");
+        let grants = ctx.with_cache(|c| c.grants_for("a/b").unwrap()).unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].key, "network:example.com");
+        assert!(ctx.approvals.lock().unwrap().is_empty());
+
+        // The grant answers the next request without asking.
+        received.try_iter().for_each(drop);
+        open_in_slot(&ctx, &item);
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
+        ask_it(ctx.clone(), item.id.clone()).await;
+        assert!(
+            !received.try_iter().any(|e| matches!(e, Event::ApprovalRequested(_))),
+            "nobody was asked"
+        );
+        let answers = std::fs::read_to_string(dir.path().join("answers")).unwrap();
+        assert_eq!(answers.lines().count(), 2);
+        assert!(answers.lines().nth(1).unwrap().contains("\"behavior\":\"allow\""));
+        let steps = step_summaries(&ctx, &item);
+        for want in [
+            "Asked: Connect to example.com [ok]",
+            "Always allowed: Connect to example.com [ok]",
+            "Allowed by a grant: Connect to example.com [ok]",
+        ] {
+            assert!(steps.iter().any(|s| s == want), "{want} in {steps:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_nobody_answers_is_denied_and_the_run_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = asking_claude(
+            dir.path(),
+            r#"{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push","dangerouslyDisableSandbox":true}}"#,
+        );
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        ctx.approval_timeout = Duration::from_millis(200);
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let item = work_branch(&ctx, &worktree);
+
+        ask(
+            &ctx,
+            item.id.clone(),
+            None,
+            None,
+            "Push it".into(),
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".into(),
+            perch_agent::Effort::Medium,
+            RunMode::Work,
+        )
+        .await;
+
+        let answers = std::fs::read_to_string(dir.path().join("answers")).unwrap();
+        assert!(answers.contains("\"behavior\":\"deny\""), "{answers}");
+        assert!(answers.contains("did not answer"), "{answers}");
+        let settled: Vec<Event> = received
+            .try_iter()
+            .filter(|e| matches!(e, Event::ApprovalRequested(_) | Event::ApprovalSettled { .. }))
+            .collect();
+        assert_eq!(settled.len(), 2, "asked, then settled");
+        let steps = step_summaries(&ctx, &item);
+        assert!(
+            steps.iter().any(|s| s == "Asked: Run outside the sandbox: git push [no]"),
+            "{steps:?}"
+        );
+        assert!(
+            steps.iter().any(|s| s.starts_with("Denied: no answer in 0 minutes: Run outside the sandbox: git push")),
+            "{steps:?}"
+        );
+        assert!(ctx.with_cache(|c| c.grants_for("a/b").unwrap()).unwrap().is_empty());
     }
 
     #[tokio::test]

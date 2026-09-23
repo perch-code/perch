@@ -187,6 +187,10 @@ pub struct AppState {
     pub confirm_loss: RwSignal<Option<crate::backend::LossPrompt>>,
     /// The new-work view and what it holds between visits.
     pub new_work: crate::ui::new_work::NewWorkState,
+    /// Requests Work runs are waiting on the reader for, oldest first.
+    pub approvals: RwSignal<Vec<crate::backend::ApprovalView>>,
+    /// Each repository's grants, as last listed.
+    pub grants: RwSignal<HashMap<String, Vec<perch_github::WorkGrantRecord>>>,
     /// A repository Add repository just put in the config, for the
     /// new-work view to choose once something with the backend sees it.
     pub added_repo: RwSignal<Option<String>>,
@@ -284,6 +288,8 @@ impl AppState {
             confirm_delete: RwSignal::new(None),
             confirm_loss: RwSignal::new(None),
             new_work: crate::ui::new_work::NewWorkState::new(),
+            approvals: RwSignal::new(Vec::new()),
+            grants: RwSignal::new(HashMap::new()),
             added_repo: RwSignal::new(None),
             search_box: RwSignal::new(None),
             focus_search: RwSignal::new(false),
@@ -1897,6 +1903,17 @@ impl AppState {
             Event::Bases { repo, bases } => self.new_work.take_bases(repo, bases),
             Event::WorkDefaults(work) => self.new_work.prefix.set(work.branch_prefix),
             Event::RepositoryAdded(identity) => self.added_repo.set(Some(identity)),
+            Event::ApprovalRequested(view) => self.approvals.update(|pending| {
+                if !pending.iter().any(|p| p.run_id == view.run_id && p.id == view.id) {
+                    pending.push(view);
+                }
+            }),
+            Event::ApprovalSettled { run_id, approval_id } => self
+                .approvals
+                .update(|pending| pending.retain(|p| !(p.run_id == run_id && p.id == approval_id))),
+            Event::Grants { repo, grants } => self.grants.update(|all| {
+                all.insert(repo.to_lowercase(), grants);
+            }),
             Event::RunChanges { run_id, counts } => {
                 if let Some(review) = self.review.get_untracked() {
                     review.run_changes.update(|changes| {
