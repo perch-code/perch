@@ -304,6 +304,15 @@ pub enum Command {
         id: String,
         name: Option<String>,
     },
+    /// The branches new work in a repository can start from.
+    ListBases {
+        repo: String,
+    },
+    /// Make a worktree for new work and open it as a branch item.
+    CreateWorktree {
+        work: NewWork,
+        navigation_id: u64,
+    },
     /// Cut `perch/issue-<n>` from the default branch and make a
     /// checkout-only item pointing back at the issue.
     StartWork {
@@ -419,6 +428,20 @@ pub enum Command {
         token: u64,
         body: String,
     },
+}
+
+/// What the new-work view asks for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewWork {
+    /// The `[[repo]]` entry's identity.
+    pub repo: String,
+    /// What to start from.
+    pub base: perch_git::BaseBranch,
+    /// The new branch's name, or `None` to check out `base` itself.
+    pub branch: Option<String>,
+    /// The reader typed `branch`, so a taken name is an error rather than
+    /// quietly becoming `-2`.
+    pub typed: bool,
 }
 
 /// What archiving or deleting an item would lose that git keeps no copy
@@ -544,6 +567,12 @@ pub enum Event {
     /// An archive or delete stopped short of losing something git cannot
     /// bring back, and asks first.
     ConfirmLoss(LossPrompt),
+    /// The branches `repo` can start new work from, the base first, or why
+    /// they could not be listed.
+    Bases {
+        repo: String,
+        bases: Result<Vec<perch_git::BaseBranch>, String>,
+    },
     /// Archive committed and names the exact pending navigation it fenced.
     ItemArchived {
         item_id: String,
@@ -2111,6 +2140,22 @@ impl Backend {
         navigation_id
     }
 
+    pub fn list_bases(&self, repo: &str) {
+        let _ = self.commands.send(Command::ListBases {
+            repo: repo.to_string(),
+        });
+    }
+
+    pub fn create_worktree(&self, work: NewWork) -> u64 {
+        let navigation_id = self.navigation_requests.begin_current();
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::CreateWorktree {
+            work,
+            navigation_id,
+        });
+        navigation_id
+    }
+
     pub fn fork_item(&self, id: &str) -> u64 {
         let navigation_id = self.navigation_requests.begin_item(id);
         self.scope_requests.clear();
@@ -3076,6 +3121,45 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     match start_work(&ctx, &issue_item_id, navigation_id).await {
+                        Ok(id) => {
+                            if open_item(&ctx, &id, navigation_id).await {
+                                start_language_server(
+                                    ctx.slot,
+                                    ctx.language_server,
+                                    ctx.events,
+                                    ctx.navigation_requests,
+                                    navigation_id,
+                                )
+                                .await;
+                            }
+                        }
+                        Err(message) => {
+                            ctx.send_navigation_event(
+                                navigation_id,
+                                Event::ReviewFailed {
+                                    navigation_id,
+                                    message,
+                                },
+                            );
+                        }
+                    }
+                });
+            }
+            Command::ListBases { repo } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let bases = list_bases(&ctx, &repo).await;
+                    let _ = ctx.events.send(Event::Bases { repo, bases });
+                });
+            }
+            Command::CreateWorktree {
+                work,
+                navigation_id,
+            } => {
+                ctx.clear_notice();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    match create_worktree(&ctx, &work, navigation_id).await {
                         Ok(id) => {
                             if open_item(&ctx, &id, navigation_id).await {
                                 start_language_server(
@@ -7737,6 +7821,243 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Resul
         source: None,
     });
     item.from_item_id = Some(issue_item.id.clone());
+    ctx.with_cache(|c| c.insert_item(&item))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    ctx.send_items();
+    Ok(item.id)
+}
+
+/// The `base` setting of a repository's `[[repo]]` entry.
+fn configured_base(ctx: &Ctx, identity: &str) -> Option<String> {
+    ctx.config
+        .repo
+        .iter()
+        .find(|r| r.identity().is_some_and(|i| i.eq_ignore_ascii_case(identity)))
+        .and_then(|r| r.base.clone())
+}
+
+/// The branches new work in a repository can start from. A root's come
+/// from the root, with no network; a GitHub repository with no root
+/// asks GitHub.
+async fn list_bases(ctx: &Ctx, identity: &str) -> Result<Vec<perch_git::BaseBranch>, String> {
+    if let Some(root) = root_of(ctx, identity) {
+        let hosts = ctx.config.github_hosts();
+        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+        let base = configured_base(ctx, identity);
+        let scan = perch_git::scan_root(ctx.preparer.git(), &root, base.as_deref(), &hosts)
+            .await
+            .map_err(|e| e.to_string())?;
+        return ctx
+            .preparer
+            .local_bases(&root, scan.remote.as_deref(), &scan.base)
+            .await
+            .map_err(|e| e.to_string());
+    }
+    if perch_github::is_local(identity) {
+        return Err(no_root_for_local(ctx, identity).unwrap_or_default());
+    }
+    let repo = RepoId::parse(identity).ok_or_else(|| format!("{identity} is not a repository name"))?;
+    let default = ctx
+        .preparer
+        .default_branch(&repo)
+        .await
+        .map_err(|e| e.to_string())?;
+    ctx.preparer
+        .remote_bases(&repo, &default)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Make the worktree the new-work view asked for, and the branch item
+/// for it, or find the item that already has the branch.
+///
+/// With a root, the worktree is added from the reader's own clone: a
+/// remote-tracking base is fetched first, one branch, with the reader's
+/// credentials, and a fetch that fails leaves the cut to what the clone
+/// had, with a notice saying how old that is. With no root, the store's
+/// clone does it, as Start work does.
+async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Result<String, String> {
+    let identity = work.repo.as_str();
+    if !ctx.config.is_declared(identity) {
+        return Err(format!("{identity} is not a repository in the config"));
+    }
+    let repo = RepoId::parse(identity).ok_or_else(|| format!("{identity} is not a repository name"))?;
+    let progress = |message: String| {
+        ctx.send_navigation_event(
+            navigation_id,
+            Event::ReviewProgress {
+                navigation_id,
+                message,
+                percent: None,
+            },
+        );
+    };
+    // Checking out a branch that is already a row opens the row.
+    let wanted = work.branch.clone().unwrap_or_else(|| work.base.name.clone());
+    if let Some(existing) = ctx
+        .with_cache(|c| c.find_item_by_branch(identity, &wanted).ok().flatten())
+        .flatten()
+    {
+        match &work.branch {
+            None => return Ok(existing.id),
+            Some(_) if work.typed => return Err(format!("{wanted} is taken")),
+            // A name Perch filled in: the cut takes the next one.
+            Some(_) => {}
+        }
+    }
+    let reserved = branches_in(ctx, identity);
+
+    let (cut, base_ref, source) = if let Some(root) = root_of(ctx, identity) {
+        let repo_dir = ctx
+            .preparer
+            .repository_of(&root)
+            .await
+            .map_err(|e| e.to_string())?;
+        let start = match &work.base.remote {
+            Some(remote) => {
+                progress(format!("Fetching {}", work.base.label()));
+                if let Err(error) = ctx
+                    .preparer
+                    .fetch_branch(&repo_dir, remote, &work.base.name)
+                    .await
+                {
+                    tracing::info!(%error, "could not fetch the base; cutting from what the clone has");
+                    let age = ctx
+                        .preparer
+                        .age_of(&repo_dir, &work.base.label())
+                        .await
+                        .map(|age| format!(", from {age}"))
+                        .unwrap_or_default();
+                    let _ = ctx.events.send(Event::Notice(format!(
+                        "Could not fetch {remote}; started from the {} {} had{age}",
+                        work.base.label(),
+                        repo_dir.display()
+                    )));
+                }
+                work.base.label()
+            }
+            None => work.base.name.clone(),
+        };
+        progress("Adding the worktree".into());
+        let cut = match &work.branch {
+            Some(name) => {
+                if work.typed && ctx.preparer.branch_taken(&repo_dir, &repo, name, &reserved).await {
+                    return Err(format!("{name} is taken"));
+                }
+                ctx.preparer
+                    .cut_branch(&repo_dir, &repo, name, &start, &reserved)
+                    .await
+            }
+            None => {
+                let tracking = work.base.remote.as_ref().map(|_| work.base.label());
+                ctx.preparer
+                    .check_out_branch(&repo_dir, &repo, &work.base.name, tracking.as_deref())
+                    .await
+            }
+        }
+        .map_err(|e| e.to_string())?;
+        // A new branch is diffed against what it was cut from; a branch
+        // checked out as it is, against the repository's base.
+        let base_ref = match &work.branch {
+            Some(_) => work.base.name.clone(),
+            None => {
+                let hosts = ctx.config.github_hosts();
+                let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+                let base = configured_base(ctx, identity);
+                perch_git::scan_root(ctx.preparer.git(), &repo_dir, base.as_deref(), &hosts)
+                    .await
+                    .map(|scan| scan.base)
+                    .unwrap_or_else(|_| work.base.name.clone())
+            }
+        };
+        (cut, base_ref, Some(repo_dir))
+    } else {
+        if let Some(message) = no_root_for_local(ctx, identity) {
+            return Err(message);
+        }
+        let progress_events = ctx.events.clone();
+        let progress_requests = ctx.navigation_requests.clone();
+        let label = repo.full_name();
+        let bare = ctx
+            .preparer
+            .ensure_bare(&repo, move |step| {
+                if let perch_git::Step::Cloning { phase, percent } = step {
+                    let _ = progress_requests.with_current(navigation_id, || {
+                        let _ = progress_events.send(Event::ReviewProgress {
+                            navigation_id,
+                            message: format!("Cloning {label}: {phase}"),
+                            percent,
+                        });
+                    });
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        progress(format!("Fetching {}", work.base.name));
+        ctx.preparer
+            .fetch_home_ref(&bare, &work.base.name)
+            .await
+            .map_err(|e| e.to_string())?;
+        let start = perch_git::home_ref(&work.base.name);
+        progress("Adding the worktree".into());
+        let cut = match &work.branch {
+            Some(name) => {
+                if work.typed && ctx.preparer.branch_taken(&bare, &repo, name, &reserved).await {
+                    return Err(format!("{name} is taken"));
+                }
+                ctx.preparer
+                    .cut_branch(&bare, &repo, name, &start, &reserved)
+                    .await
+            }
+            None => {
+                ctx.preparer
+                    .check_out_fetched(&bare, &repo, &work.base.name, &start)
+                    .await
+            }
+        }
+        .map_err(|e| e.to_string())?;
+        let base_ref = match &work.branch {
+            Some(_) => work.base.name.clone(),
+            None => {
+                let default = ctx
+                    .preparer
+                    .default_branch(&repo)
+                    .await
+                    .unwrap_or_else(|_| "main".to_string());
+                // The base's tip, where `home_ref` resolves it.
+                if default != work.base.name {
+                    let _ = ctx.preparer.fetch_home_ref(&bare, &default).await;
+                }
+                default
+            }
+        };
+        (cut, base_ref, None)
+    };
+
+    let head_sha = ctx
+        .preparer
+        .git()
+        .run(
+            Some(&cut.worktree),
+            ["rev-parse", "HEAD"],
+            Duration::from_secs(30),
+        )
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let mut item = Item::new(identity, Timestamp::now());
+    item.checkout = Some(ItemCheckout {
+        branch: cut.branch,
+        base_ref,
+        head_sha,
+        path: cut.worktree,
+        owned: true,
+        on_disk: true,
+        churn: Some((0, 0)),
+        last_seen_head: None,
+        source,
+    });
     ctx.with_cache(|c| c.insert_item(&item))
         .transpose()
         .map_err(|e| e.to_string())?;
@@ -15780,6 +16101,115 @@ mod tests {
             git(&root, &["branch", "--list", "feature-2"]).is_empty(),
             "the branch went from the root"
         );
+    }
+
+    fn local_notes(dir: &Path) -> (Ctx, Receiver<Event>, std::path::PathBuf) {
+        let root = dir.join("notes");
+        root_with_branch(&root, "feature");
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, received) = ctx_declaring(dir, &nowhere(), vec![entry]);
+        (ctx, received, root.canonicalize().unwrap())
+    }
+
+    fn new_work(base: perch_git::BaseBranch, branch: Option<&str>, typed: bool) -> NewWork {
+        NewWork {
+            repo: "local/notes".into(),
+            base,
+            branch: branch.map(str::to_string),
+            typed,
+        }
+    }
+
+    #[tokio::test]
+    async fn new_work_in_a_local_repository_is_cut_in_its_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received, root) = local_notes(dir.path());
+
+        let bases = list_bases(&ctx, "local/notes").await.unwrap();
+        assert_eq!(
+            bases.iter().map(|b| b.label()).collect::<Vec<_>>(),
+            ["main", "feature"]
+        );
+
+        let work = new_work(perch_git::BaseBranch::local("main"), Some("chris/readme"), true);
+        let id = create_worktree(&ctx, &work, 1).await.unwrap();
+
+        let item = ctx.item(&id).unwrap();
+        assert_eq!(item.repo_full_name, "local/notes");
+        assert!(item.subject.is_none());
+        let checkout = item.checkout.unwrap();
+        assert_eq!(checkout.branch, "chris/readme");
+        assert_eq!(checkout.base_ref, "main");
+        assert!(checkout.owned);
+        assert_eq!(checkout.source.as_deref(), Some(root.as_path()));
+        assert_eq!(checkout.head_sha, git(&root, &["rev-parse", "main"]));
+        assert_eq!(
+            checkout.path.file_name().unwrap().to_string_lossy(),
+            "local__notes__chris-readme"
+        );
+        assert!(git(&root, &["worktree", "list"]).contains("local__notes__chris-readme"));
+
+        // The same name typed again is refused; filled in, it moves on.
+        let again = create_worktree(&ctx, &work, 2).await.unwrap_err();
+        assert!(again.contains("chris/readme is taken"), "{again}");
+        let filled = new_work(perch_git::BaseBranch::local("main"), Some("chris/readme"), false);
+        let id = create_worktree(&ctx, &filled, 3).await.unwrap();
+        assert_eq!(ctx.item(&id).unwrap().checkout.unwrap().branch, "chris/readme-2");
+    }
+
+    #[tokio::test]
+    async fn checking_out_a_branch_that_is_a_row_opens_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received, root) = local_notes(dir.path());
+        assert!(scan_roots(&ctx).await);
+        let row = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+
+        let work = new_work(perch_git::BaseBranch::local("feature"), None, false);
+        assert_eq!(create_worktree(&ctx, &work, 1).await.unwrap(), row.id);
+
+        // A branch no row has is checked out as it is, and diffed against
+        // the repository's base.
+        git(&root, &["branch", "other", "main"]);
+        let work = new_work(perch_git::BaseBranch::local("other"), None, false);
+        let id = create_worktree(&ctx, &work, 2).await.unwrap();
+        let checkout = ctx.item(&id).unwrap().checkout.unwrap();
+        assert_eq!(checkout.branch, "other");
+        assert_eq!(checkout.base_ref, "main");
+
+        // And one checked out in the root itself is git's to refuse.
+        let work = new_work(perch_git::BaseBranch::local("main"), None, false);
+        let err = create_worktree(&ctx, &work, 3).await.unwrap_err();
+        assert!(err.contains("main"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_remote_base_is_fetched_first_and_a_failed_fetch_is_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let upstream = dir.path().join("upstream");
+        root_with_branch(&upstream, "feature");
+        let root = dir.path().join("notes");
+        git(dir.path(), &["clone", "-q", upstream.to_str().unwrap(), root.to_str().unwrap()]);
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        std::fs::write(upstream.join("new.txt"), "new\n").unwrap();
+        git(&upstream, &["add", "."]);
+        git(&upstream, &["commit", "-q", "-m", "new"]);
+        let moved = git(&upstream, &["rev-parse", "main"]);
+
+        let work = new_work(perch_git::BaseBranch::on("origin", "main"), Some("fresh"), true);
+        let id = create_worktree(&ctx, &work, 1).await.unwrap();
+        assert_eq!(ctx.item(&id).unwrap().checkout.unwrap().head_sha, moved, "cut from the fetched tip");
+        assert!(notices(&received).is_empty());
+
+        git(&root, &["remote", "set-url", "origin", dir.path().join("gone").to_str().unwrap()]);
+        let work = new_work(perch_git::BaseBranch::on("origin", "main"), Some("stale"), true);
+        let id = create_worktree(&ctx, &work, 2).await.unwrap();
+        assert_eq!(ctx.item(&id).unwrap().checkout.unwrap().head_sha, moved);
+        let notices = notices(&received);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].starts_with("Could not fetch origin; started from the origin/main"), "{}", notices[0]);
     }
 
     #[tokio::test]

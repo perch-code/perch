@@ -42,12 +42,29 @@ pub struct Git {
     /// Shared by every clone, so a token taken up after launch reaches
     /// the git commands already in flight from the same `Preparer`.
     token: Arc<RwLock<Option<String>>>,
+    /// The reader's own git, for a command in one of their clones: their
+    /// credential helpers and none of Perch's token.
+    plain: bool,
 }
 
 impl Git {
     pub fn new(token: Option<String>) -> Self {
         Self {
             token: Arc::new(RwLock::new(token)),
+            plain: false,
+        }
+    }
+
+    /// Git as the reader has it set up, for a fetch in one of their own
+    /// clones: whatever credential helper and SSH key their remotes use,
+    /// never Perch's token. It still cannot prompt: git's terminal prompt
+    /// is off, and stdin is empty, so an SSH key that wants a passphrase
+    /// fails the command rather than hanging it. Callers that start SSH
+    /// add `BatchMode` to it, see `Preparer::fetch_branch`.
+    pub fn plain() -> Self {
+        Self {
+            token: Arc::new(RwLock::new(None)),
+            plain: true,
         }
     }
 
@@ -255,14 +272,21 @@ impl Git {
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        command.args(credential_args());
+        if !self.plain {
+            command.args(credential_args());
+        }
         // Never let git block on an interactive prompt inside a GUI app.
         command.env("GIT_TERMINAL_PROMPT", "0");
-        command.env("GIT_CONFIG_NOSYSTEM", "1");
+        command.stdin(Stdio::null());
+        // The system config is where Apple's git keeps the keychain
+        // helper, which the reader's own fetches need and Perch's do not.
+        if !self.plain {
+            command.env("GIT_CONFIG_NOSYSTEM", "1");
+        }
         // Some of git's messages are read back as text; a translated git
         // would say them differently.
         command.env("LC_ALL", "C");
-        if let Some(token) = self.token() {
+        if let Some(token) = self.token().filter(|_| !self.plain) {
             command.env(TOKEN_ENV, token);
         }
         command.kill_on_drop(true);

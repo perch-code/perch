@@ -209,3 +209,80 @@ async fn a_branch_that_is_nowhere_is_refused() {
 
     assert!(err.to_string().contains("nope"), "{err}");
 }
+
+#[tokio::test]
+async fn one_branch_is_fetched_into_its_remote_tracking_ref() {
+    let l = Local::new();
+    let clone = l.root.parent().unwrap().join("clone");
+    git(
+        l.root.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            l.root.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let moved = commit(&l.root, "two");
+    git(&l.root, &["branch", "other"]);
+
+    l.preparer
+        .fetch_branch(&clone, "origin", "main")
+        .await
+        .unwrap();
+
+    assert_eq!(git(&clone, &["rev-parse", "origin/main"]), moved);
+    assert!(
+        git(&clone, &["branch", "-r", "--list", "origin/other"]).is_empty(),
+        "only the one branch"
+    );
+    let bases = l
+        .preparer
+        .local_bases(&clone, Some("origin"), "main")
+        .await
+        .unwrap();
+    assert_eq!(
+        bases.iter().map(|b| b.label()).collect::<Vec<_>>(),
+        ["origin/main", "main"]
+    );
+}
+
+#[tokio::test]
+async fn a_fetch_that_wants_a_password_fails_rather_than_asking() {
+    use std::io::{Read, Write};
+    // A server that asks every request to sign in.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().take(8) {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    let l = Local::new();
+    git(
+        &l.root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            &format!("http://127.0.0.1:{port}/acme/widgets.git"),
+        ],
+    );
+
+    let started = std::time::Instant::now();
+    let err = l
+        .preparer
+        .fetch_branch(&l.root, "origin", "main")
+        .await
+        .unwrap_err();
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "it failed at once: {err}"
+    );
+}

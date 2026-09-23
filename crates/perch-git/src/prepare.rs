@@ -53,6 +53,74 @@ pub struct Cut {
     pub worktree: PathBuf,
 }
 
+/// A branch new work can start from, as the base picker lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BaseBranch {
+    /// The branch's name, without a remote: `main`, `chris/fix`.
+    pub name: String,
+    /// The remote it is on, for a remote-tracking branch, or one the
+    /// store's clone only knows from `ls-remote`. `None` for a local one.
+    pub remote: Option<String>,
+}
+
+impl BaseBranch {
+    pub fn local(name: &str) -> Self {
+        Self { name: name.to_string(), remote: None }
+    }
+
+    pub fn on(remote: &str, name: &str) -> Self {
+        Self { name: name.to_string(), remote: Some(remote.to_string()) }
+    }
+
+    /// `origin/fix`, or `fix` for a local branch: what git calls it in a
+    /// clone that has the remote.
+    pub fn label(&self) -> String {
+        match &self.remote {
+            Some(remote) => format!("{remote}/{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
+/// Put the base first, and list each other name once: a local branch
+/// before a remote one of the same name. `refs` are `for-each-ref` names,
+/// newest first.
+fn order_bases(refs: &[String], remote: Option<&str>, base: &str) -> Vec<BaseBranch> {
+    let mut locals = Vec::new();
+    let mut remotes = Vec::new();
+    for name in refs {
+        if let Some(branch) = name.strip_prefix("refs/heads/") {
+            locals.push(BaseBranch::local(branch));
+        } else if let Some(remote) = remote {
+            if let Some(branch) = name.strip_prefix(&format!("refs/remotes/{remote}/")) {
+                if branch != "HEAD" {
+                    remotes.push(BaseBranch::on(remote, branch));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    // The base as the remote has it, fetched just before the cut, then as
+    // the clone has it, which may be behind or ahead.
+    if let Some(b) = remotes.iter().find(|b| b.name == base) {
+        out.push(b.clone());
+    }
+    if let Some(b) = locals.iter().find(|b| b.name == base) {
+        out.push(b.clone());
+    }
+    for b in &locals {
+        if b.name != base {
+            out.push(b.clone());
+        }
+    }
+    for b in &remotes {
+        if b.name != base && !locals.iter().any(|l| l.name == b.name) {
+            out.push(b.clone());
+        }
+    }
+    out
+}
+
 /// Where `ensure_home` fetches a default branch's tip to in the bare clone.
 pub fn home_ref(branch: &str) -> String {
     format!("refs/perch/home/{branch}")
@@ -391,10 +459,7 @@ impl Preparer {
         let mut branch = wanted.to_string();
         let mut n = 1u32;
         loop {
-            let taken = reserved.iter().any(|r| r == &branch)
-                || self.branch_exists(repo, &branch).await
-                || self.store.worktree_path(id, &branch).join(".git").exists();
-            if !taken {
+            if !self.branch_taken(repo, id, &branch, reserved).await {
                 break;
             }
             n += 1;
@@ -403,6 +468,25 @@ impl Preparer {
 
         let worktree = self.add_worktree(repo, id, &branch, &["-b", &branch], from).await?;
         Ok(Cut { branch, worktree })
+    }
+
+    /// Whether a new branch can't have this name: `repo` has a branch of
+    /// it, a worktree sits at the path it maps to, or the caller has it
+    /// spoken for.
+    pub async fn branch_taken(&self, repo: &Path, id: &RepoId, branch: &str, reserved: &[String]) -> bool {
+        reserved.iter().any(|r| r == branch)
+            || self.branch_exists(repo, branch).await
+            || self.store.worktree_path(id, branch).join(".git").exists()
+    }
+
+    /// Check out `branch` in the store's clone at `commitish`, a ref just
+    /// fetched from GitHub, moving the clone's own copy of the branch
+    /// there. For a repository with no root, where the clone's branches
+    /// are whatever it saw when it was made and nothing else of the
+    /// reader's.
+    pub async fn check_out_fetched(&self, bare: &Path, id: &RepoId, branch: &str, commitish: &str) -> Result<Cut, Error> {
+        let worktree = self.add_worktree(bare, id, branch, &["-B", branch], commitish).await?;
+        Ok(Cut { branch: branch.to_string(), worktree })
     }
 
     /// Check out a branch that already exists, rather than cutting a new
@@ -427,6 +511,119 @@ impl Preparer {
                 .await?
         };
         Ok(Cut { branch: branch.to_string(), worktree })
+    }
+
+    /// The branches of one of the reader's clones that new work can start
+    /// from: its local branches and `remote`'s, newest first, `base`
+    /// first of all. No network.
+    pub async fn local_bases(&self, repo: &Path, remote: Option<&str>, base: &str) -> Result<Vec<BaseBranch>, Error> {
+        let mut args = vec![
+            "for-each-ref".to_string(),
+            "--sort=-committerdate".to_string(),
+            "--format=%(refname)".to_string(),
+            "refs/heads/".to_string(),
+        ];
+        if let Some(remote) = remote {
+            args.push(format!("refs/remotes/{remote}/"));
+        }
+        let out = self.git.run(Some(repo), args, QUERY_TIMEOUT).await?;
+        let refs: Vec<String> = out.lines().map(str::to_string).collect();
+        Ok(order_bases(&refs, remote, base))
+    }
+
+    /// The branches GitHub has for a repository with no root, `base`
+    /// first. One round trip, asked of the store's clone's `origin` when
+    /// there is a clone and of GitHub directly when there is not, so
+    /// listing them does not clone.
+    pub async fn remote_bases(&self, id: &RepoId, base: &str) -> Result<Vec<BaseBranch>, Error> {
+        let bare = self.store.bare_path(id);
+        let (cwd, remote) = if self.store.has_bare_clone(id) {
+            (Some(bare.as_path()), "origin".to_string())
+        } else {
+            (None, id.clone_url())
+        };
+        let out = self
+            .git
+            .run(cwd, ["ls-remote", "--heads", &remote], FETCH_TIMEOUT)
+            .await?;
+        let mut names: Vec<&str> = out
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter_map(|(_, name)| name.strip_prefix("refs/heads/"))
+            .collect();
+        names.sort();
+        let mut out = vec![BaseBranch::on("origin", base)];
+        out.extend(
+            names
+                .into_iter()
+                .filter(|name| *name != base)
+                .map(|name| BaseBranch::on("origin", name)),
+        );
+        Ok(out)
+    }
+
+    /// Fetch one branch of `remote` into its remote-tracking ref in one of
+    /// the reader's clones, with the reader's own credentials and none of
+    /// Perch's. Nothing can prompt: SSH runs in batch mode on top of any
+    /// `core.sshCommand` the clone has, so a key that wants a passphrase
+    /// or a host not yet known fails the fetch instead of waiting.
+    pub async fn fetch_branch(&self, repo: &Path, remote: &str, branch: &str) -> Result<(), Error> {
+        let plain = Git::plain();
+        let ssh = std::env::var("GIT_SSH_COMMAND").ok().filter(|s| !s.is_empty());
+        let ssh = match ssh {
+            Some(ssh) => ssh,
+            None => plain
+                .run(Some(repo), ["config", "--get", "core.sshCommand"], QUERY_TIMEOUT)
+                .await
+                .map(|s| s.trim().to_string())
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "ssh".to_string()),
+        };
+        plain
+            .run(
+                Some(repo),
+                [
+                    "-c".to_string(),
+                    format!("core.sshCommand={ssh} -o BatchMode=yes"),
+                    "fetch".to_string(),
+                    "--no-tags".to_string(),
+                    remote.to_string(),
+                    format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}"),
+                ],
+                FETCH_TIMEOUT,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// How long ago a ref's commit was made, as git says it: `3 days ago`.
+    /// For a notice about a fetch that failed.
+    pub async fn age_of(&self, repo: &Path, rev: &str) -> Option<String> {
+        self.git
+            .run(Some(repo), ["log", "-1", "--format=%cr", rev, "--"], QUERY_TIMEOUT)
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Fetch a branch of the store's clone's `origin` into
+    /// `refs/perch/home/<branch>`, where a cut starts from.
+    pub async fn fetch_home_ref(&self, bare: &Path, branch: &str) -> Result<(), Error> {
+        self.git
+            .run(
+                Some(bare),
+                [
+                    "fetch".to_string(),
+                    "--no-tags".to_string(),
+                    "origin".to_string(),
+                    format!("+refs/heads/{branch}:{}", home_ref(branch)),
+                ],
+                FETCH_TIMEOUT,
+            )
+            .await?;
+        Ok(())
     }
 
     /// The repository a checkout belongs to, as a path a branch can be
@@ -704,6 +901,35 @@ mod tests {
     fn a_detached_remote_head_has_no_symref_line() {
         assert_eq!(parse_symref_head("0123abcd\tHEAD\n"), None);
         assert_eq!(parse_symref_head(""), None);
+    }
+
+    #[test]
+    fn the_base_comes_first_and_each_other_name_once() {
+        let refs: Vec<String> = [
+            "refs/heads/feature",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/fix",
+            "refs/heads/main",
+            "refs/remotes/origin/feature",
+            "refs/remotes/origin/main",
+            "refs/remotes/fork/other",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let bases = order_bases(&refs, Some("origin"), "main");
+        let labels: Vec<String> = bases.iter().map(BaseBranch::label).collect();
+        assert_eq!(labels, ["origin/main", "main", "feature", "origin/fix"]);
+    }
+
+    #[test]
+    fn a_clone_with_no_remote_lists_its_branches() {
+        let refs: Vec<String> = ["refs/heads/b", "refs/heads/main", "refs/heads/a"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let labels: Vec<String> = order_bases(&refs, None, "main").iter().map(BaseBranch::label).collect();
+        assert_eq!(labels, ["main", "b", "a"]);
     }
 
     #[test]

@@ -1902,6 +1902,7 @@ impl AppState {
             | Event::AgentReviewNavigationFailed { .. }
             | Event::NavigationCancelled { .. }
             | Event::ItemArchived { .. }
+            | Event::Bases { .. }
             | Event::ReviewDashboard { .. }
             | Event::ReviewGroupUpdated { .. }
             | Event::ReviewFindingUpdated { .. }
