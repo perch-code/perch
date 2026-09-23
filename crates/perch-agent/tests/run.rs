@@ -147,6 +147,7 @@ async fn a_review_keeps_the_raw_stream_and_stderr_when_asked() {
         head_sha: "2".repeat(40),
         output_schema: None,
         instructions: None,
+        discussion_dir: None,
         transcript: Some(transcript.clone()),
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

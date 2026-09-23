@@ -5,7 +5,7 @@
 //! operation in this module resolves a moving ref after snapshot capture.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -462,6 +462,20 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
     }
 
     let captured_snapshot = captured_snapshot.expect("non-empty admission has a snapshot");
+    // A review of a pull request reads what was said on it, captured with
+    // the snapshot so every reviewer and every retry reads the same.
+    let discussion_dir = match super::discussion_archive(
+        ctx,
+        &request.item_id,
+        item.pull_request(),
+        None,
+        &snapshot.head_sha,
+    ) {
+        Some(archive) => {
+            super::write_discussion(ctx, &archive, &format!("review-{group_id}")).await
+        }
+        None => None,
+    };
     for attempt in attempts {
         queue_attempt(
             ctx,
@@ -469,6 +483,7 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
             &snapshot,
             &captured_snapshot,
             request.instructions.as_deref(),
+            discussion_dir.as_deref(),
             attempt,
             None,
         )
@@ -574,12 +589,20 @@ async fn retry_attempt_inner(ctx: &Ctx, attempt_id: &str) -> Result<(), String> 
         created_at: Timestamp::now(),
     };
     cache(ctx, |cache| cache.admit_reviewer_retry(attempt_id, &retry))?;
+    // The retry reads the discussion the attempt it retries did.
+    let discussion_dir = previous
+        .run_id
+        .as_deref()
+        .and_then(|run_id| cache(ctx, |cache| cache.run_context(run_id)).ok().flatten())
+        .and_then(|context| context.dir)
+        .map(PathBuf::from);
     queue_attempt(
         ctx,
         &item,
         &snapshot,
         &captured,
         group.instructions.as_deref(),
+        discussion_dir.as_deref(),
         retry,
         previous.run_id,
     )
@@ -872,6 +895,7 @@ async fn queue_attempt(
     snapshot: &ReviewSnapshot,
     captured: &perch_git::ReviewSnapshot,
     instructions: Option<&str>,
+    discussion_dir: Option<&Path>,
     attempt: NewReviewerAttempt,
     retry_of_run_id: Option<String>,
 ) {
@@ -896,15 +920,18 @@ async fn queue_attempt(
             snapshot.branch_label.as_deref().unwrap_or("branch"),
             snapshot.requested_base_ref
         ),
-        prompt_snapshot: Some(match instructions {
-            Some(instructions) => format!(
-                "Native review of immutable range {}...{}\n\nInstructions: {instructions}",
-                snapshot.merge_base_sha, snapshot.head_sha
-            ),
-            None => format!(
+        prompt_snapshot: Some({
+            let mut prompt = format!(
                 "Native review of immutable range {}...{}",
                 snapshot.merge_base_sha, snapshot.head_sha
-            ),
+            );
+            if let Some(dir) = discussion_dir {
+                prompt.push_str(&format!("\n\nDiscussion: {}", dir.display()));
+            }
+            if let Some(instructions) = instructions {
+                prompt.push_str(&format!("\n\nInstructions: {instructions}"));
+            }
+            prompt
         }),
         working_directory: Some(captured.checkout().to_string_lossy().into_owned()),
         revision: RevisionContext::Snapshot {
@@ -940,6 +967,7 @@ async fn queue_attempt(
             return;
         }
     };
+    super::record_run_context(ctx, &run_id, discussion_dir, None);
     if let Err(message) = cache(ctx, |cache| cache.attach_reviewer_run(&attempt.id, &run_id)) {
         ctx.runs.cancel(&run_id);
         fail_attempt(ctx, &attempt.id, &message);
@@ -1116,6 +1144,12 @@ async fn execute_attempt(
         head_sha: captured.manifest.range.head.clone(),
         output_schema: schema,
         instructions,
+        discussion_dir: cache(ctx, |cache| cache.run_context(&run.id))
+            .ok()
+            .flatten()
+            .and_then(|context| context.dir)
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_dir()),
         transcript: Some(transcript(captured.root(), &attempt.id, "review")),
     };
 

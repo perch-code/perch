@@ -10133,7 +10133,7 @@ async fn ask(
         &item_id,
         pull_request.as_deref(),
         issue.as_ref().map(|i| &i.0),
-        &checkout,
+        &checkout.head_sha,
     );
     let context_dir = match &archive {
         Some(archive) => write_discussion(ctx, archive, &run.id).await,
@@ -10242,7 +10242,7 @@ fn discussion_archive(
     item_id: &str,
     pull_request: Option<&PullRequest>,
     issue: Option<&perch_github::Issue>,
-    checkout: &perch_git::Checkout,
+    head_sha: &str,
 ) -> Option<perch_knowledge::discussion::DiscussionArchive> {
     if pull_request.is_none() && issue.is_none() {
         return None;
@@ -10260,7 +10260,7 @@ fn discussion_archive(
         .map(|pr| pr.author_login.as_str())
         .or(issue.map(|i| i.author_login.as_str()))
         .unwrap_or_default();
-    let head = pull_request.map_or(checkout.head_sha.as_str(), |pr| pr.head_sha.as_str());
+    let head = pull_request.map_or(head_sha, |pr| pr.head_sha.as_str());
     Some(crate::context::archive(
         &discussion,
         item_id,
