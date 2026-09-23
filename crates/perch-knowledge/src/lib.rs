@@ -8,7 +8,11 @@
 //! [`sanitize`] is here too: the export quotes text that came from a
 //! repository through an agent, and the app quotes GitHub to an agent, so
 //! both clean it the same way.
+//!
+//! [`discussion`] renders a pull request's discussion as the files an agent
+//! is pointed at, and keeps the manifest of what a run was shown.
 
+pub mod discussion;
 pub mod sanitize;
 
 use std::collections::BTreeMap;
