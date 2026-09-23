@@ -2025,7 +2025,7 @@ mod tests {
             .await;
             let escaped = escape.exists();
             let _ = std::fs::remove_file(&escape);
-            assert!(asked.iter().any(|r| about_host(r)), "{} asked about the host: {asked:?}", backend.name());
+            assert!(asked.iter().any(about_host), "{} asked about the host: {asked:?}", backend.name());
             assert!(!escaped, "{} wrote outside the worktree after a denial", backend.name());
             assert!(text.contains("200"), "{} reached the host once allowed: {text}", backend.name());
         }

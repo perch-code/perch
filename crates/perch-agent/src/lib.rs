@@ -625,7 +625,7 @@ impl RunSpec {
         };
         Some(match self.backend {
             Backend::ClaudeCode => Conversation::Claude(ClaudeHost::new(self.prompt.clone())),
-            Backend::Codex => Conversation::Codex(CodexServer::new(self.codex_thread(grant))),
+            Backend::Codex => Conversation::Codex(Box::new(CodexServer::new(self.codex_thread(grant)))),
         })
     }
 

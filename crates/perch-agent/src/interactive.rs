@@ -75,7 +75,7 @@ pub(crate) struct Reply {
 
 pub(crate) enum Conversation {
     Claude(ClaudeHost),
-    Codex(CodexServer),
+    Codex(Box<CodexServer>),
 }
 
 impl Conversation {
