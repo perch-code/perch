@@ -25,12 +25,20 @@
 //! leaving clears it, for Cmd-C to copy. A double click takes the word
 //! under the pointer and a triple the whole run; a drag from a word grows
 //! by words. The selection is painted from the shadow, under the glyphs
-//! as a browser paints one. It is this view's alone, as a label's is the
-//! label's: a drag does not run on into the next paragraph.
+//! as a browser paints one.
+//!
+//! The views of one [`passage`], a comment's body, select together as a
+//! browser's paragraphs do: a drag that leaves the view it began in for
+//! another takes the rest of its own text, all of each view between, and
+//! the other's up to the pointer, and Cmd-C copies those runs joined by
+//! line breaks, or tabs between the cells of a row. The view the drag
+//! began in keeps the focus and so owns the selection; each view paints
+//! what that one has taken of it while it has the focus.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use floem::action::{add_overlay, exec_after, remove_overlay, TimerToken};
 use floem::context::{EventCx, PaintCx, UpdateCx};
@@ -121,16 +129,76 @@ enum Selecting {
     Done(TextSelection),
 }
 
-/// A rich text view with links, see the module.
-pub struct LinkedText {
+/// What a view shares with the rest of its passage: its text, the layout
+/// of it for hit-testing, and what a drag begun in another view has
+/// taken of it.
+struct Leaf {
     id: ViewId,
     text: String,
     attrs: AttrsList,
-    links: Vec<Link>,
-    strikes: Vec<Strike>,
     /// The layout used for hit-testing and for the rules, and the width
     /// it was made for.
     shadow: RefCell<Option<(f32, TextLayout)>>,
+    /// The byte range a drag has taken, and the view it began in.
+    taken: RefCell<Option<(ViewId, Range<usize>)>>,
+    /// Whether the text may be selected, as the view last styled it.
+    selectable: Cell<bool>,
+}
+
+thread_local! {
+    /// Every linked text view there is, by id.
+    static LEAVES: RefCell<HashMap<ViewId, Weak<Leaf>>> = RefCell::new(HashMap::new());
+    /// The views whose linked text selects together.
+    static PASSAGES: RefCell<HashSet<ViewId>> = RefCell::new(HashSet::new());
+}
+
+/// `view`, whose linked text views select as one: a drag runs on from
+/// one into the next, as across a browser's paragraphs.
+pub fn passage<V: IntoView>(view: V) -> impl IntoView {
+    let view = view.into_view();
+    let id = view.id();
+    PASSAGES.with_borrow_mut(|passages| passages.insert(id));
+    view.on_cleanup(move || {
+        PASSAGES.with_borrow_mut(|passages| passages.remove(&id));
+    })
+}
+
+fn leaf(id: ViewId) -> Option<Rc<Leaf>> {
+    LEAVES.with_borrow(|leaves| leaves.get(&id)?.upgrade())
+}
+
+/// The passage `id` is in: its nearest ancestor that is one.
+fn passage_of(id: ViewId) -> Option<ViewId> {
+    let mut at = id.parent();
+    while let Some(view) = at {
+        if PASSAGES.with_borrow(|passages| passages.contains(&view)) {
+            return Some(view);
+        }
+        at = view.parent();
+    }
+    None
+}
+
+/// The selectable views shown under `id`, in the order they read.
+fn leaves_under(id: ViewId, out: &mut Vec<Rc<Leaf>>) {
+    for child in id.children() {
+        if child.is_hidden() {
+            continue;
+        }
+        match leaf(child) {
+            Some(leaf) if leaf.selectable.get() => out.push(leaf),
+            Some(_) => {}
+            None => leaves_under(child, out),
+        }
+    }
+}
+
+/// A rich text view with links, see the module.
+pub struct LinkedText {
+    id: ViewId,
+    leaf: Rc<Leaf>,
+    links: Vec<Link>,
+    strikes: Vec<Strike>,
     /// The link under the pointer, as an index into `links`. A signal so
     /// the cursor style can follow it.
     hovered: RwSignal<Option<usize>>,
@@ -141,6 +209,14 @@ pub struct LinkedText {
     pending_tip: Option<(usize, Point, TimerToken)>,
     tip: Rc<RefCell<Option<ViewId>>>,
     selecting: Selecting,
+    /// The bytes the press took: the glyph edge it went down by, or the
+    /// word or the whole text a double or triple click took. A drag into
+    /// another view keeps them.
+    origin: Range<usize>,
+    /// The views a drag from here into others of the passage has taken
+    /// from, this one among them, in the order they read. Empty while
+    /// the selection, if any, is this view's alone.
+    spread: Vec<ViewId>,
     /// Whether the text may be selected: inherited, and off inside a row
     /// that is a button.
     props: SelectProps,
@@ -162,21 +238,33 @@ pub fn linked_text(
     id.set_children([child]);
     let hovered = RwSignal::new(None);
     let tip = Rc::new(RefCell::new(None));
-    let view = LinkedText {
+    let leaf = Rc::new(Leaf {
         id,
         text,
         attrs,
+        shadow: RefCell::new(None),
+        taken: RefCell::new(None),
+        selectable: Cell::new(true),
+    });
+    LEAVES.with_borrow_mut(|leaves| {
+        leaves.retain(|_, leaf| leaf.strong_count() > 0);
+        leaves.insert(id, Rc::downgrade(&leaf));
+    });
+    let view = LinkedText {
+        id,
+        leaf,
         links: links
             .into_iter()
             .map(|(range, target)| Link { range, target })
             .collect(),
         strikes,
-        shadow: RefCell::new(None),
         hovered,
         pressed: None,
         pending_tip: None,
         tip: tip.clone(),
         selecting: Selecting::None,
+        origin: 0..0,
+        spread: Vec::new(),
         props: SelectProps::default(),
     };
     view.style(move |s| {
@@ -203,7 +291,7 @@ pub fn linked_text(
     })
 }
 
-impl LinkedText {
+impl Leaf {
     /// The shadow layout at the width the wrapped view's text has now,
     /// built or rebuilt when that width is new, run through `with`.
     fn with_shadow<T>(&self, with: impl FnOnce(&TextLayout, Point) -> T) -> Option<T> {
@@ -224,15 +312,47 @@ impl LinkedText {
         Some(with(layout, origin))
     }
 
+    /// The text laid out as the wrapped view lays it out at `width`.
+    fn layout_for(&self, width: f32) -> TextLayout {
+        layout_at(&self.text, self.attrs.clone(), width)
+    }
+
+    /// The byte of the text at `at`, a point in the window: its start
+    /// above the text, its end below, and otherwise the nearest glyph
+    /// edge.
+    fn index_at(&self, at: Point) -> Option<usize> {
+        let local = self.id.get_visual_transform().inverse() * at;
+        self.with_shadow(|layout, child| {
+            let at = local - child.to_vec2();
+            if at.y < 0.0 {
+                return Some(0);
+            }
+            if at.y >= layout.size().height {
+                return Some(self.text.len());
+            }
+            let cursor = layout.hit_test(at)?;
+            Some(byte_of(layout, cursor))
+        })
+        .flatten()
+    }
+}
+
+/// The byte of the source text `cursor` sits at.
+fn byte_of(layout: &TextLayout, cursor: Cursor) -> usize {
+    layout
+        .selection_text_range(&layout.collapsed_selection(cursor))
+        .start
+}
+
+impl LinkedText {
+    fn with_shadow<T>(&self, with: impl FnOnce(&TextLayout, Point) -> T) -> Option<T> {
+        self.leaf.with_shadow(with)
+    }
+
     /// The link under `point`, in this view's coordinates.
     fn link_at(&self, point: Point) -> Option<usize> {
         self.with_shadow(|layout, origin| link_under(layout, &self.links, point - origin.to_vec2()))
             .flatten()
-    }
-
-    /// The text laid out as the wrapped view lays it out at `width`.
-    fn layout_for(&self, width: f32) -> TextLayout {
-        layout_at(&self.text, self.attrs.clone(), width)
     }
 }
 
@@ -304,8 +424,12 @@ impl LinkedText {
         }
     }
 
-    /// The selection, while there is one with something in it.
+    /// The selection, while there is one with something in it and it is
+    /// this view's alone.
     fn selection(&self) -> Option<TextSelection> {
+        if !self.spread.is_empty() {
+            return None;
+        }
         match self.selecting {
             Selecting::Dragging(selection) | Selecting::Done(selection)
                 if !selection.is_collapsed() =>
@@ -316,10 +440,115 @@ impl LinkedText {
         }
     }
 
-    /// The selected text.
+    /// The selected text. What a drag took of several views is their
+    /// runs joined: by a tab beside one another, as a row's cells, a line
+    /// break one straight under the other, as a list's items, and a blank
+    /// line with any room between, as paragraphs.
     fn selected_text(&self) -> Option<String> {
+        if !self.spread.is_empty() {
+            let mut out = String::new();
+            let mut above: Option<Rect> = None;
+            for leaf in self.spread.iter().filter_map(|id| leaf(*id)) {
+                let taken = leaf.taken.borrow().clone();
+                let Some((owner, range)) = taken else {
+                    continue;
+                };
+                if owner != self.id || range.is_empty() {
+                    continue;
+                }
+                let rect = leaf.id.get_visual_rect_no_clip();
+                if let Some(above) = above {
+                    out.push_str(if rect.y0 < above.y1 && rect.x0 >= above.x1 {
+                        "\t"
+                    } else if rect.y0 - above.y1 > 1.0 {
+                        "\n\n"
+                    } else {
+                        "\n"
+                    });
+                }
+                out.push_str(&leaf.text[range]);
+                above = Some(rect);
+            }
+            return (!out.is_empty()).then_some(out);
+        }
         let selection = self.selection()?;
-        self.with_shadow(|layout, _| self.text[layout.selection_text_range(&selection)].to_string())
+        self.with_shadow(|layout, _| {
+            self.leaf.text[layout.selection_text_range(&selection)].to_string()
+        })
+    }
+
+    /// Takes back what a drag from here took of the passage.
+    fn release(&mut self) {
+        for leaf in self.spread.drain(..).filter_map(leaf) {
+            let mut taken = leaf.taken.borrow_mut();
+            if taken.as_ref().is_some_and(|(owner, _)| *owner == self.id) {
+                *taken = None;
+            }
+        }
+    }
+
+    /// What a drag from here takes of the passage with the pointer at
+    /// `point`, in this view's coordinates: each view from this one to
+    /// the one the pointer is over, or the last one above it, with the
+    /// bytes taken of it. None when that view is this one.
+    fn reach(&self, point: Point) -> Option<Vec<(Rc<Leaf>, Range<usize>)>> {
+        let mut leaves = Vec::new();
+        leaves_under(passage_of(self.id)?, &mut leaves);
+        let me = leaves.iter().position(|leaf| leaf.id == self.id)?;
+        let at = self.id.get_visual_transform() * point;
+        let rects: Vec<Rect> = leaves
+            .iter()
+            .map(|leaf| leaf.id.get_visual_rect_no_clip())
+            .collect();
+        // The view in the pointer's row nearest it, or the last above.
+        let beside = |rect: &Rect| {
+            if at.x < rect.x0 {
+                rect.x0 - at.x
+            } else {
+                (at.x - rect.x1).max(0.0)
+            }
+        };
+        let target = rects
+            .iter()
+            .enumerate()
+            .filter(|(_, rect)| rect.y0 <= at.y && at.y <= rect.y1)
+            .min_by(|(_, a), (_, b)| beside(a).total_cmp(&beside(b)))
+            .map(|(i, _)| i)
+            .or_else(|| rects.iter().rposition(|rect| rect.y0 <= at.y))
+            .unwrap_or(0);
+        if target == me {
+            return None;
+        }
+        let index = leaves[target].index_at(at)?;
+        let forward = target > me;
+        let (lo, hi) = (me.min(target), me.max(target));
+        Some(
+            leaves
+                .drain(lo..=hi)
+                .enumerate()
+                .map(|(i, leaf)| {
+                    let len = leaf.text.len();
+                    let range = match (lo + i, forward) {
+                        (i, true) if i == me => self.origin.start..len,
+                        (i, false) if i == me => 0..self.origin.end,
+                        (i, true) if i == target => 0..index,
+                        (i, false) if i == target => index..len,
+                        _ => 0..len,
+                    };
+                    (leaf, range)
+                })
+                .collect(),
+        )
+    }
+
+    /// Takes `reach` for a drag from here, handing back what the last
+    /// move took.
+    fn spread_over(&mut self, reach: Vec<(Rc<Leaf>, Range<usize>)>) {
+        self.release();
+        for (leaf, range) in reach {
+            *leaf.taken.borrow_mut() = Some((self.id, range));
+            self.spread.push(leaf.id);
+        }
     }
 
     /// Whether the primary button is down for a selection, armed or drawn.
@@ -336,35 +565,45 @@ impl LinkedText {
     /// it begins, the pointer is captured so the drag and the release
     /// reach here wherever they land.
     fn press(&mut self, point: Point, count: u8, pointer: Option<PointerId>) {
-        let len = self.text.len();
+        let len = self.leaf.text.len();
         let next = self
             .with_shadow(|layout, child| {
                 let at = point - child.to_vec2();
                 match count {
-                    0 | 1 => layout.hit_test(at).map(|from| Selecting::Armed {
-                        origin: point,
-                        from,
+                    0 | 1 => layout.hit_test(at).map(|from| {
+                        let byte = byte_of(layout, from);
+                        let armed = Selecting::Armed {
+                            origin: point,
+                            from,
+                        };
+                        (armed, byte..byte)
                     }),
                     2 => {
                         TextLayout::clear_selection_geometry_cache();
-                        let word = Selection::word_from_point(
-                            layout.parley_layout(),
-                            at.x as f32,
-                            at.y as f32,
+                        let word = wrap(
+                            layout,
+                            Selection::word_from_point(
+                                layout.parley_layout(),
+                                at.x as f32,
+                                at.y as f32,
+                            ),
                         );
-                        Some(Selecting::Dragging(wrap(layout, word)))
+                        let bytes = layout.selection_text_range(&word);
+                        Some((Selecting::Dragging(word), bytes))
                     }
                     _ => {
                         TextLayout::clear_selection_geometry_cache();
-                        Some(Selecting::Done(layout.selection_from_byte_range(0, len)))
+                        let all = layout.selection_from_byte_range(0, len);
+                        Some((Selecting::Done(all), 0..len))
                     }
                 }
             })
             .flatten();
-        let Some(next) = next else {
+        let Some((next, origin)) = next else {
             return;
         };
         self.selecting = next;
+        self.origin = origin;
         if let Some(pointer) = pointer {
             self.id.set_pointer_capture(pointer);
         }
@@ -375,8 +614,33 @@ impl LinkedText {
 
     /// The pointer at `point` with the button down: from armed, past the
     /// slop, a selection from the pressed glyph edge to the one under the
-    /// pointer; from there on, the far end follows.
+    /// pointer; from there on, the far end follows, into the other views
+    /// of the passage when the pointer goes over them.
     fn drag_to(&mut self, point: Point) -> bool {
+        if let Selecting::Armed { origin, from } = self.selecting {
+            if origin.distance(point) <= DRAG_SLOP {
+                return false;
+            }
+            if let Some(reach) = self.reach(point) {
+                // Collapsed at the press, so a drag back into this view
+                // runs from there.
+                let Some(collapsed) =
+                    self.with_shadow(|layout, _| layout.collapsed_selection(from))
+                else {
+                    return false;
+                };
+                self.selecting = Selecting::Dragging(collapsed);
+                self.spread_over(reach);
+                return true;
+            }
+        }
+        if let Selecting::Dragging(_) = self.selecting {
+            if let Some(reach) = self.reach(point) {
+                self.spread_over(reach);
+                return true;
+            }
+            self.release();
+        }
         let next = match self.selecting {
             Selecting::Armed { origin, from } => {
                 if origin.distance(point) <= DRAG_SLOP {
@@ -448,6 +712,7 @@ impl LinkedText {
                 }
                 // Any press clears what was selected, as in a browser.
                 self.selecting = Selecting::None;
+                self.release();
                 cx.window_state.request_paint(self.id);
                 let point = state.logical_point();
                 self.pressed = self.link_at(point);
@@ -473,6 +738,10 @@ impl LinkedText {
                         Selecting::None
                     }
                 };
+                if !self.spread.is_empty() {
+                    // What the drag took stands on its own.
+                    self.selecting = Selecting::None;
+                }
                 cx.window_state.request_paint(self.id);
                 match pressed {
                     Some(link) if self.link_at(state.logical_point()) == Some(link) => {
@@ -497,6 +766,7 @@ impl LinkedText {
                 self.set_hovered(None);
                 if self.dragging() {
                     self.selecting = Selecting::None;
+                    self.release();
                     cx.window_state.request_paint(self.id);
                 }
                 EventPropagation::Continue
@@ -520,30 +790,37 @@ impl View for LinkedText {
     }
 
     fn paint(&mut self, cx: &mut PaintCx) {
-        // The selection goes down first, under the rules and the glyphs.
-        if let Some(selection) = self.selection() {
-            if cx.window_state.is_focused(self.id) {
-                let rects = self
-                    .with_shadow(|layout, origin| {
-                        let mut rects = Vec::new();
-                        layout.selection_geometry_with_line_metrics(
-                            &selection,
-                            |x0, y0, x1, y1| {
-                                rects.push(Rect::new(x0, y0, x1, y1) + origin.to_vec2());
-                            },
-                        );
-                        rects
-                    })
-                    .unwrap_or_default();
-                for rect in rects {
-                    cx.fill(&rect, theme::SELECTION_BG, 0.0);
-                }
+        // The selection goes down first, under the rules and the glyphs:
+        // this view's own, or what a drag from another took of it.
+        let taken = self.leaf.taken.borrow().clone();
+        let taken = taken.and_then(|(owner, range)| {
+            (!range.is_empty() && cx.window_state.is_focused(owner)).then_some(range)
+        });
+        let selection = match taken {
+            Some(range) => self
+                .with_shadow(|layout, _| layout.selection_from_byte_range(range.start, range.end)),
+            None => self
+                .selection()
+                .filter(|_| cx.window_state.is_focused(self.id)),
+        };
+        if let Some(selection) = selection {
+            let rects = self
+                .with_shadow(|layout, origin| {
+                    let mut rects = Vec::new();
+                    layout.selection_geometry_with_line_metrics(&selection, |x0, y0, x1, y1| {
+                        rects.push(Rect::new(x0, y0, x1, y1) + origin.to_vec2());
+                    });
+                    rects
+                })
+                .unwrap_or_default();
+            for rect in rects {
+                cx.fill(&rect, theme::SELECTION_BG, 0.0);
             }
         }
         if self.strikes.is_empty() {
             return;
         }
-        let len = self.text.len();
+        let len = self.leaf.text.len();
         let rules = self
             .with_shadow(|layout, origin| {
                 rules(layout, len, &self.strikes)
@@ -584,8 +861,14 @@ impl View for LinkedText {
     }
 
     fn style_pass(&mut self, cx: &mut floem::context::StyleCx<'_>) {
-        if self.props.read(cx) && !self.props.selectable() && self.selecting != Selecting::None {
+        if self.props.read(cx) {
+            self.leaf.selectable.set(self.props.selectable());
+        }
+        if !self.props.selectable()
+            && (self.selecting != Selecting::None || !self.spread.is_empty())
+        {
             self.selecting = Selecting::None;
+            self.release();
             cx.window_state.request_paint(self.id);
         }
         if self.tip.borrow().is_some() && self.id.is_hidden() {
@@ -626,8 +909,9 @@ impl View for LinkedText {
                 }
             }
             Event::Focus(FocusEvent::Lost) => {
-                if self.selecting != Selecting::None {
+                if self.selecting != Selecting::None || !self.spread.is_empty() {
                     self.selecting = Selecting::None;
+                    self.release();
                     cx.window_state.request_paint(self.id);
                 }
             }

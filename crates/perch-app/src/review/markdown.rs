@@ -9,6 +9,8 @@
 //! and links show as such and still wrap; a link is followed, a struck
 //! span ruled through and the words dragged over and copied by
 //! [`linked_text`], since the text stack has none of those of its own.
+//! The blocks of one body are a [`passage`], so a drag runs on from one
+//! into the next, and a fenced block is linked text too, to be part of it.
 //!
 //! Drawn for a review, with [`render_linked`], the code in it is linked
 //! too: a code span, a word of a fenced block or a link's destination
@@ -39,7 +41,7 @@ use pulldown_cmark::{
 
 use crate::icons::SidebarIcon;
 use crate::review::code_refs::{self, linked_run, Plan, Refs};
-use crate::review::linked_text::{linked_text, Strike, Target};
+use crate::review::linked_text::{linked_text, passage, Strike, Target};
 use crate::review::model::ReviewState;
 use crate::theme;
 use crate::ui::widgets::sidebar_glyph;
@@ -888,7 +890,7 @@ pub fn render(text: &str) -> impl IntoView {
 /// symbols of the review's worktree they name linked to Files. The same
 /// as `render` for an item with no checkout.
 pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
-    stack(
+    passage(stack(
         parse(text),
         Ctx {
             size: theme::TEXT_BODY,
@@ -896,7 +898,7 @@ pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
             depth: 0,
             refs: Refs::of(state),
         },
-    )
+    ))
 }
 
 /// Blocks already parsed, stacked, with the prose at `size`. A fenced
@@ -904,7 +906,7 @@ pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
 /// conversation card draws one; a tooltip hands its blocks here at the
 /// meta size, so a doc comment reads a step below the signature.
 pub fn render_blocks(blocks: Vec<Block>, size: f32) -> impl IntoView {
-    stack(blocks, Ctx { size, color: theme::FG, depth: 0, refs: None })
+    passage(stack(blocks, Ctx { size, color: theme::FG, depth: 0, refs: None }))
 }
 
 /// How the blocks in a container are drawn: the prose size, its colour,
@@ -1174,10 +1176,10 @@ fn task_box(checked: bool, size: f32) -> AnyView {
     .into_any()
 }
 
-/// A label, there being no spans to style. The fence's language is
-/// parsed but not coloured; it says whether the block's type names are
-/// looked up, for a block that names something of the review's worktree
-/// and so is drawn as linked text in the label's place.
+/// Linked text in the code font, so it selects with the prose around
+/// it. The fence's language is parsed but not coloured; it says whether
+/// the block's type names are looked up, for a block that names
+/// something of the review's worktree.
 fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
     let code_size = small_size(ctx.size);
     let mut plan = Plan::default();
@@ -1193,19 +1195,6 @@ fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
             .border_color(theme::BORDER_MUTED)
             .border_radius(theme::RADIUS)
     };
-    if plan.is_empty() {
-        return Label::derived(move || text.clone())
-            .style(move |s| {
-                code_box(
-                    s.font_family(theme::CODE_FONT_STACK.to_string())
-                        .font_size(code_size)
-                        .color(theme::FG)
-                        .line_height(theme::PROSE_CODE_LINE_HEIGHT)
-                        .text_wrap(),
-                )
-            })
-            .into_any();
-    }
     let run = linked_run(plan, ctx.refs, move |links| {
         let attrs = code_attrs(code_size, &links);
         linked_text(text.clone(), attrs, links, Vec::new())
@@ -1215,7 +1204,7 @@ fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
     Container::new(run).style(code_box).into_any()
 }
 
-/// A fenced block's text as the label draws it, its links in the links'
+/// A fenced block's text in the code font, its links in the links'
 /// colour.
 fn code_attrs(size: f32, links: &[(Range<usize>, Target)]) -> AttrsList {
     let family: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
@@ -2236,12 +2225,74 @@ mod tests {
             check(&h);
         }
 
+        /// Cmd-C pressed, and what it copied.
+        fn copy(h: &mut HeadlessHarness) -> Vec<String> {
+            use crate::ui::widgets::copied;
+            use crate::ui::OS_MOD;
+            use floem::ui_events::keyboard::{Code, Key, KeyState, KeyboardEvent};
+            h.dispatch_event(floem::event::Event::Key(KeyboardEvent {
+                state: KeyState::Down,
+                key: Key::Character("c".into()),
+                code: Code::KeyC,
+                location: Default::default(),
+                modifiers: OS_MOD,
+                repeat: false,
+                is_composing: false,
+            }));
+            copied()
+        }
+
+        /// A drag with the primary button from one point to another.
+        fn drag(h: &mut HeadlessHarness, from: floem::kurbo::Point, to: floem::kurbo::Point) {
+            h.pointer_down(from.x, from.y);
+            h.pointer_move(from.x + 5.0, from.y);
+            h.pointer_move(to.x, to.y);
+            h.pointer_up(to.x, to.y);
+        }
+
+        /// The runs of text, in the order they read.
+        fn runs(h: &HeadlessHarness) -> Vec<Rect> {
+            rects(h, "LinkedText")
+        }
+
+        /// A drag runs on out of its paragraph, through a quote, into the
+        /// next, and copies the runs as paragraphs, each blank line apart.
         #[test]
-        fn a_fenced_block_that_names_nothing_is_still_a_label() {
-            let (h, _) = linked_harness("```\nlet x = 1;\n```", &["src/manifest.rs"]);
-            let mut all = Vec::new();
-            find_all(h.root_id(), "LinkedText", &mut all);
-            assert!(all.is_empty(), "{all:?}");
+        fn a_drag_selects_across_paragraphs_either_way() {
+            let mut h = harness("First words here.\n\n> Quoted words.\n\nLast words end.");
+            crate::ui::widgets::copied();
+            let runs = runs(&h);
+            assert_eq!(runs.len(), 3, "{runs:?}");
+            let start = floem::kurbo::Point::new(runs[0].x0 + 1.0, runs[0].y0 + 8.0);
+            let end = floem::kurbo::Point::new(WIDTH - 1.0, runs[2].y0 + 8.0);
+            drag(&mut h, start, end);
+            let all = "First words here.\n\nQuoted words.\n\nLast words end.".to_string();
+            assert_eq!(copy(&mut h), vec![all.clone()]);
+            drag(&mut h, end, start);
+            assert_eq!(copy(&mut h), vec![all]);
+            // Stopping in the quote takes it up to the pointer.
+            let quoted = floem::kurbo::Point::new(WIDTH - 1.0, runs[1].y0 + 8.0);
+            drag(&mut h, start, quoted);
+            assert_eq!(copy(&mut h), vec!["First words here.\n\nQuoted words.".to_string()]);
+            // A click clears it all, wherever it lands.
+            h.click(runs[2].x0 + 2.0, runs[2].y0 + 8.0);
+            assert_eq!(copy(&mut h), Vec::<String>::new());
+        }
+
+        /// A list's items are a line apart, and a fenced block is part of
+        /// the passage too.
+        #[test]
+        fn a_drag_takes_list_items_and_a_fenced_block() {
+            let mut h = harness("- one\n- two\n\n```\nlet x = 1;\n```");
+            crate::ui::widgets::copied();
+            let runs = runs(&h);
+            assert_eq!(runs.len(), 3, "{runs:?}");
+            let start = floem::kurbo::Point::new(runs[0].x0 + 1.0, runs[0].y0 + 8.0);
+            let end = floem::kurbo::Point::new(runs[2].x1 - 1.0, runs[2].y1 + 40.0);
+            drag(&mut h, start, end);
+            let copied = copy(&mut h);
+            assert_eq!(copied.len(), 1, "{copied:?}");
+            assert!(copied[0].starts_with("one\ntwo\n\nlet x = 1;"), "{copied:?}");
         }
 
         #[test]

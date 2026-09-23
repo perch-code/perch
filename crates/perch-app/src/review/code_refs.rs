@@ -861,10 +861,6 @@ impl Plan {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.links.is_empty() && self.names.is_empty()
-    }
-
     /// Every link, those of the names that have found something among
     /// them, in order along the run. A name found whole links whole, its
     /// `()` and all; one found only by its qualifier links as far as that.
