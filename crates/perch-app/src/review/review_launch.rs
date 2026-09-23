@@ -23,7 +23,6 @@ use crate::review::model::{
 };
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::agents::model::{AgentsTab, BackendFilter, WorktreeFilter};
 use crate::ui::widgets::{clickable, editor_box, lay_out_every_line, sidebar_glyph};
 
 /// The bar's entry point, drawn as Codex draws Chat beside Submit review:
@@ -90,8 +89,8 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     let button_id = button.view_id();
     let click_backend = backend.clone();
     let click: Rc<dyn Fn()> = Rc::new(move || {
-        if active_group(app, state).is_some() {
-            open_agents(app, state, &click_backend, button_id);
+        if let Some(group) = active_group(app, state) {
+            show_in_agents(app, state, &group);
         } else if state.review_launcher_open.get_untracked() {
             close_launcher(state, true);
         } else {
@@ -174,6 +173,7 @@ pub fn open_launcher(
         return;
     };
     crate::review::submit_review::close(state, false);
+    crate::ui::agents::dropdown::close(state, false);
     state.review_launcher_opener.set(opener);
     state
         .review_launcher_draft
@@ -1198,13 +1198,27 @@ fn progress_label(summary: &ReviewGroupSummary) -> String {
     format!("Reviewing · {complete} of {total} complete")
 }
 
-fn open_agents(app: AppState, state: ReviewState, backend: &Backend, opener: floem::ViewId) {
-    state.review_launcher_open.set(false);
-    app.agents_tab.set(AgentsTab::Active);
-    app.agents_worktree_filter.set(WorktreeFilter::Current);
-    app.agents_backend_filter.set(BackendFilter::All);
-    app.selected_agent_run.set(None);
-    crate::ui::drawer::show(app, backend, crate::ui::drawer::DrawerView::Agents, Some(opener));
+/// While a review runs, Review goes to it in the item's Agents row: the
+/// row unfolds, and the review's first attempt with a run opens at the
+/// top of the page.
+fn show_in_agents(app: AppState, state: ReviewState, summary: &ReviewGroupSummary) {
+    close_launcher(state, false);
+    let run = app.agent_runs.with_untracked(|runs| {
+        runs.iter()
+            .find(|run| {
+                run.review_attempt_id
+                    .as_deref()
+                    .is_some_and(|attempt| summary.attempts.iter().any(|a| a.id == attempt))
+            })
+            .map(|run| run.id.clone())
+    });
+    floem::reactive::Effect::batch(|| {
+        state.show_tab(crate::review::model::ItemTab::Conversation);
+        state.agents_unfolded.set(true);
+        if let Some(run) = run {
+            state.pending_run_reveal.set(Some(run));
+        }
+    });
 }
 
 fn group_title(summary: &ReviewGroupSummary) -> String {

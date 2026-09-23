@@ -199,6 +199,7 @@ fn open(state: ReviewState, opener: Option<floem::ViewId>) {
         return;
     }
     crate::review::review_launch::close_launcher(state, false);
+    crate::ui::agents::dropdown::close(state, false);
     state.submit_review_opener.set(opener);
     state.submit_review_open.set(true);
 }

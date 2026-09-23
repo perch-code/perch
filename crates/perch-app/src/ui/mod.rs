@@ -256,8 +256,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .width_full()
                 .position(floem::style::Position::Relative)
         }),
-        status::status_bar(state, review, backend.clone()),
-        agents::completion_notice(state, capture_backend.clone()),
+        status::status_bar(state, review),
+        agents::completion_notice(state, review, capture_backend.clone()),
         // An `@`'s list, over the composer it is typed in.
         crate::review::mention::popup(state, review),
         // Cmd-P's palette, over everything but a drag's cursor.
@@ -331,9 +331,18 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // shuts, so it is noted as the drawer opens; a swap from
                 // one to the other keeps the note. Files is not offered
                 // for an item without files.
+                // Cmd-Shift-A opens the Agents dropdown from the bar, and
+                // shuts it, from anywhere; whatever had the keyboard gets it
+                // back as it shuts.
+                if key.modifiers == OS_MOD | Modifiers::SHIFT && key.code == Code::KeyA {
+                    let opener = (!review.agents_dropdown_open.get_untracked())
+                        .then(|| focused_descendant(cx, root_id))
+                        .flatten();
+                    agents::dropdown::toggle(state, review, key_backend, opener);
+                    return EventPropagation::Stop;
+                }
                 if key.modifiers == OS_MOD | Modifiers::SHIFT {
                     let view = match key.code {
-                        Code::KeyA => Some(DrawerView::Agents),
                         Code::KeyE if state.files_available() => Some(DrawerView::Files),
                         _ => None,
                     };
@@ -346,6 +355,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         drawer::toggle(state, key_backend, view, opener);
                         return EventPropagation::Stop;
                     }
+                }
+                // Escape shuts the Agents dropdown wherever the keyboard is.
+                if key.code == Code::Escape
+                    && key.modifiers.is_empty()
+                    && review.agents_dropdown_open.get_untracked()
+                {
+                    agents::dropdown::close(review, true);
+                    return EventPropagation::Stop;
                 }
                 // Escape first backs out of a run's details, then shuts the
                 // inspector on the next press.
@@ -752,37 +769,32 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         })
 }
 
-/// The main pane with nothing open in it. While the drawer is shut the
-/// lights and the drawer control have nowhere else to be, so a bare bar
-/// carries them; while it is open the drawer's strip has them and the
-/// message runs to the top. The drawer on the right can still show the
-/// agents, beside the message.
+/// The main pane with nothing open in it: a bar with the Agents button,
+/// and the lights and the drawer control while the drawer is shut, then
+/// the message. The drawer on the right can still show the agents,
+/// beside the message.
 fn empty_pane(
     state: AppState,
     review: ReviewState,
     backend: Rc<Backend>,
     message: impl IntoView + 'static,
 ) -> impl IntoView {
+    let bar_backend = backend.clone();
     Stack::vertical((
-        dyn_container(
-            move || state.sidebar_open.get(),
-            move |open| {
-                if open {
-                    Empty::new().into_any()
-                } else {
-                    titlebar::title_bar(Container::new(sidebar::lights_lane(state, 0.0)))
-                        .debug_name("empty bar")
-                        .style(|s| {
-                            s.height(theme::TITLEBAR_HEIGHT)
-                                .width_full()
-                                .flex_shrink(0.0_f32)
-                                .items_center()
-                        })
-                        .into_any()
-                }
-            },
+        // A bar like an item's, with nothing open in it: the lights and
+        // the drawer control while the drawer is shut, and the Agents
+        // button where it sits on an item, so every item's runs are a
+        // click away from here too.
+        titlebar::title_bar(
+            Stack::horizontal((
+                sidebar::lights_lane(state, theme::REVIEW_HEADER_PADDING)
+                    .style(move |s| s.apply_if(state.sidebar_open.get(), |s| s.hide())),
+                Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
+                agents::dropdown::button(state, review, bar_backend),
+            ))
+            .debug_name("empty bar"),
         )
-        .style(|s| s.width_full().flex_shrink(0.0_f32)),
+        .style(|s| crate::review::header::bar_style(s).z_index(2)),
         Stack::horizontal((
             Container::new(message).debug_name("pane-body").style(|s| {
                 s.flex_grow(1.0_f32)
@@ -893,10 +905,11 @@ mod tests {
             .find_map(|child| named(child, name))
     }
 
-    /// The window with nothing open and the drawer shut: the lights and
-    /// the drawer control have only the main pane's bare bar to sit in.
+    /// The window with nothing open has a bar like an item's with the
+    /// Agents button at its end; with the drawer shut, the lights and the
+    /// drawer control sit in it too.
     #[test]
-    fn with_nothing_open_and_the_drawer_shut_a_bare_bar_carries_the_lights_and_the_way_back() {
+    fn with_nothing_open_the_bar_has_the_agents_and_with_the_drawer_shut_the_lights() {
         let state = AppState::new();
         let review = ReviewState::new();
         state.sidebar_open.set(false);
@@ -906,16 +919,20 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
-        let bar = named(harness.root_id(), "empty bar").expect("no bare bar");
+        let bar = named(harness.root_id(), "empty bar").expect("no bar");
         let bounds = bar.get_visual_rect_no_clip();
         assert_eq!(
             (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
-            (0.0, 0.0, 1400.0, theme::TITLEBAR_HEIGHT)
+            (0.0, 0.0, 1400.0, theme::REVIEW_HEADER_HEIGHT)
         );
         let toggle = named(harness.root_id(), "drawer toggle")
             .unwrap()
             .get_visual_rect_no_clip();
         assert_eq!(toggle.x0, theme::ACTIVITY_RAIL_WIDTH, "after the lights");
+        let agents = named(harness.root_id(), "agents-button")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert_eq!(agents.x1, 1400.0 - theme::REVIEW_HEADER_PADDING, "at the bar's end");
 
         // Beside the lights is the bar's own surface: the window drags
         // from it.
@@ -924,6 +941,15 @@ mod tests {
             .expect("nothing under the lane");
         assert_eq!(hit.owning_id(), bar, "the lane took the press");
 
+        // The dropdown opens from the button with nothing open.
+        harness.click(agents.center().x, agents.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert!(review.agents_dropdown_open.get());
+        assert!(named(harness.root_id(), "\"No agent runs yet\"").is_some());
+        harness.click(agents.center().x, agents.center().y);
+        harness.rebuild();
+
         harness.click(toggle.center().x, toggle.center().y);
         harness.rebuild();
         harness.paint();
@@ -931,8 +957,15 @@ mod tests {
             state.sidebar_open.get(),
             "the control did not open the drawer"
         );
-        assert!(
-            named(harness.root_id(), "empty bar").is_none(),
+        let bar = named(harness.root_id(), "empty bar").unwrap();
+        assert_eq!(
+            bar.get_visual_rect_no_clip().x0,
+            theme::SIDEBAR_WIDTH,
+            "the bar starts at the drawer's edge"
+        );
+        assert_eq!(
+            named(bar, "drawer toggle").unwrap().get_visual_rect_no_clip().width(),
+            0.0,
             "the drawer's strip has the lights now"
         );
     }
@@ -1023,13 +1056,12 @@ mod tests {
         key(Code::KeyW, Key::Character("w".into()), OS_MOD)
     }
 
-    /// Cmd-Shift-E and Cmd-Shift-A are the drawer on the right, on the
-    /// files and on the agents: each opens the drawer on its own, swaps
-    /// it from the other, and shuts it from itself. The pane beside it
-    /// keeps the open file and its editor through all of it, and the
-    /// editor gets the keyboard back when the drawer shuts.
+    /// Cmd-Shift-E opens the tree in the drawer on the right and shuts it,
+    /// and Cmd-Shift-A opens the Agents dropdown and shuts it, both from
+    /// the editor. The pane keeps the open file and its editor through all
+    /// of it, and the editor gets the keyboard back each time.
     #[test]
-    fn the_drawer_keys_open_swap_and_shut_the_drawer_around_the_editor() {
+    fn the_tree_and_agents_keys_work_around_the_editor() {
         let (mut harness, review) = window_with_a_file_open();
         let code = named(harness.root_id(), "tinted editor").expect("no editor in the window");
         let rect = code.get_visual_rect_no_clip();
@@ -1064,17 +1096,6 @@ mod tests {
         assert!(code.get_visual_rect_no_clip().x1 <= drawer.x0, "the editor is under the drawer");
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
 
-        harness.dispatch_event(agents.clone());
-        harness.rebuild();
-        harness.paint();
-        assert!(named(harness.root_id(), "files-panel").is_none());
-        assert!(named(harness.root_id(), "agents-panel").is_some(), "Cmd-Shift-A did not swap");
-
-        harness.dispatch_event(files.clone());
-        harness.rebuild();
-        harness.paint();
-        assert!(named(harness.root_id(), "files-panel").is_some(), "Cmd-Shift-E did not swap back");
-
         harness.dispatch_event(files);
         harness.rebuild();
         harness.paint();
@@ -1087,15 +1108,26 @@ mod tests {
         assert!(harness.is_focused(editor), "the editor did not get the keyboard back");
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
 
-        // Escape shuts the agents, as it did when they were an overlay.
-        harness.dispatch_event(agents);
+        // Cmd-Shift-A opens the dropdown and Escape shuts it, giving the
+        // keyboard back; so does Cmd-Shift-A again.
+        harness.dispatch_event(agents.clone());
         harness.rebuild();
         harness.paint();
-        assert!(named(harness.root_id(), "agents-panel").is_some());
+        assert!(review.agents_dropdown_open.get(), "Cmd-Shift-A did not open the dropdown");
+        assert!(named(harness.root_id(), "agents-dropdown").is_some());
         harness.dispatch_event(key(Code::Escape, Key::Named(NamedKey::Escape), Modifiers::empty()));
         harness.rebuild();
         harness.paint();
-        assert!(named(harness.root_id(), "agents-panel").is_none());
+        assert!(!review.agents_dropdown_open.get());
+        assert!(named(harness.root_id(), "agents-dropdown").is_none());
+        assert!(harness.is_focused(editor), "Escape did not give the editor the keyboard back");
+        harness.dispatch_event(agents.clone());
+        harness.rebuild();
+        harness.dispatch_event(agents);
+        harness.rebuild();
+        assert!(!review.agents_dropdown_open.get());
+        assert!(harness.is_focused(editor));
+        assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
     }
 
     /// Cmd-W closes the open file from the code too. The editor keeps

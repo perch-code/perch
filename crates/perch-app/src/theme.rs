@@ -184,6 +184,10 @@ pub const DRAWER_MAX_WIDTH: f64 = 620.0;
 /// controls and the tab strip's, with the title given way.
 pub const MAIN_MIN_WIDTH: f64 = 620.0;
 pub const AGENT_ROW_MIN_HEIGHT: f64 = 88.0;
+/// The Agents dropdown under the bar's button: as wide as Submit review's,
+/// and as tall as this before it scrolls.
+pub const AGENTS_DROPDOWN_WIDTH: f64 = 430.0;
+pub const AGENTS_DROPDOWN_MAX_HEIGHT: f64 = 460.0;
 /// The strip at the top of the drawer, where the traffic lights sit.
 ///
 /// The lights and the scope controls share this strip, and the bar over

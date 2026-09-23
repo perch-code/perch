@@ -44,6 +44,8 @@ pub struct PendingAgentNavigation {
     pub item_id: String,
     pub thread_id: Option<String>,
     pub review_attempt_id: Option<String>,
+    /// A run to open in the item's Agents row once it is there.
+    pub run_id: Option<String>,
 }
 
 /// Which asynchronous item open is still allowed to replace the workspace.
@@ -148,7 +150,6 @@ pub struct AppState {
     pub agents_backend_filter: RwSignal<BackendFilter>,
     pub agents_outcome_filter: RwSignal<OutcomeFilter>,
     pub selected_agent_run: RwSignal<Option<String>>,
-    pub agents_control: RwSignal<Option<floem::ViewId>>,
     /// The control the drawer was opened from, or whatever had the
     /// keyboard when it was opened by a shortcut, to hand it back to when
     /// the drawer shuts.
@@ -279,7 +280,6 @@ impl AppState {
             agents_backend_filter: RwSignal::new(BackendFilter::All),
             agents_outcome_filter: RwSignal::new(OutcomeFilter::All),
             selected_agent_run: RwSignal::new(None),
-            agents_control: RwSignal::new(None),
             drawer_opener: RwSignal::new(None),
             agent_history_loading: RwSignal::new(false),
             agent_history_has_more: RwSignal::new(false),
@@ -872,6 +872,23 @@ impl AppState {
         self.begin_agent_navigation_to(item_id, thread_id, None, navigation_id)
     }
 
+    /// Open a run's item on Conversation, with the run open in its Agents
+    /// row once the item's threads have landed.
+    pub fn begin_agent_run_navigation(
+        &self,
+        item_id: String,
+        run_id: String,
+        navigation_id: u64,
+    ) -> u64 {
+        let token = self.begin_agent_navigation_to(item_id, None, None, navigation_id);
+        self.pending_agent_navigation.update(|pending| {
+            if let Some(pending) = pending {
+                pending.run_id = Some(run_id);
+            }
+        });
+        token
+    }
+
     pub fn begin_agent_review_navigation(
         &self,
         review: crate::review::model::ReviewState,
@@ -908,6 +925,7 @@ impl AppState {
                 item_id,
                 thread_id,
                 review_attempt_id,
+                run_id: None,
             }));
         token
     }
@@ -1095,6 +1113,9 @@ impl AppState {
                             review
                                 .focus_card
                                 .set(Some(crate::review::doc::CardId::Thread(thread_id)));
+                        }
+                        if let Some(run_id) = pending.run_id {
+                            review.pending_run_reveal.set(Some(run_id));
                         }
                         self.pending_agent_navigation.set(None);
                     }
@@ -2746,6 +2767,39 @@ mod tests {
         review.item.set(Some(issue("org/repo", 7)));
         review.begin("Reading the notification");
         assert!(!app.is_viewing_thread(&thread));
+    }
+
+    /// A run on another item: the item opens on Conversation, whatever it
+    /// was left on, and the run is asked for in its Agents row once its
+    /// threads are here.
+    #[test]
+    fn a_run_on_another_item_opens_it_on_conversation_asking_for_the_run() {
+        use crate::review::model::ItemTab;
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "other", 30);
+        app.apply_with_review(review_ready("other", 30), review);
+        review.show_tab(ItemTab::Code);
+        app.begin_item_review(review, "Open", "here", 31);
+        app.apply_with_review(review_ready("here", 31), review);
+
+        app.begin_agent_run_navigation("other".into(), "run-7".into(), 32);
+        app.begin_review(review, "Reading the discussion");
+        app.apply_with_review(review_ready("other", 32), review);
+        assert_eq!(review.pending_run_reveal.get(), None, "asked before the threads are here");
+        app.apply_with_review(
+            Event::CommentThreads {
+                item_id: "other".into(),
+                threads: Vec::new(),
+                review_group_id: None,
+                review_request_id: None,
+            },
+            review,
+        );
+        assert!(review.is_item("other"));
+        assert_eq!(review.tab.get(), ItemTab::Conversation);
+        assert_eq!(review.pending_run_reveal.get().as_deref(), Some("run-7"));
+        assert_eq!(review.focus_card.get(), None);
     }
 
     #[test]

@@ -8,6 +8,7 @@
 pub mod model;
 
 mod detail;
+pub mod dropdown;
 mod list;
 pub mod section;
 
@@ -26,89 +27,12 @@ use crate::icons::SidebarIcon;
 use crate::review::model::{ItemTab, ReviewState};
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::drawer::{self, DrawerView};
+use crate::ui::drawer;
 use crate::ui::widgets::{clickable, sidebar_glyph};
 
 use model::{AgentRunStatus, AgentRunSummary};
 
 const FIRST_HISTORY_PAGE: usize = 50;
-
-/// The persistent entry in the status bar. Its count is deliberately global:
-/// filters in the inspector never make running work disappear from chrome.
-pub fn control(state: AppState, backend: Rc<Backend>) -> impl IntoView {
-    let label = move || {
-        let (running, queued) = state.active_agent_counts();
-        match (running, queued) {
-            (0, 0) => "Agents".to_string(),
-            (running, 0) => format!("Agents · {running} running"),
-            (0, queued) => format!("Agents · {queued} queued"),
-            (running, queued) => format!("Agents · {running} running · {queued} queued"),
-        }
-    };
-    let inner = Stack::horizontal((
-        sidebar_glyph(SidebarIcon::Agents, theme::FG_MUTED)
-            .style(|s| s.size(13.0, 13.0).margin_right(6.0).pointer_events_none()),
-        Label::derived(label).style(|s| {
-            s.font_size(theme::TEXT_META)
-                .color(theme::FG_MUTED)
-                .selectable(false)
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-                .pointer_events_none()
-        }),
-        dyn_container(
-            move || state.active_agent_counts().0 > 0,
-            |active| {
-                if active {
-                    Empty::new()
-                        .style(|s| {
-                            s.size(6.0, 6.0)
-                                .border_radius(3.0)
-                                .background(theme::ACCENT)
-                                .margin_left(7.0)
-                        })
-                        .into_any()
-                } else {
-                    Empty::new().into_any()
-                }
-            },
-        )
-        .style(|s| s.pointer_events_none()),
-    ))
-    .style(|s| s.items_center().pointer_events_none());
-
-    let button = Container::new(inner);
-    let id = button.view_id();
-    state.agents_control.set(Some(id));
-    let click_backend = backend.clone();
-    button
-        .on_event_stop(el::Click, move |_, _| {
-            drawer::toggle(state, &click_backend, DrawerView::Agents, Some(id))
-        })
-        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-            if matches!(key.code, Code::Enter | Code::Space) {
-                drawer::toggle(state, &backend, DrawerView::Agents, Some(id));
-                EventPropagation::Stop
-            } else {
-                EventPropagation::Continue
-            }
-        })
-        .style(move |s| {
-            let base = clickable(s)
-                .height(24.0)
-                .items_center()
-                .padding_horiz(8.0)
-                .border_radius(theme::RADIUS)
-                .keyboard_navigable()
-                .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-                .hover(|s| s.background(theme::CANVAS_HOVER));
-            if state.agents_open() {
-                base.background(theme::BADGE_BG)
-            } else {
-                base
-            }
-        })
-        .debug_name("agents-control")
-}
 
 /// What follows the inspector opening: the first page of history is
 /// asked for. And the clock that keeps the elapsed times moving, on an
@@ -421,7 +345,11 @@ fn tick_clock(state: AppState) {
 /// A terminal transition stays lightweight: enough context to identify it,
 /// plus a path into the durable detail. A later completion replaces an older
 /// one, and AppState's tokenized timer dismisses only the notice it scheduled.
-pub fn completion_notice(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+pub fn completion_notice(
+    state: AppState,
+    review: ReviewState,
+    backend: Rc<Backend>,
+) -> impl IntoView {
     dyn_container(
         move || {
             state.current_agent_completion().and_then(|notice| {
@@ -448,23 +376,14 @@ pub fn completion_notice(state: AppState, backend: Rc<Backend>) -> impl IntoView
                     format!("{} · {group}", run.purpose.label())
                 }
             };
-            let run_id = run.id.clone();
             let view_backend = backend.clone();
+            let view_run = run.clone();
             let view = text_action(
                 || "View".to_string(),
                 true,
                 move || {
                     state.dismiss_agent_completion(token);
-                    drawer::show(
-                        state,
-                        &view_backend,
-                        DrawerView::Agents,
-                        state.agents_control.get_untracked(),
-                    );
-                    state.agents_tab.set(model::AgentsTab::History);
-                    state.selected_agent_run.set(Some(run_id.clone()));
-                    state.set_agent_run_events_loading(&run_id);
-                    view_backend.load_agent_run_detail(&run_id);
+                    dropdown::go_to_run(state, review, &view_backend, &view_run);
                 },
             );
             let dismiss = icon_action(SidebarIcon::Close, "Dismiss agent completion", move || {
@@ -530,31 +449,6 @@ mod tests {
     use super::*;
     use floem::headless::{HeadlessHarness, TestRoot};
 
-    fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
-        if id.debug_name().split_whitespace().any(|part| part == name) {
-            return Some(id);
-        }
-        id.children()
-            .into_iter()
-            .find_map(|child| named(child, name))
-    }
-
-    fn shown(harness: &HeadlessHarness, name: &str) -> bool {
-        named(harness.root_id(), name).is_some_and(|id| harness.get_layout_rect(id).height() > 0.0)
-    }
-
-    fn key(code: Code, key: Key, modifiers: Modifiers) -> floem::event::Event {
-        floem::event::Event::Key(KeyboardEvent {
-            state: KeyState::Down,
-            key,
-            code,
-            location: Default::default(),
-            modifiers,
-            repeat: false,
-            is_composing: false,
-        })
-    }
-
     fn running_record() -> perch_github::RunRecord {
         perch_github::RunRecord {
             id: "stream".into(),
@@ -576,94 +470,13 @@ mod tests {
         }
     }
 
+    /// The clock that moves the elapsed times starts when work arrives,
+    /// wherever the runs are on screen.
     #[test]
-    fn the_keyboard_opens_the_inspector_which_filters_streams_and_preserves_the_workspace() {
+    fn the_clock_arms_when_work_arrives() {
         let root = TestRoot::new();
         let app = AppState::new();
         let review = ReviewState::new();
-        review.composer_draft.set("half a thought".into());
-        app.merge_agent_runs([perch_github::RunSummary::from(&running_record())], false);
-        let backend = Rc::new(Backend::detached());
-        let view = crate::ui::app_view(app, review, backend);
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1200.0, 760.0);
-        harness.rebuild();
-        harness.paint();
-        assert!(!shown(&harness, "agent-run:stream"));
-        let control = named(harness.root_id(), "agents-control").unwrap();
-        control.request_focus();
-        harness.rebuild();
-        assert!(harness.is_focused(control));
-
-        harness.dispatch_event(key(
-            Code::KeyA,
-            Key::Character("a".into()),
-            crate::ui::OS_MOD | Modifiers::SHIFT,
-        ));
-        harness.rebuild();
-        harness.paint();
-        assert!(app.agents_open());
-        assert!(shown(&harness, "agent-run:stream"));
-        let close = named(harness.root_id(), "agents-close").unwrap();
-        assert!(harness.is_focused(close));
-
-        app.agents_backend_filter.set(model::BackendFilter::Codex);
-        harness.rebuild();
-        harness.paint();
-        assert!(!shown(&harness, "agent-run:stream"));
-        app.agents_backend_filter.set(model::BackendFilter::All);
-        harness.rebuild();
-        harness.paint();
-
-        let row = named(harness.root_id(), "agent-run:stream").unwrap();
-        row.request_focus();
-        harness.rebuild();
-        harness.dispatch_event(key(
-            Code::Enter,
-            Key::Named(NamedKey::Enter),
-            Modifiers::empty(),
-        ));
-        let mut update = running_record();
-        update.final_result = Some("The first durable paragraph.".into());
-        update.latest_activity = Some("Responding".into());
-        update.last_event_sequence = 2;
-        app.update_agent_run(&update);
-        harness.rebuild();
-        harness.paint();
-        assert!(shown(&harness, "agent-run-detail"));
-        let back = named(harness.root_id(), "agents-detail-back").unwrap();
-        assert!(harness.is_focused(back));
-
-        harness.dispatch_event(key(
-            Code::Escape,
-            Key::Named(NamedKey::Escape),
-            Modifiers::empty(),
-        ));
-        harness.rebuild();
-        harness.paint();
-        assert!(app.agents_open());
-        assert!(app.selected_agent_run.get().is_none());
-        assert!(shown(&harness, "agent-run:stream"));
-        let rebuilt_row = named(harness.root_id(), "agent-run:stream").unwrap();
-        assert!(harness.is_focused(rebuilt_row));
-
-        harness.dispatch_event(key(
-            Code::Escape,
-            Key::Named(NamedKey::Escape),
-            Modifiers::empty(),
-        ));
-        harness.rebuild();
-        harness.paint();
-        assert!(!app.agents_open());
-        assert_eq!(review.composer_draft.get(), "half a thought");
-        assert!(harness.is_focused(control));
-    }
-
-    #[test]
-    fn an_open_idle_panel_rearms_its_clock_when_work_arrives() {
-        let root = TestRoot::new();
-        let app = AppState::new();
-        let review = ReviewState::new();
-        app.drawer.set(Some(DrawerView::Agents));
         let backend = Rc::new(Backend::detached());
         let view = crate::ui::app_view(app, review, backend);
         let mut harness = HeadlessHarness::new_with_size(root, view, 900.0, 700.0);
@@ -673,66 +486,6 @@ mod tests {
         app.merge_agent_runs([perch_github::RunSummary::from(&running_record())], false);
         harness.rebuild();
         assert!(app.agents_clock_armed.get());
-    }
-
-    /// The inspector fills the drawer, top to status bar and edge to
-    /// edge, whether the drawer is docked beside the pane's body or, in a
-    /// window too narrow for both, over it.
-    #[test]
-    fn the_inspector_fills_the_drawer_docked_and_over_the_pane() {
-        let root = TestRoot::new();
-        let app = AppState::new();
-        let review = ReviewState::new();
-        app.drawer.set(Some(DrawerView::Agents));
-        app.agents_tab.set(model::AgentsTab::History);
-        let backend = Rc::new(Backend::detached());
-        let view = crate::ui::app_view(app, review, backend);
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1200.0, 760.0);
-        harness.rebuild();
-        harness.paint();
-
-        // With the sidebar open at 1200 there is no room to dock: the
-        // drawer lies over the pane's right edge at its own width.
-        let drawer = named(harness.root_id(), "right-drawer")
-            .expect("the open drawer exists")
-            .get_visual_rect_no_clip();
-        let list = named(harness.root_id(), "agents-list")
-            .expect("the history list exists")
-            .get_visual_rect_no_clip();
-        assert_eq!(drawer.width(), theme::DRAWER_WIDTH);
-        assert_eq!(drawer.x1, 1200.0);
-        assert!(
-            drawer.y0.abs() < 0.01 && (drawer.y1 - (760.0 - theme::STATUS_HEIGHT)).abs() < 0.01,
-            "the drawer runs from the top to the status bar: {drawer:?}"
-        );
-        assert!(
-            (drawer.x1 - list.x1).abs() < 0.01,
-            "the content must reach the drawer's right edge: drawer={drawer:?}, list={list:?}"
-        );
-        let pane = named(harness.root_id(), "main-pane").expect("the main pane");
-        assert_eq!(
-            pane.get_visual_rect_no_clip().x1,
-            1200.0,
-            "the pane still has the whole width under the drawer"
-        );
-
-        // Shut the sidebar and there is: the drawer docks under the bare
-        // bar that now has the lights, and the body stops where it starts.
-        app.sidebar_open.set(false);
-        harness.rebuild();
-        harness.paint();
-        let drawer = named(harness.root_id(), "right-drawer")
-            .unwrap()
-            .get_visual_rect_no_clip();
-        assert_eq!(drawer.width(), theme::DRAWER_WIDTH);
-        assert_eq!(drawer.x1, 1200.0);
-        assert_eq!(
-            drawer.y0,
-            theme::TITLEBAR_HEIGHT,
-            "the drawer is the pane's, under its bar"
-        );
-        let body = named(harness.root_id(), "pane-body").unwrap();
-        assert_eq!(body.get_visual_rect_no_clip().x1, drawer.x0);
     }
 
     #[test]

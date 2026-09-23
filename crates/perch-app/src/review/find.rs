@@ -1578,7 +1578,7 @@ mod window {
         state.show_tab(ItemTab::Conversation);
         harness.rebuild();
         harness.paint();
-        let control = named(harness.root_id(), "agents-control").unwrap();
+        let control = named(harness.root_id(), "agents-button").unwrap();
         control.request_focus();
         harness.rebuild();
         harness.dispatch_event(escape());
@@ -1730,7 +1730,7 @@ mod window {
             "and the code's keys are back, though the box was never told"
         );
         // `a` on Conversation opens the composer, as with no bar.
-        let control = named(harness.root_id(), "agents-control").unwrap();
+        let control = named(harness.root_id(), "agents-button").unwrap();
         control.request_focus();
         harness.rebuild();
         harness.dispatch_event(key(

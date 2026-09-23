@@ -978,6 +978,43 @@ mod tests {
         assert!(shown(&harness, "agent-run:q"));
     }
 
+    /// While a review runs, the bar's Review goes to it in the Agents row.
+    #[test]
+    fn review_goes_to_a_running_review_in_the_agents_row() {
+        let (mut harness, app, review) = pull_request_harness();
+        let attempt = |id: &str, run: &str, minute| perch_github::RunRecord {
+            owner: perch_github::RunOwner::Review {
+                item_id: "pr".into(),
+                reviewer_run_id: id.into(),
+            },
+            purpose: perch_github::comments::RunPurpose::WorktreeReview,
+            ..record(run, perch_github::RunStatus::Running, minute)
+        };
+        add(app, &[attempt("attempt-claude", "claude-run", 1)]);
+        let mut summary =
+            super::super::model::tests::review_summary("group-3", &["attempt-claude"]);
+        summary.group.status = perch_github::ReviewGroupStatus::Reconciling;
+        app.review_groups.update(|all| {
+            all.insert("pr".into(), Arc::new(vec![summary]));
+        });
+        review.show_tab(crate::review::model::ItemTab::Code);
+        settle(&mut harness);
+
+        click(&mut harness, "review-launch-control");
+        assert!(
+            !review.review_launcher_open.get(),
+            "the launcher opened over a running review"
+        );
+        assert_eq!(
+            review.tab.get(),
+            crate::review::model::ItemTab::Conversation
+        );
+        assert!(review.agents_unfolded.get());
+        assert!(review
+            .agents_open_runs
+            .with(|open| open.contains("claude-run")));
+    }
+
     /// A run asked for from elsewhere comes into view: the row unfolds,
     /// the run opens, and the ask is done with once the row is laid out.
     #[test]

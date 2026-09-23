@@ -5,18 +5,14 @@ use floem::peniko::Color;
 use floem::prelude::*;
 use floem::views::{dyn_container, Decorators, Label, Stack};
 
-use crate::backend::{Backend, Status};
+use crate::backend::Status;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::spacer;
 
-pub fn status_bar(
-    state: AppState,
-    review: ReviewState,
-    backend: std::rc::Rc<Backend>,
-) -> impl IntoView {
+pub fn status_bar(state: AppState, review: ReviewState) -> impl IntoView {
     Stack::horizontal((
         dot(state),
         Label::derived(move || message(state)).style(move |s| {
@@ -55,7 +51,6 @@ pub fn status_bar(
             },
         )
         .style(|s| s.min_width(0.0).margin_right(12.0)),
-        crate::ui::agents::control(state, backend),
     ))
     .debug_name("status bar")
     .style(|s| {

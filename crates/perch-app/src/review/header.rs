@@ -1,10 +1,10 @@
 //! The bar above the item view.
 //!
 //! The bar is the window's title bar. It holds what is open, the switch
-//! between Conversation and Code, and the four things a reader reaches
-//! for from anywhere in an item: GitHub, an agent's review of the branch,
-//! the item's one action (Submit review, or Start work on an issue), and
-//! the whole window. Everything else about the item, its state and
+//! between Conversation and Code, and the things a reader reaches for from
+//! anywhere in an item: GitHub, an agent's review of the branch, every
+//! item's agents, the item's one action (Submit review, or Start work on
+//! an issue), and the whole window. Everything else about the item, its state and
 //! number, branches, checks and worktree, and what GitHub says about it,
 //! is `review::summary`, under Conversation's title.
 
@@ -39,13 +39,13 @@ pub fn header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
         ))
         .debug_name("item bar"),
     )
-    // Floem bounds z-index to sibling stacking contexts. Submit review and
-    // the review launcher open from this bar, so the bar sits above the
-    // item.
+    // Floem bounds z-index to sibling stacking contexts. Submit review, the
+    // review launcher and the Agents dropdown open from this bar, so the
+    // bar sits above the item.
     .style(|s| bar_style(s).z_index(2))
 }
 
-fn bar_style(s: floem::style::Style) -> floem::style::Style {
+pub(crate) fn bar_style(s: floem::style::Style) -> floem::style::Style {
     // The bottom border comes out of the bar's height, so a pixel of
     // padding at the top balances it: the bar's contents then centre on
     // the same line as the drawer's strip, which has no border, and the
@@ -131,12 +131,14 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
-/// The four things reached for from anywhere in an item: GitHub, an
-/// agent's review, the item's one action, and the whole window.
+/// What is reached for from anywhere in an item: GitHub, an agent's
+/// review, every item's agents, the item's one action, and the whole
+/// window.
 fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         github_button(state),
         launcher(app, state, backend.clone()),
+        crate::ui::agents::dropdown::button(app, state, backend.clone()),
         primary_action(app, state, backend),
         expand_button(app),
     ))
@@ -429,8 +431,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_bar_is_the_title_the_switch_and_four_controls_in_a_row() {
-        let (harness, ..) = pull_request_harness();
+    fn the_bar_is_the_title_the_switch_and_five_controls_in_a_row() {
+        let (mut harness, app, _) = pull_request_harness();
         let bar = rect(&harness, "item bar");
         assert_eq!(bar.height(), theme::REVIEW_HEADER_HEIGHT);
         assert_eq!(
@@ -440,13 +442,14 @@ pub(crate) mod tests {
         );
         assert_eq!(bar.y0, 0.0, "and at the window's top: it is the title bar");
 
-        // Left to right: the title, the switch at the bar's centre, then
-        // GitHub, Review, Submit review and the expand control against the
-        // right edge.
+        // Left to right: the title, the switch, then GitHub, Review,
+        // Agents, Submit review and the expand control against the right
+        // edge.
         let title = rect(&harness, "item title");
         let switch = rect(&harness, "item switch");
         let github = rect(&harness, "github button");
         let review = rect(&harness, "review-launch-control");
+        let agents = rect(&harness, "agents-button");
         let submit = rect(&harness, "submit-review-control");
         let expand = rect(&harness, "expand button");
         for (name, r) in [
@@ -454,20 +457,18 @@ pub(crate) mod tests {
             ("switch", switch),
             ("github", github),
             ("review", review),
+            ("agents", agents),
             ("submit", submit),
             ("expand", expand),
         ] {
             assert!(within(r, bar), "{name} at {r:?} is not in the bar {bar:?}");
             assert!(r.width() > 0.0, "{name} has no width");
         }
-        assert!(
-            (switch.center().x - bar.center().x).abs() <= 1.0,
-            "the switch at {switch:?} is not at the bar's centre {bar:?}"
-        );
         assert!(title.x1 <= switch.x0);
         assert!(switch.x1 <= github.x0);
         assert!(github.x1 <= review.x0);
-        assert!(review.x1 <= submit.x0);
+        assert!(review.x1 <= agents.x0);
+        assert!(agents.x1 <= submit.x0);
         assert!(submit.x1 <= expand.x0);
         assert_eq!(
             review.height(),
@@ -482,13 +483,28 @@ pub(crate) mod tests {
         // With the drawer open there is no lane before the title: the
         // state glyph and its gap are all that is.
         assert_eq!(title.x0, bar.x0 + theme::REVIEW_HEADER_PADDING + 16.0 + 8.0);
+        // The controls take more than half this bar, so the switch gives
+        // way to them, right beside them. With the room, it is at the
+        // bar's centre.
+        assert_eq!(switch.x1 + 12.0, github.x0);
+        app.sidebar_open.set(false);
+        harness.rebuild();
+        harness.paint();
+        let (bar, switch) = (rect(&harness, "item bar"), rect(&harness, "item switch"));
+        assert!(
+            (switch.center().x - bar.center().x).abs() <= 1.0,
+            "the switch at {switch:?} is not at the bar's centre {bar:?}"
+        );
     }
 
     #[test]
     fn a_long_title_gives_way_to_the_controls() {
         let mut pull = pull_request(812);
         pull.title = "Add tracing spans to every read path, ".repeat(8);
-        let (harness, ..) = pull_request_harness_with(pull);
+        let (mut harness, app, _) = pull_request_harness_with(pull);
+        app.sidebar_open.set(false);
+        harness.rebuild();
+        harness.paint();
         let bar = rect(&harness, "item bar");
         let title = rect(&harness, "item title");
         let switch = rect(&harness, "item switch");
