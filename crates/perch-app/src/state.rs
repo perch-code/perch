@@ -1240,7 +1240,7 @@ impl AppState {
                         self.reload.update(|reload| reload.push(path));
                     }
                     review.tree.set(tree);
-                    review.show_tab(ItemTab::Files);
+                    review.show_tab(ItemTab::Code);
                 }
             }
             Event::HistoricalReviewFailed {
@@ -2779,7 +2779,7 @@ mod tests {
 
     /// An item opened again comes back on the pane it was left with, and
     /// the files its tabs hold are asked for, the one showing first. One
-    /// opened for the first time is on Conversation alone.
+    /// opened for the first time is on Conversation.
     #[test]
     fn an_item_opened_again_comes_back_on_its_pane_and_asks_for_its_files() {
         use crate::review::model::ItemTab;
@@ -2789,23 +2789,19 @@ mod tests {
         app.begin_item_review(review, "Open", "a", 71);
         app.apply_with_review(review_ready("a", 71), review);
         assert_eq!(review.tab.get(), ItemTab::Conversation);
-        assert!(review.conversation_open.get());
         review.open_tab("src/x.rs");
         review.open_tab("src/y.rs");
-        review.show_tab(ItemTab::Files);
-        review.close_conversation();
+        review.show_tab(ItemTab::Code);
 
         app.begin_item_review(review, "Open", "b", 72);
         app.apply_with_review(review_ready("b", 72), review);
-        assert!(review.conversation_open.get());
         assert_eq!(review.tab.get(), ItemTab::Conversation);
         assert!(review.tabs.with(Vec::is_empty));
         assert!(app.reload.get().is_empty());
 
         app.begin_item_review(review, "Open", "a", 73);
         app.apply_with_review(review_ready("a", 73), review);
-        assert!(!review.conversation_open.get());
-        assert_eq!(review.tab.get(), ItemTab::Files);
+        assert_eq!(review.tab.get(), ItemTab::Code);
         assert_eq!(review.tabs.with(Vec::len), 2);
         assert_eq!(review.active.get().as_deref(), Some("src/y.rs"));
         assert_eq!(app.reload.get(), ["src/y.rs", "src/x.rs"]);
@@ -2819,14 +2815,12 @@ mod tests {
         let app = AppState::new();
         let review = review_of("same");
         review.open_tab("src/x.rs");
-        review.show_tab(ItemTab::Files);
-        review.close_conversation();
+        review.show_tab(ItemTab::Code);
         app.expect_item_navigation("same", 43);
 
         app.apply_with_review(review_ready("same", 43), review);
 
-        assert_eq!(review.tab.get(), ItemTab::Files);
-        assert!(!review.conversation_open.get());
+        assert_eq!(review.tab.get(), ItemTab::Code);
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
         assert!(app.reload.get().is_empty());
     }
@@ -3952,7 +3946,7 @@ mod tests {
         assert_eq!(review.scope_gen.get(), Some(7));
         assert_eq!(review.changed_files.get()[0].path, "src/historical.rs");
         assert_eq!(review.tree.get()[0].path, "src/historical.rs");
-        assert_eq!(review.tab.get(), crate::review::model::ItemTab::Files);
+        assert_eq!(review.tab.get(), crate::review::model::ItemTab::Code);
         assert!(review.historical_findings.with(Option::is_some));
         assert_eq!(
             review

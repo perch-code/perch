@@ -4,7 +4,7 @@
 //!
 //! The order is `review::timeline`'s; this module only draws it. The cards
 //! are in `review::cards`, and a thread's card shares its views with the
-//! inline card on Files.
+//! inline card on Code.
 
 use std::rc::Rc;
 
@@ -1322,7 +1322,7 @@ mod tests {
         harness.click(links[0].x, links[0].y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         assert_eq!(state.active.get().as_deref(), Some("src/manifest.rs"));
         // On its way already, for the thread's lines on Conversation.
         assert!(state.is_loading("src/manifest.rs"));
@@ -1638,7 +1638,7 @@ mod tests {
         // none; a click on the page is what a reader would have done.
         harness.click(700.0, 500.0);
         harness.rebuild();
-        // A selection left over from Files does not anchor it.
+        // A selection left over from Code does not anchor it.
         state.selection.set(Some((3, 5)));
         harness.dispatch_event(key_a());
         harness.rebuild();
@@ -1763,7 +1763,7 @@ mod tests {
         let scrolled = title().get_visual_rect_no_clip().y0;
         assert!(scrolled < top, "the page did not scroll");
 
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         harness.rebuild();
         harness.paint();
         assert!(

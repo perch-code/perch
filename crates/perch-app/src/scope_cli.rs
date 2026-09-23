@@ -1,6 +1,6 @@
 //! `perch --scope <item-id> <scope>`
 //!
-//! Prints the changed list the Files tab would show for an item under a
+//! Prints the changed list Code would show for an item under a
 //! scope: status, path, churn, the head blob, and a check where the reader
 //! has viewed that content. `<scope>` is `branch`, `since:<sha>`,
 //! `commit:<sha>`, `uncommitted`, `unstaged` or `staged`. Reads the cache

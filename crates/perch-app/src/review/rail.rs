@@ -29,12 +29,12 @@ use crate::ui::widgets::{checkbox, icon_button, sidebar_glyph};
 type ChangedByPath = Memo<Arc<HashMap<String, ChangedFile>>>;
 
 /// The drawer holding the files: its bar, then the rail. A file opened
-/// from the tree opens on Files, whichever tab the reader was on.
+/// from the tree opens on Code, whichever tab the reader was on.
 pub fn drawer_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let open_file = crate::review::open_file(state, backend.clone());
     let on_open: OpenFile = Rc::new(move |path: &str| {
-        if state.tab.get_untracked() != ItemTab::Files {
-            state.show_tab(ItemTab::Files);
+        if state.tab.get_untracked() != ItemTab::Code {
+            state.show_tab(ItemTab::Code);
         }
         open_file(path);
     });
@@ -558,7 +558,7 @@ mod tests {
     /// width against the window's right edge.
     const DRAWER_LEFT: f64 = 1400.0 - theme::DRAWER_WIDTH;
 
-    /// The whole window on Files with a worktree of `src` and a README,
+    /// The whole window on Code with a worktree of `src` and a README,
     /// a branch that changed three of the files in `src`, the second of
     /// them viewed, and the sidebar shut so the drawer on the right, on
     /// the files, is docked. The filter is on, so the rows are `src` and
@@ -584,7 +584,7 @@ mod tests {
         state.item.set(Some(Arc::new(item)));
         state.ready.set(true);
         state.set_phase(Phase::Ready);
-        state.tab.set(ItemTab::Files);
+        state.tab.set(ItemTab::Code);
         state.tree.set(Arc::new(
             [
                 "src",

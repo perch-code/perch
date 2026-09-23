@@ -123,23 +123,22 @@ impl LoadedFile {
     }
 }
 
-/// What the item view shows: Conversation, or the open file, the file tab
-/// that is active. Conversation is a tab in the strip as a file is, and
-/// closes as one does.
+/// What the item view shows: Conversation, or Code, the open file and the
+/// tabs over it. The two are the switch in the bar; Conversation cannot
+/// be closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ItemTab {
     #[default]
     Conversation,
-    Files,
+    Code,
 }
 
-/// An item's pane as it was left: whether Conversation's tab was open,
-/// the file tabs, which tab was showing, the files shown whole, and where
+/// An item's pane as it was left: which of Conversation and Code was
+/// showing, the file tabs, the files shown whole, and where
 /// the reader was on each tab. The item opens on it again; the first time,
 /// on Conversation alone.
 #[derive(Debug, Clone)]
 pub struct Pane {
-    conversation: bool,
     tab: ItemTab,
     tabs: Vec<Tab>,
     active: Option<String>,
@@ -151,7 +150,6 @@ pub struct Pane {
 impl Default for Pane {
     fn default() -> Self {
         Self {
-            conversation: true,
             tab: ItemTab::Conversation,
             tabs: Vec::new(),
             active: None,
@@ -1173,9 +1171,6 @@ pub struct ReviewState {
     historical_review_rollback: RwSignal<Option<HistoricalReviewRollback>>,
     /// Conversation or the open file.
     pub tab: RwSignal<ItemTab>,
-    /// Whether the strip has Conversation's tab. Closed from the tab or
-    /// with Cmd-W, as a file's is; showing Conversation opens it again.
-    pub conversation_open: RwSignal<bool>,
     /// Each item's pane as it was last left, by item, for the life of the
     /// app.
     pub panes: RwSignal<HashMap<String, Pane>>,
@@ -1566,7 +1561,6 @@ impl ReviewState {
             historical_findings: RwSignal::new(None),
             historical_review_rollback: RwSignal::new(None),
             tab: RwSignal::new(ItemTab::Conversation),
-            conversation_open: RwSignal::new(true),
             panes: RwSignal::new(HashMap::new()),
             conversation_scroll: RwSignal::new(0.0),
             file_places: RwSignal::new(HashMap::new()),
@@ -1734,9 +1728,6 @@ impl ReviewState {
         self.submitted_reviews.set(Arc::new(Vec::new()));
         self.clear_historical_review();
         self.tab.set(ItemTab::Conversation);
-        if !self.conversation_open.get_untracked() {
-            self.conversation_open.set(true);
-        }
         self.scope.set(Scope::Branch);
         self.scope_gen.set(None);
         self.commits.set(Arc::new(Vec::new()));
@@ -1907,25 +1898,29 @@ impl ReviewState {
         self.historical_review_rollback.set(None);
     }
 
-    /// Show a tab: Conversation, opening its tab again if it was closed,
-    /// or the open file.
+    /// Show Conversation or Code. Code with no file open opens the first
+    /// changed file, in the tree's order, as the pane is built; with no
+    /// changes it opens nothing, and the pane says so.
     pub fn show_tab(&self, tab: ItemTab) {
-        if tab == ItemTab::Conversation && !self.conversation_open.get_untracked() {
-            self.conversation_open.set(true);
+        if tab == ItemTab::Code
+            && self.tabs.with_untracked(|t| t.is_empty())
+            && self.pending_open.with_untracked(|p| p.is_none())
+        {
+            if let Some(first) = self.first_change() {
+                self.pending_open.set(Some(first));
+            }
         }
         self.tab.set(tab);
     }
 
-    /// Close Conversation's tab, as a file's is closed. Were it showing,
-    /// the open file shows in its place, or nothing when no file is open.
-    pub fn close_conversation(&self) {
-        if !self.conversation_open.get_untracked() {
-            return;
-        }
-        self.conversation_open.set(false);
-        if self.tab.get_untracked() == ItemTab::Conversation {
-            self.tab.set(ItemTab::Files);
-        }
+    /// The first changed file in the tree's order: directories before
+    /// files, as the rail lists them.
+    pub fn first_change(&self) -> Option<String> {
+        self.changed_files.with_untracked(|files| {
+            let entries =
+                crate::review::tree::with_paths(&[], files.iter().map(|f| f.path.as_str()))?;
+            entries.into_iter().find(|e| !e.is_dir).map(|e| e.path)
+        })
     }
 
     /// Whether the open item has a checkout, and so files to open.
@@ -1944,7 +1939,6 @@ impl ReviewState {
             return;
         };
         let pane = Pane {
-            conversation: self.conversation_open.get_untracked(),
             tab: self.tab.get_untracked(),
             tabs: self.tabs.get_untracked(),
             active: self.active.get_untracked(),
@@ -1980,9 +1974,6 @@ impl ReviewState {
         }
         // One rebuild of a pane on screen, not one for each write.
         floem::reactive::Effect::batch(|| {
-            if self.conversation_open.get_untracked() != pane.conversation {
-                self.conversation_open.set(pane.conversation);
-            }
             self.tab.set(pane.tab);
             self.tabs.set(pane.tabs);
             self.active.set(pane.active);
@@ -2335,14 +2326,14 @@ impl ReviewState {
         self.navigate_to(&located.path, located.line.saturating_sub(1), located.character);
     }
 
-    /// Go to a file a comment or an answer names, on Files: at the head
+    /// Go to a file a comment or an answer names, on Code: at the head
     /// line and column it names, or, named alone, as the tree opens it,
     /// with no jump to unfold anything. The place left is remembered for
     /// `Ctrl--`, unless the file named alone is the one open, which
     /// leaves nothing.
     pub fn go_to_file(&self, path: &str, at: Option<(usize, usize)>) {
-        if self.tab.get_untracked() != ItemTab::Files {
-            self.show_tab(ItemTab::Files);
+        if self.tab.get_untracked() != ItemTab::Code {
+            self.show_tab(ItemTab::Code);
         }
         match at {
             Some((line, column)) => self.navigate_to(path, line, column),
@@ -2356,11 +2347,11 @@ impl ReviewState {
         }
     }
 
-    /// Go to what a name in a comment or an answer names, on Files: one
+    /// Go to what a name in a comment or an answer names, on Code: one
     /// definition opens, and several open the panel as its definitions.
     pub fn go_to_definitions(&self, name: &str, locations: &[Located]) {
-        if self.tab.get_untracked() != ItemTab::Files {
-            self.show_tab(ItemTab::Files);
+        if self.tab.get_untracked() != ItemTab::Code {
+            self.show_tab(ItemTab::Code);
         }
         match locations {
             [] => {}
@@ -2735,17 +2726,9 @@ impl ReviewState {
             if let Some(neighbour) = &neighbour {
                 self.remember_recent(neighbour);
             }
-            // The last file's tab closed while it showed: Conversation's,
-            // beside it, is the neighbour left.
-            let to_conversation = neighbour.is_none()
-                && self.tab.get_untracked() == ItemTab::Files
-                && self.conversation_open.get_untracked();
             self.active.set(neighbour);
             self.cursor_line.set(0);
             self.editor_epoch.update(|e| *e += 1);
-            if to_conversation {
-                self.tab.set(ItemTab::Conversation);
-            }
             self.keep_composer_in_view(composer_was_in_code);
         }
         // So was the place in the file: opened again, it opens at its top.
@@ -4673,7 +4656,7 @@ mod tests {
 
         // A reply to an outdated thread has no inline card, so it moves to
         // Conversation without losing what was typed.
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         let choice = (
             perch_agent::Backend::ClaudeCode,
             "sonnet".to_string(),
@@ -4828,10 +4811,10 @@ mod tests {
             "sonnet".to_string(),
             perch_agent::Effort::Medium,
         );
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         state.open_composer(None, Some(composer.clone()), String::new(), choice.clone());
         assert!(state.composer_is_inline());
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         assert_eq!(
             state.composer_card_anchor("src/x.rs"),
             Some(composer.clone())
@@ -4839,7 +4822,7 @@ mod tests {
         assert_eq!(state.composer_card_anchor("src/y.rs"), None);
         assert_eq!(state.cards_in("src/x.rs").len(), 6);
         // A follow-up is inside its thread's card, not a card of its own,
-        // and stays on Files when that card is in the open file. A question
+        // and stays on Code when that card is in the open file. A question
         // about the item as a whole moves to Conversation.
         state.open_composer(
             Some("mine".into()),
@@ -4854,7 +4837,7 @@ mod tests {
             "no such thread in the file"
         );
         assert!(state.composer_in_code());
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         assert_eq!(state.cards_in("src/x.rs").len(), 5);
         state.open_composer(None, None, "whole item".into(), choice.clone());
         assert!(!state.composer_is_inline());
@@ -4865,11 +4848,11 @@ mod tests {
 
         // A follow-up on a thread whose card is collapsed opens the card,
         // so the box it sits inside is seen.
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         state.toggle_card(&CardId::Thread("mine".into()));
         state.open_composer(Some("mine".into()), Some(composer), String::new(), choice);
         assert!(!state.is_collapsed(&CardId::Thread("mine".into())));
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
     }
 
     #[test]
@@ -5186,18 +5169,18 @@ mod tests {
         // Opened on lines of the open file, the composer is a card there
         // and Files stays visible. Another file opened over it has no card
         // for it, so Conversation takes over without losing the draft.
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         state.open_composer(None, Some(anchor.clone()), "why?".into(), choice.clone());
         assert!(state.composer_in_code());
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         state.open_tab("src/y.rs");
         assert!(!state.composer_in_code());
         assert_eq!(state.tab.get(), ItemTab::Conversation);
         assert_eq!(state.composer_draft.get(), "why?");
         state.open_tab("src/x.rs");
         assert!(state.composer_in_code());
-        state.show_tab(ItemTab::Files);
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        state.show_tab(ItemTab::Code);
+        assert_eq!(state.tab.get(), ItemTab::Code);
 
         // Closing the composer's file for its neighbour does the same.
         state.close_tab("src/x.rs");
@@ -5208,7 +5191,7 @@ mod tests {
         // A follow-up inside a card of the open file likewise.
         state.close_composer();
         state.open_tab("src/x.rs");
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         state.set_comment_threads(Arc::new(vec![anchored(
             "t",
             3,
@@ -5223,16 +5206,16 @@ mod tests {
             choice.clone(),
         );
         assert!(state.composer_in_code());
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         state.open_tab("src/y.rs");
         assert_eq!(state.tab.get(), ItemTab::Conversation);
 
         // Without a composer, changing files leaves Files selected.
         state.close_composer();
         state.open_tab("src/x.rs");
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         state.open_tab("src/y.rs");
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
     }
 
     #[test]
@@ -5255,24 +5238,24 @@ mod tests {
         // the draft with it.
         state.open_composer(None, None, "what does this do?".into(), choice.clone());
         assert_eq!(state.tab.get(), ItemTab::Conversation);
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         state.open_tab("src/y.rs");
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         state.open_tab("src/x.rs");
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         assert_eq!(state.composer_draft.get(), "what does this do?");
 
         // Closing a tab likewise.
         state.close_tab("src/x.rs");
         assert_eq!(state.active.get().as_deref(), Some("src/y.rs"));
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
 
         // A composer on lines of a file other than the open one is not in
         // the code either, so opening a third file over it leaves Files
         // too; opening its own file draws it in the code again.
         state.close_composer();
         state.open_tab("src/x.rs");
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         let anchor = Anchor {
             path: "src/x.rs".into(),
             start_line: 3,
@@ -5284,60 +5267,58 @@ mod tests {
         assert!(state.composer_in_code());
         state.open_tab("src/y.rs");
         assert_eq!(state.tab.get(), ItemTab::Conversation);
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         state.open_tab("src/z.rs");
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         state.open_tab("src/x.rs");
         assert!(state.composer_in_code());
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         assert_eq!(state.composer_draft.get(), "why?");
     }
 
-    /// Conversation's tab closes as a file's does. Closed while it shows,
-    /// the open file shows in its place, and showing Conversation opens it
-    /// again. A file's tab closed while it shows leaves its neighbour, and
-    /// Conversation's is the last file's.
+    /// Code with no file open opens the first changed file, in the
+    /// tree's order, directories first; with no changes it opens nothing.
+    /// Closing the last file's tab leaves Code showing, not Conversation.
     #[test]
-    fn conversation_closes_and_opens_again_as_a_tab_does() {
+    fn code_opens_the_first_change_and_stays_when_its_last_tab_closes() {
+        let changed = |path: &str| perch_git::ChangedFile {
+            path: path.into(),
+            old_path: None,
+            status: perch_git::ChangeStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            head_blob: None,
+        };
         let state = ReviewState::new();
-        state.open_tab("src/x.rs");
-        assert!(state.conversation_open.get());
-        assert_eq!(state.tab.get(), ItemTab::Conversation);
-
-        state.close_conversation();
-        assert!(!state.conversation_open.get());
-        assert_eq!(state.tab.get(), ItemTab::Files);
-        assert_eq!(state.active.get().as_deref(), Some("src/x.rs"));
+        state.show_tab(ItemTab::Code);
+        assert_eq!(state.tab.get(), ItemTab::Code);
+        assert_eq!(state.pending_open.get(), None, "nothing changed, nothing to open");
 
         state.show_tab(ItemTab::Conversation);
-        assert!(state.conversation_open.get());
-        assert_eq!(state.tab.get(), ItemTab::Conversation);
+        state.changed_files.set(Arc::new(vec![
+            changed("README.md"),
+            changed("src/z.rs"),
+            changed("src/a/b.rs"),
+        ]));
+        assert_eq!(state.first_change().as_deref(), Some("src/a/b.rs"));
+        state.show_tab(ItemTab::Code);
+        assert_eq!(state.pending_open.get().as_deref(), Some("src/a/b.rs"));
 
-        // A file's tab closed behind Conversation leaves it showing.
-        state.open_tab("src/y.rs");
-        state.close_tab("src/y.rs");
-        assert_eq!(state.tab.get(), ItemTab::Conversation);
-        assert_eq!(state.active.get().as_deref(), Some("src/x.rs"));
+        // With a tab open, Code shows it and asks for nothing.
+        state.pending_open.set(None);
+        state.open_tab("src/z.rs");
+        state.show_tab(ItemTab::Conversation);
+        state.show_tab(ItemTab::Code);
+        assert_eq!(state.pending_open.get(), None);
 
-        // The last file's, closed while it shows: Conversation's is left.
-        state.show_tab(ItemTab::Files);
-        state.close_tab("src/x.rs");
+        state.close_tab("src/z.rs");
         assert_eq!(state.active.get(), None);
-        assert_eq!(state.tab.get(), ItemTab::Conversation);
-
-        // With Conversation's closed as well, nothing is left to show.
-        state.open_tab("src/x.rs");
-        state.show_tab(ItemTab::Files);
-        state.close_conversation();
-        state.close_tab("src/x.rs");
-        assert!(!state.conversation_open.get());
-        assert_eq!(state.tab.get(), ItemTab::Files);
-        assert!(state.tabs.with(Vec::is_empty));
+        assert_eq!(state.tab.get(), ItemTab::Code);
     }
 
-    /// An item opens on Conversation alone the first time, and after that
-    /// on the pane it was left with: Conversation's tab open or closed,
-    /// the files' tabs, the one showing, and the files shown whole. What
+    /// An item opens on Conversation the first time, and after that on
+    /// the pane it was left with: Conversation or Code, the files' tabs, the one showing, and the files shown whole. What
     /// its tabs hold is loading, the file showing first.
     #[test]
     fn an_item_opens_on_conversation_the_first_time_and_on_its_pane_after() {
@@ -5359,21 +5340,17 @@ mod tests {
         };
 
         assert!(open("a").is_empty());
-        assert!(state.conversation_open.get());
         assert_eq!(state.tab.get(), ItemTab::Conversation);
         assert!(tabs().is_empty());
 
-        // Two files, the second showing and shown whole, and
-        // Conversation's tab closed.
+        // Two files on Code, the second showing and shown whole.
         state.open_tab("src/x.rs");
         state.open_tab("src/y.rs");
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         state.toggle_whole();
-        state.close_conversation();
 
         // Another item, the first time: Conversation alone.
         assert!(open("b").is_empty());
-        assert!(state.conversation_open.get());
         assert_eq!(state.tab.get(), ItemTab::Conversation);
         assert!(tabs().is_empty());
         assert_eq!(state.active.get(), None);
@@ -5382,8 +5359,7 @@ mod tests {
 
         // Back to the first, as it was left.
         assert_eq!(open("a"), ["src/y.rs", "src/x.rs"]);
-        assert!(!state.conversation_open.get());
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         assert_eq!(tabs(), ["src/x.rs", "src/y.rs"]);
         assert_eq!(state.active.get().as_deref(), Some("src/y.rs"));
         assert!(!state.folded("src/y.rs"));
@@ -5392,7 +5368,6 @@ mod tests {
 
         // And the second: its file's tab behind Conversation.
         assert_eq!(open("b"), ["src/z.rs"]);
-        assert!(state.conversation_open.get());
         assert_eq!(state.tab.get(), ItemTab::Conversation);
         assert_eq!(tabs(), ["src/z.rs"]);
         assert_eq!(state.active.get().as_deref(), Some("src/z.rs"));

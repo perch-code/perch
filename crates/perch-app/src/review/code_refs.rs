@@ -1,6 +1,6 @@
 //! Code named in what people write: a file, a line of one, or a symbol,
 //! in a code span, a fenced block or a link. The markdown links what it
-//! finds here to Files.
+//! finds here to Code.
 //!
 //! A file is looked up in the worktree's listing, so a path links only
 //! when the file is there. A path written short, from a directory down or

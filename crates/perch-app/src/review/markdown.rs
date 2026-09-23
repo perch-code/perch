@@ -887,7 +887,7 @@ pub fn render(text: &str) -> impl IntoView {
 }
 
 /// The blocks, stacked, at the body size, with the files, lines and
-/// symbols of the review's worktree they name linked to Files. The same
+/// symbols of the review's worktree they name linked to Code. The same
 /// as `render` for an item with no checkout.
 pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
     passage(stack(
@@ -2188,7 +2188,7 @@ mod tests {
             let links = links_on_first_line(&mut h, 0);
             assert_eq!(links.len(), 1, "{links:?}");
             h.click(links[0].x, links[0].y);
-            assert_eq!(state.tab.get(), ItemTab::Files);
+            assert_eq!(state.tab.get(), ItemTab::Code);
             assert_eq!(state.pending_jump.get(), Some(("src/manifest.rs".into(), 11, 0)));
 
             // A fenced block names it too, with a column.
@@ -2319,7 +2319,7 @@ mod tests {
             let links = links_on_first_line(&mut h, 0);
             assert_eq!(links.len(), 1, "{links:?}");
             h.click(links[0].x, links[0].y);
-            assert_eq!(state.tab.get(), ItemTab::Files);
+            assert_eq!(state.tab.get(), ItemTab::Code);
             assert_eq!(state.pending_jump.get(), Some(("src/manifest.rs".into(), 11, 11)));
         }
 

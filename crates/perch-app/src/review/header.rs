@@ -1,12 +1,12 @@
 //! The bar above the item view.
 //!
-//! The bar is the window's title bar. It holds what is open, and the four
-//! things a reader reaches for from anywhere in an item: GitHub, an
-//! agent's review of the branch, the item's one action (Submit review, or
-//! Start work on an issue), and the whole window. Conversation and the
-//! files are tabs under it, in `review::tabs`. Everything else about the
-//! item, its state and number, branches, checks and worktree, and what
-//! GitHub says about it, is `review::summary`, under Conversation's title.
+//! The bar is the window's title bar. It holds what is open, the switch
+//! between Conversation and Code, and the four things a reader reaches
+//! for from anywhere in an item: GitHub, an agent's review of the branch,
+//! the item's one action (Submit review, or Start work on an issue), and
+//! the whole window. Everything else about the item, its state and
+//! number, branches, checks and worktree, and what GitHub says about it,
+//! is `review::summary`, under Conversation's title.
 
 use std::rc::Rc;
 
@@ -29,11 +29,15 @@ use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph};
 /// a branch of the reader's own.
 pub fn header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // The bar is the window's title bar, so a press on anything in it that
-    // is not a control drags the window. Its two parts let the pointer
+    // is not a control drags the window. Its three parts let the pointer
     // through, and each control in them takes it back.
     title_bar(
-        Stack::horizontal((leading(app, state), trailing(app, state, backend)))
-            .debug_name("item bar"),
+        Stack::horizontal((
+            leading(app, state),
+            crate::review::switch::switch(state),
+            trailing(app, state, backend),
+        ))
+        .debug_name("item bar"),
     )
     // Floem bounds z-index to sibling stacking contexts. Submit review and
     // the review launcher open from this bar, so the bar sits above the
@@ -58,16 +62,18 @@ fn bar_style(s: floem::style::Style) -> floem::style::Style {
         .border_color(theme::BORDER_MUTED)
 }
 
-/// Either part of the bar. Both let the pointer through, so a press
-/// between the controls drags the window.
+/// Either side of the switch. Both let the pointer through, so a press
+/// between the controls drags the window. While the switch shows, the two
+/// take the bar's room in equal shares, so it sits at the bar's centre
+/// whatever is on either side of it; the title on the left gives way
+/// first, since the controls on the right hold their size. Without it,
+/// the title takes the room the controls leave.
 fn side(s: floem::style::Style) -> floem::style::Style {
     s.items_center().pointer_events_none()
 }
 
 /// What is open: the lights and the drawer control while the drawer is
-/// shut, then the item's state as a glyph, and its title. It takes the
-/// room the controls leave, and its title gives way first, since the
-/// controls hold their size.
+/// shut, then the item's state as a glyph, and its title.
 fn leading(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
         crate::ui::sidebar::lights_lane(app, theme::REVIEW_HEADER_PADDING)
@@ -134,7 +140,13 @@ fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
         primary_action(app, state, backend),
         expand_button(app),
     ))
-    .style(|s| side(s).flex_shrink(0.0_f32).gap(8.0))
+    .style(move |s| {
+        side(s)
+            .flex_shrink(0.0_f32)
+            .gap(8.0)
+            .justify_end()
+            .apply_if(state.has_files(), |s| s.flex_grow(1.0_f32).flex_basis(0.0))
+    })
 }
 
 /// The agent review launcher. An issue has no files to review until
@@ -285,6 +297,8 @@ pub(crate) mod tests {
     use floem::kurbo::Rect;
     use perch_github::{CheckState, Item, ItemSubject};
 
+    use crate::review::model::ItemTab;
+
     /// The first view whose debug name has `name` in it, depth first.
     pub(crate) fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
         if id.debug_name().contains(name) {
@@ -415,7 +429,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_bar_is_the_title_and_four_controls_in_a_row() {
+    fn the_bar_is_the_title_the_switch_and_four_controls_in_a_row() {
         let (harness, ..) = pull_request_harness();
         let bar = rect(&harness, "item bar");
         assert_eq!(bar.height(), theme::REVIEW_HEADER_HEIGHT);
@@ -426,16 +440,18 @@ pub(crate) mod tests {
         );
         assert_eq!(bar.y0, 0.0, "and at the window's top: it is the title bar");
 
-        // Left to right: the title, then GitHub, Review, Submit review and
-        // the expand control against the right edge. Conversation is a
-        // tab under the bar, not a switch in it.
+        // Left to right: the title, the switch at the bar's centre, then
+        // GitHub, Review, Submit review and the expand control against the
+        // right edge.
         let title = rect(&harness, "item title");
+        let switch = rect(&harness, "item switch");
         let github = rect(&harness, "github button");
         let review = rect(&harness, "review-launch-control");
         let submit = rect(&harness, "submit-review-control");
         let expand = rect(&harness, "expand button");
         for (name, r) in [
             ("title", title),
+            ("switch", switch),
             ("github", github),
             ("review", review),
             ("submit", submit),
@@ -444,9 +460,12 @@ pub(crate) mod tests {
             assert!(within(r, bar), "{name} at {r:?} is not in the bar {bar:?}");
             assert!(r.width() > 0.0, "{name} has no width");
         }
-        assert!(named(harness.root_id(), "item switch").is_none());
-        assert!(!within(rect(&harness, "chat tab"), bar));
-        assert!(title.x1 <= github.x0);
+        assert!(
+            (switch.center().x - bar.center().x).abs() <= 1.0,
+            "the switch at {switch:?} is not at the bar's centre {bar:?}"
+        );
+        assert!(title.x1 <= switch.x0);
+        assert!(switch.x1 <= github.x0);
         assert!(github.x1 <= review.x0);
         assert!(review.x1 <= submit.x0);
         assert!(submit.x1 <= expand.x0);
@@ -472,14 +491,14 @@ pub(crate) mod tests {
         let (harness, ..) = pull_request_harness_with(pull);
         let bar = rect(&harness, "item bar");
         let title = rect(&harness, "item title");
-        let github = rect(&harness, "github button");
+        let switch = rect(&harness, "item switch");
         assert!(
-            title.x1 <= github.x0,
-            "the title at {title:?} did not give way to {github:?}"
+            title.x1 <= switch.x0,
+            "the title at {title:?} did not give way to {switch:?}"
         );
         assert!(
-            title.width() > bar.width() / 2.0,
-            "the title at {title:?} does not have the room the controls leave"
+            (switch.center().x - bar.center().x).abs() <= 1.0,
+            "the title pushed the switch off the centre"
         );
         assert_eq!(
             rect(&harness, "expand button").x1,
@@ -506,7 +525,6 @@ pub(crate) mod tests {
         let bounds = popover.get_visual_rect_no_clip();
         let x = bounds.x0 + 2.0;
         let title_y = theme::REVIEW_HEADER_HEIGHT
-            + theme::TAB_HEIGHT
             + theme::CONVERSATION_PADDING
             + 10.0;
         let summary_y = title_y + theme::TEXT_PAGE_TITLE as f64 + theme::CONVERSATION_TITLE_GAP;
@@ -554,19 +572,59 @@ pub(crate) mod tests {
         assert!(!state.review_launcher_open.get());
     }
 
+    /// Conversation starts under the bar, with no tabs between; Code's
+    /// tabs start under the bar.
     #[test]
-    fn only_the_tabs_sit_between_the_bar_and_the_item() {
-        let (harness, ..) = pull_request_harness();
+    fn conversation_is_under_the_bar_and_codes_tabs_are_under_it_too() {
+        let (mut harness, _, state) = pull_request_harness();
         let bar = rect(&harness, "item bar");
-        let strip = rect(&harness, "tab strip");
         let title = rect(&harness, "conversation-title");
-        assert_eq!(strip.y0, bar.y1, "the tabs start under the bar");
-        assert_eq!(strip.height(), theme::TAB_HEIGHT);
+        assert!(named(harness.root_id(), "tab strip").is_none(), "Conversation has no tabs");
         assert_eq!(
             title.y0,
-            strip.y1 + theme::CONVERSATION_PADDING,
-            "the page starts under the tabs with the column's own padding"
+            bar.y1 + theme::CONVERSATION_PADDING,
+            "the page starts under the bar with the column's own padding"
         );
+
+        let code = rect(&harness, "Code pill").center();
+        harness.click(code.x, code.y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.tab.get(), ItemTab::Code);
+        let strip = rect(&harness, "tab strip");
+        assert_eq!(strip.y0, bar.y1, "the tabs start under the bar");
+        assert_eq!(strip.height(), theme::TAB_HEIGHT);
+        assert!(named(harness.root_id(), "conversation-title").is_none());
+
+        let conversation = rect(&harness, "Conversation pill").center();
+        harness.click(conversation.x, conversation.y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
+        assert!(named(harness.root_id(), "tab strip").is_none());
+    }
+
+    /// An issue with no checkout has no switch, and its title takes the
+    /// room the controls leave. Start work gives it a checkout, and the
+    /// switch comes.
+    #[test]
+    fn an_issue_has_no_switch_until_it_has_a_checkout() {
+        let (mut harness, _, state) = issue_harness();
+        let bar = rect(&harness, "item bar");
+        assert_eq!(rect(&harness, "item switch").width(), 0.0);
+        assert!(named(harness.root_id(), "tab strip").is_none());
+        let title = rect(&harness, "item title");
+        let github = rect(&harness, "github button");
+        assert!(title.x1 <= github.x0);
+
+        let mut item = (*state.item.get().unwrap()).clone();
+        item.checkout = Some(checkout());
+        state.item.set(Some(Arc::new(item)));
+        harness.rebuild();
+        harness.paint();
+        let switch = rect(&harness, "item switch");
+        assert!(switch.width() > 0.0, "no switch with a checkout");
+        assert!((switch.center().x - bar.center().x).abs() <= 1.0);
     }
 
     #[test]
@@ -574,11 +632,10 @@ pub(crate) mod tests {
         let (mut harness, app, _) = pull_request_harness();
         let bar = named(harness.root_id(), "item bar").unwrap();
         let title = rect(&harness, "item title");
-        let github = rect(&harness, "github button");
 
-        // The room between the title and the controls is the bar's own, so
+        // The room between the title and the switch is the bar's own, so
         // a press there is a drag and not a click on anything.
-        let x = (title.x1 + github.x0) / 2.0;
+        let x = (title.x1 + rect(&harness, "item switch").x0) / 2.0;
         let y = rect(&harness, "item bar").center().y;
         let hit = harness.element_id_at(x, y).expect("nothing under the bar");
         assert_eq!(hit.owning_id(), bar, "the bar's side took the press");

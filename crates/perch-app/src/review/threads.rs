@@ -2932,7 +2932,7 @@ fn approval_card(
 }
 
 /// What a finished Work run changed, `4 files changed, +120 −30`: a
-/// click shows it on Files as the Run scope. Nothing for a question, for
+/// click shows it on Code as the Run scope. Nothing for a question, for
 /// a run still going, or for one that changed nothing.
 fn work_changes(state: ReviewState, backend: Rc<Backend>, run: &RunRecord) -> floem::AnyView {
     let (Some(before), Some(after)) = (run.work_before.clone(), run.work_after.clone()) else {
@@ -2968,7 +2968,7 @@ fn work_changes(state: ReviewState, backend: Rc<Backend>, run: &RunRecord) -> fl
                             after: after.clone(),
                         },
                     );
-                    state.show_tab(crate::review::ItemTab::Files);
+                    state.show_tab(crate::review::ItemTab::Code);
                 })
                 .debug_name("run-changes")
                 .style(|s| {

@@ -12,7 +12,7 @@
 //!
 //! A person goes in as `@login`. A file goes in as `@path` for an agent,
 //! as Claude Code and Codex take one, and as a code span for GitHub,
-//! where `@` would be a mention and a code span links to Files.
+//! where `@` would be a mention and a code span links to Code.
 //!
 //! The list is drawn over the window, not in the composer, so a composer
 //! in a card in the code does not cut it off.

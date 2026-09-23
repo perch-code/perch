@@ -375,7 +375,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 {
                     let showing = match review.tab.get() {
                         crate::review::model::ItemTab::Conversation => true,
-                        crate::review::model::ItemTab::Files => {
+                        crate::review::model::ItemTab::Code => {
                             review.active_file().is_some_and(|f| !f.truncated)
                                 && review.drawn_picture().is_none()
                         }
@@ -393,12 +393,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // Cmd-F puts the bar up over the code, or gives it the
                 // keyboard again; Cmd-G and Cmd-Shift-G walk the matches,
                 // putting the bar up without the keyboard when it is down;
-                // Alt-Cmd-C, -W and -R are its toggles. Files only, with a
+                // Alt-Cmd-C, -W and -R are its toggles. Code only, with a
                 // file that has an editor to find anything in; a text box
                 // elsewhere keeps its own keys.
                 let finding = !typing
                     && review.is_open()
-                    && review.tab.get() == crate::review::model::ItemTab::Files
+                    && review.tab.get() == crate::review::model::ItemTab::Code
                     && review.active.with(Option::is_some)
                     && review.drawn_picture().is_none();
                 if finding {
@@ -436,9 +436,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 if typing || !review.is_open() {
                     return EventPropagation::Continue;
                 }
-                // Cmd-Shift-1 shows Conversation, opening its tab again if it
-                // was closed, as the strip's chat tile does; Cmd-Shift-2 goes
-                // back to the open file. Here rather than with the other Cmd
+                // Cmd-Shift-1 shows Conversation and Cmd-Shift-2 Code, as the
+                // switch in the bar does. Here rather than with the other Cmd
                 // keys because they are pressed from the code as often as
                 // from anywhere.
                 if key.modifiers == OS_MOD | Modifiers::SHIFT {
@@ -448,8 +447,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                             return EventPropagation::Stop;
                         }
                         Code::Digit2 => {
-                            if review.has_files() && review.active.with(Option::is_some) {
-                                review.show_tab(crate::review::model::ItemTab::Files);
+                            if review.has_files() {
+                                review.show_tab(crate::review::model::ItemTab::Code);
                             }
                             return EventPropagation::Stop;
                         }
@@ -586,22 +585,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 }
 
-                // Cmd-W closes Conversation's tab while it shows, as it
-                // closes a file's.
-                if key.code == Code::KeyW
-                    && key.modifiers == OS_MOD
-                    && review.tab.get() == crate::review::model::ItemTab::Conversation
-                    && review.conversation_open.get()
-                {
-                    review.close_conversation();
-                    return EventPropagation::Stop;
-                }
                 // Cmd-W closes the open file, as in any editor; `v` checks it
                 // as viewed, `]` and `[` go to the next and previous change,
                 // `}` and `{` open the next and previous unviewed file. Files
                 // only. The braces are shifted brackets: the physical codes
                 // with Shift alone, so Cmd-[ steps through the tabs.
-                if review.tab.get() == crate::review::model::ItemTab::Files {
+                if review.tab.get() == crate::review::model::ItemTab::Code {
                     let shifted = key.modifiers == Modifiers::SHIFT;
                     match key.code {
                         Code::KeyW if key.modifiers == OS_MOD => {
@@ -723,7 +712,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 // Cmd-1 is the sidebar's search. With the drawer shut it opens
                 // the drawer, and the box takes the keyboard once it is built.
-                Code::Digit1 => {
+                // Not Cmd-Shift-1, which is Conversation's, and reaches here
+                // too when the root is its target.
+                Code::Digit1 if !key.modifiers.contains(Modifiers::SHIFT) => {
                     if state.sidebar_open.get() {
                         if let Some(id) = state.search_box.get() {
                             id.request_focus();
@@ -967,7 +958,7 @@ mod tests {
         );
     }
 
-    /// The window on Files with one changed file open in the editor.
+    /// The window on Code with one changed file open in the editor.
     fn window_with_a_file_open() -> (HeadlessHarness, ReviewState) {
         use crate::review::model::{ItemTab, Phase};
         use perch_github::{Item, ItemCheckout};
@@ -993,7 +984,7 @@ mod tests {
         review.item.set(Some(Arc::new(item)));
         review.ready.set(true);
         review.set_phase(Phase::Ready);
-        review.tab.set(ItemTab::Files);
+        review.tab.set(ItemTab::Code);
         review.composer_autofocus.set(false);
         let file = Arc::new(crate::backend::build_loaded_file(
             "src/x.rs".into(),
@@ -1132,24 +1123,20 @@ mod tests {
         harness.paint();
         assert_eq!(review.active.get(), None, "the file is still open");
         assert!(review.tabs.with(Vec::is_empty), "the tab is still there");
-        // Conversation's tab, the one left, shows in its place; the next
-        // Cmd-W closes it.
-        assert_eq!(review.tab.get(), crate::review::model::ItemTab::Conversation);
-        harness.dispatch_event(cmd_w());
-        harness.rebuild();
-        assert!(!review.conversation_open.get());
+        // Code stays, with nothing open, rather than going to Conversation.
+        assert_eq!(review.tab.get(), crate::review::model::ItemTab::Code);
 
         // With nothing open, the key is left for whoever else wants it.
         harness.dispatch_event(cmd_w());
         harness.rebuild();
         assert_eq!(review.active.get(), None);
-        assert!(!review.conversation_open.get());
+        assert_eq!(review.tab.get(), crate::review::model::ItemTab::Code);
     }
 
-    /// Cmd-] and Cmd-[ step through the tabs in the strip's order,
-    /// Conversation's then the files', wrapping at both ends, from the
-    /// code as from anywhere. With no tab left, Cmd-[ is the way back to
-    /// the sidebar again.
+    /// Cmd-] and Cmd-[ step through Code's tabs in the strip's order,
+    /// wrapping at both ends, from the code as from anywhere; from
+    /// Conversation they go to the first or the last. With no tab left,
+    /// Cmd-[ is the way back to the sidebar again.
     #[test]
     fn cmd_brackets_step_through_the_tabs_and_wrap() {
         use crate::review::model::ItemTab;
@@ -1161,8 +1148,8 @@ mod tests {
         let next = || key(Code::BracketRight, Key::Character("]".into()), OS_MOD);
         let previous = || key(Code::BracketLeft, Key::Character("[".into()), OS_MOD);
         let showing = |review: &ReviewState| match review.tab.get() {
-            ItemTab::Conversation => "chat".to_string(),
-            ItemTab::Files => review.active.get().unwrap_or_default(),
+            ItemTab::Conversation => "conversation".to_string(),
+            ItemTab::Code => review.active.get().unwrap_or_default(),
         };
 
         let mut seen = Vec::new();
@@ -1171,7 +1158,7 @@ mod tests {
             harness.rebuild();
             seen.push(showing(&review));
         }
-        assert_eq!(seen, ["src/y.rs", "chat", "src/x.rs", "src/y.rs"]);
+        assert_eq!(seen, ["src/y.rs", "src/x.rs", "src/y.rs", "src/x.rs"]);
 
         let mut seen = Vec::new();
         for _ in 0..4 {
@@ -1179,12 +1166,22 @@ mod tests {
             harness.rebuild();
             seen.push(showing(&review));
         }
-        assert_eq!(seen, ["src/x.rs", "chat", "src/y.rs", "src/x.rs"]);
+        assert_eq!(seen, ["src/y.rs", "src/x.rs", "src/y.rs", "src/x.rs"]);
+
+        // From Conversation, to the first tab, or the last; Conversation
+        // is never stepped to.
+        review.show_tab(ItemTab::Conversation);
+        harness.dispatch_event(next());
+        harness.rebuild();
+        assert_eq!(showing(&review), "src/x.rs");
+        review.show_tab(ItemTab::Conversation);
+        harness.dispatch_event(previous());
+        harness.rebuild();
+        assert_eq!(showing(&review), "src/y.rs");
 
         // With every tab closed, Cmd-[ leaves the item.
         review.close_tab("src/x.rs");
         review.close_tab("src/y.rs");
-        review.close_conversation();
         harness.rebuild();
         assert!(review.is_showing());
         harness.dispatch_event(previous());
@@ -1192,11 +1189,64 @@ mod tests {
         assert!(!review.is_showing(), "Cmd-[ did not go back to the sidebar");
     }
 
-    /// On Conversation, Cmd-W closes Conversation's tab, as it would a
-    /// file's, and leaves the file's be: the file shows in its place. The
-    /// file's goes on the next.
+    /// Cmd-Shift-1 and Cmd-Shift-2 pick Conversation and Code. Code with
+    /// no file open opens the first change; with none, the tree opens
+    /// beside a pane that says so.
     #[test]
-    fn cmd_w_on_conversation_closes_it_and_leaves_the_files_tab() {
+    fn the_mode_keys_switch_and_code_opens_the_first_change_or_the_tree() {
+        use crate::review::model::ItemTab;
+        use std::sync::Arc;
+        let (mut harness, review) = window_with_a_file_open();
+        let mode = |n: u8| {
+            let (code, c) = if n == 1 { (Code::Digit1, "!") } else { (Code::Digit2, "@") };
+            key(code, Key::Character(c.into()), OS_MOD | Modifiers::SHIFT)
+        };
+        // Closed from Conversation, so the tree does not come for an
+        // empty Code.
+        harness.dispatch_event(mode(1));
+        review.close_tab("src/x.rs");
+        review.changed_files.set(Arc::new(vec![perch_git::ChangedFile {
+            path: "src/x.rs".into(),
+            old_path: None,
+            status: perch_git::ChangeStatus::Modified,
+            additions: 1,
+            deletions: 1,
+            binary: false,
+            head_blob: None,
+        }]));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(review.tab.get(), ItemTab::Conversation);
+        assert!(named(harness.root_id(), "conversation-title").is_some());
+
+        harness.dispatch_event(mode(2));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(review.tab.get(), ItemTab::Code);
+        assert_eq!(review.active.get().as_deref(), Some("src/x.rs"), "the first change opened");
+        assert!(named(harness.root_id(), "files-panel").is_none(), "the tree opened over a file");
+
+        // With no changes and nothing open, the tree comes, and the pane
+        // says there is nothing changed.
+        harness.dispatch_event(mode(1));
+        review.close_tab("src/x.rs");
+        review.changed_files.set(Arc::new(Vec::new()));
+        harness.dispatch_event(mode(2));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(review.tab.get(), ItemTab::Code);
+        assert_eq!(review.active.get(), None);
+        assert!(named(harness.root_id(), "files-panel").is_some(), "no tree beside an empty Code");
+        assert!(
+            named(harness.root_id(), "\"No changes\"").is_some(),
+            "the pane does not say there are no changes"
+        );
+    }
+
+    /// On Conversation, Cmd-W does nothing: Conversation cannot be closed,
+    /// and the file's tab behind it stays.
+    #[test]
+    fn cmd_w_on_conversation_closes_nothing() {
         use crate::review::model::ItemTab;
         let (mut harness, review) = window_with_a_file_open();
         review.show_tab(ItemTab::Conversation);
@@ -1206,16 +1256,10 @@ mod tests {
         harness.dispatch_event(cmd_w());
         harness.rebuild();
         harness.paint();
-        assert!(!review.conversation_open.get(), "Conversation's tab is still there");
-        assert_eq!(review.tab.get(), ItemTab::Files);
+        assert_eq!(review.tab.get(), ItemTab::Conversation);
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
         assert_eq!(review.tabs.with(Vec::len), 1);
-        assert!(named(harness.root_id(), "chat tab").is_none());
-        assert!(named(harness.root_id(), "tinted editor").is_some(), "the file is not showing");
-
-        harness.dispatch_event(cmd_w());
-        harness.rebuild();
-        assert!(review.tabs.with(Vec::is_empty), "the file's tab is still there");
+        assert!(named(harness.root_id(), "conversation-title").is_some());
     }
 
     /// The review launcher's instructions are a text box: `a` typed there

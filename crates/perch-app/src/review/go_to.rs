@@ -1067,7 +1067,7 @@ fn page(state: ReviewState, down: bool) {
     state.go_to.selected.set(to);
 }
 
-/// Enter, or a click: open the row's file on Files, at the query's line
+/// Enter, or a click: open the row's file on Code, at the query's line
 /// when it has one. The file on screen stays, and gets the keyboard back
 /// when it had it; another file is another editor, and the keyboard is
 /// nobody's until the reader clicks.
@@ -1085,13 +1085,13 @@ pub fn accept(state: ReviewState, open_file: &OpenFile, index: usize) {
             path, line, column, ..
         } => (path, Some(line), column),
     };
-    let on_files = state.tab.get_untracked() == ItemTab::Files;
+    let on_files = state.tab.get_untracked() == ItemTab::Code;
     let on_screen = state
         .active
         .with_untracked(|a| a.as_deref() == Some(path.as_str()));
     close(state, on_files && on_screen);
     if !on_files {
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
     }
     match line {
         Some(line) => state.navigate_to(&path, line.max(1) - 1, column.map_or(0, |c| c.max(1) - 1)),
@@ -2001,7 +2001,7 @@ mod window {
     use crate::state::AppState;
     use crate::theme;
 
-    /// The window on Files with `src/x.rs` open, a branch that changed it
+    /// The window on Code with `src/x.rs` open, a branch that changed it
     /// and deleted `src/gone.rs`, and a few other files in the tree.
     fn harness() -> (HeadlessHarness, ReviewState) {
         let root = TestRoot::new();
@@ -2024,7 +2024,7 @@ mod window {
         state.item.set(Some(Arc::new(item)));
         state.ready.set(true);
         state.set_phase(Phase::Ready);
-        state.tab.set(ItemTab::Files);
+        state.tab.set(ItemTab::Code);
         state.composer_autofocus.set(false);
         state.tree.set(Arc::new(
             [
@@ -2232,7 +2232,7 @@ mod window {
         assert_eq!(state.go_to.query.get(), "");
     }
 
-    /// Typed from Conversation, Enter opens the file on Files, shows it
+    /// Typed from Conversation, Enter opens the file on Code, shows it
     /// in the tree, and puts it first among what was open.
     #[test]
     fn typing_narrows_the_list_and_enter_opens_the_file_on_files() {
@@ -2255,7 +2255,7 @@ mod window {
 
         press(&mut harness, Code::Enter, NamedKey::Enter);
         assert!(!state.go_to.open.get());
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         assert_eq!(state.active.get().as_deref(), Some("src/lib/config.rs"));
         assert!(
             state.expanded.with(|e| e.contains("src/lib")),

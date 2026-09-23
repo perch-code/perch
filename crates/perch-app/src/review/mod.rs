@@ -27,6 +27,7 @@ pub mod scope;
 pub mod styling;
 pub mod submit_review;
 pub mod summary;
+pub mod switch;
 pub mod tabs;
 pub mod threads;
 pub mod timeline;
@@ -94,16 +95,22 @@ pub fn review_view(
             // not let a descendant's z-index escape its parent's sibling
             // context.
             .style(|s| s.width_full().flex_shrink(0.0_f32).z_index(1)),
-        // The tabs, once there is an item to have them. They run the
+        // Code's tabs, once there is an item to have them. They run the
         // pane's width, over the drawer too, so its tiles sit over what
-        // they open.
+        // they open. Conversation has none.
         dyn_container(
-            move || state.phase.get(),
-            move |phase| match phase {
-                Phase::Issue | Phase::Ready => {
+            {
+                // A memo, so the strip is built again when it comes or
+                // goes and not on every write to the tab.
+                let code = floem::reactive::Memo::new(move |_| showing_code(state));
+                move || code.get()
+            },
+            move |code| {
+                if code {
                     tabs::tab_bar(app, state, tabs_backend.clone()).into_any()
+                } else {
+                    Empty::new().into_any()
                 }
-                Phase::Preparing | Phase::Failed => Empty::new().into_any(),
             },
         )
         .style(|s| s.width_full().flex_shrink(0.0_f32)),
@@ -171,19 +178,17 @@ pub fn review_view(
     })
 }
 
-/// What the pane under the tabs holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Showing {
-    Conversation,
-    /// The open file, or the word that none is, for an item with files.
-    Code,
-    /// Every tab closed on an item with no files to open.
-    Nothing,
+/// Whether the pane shows Code: its tabs and the editor. An item with no
+/// files shows Conversation whatever its tab says. Tracked.
+fn showing_code(state: ReviewState) -> bool {
+    matches!(state.phase.get(), Phase::Issue | Phase::Ready)
+        && state.tab.get() == ItemTab::Code
+        && state.has_files()
 }
 
-/// What the tab showing holds, under the tabs. Threads anchored in the
-/// open file are drawn inline in the code; the whole conversation is
-/// Conversation's, and the files are a tree in the drawer on the right.
+/// What the switch has picked. Threads anchored in the open file are
+/// drawn inline in the code; the whole conversation is Conversation's,
+/// and the files are a tree in the drawer on the right.
 fn item_view(
     app: AppState,
     state: ReviewState,
@@ -193,33 +198,24 @@ fn item_view(
 ) -> impl IntoView {
     // A memo, so the pane is built again when what it shows changes and
     // not on every write to the tab.
-    let showing = floem::reactive::Memo::new(move |_| match state.tab.get() {
-        ItemTab::Conversation => Showing::Conversation,
-        ItemTab::Files if state.has_files() => Showing::Code,
-        ItemTab::Files => Showing::Nothing,
-    });
+    let showing = floem::reactive::Memo::new(move |_| showing_code(state));
     let refresh_backend = backend.clone();
     Stack::vertical((
         dyn_container(
             move || showing.get(),
-            move |showing| match showing {
-                Showing::Conversation => conversation::view(
-                    app,
-                    state,
-                    backend.clone(),
-                    open_file.clone(),
-                    open_item.clone(),
-                )
-                .into_any(),
-                Showing::Code => {
+            move |code| {
+                if code {
                     editor::editor_pane(app, state, backend.clone(), open_file.clone()).into_any()
+                } else {
+                    conversation::view(
+                        app,
+                        state,
+                        backend.clone(),
+                        open_file.clone(),
+                        open_item.clone(),
+                    )
+                    .into_any()
                 }
-                Showing::Nothing => centered_message(
-                    SidebarIcon::Chat,
-                    || "Nothing open".to_string(),
-                    || "Press ⇧⌘1 to show the conversation.".to_string(),
-                )
-                .into_any(),
             },
         )
         .style(|s| s.size_full().min_height(0.0)),

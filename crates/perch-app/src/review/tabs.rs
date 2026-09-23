@@ -1,5 +1,4 @@
-//! The item's tabs, shaped like an editor's: Conversation's, then the open
-//! files'.
+//! Code's tabs, shaped like an editor's: the open files'.
 //!
 //! The active tab takes the surface of what it shows, the editor's or the
 //! page's, and an accent stripe along its top, so it reads as continuous
@@ -27,19 +26,17 @@ use crate::theme;
 use crate::ui::drawer::{self, DrawerView};
 use crate::ui::widgets::icon_in;
 
-/// Conversation's tab and the open files', then, at the right end, what
-/// is about the open file while it shows: the way back from a retained
-/// snapshot, the notice about what the files are when it is not the pull
-/// request's latest, the change navigation and the file's tiles; then the
-/// tiles every tab has. The way back and the notice are here because a
-/// file has no summary to hold them; on Conversation, the summary has
-/// them both.
+/// The open files' tabs, then, at the right end, what is about the open
+/// file while it shows: the way back from a retained snapshot, the notice
+/// about what the files are when it is not the pull request's latest, the
+/// change navigation and the file's tiles; then the drawer's. The way back
+/// and the notice are here because a file has no summary to hold them; on
+/// Conversation, the summary has them both.
 pub fn tab_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // A memo, so the file's notes are built again when a file comes to
     // show or goes, and not on every write to the tab.
     let showing_file = floem::reactive::Memo::new(move |_| on_file(state));
     Stack::horizontal((
-        conversation_tab(state),
         dyn_container(
             move || state.tabs.with(|t| t.is_empty()),
             {
@@ -63,8 +60,7 @@ pub fn tab_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .min_width(0.0)
                 .height_full()
         }),
-        // Built only while a file shows: on Conversation the summary has
-        // them, and there is one of each.
+        // Built only while a file shows, since there is one of each.
         dyn_container(move || showing_file.get(), {
             let backend = backend.clone();
             move |showing: bool| {
@@ -100,42 +96,9 @@ pub fn tab_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     })
 }
 
-/// Whether the pane shows a file's tab, rather than Conversation or
-/// nothing. Tracked.
+/// Whether the pane shows Code, rather than Conversation. Tracked.
 fn on_file(state: ReviewState) -> bool {
-    state.tab.get() == ItemTab::Files && state.has_files()
-}
-
-/// Conversation's tab, before the files': a tab as theirs are, with the
-/// chat glyph where a file has its language's dot. Closed as theirs are;
-/// the chat tile, or Cmd-Shift-1, opens it again. Outside the files'
-/// scroll, so it stays in sight however many files are open.
-fn conversation_tab(state: ReviewState) -> impl IntoView {
-    dyn_container(
-        move || state.conversation_open.get(),
-        move |open| {
-            if !open {
-                return Empty::new().into_any();
-            }
-            let active = move || state.tab.get() == ItemTab::Conversation;
-            Stack::horizontal((
-                crate::ui::widgets::sidebar_glyph(SidebarIcon::Chat, theme::FG_MUTED).style(|s| {
-                    s.size(14.0, 14.0)
-                        .flex_shrink(0.0_f32)
-                        .margin_right(6.0)
-                }),
-                Label::derived(|| "Conversation".to_string())
-                    .style(move |s| tab_label(s, active())),
-                close_button(move || state.close_conversation())
-                    .debug_name("close chat"),
-            ))
-            .debug_name("chat tab")
-            .on_event_stop(el::Click, move |_, _| state.show_tab(ItemTab::Conversation))
-            .style(move |s| tab_style(s, active()))
-            .into_any()
-        },
-    )
-    .style(|s| s.height_full().flex_shrink(0.0_f32))
+    state.tab.get() == ItemTab::Code && state.has_files()
 }
 
 fn open_tabs(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
@@ -170,11 +133,11 @@ fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Orig
     // file the pane would show.
     let (active_box, active_text) = (path.clone(), path.clone());
     let is_active_box = move || {
-        state.tab.get() == ItemTab::Files
+        state.tab.get() == ItemTab::Code
             && state.active.with(|a| a.as_deref() == Some(active_box.as_str()))
     };
     let is_active_text = move || {
-        state.tab.get() == ItemTab::Files
+        state.tab.get() == ItemTab::Code
             && state.active.with(|a| a.as_deref() == Some(active_text.as_str()))
     };
 
@@ -196,10 +159,8 @@ fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Orig
         close_button(move || state.close_tab(&close_path)).debug_name("close file"),
     ))
     .debug_name(debug_name)
-    // From Conversation, a file's tab goes back to the file, in one
-    // rebuild of the pane rather than one for each write. Its content is
-    // asked for when it is not here, as for a tab an item opened on again
-    // whose load has failed.
+    // Its content is asked for when it is not here, as for a tab an item
+    // opened on again whose load has failed.
     .on_event_stop(el::Click, move |_, _| show_file(state, &backend, &select_path))
     .style(move |s| tab_style(s, is_active_box()))
 }
@@ -209,7 +170,7 @@ fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Orig
 /// not here.
 fn show_file(state: ReviewState, backend: &Backend, path: &str) {
     let load = floem::reactive::Effect::batch(|| {
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         state.open_tab(path)
     });
     if load {
@@ -217,42 +178,37 @@ fn show_file(state: ReviewState, backend: &Backend, path: &str) {
     }
 }
 
-/// Whether Conversation's tab is in the strip, and the files' tabs.
-fn strip(state: ReviewState) -> (bool, Vec<String>) {
-    let conversation = state.conversation_open.get_untracked();
-    let files = if state.has_files() {
+/// The files' tabs, when there are files to have them.
+fn strip(state: ReviewState) -> Vec<String> {
+    if state.has_files() {
         state.tabs.with_untracked(|t| t.iter().map(|t| t.path.clone()).collect())
     } else {
         Vec::new()
-    };
-    (conversation, files)
+    }
 }
 
 /// Whether the strip has a tab for Cmd-] and Cmd-[ to step to.
 pub fn has_tabs(state: ReviewState) -> bool {
-    let (conversation, files) = strip(state);
-    conversation || !files.is_empty()
+    !strip(state).is_empty()
 }
 
-/// Show the tab after the one showing, or before it, wrapping at the
-/// ends, as VS Code's Cmd-] and Cmd-[ do across its editors'. The order
-/// is the strip's: Conversation's, then the files'. False when there is
-/// no tab to go to.
+/// Show the file's tab after the one showing, or before it, wrapping at
+/// the ends, as VS Code's Cmd-] and Cmd-[ do across its editors'. From
+/// Conversation, the first or the last. False when there is no tab to go
+/// to.
 pub fn step_tab(state: ReviewState, backend: &Backend, forward: bool) -> bool {
-    let (conversation, files) = strip(state);
-    let count = usize::from(conversation) + files.len();
+    let files = strip(state);
+    let count = files.len();
     if count == 0 {
         return false;
     }
     let current = match state.tab.get_untracked() {
-        ItemTab::Conversation if conversation => Some(0),
-        ItemTab::Files => state.active.with_untracked(|active| {
+        ItemTab::Code => state.active.with_untracked(|active| {
             active
                 .as_deref()
                 .and_then(|a| files.iter().position(|p| p == a))
-                .map(|i| i + usize::from(conversation))
         }),
-        _ => None,
+        ItemTab::Conversation => None,
     };
     let next = match current {
         Some(i) if forward => (i + 1) % count,
@@ -260,10 +216,7 @@ pub fn step_tab(state: ReviewState, backend: &Backend, forward: bool) -> bool {
         None if forward => 0,
         None => count - 1,
     };
-    match next.checked_sub(usize::from(conversation)) {
-        None => state.show_tab(ItemTab::Conversation),
-        Some(i) => show_file(state, backend, &files[i]),
-    }
+    show_file(state, backend, &files[next]);
     true
 }
 
@@ -279,7 +232,7 @@ fn strip_rule() -> Empty {
     })
 }
 
-/// A tab, a file's or Conversation's. The active one has the surface of
+/// A file's tab. The active one has the surface of
 /// what it shows, the editor's or the page's, which are one white, with
 /// the stripe on top and nothing along its bottom, so the tab and what it
 /// shows join up.
@@ -452,8 +405,8 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 
 /// The tiles at the strip's right end: while a file shows, Source, when
 /// the file is a picture, then Show whole, then Stacked and Split, with a
-/// rule after each group; then, on every tab, Conversation and the drawer
-/// on the right, on the files or on the agents. A chosen tile is filled;
+/// rule after each group; then the drawer on the right, on the files or
+/// on the agents. A chosen tile is filled;
 /// the others are only a glyph until the pointer is over one. The last
 /// group is at the strip's end, so its tiles keep their place when the
 /// file's come and go.
@@ -466,8 +419,6 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 /// every file opens folded. Source is the file's, for the app's life: a
 /// reader wants the markup of this SVG, not of SVGs. The drawer is the
 /// window's, and comes back at the next launch as the layout does.
-/// Conversation's tile is no preference but a place to go, as the
-/// drawer's are, and sits with them.
 fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         Stack::horizontal((
@@ -484,7 +435,6 @@ fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoVi
         .debug_name("file tiles")
         .style(move |s| s.items_center().apply_if(!on_file(state), |s| s.hide())),
         Stack::horizontal((
-            conversation_tile(state),
             // An item with no files has no files for the drawer to hold.
             drawer_tile(app, backend.clone(), DrawerView::Files)
                 .style(move |s| s.apply_if(!state.has_files(), |s| s.hide())),
@@ -572,25 +522,6 @@ fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: Sidebar
     .debug_name(format!("{} tile", layout.name()))
 }
 
-/// Conversation, filled while it shows. A click shows it, and opens its
-/// tab again when it was closed.
-fn conversation_tile(state: ReviewState) -> impl IntoView {
-    let active = move || state.tab.get() == ItemTab::Conversation;
-    tip_with(
-        tile(SidebarIcon::Chat, active, move || {
-            state.show_tab(ItemTab::Conversation)
-        })
-        .debug_name("chat tile"),
-        move || {
-            if active() {
-                "Showing the conversation".to_string()
-            } else {
-                "Show the conversation".to_string()
-            }
-        },
-    )
-}
-
 /// The drawer on the right, on one of the things it holds: filled while
 /// it shows that. A click on the filled tile shuts the drawer; on the
 /// other, the drawer opens on it, or swaps to it. Nothing to give the
@@ -670,8 +601,10 @@ mod tests {
         let (mut harness, app, state) = pull_request_harness();
         // The sidebar shut, so the window has the room to dock, and
         // Files, where the tiles are, with a worktree of one file.
+        // A file open, so Code does not open the tree for want of one.
         app.sidebar_open.set(false);
-        state.show_tab(ItemTab::Files);
+        state.open_tab("README.md");
+        state.show_tab(ItemTab::Code);
         state.tree.set(Arc::new(vec![perch_git::TreeEntry::new("README.md", false)]));
         harness.rebuild();
         harness.paint();
@@ -727,7 +660,7 @@ mod tests {
         assert_eq!(app.drawer_shown(), None);
         assert!(named(harness.root_id(), "agents-panel").is_none());
         assert_eq!(rect(&harness, "pane-body").x1, 1400.0);
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
     }
 
     /// A drawer asked to show the files stays shut on an issue, which has
@@ -762,95 +695,28 @@ mod tests {
         assert_eq!(app.drawer_shown(), Some(DrawerView::Files));
     }
 
-    /// Conversation is a tab before the files', and the chat tile at the
-    /// strip's end shows it. Closed, its tab goes and the file shows; the
-    /// tile opens it again, in its place before the files. The file's
-    /// tiles are there only while a file shows, and the tiles after them
-    /// keep their place when they come and go.
+    /// Code's strip is the files' tabs, the first at its left edge, then
+    /// the file's tiles and the drawer's. Conversation has no tab in it.
+    /// The rule after the tabs runs on from the last one.
     #[test]
-    fn conversation_is_a_tab_that_the_chat_tile_shows_and_opens_again() {
+    fn codes_strip_is_the_files_tabs_then_the_tiles() {
         let (mut harness, _, state) = pull_request_harness();
         state.open_tab("src/x.rs");
+        state.show_tab(ItemTab::Code);
         harness.rebuild();
         harness.paint();
         let strip = rect(&harness, "tab strip");
-        let conversation = rect(&harness, "chat tab");
         let file = rect(&harness, "file tab:src/x.rs");
-        assert_eq!(conversation.x0, strip.x0, "Conversation's tab is first");
-        assert!(within(conversation, strip) && within(file, strip));
-        assert!(conversation.x1 <= file.x0);
-        assert_eq!((file.y0, file.y1), (strip.y0, strip.y1), "a file's tab fills the strip, as Conversation's does");
-        assert_eq!((conversation.y0, conversation.y1), (strip.y0, strip.y1));
-        let tile = rect(&harness, "chat tile");
-        assert!(tile.x1 <= rect(&harness, "files tile").x0);
-        assert!(rect(&harness, "files tile").x1 <= rect(&harness, "agents tile").x0);
-        assert_eq!(
-            rect(&harness, "file tiles").width(),
-            0.0,
-            "a file's tiles on Conversation"
-        );
-        assert!(named(harness.root_id(), "conversation-title").is_some());
-        // The rule after the tabs runs on to the tiles, with no gap before
-        // them.
-        assert_eq!(rect(&harness, "tabs rule").x1, rect(&harness, "file tiles").x0);
-
-        // The file's tab shows the file, and its tiles come; the chat
-        // tile stays where it was.
-        harness.click(file.center().x, file.center().y);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(file.x0, strip.x0, "the file's tab is first");
+        assert_eq!((file.y0, file.y1), (strip.y0, strip.y1), "a file's tab fills the strip");
+        assert!(named(harness.root_id(), "chat").is_none(), "no Conversation in the strip");
         assert!(rect(&harness, "file tiles").width() > 0.0);
-        assert_eq!(rect(&harness, "chat tile"), tile);
-        assert!(named(harness.root_id(), "conversation-title").is_none());
-        // The room after the tab is ruled, from the tab to the controls
-        // and down to the pane.
+        assert!(rect(&harness, "file tiles").x1 <= rect(&harness, "files tile").x0);
+        assert!(rect(&harness, "files tile").x1 <= rect(&harness, "agents tile").x0);
         let rule = rect(&harness, "tabs rule");
         assert_eq!(rule.x0, file.x1);
-        assert_eq!(rule.y1, strip.y1);
         assert!(rule.width() > 0.0);
-
-        // Back to Conversation, and closed from its tab: the file shows.
-        harness.click(conversation.center().x, conversation.center().y);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(state.tab.get(), ItemTab::Conversation);
-        let close = rect(&harness, "close chat");
-        assert!(within(close, conversation));
-        harness.click(close.center().x, close.center().y);
-        harness.rebuild();
-        harness.paint();
-        assert!(!state.conversation_open.get());
-        assert_eq!(state.tab.get(), ItemTab::Files);
-        assert!(named(harness.root_id(), "chat tab").is_none());
-        assert_eq!(
-            rect(&harness, "file tab:src/x.rs").x0,
-            strip.x0,
-            "the file's tab moved into the room"
-        );
-
-        // The chat tile opens it again, before the file's, and shows it.
-        harness.click(tile.center().x, tile.center().y);
-        harness.rebuild();
-        harness.paint();
-        assert!(state.conversation_open.get());
-        assert_eq!(state.tab.get(), ItemTab::Conversation);
-        assert_eq!(rect(&harness, "chat tab").x0, strip.x0);
-        assert_eq!(rect(&harness, "file tab:src/x.rs"), file);
-        assert!(named(harness.root_id(), "conversation-title").is_some());
-    }
-
-    /// An issue has Conversation's tab as every item does, and of the
-    /// tiles only Conversation's and the agents': it has no files.
-    #[test]
-    fn an_issue_has_conversations_tab_and_no_tiles_for_files() {
-        let (harness, ..) = issue_harness();
-        let strip = rect(&harness, "tab strip");
-        assert!(within(rect(&harness, "chat tab"), strip));
-        assert!(within(rect(&harness, "chat tile"), strip));
-        assert!(within(rect(&harness, "agents tile"), strip));
-        assert_eq!(rect(&harness, "files tile").width(), 0.0);
-        assert_eq!(rect(&harness, "file tiles").width(), 0.0);
+        assert_eq!(rule.y1, strip.y1);
     }
 
     #[test]

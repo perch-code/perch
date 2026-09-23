@@ -515,7 +515,7 @@ mod tests {
     const HEAD: &str = "fn alpha() {}\nfn beta() {\n    alpha();\n}\n";
     const BASE: &str = "fn alpha() {}\nfn old() {\n    alpha();\n}\n";
 
-    /// The whole window on Files with one changed file open, so the
+    /// The whole window on Code with one changed file open, so the
     /// editor is where it lives and the pointer can be moved over it.
     fn harness() -> (HeadlessHarness, ReviewState) {
         let (harness, state, _) = recording_harness();
@@ -544,7 +544,7 @@ mod tests {
         state.item.set(Some(Arc::new(item)));
         state.ready.set(true);
         state.set_phase(Phase::Ready);
-        state.tab.set(ItemTab::Files);
+        state.tab.set(ItemTab::Code);
         state.composer_autofocus.set(false);
         state.lsp_status.set(perch_lsp::Status::Ready);
 

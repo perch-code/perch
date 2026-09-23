@@ -611,7 +611,7 @@ fn query_box(state: ReviewState) -> impl IntoView {
     state.find_box.set(Some(id));
     // Cmd-F asked for the keyboard before this box existed; it is taken
     // once the box is in the tree, where a request can find it. A box
-    // built again for the same bar, back on Files from Conversation, was
+    // built again for the same bar, back on Code from Conversation, was
     // not asked, and leaves the keyboard where the reader has it.
     let input = input
         .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
@@ -1030,7 +1030,7 @@ mod window {
     use crate::review::model::{ItemTab, Layout, LiveDoc, Phase, ReviewState};
     use crate::state::AppState;
 
-    /// The whole window on Files with one changed file open: `head`
+    /// The whole window on Code with one changed file open: `head`
     /// against `base`, as `src/x.rs`.
     fn harness_with(head: &str, base: &str) -> (HeadlessHarness, ReviewState) {
         let root = TestRoot::new();
@@ -1053,7 +1053,7 @@ mod window {
         state.item.set(Some(Arc::new(item)));
         state.ready.set(true);
         state.set_phase(Phase::Ready);
-        state.tab.set(ItemTab::Files);
+        state.tab.set(ItemTab::Code);
         state.composer_autofocus.set(false);
         state.open_tab("src/x.rs");
         state.finish_load("src/x.rs", Arc::new(file("src/x.rs", head, base)));
@@ -1745,7 +1745,7 @@ mod window {
         );
         state.close_composer();
 
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         harness.rebuild();
         harness.paint();
         assert!(state.find_open.get(), "still up");
@@ -1774,7 +1774,7 @@ mod window {
         harness.rebuild();
         assert!(!state.find_open.get());
 
-        state.tab.set(ItemTab::Files);
+        state.tab.set(ItemTab::Code);
         state.open_tab("a.svg");
         state.finish_load(
             "a.svg",

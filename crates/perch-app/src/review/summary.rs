@@ -4,7 +4,7 @@
 //! Branch, Reviewers, Checks, Status, Worktree, then what GitHub says about the
 //! item. A row is absent when it has nothing, and the block with them.
 //! The notices, and the way back from a retained snapshot, sit over the
-//! rows; on Files the notice is in the tab bar and the way back in the
+//! rows; on Code the notice is in the tab bar and the way back in the
 //! rail, since the summary is Conversation's alone.
 
 use std::rc::Rc;
@@ -696,7 +696,7 @@ fn notices(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
 }
 
 /// `Review #N snapshot · read-only`, and Back to current beside it. Over
-/// the rows on Conversation, and in the tab bar on Files.
+/// the rows on Conversation, and in the tab bar on Code.
 pub fn snapshot_banner(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     dyn_container(
         move || state.historical_review.get(),
@@ -776,10 +776,10 @@ fn notice_text(state: ReviewState) -> Option<String> {
     if state.offline.get() {
         return Some("Offline; showing the checkout as it was last left".to_string());
     }
-    // Under a commit or the index the files on Files are not the
+    // Under a commit or the index the files on Code are not the
     // disk's, which is what rust-analyzer reads, so hover and
     // definition can be off by the lines that differ.
-    if state.tab.get() == ItemTab::Files {
+    if state.tab.get() == ItemTab::Code {
         match state.scope.get() {
             perch_git::Scope::Commit { sha } => {
                 let short: String = sha.chars().take(7).collect();
@@ -802,7 +802,7 @@ fn notice_text(state: ReviewState) -> Option<String> {
 }
 
 /// The notice as a pill, over the rows on Conversation and in the tab
-/// bar on Files. It gives way, as the branches and the worktree name do:
+/// bar on Code. It gives way, as the branches and the worktree name do:
 /// it is a sentence, and its start says what it is about. Hidden when
 /// there is nothing to say.
 pub fn notice(state: ReviewState) -> impl IntoView {
@@ -1294,7 +1294,7 @@ mod tests {
         );
 
         // Files has none of it: the page is Conversation's alone.
-        state.tab.set(ItemTab::Files);
+        state.tab.set(ItemTab::Code);
         harness.rebuild();
         harness.paint();
         assert!(named(harness.root_id(), "item summary").is_none());
@@ -1402,7 +1402,7 @@ mod tests {
             "{notice:?} does not start where the rows do"
         );
 
-        state.tab.set(ItemTab::Files);
+        state.tab.set(ItemTab::Code);
         harness.rebuild();
         harness.paint();
         let notice = rect(&harness, "item notice");
@@ -1483,7 +1483,7 @@ mod tests {
         assert!(within(banner, rect(&harness, "item summary")));
         assert!(within(back, banner));
 
-        state.tab.set(ItemTab::Files);
+        state.tab.set(ItemTab::Code);
         harness.rebuild();
         harness.paint();
         let back = rect(&harness, "back to current");

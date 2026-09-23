@@ -110,6 +110,20 @@ pub fn editor_pane(
         });
     }
 
+    // Code with no file open has the tree beside it, to pick one from: as
+    // it comes with none, or once the last tab closes. Only as that
+    // happens, so a tree the reader shuts stays shut; and not over the
+    // agents, which the reader asked for.
+    {
+        let backend = backend.clone();
+        Effect::new(move |_| {
+            let none = state.active.with(Option::is_none) && state.pending_open.with(Option::is_none);
+            if none && app.drawer_shown_untracked().is_none() {
+                crate::ui::drawer::show(app, &backend, crate::ui::drawer::DrawerView::Files, None);
+            }
+        });
+    }
+
     // The find bar's matches follow the file and the query from here,
     // beside the jump: one effect for the pane, whichever editor is up.
     find::wire(state);
@@ -139,10 +153,18 @@ pub fn editor_pane(
                     // the one built below registers its own.
                     state.docs.set(None);
                     match path {
+                        None if state.changed_files.with_untracked(|f| f.is_empty()) => {
+                            centered_message(
+                                SidebarIcon::Search,
+                                || "No changes".to_string(),
+                                || "Pick a file from the tree, or press ⌘P to go to one by name.".to_string(),
+                            )
+                            .into_any()
+                        }
                         None => centered_message(
                             SidebarIcon::Search,
                             || "No file open".to_string(),
-                            || "Pick a file from the list, or press ⌘P to go to one by name.".to_string(),
+                            || "Pick a file from the tree, or press ⌘P to go to one by name.".to_string(),
                         )
                         .into_any(),
                         Some(path) => match state.file(&path) {
@@ -1951,7 +1973,7 @@ mod window {
     use crate::review::model::{ItemTab, Layout, LiveDoc, LiveLayout, Phase, ReviewState};
     use crate::state::AppState;
 
-    /// The whole window on Files with one changed file open, so the split
+    /// The whole window on Code with one changed file open, so the split
     /// is built where it lives: under the tab bar, beside the rail. The
     /// file is a 90-line one changed every third line, so nothing in it
     /// folds and a row is its head line.
@@ -1984,7 +2006,7 @@ mod window {
         state.item.set(Some(Arc::new(item)));
         state.ready.set(true);
         state.set_phase(Phase::Ready);
-        state.tab.set(ItemTab::Files);
+        state.tab.set(ItemTab::Code);
         // See the field: a focused editor cannot be driven headlessly.
         state.composer_autofocus.set(false);
 
@@ -2480,14 +2502,14 @@ mod window {
     }
 
     /// The tiles sit at the strip's right end: 8 of padding, then the
-    /// agents', the files' and Conversation's tiles and their rule, then
+    /// agents' and the files' tiles and their rule, then
     /// Split then Stacked reading leftwards, each `LAYOUT_TILE` square with
     /// 2 between, in a strip `TAB_HEIGHT` tall under the header's bar.
     fn tile_center(layout: Layout) -> (f64, f64) {
         let tile = crate::theme::LAYOUT_TILE;
         let split_right = 1400.0
             - 8.0
-            - (tile + 2.0 + tile + 2.0 + tile)
+            - (tile + 2.0 + tile)
             - (crate::theme::TILE_RULE_GAP + 1.0 + crate::theme::TILE_RULE_GAP);
         let x = match layout {
             Layout::Split => split_right - tile / 2.0,
@@ -2956,7 +2978,7 @@ mod window {
 
         state.show_tab(ItemTab::Conversation);
         rebuilt(&mut harness);
-        state.show_tab(ItemTab::Files);
+        state.show_tab(ItemTab::Code);
         rebuilt(&mut harness);
         assert_eq!(viewport().get().y0, scrolled, "back from Conversation");
         assert_eq!(caret(), at);
@@ -4215,7 +4237,7 @@ mod window {
             "inside the card in the code"
         );
         assert_eq!(count(harness.root_id(), "Follow up…"), 0);
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         assert!(state.composer_in_code());
 
         // With the thread's file closed there is no inline card for the box,
@@ -4632,7 +4654,7 @@ mod window {
             Some((7, 7))
         );
         assert!(state.composer_is_inline());
-        assert_eq!(state.tab.get(), ItemTab::Files);
+        assert_eq!(state.tab.get(), ItemTab::Code);
         harness.rebuild();
         harness.paint();
         let rows = laid_out_rows(&harness, "composer");

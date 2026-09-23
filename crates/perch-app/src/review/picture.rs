@@ -507,7 +507,7 @@ mod window {
     const CIRCLE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="10" fill="#c00"/></svg>"##;
     const SQUARE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 16"><rect width="32" height="16" fill="#0c0"/></svg>"##;
 
-    /// The whole window on Files with the file at `path` open, loaded
+    /// The whole window on Code with the file at `path` open, loaded
     /// from the given sides.
     fn window_with(
         path: &str,
@@ -535,7 +535,7 @@ mod window {
         state.item.set(Some(Arc::new(item)));
         state.ready.set(true);
         state.set_phase(Phase::Ready);
-        state.tab.set(ItemTab::Files);
+        state.tab.set(ItemTab::Code);
         state.composer_autofocus.set(false);
 
         let file = Arc::new(crate::backend::build_loaded_file(

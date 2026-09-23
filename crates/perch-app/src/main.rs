@@ -64,7 +64,7 @@ fn main() {
         scan_cli::run(&args[2..]);
         return;
     }
-    // The changed list under a scope, as the Files tab would show it.
+    // The changed list under a scope, as Code would show it.
     if args.get(1).map(String::as_str) == Some("--scope") {
         scope_cli::run(&args[2..]);
         return;

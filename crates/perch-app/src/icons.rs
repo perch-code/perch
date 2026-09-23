@@ -326,12 +326,6 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M8 14 V10.4 M5.9 12.3 L8 10.2 L10.1 12.3" fill="none" stroke="{c}"
                      stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
-        // A speech bubble with the layout tiles' round corners: Conversation.
-        SidebarIcon::Chat => format!(
-            r#"<path d="M3.7 2.7 H12.3 a1.5 1.5 0 0 1 1.5 1.5 V9.4 a1.5 1.5 0 0 1 -1.5 1.5 H7.4
-                       L4.6 13.4 V10.9 H3.7 a1.5 1.5 0 0 1 -1.5 -1.5 V4.2 a1.5 1.5 0 0 1 1.5 -1.5 Z"
-                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>"#
-        ),
         // The fold opened: the rule dotted, and the chevrons pointing away
         // from it, as github.com draws Show resolved.
         SidebarIcon::Unfold => format!(
@@ -453,9 +447,6 @@ pub enum SidebarIcon {
     Unfold,
     /// A frame with a rule down its left third: the drawer toggle.
     Drawer,
-    /// A speech bubble with round corners: Conversation, on its tab and
-    /// on the tile that shows it.
-    Chat,
     /// A box with an arrow leaving it: open on GitHub.
     External,
     /// Two diagonal arrows pointing out: the pane to the whole window.
@@ -501,8 +492,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 51] = [
-        SidebarIcon::Chat,
+    pub const ALL: [SidebarIcon; 50] = [
         SidebarIcon::Unfold,
         SidebarIcon::Copy,
         SidebarIcon::Reply,
