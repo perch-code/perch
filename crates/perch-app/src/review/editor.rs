@@ -354,6 +354,7 @@ fn stacked_view(
         epoch,
     );
     wire_jump(state, file.clone(), doc, scroll_to, cursor, epoch);
+    wire_page(state, doc, scroll_to, cursor, epoch);
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
     let path = file.path.clone();
@@ -1274,6 +1275,7 @@ fn split_view(
         epoch,
     );
     wire_jump(state, file.clone(), right_doc, right_scroll_to, right_cursor, epoch);
+    wire_page(state, right_doc, right_scroll_to, right_cursor, epoch);
     let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
     // The left follows the right down the file. Sideways it keeps its own
@@ -1371,7 +1373,15 @@ fn split_view(
             None,
         ),
     ))
-    .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
+    // The base side takes no pointer, so a click on it would focus
+    // nothing and a bare key would go nowhere: the split takes the focus,
+    // as Conversation's column does, so the key reaches the window.
+    .style(|s| {
+        s.size_full()
+            .min_height(0.0)
+            .position(Position::Relative)
+            .focusable()
+    })
 }
 
 #[cfg(test)]
@@ -1667,6 +1677,42 @@ fn wire_jump(
             });
             cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
         }
+    });
+}
+
+/// Page Up and Page Down: the caret to the start of the first line or of
+/// the last, and the view flush with that end of the file. The caret
+/// moves first: bringing it into view may leave it mid-screen, and the
+/// scroll after it puts the end against the edge. The scroll clamps, so
+/// the rows' full height is the end even with room left under it.
+fn wire_page(
+    state: ReviewState,
+    doc: RwSignal<Arc<Doc>>,
+    scroll_to: RwSignal<Option<Vec2>>,
+    cursor: RwSignal<Cursor>,
+    epoch: u64,
+) {
+    Effect::new(move |_| {
+        let Some(end) = state.page_end.get() else {
+            return;
+        };
+        // As with a jump: a press as the editor is rebuilt is the next
+        // editor's.
+        if state.editor_epoch.get_untracked() != epoch {
+            return;
+        }
+        state.page_end.set(None);
+        let (offset, y) = doc.with_untracked(|d| {
+            // A line of the file, not a divider or a card's spacer.
+            let mut rows = (0..d.len()).filter(|&r| d.display_line(r).is_some());
+            let row = if end { rows.next_back() } else { rows.next() };
+            let y = if end { d.len() as f64 * theme::CODE_LINE_HEIGHT as f64 } else { 0.0 };
+            (row.map(|r| d.offset_of_row(r)), y)
+        });
+        if let Some(offset) = offset {
+            cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
+        }
+        scroll_to.set(Some(Vec2::new(0.0, y)));
     });
 }
 
@@ -3295,6 +3341,68 @@ mod window {
             (row as f64 - 4.0) * line_height,
             "scrolled to the target"
         );
+        assert_eq!(left_viewport.get().y0, right_viewport.get().y0);
+    }
+
+    /// Page Down puts the caret on the file's last line and its end at
+    /// the foot of the pane; Page Up puts both back at the top. The code
+    /// has the keyboard, and still the window has the key first: the
+    /// editor's own half a screen never runs.
+    #[test]
+    fn the_page_keys_go_to_the_end_of_the_file_and_back_to_its_top() {
+        use floem::prelude::{Code, Key, NamedKey};
+        let (mut harness, state) = one_long_run();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
+        let rows = live.doc.get().len();
+        let last = (0..rows)
+            .rev()
+            .find_map(|r| live.doc.get().display_line(r))
+            .unwrap();
+        let page = |down| {
+            if down {
+                key_press(Code::PageDown, Key::Named(NamedKey::PageDown))
+            } else {
+                key_press(Code::PageUp, Key::Named(NamedKey::PageUp))
+            }
+        };
+        // A page key is no shortcut to floem: with nothing focused it goes
+        // nowhere. A reader has clicked the code.
+        let (left, top) = pane_origin();
+        harness.click(left + 200.0, top + 3.0 * line_height + line_height / 2.0);
+        harness.rebuild();
+
+        harness.dispatch_event(page(true));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.page_end.get(), None, "the editor took the key");
+        assert_eq!(state.cursor_line.get(), last);
+        // The editor keeps a line's room under the last row, and the
+        // scroll stops at the end of that.
+        assert_eq!(viewport.get().y1, (rows + 1) as f64 * line_height);
+
+        harness.dispatch_event(page(false));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.cursor_line.get(), 0);
+        assert_eq!(viewport.get().y0, 0.0);
+
+        // Split, the right side takes the key and the left follows it.
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let (_, right) = sides(state);
+        let (left_viewport, right_viewport) = super::SPLIT_VIEWPORTS.with(|v| v.get()).unwrap();
+        let rows = right.doc.get().len();
+        // A click on the base side, which takes no pointer itself.
+        harness.click(left + 200.0, top + 3.0 * line_height + line_height / 2.0);
+        harness.rebuild();
+        harness.dispatch_event(page(true));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.page_end.get(), None, "the split took the key");
+        assert_eq!(right_viewport.get().y1, (rows + 1) as f64 * line_height);
         assert_eq!(left_viewport.get().y0, right_viewport.get().y0);
     }
 

@@ -671,6 +671,10 @@ stacked layout.
 | Match case, whole word, regular expression | `Alt-Cmd-C`, `Alt-Cmd-W`, `Alt-Cmd-R` |
 | Close the bar | `Escape` |
 
+`Page Up` and `Page Down` go to the top and the end of the open file, the
+caret with them, and of Conversation. They work from the code, the page or a
+composer; the find bar and the other boxes keep them.
+
 An SVG opens as the picture it draws rather than as its markup, fitted to the
 pane. A changed one shows before and after side by side, both at one scale,
 so a change of size shows as one; an added or deleted one says which it is.

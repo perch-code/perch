@@ -357,6 +357,34 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                     return EventPropagation::Stop;
                 }
+                // Page Up and Page Down go to the top and the end of
+                // Conversation or of the open file, with the keyboard in
+                // the page, the code or a composer: a composer is a few
+                // lines, and the page is what there is to page through.
+                // Caught here, as the editors would take them for half a
+                // screen. A file with no editor, a picture or one too big
+                // to show, has nowhere to go.
+                let boxed = state.search_focused.get()
+                    || review.submit_review_open.get()
+                    || review.review_launcher_open.get()
+                    || review.find_focused.get();
+                if matches!(key.code, Code::PageUp | Code::PageDown)
+                    && key.modifiers.is_empty()
+                    && !boxed
+                    && review.is_open()
+                {
+                    let showing = match review.tab.get() {
+                        crate::review::model::ItemTab::Conversation => true,
+                        crate::review::model::ItemTab::Files => {
+                            review.active_file().is_some_and(|f| !f.truncated)
+                                && review.drawn_picture().is_none()
+                        }
+                    };
+                    if showing {
+                        review.page_end.set(Some(key.code == Code::PageDown));
+                        return EventPropagation::Stop;
+                    }
+                }
                 let typing = state.search_focused.get()
                     || review.composer_focused.get()
                     || review.submit_review_open.get()

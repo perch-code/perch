@@ -154,6 +154,13 @@ pub fn view(
         let y = state.conversation_scroll.get_untracked();
         (y > 0.0).then_some(floem::kurbo::Point::new(0.0, y))
     })
+    // Page Up and Page Down: the top, or the end. The scroll clamps, so
+    // any depth past the page is its end.
+    .scroll_to(move || {
+        let end = state.page_end.get()?;
+        state.page_end.set(None);
+        Some(floem::kurbo::Point::new(0.0, if end { f64::MAX } else { 0.0 }))
+    })
     .on_event_cont(
         ScrollChanged::listener(),
         move |_, event: &ScrollChanged| {
@@ -1773,5 +1780,59 @@ mod tests {
             scrolled,
             "the page opened somewhere else"
         );
+    }
+
+    /// A page key, unmodified, as the window receives it.
+    fn page_key(down: bool) -> floem::event::Event {
+        use floem::prelude::{Code, Key, NamedKey};
+        let (code, key) = if down {
+            (Code::PageDown, NamedKey::PageDown)
+        } else {
+            (Code::PageUp, NamedKey::PageUp)
+        };
+        floem::event::Event::Key(floem::prelude::KeyboardEvent {
+            state: floem::prelude::KeyState::Down,
+            key: Key::Named(key),
+            code,
+            location: Default::default(),
+            modifiers: floem::prelude::Modifiers::empty(),
+            repeat: false,
+            is_composing: false,
+        })
+    }
+
+    /// Page Down goes to the end of the page, the composer at the foot
+    /// of the scroll, and Page Up back to its top.
+    #[test]
+    fn the_page_keys_go_to_the_end_of_the_page_and_back_to_its_top() {
+        let (mut harness, _, state) = app_harness();
+        let scroll = find(harness.root_id(), "conversation").unwrap();
+        let viewport = scroll.get_visual_rect_no_clip();
+        let title = find(harness.root_id(), "conversation-title").unwrap();
+        let top = title.get_visual_rect_no_clip().y0;
+        harness.click(700.0, 500.0);
+        harness.rebuild();
+
+        harness.dispatch_event(page_key(true));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.page_end.get(), None, "the page took the key");
+        let composer = find(harness.root_id(), "composer")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert_eq!(
+            composer.y1,
+            viewport.y1 - crate::theme::CONVERSATION_PADDING,
+            "the composer at {composer:?} is not at the end of the scroll {viewport:?}"
+        );
+        assert!(title.get_visual_rect_no_clip().y0 < top);
+
+        // From a composer as well: its few lines are not what a reader
+        // pages through.
+        state.composer_focused.set(true);
+        harness.dispatch_event(page_key(false));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(title.get_visual_rect_no_clip().y0, top);
     }
 }

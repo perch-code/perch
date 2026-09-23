@@ -1499,6 +1499,10 @@ pub struct ReviewState {
     /// definition puts the caret on it, so the next jump remembers leaving
     /// from there. Read by the jump, and cleared by it.
     pub jump_caret: RwSignal<Option<(usize, usize)>>,
+    /// Page Up or Page Down, pressed: the top of the page, or the end of
+    /// it. Conversation or the open file's editor, whichever is showing,
+    /// scrolls there and clears it.
+    pub page_end: RwSignal<Option<bool>>,
     /// The head position the last request was made about, so the definition
     /// button asks about the same symbol the panel is describing.
     pub last_position: RwSignal<Option<(usize, usize)>>,
@@ -1660,6 +1664,7 @@ impl ReviewState {
             pending_names: RwSignal::new(Vec::new()),
             jump_to_line: RwSignal::new(None),
             jump_caret: RwSignal::new(None),
+            page_end: RwSignal::new(None),
             last_position: RwSignal::new(None),
             expanded: RwSignal::new(std::collections::HashSet::new()),
             scroll_to_row: RwSignal::new(None),
