@@ -197,6 +197,7 @@ New work (see [Starting work](#starting-work)) reads two more tables:
 ```toml
 [work]
 branch_prefix = "chris/"       # before a branch name Perch fills in
+approvals = "auto"             # or "ask"; see Approvals
 
 [[repo]]
 roots = ["~/Code/perch"]
@@ -431,8 +432,7 @@ except the first two points, and it can ask for more (see
   turned off by name, since the app-server has no way to ignore that
   config. Its thread runs under a permission profile: everything readable,
   the worktree, the temporary directory and `[repo.work] write` writable,
-  the same paths read-only, and no network until it asks. Approvals go to
-  you, never to Codex's automatic reviewer. Codex lets a bare `git commit`
+  the same paths read-only, and no network until it asks. Codex lets a bare `git commit`
   write the repository's objects and refs whatever the profile says, so a
   Codex Work run can commit; it cannot change git's config or hooks, and it
   cannot push.
@@ -443,7 +443,18 @@ saying so, without taking a slot, and questions go on beside it.
 
 ### Approvals
 
-When a Work run needs something its sandbox refuses, it asks. Claude Code asks
+When a Work run needs something its sandbox refuses, it asks. By default
+(`[work] approvals = "auto"`) the CLI's own automatic reviewer answers first:
+Claude Code runs in its auto permission mode, and Codex with its `auto_review`
+reviewer. What the reviewer decides shows in the run's steps: Codex's as
+`Approved automatically: …` or `Refused automatically: …` with its reason,
+Claude Code's as the command itself, `Ran outside the sandbox: …` or `Ran …
+(network: example.com)`. Claude Code's auto mode needs a model that has it, such
+as Sonnet or Opus; with one that does not, such as Haiku, every request comes to
+you. Anything the reviewer passes on comes to you, and so does everything when
+`approvals = "ask"`.
+
+What comes to you: Claude Code asks
 for a host a command wants to reach, for a command it wants to run outside the
 sandbox, and for an edit outside the worktree. Codex asks to run a command
 outside its profile, naming the host when it knows the command needs one, and

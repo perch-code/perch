@@ -223,6 +223,10 @@ pub struct WorkGrant {
     pub commit: bool,
     /// The repository's own agent configuration is loaded.
     pub trust: bool,
+    /// The CLI's own automatic reviewer decides what the sandbox refuses:
+    /// Claude Code's auto permission mode, Codex's `auto_review`. What it
+    /// passes on, or all of it when this is off, comes to Perch.
+    pub auto_review: bool,
 }
 
 /// The tools a Work run may use without asking, besides editing inside
@@ -571,7 +575,10 @@ impl RunSpec {
             "--effort".into(),
             self.effort.claude_name().into(),
             "--permission-mode".into(),
-            "default".into(),
+            match &self.mode {
+                Mode::Work(grant) if grant.auto_review => "auto".into(),
+                _ => "default".into(),
+            },
         ]);
         let (allowed, denied): (Vec<String>, Vec<String>) = match &self.mode {
             Mode::Ask => {
@@ -652,6 +659,7 @@ impl RunSpec {
             prompt: self.prompt.clone(),
             developer_instructions: self.system.clone(),
             resume: self.resume.clone(),
+            reviewer: if grant.auto_review { "auto_review" } else { "user" }.to_string(),
             config: serde_json::json!({
                 "default_permissions": CODEX_WORK_PROFILE,
                 "permissions": {CODEX_WORK_PROFILE: {"filesystem": filesystem}},
@@ -2109,6 +2117,27 @@ mod tests {
         let ask = RunSpec { mode: Mode::Ask, ..work(Backend::ClaudeCode, WorkGrant::default(), None) };
         assert!(ask.conversation().is_none(), "a question stays in print mode");
         assert!(!ask.args().contains(&"--input-format".to_string()));
+    }
+
+    #[test]
+    fn the_automatic_reviewer_is_each_cli_s_own() {
+        let auto = WorkGrant { auto_review: true, ..WorkGrant::default() };
+        let claude = work(Backend::ClaudeCode, auto.clone(), None).args();
+        assert!(claude.windows(2).any(|w| w == ["--permission-mode", "auto"]));
+        assert!(!claude.iter().any(|a| a.contains("bypassPermissions")));
+        let asking = work(Backend::ClaudeCode, WorkGrant::default(), None).args();
+        assert!(asking.windows(2).any(|w| w == ["--permission-mode", "default"]));
+        let ask = RunSpec { mode: Mode::Ask, ..work(Backend::ClaudeCode, WorkGrant::default(), None) }.args();
+        assert!(ask.windows(2).any(|w| w == ["--permission-mode", "default"]), "a question never is");
+
+        let Some(Conversation::Codex(server)) = work(Backend::Codex, auto, None).conversation() else {
+            unreachable!()
+        };
+        assert_eq!(server_thread(&server).reviewer, "auto_review");
+        let Some(Conversation::Codex(server)) = work(Backend::Codex, WorkGrant::default(), None).conversation() else {
+            unreachable!()
+        };
+        assert_eq!(server_thread(&server).reviewer, "user");
     }
 
     #[test]

@@ -230,7 +230,27 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
                 None => format!("Searched for {pattern}"),
             }
         }
-        "Bash" => format!("Ran {}", strip_cd(&field("command").unwrap_or_default())),
+        // A command let out of the sandbox says so: in a Work run an
+        // automatic reviewer may have let it, and the step is how the
+        // reader sees that.
+        "Bash" if input.get("dangerouslyDisableSandbox").and_then(Value::as_bool) == Some(true) => {
+            format!("Ran outside the sandbox: {}", strip_cd(&field("command").unwrap_or_default()))
+        }
+        // In auto mode a command can name the hosts it needs, which the
+        // classifier reviews with it; the step says which.
+        "Bash" => {
+            let command = strip_cd(&field("command").unwrap_or_default());
+            let hosts: Vec<&str> = input
+                .get("allowed_domains")
+                .and_then(Value::as_array)
+                .map(|hosts| hosts.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if hosts.is_empty() {
+                format!("Ran {command}")
+            } else {
+                format!("Ran {command} (network: {})", hosts.join(", "))
+            }
+        }
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
             format!(
                 "Asked to edit {}",
@@ -303,6 +323,14 @@ pub(crate) fn one_line(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_let_out_or_given_hosts_says_so() {
+        let out = serde_json::json!({"command": "echo x > ~/f", "dangerouslyDisableSandbox": true});
+        assert_eq!(summarize_tool_call("Bash", &out), "Ran outside the sandbox: echo x > ~/f");
+        let hosts = serde_json::json!({"command": "curl https://example.com", "allowed_domains": ["example.com"]});
+        assert_eq!(summarize_tool_call("Bash", &hosts), "Ran curl https://example.com (network: example.com)");
+    }
     use serde_json::json;
 
     #[test]

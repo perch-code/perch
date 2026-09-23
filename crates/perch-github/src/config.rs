@@ -205,6 +205,21 @@ pub struct WorkDefaults {
     /// `chris/`. A name the reader types is taken as typed.
     #[serde(default)]
     pub branch_prefix: String,
+    /// Who decides what a Work run's sandbox refuses.
+    #[serde(default)]
+    pub approvals: Approvals,
+}
+
+/// Who decides a Work run's requests to go past its sandbox.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Approvals {
+    /// The CLI's own automatic reviewer: Claude Code's auto permission
+    /// mode, Codex's `auto_review`. What it passes on comes to the reader.
+    #[default]
+    Auto,
+    /// Every request comes to the reader.
+    Ask,
 }
 
 /// `[repo.work]`: what a Work run may reach outside its worktree, in one
@@ -703,6 +718,13 @@ mod tests {
         assert_eq!(config.agent.model, "opus");
         assert_eq!(config.repo.len(), 1);
         assert_eq!(config.repo[0].root_paths(), [home_dir().join("Code").join("wid\"gets")]);
+    }
+
+    #[test]
+    fn work_approvals_are_automatic_unless_the_file_says_ask() {
+        assert_eq!(Config::parse("").unwrap().work.approvals, Approvals::Auto);
+        let ask = Config::parse("[work]\napprovals = \"ask\"\n").unwrap();
+        assert_eq!(ask.work.approvals, Approvals::Ask);
     }
 
     #[test]

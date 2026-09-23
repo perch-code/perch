@@ -266,6 +266,9 @@ pub(crate) struct CodexThread {
     pub resume: Option<String>,
     /// Config for the thread: the Work profile, trust, and the like.
     pub config: Value,
+    /// Who approval requests go to: `user`, which is Perch, or Codex's
+    /// own `auto_review`.
+    pub reviewer: String,
 }
 
 const INITIALIZE: u64 = 1;
@@ -319,7 +322,7 @@ impl CodexServer {
             "cwd": self.thread.cwd,
             "model": self.thread.model,
             "approvalPolicy": "on-request",
-            "approvalsReviewer": "user",
+            "approvalsReviewer": self.thread.reviewer,
             "config": self.thread.config,
         });
         if let Some(instructions) = &self.thread.developer_instructions {
@@ -420,6 +423,10 @@ impl CodexServer {
                     ..Reply::default()
                 }
             }
+            "item/autoApprovalReview/completed" => Reply {
+                events: auto_review_step(&params),
+                ..Reply::default()
+            },
             "turn/completed" => {
                 let turn = params.get("turn").cloned().unwrap_or(Value::Null);
                 if turn.get("status").and_then(Value::as_str) == Some("failed") {
@@ -622,6 +629,46 @@ impl CodexServer {
     }
 }
 
+/// What Codex's automatic reviewer decided about a request, as a step:
+/// the command and the decision, and its reason when it refused.
+fn auto_review_step(params: &Value) -> Vec<RunEvent> {
+    let id = format!("review-{}", str_of(params, "reviewId"));
+    let status = params.pointer("/review/status").and_then(Value::as_str).unwrap_or("");
+    let approved = status == "approved";
+    let action = params.get("action").cloned().unwrap_or(Value::Null);
+    let what = match str_of(&action, "command") {
+        command if !command.is_empty() => strip_shell(&command),
+        _ => str_of(&action, "type"),
+    };
+    let risk = params
+        .pointer("/review/riskLevel")
+        .and_then(Value::as_str)
+        .map(|risk| format!(" (risk: {risk})"))
+        .unwrap_or_default();
+    let summary = if approved {
+        format!("Approved automatically: {what}{risk}")
+    } else {
+        let why = params
+            .pointer("/review/rationale")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        format!("Refused automatically: {what}{risk}. {why}")
+    };
+    vec![
+        RunEvent::ToolCall {
+            id: id.clone(),
+            name: "auto_review".into(),
+            summary: one_line(summary.trim(), 200),
+            parent_id: None,
+        },
+        RunEvent::ToolResult {
+            id,
+            ok: approved,
+            summary: String::new(),
+        },
+    ]
+}
+
 fn request(id: u64, method: &str, params: Value) -> String {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
 }
@@ -760,6 +807,7 @@ mod tests {
             developer_instructions: Some("Work here.".into()),
             resume: resume.map(str::to_string),
             config: json!({"default_permissions": "perch_work"}),
+            reviewer: "user".into(),
         }
     }
 
@@ -865,6 +913,35 @@ mod tests {
         let other = server.after_line(&line(r#"{"method":"item/tool/call","id":9,"params":{}}"#));
         assert!(other.events.is_empty());
         assert!(other.writes[0].contains("\"error\""));
+    }
+
+    #[test]
+    fn codex_s_automatic_reviewer_leaves_a_step_for_each_decision() {
+        let mut server = CodexServer::new(CodexThread {
+            reviewer: "auto_review".into(),
+            ..thread(None)
+        });
+        server.opening();
+        let start: Value =
+            serde_json::from_str(&server.after_line(&line(r#"{"id":1,"result":{}}"#)).writes[1]).unwrap();
+        assert_eq!(start["params"]["approvalsReviewer"], "auto_review");
+
+        let approved = server.after_line(&line(
+            r#"{"method":"item/autoApprovalReview/completed","params":{"reviewId":"r1","review":{"status":"approved","riskLevel":"low","rationale":"asked for"},"action":{"type":"command","command":"/bin/zsh -lc 'curl https://example.com'"}}}"#,
+        ));
+        assert!(matches!(
+            &approved.events[..],
+            [RunEvent::ToolCall { summary, .. }, RunEvent::ToolResult { ok: true, .. }]
+                if summary == "Approved automatically: curl https://example.com (risk: low)"
+        ), "{:?}", approved.events);
+        let refused = server.after_line(&line(
+            r#"{"method":"item/autoApprovalReview/completed","params":{"reviewId":"r2","review":{"status":"denied","riskLevel":"high","rationale":"Deletes the home directory."},"action":{"type":"command","command":"rm -rf ~"}}}"#,
+        ));
+        assert!(matches!(
+            &refused.events[..],
+            [RunEvent::ToolCall { summary, .. }, RunEvent::ToolResult { ok: false, .. }]
+                if summary == "Refused automatically: rm -rf ~ (risk: high). Deletes the home directory."
+        ), "{:?}", refused.events);
     }
 
     #[test]

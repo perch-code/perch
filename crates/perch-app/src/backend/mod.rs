@@ -11306,6 +11306,7 @@ fn work_setup(
         network: repo.map(|r| r.work.network.clone()).unwrap_or_default(),
         commit: crate::approvals::commits_granted(&grants),
         trust: repo.is_some_and(|r| r.work.trust),
+        auto_review: config.work.approvals == perch_github::Approvals::Auto,
     };
     // Codex's profile has no allowlist, so it starts with no network
     // whatever the grant says, and asks for each host.
@@ -11326,6 +11327,7 @@ fn work_setup(
         &base,
         &network,
         grant.commit,
+        grant.auto_review,
     );
     Ok((perch_agent::Mode::Work(grant), framing))
 }
@@ -14694,6 +14696,8 @@ mod tests {
         assert!(args.contains("\"autoAllowBashIfSandboxed\":true"), "{args}");
         assert!(args.contains("Do not commit, push, or switch branches"), "{args}");
         assert!(args.contains("on the branch chris/readme, which started from main"), "{args}");
+        assert!(args.contains("--permission-mode\nauto\n"), "the automatic reviewer by default: {args}");
+        assert!(args.contains("an automatic reviewer decides it"), "{args}");
         assert!(!args.contains("Do not change any file"), "{args}");
 
         // A question in the same thread starts over, as a switch of

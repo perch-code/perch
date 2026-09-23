@@ -318,3 +318,25 @@ In a worktree Perch made for this repository, with no `[repo.work]`:
 - Do not use Codex's automatic reviewer, and do not start the user's
   MCP servers for a Work run.
 - Do not change Ask runs or reviews.
+
+## Afterwards: automatic reviewers by default
+
+Changed after the milestone landed, at the reader's request. A Work run
+now goes to each CLI's own automatic reviewer first, and to the reader
+only for what that passes on: `[work] approvals = "auto"`, the
+default, or `"ask"` for the behaviour above.
+
+- Claude Code runs with `--permission-mode auto`. Its classifier
+  decides sandbox escapes and host access itself: checked with Sonnet,
+  an unsandboxed write to the home directory went through without a
+  `can_use_tool` request. Haiku has no auto mode and falls back to
+  asking. In auto mode `Bash` takes `allowed_domains`, which the
+  classifier reviews with the command, and the step shows them.
+- Codex runs with `approvalsReviewer: "auto_review"`. Its
+  `item/autoApprovalReview/completed` notifications become steps:
+  `Approved automatically: <command> (risk: low)` or `Refused
+  automatically: … <rationale>`.
+- Grants, the card and the **Work may** row are unchanged, and apply to
+  whatever reaches Perch.
+- This reverses the non-goal "Codex's automatic approval reviewer": the
+  reviewer is the default now, and Perch records what it decided.
