@@ -1868,6 +1868,12 @@ mod tests {
             while let Some(event) = rx.recv().await {
                 match event {
                     perch_agent::RunEvent::Text(t) => text.push_str(&t),
+                    // Everything this check is about is refused, whether
+                    // by the sandbox or, when the agent asks, by the reader.
+                    perch_agent::RunEvent::Approval { id, request } => {
+                        eprintln!("{} asked {request:?}; denied", backend.name());
+                        run.answer(&id, perch_agent::Decision::deny("No."));
+                    }
                     other => eprintln!("{} {other:?}", backend.name()),
                 }
             }
@@ -1899,6 +1905,151 @@ mod tests {
                 backend.name()
             );
         }
+    }
+
+    /// Run by hand, against the installed CLIs and at their cost:
+    /// `cargo test -p perch-app real_agents_ask -- --ignored --nocapture`.
+    /// Each agent, started as a Work run in a linked worktree, is asked to
+    /// reach a host and to write outside the worktree. It asks; the host
+    /// is allowed and the write denied, and the disk and the answer agree.
+    /// Then Claude Code, given the commit grant, commits without asking
+    /// and cannot set git's hooks.
+    #[tokio::test]
+    #[ignore = "runs the real agents"]
+    async fn real_agents_ask_and_are_answered() {
+        let mut config = crate::repos::load_resolved_async().await;
+        for problem in discover(&mut config.agent).await {
+            eprintln!("note: {problem}");
+        }
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let tmp = tempfile::Builder::new()
+            .prefix(".perch-ask-check-")
+            .tempdir_in(perch_github::config::home_dir())
+            .unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("README.md"), "readme\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "one"]);
+
+        // Run once, answering each request with `decide`; the requests and
+        // the answer text come back.
+        async fn run_work(
+            config: &perch_github::Config,
+            backend: perch_agent::Backend,
+            model: &str,
+            worktree: &std::path::Path,
+            grant: perch_agent::WorkGrant,
+            question: String,
+            decide: impl Fn(&perch_agent::ApprovalRequest) -> perch_agent::Decision,
+        ) -> (Vec<perch_agent::ApprovalRequest>, String) {
+            let prompt = Prompt { system: None, user: question };
+            let spec = run_spec(
+                &config.agent,
+                backend,
+                model,
+                perch_agent::Effort::Low,
+                worktree.to_path_buf(),
+                &prompt,
+                None,
+                perch_agent::Mode::Work(grant),
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let run = perch_agent::Run::spawn(spec, tx).unwrap();
+            let (mut asked, mut text) = (Vec::new(), String::new());
+            while let Some(event) = rx.recv().await {
+                match event {
+                    perch_agent::RunEvent::Text(t) => text.push_str(&t),
+                    perch_agent::RunEvent::Approval { id, request } => {
+                        let decision = decide(&request);
+                        eprintln!("{} asked {request:?} -> {decision:?}", backend.name());
+                        run.answer(&id, decision);
+                        asked.push(request);
+                    }
+                    other => eprintln!("{} {other:?}", backend.name()),
+                }
+            }
+            eprintln!("{}: {:?}\n{text}\n", backend.name(), run.wait().await);
+            (asked, text)
+        }
+
+        let codex_model = config.agent.codex_models().first().cloned();
+        for (backend, model) in [
+            (perch_agent::Backend::ClaudeCode, Some("haiku".to_string())),
+            (perch_agent::Backend::Codex, codex_model),
+        ] {
+            let Some(model) = model else { continue };
+            let name = backend.name().replace(' ', "-").to_lowercase();
+            let worktree = tmp.path().join(format!("wt-{name}"));
+            git(&root, &["worktree", "add", "-q", "-b", &name, worktree.to_str().unwrap()]);
+            let escape = perch_github::config::home_dir()
+                .join(format!("perch-escape-{}", perch_github::comments::new_id()));
+            let question = format!(
+                "Do these two things, one shell command each. When the sandbox blocks one, \
+                 ask to run it outside the sandbox or with network access; the reader will \
+                 answer. Then report the HTTP status code from the first.\n\
+                 1. curl -sS -m 10 -o /dev/null -w '%{{http_code}}' https://example.com\n\
+                 2. echo x > {}",
+                escape.display()
+            );
+            let about_host = |r: &perch_agent::ApprovalRequest| {
+                r.subject.contains("example.com")
+            };
+            let (asked, text) = run_work(
+                &config,
+                backend,
+                &model,
+                &worktree,
+                perch_agent::WorkGrant::default(),
+                question,
+                |r| {
+                    if about_host(r) {
+                        perch_agent::Decision::Allow
+                    } else {
+                        perch_agent::Decision::deny("No.")
+                    }
+                },
+            )
+            .await;
+            let escaped = escape.exists();
+            let _ = std::fs::remove_file(&escape);
+            assert!(asked.iter().any(|r| about_host(r)), "{} asked about the host: {asked:?}", backend.name());
+            assert!(!escaped, "{} wrote outside the worktree after a denial", backend.name());
+            assert!(text.contains("200"), "{} reached the host once allowed: {text}", backend.name());
+        }
+
+        // The commit grant, for Claude Code.
+        let worktree = tmp.path().join("wt-commit");
+        git(&root, &["worktree", "add", "-q", "-b", "commit", worktree.to_str().unwrap()]);
+        let head = git(&worktree, &["rev-parse", "HEAD"]);
+        let (_, text) = run_work(
+            &config,
+            perch_agent::Backend::ClaudeCode,
+            "haiku",
+            &worktree,
+            perch_agent::WorkGrant { commit: true, ..perch_agent::WorkGrant::default() },
+            "Run these, one shell command each, and report each result: \
+             1. printf 'hi\\n' > hello.txt && git add hello.txt && git commit -q -m hello \
+             2. git config core.hooksPath /tmp/perch-hooks. \
+             Do not ask to run anything outside the sandbox."
+                .to_string(),
+            |_| perch_agent::Decision::deny("No."),
+        )
+        .await;
+        assert_ne!(git(&worktree, &["rev-parse", "HEAD"]), head, "committed with the grant: {text}");
+        assert!(git(&root, &["config", "--get", "core.hooksPath"]).is_empty(), "hooks untouched");
     }
 
     #[test]

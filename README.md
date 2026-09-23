@@ -204,6 +204,7 @@ roots = ["~/Code/perch"]
 [repo.work]                    # what a Work run here may reach
 write = ["~/.cargo/registry", "~/.cargo/git", "~/.cargo/.package-cache"]
 network = ["index.crates.io", "static.crates.io"]
+trust = false                  # true loads the repository's own agent config
 ```
 
 Both lists are empty unless given. A `write` entry is a place the agent can
@@ -413,27 +414,69 @@ folded in, as a switch of agent does.
 
 A Work run edits files and runs commands in the worktree, and is told it may.
 It keeps everything under [What the agent can and cannot do](#what-the-agent-can-and-cannot-do)
-except the first two points:
+except the first two points, and it can ask for more (see
+[Approvals](#approvals)).
 
-- **Claude Code** may use `Edit`, `Write`, `MultiEdit` and `NotebookEdit`
-  under the worktree only, and `Bash` with no command list: every command
-  runs in its sandbox, which is the boundary now, and runs without asking.
-  The sandbox writes the worktree, the temporary directory and
-  `[repo.work] write`, never the worktree's `.git`, `.claude`, `.codex` or
-  `.mcp.json`, nor the git directories a linked worktree uses; so
-  `git commit` fails. It reaches `[repo.work] network` and nothing else.
-- **Codex** runs under a permission profile Perch defines on its command
-  line: everything readable, the worktree, the temporary directory and
-  `[repo.work] write` writable, the same paths read-only, no network at all
-  (its sandbox has no domain allowlist, so `network` does not apply), and no
-  approvals. Codex lets a bare `git commit` write the repository's objects
-  and refs whatever the profile says, so a Codex Work run can commit; it
-  cannot change git's config or hooks, and it cannot push.
+- **Claude Code** runs with its prompt and Perch's answers on stdin
+  (`--input-format stream-json`, `--permission-prompt-tool stdio`). It may
+  use `Edit`, `Write`, `MultiEdit` and `NotebookEdit` under the worktree,
+  and every command runs in its sandbox without asking. `Bash` itself is
+  not on its allowed list, since there it would let a command leave the
+  sandbox without asking. The sandbox writes the worktree, the temporary
+  directory and `[repo.work] write`, never the worktree's `.git`, `.claude`,
+  `.codex` or `.mcp.json`, nor the git directories a linked worktree uses,
+  so `git commit` fails. It reaches `[repo.work] network` without asking.
+- **Codex** runs as `codex app-server`, the protocol its own app speaks,
+  with plugins, hooks and apps off and each MCP server in your Codex config
+  turned off by name, since the app-server has no way to ignore that
+  config. Its thread runs under a permission profile: everything readable,
+  the worktree, the temporary directory and `[repo.work] write` writable,
+  the same paths read-only, and no network until it asks. Approvals go to
+  you, never to Codex's automatic reviewer. Codex lets a bare `git commit`
+  write the repository's objects and refs whatever the profile says, so a
+  Codex Work run can commit; it cannot change git's config or hooks, and it
+  cannot push.
 
-Neither is given a token or a route to GitHub, and neither is told to commit:
-you commit. A machine without the sandbox refuses the run. One Work run at a
-time runs in a worktree; another waits, saying so, without taking a slot, and
-questions go on beside it.
+Neither is given a token or a route to GitHub. A machine without the sandbox
+refuses the run. One Work run at a time runs in a worktree; another waits,
+saying so, without taking a slot, and questions go on beside it.
+
+### Approvals
+
+When a Work run needs something its sandbox refuses, it asks. Claude Code asks
+for a host a command wants to reach, for a command it wants to run outside the
+sandbox, and for an edit outside the worktree. Codex asks to run a command
+outside its profile, naming the host when it knows the command needs one, and
+for file changes and permissions it lacks. The request is a card in the run's
+block, `Connect to example.com` or `Run outside the sandbox` with the command
+in the code font and the agent's reason, with three buttons:
+
+- **Allow once** allows this request.
+- The **Always** button allows it now, and keeps a grant on the repository
+  that answers the same request again without asking: **Always allow
+  example.com here**, **Always allow this command here** for that command
+  exactly, **Always allow this here** for a tool or a path, and for a git
+  command that writes the repository, **Always let Work commit here**.
+- **Deny** says no. The agent is told "The reader said no." and goes on.
+
+A request not answered in fifteen minutes is denied, and a run that is stopped
+or ends settles whatever it was waiting on. The run's steps keep what was asked
+and what was answered, and the Agents inspector's row shows the request while
+it waits.
+
+Grants are Perch's own, kept in its database and keyed by repository. Perch
+never writes Claude Code's settings or Codex's rules to remember one. The
+summary of an item that takes Work runs lists its repository's grants in a
+**Work may** row, each with a × that takes it back from the next request on.
+
+The commit grant also changes the sandbox of later Claude Code Work runs: their
+worktree's git directories become writable, apart from each one's `config`,
+`config.worktree` and `hooks`, and the run is told it may commit but not push.
+`[repo.work] trust = true` loads the repository's own agent configuration for
+Work runs: Claude Code reads its project and local settings and its
+`.mcp.json`, and Codex treats the worktree as trusted, so its `.codex/` loads.
+What those files name runs as you, outside any sandbox, which is why trust is
+off unless you turn it on. Questions and reviews never read it.
 
 As a Work run starts and as it ends, however it ends, Perch records the
 worktree as a commit under `refs/perch/runs/<run>/` in the repository, without

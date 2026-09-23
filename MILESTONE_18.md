@@ -71,7 +71,9 @@ A Work run asks about three kinds of thing.
   `[repo.work] network`. Claude Code sends `SandboxNetworkAccess` with
   the host. Codex asks to run the command with network access, naming
   the host when it knows it, and otherwise the command. The card reads
-  `Connect to example.com`.
+  `Connect to example.com`. (Checked against Codex 0.156: a `curl` came
+  as a command, with the host only in its reason, so its "Always" keeps
+  the command.)
 - **A command outside the sandbox.** The agent retries a command the
   sandbox refused, asking to run it without the sandbox. Claude Code
   sends `Bash` with `dangerouslyDisableSandbox`. Codex sends a
@@ -119,13 +121,16 @@ Always button:
   where `<what>` is the path for an edit or the CLI's own rule content
   when it suggests one (`domain:example.com`).
 
-The request stays on the card while the run waits. After the answer
-the card shows one line in its place: `Allowed once: …`, `Always
-allowed: …` or `Denied: …`. The same line is recorded as a step of the
-run, so it survives a restart and shows in the Agents inspector.
+The request stays on the card while the run waits, and the card goes
+as soon as it is answered. The run's steps keep both halves: `Asked:
+Connect to example.com` when it is asked, then `Allowed once: …`,
+`Always allowed: …`, `Denied: …` or `Allowed by a grant: …`. So they
+survive a restart and show in the Agents inspector. (As built: a step's
+own words cannot change after it is written, so the question and the
+answer are two steps rather than one line that changes.)
 
 While a run waits, the Agents inspector's row and the run's activity
-say `Waiting for you: Run outside the sandbox`. The run keeps its slot
+say `Asked: Run outside the sandbox: <command>`. The run keeps its slot
 and its worktree lock. After fifteen minutes with no answer the request
 is denied, and the step says `Denied: no answer in 15 minutes`. Stopping
 the run denies anything pending and stops it, as today. More than one
