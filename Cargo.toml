@@ -101,12 +101,19 @@ codegen-units = 4
 # one that scrolls the editor's caret into view only when the caret moves.
 # Working out where the caret is drawn read the editor's style tracked,
 # and every restyle writes the style, so a hover or a resize pulled code
-# the reader had scrolled past the caret back up to it. Last, one that
+# the reader had scrolled past the caret back up to it. Then one that
 # runs a timer whose view was removed before it fired: floem looked up
 # that view's root when the timer fired and panicked ("all view ids are
 # entered into the root map") when there was none, so a scroll closed
 # within a second of being scrolled took the app down with its bars'
-# fade timer. Drop a
+# fade timer. Last, one that makes vger's faux bold (0.1px on macOS)
+# thicken every glyph. swash worked out which way is outward from all of
+# a glyph's points strung together, so where a small contour led the
+# outline it pushed the glyph inward: SF Mono's `i`, whose dot comes
+# first, drew a stem two thirds as wide as its `l`, with slabs smeared
+# over two grey rows, and so did 91 more of its glyphs (ì, í, ½) and
+# about 50 of SF Pro's (Ě, Ž). vger now bolds the outline itself, the
+# direction taken contour by contour as FreeType does. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
