@@ -361,17 +361,26 @@ impl Preparer {
 
     /// Cut a new branch at `from` and check it out in a worktree of its own.
     ///
-    /// Start work and Fork both come here. `wanted` is the name asked for;
-    /// when the bare clone already has a branch of that name, `-2`, `-3`
-    /// and so on are tried, so a second Start work on the same issue or a
-    /// second Fork of the same item gets a fresh branch rather than an
-    /// error. `from` is anything git resolves to a commit: a sha, or the
+    /// Start work, Fork and new work all come here. `repo` is where the
+    /// branch is made: the store's bare clone of `id`, or one of the
+    /// reader's roots. The worktree goes under the store either way, named
+    /// for `id`. `wanted` is the name asked for; when `repo` already has a
+    /// branch of that name, `-2`, `-3` and so on are tried, so a second
+    /// Start work on the same issue or a second Fork of the same item gets
+    /// a fresh branch rather than an error. `from` is anything git
+    /// resolves to a commit: a sha, a branch, or the
     /// `refs/perch/home/<branch>` ref a home was just fetched to.
-    pub async fn cut_branch(&self, id: &RepoId, wanted: &str, from: &str, reserved: &[String]) -> Result<Cut, Error> {
-        if !self.store.has_bare_clone(id) {
-            return Err(Error::Io(format!("no clone of {} in the store", id.full_name())));
+    pub async fn cut_branch(
+        &self,
+        repo: &Path,
+        id: &RepoId,
+        wanted: &str,
+        from: &str,
+        reserved: &[String],
+    ) -> Result<Cut, Error> {
+        if !repo.exists() {
+            return Err(Error::Io(format!("no repository at {}", repo.display())));
         }
-        let bare = self.store.bare_path(id);
 
         // A name is taken when the branch exists, when a worktree already
         // sits at the path the name maps to (two branches can map to one
@@ -383,7 +392,7 @@ impl Preparer {
         let mut n = 1u32;
         loop {
             let taken = reserved.iter().any(|r| r == &branch)
-                || self.branch_exists(&bare, &branch).await
+                || self.branch_exists(repo, &branch).await
                 || self.store.worktree_path(id, &branch).join(".git").exists();
             if !taken {
                 break;
@@ -392,21 +401,78 @@ impl Preparer {
             branch = format!("{wanted}-{n}");
         }
 
-        let worktree = self.store.worktree_path(id, &branch);
+        let worktree = self.add_worktree(repo, id, &branch, &["-b", &branch], from).await?;
+        Ok(Cut { branch, worktree })
+    }
+
+    /// Check out a branch that already exists, rather than cutting a new
+    /// one: `branch` itself when `repo` has it, else a new local branch of
+    /// that name tracking `tracking`, a remote-tracking ref such as
+    /// `origin/fix`. Git refuses a branch another worktree has checked
+    /// out, and that refusal is the error.
+    pub async fn check_out_branch(
+        &self,
+        repo: &Path,
+        id: &RepoId,
+        branch: &str,
+        tracking: Option<&str>,
+    ) -> Result<Cut, Error> {
+        let worktree = if self.branch_exists(repo, branch).await {
+            self.add_worktree(repo, id, branch, &[], branch).await?
+        } else {
+            let Some(tracking) = tracking else {
+                return Err(Error::Io(format!("there is no branch {branch} to check out")));
+            };
+            self.add_worktree(repo, id, branch, &["--track", "-b", branch], tracking)
+                .await?
+        };
+        Ok(Cut { branch: branch.to_string(), worktree })
+    }
+
+    /// The repository a checkout belongs to, as a path a branch can be
+    /// cut from and that outlives the checkout: its main worktree, or the
+    /// bare repository when it has none. `git worktree list` names that
+    /// first, from any worktree of the repository.
+    pub async fn repository_of(&self, checkout: &Path) -> Result<PathBuf, Error> {
+        let out = self
+            .git
+            .run(Some(checkout), ["worktree", "list", "--porcelain"], QUERY_TIMEOUT)
+            .await?;
+        out.lines()
+            .find_map(|line| line.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .ok_or_else(|| Error::Io(format!("git lists no worktree for {}", checkout.display())))
+    }
+
+    /// `git worktree add <flags> <path> <commitish>` in `repo`, at the
+    /// store's path for `branch`, after clearing a leftover there.
+    async fn add_worktree(
+        &self,
+        repo: &Path,
+        id: &RepoId,
+        branch: &str,
+        flags: &[&str],
+        commitish: &str,
+    ) -> Result<PathBuf, Error> {
+        let worktree = self.store.worktree_path(id, branch);
+        if worktree.join(".git").exists() {
+            return Err(Error::Io(format!("{} is already a checkout", worktree.display())));
+        }
         std::fs::create_dir_all(self.store.worktrees_dir()).map_err(|e| Error::Io(e.to_string()))?;
-        // Neither a branch nor a checkout, so anything at the path is a
-        // leftover from an interrupted run, and empty of git's knowledge.
+        // Not a checkout, so anything at the path is a leftover from an
+        // interrupted run, and empty of git's knowledge.
         if worktree.exists() {
             std::fs::remove_dir_all(&worktree).map_err(|e| Error::Io(e.to_string()))?;
         }
-        let _ = self.git.run(Some(&bare), ["worktree", "prune"], WORKTREE_TIMEOUT).await;
+        let _ = self.git.run(Some(repo), ["worktree", "prune"], WORKTREE_TIMEOUT).await;
 
         let path = worktree.to_string_lossy().into_owned();
-        self.git
-            .run(Some(&bare), ["worktree", "add", "-b", &branch, &path, from], WORKTREE_TIMEOUT)
-            .await?;
-
-        Ok(Cut { branch, worktree })
+        let mut args = vec!["worktree", "add"];
+        args.extend_from_slice(flags);
+        args.push(&path);
+        args.push(commitish);
+        self.git.run(Some(repo), args, WORKTREE_TIMEOUT).await?;
+        Ok(worktree)
     }
 
     /// Whether the commit on disk is one the pull request had: behind its

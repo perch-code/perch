@@ -265,6 +265,11 @@ pub struct Checkout {
     /// from. Set from `head_sha` when the item is opened, before `head_sha`
     /// is refreshed; `None` until the item has been opened once.
     pub last_seen_head: Option<String>,
+    /// The repository an owned checkout was added from when that is one
+    /// of the reader's roots rather than Perch's bare clone: where its
+    /// branch lives, and where removing it prunes. `None` for the bare
+    /// clone, and for a checkout that is not owned.
+    pub source: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -406,6 +411,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            source: None,
         });
         assert_eq!(i.title(), "perch/issue-42");
         i.subject = Some(Subject::Issue(Issue {
@@ -456,7 +462,7 @@ mod tests {
         assert!(i.is_closed());
         assert!(!i.is_active());
         let mut j = item();
-        j.checkout = Some(Checkout { branch: "b".into(), base_ref: "main".into(), head_sha: "h".into(), path: "/x".into(), owned: false, on_disk: true, churn: None, last_seen_head: None });
+        j.checkout = Some(Checkout { branch: "b".into(), base_ref: "main".into(), head_sha: "h".into(), path: "/x".into(), owned: false, on_disk: true, churn: None, last_seen_head: None, source: None });
         assert!(j.is_active());
         j.archived_at = Some(at("2026-09-18T12:00:00Z"));
         assert!(j.is_archived());

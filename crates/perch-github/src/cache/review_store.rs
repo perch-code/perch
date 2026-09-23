@@ -3021,6 +3021,7 @@ mod tests {
             on_disk: true,
             churn: Some((3, 1)),
             last_seen_head: None,
+            source: None,
         });
         cache.insert_item(&item).unwrap();
     }

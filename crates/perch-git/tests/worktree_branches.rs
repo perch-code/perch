@@ -321,7 +321,7 @@ async fn commits_only_on_counts_what_deleting_the_branch_loses() {
     let main = git(&f.bare(), &["rev-parse", "refs/heads/main"]);
     let cut = f
         .preparer
-        .cut_branch(&f.id, "chris/work", &main, &[])
+        .cut_branch(&f.bare(), &f.id, "chris/work", &main, &[])
         .await
         .unwrap();
     assert_eq!(f.preparer.commits_only_on(&f.bare(), &cut.branch).await.unwrap(), 0);

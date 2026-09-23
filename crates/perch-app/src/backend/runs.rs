@@ -748,6 +748,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            source: None,
         });
         cache.insert_item(&item).unwrap();
         let (events, _) = std::sync::mpsc::channel();

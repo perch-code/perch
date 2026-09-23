@@ -1512,6 +1512,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            source: None,
         });
         state.item.set(Some(std::sync::Arc::new(item)));
         app.review_capabilities.set(std::sync::Arc::new(vec![

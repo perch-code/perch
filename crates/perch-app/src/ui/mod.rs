@@ -934,6 +934,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            source: None,
         });
         review.item.set(Some(Arc::new(item)));
         review.ready.set(true);

@@ -311,6 +311,7 @@ pub(crate) mod tests {
             on_disk: true,
             churn: Some((504, 135)),
             last_seen_head: None,
+            source: None,
         }
     }
 

@@ -636,6 +636,7 @@ mod tests {
             on_disk: true,
             churn: Some((1192, 36)),
             last_seen_head: None,
+            source: None,
         });
         item
     }

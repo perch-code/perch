@@ -5103,9 +5103,8 @@ async fn retire_archived_checkout_from_cache(
         {
             return Err(format!("{} has uncommitted changes", checkout.branch));
         }
-        let repo = RepoId::parse(&item.repo_full_name)
+        let bare = owned_repo(preparer.store(), &item)
             .ok_or_else(|| format!("{} is not a repository name", item.repo_full_name))?;
-        let bare = preparer.store().bare_path(&repo);
         preparer
             .remove_worktree(&bare, &checkout.path)
             .await
@@ -5153,15 +5152,13 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
             return Err(format!("{} has uncommitted changes", checkout.branch));
         }
         if !accept_loss {
-            let commits = match RepoId::parse(&item.repo_full_name) {
-                Some(repo) => {
-                    let bare = ctx.preparer.store().bare_path(&repo);
-                    // No clone, or no such branch in it: nothing to lose.
-                    ctx.preparer
-                        .commits_only_on(&bare, &checkout.branch)
-                        .await
-                        .unwrap_or(0)
-                }
+            let commits = match owned_repo(ctx.preparer.store(), &item) {
+                // No clone, or no such branch in it: nothing to lose.
+                Some(repo) => ctx
+                    .preparer
+                    .commits_only_on(&repo, &checkout.branch)
+                    .await
+                    .unwrap_or(0),
                 None => 0,
             };
             if commits > 0 {
@@ -5179,8 +5176,7 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
     let _deletion = ctx.runs.block_owner(id, None)?;
     ctx.runs.cancel_owner(id, None).await;
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned) {
-        if let Some(repo) = RepoId::parse(&item.repo_full_name) {
-            let bare = ctx.preparer.store().bare_path(&repo);
+        if let Some(bare) = owned_repo(ctx.preparer.store(), &item) {
             if checkout.path.join(".git").exists() {
                 // Cancellation is asynchronous and the checkout is also a
                 // normal directory the reader can edit. The first check
@@ -5202,7 +5198,8 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
                     .await
                     .map_err(|e| e.to_string())?;
             }
-            if bare.join("HEAD").is_file() {
+            // The bare clone, or a root with its `.git`.
+            if bare.join("HEAD").is_file() || bare.join(".git").exists() {
                 // A branch that is already gone is not a reason to keep the row.
                 if let Err(e) = ctx.preparer.delete_branch(&bare, &checkout.branch).await {
                     tracing::info!(id, error = %e, "branch was not there to delete");
@@ -5433,8 +5430,9 @@ async fn open_branch_item(ctx: &Ctx, item: Item, navigation_id: u64) -> bool {
         // A checkout under the store is cut in a clone from GitHub, which
         // a local repository has not got, so a row like this is from
         // before the entry was local. Said here rather than found out by
-        // a clone that cannot start.
-        if perch_github::is_local(&item.repo_full_name) {
+        // a clone that cannot start. One cut from a root has no clone to
+        // need.
+        if perch_github::is_local(&item.repo_full_name) && checkout.source.is_none() {
             ctx.send_navigation_event(
                 navigation_id,
                 Event::ReviewFailed {
@@ -5510,12 +5508,30 @@ async fn open_branch_item(ctx: &Ctx, item: Item, navigation_id: u64) -> bool {
 }
 
 /// A checkout under the store on a branch Perch cut: back on disk if it
-/// was archived, then read as it is.
+/// was archived, then read as it is. One cut from a root goes back into
+/// that root and is read as a root's checkout is, against the base as
+/// the root's remote has it.
 async fn open_owned_branch(
     ctx: &Ctx,
     repo: &RepoId,
     checkout: &ItemCheckout,
 ) -> Result<perch_git::Checkout, perch_git::Error> {
+    if let Some(root) = &checkout.source {
+        if !checkout.path.join(".git").exists() {
+            let path = checkout.path.to_string_lossy().into_owned();
+            let git = ctx.preparer.git();
+            let _ = git
+                .run(Some(root), ["worktree", "prune"], Duration::from_secs(30))
+                .await;
+            git.run(
+                Some(root),
+                ["worktree", "add", &path, &checkout.branch],
+                Duration::from_secs(60),
+            )
+            .await?;
+        }
+        return open_own_checkout(ctx, repo, checkout, &checkout.base_ref).await;
+    }
     let bare = ctx.preparer.ensure_bare(repo, |_| {}).await?;
     if !checkout.path.join(".git").exists() {
         // Archived: the branch is still in the bare clone.
@@ -6096,7 +6112,7 @@ async fn base_revs_for(ctx: &Ctx, item: &Item) -> Vec<String> {
     };
     let base = &checkout.base_ref;
     let is_sha = base.len() == 40 && base.chars().all(|c| c.is_ascii_hexdigit());
-    if !checkout.owned {
+    if !checkout.owned || checkout.source.is_some() {
         return root_base_revs(ctx, &checkout.path, base).await;
     }
     let mut out = Vec::new();
@@ -7587,13 +7603,31 @@ async fn set_scope(
 }
 
 /// Why a branch cannot be cut for a local repository, or None when it can.
-/// A cut is made in the store's clone of the repository on GitHub, from
-/// its home checkout; a repository that lives only on this machine has
-/// neither, and the clone that would fail is one that must not be tried.
-fn no_home_for_local(ctx: &Ctx, repo_full_name: &str) -> Option<String> {
-    perch_github::is_local(repo_full_name).then(|| {
+/// The repository an owned checkout's branch lives in, where adding,
+/// pruning and deleting it happen: the root it was cut from, else the
+/// store's bare clone.
+fn owned_repo(store: &perch_git::Store, item: &Item) -> Option<PathBuf> {
+    if let Some(source) = item.checkout.as_ref().and_then(|c| c.source.clone()) {
+        return Some(source);
+    }
+    RepoId::parse(&item.repo_full_name).map(|repo| store.bare_path(&repo))
+}
+
+/// The first of a repository's roots that is a checkout, where a branch
+/// of the reader's own clone is cut.
+fn root_of(ctx: &Ctx, identity: &str) -> Option<PathBuf> {
+    ctx.config
+        .roots_for(identity)
+        .into_iter()
+        .find(|root| root.join(".git").exists())
+}
+
+/// A repository that lives only on this machine has no clone in the
+/// store to cut from, so a cut there needs one of its roots.
+fn no_root_for_local(ctx: &Ctx, repo_full_name: &str) -> Option<String> {
+    (perch_github::is_local(repo_full_name) && root_of(ctx, repo_full_name).is_none()).then(|| {
         format!(
-            "{} is not on GitHub, so there is no home checkout to cut from",
+            "{} is not on GitHub and has no root on disk to cut from",
             ctx.config.display_name(repo_full_name)
         )
     })
@@ -7614,8 +7648,11 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Resul
             issue_item.repo_full_name
         ));
     };
-    if let Some(message) = no_home_for_local(ctx, &issue_item.repo_full_name) {
-        return Err(message);
+    if perch_github::is_local(&issue_item.repo_full_name) {
+        return Err(format!(
+            "{} is not on GitHub, so it has no issues to start work on",
+            ctx.config.display_name(&issue_item.repo_full_name)
+        ));
     }
     let wanted = format!("perch/issue-{}", issue.number);
     if let Some(existing) = ctx
@@ -7666,6 +7703,7 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Resul
     let cut = ctx
         .preparer
         .cut_branch(
+            &ctx.preparer.store().bare_path(&repo),
             &repo,
             &wanted,
             &perch_git::home_ref(&default),
@@ -7696,6 +7734,7 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Resul
         on_disk: true,
         churn: Some((0, 0)),
         last_seen_head: None,
+        source: None,
     });
     item.from_item_id = Some(issue_item.id.clone());
     ctx.with_cache(|c| c.insert_item(&item))
@@ -7706,6 +7745,12 @@ async fn start_work(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Resul
 }
 
 /// Cut a new branch from an item's head into a new checkout-only item.
+///
+/// The cut is made where the source's commits are. A checkout Perch cut
+/// from a root is cut again in that root, and so is any checkout of a
+/// repository that lives only on this machine, in the repository the
+/// checkout belongs to. Anything else is cut in the store's clone, with a
+/// root's head fetched into it first.
 async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
     let Some(source) = ctx.item(id) else {
         return Err("That item is gone".into());
@@ -7722,19 +7767,13 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
             source.repo_full_name
         ));
     };
-    if let Some(message) = no_home_for_local(ctx, &source.repo_full_name) {
-        return Err(message);
-    }
-    ctx.preparer
-        .ensure_bare(&repo, |_| {})
-        .await
-        .map_err(|e| e.to_string())?;
-    // A root's branch may not be in the store's clone; fetch its head
-    // there by commit so the cut has something to start from.
+    let local = perch_github::is_local(&source.repo_full_name);
+    let git = ctx.preparer.git();
+    // A root's branch: check it is still what the row says, and take its
+    // head from disk, since the row's may be behind.
     let head = if checkout.owned {
         checkout.head_sha.clone()
     } else {
-        let git = ctx.preparer.git();
         // The root may have been switched since the row was made; a fork
         // of another branch under this one's name would be a lie.
         let on_branch = git
@@ -7753,32 +7792,65 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
                 checkout.branch
             ));
         }
-        let sha = git
-            .run(
-                Some(&checkout.path),
-                ["rev-parse", "HEAD"],
-                Duration::from_secs(30),
-            )
-            .await
-            .map_err(|e| e.to_string())?
-            .trim()
-            .to_string();
-        let bare = ctx.preparer.store().bare_path(&repo);
-        let from = checkout.path.to_string_lossy().into_owned();
         git.run(
-            Some(&bare),
-            ["fetch", "--no-tags", &from, &sha],
-            Duration::from_secs(120),
+            Some(&checkout.path),
+            ["rev-parse", "HEAD"],
+            Duration::from_secs(30),
         )
         .await
-        .map_err(|e| e.to_string())?;
-        sha
+        .map_err(|e| e.to_string())?
+        .trim()
+        .to_string()
+    };
+
+    let root = if let Some(root) = checkout.source.clone() {
+        Some(root)
+    } else if local {
+        if checkout.owned {
+            // Owned, local, and not cut from a root: a row from before
+            // the repository was local. There is nowhere to cut.
+            return Err(no_root_for_local(ctx, &source.repo_full_name).unwrap_or_else(|| {
+                format!("{} was not cut from a root", checkout.branch)
+            }));
+        }
+        Some(
+            ctx.preparer
+                .repository_of(&checkout.path)
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+    let repo_dir = match &root {
+        Some(root) => root.clone(),
+        None => {
+            let bare = ctx
+                .preparer
+                .ensure_bare(&repo, |_| {})
+                .await
+                .map_err(|e| e.to_string())?;
+            // A root's branch may not be in the store's clone; fetch its
+            // head there by commit so the cut has something to start from.
+            if !checkout.owned {
+                let from = checkout.path.to_string_lossy().into_owned();
+                git.run(
+                    Some(&bare),
+                    ["fetch", "--no-tags", &from, &head],
+                    Duration::from_secs(120),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            }
+            bare
+        }
     };
     // The source's own name is spoken for by the source; the cut takes
     // the next one, whether or not this clone has heard of it.
     let cut = ctx
         .preparer
         .cut_branch(
+            &repo_dir,
             &repo,
             &checkout.branch,
             &head,
@@ -7799,6 +7871,7 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         on_disk: true,
         churn: Some((0, 0)),
         last_seen_head: None,
+        source: root,
     });
     item.from_item_id = Some(source.id.clone());
     ctx.with_cache(|c| c.insert_item(&item))
@@ -8574,6 +8647,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                             on_disk: true,
                             churn,
                             last_seen_head: None,
+                            source: None,
                         });
                         if let Some(Err(e)) = ctx.with_cache(|c| c.insert_item(&item)) {
                             tracing::warn!(error = %e, "could not record a root worktree");
@@ -9363,6 +9437,7 @@ async fn open_pull_request(
         // The head being opened now, which the next open will look back
         // to. What the row held until now is this open's "since".
         last_seen_head: Some(checkout.head_sha.clone()).filter(|h| !h.is_empty()),
+        source: None,
     });
     let since = kept.as_ref().and_then(|c| c.last_seen_head.clone());
     item.archived_at = None;
@@ -15510,6 +15585,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            source: None,
         });
         ctx.with_cache(|cache| cache.update_item(&item))
             .unwrap()
@@ -15647,6 +15723,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_local_branch_forks_into_its_root_and_deleting_it_asks_about_its_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        root_with_branch(&root, "feature");
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        assert!(scan_roots(&ctx).await);
+        let source = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+
+        let id = fork_item(&ctx, &source.id).await.expect("a local branch forks");
+
+        let fork = ctx.item(&id).unwrap();
+        let checkout = fork.checkout.clone().unwrap();
+        let root = root.canonicalize().unwrap();
+        assert_eq!(fork.repo_full_name, "local/notes");
+        assert_eq!(checkout.branch, "feature-2");
+        assert!(checkout.owned);
+        assert_eq!(checkout.source.as_deref(), Some(root.as_path()));
+        assert!(checkout.path.starts_with(ctx.preparer.store().worktrees_dir()));
+        assert_eq!(
+            git(&root, &["rev-parse", "refs/heads/feature-2"]),
+            source.checkout.as_ref().unwrap().head_sha,
+            "the branch is the root's"
+        );
+        assert!(
+            !scan_roots(&ctx).await,
+            "the scan sees the new worktree and leaves Perch's row alone"
+        );
+        assert_eq!(ctx.with_cache(|c| c.load_items().unwrap()).unwrap().len(), 2);
+
+        std::fs::write(checkout.path.join("three.txt"), "three\n").unwrap();
+        git(&checkout.path, &["add", "."]);
+        git(&checkout.path, &["commit", "-q", "-m", "three"]);
+        received.try_iter().for_each(drop);
+
+        delete_item(&ctx, &id, false).await.unwrap();
+        let prompts: Vec<LossPrompt> = received
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::ConfirmLoss(prompt) => Some(prompt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0].action, LossAction::Delete);
+        assert_eq!(prompts[0].commits, 1);
+        assert!(ctx.item(&id).is_some(), "nothing was deleted yet");
+        assert!(checkout.path.exists());
+
+        delete_item(&ctx, &id, true).await.unwrap();
+        assert!(ctx.item(&id).is_none());
+        assert!(!checkout.path.exists());
+        assert!(
+            git(&root, &["branch", "--list", "feature-2"]).is_empty(),
+            "the branch went from the root"
+        );
+    }
+
+    #[tokio::test]
     async fn a_github_entry_whose_root_has_no_remote_is_told_so_and_gets_no_row() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("b");
@@ -15768,6 +15904,7 @@ mod tests {
             on_disk: true,
             churn: Some((3, 1)),
             last_seen_head: None,
+            source: None,
         }
     }
 

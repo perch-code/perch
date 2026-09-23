@@ -1362,6 +1362,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            source: None,
         });
         state.item.set(Some(Arc::new(item)));
         state.pull_request.set(Some(pull_request("head-42")));

@@ -36,7 +36,7 @@ mod review_store;
 /// whether the reader may resolve it. Version 24 keeps the instructions a
 /// worktree review was run with. Schemas 13 through 23 migrate in place so
 /// local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 25;
+pub const SCHEMA_VERSION: u32 = 26;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -161,6 +161,7 @@ CREATE TABLE items (
     additions        INTEGER,
     deletions        INTEGER,
     last_seen_head   TEXT,
+    source_path      TEXT,
     CHECK (subject_kind IS NOT NULL OR branch IS NOT NULL)
 );
 CREATE UNIQUE INDEX items_subject ON items(subject_repo, subject_kind, subject_number)
@@ -268,6 +269,9 @@ CREATE TABLE runs (
     last_event_sequence    INTEGER NOT NULL DEFAULT 0,
     context_dir            TEXT,
     context_manifest       TEXT,
+    mode                   TEXT NOT NULL DEFAULT 'ask',
+    work_before            TEXT,
+    work_after             TEXT,
     CHECK (owner_kind IN ('discussion', 'review', 'unavailable')),
     CHECK (
         (owner_kind = 'discussion' AND owner_item_id IS NOT NULL AND owner_thread_id IS NOT NULL
@@ -396,6 +400,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             22 => add_github_thread_columns(&tx)?,
             23 => review_store::add_group_instructions(&tx)?,
             24 => add_run_context_columns(&tx)?,
+            25 => add_work_columns(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -562,6 +567,29 @@ fn add_run_context_columns(tx: &Transaction<'_>) -> Result<(), CacheError> {
     Ok(())
 }
 
+/// Schema 26: an owned checkout says which repository it was added from,
+/// and a run says whether it was a question or work, and the commits
+/// that record the worktree before and after work.
+fn add_work_columns(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    let columns = [
+        ("items", "source_path", "TEXT"),
+        ("runs", "mode", "TEXT NOT NULL DEFAULT 'ask'"),
+        ("runs", "work_before", "TEXT"),
+        ("runs", "work_after", "TEXT"),
+    ];
+    for (table, column, kind) in columns {
+        let present: bool = tx.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1)"),
+            params![column],
+            |row| row.get(0),
+        )?;
+        if !present {
+            tx.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"), [])?;
+        }
+    }
+    Ok(())
+}
+
 /// Every event gains an actor, and the merge gives up its own `by`.
 /// Rewritten in place rather than dropped, so a pull request read offline
 /// still says how it ended before the next fetch. A row that no longer
@@ -607,17 +635,22 @@ fn migrate_21_to_22(tx: &Transaction<'_>) -> Result<(), CacheError> {
 }
 
 /// The head of an item's pull request, or nothing when the item has none.
+/// Reads the one column it needs, since a migration calls it on a schema
+/// older than `ITEM_COLUMNS`.
 fn item_head_sha_on(conn: &Connection, item_id: &str) -> Result<String, CacheError> {
-    let item = conn
+    let subject_json: Option<String> = conn
         .query_row(
-            &format!("SELECT {ITEM_COLUMNS} FROM items WHERE id = ?1"),
+            "SELECT subject_json FROM items WHERE id = ?1",
             params![item_id],
-            read_item,
+            |row| row.get(0),
         )
-        .optional()?;
-    Ok(item
-        .and_then(|item| item.pull_request().map(|pr| pr.head_sha.clone()))
-        .unwrap_or_default())
+        .optional()?
+        .flatten();
+    let subject: Option<Subject> = subject_json.and_then(|j| serde_json::from_str(&j).ok());
+    Ok(match subject {
+        Some(Subject::PullRequest(pr)) => pr.head_sha,
+        _ => String::new(),
+    })
 }
 
 /// Put GitHub's review threads into the cache beside Perch's own,
@@ -3537,8 +3570,8 @@ impl Cache {
              (id, repo_full_name, subject_kind, subject_number, subject_json,
               branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name,
               saved, pinned_at, archived_at, created_at, last_opened_at, additions, deletions,
-              subject_repo, last_seen_head)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+              subject_repo, last_seen_head, source_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 item.id, item.repo_full_name,
                 c.subject_kind, c.subject_number, c.subject_json,
@@ -3553,6 +3586,7 @@ impl Cache {
                 c.deletions,
                 c.subject_repo,
                 c.last_seen_head,
+                c.source_path,
             ],
         )?;
         Ok(())
@@ -3572,7 +3606,8 @@ impl Cache {
                 subject_json = ?5, branch = ?6, base_ref = ?7, head_sha = ?8, checkout_path = ?9,
                 owned = ?10, on_disk = ?11, from_item_id = ?12, name = ?13, saved = ?14,
                 pinned_at = ?15, archived_at = ?16, last_opened_at = ?17,
-                additions = ?18, deletions = ?19, subject_repo = ?20, last_seen_head = ?21
+                additions = ?18, deletions = ?19, subject_repo = ?20, last_seen_head = ?21,
+                source_path = ?22
              WHERE id = ?1",
             params![
                 item.id,
@@ -3596,6 +3631,7 @@ impl Cache {
                 c.deletions,
                 c.subject_repo,
                 c.last_seen_head,
+                c.source_path,
             ],
         )?;
         Ok(())
@@ -3896,7 +3932,8 @@ fn hash(s: &str) -> String {
 
 const ITEM_COLUMNS: &str = "id, repo_full_name, subject_kind, subject_number, subject_json,
     branch, base_ref, head_sha, checkout_path, owned, on_disk, from_item_id, name, saved,
-    pinned_at, archived_at, created_at, last_opened_at, additions, deletions, last_seen_head";
+    pinned_at, archived_at, created_at, last_opened_at, additions, deletions, last_seen_head,
+    source_path";
 
 /// An item's optional parts as columns.
 struct ItemColumns {
@@ -3913,6 +3950,7 @@ struct ItemColumns {
     deletions: Option<i64>,
     subject_repo: Option<String>,
     last_seen_head: Option<String>,
+    source_path: Option<String>,
 }
 
 impl ItemColumns {
@@ -3939,6 +3977,9 @@ impl ItemColumns {
                 .as_ref()
                 .map(|s| s.repo_full_name().to_lowercase()),
             last_seen_head: c.and_then(|c| c.last_seen_head.clone()),
+            source_path: c
+                .and_then(|c| c.source.as_ref())
+                .map(|p| p.to_string_lossy().into_owned()),
         })
     }
 }
@@ -3981,6 +4022,11 @@ fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
             _ => None,
         },
         last_seen_head: r.get::<_, Option<String>>(20).ok().flatten(),
+        source: r
+            .get::<_, Option<String>>(21)
+            .ok()
+            .flatten()
+            .map(PathBuf::from),
     });
     let created: String = r.get(16)?;
     let opened: String = r.get(17)?;
@@ -5171,6 +5217,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            source: None,
         });
         i
     }
@@ -5601,6 +5648,7 @@ mod tests {
             on_disk: false,
             churn: None,
             last_seen_head: None,
+            source: None,
         });
         i.name = Some("the fence".into());
         i.saved = true;
@@ -5723,6 +5771,54 @@ mod tests {
         let checkout = c.load_item(&i.id).unwrap().unwrap().checkout.unwrap();
         assert_eq!(checkout.last_seen_head.as_deref(), Some("abc"));
         assert_eq!(checkout.head_sha, "def");
+    }
+
+    #[test]
+    fn a_checkout_cut_from_a_root_remembers_the_root() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut i = branch_item("feature");
+        c.insert_item(&i).unwrap();
+        assert_eq!(c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().source, None);
+
+        i.checkout.as_mut().unwrap().source = Some("/Users/me/Code/notes".into());
+        c.update_item(&i).unwrap();
+        assert_eq!(
+            c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().source,
+            Some(PathBuf::from("/Users/me/Code/notes"))
+        );
+    }
+
+    #[test]
+    fn schema_25_gains_the_work_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let item = branch_item("feature");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&item).unwrap();
+            cache.insert_run(&run("run-25", "thread-25", RunStatus::Completed)).unwrap();
+            for (table, column) in [
+                ("items", "source_path"),
+                ("runs", "mode"),
+                ("runs", "work_before"),
+                ("runs", "work_after"),
+            ] {
+                cache
+                    .conn
+                    .execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
+                    .unwrap();
+            }
+            cache.set_meta("schema_version", "25").unwrap();
+        }
+
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 25, to: SCHEMA_VERSION });
+        assert_eq!(cache.load_item(&item.id).unwrap().unwrap().checkout.unwrap().source, None);
+        let mode: String = cache
+            .conn
+            .query_row("SELECT mode FROM runs WHERE id='run-25'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "ask", "a run from before was a question");
     }
 
     fn discussion() -> Discussion {

@@ -171,6 +171,7 @@ mod tests {
             on_disk: true,
             churn: None,
             last_seen_head: None,
+            source: None,
         });
         branch.pinned_at = Some(at("2026-09-18T10:00:00Z"));
 
