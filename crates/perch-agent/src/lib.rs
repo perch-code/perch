@@ -196,10 +196,164 @@ pub fn claude_settings(cwd: &std::path::Path) -> String {
     .to_string()
 }
 
+/// What a run may do.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// Read the worktree and answer: [`READ_ONLY_TOOLS`], and a shell
+    /// that writes nowhere.
+    #[default]
+    Ask,
+    /// Edit the worktree and run commands in it, in a sandbox that
+    /// writes only to the worktree, the temporary directory and the
+    /// grant, and reaches only the grant's domains.
+    Work(WorkGrant),
+}
+
+/// What a Work run may reach beyond its worktree: `[repo.work]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkGrant {
+    pub write: Vec<PathBuf>,
+    pub network: Vec<String>,
+}
+
+/// The tools a Work run may use without asking, besides editing inside
+/// the worktree (see [`work_edit_rules`]). `Bash` has no command list:
+/// every command runs in the sandbox, which is the boundary.
+pub const WORK_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS", "Bash", "TodoWrite"];
+
+/// The tools that edit files, allowed to a Work run only under its
+/// worktree. `NotebookEdit` is among them; for Ask it is denied by name.
+const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// What in a worktree a Work run may not write: the file that points at
+/// the git directory, and the agents' own configuration, which a later
+/// run, or the reader's own agent, would take as instructions.
+pub const WORK_PROTECTED: &[&str] = &[".git", ".claude", ".codex", ".mcp.json"];
+
+/// Permission rules scoping the editing tools to the worktree, in Claude
+/// Code's absolute-path form (`//` before the path), with the protected
+/// paths in it denied. `(allowed, denied)`.
+pub fn work_edit_rules(cwd: &std::path::Path) -> (Vec<String>, Vec<String>) {
+    let real = real_path(cwd);
+    let root = real.to_string_lossy();
+    let root = root.trim_end_matches('/');
+    let allowed = EDIT_TOOLS
+        .iter()
+        .map(|tool| format!("{tool}(/{root}/**)"))
+        .collect();
+    let denied = EDIT_TOOLS
+        .iter()
+        .flat_map(|tool| {
+            WORK_PROTECTED.iter().flat_map(move |name| {
+                [
+                    format!("{tool}(/{root}/{name})"),
+                    format!("{tool}(/{root}/{name}/**)"),
+                ]
+            })
+        })
+        .collect();
+    (allowed, denied)
+}
+
+/// The git directories a linked worktree uses, which live outside it:
+/// its own under `worktrees/<name>`, which its `.git` file names, and the
+/// repository's, which that one's `commondir` names. Empty for a
+/// checkout whose `.git` is a directory inside it.
+pub fn linked_git_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(pointer) = std::fs::read_to_string(worktree.join(".git")) else {
+        return Vec::new();
+    };
+    let Some(gitdir) = pointer.trim().strip_prefix("gitdir:") else {
+        return Vec::new();
+    };
+    let gitdir = worktree.join(gitdir.trim());
+    let mut dirs = vec![real_path(&gitdir)];
+    if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
+        dirs.push(real_path(&gitdir.join(common.trim())));
+    }
+    dirs
+}
+
+/// The `--settings` a Work run starts with. The shell's sandbox is the
+/// boundary now, so a sandboxed command runs without asking; there is
+/// still no unsandboxed retry, and no sandbox means no run. Writes go to
+/// the worktree, the temporary directory and the grant, never to the
+/// protected paths in the worktree nor to the git directories it uses,
+/// wherever they are, so `git commit` fails. The network is the grant's
+/// domains and nothing else.
+pub fn claude_work_settings(cwd: &std::path::Path, grant: &WorkGrant) -> String {
+    let real = real_path(cwd);
+    let mut allow_write = vec![real.clone(), real_path(&std::env::temp_dir())];
+    allow_write.extend(grant.write.iter().map(|p| real_path(p)));
+    let mut deny_write: Vec<PathBuf> = WORK_PROTECTED.iter().map(|name| real.join(name)).collect();
+    deny_write.extend(linked_git_dirs(&real));
+    serde_json::json!({
+        "sandbox": {
+            "enabled": true,
+            "autoAllowBashIfSandboxed": true,
+            "allowUnsandboxedCommands": false,
+            "failIfUnavailable": true,
+            "filesystem": {
+                "allowWrite": allow_write,
+                "denyWrite": deny_write,
+            },
+            "network": {
+                "allowedDomains": grant.network,
+                "deniedDomains": [],
+                "strictAllowlist": true,
+            },
+        },
+    })
+    .to_string()
+}
+
+/// The permission profile a Codex Work run runs under, defined on its
+/// command line by [`codex_work_filesystem`].
+pub const CODEX_WORK_PROFILE: &str = "perch_work";
+
+/// The `-c` that defines Codex's Work profile: everything readable, the
+/// workspace, the temporary directory and the grant writable, and the
+/// protected paths in the worktree and the git directories it uses read
+/// only. Codex's `workspace-write` is not used, because for a linked
+/// worktree it makes the repository's git directory writable, and a
+/// commit would go through; a path named here outranks the workspace it
+/// is in. The profile names no network, and a profile without one has
+/// none: Codex has no allowlist to honour the grant's domains with. A
+/// path cannot be a `-c` key segment, so the whole table goes in as one
+/// inline value.
+pub fn codex_work_filesystem(cwd: &std::path::Path, grant: &WorkGrant) -> String {
+    let real = real_path(cwd);
+    let mut entries = vec![
+        (":root".to_string(), "read"),
+        (":workspace_roots".to_string(), "write"),
+        (":tmpdir".to_string(), "write"),
+    ];
+    for path in &grant.write {
+        entries.push((real_path(path).to_string_lossy().into_owned(), "write"));
+    }
+    for name in WORK_PROTECTED {
+        entries.push((real.join(name).to_string_lossy().into_owned(), "read"));
+    }
+    for dir in linked_git_dirs(&real) {
+        entries.push((dir.to_string_lossy().into_owned(), "read"));
+    }
+    let table = entries
+        .iter()
+        .map(|(path, access)| format!("{}=\"{access}\"", toml_string(path)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("permissions.{CODEX_WORK_PROFILE}.filesystem={{{table}}}")
+}
+
 /// The arguments that keep a Claude Code run to the user's own settings:
 /// only `~/.claude/settings.json` is read, never the repository's
 /// `.claude/settings*.json` or `.mcp.json`, and no MCP server starts.
 pub fn claude_isolation_args(cwd: &std::path::Path) -> Vec<String> {
+    isolation_args_with(claude_settings(cwd))
+}
+
+/// [`claude_isolation_args`] with the sandbox a mode needs.
+fn isolation_args_with(settings: String) -> Vec<String> {
     vec![
         "--setting-sources".into(),
         "user".into(),
@@ -207,7 +361,7 @@ pub fn claude_isolation_args(cwd: &std::path::Path) -> Vec<String> {
         "--mcp-config".into(),
         r#"{"mcpServers":{}}"#.into(),
         "--settings".into(),
-        claude_settings(cwd),
+        settings,
     ]
 }
 
@@ -304,9 +458,9 @@ pub struct RunSpec {
     pub system: Option<String>,
     /// A session id from an earlier run, to continue it.
     pub resume: Option<String>,
-    /// Claude Code only. Codex has no tool list; its sandbox is the
-    /// permission story, and `args` sets it read-only.
-    pub allowed_tools: Vec<String>,
+    /// Ask or Work. For Claude Code it picks the tool lists and the
+    /// sandbox settings; Codex has no tool list, and it picks the sandbox.
+    pub mode: Mode,
 }
 
 impl RunSpec {
@@ -333,7 +487,23 @@ impl RunSpec {
             "--permission-mode".into(),
             "default".into(),
         ];
-        args.extend(claude_isolation_args(&self.cwd));
+        let (allowed, denied): (Vec<String>, Vec<String>) = match &self.mode {
+            Mode::Ask => {
+                args.extend(claude_isolation_args(&self.cwd));
+                (
+                    READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
+                    denied_tools().collect(),
+                )
+            }
+            Mode::Work(grant) => {
+                args.extend(isolation_args_with(claude_work_settings(&self.cwd, grant)));
+                let (edits, protected) = work_edit_rules(&self.cwd);
+                (
+                    WORK_TOOLS.iter().map(|t| t.to_string()).chain(edits).collect(),
+                    NETWORK_TOOLS.iter().map(|t| t.to_string()).chain(protected).collect(),
+                )
+            }
+        };
         if let Some(system) = &self.system {
             args.push("--append-system-prompt".into());
             args.push(system.clone());
@@ -343,12 +513,12 @@ impl RunSpec {
             args.push(session.clone());
         }
         args.push("--allowedTools".into());
-        args.extend(self.allowed_tools.iter().cloned());
+        args.extend(allowed);
         if self.effort == Effort::Ultra {
             args.extend(ORCHESTRATION_TOOLS.iter().map(|t| t.to_string()));
         }
         args.push("--disallowedTools".into());
-        args.extend(denied_tools());
+        args.extend(denied);
         args.push("--".into());
         args.push(self.prompt.clone());
         args
@@ -363,9 +533,14 @@ impl RunSpec {
     /// in it run outside the read-only sandbox, and a prompt can call them.
     fn codex_args(&self) -> Vec<String> {
         let mut args = vec!["exec".to_string(), "--json".into()];
+        let ask = matches!(self.mode, Mode::Ask);
         match &self.resume {
             None => {
-                args.extend(["-s".into(), "read-only".into()]);
+                // Work's sandbox is a permission profile, which Codex will
+                // not take beside a sandbox mode.
+                if ask {
+                    args.extend(["-s".into(), "read-only".into()]);
+                }
                 args.extend(["-C".into(), self.cwd.to_string_lossy().into_owned()]);
             }
             Some(thread) => {
@@ -382,8 +557,18 @@ impl RunSpec {
             "hooks".into(),
         ]);
         args.extend(["-m".into(), self.model.clone()]);
-        if self.resume.is_some() {
+        if ask && self.resume.is_some() {
             args.extend(["-c".into(), "sandbox_mode=\"read-only\"".into()]);
+        }
+        if let Mode::Work(grant) = &self.mode {
+            args.extend([
+                "-c".into(),
+                format!("default_permissions=\"{CODEX_WORK_PROFILE}\""),
+                "-c".into(),
+                codex_work_filesystem(&self.cwd, grant),
+                "-c".into(),
+                "approval_policy=\"never\"".into(),
+            ]);
         }
         args.extend(["-c".into(), codex_untrusted_project_override(&self.cwd)]);
         args.extend([
@@ -1479,7 +1664,7 @@ mod tests {
             prompt: "why?".into(),
             system: Some("be brief".into()),
             resume: None,
-            allowed_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
+            mode: Mode::Ask,
         };
         let args = spec.args();
         assert_eq!(args[0], "-p");
@@ -1522,7 +1707,7 @@ mod tests {
             prompt: "and?".into(),
             system: None,
             resume: Some("sess-1".into()),
-            allowed_tools: vec![],
+            mode: Mode::Ask,
         };
         let args = spec.args();
         assert!(args.windows(2).any(|w| w == ["--resume", "sess-1"]));
@@ -1577,6 +1762,168 @@ mod tests {
                 .any(|w| w[0] == "--setting-sources" && w[1].contains("project")),
             "no project settings source"
         );
+    }
+
+    fn work(backend: Backend, grant: WorkGrant, resume: Option<&str>) -> RunSpec {
+        RunSpec {
+            backend,
+            binary: "agent".into(),
+            model: "m".into(),
+            effort: Effort::High,
+            cwd: "/tmp".into(),
+            prompt: "do it".into(),
+            system: None,
+            resume: resume.map(str::to_string),
+            mode: Mode::Work(grant),
+        }
+    }
+
+    fn full_grant() -> WorkGrant {
+        WorkGrant {
+            write: vec!["/opt/cache".into()],
+            network: vec!["index.crates.io".into()],
+        }
+    }
+
+    /// No Work command line ever turns a boundary off.
+    fn assert_nothing_bypassed(args: &[String]) {
+        for arg in args {
+            for bad in [
+                "bypassPermissions",
+                "dangerously",
+                "danger-full-access",
+                "\"allowUnsandboxedCommands\":true",
+            ] {
+                assert!(!arg.contains(bad), "{bad} in {arg}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_work_run_edits_the_worktree_and_runs_commands_in_the_sandbox() {
+        let real = std::fs::canonicalize("/tmp").unwrap();
+        let root = real.to_string_lossy().to_string();
+        for grant in [WorkGrant::default(), full_grant()] {
+            for resume in [None, Some("sess-1")] {
+                let args = work(Backend::ClaudeCode, grant.clone(), resume).args();
+                assert_nothing_bypassed(&args);
+                let allowed = args.iter().position(|a| a == "--allowedTools").unwrap();
+                let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
+                let end = args.iter().position(|a| a == "--").unwrap();
+                let allowed = &args[allowed + 1..denied];
+                let denied = &args[denied + 1..end];
+                assert!(allowed.contains(&"Bash".to_string()), "{allowed:?}");
+                assert!(allowed.contains(&format!("Edit(/{root}/**)")), "{allowed:?}");
+                assert!(allowed.contains(&format!("Write(/{root}/**)")), "{allowed:?}");
+                assert!(!allowed.contains(&"Edit".to_string()), "never unscoped");
+                for tool in ["WebFetch", "WebSearch"] {
+                    assert!(denied.contains(&tool.to_string()), "{tool}: {denied:?}");
+                }
+                for name in [".git", ".claude", ".codex", ".mcp.json"] {
+                    assert!(
+                        denied.contains(&format!("Write(/{root}/{name}/**)")),
+                        "{name}: {denied:?}"
+                    );
+                }
+                let settings = args
+                    .windows(2)
+                    .find(|w| w[0] == "--settings")
+                    .map(|w| w[1].clone())
+                    .unwrap();
+                let value: serde_json::Value = serde_json::from_str(&settings).unwrap();
+                let sandbox = &value["sandbox"];
+                assert_eq!(sandbox["enabled"], true);
+                assert_eq!(sandbox["autoAllowBashIfSandboxed"], true);
+                assert_eq!(sandbox["allowUnsandboxedCommands"], false);
+                assert_eq!(sandbox["failIfUnavailable"], true);
+                let allow_write = sandbox["filesystem"]["allowWrite"].as_array().unwrap();
+                assert_eq!(allow_write[0], root.as_str(), "the worktree first");
+                assert_eq!(allow_write.len(), 2 + grant.write.len());
+                assert_eq!(
+                    sandbox["filesystem"]["denyWrite"],
+                    serde_json::json!([
+                        format!("{root}/.git"),
+                        format!("{root}/.claude"),
+                        format!("{root}/.codex"),
+                        format!("{root}/.mcp.json"),
+                    ])
+                );
+                assert_eq!(
+                    sandbox["network"]["allowedDomains"],
+                    serde_json::json!(grant.network)
+                );
+                assert_eq!(sandbox["network"]["strictAllowlist"], true);
+                assert!(args.windows(2).any(|w| w == ["--setting-sources", "user"]));
+                assert!(args.contains(&"--strict-mcp-config".to_string()));
+                assert_eq!(args.windows(2).any(|w| w[0] == "--resume"), resume.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn a_codex_work_run_writes_the_workspace_and_the_grant_with_no_network() {
+        let real = std::fs::canonicalize("/tmp").unwrap();
+        let root = real.to_string_lossy().to_string();
+        let fresh = work(Backend::Codex, full_grant(), None).args();
+        assert_nothing_bypassed(&fresh);
+        assert!(!fresh.contains(&"-s".to_string()), "a profile, not a sandbox mode");
+        assert!(!fresh.iter().any(|a| a.contains("sandbox_mode")));
+        assert!(fresh
+            .windows(2)
+            .any(|w| w == ["-c", "default_permissions=\"perch_work\""]));
+        let profile = fresh
+            .iter()
+            .find(|a| a.starts_with("permissions.perch_work.filesystem="))
+            .expect("the profile is defined");
+        for entry in [
+            "\":root\"=\"read\"".to_string(),
+            "\":workspace_roots\"=\"write\"".to_string(),
+            "\":tmpdir\"=\"write\"".to_string(),
+            "\"/opt/cache\"=\"write\"".to_string(),
+            format!("\"{root}/.git\"=\"read\""),
+            format!("\"{root}/.claude\"=\"read\""),
+        ] {
+            assert!(profile.contains(&entry), "{entry} in {profile}");
+        }
+        assert!(!profile.contains("network"), "no network in the profile");
+        assert!(fresh.windows(2).any(|w| w == ["-c", "approval_policy=\"never\""]));
+        assert!(fresh.contains(&"--ignore-user-config".to_string()));
+
+        let resumed = work(Backend::Codex, WorkGrant::default(), Some("t-1")).args();
+        assert_nothing_bypassed(&resumed);
+        assert!(!resumed.iter().any(|a| a == "-s" || a.contains("sandbox_mode")));
+        assert!(resumed
+            .iter()
+            .any(|a| a.starts_with("permissions.perch_work.filesystem=")));
+
+        let ask = RunSpec {
+            mode: Mode::Ask,
+            ..work(Backend::Codex, WorkGrant::default(), None)
+        }
+        .args();
+        assert!(ask.windows(2).any(|w| w == ["-s", "read-only"]));
+        assert!(!ask.iter().any(|a| a.contains("permissions")));
+    }
+
+    #[test]
+    fn a_linked_worktree_s_git_directories_are_denied_to_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let common = real.join("repo/.git");
+        let own = common.join("worktrees/wt");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("commondir"), "../..\n").unwrap();
+        let worktree = real.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", own.display())).unwrap();
+
+        assert_eq!(linked_git_dirs(&worktree), [own.clone(), common.clone()]);
+        let settings: serde_json::Value =
+            serde_json::from_str(&claude_work_settings(&worktree, &WorkGrant::default())).unwrap();
+        let denied = settings["sandbox"]["filesystem"]["denyWrite"].as_array().unwrap();
+        assert!(denied.contains(&serde_json::json!(common.to_string_lossy())), "{denied:?}");
+        assert!(denied.contains(&serde_json::json!(own.to_string_lossy())), "{denied:?}");
+        assert!(linked_git_dirs(&real).is_empty(), "no .git file, nothing linked");
     }
 
     #[test]
@@ -1703,7 +2050,7 @@ mod tests {
             prompt: "why?".into(),
             system: None,
             resume: None,
-            allowed_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
+            mode: Mode::Ask,
         }
     }
 
@@ -1752,7 +2099,7 @@ mod tests {
             prompt: "why?".into(),
             system: Some("be \"brief\"\nplease".into()),
             resume: resume.map(str::to_string),
-            allowed_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
+            mode: Mode::Ask,
         }
     }
 

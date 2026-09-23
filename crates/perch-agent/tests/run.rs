@@ -26,7 +26,7 @@ fn spec(binary: PathBuf, cwd: PathBuf) -> RunSpec {
         prompt: "hi".into(),
         system: None,
         resume: None,
-        allowed_tools: vec![],
+        mode: perch_agent::Mode::Ask,
     }
 }
 

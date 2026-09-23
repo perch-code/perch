@@ -10784,6 +10784,7 @@ async fn ask(
         checkout.worktree.clone(),
         &prompt,
         resume,
+        perch_agent::Mode::Ask,
     );
     // Queue time begins at admission, after local prompt preparation. This
     // keeps the displayed FIFO order aligned with the scheduler's order.
@@ -11486,6 +11487,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         directory.to_path_buf(),
         &prompt,
         resume,
+        perch_agent::Mode::Ask,
     );
     let now = Timestamp::now();
     let run = RunRecord {
