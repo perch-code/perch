@@ -62,6 +62,31 @@ issue is fetched when a notification is opened or when the user opens it by
 repository and number. Its current data and discussion may be cached locally;
 closed history is never backfilled.
 
+## Conversation and Code
+
+An item has two modes, the two pills at the centre of its bar, as Codex has
+Summary and Code. **Conversation** is the item's summary, its timeline and its
+threads, with a composer at the foot. **Code** is the worktree: the open files
+as tabs over the editor, and the file tree in the drawer on the right (see
+[The file tree](#the-file-tree)). An issue with no checkout has no Code and no
+pills; Start work gives it a checkout, and the pills come. When the bar's
+controls take more than half of it, the pills give way to them rather than
+sit at the centre.
+
+Each item comes back on the mode it was left in, with its tabs, until Perch
+quits; it opens on Conversation the first time. Code with no file open opens
+the first changed file in the tree's order, and with no changes opens the
+tree. Closing the last file's tab leaves Code showing, with the tree.
+Conversation cannot be closed.
+
+| Action | Key |
+|---|---|
+| Conversation, Code | `Cmd-Shift-1`, `Cmd-Shift-2` |
+| Next, previous file tab | `Cmd-]`, `Cmd-[` |
+| Close the file | `Cmd-W` |
+| The file tree | `Cmd-Shift-E` |
+| Agents | `Cmd-Shift-A` |
+
 ## Timeline
 
 Conversation is the item's description, what was said about it, and what was
@@ -109,7 +134,7 @@ for the letters typed, never you. The worktree's files follow, ranked as
 or `Tab` takes it, a click takes a row, and `Escape` puts the list away until
 the next `@`. A person goes in as `@login`. A file goes to an agent as
 `@path`, as Claude Code and Codex take one, and to GitHub as `` `path` ``,
-since `@` there mentions someone and a code span links to Files.
+since `@` there mentions someone and a code span links to the file on Code.
 
 Every composer in Perch has a destination: Claude, Codex, or GitHub, picked
 from the same menu as the model. What goes to an agent stays in Perch. What
@@ -136,10 +161,10 @@ At the foot of Conversation, a message to GitHub is an issue comment and
 posts at once, after one confirmation naming the pull request.
 
 GitHub's review threads are drawn beside Perch's own with the same cards, in
-both Files and Conversation, so one thread can hold a reviewer's comment, your
+both Code and Conversation, so one thread can hold a reviewer's comment, your
 reply to them, and an agent's private take on both. A thread looks as it does
 on github.com: on Conversation, a box headed by its file with the lines it is
-on under the header; in Files, a box under those lines headed "Comment on line
+on under the header; in Code, a box under those lines headed "Comment on line
 R12". Each message sits under its author's face and name, with **Author** by
 whoever opened the pull request, and the thread ends in a **Follow up** box and
 a foot with **Resolve**. A reviewer's comment offers **Reply** and **Ask about
@@ -160,9 +185,9 @@ the button there does. The thread shows the change before GitHub answers
 and goes back if GitHub refuses. On a thread of Perch's own, a question to
 an agent and its answers, the button is always there and the change stays
 in Perch. A review finding has **Dismiss** and **Reopen** instead.
-Resolved, a thread folds, in Files to one row and on Conversation to its
+Resolved, a thread folds, in Code to one row and on Conversation to its
 header, as one resolved on github.com arrives; **Show resolved** opens it
-again and **Hide resolved** folds it. Conversation and Files each keep their
+again and **Hide resolved** folds it. Conversation and Code each keep their
 own, as github.com's tabs do, and the chevron on a thread's header folds any
 thread.
 
@@ -294,7 +319,7 @@ A worktree made for work can hold the only copy of it.
 
 ## Agents
 
-Questions about an item or selected lines in its Files view run through Claude
+Questions about an item or selected lines in its Code view run through Claude
 Code or Codex in that item's worktree. Follow-ups remain attached to the local
 conversation. A run is a question (**Ask**), which reads and answers, or, on
 your own work, **Work**, which changes the worktree (see [Work](#work)).
@@ -325,16 +350,32 @@ and new reviews, comments, threads and check results elsewhere. Nothing
 changed, nothing is added. `perch --ask --print-prompt` prints the prompt a
 question would get, and the files, without running an agent.
 
-The app-wide activity inspector is one of the two things the drawer on the
-right holds (see [The drawer](#the-drawer)). The persistent **Agents** control
-in the status bar opens it, as do the Agents tile at the right end of the file
-tabs and `Cmd-Shift-A`. Active work is grouped by worktree and continues while
-another item is open or while the drawer is shut. Each row shows the agent,
-model, effort, queue or execution time, and latest tool activity. Selecting
-one shows its retained request, ordered activity, streamed response, usage,
-and errors. Active rows can be stopped, queued rows can be cancelled, and
-failed, stopped, or interrupted attempts can be retried without replacing
-their history.
+An item's runs are in the **Agents** row of its summary on Conversation, after
+Checks, once it has had one. The row's pill says what they are doing, the
+busiest first while any work goes (`1 running · 4 done`, with queued, waiting
+on an approval, and failed), and after, how many there were, or that the last
+one failed. A click unfolds the list under the rows: the working runs first,
+then the item's history, newest first, twenty at a time with **Load older
+runs**. A review's attempts are under a row for the review, which opens the
+snapshot it read. Each run shows the agent, model, effort, queue or execution
+time, and latest tool activity, and **Show in thread** goes to its thread. A
+click opens the run in place to its retained request, ordered activity,
+streamed response, usage and errors, scrolling inside a fixed height and
+following the end while it runs; more than one can be open. Active runs can be
+stopped, queued ones cancelled, and failed, stopped, or interrupted attempts
+retried without replacing their history. Whether the row is unfolded, and
+which runs are open, are kept with the item.
+
+Every item's runs are behind the **Agents** button in the bar, before Submit
+review or Start work, and in the bar of the pane with nothing open. It counts
+the running and queued work, and has a dot while a run waits on you. Its
+dropdown lists the working runs under their items' titles, then the fifteen
+that finished last. A run there goes to its item on Conversation, with the
+Agents row unfolded and the run open at the top. `Cmd-Shift-A` opens and
+shuts the dropdown from anywhere, the arrows move through it, `Enter` goes,
+and `Escape` shuts it. The notice a run leaves as it finishes has a **View**
+that goes to it the same way, and **Review** in the bar, while a review runs,
+goes to it in the Agents row. Work continues while another item is open.
 
 Perch executes at most four top-level agents by default and queues the rest in
 FIFO order. Stopping a run terminates and reaps its process group. Closing
@@ -405,7 +446,7 @@ Perch does not try to detect them; it limits what following one could do.
   `knowledge/reviews/` are cleaned the same way.
 - **Inert links.** A link in an answer or a comment does nothing until it
   is clicked. Hovering it shows the full destination; a click opens `http`
-  and `https` links in the browser and a file of the worktree in Files
+  and `https` links in the browser and a file of the worktree in Code
   (see [Links to code](#links-to-code)), and nothing else.
 
 What remains: the CLIs still read the repository's `CLAUDE.md` and
@@ -483,8 +524,8 @@ in the code font and the agent's reason, with three buttons:
 
 A request not answered in fifteen minutes is denied, and a run that is stopped
 or ends settles whatever it was waiting on. The run's steps keep what was asked
-and what was answered, and the Agents inspector's row shows the request while
-it waits.
+and what was answered. While it waits, its item's Agents row counts it as
+waiting and the bar's Agents button has a dot.
 
 Grants are Perch's own, kept in its database and keyed by repository. Perch
 never writes Claude Code's settings or Codex's rules to remember one. The
@@ -503,7 +544,7 @@ off unless you turn it on. Questions and reviews never read it.
 As a Work run starts and as it ends, however it ends, Perch records the
 worktree as a commit under `refs/perch/runs/<run>/` in the repository, without
 touching the worktree, its index or `HEAD`. The run's card says `Work` and how
-many files it changed; a click shows the change on Files as the **What the run
+many files it changed; a click shows the change on Code as the **What the run
 changed** scope. Deleting the run's thread or item drops the refs.
 
 ## Worktree reviews
@@ -572,38 +613,33 @@ deterministic Markdown at
 document rather than duplicating unchanged entries; unrelated legacy files in
 the knowledge directory are not imported.
 
-## The drawer
+## The file tree
 
-The drawer on the right holds one of two things: the open item's files as a
-tree, or the Agents inspector. It is a column beside the main pane, so
-opening it moves the pane over rather than covering what is being read, and
-the open file, its scroll and a composer are kept through it opening,
-shutting, and changing what it holds. When the window is too narrow for both
-the drawer and a usable pane, the drawer lies over the pane's right edge
-instead, from the top of the window to the status bar.
+The drawer on the right holds the open item's files as a tree, on Code. It is
+a column beside the editor, so opening it moves the file over rather than
+covering it, and the open file, its scroll and a composer are kept through it
+opening and shutting. When the window is too narrow for both the drawer and a
+usable pane, the drawer lies over the pane's right edge instead, from under
+the tabs to the status bar.
 
-The two tiles at the right end of the file tabs open it, after the layout
-tiles: Files and Agents, as Codex has its folder there. Each is a toggle. The
-tile for what the drawer shows is filled, and a click on it shuts the drawer;
-a click on the other swaps what it holds. `Cmd-Shift-E` and `Cmd-Shift-A` do
-the same from anywhere, including from the code or a composer, and the Agents
-control in the status bar is the third way to the inspector. `Escape` backs
-out of a run's details and then shuts the inspector; the drawer's own close
-button shuts it from either. What the drawer holds and how wide it is are
-remembered between launches; asked for the files while an issue is open, it
-stays shut until an item with files opens.
+The tile at the right end of Code's tabs, after the layout tiles, opens and
+shuts it, as Codex has its folder there, and so do `Cmd-Shift-E` from anywhere
+and the drawer's own close button. From Conversation, `Cmd-Shift-E` goes to
+Code with the tree open. On Conversation the tree is hidden, and it comes back
+with Code. Whether it is open and how wide it is are remembered between
+launches.
 
-The files tree is the changed files until its filter is turned off, with the
-scope button and the viewed count above it. A file opened from the tree opens
-on Files, whichever tab the reader was on, and a file opened from anywhere
-else, a card or a definition, is shown in the tree: the way to it opens, the
-filter comes off when the file is not a change, and the tree scrolls to its
-row. During a retained snapshot the tree has no scope to pick and nothing to
-mark viewed, and the way back to the current files is in the tab strip.
+The tree is the changed files until its filter is turned off, with the scope
+button and the viewed count above it. A file opened from the tree opens on
+Code, and a file opened from anywhere else, a card or a definition, is shown
+in the tree: the way to it opens, the filter comes off when the file is not a
+change, and the tree scrolls to its row. During a retained snapshot the tree
+has no scope to pick and nothing to mark viewed, and the way back to the
+current files is in the tab strip.
 
 ## Going to a file
 
-`Cmd-P` puts VS Code's Go to File over the top of the pane, from Files or
+`Cmd-P` puts VS Code's Go to File over the top of the pane, from Code or
 Conversation, for any item with files. Before anything is typed it lists
 the files the item has had open, the most recent first, and then its
 changes. As you type, it lists the recently opened files that match and
@@ -619,7 +655,7 @@ double quotes must match as one run. A recently opened file is listed as
 recent only when the letters form one run in its name, or in its path for
 a query with a `/`; otherwise it is ranked with the other files.
 
-`Enter` opens the file on Files, and `config.rs:42` opens it at line 42;
+`Enter` opens the file on Code, and `config.rs:42` opens it at line 42;
 `:42` alone goes to line 42 of the open file. The list of recently opened
 files is kept for each item until Perch quits.
 
@@ -632,7 +668,7 @@ files is kept for each item until Perch quits.
 
 ## Code navigation
 
-Files reads like an IDE when rust-analyzer is installed. Rest the pointer on
+Code reads like an IDE when rust-analyzer is installed. Rest the pointer on
 an identifier and a tooltip says what it is: the signature in the code font,
 then the first lines of its doc comment. The tooltip cannot be entered and has
 no scroll. It opens where the pointer is and goes away when the pointer does,
@@ -698,7 +734,7 @@ threads, and the picture is back at the next click.
 A file, a line or a symbol of the worktree that a comment or an answer
 names is a link to it, on Conversation and in the cards over the code: in
 a code span, in a fenced block, or as a link's destination. A click goes to
-Files, opens the file with the caret on the line, and `Ctrl--` comes back.
+Code, opens the file with the caret on the line, and `Ctrl--` comes back.
 Hovering says where it goes. It is drawn as any link is, so the text reads
 as it did.
 
