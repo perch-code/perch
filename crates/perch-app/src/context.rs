@@ -33,7 +33,9 @@ pub const MAX_INDEX_LINES: usize = 60;
 /// The discussion in the shape the files and the prompt are made from.
 /// Review threads come from the discussion itself, never from Perch's own
 /// threads, so the reader's private questions and an agent's answers stay
-/// out. A pending review, the reader's own unfinished one, is left out.
+/// out. A pending review, the reader's own unfinished one, is left out,
+/// and so is a review that only commented and said nothing: it is the
+/// wrapper GitHub puts around comments on lines, which are in the threads.
 pub fn archive(
     discussion: &Discussion,
     item_id: &str,
@@ -50,6 +52,7 @@ pub fn archive(
     let reviews = discussion
         .reviews
         .iter()
+        .filter(|review| !(review.state == "COMMENTED" && review.body.trim().is_empty()))
         .filter_map(|review| {
             Some(ReviewEntry {
                 verdict: Verdict::parse(&review.state)?,
@@ -843,6 +846,7 @@ mod tests {
             body: "Fence it.".into(),
             reviews: vec![
                 review(1, "alice", "CHANGES_REQUESTED"),
+                review(2, "bob", "COMMENTED"),
                 review(3, "me", "PENDING"),
             ],
             review_comments: vec![

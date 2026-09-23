@@ -207,6 +207,31 @@ Code or Codex in that item's worktree. Follow-ups remain attached to the local
 conversation, and the agents retain their read-only permissions. Nothing an
 agent writes reaches GitHub unless you post it (see Posting).
 
+### What the agent is told about the discussion
+
+A question on a pull request or issue carries what was said on GitHub, as the
+last fetch left it. The prompt quotes as much as fits in about 24,000
+characters, in this order: each reviewer's latest verdict, the checks, the
+threads within 20 lines of the lines asked about, the other unresolved threads,
+the conversation tab, and the resolved threads. An entry goes in whole or not
+at all; one comment is cut at 2,000 characters with a note of where the rest
+is. Bots' comments stay out of the prompt. What does not fit is listed a line
+each.
+
+All of it, bots included, is also written as files to
+`~/.perch/context/<run>/`: `INDEX.md`, `conversation.md` (the description,
+comments, review summaries and timeline in time order), a file per review
+thread under `threads/`, and `checks.md`. The prompt names the directory and
+the agent reads what it needs. The directory is outside the worktree, belongs
+to the run, and goes when the run is deleted; a retry reads the one its first
+attempt had.
+
+A follow-up that resumes the agent's session is told only what changed on
+GitHub since the run it continues: new or edited replies in its thread, whole,
+and new reviews, comments, threads and check results elsewhere. Nothing
+changed, nothing is added. `perch --ask --print-prompt` prints the prompt a
+question would get, and the files, without running an agent.
+
 The app-wide activity inspector is one of the two things the drawer on the
 right holds (see [The drawer](#the-drawer)). The persistent **Agents** control
 in the status bar opens it, as do the Agents tile at the right end of the file
@@ -241,7 +266,7 @@ models = ["gpt-6-astra"]       # omit to use Codex's own model catalog
 `perch --agents [limit]` prints active runs and retained history without
 launching an agent. `perch --ask owner/repo#N path:start-end "question"`
 runs the same question flow from a terminal; omit the path to ask about the
-whole item.
+whole item, and add `--print-prompt` to see the prompt without running it.
 
 ### What the agent can and cannot do
 
@@ -282,8 +307,9 @@ Perch does not try to detect them; it limits what following one could do.
   characters, however they were written. It is set between
   `[BEGIN untrusted text: …]` and `[END untrusted text]` lines, a line
   inside it that imitates a marker is spoiled, and your question comes
-  last. The review history export under `knowledge/reviews/` is cleaned
-  the same way.
+  last. The discussion files under `context/`, which the prompt says are
+  untrusted like a marked block, and the review history export under
+  `knowledge/reviews/` are cleaned the same way.
 - **Inert links.** A link in an answer or a comment does nothing until it
   is clicked. Hovering it shows the full destination; a click opens `http`
   and `https` links in the browser and a file of the worktree in Files
@@ -311,6 +337,14 @@ range reviewed stays the same: Claude reads the instructions after the range in
 its `/code-review` argument, and Codex, which refuses a custom prompt beside
 `--base`, reads them as developer instructions. A review keeps its
 instructions, so **Retry** uses them again and its history card shows them.
+
+A review of a pull request also reads its discussion. When the snapshot is
+taken, Perch writes the discussion to `~/.perch/context/review-<id>/` in the
+same shape a question gets it, and tells each reviewer, ahead of the requester's
+instructions, where it is and what to do with it: not to report a problem a
+reviewer already raised in an unresolved thread, and to report a change a
+reviewer asked for that the range does not make, naming who asked. A review of
+a branch with no pull request has no discussion to read.
 
 Every review uses a clean, read-only, immutable snapshot in Perch-owned
 storage. Perch retains its exact diff, manifest, commits, and anchored blobs so
