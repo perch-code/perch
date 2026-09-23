@@ -1219,12 +1219,18 @@ pub fn thread_card(
         let card_id = card_id.clone();
         Memo::new(move |_| state.is_collapsed(&card_id))
     };
+    let resolved = {
+        let id = thread.id.clone();
+        Memo::new(move |_| state.is_resolved(&id))
+    };
     let open_thread = thread.clone();
     let open_backend = backend.clone();
     let card = dyn_container(
-        move || collapsed.get(),
-        move |collapsed| {
-            if collapsed {
+        move || (collapsed.get(), resolved.get()),
+        move |(collapsed, resolved)| {
+            if collapsed && resolved {
+                resolved_row(app, state, open_thread.clone()).into_any()
+            } else if collapsed {
                 collapsed_row(app, state, open_thread.clone()).into_any()
             } else {
                 open_inline_card(app, state, open_backend.clone(), open_thread.clone()).into_any()
@@ -1464,7 +1470,7 @@ pub(crate) fn resolved_toggle(
                 "Hide resolved".to_string()
             }
         })
-        .style(move |s| s.font_size(size).color(theme::FG_MUTED).selectable(false)),
+        .style(move |s| s.font_size(size).color(theme::FG).selectable(false)),
     ))
     .on_event_stop(el::Click, move |_, _| toggle())
     .debug_name("resolved-toggle")
@@ -1480,10 +1486,42 @@ pub(crate) fn resolved_toggle(
     })
 }
 
-/// A thread collapsed to its one row: who spoke first, the first line of
-/// what they said, how many messages follow, Outdated, Show resolved on
-/// one that is resolved, and the `...` menu, smaller than the open
-/// card's so it fits the row.
+/// A resolved thread collapsed to its one row, as github.com folds one:
+/// the chevron, the lines it is on, Outdated, Local on one of the
+/// reader's own, and Show resolved and the `...` menu at the end. It is
+/// the open card's header with the chevron pointing right, so nothing
+/// moves when Show resolved opens it.
+fn resolved_row(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
+    let card_id = CardId::Thread(thread.id.clone());
+    let toggle_id = card_id.clone();
+    Stack::horizontal((
+        chevron(state, card_id, false),
+        lines_heading(app, state, &thread),
+        outdated_pill(thread.outdated),
+        local_chip(!thread.is_github_bound()),
+        Empty::new().style(|s| s.flex_grow(1.0_f32).min_width(12.0)),
+        resolved_toggle(
+            state,
+            thread.id.clone(),
+            || true,
+            ThreadFace::Inline,
+            move || state.toggle_card(&toggle_id),
+        ),
+        thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU)
+            .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP)),
+    ))
+    .debug_name("resolved-row")
+    .style(|s| {
+        s.items_center()
+            .width_full()
+            .height_full()
+            .padding_horiz(theme::COLLAPSED_CARD_PADDING)
+    })
+}
+
+/// A thread not resolved collapsed to its one row: who spoke first, the
+/// first line of what they said, how many messages follow, Outdated, and
+/// the `...` menu, smaller than the open card's so it fits the row.
 fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
     let first = thread.messages.first();
     let author = first.map(|m| m.author.clone()).unwrap_or(Author::User);
@@ -1491,24 +1529,12 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
         .map(|m| crate::review::timeline::first_line(&m.body))
         .unwrap_or_default();
     let card_id = CardId::Thread(thread.id.clone());
-    let toggle_id = card_id.clone();
     // Set off from the pill before it as the pills are from what is
     // before them: the pill's fill and the menu's hover fill are one
     // colour, and would touch.
-    let trailing = Stack::horizontal((
-        resolved_toggle(
-            state,
-            thread.id.clone(),
-            || true,
-            ThreadFace::Inline,
-            move || state.toggle_card(&toggle_id),
-        )
-        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP)),
-        thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU)
-            .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP)),
-    ))
-    .style(|s| s.items_center().flex_shrink(0.0_f32))
-    .into_any();
+    let trailing = thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU)
+        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP).flex_shrink(0.0_f32))
+        .into_any();
     let avatar = author_avatar(app, state, &author, theme::COLLAPSED_CARD_PILL);
     collapsed_card_row(
         state,
@@ -5136,7 +5162,13 @@ mod tests {
         assert!(find(ours, "Label: \"Local\"").is_some(), "marked as the reader's own");
 
         let theirs = find(harness.root_id(), "theirs").unwrap();
-        assert!(find(theirs, "lines-heading").is_none(), "resolved, so collapsed to its row");
+        let row = find(theirs, "resolved-row").expect("resolved, so collapsed to its row");
+        assert_eq!(
+            texts(find(row, "lines-heading").unwrap()).join(" "),
+            "Comment on line R7",
+            "the row says where the thread is, as GitHub's does"
+        );
+        assert!(find(row, "name label").is_none(), "and not who spoke or what they said");
         let toggle = find(theirs, "resolved-toggle").expect("Show resolved on the row");
         assert!(harness.get_layout_rect(toggle).width() > 0.0);
         assert_eq!(texts(toggle), ["Show resolved"]);
