@@ -154,20 +154,21 @@ pub fn item_row(
 }
 
 /// Whether the inbox has an unread notification about the item's pull
-/// request or issue: what bolds the title and draws the dot, as the
-/// Notifications scope's row for the same thread has them. Read from
-/// the inbox each time, so viewing the item, which reads the thread,
-/// clears both without the row being rebuilt. A branch with no subject
-/// has nothing to be unread.
+/// request or issue, or the item has local activity it hasn't been
+/// opened since: what bolds the title and draws the dot, as the
+/// Notifications scope's row has them. Read each time, so viewing the
+/// item, which reads both, clears them without the row being rebuilt.
 fn unread(state: AppState, item: &Item) -> impl Fn() -> bool + Clone + 'static {
     let about = item
         .subject
         .as_ref()
         .map(|subject| (subject.repo_full_name().to_string(), subject.kind(), subject.number()));
+    let id = item.id.clone();
     move || {
-        about
-            .as_ref()
-            .is_some_and(|(repo, kind, number)| state.subject_unread(repo, *kind, *number))
+        state.activity_unread(&id)
+            || about
+                .as_ref()
+                .is_some_and(|(repo, kind, number)| state.subject_unread(repo, *kind, *number))
     }
 }
 
@@ -396,19 +397,28 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         });
     }
     {
-        // Put the unread reminder back on the subject's notification,
-        // the way the Notifications scope's row does. Greyed while there
-        // is none to put it on: a branch, a subject the inbox has nothing
-        // about, or one still unread.
+        // Put the unread reminder back on the subject's notification and
+        // on the item's own activity, the way the Notifications scope's
+        // row does. Greyed while there is neither to put it on, or both
+        // are still unread.
         let read = read_threads(state, &item);
+        let activity_read = state.item_activity.with_untracked(|all| {
+            all.get(&item.id).is_some_and(|a| a.is_visible() && !a.is_unread())
+        });
         let b = backend.clone();
+        let activity_id = item.id.clone();
         menu = menu.item("Mark Unread", move |m| {
-            let (b, read) = (b.clone(), read.clone());
-            m.enabled(!read.is_empty()).accelerator(key(KeyCode::KeyU)).action(move || {
-                for thread_id in &read {
-                    b.mark_notification_unread(thread_id);
-                }
-            })
+            let (b, read, activity_id) = (b.clone(), read.clone(), activity_id.clone());
+            m.enabled(!read.is_empty() || activity_read)
+                .accelerator(key(KeyCode::KeyU))
+                .action(move || {
+                    for thread_id in &read {
+                        b.mark_notification_unread(thread_id);
+                    }
+                    if activity_read {
+                        b.mark_item_activity_unread(&activity_id);
+                    }
+                })
         });
     }
     {

@@ -96,6 +96,19 @@ pub enum Command {
     DoneNotification {
         thread_id: String,
     },
+    /// Put an item's latest local activity away until a newer event.
+    ItemActivityDone {
+        item_id: String,
+    },
+    /// Make an item's latest local activity unread again.
+    MarkItemActivityUnread {
+        item_id: String,
+    },
+    /// Whether Perch's window is the key window. Activity on the open item
+    /// isn't recorded while it is: the reader watched it happen.
+    WindowKey {
+        key: bool,
+    },
     /// Ignore future notifications for the thread, then remove this one
     /// from GitHub's inbox.
     UnsubscribeNotification {
@@ -556,6 +569,12 @@ pub enum LossAction {
 /// under. An item opens on it; see `opening_scope`.
 pub const SCOPE_META_KEY: &str = "review.scope";
 
+/// The repositories whose roots have been scanned since Perch started
+/// recording local activity, one lowercased identity a line. A head move
+/// or a new worktree in a repository the scan hasn't seen before is where
+/// things already were, not something that happened.
+const ACTIVITY_REPOS_KEY: &str = "activity.scanned_repos";
+
 /// What the scope menu's Last run shows: the newest finished Work run on
 /// the item that changed something. A run that changed nothing is passed
 /// over for the one before it.
@@ -617,6 +636,9 @@ pub enum Event {
     },
     /// Every item, active and archived. Whole, for the same reason.
     Items(Vec<Item>),
+    /// Every item's latest local activity: runs and reviews that ended,
+    /// heads that moved. Whole, with the items.
+    ItemActivity(Vec<perch_github::ItemActivity>),
     /// The items again, as a poll found them rather than something the
     /// reader did. The drawer may hold these back until asked.
     ItemsPolled(Vec<Item>),
@@ -1987,6 +2009,22 @@ impl Backend {
         });
     }
 
+    pub fn done_item_activity(&self, item_id: &str) {
+        let _ = self.commands.send(Command::ItemActivityDone {
+            item_id: item_id.to_string(),
+        });
+    }
+
+    pub fn mark_item_activity_unread(&self, item_id: &str) {
+        let _ = self.commands.send(Command::MarkItemActivityUnread {
+            item_id: item_id.to_string(),
+        });
+    }
+
+    pub fn set_window_key(&self, key: bool) {
+        let _ = self.commands.send(Command::WindowKey { key });
+    }
+
     pub fn mark_notification_unread(&self, thread_id: &str) {
         let _ = self.commands.send(Command::MarkNotificationUnread {
             thread_id: thread_id.to_string(),
@@ -2856,6 +2894,7 @@ async fn run(
         asked_subjects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         approvals: Default::default(),
         approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
+        window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
@@ -3069,6 +3108,19 @@ async fn run(
             }
             Command::MarkNotificationUnread { thread_id } => {
                 ctx.mark_notification_unread(&thread_id);
+            }
+            Command::ItemActivityDone { item_id } => {
+                if let Some(Ok(true)) = ctx.with_cache(|c| c.done_item_activity(&item_id)) {
+                    ctx.send_item_activity();
+                }
+            }
+            Command::MarkItemActivityUnread { item_id } => {
+                if let Some(Ok(true)) = ctx.with_cache(|c| c.mark_item_activity_unread(&item_id)) {
+                    ctx.send_item_activity();
+                }
+            }
+            Command::WindowKey { key } => {
+                ctx.window_key.store(key, std::sync::atomic::Ordering::Relaxed);
             }
             Command::DoneNotification { thread_id } => {
                 ctx.clear_notice();
@@ -4207,6 +4259,8 @@ struct Ctx {
     /// time, so one it could not resolve is not asked about again at
     /// every poll until the thread moves on.
     asked_subjects: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
+    /// Whether Perch's window is the key window, as the UI last said.
+    window_key: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The GitHub client and the token it was built on.
@@ -4498,6 +4552,7 @@ impl Ctx {
         {
             self.want_avatars(author_avatars(&items));
         }
+        self.send_item_activity();
     }
 
     /// The same, for what a poll found rather than what the reader did.
@@ -4507,6 +4562,46 @@ impl Ctx {
             .flatten()
         {
             self.want_avatars(author_avatars(&items));
+        }
+        self.send_item_activity();
+    }
+
+    fn send_item_activity(&self) {
+        match self.with_cache(Cache::load_item_activity) {
+            Some(Ok(activity)) => {
+                let _ = self.events.send(Event::ItemActivity(activity));
+            }
+            Some(Err(e)) => tracing::warn!(error = %e, "could not read item activity"),
+            None => {}
+        }
+    }
+
+    /// Record the latest thing that happened on an item, unless the
+    /// reader is looking at it: open in the main pane, with Perch's window
+    /// key. Whether it was recorded.
+    fn record_activity(&self, item_id: &str, event: perch_github::ActivityEvent) -> bool {
+        if self.is_open(item_id) && self.window_key.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        match self.with_cache(|c| c.record_item_activity(item_id, Timestamp::now(), &event)) {
+            Some(Ok(())) => {
+                tracing::info!(item = item_id, ?event, "recorded item activity");
+                self.send_item_activity();
+                true
+            }
+            Some(Err(e)) => {
+                tracing::warn!(item = item_id, error = %e, "could not record item activity");
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Opening an item reads its local activity, whichever row it was
+    /// opened from.
+    fn read_activity(&self, item_id: &str) {
+        if let Some(Ok(true)) = self.with_cache(|c| c.read_item_activity(item_id)) {
+            self.send_item_activity();
         }
     }
 
@@ -5726,6 +5821,7 @@ async fn open_item(ctx: &Ctx, id: &str, navigation_id: u64) -> bool {
         });
         return false;
     };
+    ctx.read_activity(&item.id);
     let source_checkout_missing = item
         .checkout
         .as_ref()
@@ -9446,6 +9542,11 @@ async fn scan_roots(ctx: &Ctx) -> bool {
     let mut failed_repos: std::collections::HashSet<String> = std::collections::HashSet::new();
     let hosts = ctx.config().github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+    let known_repos: std::collections::HashSet<String> = ctx
+        .with_cache(|c| c.meta(ACTIVITY_REPOS_KEY).ok().flatten())
+        .flatten()
+        .map(|value| value.lines().map(str::to_string).collect())
+        .unwrap_or_default();
 
     for declared in &ctx.config().repo {
         // Every entry has its identity by the time the backend runs. One
@@ -9523,6 +9624,13 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                         if c.owned {
                             continue;
                         }
+                        // A head somewhere new that the reader hasn't
+                        // opened the item at.
+                        let from = c.head_sha.clone();
+                        let head_moved = known_repos.contains(&identity.to_lowercase())
+                            && !from.is_empty()
+                            && from != entry.head_sha
+                            && c.last_seen_head.as_deref() != Some(entry.head_sha.as_str());
                         let moved = c.head_sha != entry.head_sha
                             || !c.on_disk
                             || c.churn != churn
@@ -9547,6 +9655,10 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                             ctx.with_cache(|cache| cache.update_item(&item));
                             changed = true;
                         }
+                        if head_moved {
+                            record_head_move(ctx, &item.id, &entry.path, &from, &entry.head_sha)
+                                .await;
+                        }
                     }
                     None => {
                         // The entry's identity, not the scan's slug: the
@@ -9569,6 +9681,29 @@ async fn scan_roots(ctx: &Ctx) -> bool {
                             tracing::warn!(error = %e, "could not record a root worktree");
                         } else {
                             changed = true;
+                            // Made and committed to since the last scan:
+                            // an agent's worktree, most likely.
+                            if known_repos.contains(&identity.to_lowercase()) {
+                                let commits = git
+                                    .run(
+                                        Some(&entry.path),
+                                        ["rev-list", "--count", &format!("{base_ref}..HEAD")],
+                                        Duration::from_secs(30),
+                                    )
+                                    .await
+                                    .ok()
+                                    .and_then(|n| n.trim().parse::<u32>().ok())
+                                    .unwrap_or(0);
+                                if commits > 0 {
+                                    ctx.record_activity(
+                                        &item.id,
+                                        perch_github::ActivityEvent::NewWorktree {
+                                            head: entry.head_sha.clone(),
+                                            commits,
+                                        },
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -9622,7 +9757,48 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         }
         changed = true;
     }
+    if !scanned_repos.is_subset(&known_repos) {
+        let mut all: Vec<&String> = known_repos.union(&scanned_repos).collect();
+        all.sort();
+        let value = all.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+        ctx.with_cache(|c| c.set_meta(ACTIVITY_REPOS_KEY, &value));
+    }
     changed
+}
+
+/// A worktree's head the scan found somewhere new, for the inbox: how
+/// many commits the new head has that the old one didn't, when both are
+/// there to count. A head a run on the item ended at is that run's, and
+/// already in the inbox as the run.
+async fn record_head_move(ctx: &Ctx, item_id: &str, dir: &Path, from: &str, to: &str) {
+    use perch_github::ActivityEvent;
+    let latest = ctx
+        .with_cache(|c| c.item_activity(item_id).ok().flatten())
+        .flatten();
+    if let Some(ActivityEvent::Run { head: Some(head), .. }) = latest.as_ref().map(|a| &a.event) {
+        if head == to {
+            return;
+        }
+    }
+    let commits = ctx
+        .preparer
+        .git()
+        .run(
+            Some(dir),
+            ["rev-list", "--count", &format!("{from}..{to}")],
+            Duration::from_secs(30),
+        )
+        .await
+        .ok()
+        .and_then(|n| n.trim().parse::<u32>().ok());
+    ctx.record_activity(
+        item_id,
+        ActivityEvent::HeadMoved {
+            from: from.to_string(),
+            to: to.to_string(),
+            commits,
+        },
+    );
 }
 
 /// For each item with a branch and no subject, ask GitHub whether a pull
@@ -9830,6 +10006,11 @@ async fn open_subject(
         return false;
     }
     read_subject_notifications(ctx, &repo_full_name, kind, number).await;
+    if let Some(Ok(Some(item))) =
+        ctx.with_cache(|c| c.find_item_by_subject(&repo_full_name, kind, number))
+    {
+        ctx.read_activity(&item.id);
+    }
     match kind {
         ItemKind::PullRequest => {
             open_pull_request(ctx, repo_full_name, number, navigation_id).await
@@ -11584,6 +11765,59 @@ async fn record_work(ctx: &Ctx, run: &RunRecord, side: WorkSide) {
     }
 }
 
+/// A run that ended on an item goes in the inbox: finished, failed or
+/// cut off, but not one the reader stopped or cancelled, or one Perch's
+/// quitting ended. A Work run says how many files it changed, and every
+/// run where its worktree's head was, so a commit it made isn't reported
+/// again by the scan.
+async fn record_run_activity(ctx: &Ctx, item_id: &str, run: &RunRecord) {
+    use perch_github::{ActivityEvent, ActivityOutcome};
+    let outcome = match run.status {
+        RunStatus::Completed => ActivityOutcome::Completed,
+        RunStatus::Failed => ActivityOutcome::Failed,
+        RunStatus::Interrupted => ActivityOutcome::Interrupted,
+        _ => return,
+    };
+    if matches!(
+        run.terminal_reason,
+        Some(
+            TerminalReason::UserStopped
+                | TerminalReason::QueueCancelled
+                | TerminalReason::AppShutdown
+                | TerminalReason::AppRestart
+        )
+    ) {
+        return;
+    }
+    let files = if run.mode == RunMode::Work {
+        run_changes(ctx, &run.id).await.map(|(files, _, _)| files)
+    } else {
+        None
+    };
+    let head = match run.working_directory.as_deref().map(Path::new) {
+        Some(dir) if dir.join(".git").exists() => ctx
+            .preparer
+            .git()
+            .run(Some(dir), ["rev-parse", "HEAD"], Duration::from_secs(30))
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    };
+    ctx.record_activity(
+        item_id,
+        ActivityEvent::Run {
+            run_id: run.id.clone(),
+            backend: run.backend.clone(),
+            mode: run.mode,
+            outcome,
+            files,
+            head,
+        },
+    );
+}
+
 /// Files changed, lines added and removed by a Work run, for its card.
 async fn run_changes(ctx: &Ctx, run_id: &str) -> Option<(u32, u32, u32)> {
     let run = ctx.runs.load(run_id)?;
@@ -11865,6 +12099,9 @@ async fn execute_question(
             ctx.runs.finish(lease);
             ctx.send_threads(&item_id);
             send_agent_runs(ctx, 50);
+            if let Some(run) = ctx.runs.load(&run.id) {
+                record_run_activity(ctx, &item_id, &run).await;
+            }
             return;
         }
     };
@@ -12135,6 +12372,7 @@ async fn execute_question(
     });
     ctx.runs.finish(lease);
     tracing::info!(thread = %thread.id, run = %final_run.id, status = final_run.status.name(), steps = final_run.steps.len(), "run ended");
+    record_run_activity(ctx, &item_id, &final_run).await;
     ctx.send_threads(&item_id);
     // Finding threads start with the reviewer's report, then use the ordinary
     // discussion flow for follow-ups. Keep the review archive in step with
@@ -13839,6 +14077,7 @@ mod tests {
             asked_subjects: Default::default(),
             approvals: Default::default(),
             approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
+            window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         (ctx, received)
     }
@@ -15044,6 +15283,223 @@ mod tests {
         assert!(args.contains("--resume"), "the Work session is resumed: {args}");
     }
 
+    fn branch_item(branch: &str) -> Item {
+        let mut item = Item::new("local/notes", Timestamp::now());
+        item.checkout = Some(ItemCheckout {
+            branch: branch.into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: format!("/tmp/perch-no-such-worktree/{branch}").into(),
+            owned: false,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        item
+    }
+
+    fn activity(ctx: &Ctx, item_id: &str) -> Option<perch_github::ItemActivity> {
+        ctx.with_cache(|c| c.item_activity(item_id).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_scan_records_a_head_that_moved_while_the_reader_was_away() {
+        use perch_github::ActivityEvent;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        assert!(scan_roots(&ctx).await);
+        let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        assert_eq!(activity(&ctx, &item.id), None, "the first scan finds where things are");
+
+        // From the second scan on, a head somewhere new is news.
+        let first = git(&worktree, &["rev-parse", "HEAD"]);
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "three"]);
+        assert!(scan_roots(&ctx).await);
+        let moved = activity(&ctx, &item.id).expect("the head moved");
+        let three = git(&worktree, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            moved.event,
+            ActivityEvent::HeadMoved { from: first, to: three.clone(), commits: Some(2) }
+        );
+        assert!(moved.is_unread() && moved.is_visible());
+
+        // Opening it reads it.
+        ctx.read_activity(&item.id);
+        assert!(!activity(&ctx, &item.id).unwrap().is_unread());
+
+        // A head the reader opened the item at is one they've seen.
+        let mut seen = ctx.item(&item.id).unwrap();
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "four"]);
+        seen.checkout.as_mut().unwrap().last_seen_head = Some(git(&worktree, &["rev-parse", "HEAD"]));
+        ctx.with_cache(|c| c.update_item(&seen).unwrap());
+        assert!(scan_roots(&ctx).await);
+        assert_eq!(activity(&ctx, &item.id).unwrap().event, moved.event);
+
+        // Nothing while the reader is looking at it.
+        open_in_slot(&ctx, &item);
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "five"]);
+        assert!(scan_roots(&ctx).await);
+        assert_eq!(activity(&ctx, &item.id).unwrap().event, moved.event);
+        // With the window in the background, they aren't.
+        ctx.window_key.store(false, std::sync::atomic::Ordering::Relaxed);
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "six"]);
+        assert!(scan_roots(&ctx).await);
+        assert!(matches!(
+            activity(&ctx, &item.id).unwrap().event,
+            ActivityEvent::HeadMoved { commits: Some(1), .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_scan_records_a_new_worktree_only_when_it_has_commits() {
+        use perch_github::ActivityEvent;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        root_with_branch(&root, "feature");
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        assert!(scan_roots(&ctx).await);
+
+        let add = |branch: &str| {
+            let path = dir.path().join(format!("notes-{branch}"));
+            git(&root, &["worktree", "add", "-q", "-b", branch, path.to_str().unwrap()]);
+            path
+        };
+        let idle = add("idle");
+        let _ = idle;
+        let busy = add("busy");
+        git(&busy, &["commit", "-q", "--allow-empty", "-m", "agent"]);
+        assert!(scan_roots(&ctx).await);
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        let by_branch = |b: &str| items.iter().find(|i| i.branch() == Some(b)).unwrap().id.clone();
+        assert_eq!(activity(&ctx, &by_branch("idle")), None);
+        assert!(matches!(
+            activity(&ctx, &by_branch("busy")).unwrap().event,
+            ActivityEvent::NewWorktree { commits: 1, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_runs_that_ended_on_their_own_are_recorded() {
+        use perch_github::{ActivityEvent, ActivityOutcome};
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = branch_item("feature");
+        ctx.with_cache(|c| c.insert_item(&item).unwrap());
+        let ended = |status, reason| RunRecord {
+            id: "run-1".into(),
+            backend: "codex".into(),
+            status,
+            terminal_reason: Some(reason),
+            ..RunRecord::default()
+        };
+        for (status, reason) in [
+            (RunStatus::Stopped, TerminalReason::UserStopped),
+            (RunStatus::Stopped, TerminalReason::QueueCancelled),
+            (RunStatus::Interrupted, TerminalReason::AppShutdown),
+            (RunStatus::Interrupted, TerminalReason::AppRestart),
+        ] {
+            record_run_activity(&ctx, &item.id, &ended(status, reason)).await;
+            assert_eq!(activity(&ctx, &item.id), None, "{reason:?}");
+        }
+        record_run_activity(&ctx, &item.id, &ended(RunStatus::Failed, TerminalReason::SpawnFailed))
+            .await;
+        assert_eq!(
+            activity(&ctx, &item.id).unwrap().event,
+            ActivityEvent::Run {
+                run_id: "run-1".into(),
+                backend: "codex".into(),
+                mode: RunMode::Ask,
+                outcome: ActivityOutcome::Failed,
+                files: None,
+                head: None,
+            }
+        );
+        // The open item, in front of the reader, isn't news.
+        ctx.with_cache(|c| c.done_item_activity(&item.id).unwrap());
+        open_in_slot(&ctx, &item);
+        record_run_activity(&ctx, &item.id, &ended(RunStatus::Completed, TerminalReason::Completed))
+            .await;
+        assert!(!activity(&ctx, &item.id).unwrap().is_visible());
+    }
+
+    #[tokio::test]
+    async fn a_review_is_recorded_once_when_its_last_reviewer_ends() {
+        use perch_github::{
+            ActivityEvent, ActivityOutcome, NewReviewerAttempt, ReviewAdmission, ReviewSnapshot,
+            ReviewerPhase,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = branch_item("feature");
+        ctx.with_cache(|c| c.insert_item(&item).unwrap());
+        let now = Timestamp::now();
+        let attempt = |id: &str, backend: &str| NewReviewerAttempt {
+            id: id.into(),
+            run_id: None,
+            backend: backend.into(),
+            executable: None,
+            executable_version: None,
+            model: "m".into(),
+            effort: "medium".into(),
+            adapter_version: "a".into(),
+            output_format_version: "o".into(),
+            created_at: now,
+        };
+        let admission = ReviewAdmission {
+            group_id: "g1".into(),
+            snapshot: ReviewSnapshot {
+                id: "s1".into(),
+                item_id: item.id.clone(),
+                repository: "acme/widgets".into(),
+                branch_label: Some("feature".into()),
+                requested_base_ref: "main".into(),
+                base_tip_sha: "b".into(),
+                merge_base_sha: "m".into(),
+                head_sha: "h".into(),
+                dirty_edits_excluded: true,
+                retention_key: "k".into(),
+                retained_ref: None,
+                manifest_path: None,
+                diff_path: None,
+                created_at: now,
+            },
+            attempts: vec![attempt("a1", "claude-code"), attempt("a2", "codex")],
+            admitted_at: now,
+            instructions: None,
+        };
+        ctx.with_cache(|c| c.admit_review_group(&admission).unwrap());
+        let phase = |id: &str, next| {
+            ctx.with_cache(|c| c.transition_reviewer_attempt(id, next, Timestamp::now()).unwrap());
+        };
+        phase("a1", ReviewerPhase::Reviewing);
+        phase("a2", ReviewerPhase::Reviewing);
+        phase("a1", ReviewerPhase::Completed);
+        reviews::settle_group(&ctx, "g1");
+        assert_eq!(activity(&ctx, &item.id), None, "a reviewer is still going");
+        phase("a2", ReviewerPhase::Failed);
+        reviews::settle_group(&ctx, "g1");
+        let recorded = activity(&ctx, &item.id).unwrap();
+        assert_eq!(
+            recorded.event,
+            ActivityEvent::Review {
+                group_id: "g1".into(),
+                outcome: ActivityOutcome::Completed,
+                findings: 0,
+            }
+        );
+        reviews::settle_group(&ctx, "g1");
+        assert_eq!(activity(&ctx, &item.id).unwrap().at, recorded.at, "once");
+    }
+
     #[tokio::test]
     async fn the_scan_counts_a_root_branch_against_its_pull_request() {
         let dir = tempfile::tempdir().unwrap();
@@ -15119,6 +15575,8 @@ mod tests {
         let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
         open_in_slot(&ctx, &item);
         ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
+        // Open, but the reader is in another app.
+        ctx.window_key.store(false, std::sync::atomic::Ordering::Relaxed);
 
         ask(
             &ctx,
@@ -15150,6 +15608,17 @@ mod tests {
             git(&worktree, &["status", "--porcelain"]),
             "?? made.txt",
             "the worktree's own index was not touched"
+        );
+        assert_eq!(
+            activity(&ctx, &item.id).unwrap().event,
+            perch_github::ActivityEvent::Run {
+                run_id: run.id.clone(),
+                backend: run.backend.clone(),
+                mode: RunMode::Work,
+                outcome: perch_github::ActivityOutcome::Completed,
+                files: Some(1),
+                head: Some(git(&worktree, &["rev-parse", "HEAD"])),
+            }
         );
 
         delete_comment_thread(&ctx, &thread.id).await;

@@ -1043,6 +1043,49 @@ mod tests {
         assert_eq!(dot.get_visual_rect_no_clip().width(), 7.0);
     }
 
+    /// Local activity the reader hasn't opened the item since bolds its
+    /// row as an unread notification does, and reading it clears that.
+    #[test]
+    fn an_item_row_is_bold_and_dotted_while_its_local_activity_is_unread() {
+        use floem::style::FontWeight;
+
+        let (mut harness, state) = harness();
+        let mut activity = perch_github::ItemActivity {
+            item_id: "mine".into(),
+            at: "2026-09-20T11:00:00Z".parse().unwrap(),
+            event: perch_github::ActivityEvent::HeadMoved {
+                from: "a".into(),
+                to: "b".into(),
+                commits: Some(1),
+            },
+            read_at: None,
+            done_at: None,
+            local_unread: false,
+        };
+        state
+            .item_activity
+            .update(|all| drop(all.insert("mine".into(), activity.clone())));
+        harness.rebuild();
+        harness.paint();
+        let row = find(harness.root_id(), "item row:mine").unwrap();
+        let title = find(row, "Issue mine").unwrap();
+        let dot = find(row, "unread dot").unwrap();
+        assert_eq!(
+            harness.get_computed_style(title).get(FontWeight),
+            Some(theme::weight_emphasis())
+        );
+        assert_eq!(dot.get_visual_rect_no_clip().width(), 7.0);
+
+        activity.read_at = Some(activity.at);
+        state
+            .item_activity
+            .update(|all| drop(all.insert("mine".into(), activity.clone())));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(harness.get_computed_style(title).get(FontWeight), Some(theme::weight_read()));
+        assert_eq!(dot.get_visual_rect_no_clip().width(), 0.0);
+    }
+
     /// A notification row is bold and full black with the dot while
     /// GitHub has it unread, and steps back to the read title's lighter
     /// weight and grey once the thread is read.

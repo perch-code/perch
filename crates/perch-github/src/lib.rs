@@ -3,6 +3,7 @@
 //! This crate has no UI dependencies and never will. Data and IO stay
 //! separable from the Floem layer so both can be tested on their own.
 
+pub mod activity;
 pub mod auth;
 pub mod cache;
 pub mod client;
@@ -20,6 +21,7 @@ mod subjects;
 pub mod timeline;
 pub mod workflow_runs;
 
+pub use activity::{ActivityEvent, ActivityOutcome, ItemActivity};
 pub use auth::{resolve_token, Token, TokenSource};
 pub use cache::{
     Cache, CacheError, CacheOpen, DraftRow, Reconciled, RunContext, RunEventAppend, StoredReveals,

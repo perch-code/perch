@@ -16,6 +16,7 @@ use crate::comments::{
     RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunHistoryPage, RunLabels, RunOwner,
     RunMode, RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, TerminalReason, ThreadOrigin,
 };
+use crate::activity::{ActivityEvent, ItemActivity};
 use crate::discussion::Discussion;
 use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
 use crate::model::Thread;
@@ -36,7 +37,7 @@ mod review_store;
 /// whether the reader may resolve it. Version 24 keeps the instructions a
 /// worktree review was run with. Schemas 13 through 23 migrate in place so
 /// local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 28;
+pub const SCHEMA_VERSION: u32 = 29;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -140,6 +141,17 @@ CREATE TABLE IF NOT EXISTS work_grants (
     created_at  TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS work_grants_key ON work_grants(repo COLLATE NOCASE, key);
+"#;
+
+const ACTIVITY_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS item_activity (
+    item_id       TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    at            TEXT NOT NULL,
+    event_json    TEXT NOT NULL,
+    read_at       TEXT,
+    done_at       TEXT,
+    local_unread  INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 pub struct Cache {
@@ -371,6 +383,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
         tx.execute_batch(RUN_SCHEMA)?;
         tx.execute_batch(review_store::REVIEW_SCHEMA)?;
         tx.execute_batch(GRANT_SCHEMA)?;
+        tx.execute_batch(ACTIVITY_SCHEMA)?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -429,6 +442,8 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             25 => add_work_columns(&tx)?,
             26 => tx.execute_batch(GRANT_SCHEMA)?,
             27 => add_divergence_column(&tx)?,
+            // Empty: nothing that happened before is backfilled.
+            28 => tx.execute_batch(ACTIVITY_SCHEMA)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -3989,6 +4004,99 @@ impl Cache {
         Ok(grants)
     }
 
+    /// Record the latest thing that happened on an item. It replaces the
+    /// one before, and is unread and visible again: Mark Unread is for the
+    /// event it was given on, and a Done or a read stays with its time.
+    pub fn record_item_activity(
+        &self,
+        item_id: &str,
+        at: Timestamp,
+        event: &ActivityEvent,
+    ) -> Result<(), CacheError> {
+        self.conn.execute(
+            "INSERT INTO item_activity (item_id, at, event_json, local_unread)
+             VALUES (?1, ?2, ?3, 0)
+             ON CONFLICT(item_id) DO UPDATE SET
+                at = excluded.at, event_json = excluded.event_json, local_unread = 0",
+            params![item_id, at.to_string(), serde_json::to_string(event)?],
+        )?;
+        Ok(())
+    }
+
+    /// Every item's latest activity. A record whose event no longer reads
+    /// is passed over.
+    pub fn load_item_activity(&self) -> Result<Vec<ItemActivity>, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT item_id, at, event_json, read_at, done_at, local_unread FROM item_activity",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (item_id, at, event, read_at, done_at, local_unread) = row?;
+            let (Ok(at), Ok(event)) = (at.parse(), serde_json::from_str(&event)) else {
+                continue;
+            };
+            out.push(ItemActivity {
+                item_id,
+                at,
+                event,
+                read_at: stamp(read_at),
+                done_at: stamp(done_at),
+                local_unread: local_unread != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn item_activity(&self, item_id: &str) -> Result<Option<ItemActivity>, CacheError> {
+        Ok(self
+            .load_item_activity()?
+            .into_iter()
+            .find(|a| a.item_id == item_id))
+    }
+
+    /// The reader opened the item: its current event is read. Whether
+    /// that changed anything.
+    pub fn read_item_activity(&self, item_id: &str) -> Result<bool, CacheError> {
+        let Some(activity) = self.item_activity(item_id)? else {
+            return Ok(false);
+        };
+        if !activity.is_unread() {
+            return Ok(false);
+        }
+        self.conn.execute(
+            "UPDATE item_activity SET read_at = at, local_unread = 0 WHERE item_id = ?1",
+            params![item_id],
+        )?;
+        Ok(true)
+    }
+
+    /// Done: the current event is put away until a newer one.
+    pub fn done_item_activity(&self, item_id: &str) -> Result<bool, CacheError> {
+        Ok(self.conn.execute(
+            "UPDATE item_activity SET done_at = at WHERE item_id = ?1",
+            params![item_id],
+        )? > 0)
+    }
+
+    /// Mark Unread: the current event is unread again, until the item is
+    /// opened.
+    pub fn mark_item_activity_unread(&self, item_id: &str) -> Result<bool, CacheError> {
+        Ok(self.conn.execute(
+            "UPDATE item_activity SET local_unread = 1 WHERE item_id = ?1",
+            params![item_id],
+        )? > 0)
+    }
+
     /// Keep a grant. One the repository already has is left as it is.
     pub fn insert_grant(&self, grant: &WorkGrantRecord) -> Result<(), CacheError> {
         self.conn.execute(
@@ -5981,6 +6089,59 @@ mod tests {
         assert_eq!(outcome, CacheOpen::Migrated { from: 27, to: SCHEMA_VERSION });
         cache.insert_item(&item).unwrap();
         assert_eq!(cache.load_item(&item.id).unwrap().unwrap().checkout.unwrap().divergence, None);
+    }
+
+    #[test]
+    fn item_activity_is_read_put_away_and_brought_back_by_a_newer_event() {
+        let c = Cache::open_in_memory().unwrap();
+        let item = branch_item("feature");
+        c.insert_item(&item).unwrap();
+        let moved = |to: &str| ActivityEvent::HeadMoved {
+            from: "abc".into(),
+            to: to.into(),
+            commits: Some(1),
+        };
+        c.record_item_activity(&item.id, stamp_of("2026-09-23T10:00:00Z"), &moved("b1"))
+            .unwrap();
+        let a = c.item_activity(&item.id).unwrap().unwrap();
+        assert!(a.is_unread() && a.is_visible());
+
+        assert!(c.read_item_activity(&item.id).unwrap());
+        assert!(!c.read_item_activity(&item.id).unwrap(), "already read");
+        assert!(!c.item_activity(&item.id).unwrap().unwrap().is_unread());
+        assert!(c.mark_item_activity_unread(&item.id).unwrap());
+        assert!(c.item_activity(&item.id).unwrap().unwrap().is_unread());
+        assert!(c.done_item_activity(&item.id).unwrap());
+        assert!(!c.item_activity(&item.id).unwrap().unwrap().is_visible());
+
+        // A newer event replaces the old one and is unread and visible.
+        c.record_item_activity(&item.id, stamp_of("2026-09-23T11:00:00Z"), &moved("b2"))
+            .unwrap();
+        let a = c.item_activity(&item.id).unwrap().unwrap();
+        assert_eq!(a.event, moved("b2"));
+        assert!(a.is_unread() && a.is_visible());
+        assert_eq!(c.load_item_activity().unwrap().len(), 1);
+
+        // Nothing is left behind by the item.
+        c.delete_item(&item.id).unwrap();
+        assert!(c.load_item_activity().unwrap().is_empty());
+        assert!(!c.done_item_activity(&item.id).unwrap());
+    }
+
+    #[test]
+    fn schema_28_gains_an_empty_activity_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let item = branch_item("feature");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&item).unwrap();
+            cache.conn.execute_batch("DROP TABLE item_activity").unwrap();
+            cache.set_meta("schema_version", "28").unwrap();
+        }
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 28, to: SCHEMA_VERSION });
+        assert!(cache.load_item_activity().unwrap().is_empty(), "nothing is backfilled");
     }
 
     #[test]

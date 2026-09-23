@@ -77,6 +77,9 @@ pub struct AppState {
     /// Perch's visible notification list, in GitHub response order after local
     /// Done watermarks have been applied.
     pub notifications: RwSignal<Vec<Thread>>,
+    /// Each item's latest local activity, by item id: a run or a review
+    /// that ended, a head that moved.
+    pub item_activity: RwSignal<HashMap<String, perch_github::ItemActivity>>,
     /// A poll's items the drawer is holding back because they would move
     /// its rows, until the reader asks for them or does something that
     /// sends the list again.
@@ -242,6 +245,7 @@ impl AppState {
             repos: RwSignal::new(Vec::new()),
             items: RwSignal::new(Vec::new()),
             notifications: RwSignal::new(Vec::new()),
+            item_activity: RwSignal::new(HashMap::new()),
             pending_items: RwSignal::new(None),
             pending_notifications: RwSignal::new(None),
             notifications_polled: RwSignal::new(false),
@@ -1924,6 +1928,13 @@ impl AppState {
                 self.notifications.set(notifications);
                 self.pending_notifications.set(None);
             }
+            Event::ItemActivity(activity) => {
+                let activity: HashMap<_, _> =
+                    activity.into_iter().map(|a| (a.item_id.clone(), a)).collect();
+                if self.item_activity.with_untracked(|now| *now != activity) {
+                    self.item_activity.set(activity);
+                }
+            }
             Event::NotificationsPolled(notifications) => {
                 let first = !self.notifications_polled.get_untracked();
                 self.notifications_polled.set(true);
@@ -2179,6 +2190,13 @@ impl AppState {
                 .iter()
                 .any(|thread| thread.unread && thread.is_about(repo_full_name, kind, number))
         })
+    }
+
+    /// Whether the item has local activity the reader hasn't opened it
+    /// since: what, with the inbox's GitHub thread, bolds its row.
+    pub fn activity_unread(&self, item_id: &str) -> bool {
+        self.item_activity
+            .with(|all| all.get(item_id).is_some_and(|a| a.is_unread()))
     }
 
     /// Whether the main pane has the notification's pull request or issue

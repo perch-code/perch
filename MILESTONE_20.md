@@ -283,9 +283,14 @@ what Code shows.
   the backend whether the window is key, as it tells it what's open.
   It sets `at`, clears `local_unread`, and leaves `read_at` and
   `done_at`, so a new event over a done one is visible again.
-- The scan skips a head move that matches the `work_after` commit of a
-  run that ended on the item since the previous scan. That's the
-  run's own commit, already recorded.
+- A run event records the worktree's `HEAD` as the run ended, and the
+  scan skips a head move to that commit: it's the run's own commit,
+  already recorded. (`work_after` is a snapshot under `refs/perch/runs`,
+  never the branch head, so it can't serve.)
+- The scan only raises head moves and new worktrees in repositories it
+  has scanned before, kept in the `activity.scanned_repos` meta key. The
+  first scan after the upgrade, or of a newly added repository, records
+  where things are without calling any of it news.
 - Opening an item sets `read_at = at`. This is the same place
   `read_subject_notifications` runs.
 - The commands `ItemActivityDone(item_id)` and
