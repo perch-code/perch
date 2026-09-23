@@ -239,6 +239,17 @@ const SNAPSHOT_COLUMNS: &str = "id, item_id, repository, branch_label, requested
     manifest_path, diff_path, created_at";
 const GROUP_COLUMNS: &str = "id, item_id, snapshot_id, number, status, new_findings,
     still_present, verified_fixed, not_verified, created_at, started_at, ended_at, instructions";
+/// An attempt the extractor at version `?1` may read again: completed and
+/// incomplete, with saved output, an older adapter, no observation, and a
+/// group that was not stopped.
+const OUTDATED_INCOMPLETE: &str = "ingestion_state='incomplete' AND phase='completed'
+    AND output_id IS NOT NULL AND raw_result IS NOT NULL
+    AND CAST(adapter_version AS INTEGER) < ?1
+    AND NOT EXISTS(SELECT 1 FROM review_observations o
+                   WHERE o.attempt_id=reviewer_attempts.id)
+    AND NOT EXISTS(SELECT 1 FROM review_groups g
+                   WHERE g.id=reviewer_attempts.group_id AND g.status IN ('stopping','stopped'))";
+
 const ATTEMPT_COLUMNS: &str = "id, group_id, run_id, backend, executable, executable_version,
     model, effort, adapter_version, output_format_version, attempt_number, retry_of_id, phase,
     ingestion_state, result_kind, output_id, raw_result, diagnostics, verification_input_json,
@@ -1442,6 +1453,66 @@ impl Cache {
             mapped.collect::<Result<Vec<_>, _>>()?
         };
         rows.into_iter().map(attempt_from_row).collect()
+    }
+
+    /// Completed attempts whose saved output an older extractor could not
+    /// read and which recorded nothing, so a newer extractor may read it
+    /// again. An attempt with any observation stays as it was ingested.
+    pub fn outdated_incomplete_ingestions(
+        &self,
+        adapter_version: u32,
+    ) -> Result<Vec<ReviewerAttempt>, CacheError> {
+        let sql = format!(
+            "SELECT {ATTEMPT_COLUMNS} FROM reviewer_attempts
+             WHERE {OUTDATED_INCOMPLETE}
+             ORDER BY COALESCE(output_saved_at, created_at), id"
+        );
+        let rows = {
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mapped = stmt.query_map(params![adapter_version], read_attempt_row)?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        rows.into_iter().map(attempt_from_row).collect()
+    }
+
+    /// Record that `adapter_version` read an outdated attempt's saved output
+    /// again. With `reopen`, the output goes back to awaiting ingestion,
+    /// which `pending_review_ingestions` then offers; without, only the
+    /// version and diagnostics change so the attempt is not read again.
+    pub fn reread_reviewer_output(
+        &self,
+        attempt_id: &str,
+        adapter_version: u32,
+        diagnostics: Option<&str>,
+        reopen: bool,
+    ) -> Result<ReviewerAttempt, CacheError> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let sql = format!(
+            "UPDATE reviewer_attempts SET adapter_version=?3, diagnostics=?4,
+               ingestion_state=CASE WHEN ?5 THEN 'raw_saved' ELSE ingestion_state END,
+               result_kind=CASE WHEN ?5 THEN NULL ELSE result_kind END,
+               phase=CASE WHEN ?5 THEN 'reconciling' ELSE phase END
+             WHERE id=?2 AND {OUTDATED_INCOMPLETE}"
+        );
+        let changed = tx.execute(
+            &sql,
+            params![
+                adapter_version,
+                attempt_id,
+                adapter_version.to_string(),
+                diagnostics,
+                reopen
+            ],
+        )?;
+        if changed == 0 {
+            return Err(CacheError::ReviewConflict(format!(
+                "reviewer attempt {attempt_id} has no outdated incomplete output"
+            )));
+        }
+        let stored = load_attempt_on(&tx, attempt_id)?
+            .ok_or_else(|| CacheError::Corrupt("reread reviewer attempt".into()))?;
+        tx.commit()?;
+        Ok(stored)
     }
 
     pub fn load_finding(&self, id: &str) -> Result<Option<Finding>, CacheError> {
@@ -2899,7 +2970,7 @@ impl Cache {
         };
         tx.execute(
             "UPDATE reviewer_attempts SET result_kind=?2, ingestion_state=?3,
-             phase='completed', ended_at=?4 WHERE id=?1",
+             phase='completed', ended_at=COALESCE(ended_at, ?4) WHERE id=?1",
             params![
                 attempt.id,
                 ingestion.result_kind.name(),
@@ -3510,6 +3581,103 @@ mod tests {
             }),
             Err(CacheError::ReviewConflict(_))
         ));
+    }
+
+    #[test]
+    fn an_outdated_unreadable_output_can_be_read_again_once() {
+        let cache = Cache::open_in_memory().unwrap();
+        insert_item(&cache, "item");
+        cache
+            .admit_review_group(&admission(
+                "g1",
+                "s1",
+                "item",
+                vec![
+                    attempt("unread", "claude", 1),
+                    attempt("none", "codex", 1),
+                    attempt("clean", "other", 1),
+                ],
+                1,
+            ))
+            .unwrap();
+        for (id, kind, second) in [
+            ("unread", ReviewResultKind::Incomplete, 2),
+            ("none", ReviewResultKind::Incomplete, 3),
+            ("clean", ReviewResultKind::Clean, 4),
+        ] {
+            save_output(&cache, id, &format!("{id}-output"), second);
+            cache
+                .ingest_review_output(&ReviewIngestion {
+                    attempt_id: id.into(),
+                    output_id: format!("{id}-output"),
+                    result_kind: kind,
+                    observations: vec![],
+                    anchor_mappings: vec![],
+                    completed_at: stamp(second + 1),
+                })
+                .unwrap();
+        }
+        let ids = |cache: &Cache, version| {
+            cache
+                .outdated_incomplete_ingestions(version)
+                .unwrap()
+                .into_iter()
+                .map(|attempt| attempt.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&cache, 3), ["unread", "none"]);
+
+        let none = cache
+            .reread_reviewer_output("none", 3, Some("still unreadable"), false)
+            .unwrap();
+        assert_eq!(none.ingestion_state, ReviewIngestionState::Incomplete);
+        assert_eq!(none.phase, ReviewerPhase::Completed);
+        assert_eq!(none.adapter_version, "3");
+        assert_eq!(none.diagnostics.as_deref(), Some("still unreadable"));
+
+        let ended = cache
+            .load_reviewer_attempt("unread")
+            .unwrap()
+            .unwrap()
+            .ended_at;
+        let unread = cache
+            .reread_reviewer_output("unread", 3, None, true)
+            .unwrap();
+        assert_eq!(unread.ingestion_state, ReviewIngestionState::RawSaved);
+        assert_eq!(unread.result_kind, None);
+        assert_eq!(unread.diagnostics, None);
+        assert!(ids(&cache, 3).is_empty());
+        assert!(cache
+            .reread_reviewer_output("unread", 3, None, true)
+            .is_err());
+        assert_eq!(
+            cache
+                .pending_review_ingestions()
+                .unwrap()
+                .into_iter()
+                .map(|attempt| attempt.id)
+                .collect::<Vec<_>>(),
+            ["unread"]
+        );
+
+        cache
+            .ingest_review_output(&ReviewIngestion {
+                attempt_id: "unread".into(),
+                output_id: "unread-output".into(),
+                result_kind: ReviewResultKind::Findings,
+                observations: vec![new_report("f1", "unread", "t1", "o1", "source-1", "s1", 9)],
+                anchor_mappings: vec![],
+                completed_at: stamp(9),
+            })
+            .unwrap();
+        let unread = cache.load_reviewer_attempt("unread").unwrap().unwrap();
+        assert_eq!(unread.ingestion_state, ReviewIngestionState::Complete);
+        assert_eq!(unread.phase, ReviewerPhase::Completed);
+        assert_eq!(unread.ended_at, ended);
+        assert_eq!(
+            cache.load_review_group("g1").unwrap().unwrap().new_findings,
+            1
+        );
     }
 
     #[test]

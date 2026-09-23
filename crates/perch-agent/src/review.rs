@@ -18,8 +18,9 @@ use crate::{
 };
 
 /// Bumped when the extractor learns a format. 2 reads the report Claude
-/// Code's review skill files through `ReportFindings`.
-pub const REVIEW_ADAPTER_VERSION: u32 = 2;
+/// Code's review skill files through `ReportFindings`; 3 also reads the
+/// same findings when the skill prints them as a fenced JSON array instead.
+pub const REVIEW_ADAPTER_VERSION: u32 = 3;
 pub const REVIEW_OUTPUT_FORMAT_VERSION: u32 = 1;
 
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -916,14 +917,25 @@ struct ReportedFinding {
 }
 
 /// Normalize a native final response. A filed report is authoritative and
-/// the prose around it is only a summary. Without one, JSON is preferred;
-/// otherwise the versioned Markdown adapter recognizes only explicit
-/// review sections.
+/// the prose around it is only a summary. Without one, JSON is preferred:
+/// an array holds the findings the skill would have filed, an object is
+/// the structured review format. Otherwise the versioned Markdown adapter
+/// recognizes only explicit review sections.
 pub fn extract_review(raw_response: &str, manifest: &ReviewManifest) -> ReviewExtraction {
     if let Some((_, report)) = raw_response.split_once(REPORT_DELIMITER) {
         return extract_reported_review(raw_response, report, manifest);
     }
     if let Some(candidate) = structured_candidate(raw_response) {
+        if candidate.starts_with('[') {
+            let evidence_start = raw_response.find(candidate).unwrap_or(0);
+            return match serde_json::from_str::<Vec<ReportedFinding>>(candidate) {
+                Ok(findings) => reported_review(raw_response, findings, evidence_start, manifest),
+                Err(error) => ReviewExtraction::incomplete(
+                    raw_response,
+                    format!("the printed findings array was invalid: {error}"),
+                ),
+            };
+        }
         match serde_json::from_str::<WireOutput>(candidate) {
             Ok(output) => return normalize_wire(output, raw_response, candidate, manifest),
             Err(error) => {
@@ -940,7 +952,9 @@ pub fn extract_review(raw_response: &str, manifest: &ReviewManifest) -> ReviewEx
 
 fn structured_candidate(raw: &str) -> Option<&str> {
     let trimmed = raw.trim();
-    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    {
         return Some(trimmed);
     }
     let marker = "```json";
@@ -1014,17 +1028,28 @@ fn extract_reported_review(raw: &str, report: &str, manifest: &ReviewManifest) -
             )
         }
     };
-    let evidence_start = raw.len() - report.len();
+    reported_review(raw, output.findings, raw.len() - report.len(), manifest)
+}
+
+/// Findings in the shape of a `ReportFindings` call, whether filed through
+/// the tool or printed. Evidence runs from `evidence_start` to the end.
+fn reported_review(
+    raw: &str,
+    reported: Vec<ReportedFinding>,
+    evidence_start: usize,
+    manifest: &ReviewManifest,
+) -> ReviewExtraction {
     let mut findings = Vec::new();
     let mut diagnostics = Vec::new();
-    for (index, finding) in output.findings.into_iter().enumerate() {
+    for (index, finding) in reported.into_iter().enumerate() {
         match normalize_reported_finding(finding, index, raw, evidence_start, manifest) {
             Ok(finding) => findings.push(finding),
             Err(error) => diagnostics.push(format!("finding {} was rejected: {error}", index + 1)),
         }
     }
-    // An empty report is the reviewer saying clean: the skill files one
-    // even when nothing survived its own verification.
+    // An empty report is the reviewer saying clean: the skill files one,
+    // or prints an empty array, even when nothing survived its own
+    // verification.
     let explicit_clean = findings.is_empty() && diagnostics.is_empty();
     ReviewExtraction {
         findings,
@@ -1979,6 +2004,36 @@ mod tests {
         assert!(result.explicit_clean, "{:?}", result.diagnostics);
         assert!(!result.incomplete);
         assert!(result.findings.is_empty());
+    }
+
+    #[test]
+    fn findings_printed_as_a_json_array_are_read_like_a_filed_report() {
+        // What 2.1.280's review skill printed when it filed no report.
+        let raw = "```json\n[\n  {\n    \"file\": \"src/lib.rs\",\n    \"line\": 4,\n    \"summary\": \"The cache key omits the tenant id.\",\n    \"failure_scenario\": \"Tenant B reads A's row.\"\n  },\n  {\n    \"file\": \"deleted.rs\",\n    \"line\": 2,\n    \"summary\": \"Cleanup was dropped.\",\n    \"failure_scenario\": \"The handle leaks.\"\n  }\n]\n```\n\nI verified 3 candidates and cut 1 of them:\n- **Naming:** minor.";
+        let result = extract_review(raw, &manifest());
+        assert!(!result.incomplete, "{:?}", result.diagnostics);
+        assert!(!result.explicit_clean);
+        assert_eq!(result.findings.len(), 2);
+        assert_eq!(
+            result.findings[0].title,
+            "The cache key omits the tenant id."
+        );
+        assert_eq!(result.findings[0].severity, ReviewSeverity::Medium);
+        let deleted = result.findings[1].location.as_ref().unwrap();
+        assert_eq!(deleted.path, "deleted.rs");
+        assert_eq!(deleted.side, ReviewSide::Left);
+        let evidence = &result.findings[0].evidence;
+        assert!(evidence.text.starts_with("[\n"));
+        assert_eq!(&raw[evidence.start..evidence.end], evidence.text);
+
+        let bare = "[]";
+        assert!(extract_review(bare, &manifest()).explicit_clean);
+
+        let broken = "```json\n[{\"line\": \"four\"}]\n```";
+        let result = extract_review(broken, &manifest());
+        assert!(result.incomplete);
+        assert!(!result.explicit_clean);
+        assert!(result.diagnostics[0].starts_with("the printed findings array was invalid"));
     }
 
     #[test]

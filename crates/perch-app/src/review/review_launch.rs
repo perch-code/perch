@@ -775,6 +775,7 @@ fn group_card(
     let title = group_title(&summary);
     let instructions = summary.group.instructions.clone();
     let attempts = attempt_summary(&summary);
+    let unread = unread_summary(&summary);
     let counts = count_summary(&summary);
     let newer_summary = summary.clone();
     let open_summary = summary.clone();
@@ -893,6 +894,18 @@ fn group_card(
                     .text_wrap()
                     .width_full()
             }),
+            match unread {
+                Some(unread) => Label::derived(move || unread.clone())
+                    .style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .color(theme::NOTICE_FG)
+                            .text_wrap()
+                            .width_full()
+                    })
+                    .debug_name("review-group-unread")
+                    .into_any(),
+                None => Empty::new().into_any(),
+            },
             Label::derived(move || counts.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::FG_SUBTLE)
@@ -1222,6 +1235,31 @@ fn attempt_summary(summary: &ReviewGroupSummary) -> String {
         .join(" · ")
 }
 
+/// What a finished attempt left unread: its counts cover only what Perch
+/// could read, so an incomplete ingestion must not pass for a quiet review.
+fn unread_summary(summary: &ReviewGroupSummary) -> Option<String> {
+    let lines = summary
+        .attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.phase == perch_github::ReviewerPhase::Completed
+                && attempt.ingestion_state == perch_github::ReviewIngestionState::Incomplete
+        })
+        .map(|attempt| {
+            let backend = backend_label_from_name(&attempt.backend);
+            match attempt
+                .diagnostics
+                .as_deref()
+                .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+            {
+                Some(reason) => format!("Perch could not read all of {backend}'s output: {reason}"),
+                None => format!("Perch could not read all of {backend}'s output"),
+            }
+        })
+        .collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 fn count_summary(summary: &ReviewGroupSummary) -> String {
     format!(
         "{} new · {} still present · {} verified fixed · {} not verified",
@@ -1522,6 +1560,65 @@ mod tests {
             },
             attempts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_unread_output_is_called_out_rather_than_passing_for_no_findings() {
+        let created_at = "2026-09-19T12:00:00Z".parse::<Timestamp>().unwrap();
+        let attempt =
+            |backend: &str,
+             ingestion_state: perch_github::ReviewIngestionState,
+             diagnostics: Option<&str>| perch_github::ReviewerAttempt {
+                id: format!("attempt-{backend}"),
+                group_id: "group-3".into(),
+                run_id: None,
+                backend: backend.into(),
+                executable: None,
+                executable_version: None,
+                model: "model".into(),
+                effort: "max".into(),
+                adapter_version: "3".into(),
+                output_format_version: "1".into(),
+                attempt_number: 1,
+                retry_of: None,
+                phase: perch_github::ReviewerPhase::Completed,
+                ingestion_state,
+                result_kind: None,
+                output_id: None,
+                raw_result: None,
+                diagnostics: diagnostics.map(str::to_string),
+                verification_input: perch_github::ReviewVerificationInput::default(),
+                output_saved_at: Some(created_at),
+                created_at,
+                started_at: Some(created_at),
+                ended_at: Some(created_at),
+            };
+        let mut review = summary(perch_github::ReviewGroupStatus::Completed);
+        review.attempts = vec![attempt(
+            "claude-code",
+            perch_github::ReviewIngestionState::Complete,
+            Some("finding 3 was rejected"),
+        )];
+        assert_eq!(unread_summary(&review), None);
+
+        review.attempts = vec![
+            attempt(
+                "claude-code",
+                perch_github::ReviewIngestionState::Incomplete,
+                Some("\nthe printed findings array was invalid\nmore detail"),
+            ),
+            attempt(
+                "codex",
+                perch_github::ReviewIngestionState::Incomplete,
+                None,
+            ),
+        ];
+        assert_eq!(
+            unread_summary(&review).as_deref(),
+            Some(
+                "Perch could not read all of Claude's output: the printed findings array was invalid\nPerch could not read all of Codex's output"
+            )
+        );
     }
 
     #[test]

@@ -809,6 +809,7 @@ pub(super) async fn recover(ctx: &Ctx) {
         }
     }
 
+    reread_outdated_outputs(ctx).await;
     let pending = cache(ctx, |cache| cache.pending_review_ingestions()).unwrap_or_default();
     for attempt in pending {
         if matches!(
@@ -2499,7 +2500,54 @@ async fn reconcile_and_ingest(ctx: &Ctx, input: ReconciliationInput<'_>) -> Resu
     Ok(())
 }
 
-async fn ingest_saved_attempt(ctx: &Ctx, attempt: &ReviewerAttempt) -> Result<(), String> {
+/// Give output an older extractor could not read to the current one. An
+/// attempt it now reads as findings or clean goes back to awaiting
+/// ingestion, which the caller's pending pass then completes; any other
+/// keeps its result and takes the new diagnostics, so it is read once.
+async fn reread_outdated_outputs(ctx: &Ctx) {
+    let version = perch_agent::REVIEW_ADAPTER_VERSION;
+    let outdated =
+        cache(ctx, |cache| cache.outdated_incomplete_ingestions(version)).unwrap_or_default();
+    for attempt in outdated {
+        let extraction = match saved_extraction(ctx, &attempt).await {
+            Ok(saved) => saved.extraction,
+            Err(error) => {
+                tracing::warn!(attempt = %attempt.id, %error, "could not reread saved review output");
+                continue;
+            }
+        };
+        let readable = !extraction.findings.is_empty() || extraction.explicit_clean;
+        let diagnostics =
+            (!extraction.diagnostics.is_empty()).then(|| extraction.diagnostics.join("\n"));
+        match cache(ctx, |cache| {
+            cache.reread_reviewer_output(&attempt.id, version, diagnostics.as_deref(), readable)
+        }) {
+            Ok(_) if readable => {
+                tracing::info!(attempt = %attempt.id, "reread saved review output");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(attempt = %attempt.id, %error, "could not reopen saved review output");
+            }
+        }
+    }
+}
+
+/// A saved attempt's output, split from its verification and extracted
+/// against the snapshot it reviewed.
+struct SavedExtraction<'a> {
+    snapshot: perch_git::ReviewSnapshot,
+    group: perch_github::ReviewGroup,
+    native_raw: &'a str,
+    verification_raw: Option<&'a str>,
+    manifest: ReviewManifest,
+    extraction: ReviewExtraction,
+}
+
+async fn saved_extraction<'a>(
+    ctx: &Ctx,
+    attempt: &'a ReviewerAttempt,
+) -> Result<SavedExtraction<'a>, String> {
     let group = cache(ctx, |cache| cache.load_review_group(&attempt.group_id))?
         .ok_or_else(|| "The saved review group is gone".to_string())?;
     let snapshot = ctx
@@ -2511,10 +2559,6 @@ async fn ingest_saved_attempt(ctx: &Ctx, attempt: &ReviewerAttempt) -> Result<()
         .raw_result
         .as_deref()
         .ok_or_else(|| "The saved reviewer output is empty".to_string())?;
-    let output_id = attempt
-        .output_id
-        .as_deref()
-        .ok_or_else(|| "The saved reviewer output has no identity".to_string())?;
     let (native_raw, verification_raw) = raw
         .split_once(VERIFICATION_DELIMITER)
         .map_or((raw, None), |(native, verification)| {
@@ -2522,6 +2566,29 @@ async fn ingest_saved_attempt(ctx: &Ctx, attempt: &ReviewerAttempt) -> Result<()
         });
     let manifest = extraction_manifest(&snapshot).await?;
     let extraction = perch_agent::extract_review(native_raw, &manifest);
+    Ok(SavedExtraction {
+        snapshot,
+        group,
+        native_raw,
+        verification_raw,
+        manifest,
+        extraction,
+    })
+}
+
+async fn ingest_saved_attempt(ctx: &Ctx, attempt: &ReviewerAttempt) -> Result<(), String> {
+    let output_id = attempt
+        .output_id
+        .as_deref()
+        .ok_or_else(|| "The saved reviewer output has no identity".to_string())?;
+    let SavedExtraction {
+        snapshot,
+        group,
+        native_raw,
+        verification_raw,
+        manifest,
+        extraction,
+    } = saved_extraction(ctx, attempt).await?;
     let requested = attempt
         .verification_input
         .finding_ids
