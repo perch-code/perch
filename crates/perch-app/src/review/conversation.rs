@@ -11,6 +11,7 @@ use std::rc::Rc;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
 use floem::style::CursorStyle;
+use floem::views::scroll::ScrollChanged;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
@@ -146,6 +147,19 @@ pub fn view(
             .padding(theme::CONVERSATION_PADDING)
     })
     .scroll()
+    // Where the reader left the page, put back as it is built, since a
+    // file's tab showing in its place takes the page away; and kept as it
+    // scrolls. The request waits for the page to be laid out.
+    .scroll_to(move || {
+        let y = state.conversation_scroll.get_untracked();
+        (y > 0.0).then_some(floem::kurbo::Point::new(0.0, y))
+    })
+    .on_event_cont(
+        ScrollChanged::listener(),
+        move |_, event: &ScrollChanged| {
+            state.conversation_scroll.set(event.offset.y);
+        },
+    )
     .debug_name("conversation")
     // A bare key goes to the focused view and bubbles up from there, and
     // a click on the page would otherwise focus nothing: the column takes
@@ -1719,6 +1733,44 @@ mod tests {
             title.get_visual_rect_no_clip().y0,
             scrolled,
             "the comment moved the page"
+        );
+    }
+
+    /// A file's tab showing takes the page away, as a link to a file from
+    /// a card does; showing Conversation again builds the page scrolled to
+    /// where the reader left it, not at its top.
+    #[test]
+    fn the_page_opens_where_it_was_left_after_a_files_tab() {
+        use crate::review::model::ItemTab;
+
+        let (mut harness, _, state) = app_harness();
+        let scroll = find(harness.root_id(), "conversation").unwrap();
+        let viewport = scroll.get_visual_rect_no_clip();
+        let root = harness.root_id();
+        let title = move || find(root, "conversation-title").unwrap();
+        let top = title().get_visual_rect_no_clip().y0;
+        harness.scroll_down(viewport.center().x, viewport.center().y, 300.0);
+        harness.rebuild();
+        harness.paint();
+        let scrolled = title().get_visual_rect_no_clip().y0;
+        assert!(scrolled < top, "the page did not scroll");
+
+        state.show_tab(ItemTab::Files);
+        harness.rebuild();
+        harness.paint();
+        assert!(
+            find(harness.root_id(), "conversation").is_none(),
+            "the page is still up under the file's tab"
+        );
+
+        state.show_tab(ItemTab::Conversation);
+        harness.rebuild();
+        harness.paint();
+        assert_ne!(find(harness.root_id(), "conversation").unwrap(), scroll);
+        assert_eq!(
+            title().get_visual_rect_no_clip().y0,
+            scrolled,
+            "the page opened somewhere else"
         );
     }
 }

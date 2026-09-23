@@ -58,7 +58,7 @@ use crate::review::gutter::{column_offset, diff_gutter, plain_gutter, side_gutte
 use crate::review::hierarchy;
 use crate::review::hover;
 use crate::review::model::{
-    Composer, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState,
+    Composer, FilePlace, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState,
 };
 use crate::review::navigation;
 use crate::review::picture;
@@ -344,6 +344,15 @@ fn stacked_view(
         }
     });
     wire_cursor(state, backend.clone(), file.clone(), doc, cursor, shifted);
+    wire_place(
+        state,
+        file.path.clone(),
+        doc,
+        viewport,
+        scroll_to,
+        cursor,
+        epoch,
+    );
     wire_jump(state, file.clone(), doc, scroll_to, cursor, epoch);
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
@@ -1258,6 +1267,15 @@ fn split_view(
         }
     });
     wire_cursor(state, backend.clone(), file.clone(), right_doc, right_cursor, right_shifted);
+    wire_place(
+        state,
+        file.path.clone(),
+        right_doc,
+        right_viewport,
+        right_scroll_to,
+        right_cursor,
+        epoch,
+    );
     wire_jump(state, file.clone(), right_doc, right_scroll_to, right_cursor, epoch);
     let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
@@ -1514,6 +1532,90 @@ fn wire_highlights(state: ReviewState, live: &LiveDoc) {
             handle.cache_rev().update(|rev| *rev += 1);
         }
     });
+}
+
+/// Puts the reader back where they were in the file as its editor is
+/// built, and keeps their place as the editor scrolls and the caret
+/// moves; see `FilePlace`. A jump waiting for this editor goes where it
+/// was asked to instead. The place is kept only while this editor is the
+/// one showing: an editor on its way out has no place to keep.
+fn wire_place(
+    state: ReviewState,
+    path: String,
+    doc: RwSignal<Arc<Doc>>,
+    viewport: RwSignal<Rect>,
+    scroll_to: RwSignal<Option<Vec2>>,
+    cursor: RwSignal<Cursor>,
+    epoch: u64,
+) {
+    let place = state
+        .file_places
+        .with_untracked(|places| places.get(&path).copied());
+    if let Some(place) = place.filter(|_| state.jump_to_line.get_untracked().is_none()) {
+        doc.with_untracked(|doc| restore_place(&place, doc, scroll_to, cursor));
+    }
+    Effect::new(move |_| {
+        let viewport = viewport.get();
+        let caret = cursor.with(|c| c.offset());
+        if state.editor_epoch.get_untracked() != epoch {
+            return;
+        }
+        let place = doc.with(|doc| place_of(doc, viewport, caret));
+        state.file_places.update(|places| {
+            places.insert(path.clone(), place);
+        });
+    });
+}
+
+/// Where the reader is in a document: see `FilePlace`.
+fn place_of(doc: &Doc, viewport: Rect, caret: usize) -> FilePlace {
+    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let top = (viewport.y0 / line_height).floor().max(0.0) as usize;
+    let anchor = (top..doc.len()).find_map(|row| {
+        let line = doc.display_line(row)?;
+        Some((line, viewport.y0 - row as f64 * line_height))
+    });
+    let (row, column) = hover::line_col_of_offset(doc.text(), caret);
+    FilePlace {
+        anchor,
+        x: viewport.x0,
+        y: viewport.y0,
+        caret: doc.display_line(row).map(|line| (line, column)),
+    }
+}
+
+/// Put the caret back on its line, and the view where it was: its line
+/// as far from the top as it was, or the same pixels when the document
+/// no longer shows the line. The caret goes first, since moving it asks
+/// the editor to bring it into view, and the scroll, asked for after
+/// that, is what the editor does last.
+fn restore_place(
+    place: &FilePlace,
+    doc: &Doc,
+    scroll_to: RwSignal<Option<Vec2>>,
+    cursor: RwSignal<Cursor>,
+) {
+    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let caret = place.caret.and_then(|(line, column)| {
+        let row = doc.row_of_display(line)?;
+        // The line's text may have changed under the column since.
+        let text = doc.line(row);
+        let mut column = column.min(text.len());
+        while !text.is_char_boundary(column) {
+            column -= 1;
+        }
+        Some(doc.offset_of_row(row) + column)
+    });
+    if let Some(offset) = caret {
+        cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
+    }
+    let y = place
+        .anchor
+        .and_then(|(line, into)| {
+            Some(doc.row_at_or_after_display(line)? as f64 * line_height + into)
+        })
+        .unwrap_or(place.y);
+    scroll_to.set(Some(Vec2::new(place.x, y.max(0.0))));
 }
 
 /// A jump opens its file, then asks to be scrolled to. The head line has
@@ -2186,7 +2288,9 @@ mod window {
         assert_eq!(bg, Some(Brush::Solid(DIFF_MODIFIED_BG)));
 
         // A split has a layer under each side, over that side's rows: the
-        // deleted line on the left, the changed one on the right.
+        // deleted line on the left, the changed one on the right. The split
+        // opens where the file was left, so back to the top first.
+        harness.scroll_up(x, y, 100.0);
         state.layout.set(Layout::Split);
         harness.rebuild();
         harness.paint();
@@ -2713,6 +2817,134 @@ mod window {
             doc.display_line(first_row + 20),
             first_line,
             "the same line is first in view"
+        );
+    }
+
+    /// A click on the code at a row of the stacked editor, which puts the
+    /// caret there.
+    fn click_row(harness: &mut HeadlessHarness, row: usize) {
+        let (left, top) = pane_origin();
+        let x = left + crate::theme::GUTTER_WIDTH + crate::theme::CODE_GUTTER_GAP + 20.0;
+        let y = top + (row as f64 + 0.5) * crate::theme::CODE_LINE_HEIGHT as f64;
+        harness.dispatch_event(button(x, y, 1, true));
+        harness.dispatch_event(button(x, y, 1, false));
+        harness.rebuild();
+        harness.paint();
+    }
+
+    /// Scroll the stacked editor down by `rows`.
+    fn scroll_rows(harness: &mut HeadlessHarness, rows: usize) {
+        let (left, top) = pane_origin();
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        harness.scroll_down(left + 300.0, top + 300.0, rows as f64 * line_height);
+        harness.rebuild();
+        harness.paint();
+    }
+
+    fn rebuilt(harness: &mut HeadlessHarness) {
+        harness.rebuild();
+        harness.paint();
+    }
+
+    /// A restyle of the code, which hovering it, a resize or the system's
+    /// appearance changing brings, leaves it where the reader scrolled it,
+    /// though the caret is out of sight above. floem's editor scrolled its
+    /// caret back into view on every restyle; the fork's does only when
+    /// the caret moves.
+    #[test]
+    fn a_restyle_leaves_the_code_where_it_was_scrolled_to() {
+        let (mut harness, state) = harness();
+        let live = stacked(state);
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        click_row(&mut harness, 10);
+        scroll_rows(&mut harness, 20);
+        let scrolled = viewport.get().y0;
+        assert!(
+            scrolled > 11.0 * line_height,
+            "the caret is not out of view"
+        );
+
+        live.content
+            .expect("the editor's content view")
+            .request_style(floem::style::recalc::StyleReason::full_recalc());
+        rebuilt(&mut harness);
+        assert_eq!(viewport.get().y0, scrolled, "the restyle moved the code");
+    }
+
+    /// Each file's tab shows where the reader left it: scrolled as it was,
+    /// with the caret on its line, after another file's tab or Conversation
+    /// has shown in its place. The other layout keeps the same line at the
+    /// top. A tab closed and opened again starts at the top, as it starts
+    /// folded.
+    #[test]
+    fn a_file_shows_where_it_was_left_when_its_tab_shows_again() {
+        let (mut harness, state) = harness();
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let viewport = || super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
+        let caret = || {
+            super::STACKED_CURSOR
+                .with(|c| c.get())
+                .unwrap()
+                .get()
+                .offset()
+        };
+        click_row(&mut harness, 10);
+        scroll_rows(&mut harness, 20);
+        let (scrolled, at) = (viewport().get().y0, caret());
+        assert!(scrolled > 0.0 && at > 0, "nothing to come back to");
+
+        let other = crate::backend::build_loaded_file(
+            "src/y.rs".into(),
+            "fn y() {}\n".repeat(90),
+            "fn y() {}\n".repeat(90),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        state.open_tab("src/y.rs");
+        state.finish_load("src/y.rs", Arc::new(other));
+        rebuilt(&mut harness);
+        assert_eq!(viewport().get().y0, 0.0, "another file opens at its top");
+
+        state.open_tab("src/x.rs");
+        rebuilt(&mut harness);
+        assert_eq!(
+            viewport().get().y0,
+            scrolled,
+            "back from another file's tab"
+        );
+        assert_eq!(caret(), at, "the caret is where it was");
+
+        state.show_tab(ItemTab::Conversation);
+        rebuilt(&mut harness);
+        state.show_tab(ItemTab::Files);
+        rebuilt(&mut harness);
+        assert_eq!(viewport().get().y0, scrolled, "back from Conversation");
+        assert_eq!(caret(), at);
+
+        // Split has no ghost rows, so the line at the top is on another
+        // row there, and the code is scrolled to it.
+        let top_line = stacked(state).doc.get().display_line(20);
+        state.layout.set(Layout::Split);
+        rebuilt(&mut harness);
+        let (_, right) = super::SPLIT_VIEWPORTS.with(|v| v.get()).unwrap();
+        let (_, head) = sides(state);
+        let row = (right.get().y0 / line_height).round() as usize;
+        assert!(row < 20, "the split did not scroll to the line: row {row}");
+        assert_eq!(head.doc.get().display_line(row), top_line);
+        state.layout.set(Layout::Stacked);
+        rebuilt(&mut harness);
+        assert_eq!(viewport().get().y0, scrolled, "and back to stacked");
+
+        state.close_tab("src/x.rs");
+        state.open_tab("src/x.rs");
+        rebuilt(&mut harness);
+        assert_eq!(
+            viewport().get().y0,
+            0.0,
+            "a tab opened again starts at the top"
         );
     }
 

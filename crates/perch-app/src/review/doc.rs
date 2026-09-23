@@ -243,6 +243,17 @@ impl Doc {
         self.display_rows.get(display).copied().flatten()
     }
 
+    /// The row of a display line, or of the first line after it that has
+    /// one: a ghost on a split's head side, which has no row, is on the
+    /// row of the head line after it, and a line folded away is past its
+    /// divider. `None` past the last line shown.
+    pub fn row_at_or_after_display(&self, display: usize) -> Option<usize> {
+        self.display_rows
+            .get(display..)?
+            .iter()
+            .find_map(|row| *row)
+    }
+
     /// The head line a row is. `None` for a ghost, and for every row that
     /// is no line.
     pub fn head_line(&self, row: usize) -> Option<usize> {

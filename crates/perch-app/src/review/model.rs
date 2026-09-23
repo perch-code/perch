@@ -134,8 +134,9 @@ pub enum ItemTab {
 }
 
 /// An item's pane as it was left: whether Conversation's tab was open,
-/// the file tabs, which tab was showing, and the files shown whole. The
-/// item opens on it again; the first time, on Conversation alone.
+/// the file tabs, which tab was showing, the files shown whole, and where
+/// the reader was on each tab. The item opens on it again; the first time,
+/// on Conversation alone.
 #[derive(Debug, Clone)]
 pub struct Pane {
     conversation: bool,
@@ -143,6 +144,8 @@ pub struct Pane {
     tabs: Vec<Tab>,
     active: Option<String>,
     whole: HashSet<String>,
+    conversation_scroll: f64,
+    file_places: HashMap<String, FilePlace>,
 }
 
 impl Default for Pane {
@@ -153,8 +156,33 @@ impl Default for Pane {
             tabs: Vec::new(),
             active: None,
             whole: HashSet::new(),
+            conversation_scroll: 0.0,
+            file_places: HashMap::new(),
         }
     }
+}
+
+/// Where the reader was in a file: the view's scroll, and the caret.
+///
+/// The scroll is held as a line and how far the view's top is from it, so
+/// that the file shows the same code when its document is built again
+/// with other rows above, a card grown or a fold opened, or in the other
+/// layout. The line is the first one at or under the view's top, a
+/// display line of the unified buffer, which the stacked document and a
+/// split's head side both have rows for; the pixels are kept as well, for
+/// a document that no longer shows the line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FilePlace {
+    /// The first line at or under the top of the view, and how far the
+    /// top is below that line's own top: negative when the line is under
+    /// it, below a card or a divider.
+    pub anchor: Option<(usize, f64)>,
+    /// The scroll offset, in pixels.
+    pub x: f64,
+    pub y: f64,
+    /// The caret, as a display line and a byte column in it; `None` when
+    /// it was on a row that is no line.
+    pub caret: Option<(usize, usize)>,
 }
 
 /// How Files draws a changed file: head with the removed lines spliced in,
@@ -1146,6 +1174,18 @@ pub struct ReviewState {
     /// Each item's pane as it was last left, by item, for the life of the
     /// app.
     pub panes: RwSignal<HashMap<String, Pane>>,
+    /// How far down Conversation was scrolled, kept as it scrolls, so the
+    /// page shows where it was left when it is built again: after a file's
+    /// tab has shown in its place, or when the item comes back. Written
+    /// on every scroll and read only as the page is built, so nothing
+    /// tracks it.
+    pub conversation_scroll: RwSignal<f64>,
+    /// Where the reader was in each open file, by path, kept as its editor
+    /// scrolls and its caret moves, so a file shows where it was left when
+    /// its tab shows again or its editor is built again. The place is the
+    /// tab's, as Show whole is: it goes when the tab closes. Nothing
+    /// tracks it, as with `conversation_scroll`.
+    pub file_places: RwSignal<HashMap<String, FilePlace>>,
     /// Stacked or Split, remembered across items in `meta`.
     pub layout: RwSignal<Layout>,
     /// The files with a picture that the reader asked to see as markup,
@@ -1507,6 +1547,8 @@ impl ReviewState {
             tab: RwSignal::new(ItemTab::Conversation),
             conversation_open: RwSignal::new(true),
             panes: RwSignal::new(HashMap::new()),
+            conversation_scroll: RwSignal::new(0.0),
+            file_places: RwSignal::new(HashMap::new()),
             layout: RwSignal::new(Layout::Stacked),
             as_source: RwSignal::new(HashSet::new()),
             scope: RwSignal::new(Scope::Branch),
@@ -1694,6 +1736,8 @@ impl ReviewState {
         if !self.reveals.with_untracked(HashMap::is_empty) {
             self.reveals.set(HashMap::new());
         }
+        self.conversation_scroll.set(0.0);
+        self.file_places.set(HashMap::new());
         self.pending_reveals.set(Vec::new());
         self.references.set(None);
         self.goto.set(None);
@@ -1878,6 +1922,8 @@ impl ReviewState {
             tabs: self.tabs.get_untracked(),
             active: self.active.get_untracked(),
             whole: self.whole.get_untracked(),
+            conversation_scroll: self.conversation_scroll.get_untracked(),
+            file_places: self.file_places.get_untracked(),
         };
         self.panes.update(|panes| {
             panes.insert(id, pane);
@@ -1917,6 +1963,8 @@ impl ReviewState {
             if !pane.whole.is_empty() {
                 self.whole.set(pane.whole);
             }
+            self.conversation_scroll.set(pane.conversation_scroll);
+            self.file_places.set(pane.file_places);
             if !paths.is_empty() {
                 self.loading.update(|loading| {
                     for path in &paths {
@@ -2561,6 +2609,7 @@ impl ReviewState {
             });
             if let Some(dropped) = dropped {
                 self.forget_whole(&dropped.path);
+                self.forget_place(&dropped.path);
             }
         }
         self.active.set(Some(path.to_string()));
@@ -2672,6 +2721,10 @@ impl ReviewState {
             }
             self.keep_composer_in_view(composer_was_in_code);
         }
+        // So was the place in the file: opened again, it opens at its top.
+        // Forgotten once its editor is no longer the one showing, which
+        // folding it again above may have moved the caret of.
+        self.forget_place(path);
     }
 
     /// The files the open item has had on screen, the most recent first.
@@ -2720,6 +2773,13 @@ impl ReviewState {
                 paths.remove(path);
             });
         }
+    }
+
+    /// A tab is gone: its file opens at its top next time.
+    fn forget_place(&self, path: &str) {
+        self.file_places.update(|places| {
+            places.remove(path);
+        });
     }
 
     pub fn finish_load(&self, path: &str, file: Arc<LoadedFile>) {
@@ -5208,6 +5268,57 @@ mod tests {
         assert_eq!(tabs(), ["src/z.rs"]);
         assert_eq!(state.active.get().as_deref(), Some("src/z.rs"));
         assert!(state.whole.get().is_empty());
+    }
+
+    /// Where the reader was, on Conversation and in each file, waits with
+    /// the item's pane while another item is open, and a file's place goes
+    /// with its tab.
+    #[test]
+    fn the_places_on_an_items_tabs_wait_with_its_pane() {
+        let state = ReviewState::new();
+        let open = |id: &str| {
+            let mut item = perch_github::Item::new(
+                "slatedb/slatedb",
+                "2026-09-18T09:59:00Z".parse().unwrap(),
+            );
+            item.id = id.into();
+            state.begin("Reading the branch");
+            state.item.set(Some(Arc::new(item)));
+            state.restore_pane()
+        };
+        let place = |y: f64| FilePlace {
+            anchor: Some((3, 0.0)),
+            x: 0.0,
+            y,
+            caret: Some((3, 1)),
+        };
+
+        open("a");
+        state.open_tab("src/x.rs");
+        state.open_tab("src/y.rs");
+        state.conversation_scroll.set(300.0);
+        state.file_places.update(|places| {
+            places.insert("src/x.rs".into(), place(66.0));
+            places.insert("src/y.rs".into(), place(88.0));
+        });
+
+        open("b");
+        assert_eq!(state.conversation_scroll.get(), 0.0);
+        assert!(state.file_places.with(HashMap::is_empty));
+
+        open("a");
+        assert_eq!(state.conversation_scroll.get(), 300.0);
+        assert_eq!(
+            state.file_places.with(|p| p.get("src/x.rs").copied()),
+            Some(place(66.0))
+        );
+
+        state.close_tab("src/x.rs");
+        assert!(!state.file_places.with(|p| p.contains_key("src/x.rs")));
+        assert_eq!(
+            state.file_places.with(|p| p.get("src/y.rs").copied()),
+            Some(place(88.0))
+        );
     }
 
     #[test]
