@@ -1,7 +1,7 @@
 //! The summary under Conversation's title: what the item is, in rows.
 //!
-//! Each row is a name and a value, as Codex's summary has them: Branch,
-//! Reviewers, Checks, Status, Worktree, then what GitHub says about the
+//! Each row is a name and a value, as Codex's summary has them: Author,
+//! Branch, Reviewers, Checks, Status, Worktree, then what GitHub says about the
 //! item. A row is absent when it has nothing, and the block with them.
 //! The notices, and the way back from a retained snapshot, sit over the
 //! rows; on Files the notice is in the tab bar and the way back in the
@@ -21,6 +21,7 @@ use crate::review::cards::{avatar_url_for, tip, verdict_glyph};
 use crate::review::model::{ItemTab, ReviewState};
 use crate::state::AppState;
 use crate::theme;
+use crate::timefmt;
 use crate::ui::items::OpenItem;
 use crate::ui::widgets::{
     avatar, clickable, name_label, open_in_browser, sidebar_glyph, worktree_menu, Name,
@@ -47,6 +48,16 @@ pub fn summary(
     let directory_backend = backend.clone();
     Stack::vertical((
         notices(app, state, backend.clone()),
+        dyn_row(
+            SidebarIcon::Person,
+            "Author",
+            move || data.with(|d| d.author.clone()),
+            Option::is_some,
+            move |author| match author {
+                Some(author) => author_view(app, author).into_any(),
+                None => Empty::new().into_any(),
+            },
+        ),
         row(
             SidebarIcon::Branch,
             "Branch",
@@ -801,6 +812,8 @@ pub fn notice(state: ReviewState) -> impl IntoView {
 /// merely written.
 #[derive(Debug, Clone, PartialEq, Default)]
 struct GitHubData {
+    /// Who opened it, their avatar, and when, once the discussion says.
+    author: Option<(String, String, Option<jiff::Timestamp>)>,
     /// Login, avatar, and the state of their latest review if they have
     /// given one.
     reviewers: Vec<(String, String, Option<String>)>,
@@ -815,7 +828,8 @@ struct GitHubData {
 
 impl GitHubData {
     fn is_empty(&self) -> bool {
-        self.reviewers.is_empty()
+        self.author.is_none()
+            && self.reviewers.is_empty()
             && self.labels.is_empty()
             && self.assignees.is_empty()
             && self.milestone.is_none()
@@ -827,6 +841,9 @@ impl GitHubData {
 fn github_data(app: AppState, state: ReviewState) -> GitHubData {
     let mut data = GitHubData::default();
     if let Some(pr) = state.pull_request.get() {
+        let opened = state.discussion.with(|d| d.as_ref().and_then(|d| d.opened_at));
+        data.author = Some((pr.author_login.clone(), pr.author_avatar_url.clone(), opened))
+            .filter(|(login, ..)| !login.is_empty());
         for r in &pr.requested_reviewers {
             data.reviewers
                 .push((r.login.clone(), r.avatar_url.clone(), None));
@@ -863,6 +880,12 @@ fn github_data(app: AppState, state: ReviewState) -> GitHubData {
         data.assignees = pr.assignees.clone();
     }
     if let Some(issue) = state.issue.get() {
+        data.author = Some((
+            issue.author_login.clone(),
+            issue.author_avatar_url.clone(),
+            issue.created_at,
+        ))
+        .filter(|(login, ..)| !login.is_empty());
         data.labels = issue.labels.clone();
         data.assignees = issue.assignees.clone();
     }
@@ -903,6 +926,37 @@ fn closes(body: &str) -> Vec<u64> {
         }
     }
     out
+}
+
+/// Avatar, login, and when it was opened, as the reviewers are drawn.
+fn author_view(
+    app: AppState,
+    (login, url, opened): (String, String, Option<jiff::Timestamp>),
+) -> impl IntoView {
+    let seed = login.clone();
+    Stack::horizontal((
+        avatar(app, move || url.clone(), theme::SUMMARY_AVATAR, seed)
+            .style(|s| s.margin_right(5.0)),
+        name_label(
+            move || Name::Login(login.clone()),
+            |s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED),
+        ),
+        Label::derived(move || {
+            opened
+                .map(|at| format!("opened {}", timefmt::relative(at, app.now.get())))
+                .unwrap_or_default()
+        })
+        .debug_name("opened")
+        .style(move |s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::FG_SUBTLE)
+                .margin_left(6.0)
+                .selectable(false)
+                .apply_if(opened.is_none(), |s| s.hide())
+        }),
+    ))
+    .debug_name("author")
+    .style(|s| s.items_center().min_width(0.0))
 }
 
 /// Avatar, login, and the verdict's glyph after it for a review given.
@@ -1119,16 +1173,17 @@ mod tests {
         );
         assert_eq!(summary.x0, title.x0, "and starts where the title does");
         // A pull request with a checkout and passing checks, and nobody
-        // asked to review it: Branch, Checks, Status, Worktree.
+        // asked to review it: Author, Branch, Checks, Status, Worktree.
         assert_eq!(
             rows_shown(&harness),
-            ["Branch", "Checks", "Status", "Worktree"]
+            ["Author", "Branch", "Checks", "Status", "Worktree"]
         );
 
         // Each row is a line tall, its name in the column at the left and
         // its value after the column.
         let mut last: Option<Rect> = None;
         for (row, value) in [
+            ("Author", "author"),
             ("Branch", "branches"),
             ("Checks", "checks pill"),
             ("Status", "state pill"),
@@ -1192,6 +1247,7 @@ mod tests {
         assert_eq!(
             rows_shown(&harness),
             [
+                "Author",
                 "Branch",
                 "Reviewers",
                 "Checks",
@@ -1235,7 +1291,7 @@ mod tests {
     #[test]
     fn an_issue_has_its_status_and_number_and_nothing_an_issue_cannot_have() {
         let (harness, ..) = issue_harness();
-        assert_eq!(rows_shown(&harness), ["Status"]);
+        assert_eq!(rows_shown(&harness), ["Author", "Status"]);
         let repo = rect(&harness, "repository line");
         assert!(within(repo, rect(&harness, "summary row Status")));
         assert!(named(harness.root_id(), "worktree menu").is_none());

@@ -18,10 +18,11 @@ use perch_github::{
 /// One card on Conversation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Card {
-    /// The pull request's or issue's own text, led by who opened it. Always
-    /// first. `node_id` is what reactions on it are left by; empty when the
-    /// pull request's discussion has not landed, or an older build kept it.
-    Description { author: String, avatar_url: String, at: Option<Timestamp>, body: String, node_id: String },
+    /// The pull request's or issue's own text. Always first; who opened it
+    /// is the summary's Author row. `node_id` is what reactions on it are
+    /// left by; empty when the pull request's discussion has not landed, or
+    /// an older build kept it.
+    Description { at: Option<Timestamp>, body: String, node_id: String },
     Comment(IssueComment),
     /// A review with its verdict and summary. Its line comments are threads
     /// of their own.
@@ -247,16 +248,12 @@ pub fn timeline(
     let mut cards = Vec::new();
 
     match (pull, issue) {
-        (Some(pr), _) => cards.push(Card::Description {
-            author: pr.author_login.clone(),
-            avatar_url: pr.author_avatar_url.clone(),
+        (Some(_), _) => cards.push(Card::Description {
             at: discussion.and_then(|d| d.opened_at),
             body: discussion.map(|d| d.body.clone()).unwrap_or_default(),
             node_id: discussion.map(|d| d.node_id.clone()).unwrap_or_default(),
         }),
         (None, Some((issue, _, _))) => cards.push(Card::Description {
-            author: issue.author_login.clone(),
-            avatar_url: issue.author_avatar_url.clone(),
             at: issue.created_at,
             body: issue.body.clone(),
             node_id: issue.node_id.clone(),
@@ -546,9 +543,7 @@ pub(crate) mod tests {
 
         let cards = timeline(None, None, Some((&issue, &comments, &[])), &[t]);
         assert_eq!(kinds(&cards), ["description", "comment", "thread"]);
-        let Card::Description { author, avatar_url, at: opened, body, .. } = &cards[0] else { panic!("{cards:?}") };
-        assert_eq!(author, "rohan");
-        assert_eq!(avatar_url, "https://avatars/2");
+        let Card::Description { at: opened, body, .. } = &cards[0] else { panic!("{cards:?}") };
         assert_eq!(*opened, Some(at("2026-09-14T14:02:00Z")));
         assert_eq!(body, "The manifest can be written twice.");
     }

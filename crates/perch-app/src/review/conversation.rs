@@ -279,14 +279,9 @@ fn card_view(
     let view: floem::AnyView = match card {
         // What Perch started from an issue is the summary's In Perch row,
         // not repeated under the description.
-        Card::Description {
-            author,
-            avatar_url,
-            at,
-            body,
-            node_id,
-        } => cards::description_card(app, state, backend, author, avatar_url, at, body, node_id)
-            .into_any(),
+        Card::Description { body, node_id, .. } => {
+            cards::description_card(state, backend, body, node_id).into_any()
+        }
         Card::Comment(comment) => cards::comment_card(app, state, backend, comment).into_any(),
         Card::Review { review } => cards::review_card(app, state, backend, review).into_any(),
         Card::Event(event) => {

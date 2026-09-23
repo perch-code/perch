@@ -125,7 +125,7 @@ mod tests {
                     message(32, "2026-09-16T12:00:00Z", "  the reply "),
                 ],
             }),
-            Card::Description { author: "rohan".into(), avatar_url: String::new(), at: None, body: String::new(), node_id: String::new() },
+            Card::Description { at: None, body: String::new(), node_id: String::new() },
         ];
         let mut out = String::new();
         render(&mut out, &cards);

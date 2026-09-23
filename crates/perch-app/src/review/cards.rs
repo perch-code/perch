@@ -869,28 +869,16 @@ fn ask_about(
 // GitHub's cards
 // ---------------------------------------------------------------------
 
-/// The pull request's or issue's own text, led by who opened it, with the
-/// reactions on it under.
-#[allow(clippy::too_many_arguments)]
+/// The pull request's or issue's own text, with the reactions on it under.
+/// Its strip is its title and the picker; who opened it and when is the
+/// summary's Author row.
 pub fn description_card(
-    app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
-    author: String,
-    avatar_url: String,
-    at: Option<jiff::Timestamp>,
     body: String,
     node_id: String,
 ) -> impl IntoView {
     let hovered = RwSignal::new(false);
-    let who = Byline {
-        login: author,
-        avatar_url: fixed(avatar_url),
-        avatar_size: theme::CARD_AVATAR,
-        glyph: None,
-        verb: "opened".into(),
-        when: at,
-    };
     let description = if body.trim().is_empty() {
         Label::derived(|| "No description.".to_string())
             .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG_SUBTLE))
@@ -902,21 +890,19 @@ pub fn description_card(
     let reactions = reactions_under(state, backend.clone(), &react);
     track_hover(
         card(
-            byline_strip(byline(
-                app,
-                who,
-                actions(state, backend, hovered, None, None, react, String::new()),
-            )),
-            Stack::vertical((
-                Label::derived(|| "Description".to_string()).style(|s| {
-                    s.font_size(theme::TEXT_SECTION_TITLE)
-                        .font_weight(theme::weight_emphasis())
-                        .color(theme::FG)
-                        .margin_bottom(10.0)
-                }),
-                description,
-                reactions,
-            ))
+            byline_strip(
+                Stack::horizontal((
+                    Label::derived(|| "Description".to_string()).style(|s| {
+                        s.font_size(theme::TEXT_SECTION_TITLE)
+                            .font_weight(theme::weight_emphasis())
+                            .color(theme::FG)
+                    }),
+                    Empty::new().style(|s| s.flex_grow(1.0_f32)),
+                    actions(state, backend, hovered, None, None, react, String::new()),
+                ))
+                .style(|s| s.items_center().width_full().min_width(0.0)),
+            ),
+            Stack::vertical((description, reactions))
             .style(|s| s.flex_col().width_full())
             .into_any(),
         ),
