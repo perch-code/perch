@@ -160,9 +160,9 @@ at what happened:
 - **A Work run that changed files**: Code, on that run's **What the run
   changed** scope.
 - **A Work run that changed nothing, an Ask run, or a failure**:
-  Conversation, with the run's thread card focused (`focus_card`).
-- **A review**: Conversation, scrolled to the review's group in REVIEW
-  HISTORY.
+  Conversation, at the run: the Agents row unfolded with the run
+  expanded, as the Agents dropdown's rows go to it (`go_to_run`).
+- **A review**: Conversation.
 - **A head move**: Code, on **Since you last looked**. Opening then
   moves `last_seen_head`, as it does now.
 

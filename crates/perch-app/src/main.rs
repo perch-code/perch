@@ -8,6 +8,7 @@ mod ask;
 mod backend;
 mod context;
 mod icons;
+mod inbox;
 mod items;
 mod items_cli;
 mod repos;

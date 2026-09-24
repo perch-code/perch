@@ -57,6 +57,13 @@ pub enum Command {
         id: String,
         navigation_id: u64,
     },
+    /// Open an item from its inbox row, landing where its local activity
+    /// happened for this open only.
+    OpenItemAt {
+        id: String,
+        navigation_id: u64,
+        landing: crate::inbox::Landing,
+    },
     /// Open an agent's owner for reading. Archived items use their cached
     /// conversation without restoring a checkout or clearing Archive.
     ViewAgentOwner {
@@ -639,6 +646,9 @@ pub enum Event {
     /// Every item's latest local activity: runs and reviews that ended,
     /// heads that moved. Whole, with the items.
     ItemActivity(Vec<perch_github::ItemActivity>),
+    /// The same, after something the reader didn't do: a run ended, a
+    /// head moved. The drawer may hold these back until asked.
+    ItemActivityPolled(Vec<perch_github::ItemActivity>),
     /// The items again, as a poll found them rather than something the
     /// reader did. The drawer may hold these back until asked.
     ItemsPolled(Vec<Item>),
@@ -2135,6 +2145,17 @@ impl Backend {
         navigation_id
     }
 
+    pub fn open_item_at(&self, id: &str, landing: crate::inbox::Landing) -> u64 {
+        let navigation_id = self.navigation_requests.begin_item(id);
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::OpenItemAt {
+            id: id.to_string(),
+            navigation_id,
+            landing,
+        });
+        navigation_id
+    }
+
     pub fn view_agent_owner(&self, id: &str) -> u64 {
         let navigation_id = self.navigation_requests.begin_item(id);
         self.scope_requests.clear();
@@ -2895,6 +2916,7 @@ async fn run(
         approvals: Default::default(),
         approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
         window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        landing: Default::default(),
     };
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
@@ -3111,12 +3133,12 @@ async fn run(
             }
             Command::ItemActivityDone { item_id } => {
                 if let Some(Ok(true)) = ctx.with_cache(|c| c.done_item_activity(&item_id)) {
-                    ctx.send_item_activity();
+                    ctx.send_item_activity(Event::ItemActivity);
                 }
             }
             Command::MarkItemActivityUnread { item_id } => {
                 if let Some(Ok(true)) = ctx.with_cache(|c| c.mark_item_activity_unread(&item_id)) {
-                    ctx.send_item_activity();
+                    ctx.send_item_activity(Event::ItemActivity);
                 }
             }
             Command::WindowKey { key } => {
@@ -3258,6 +3280,29 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     resolve_thread(&ctx, &item_id, &thread_id, resolve).await;
+                });
+            }
+            Command::OpenItemAt {
+                id,
+                navigation_id,
+                landing,
+            } => {
+                ctx.clear_notice();
+                if let Ok(mut pending) = ctx.landing.lock() {
+                    *pending = Some((id.clone(), landing));
+                }
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    if open_item(&ctx, &id, navigation_id).await {
+                        start_language_server(
+                            ctx.slot,
+                            ctx.language_server,
+                            ctx.events,
+                            ctx.navigation_requests,
+                            navigation_id,
+                        )
+                        .await;
+                    }
                 });
             }
             Command::OpenItem { id, navigation_id }
@@ -4261,6 +4306,8 @@ struct Ctx {
     asked_subjects: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
     /// Whether Perch's window is the key window, as the UI last said.
     window_key: Arc<std::sync::atomic::AtomicBool>,
+    /// Where the next open of an item, from its inbox row, lands.
+    landing: Arc<std::sync::Mutex<Option<(String, crate::inbox::Landing)>>>,
 }
 
 /// The GitHub client and the token it was built on.
@@ -4552,7 +4599,7 @@ impl Ctx {
         {
             self.want_avatars(author_avatars(&items));
         }
-        self.send_item_activity();
+        self.send_item_activity(Event::ItemActivity);
     }
 
     /// The same, for what a poll found rather than what the reader did.
@@ -4563,13 +4610,16 @@ impl Ctx {
         {
             self.want_avatars(author_avatars(&items));
         }
-        self.send_item_activity();
+        self.send_item_activity(Event::ItemActivityPolled);
     }
 
-    fn send_item_activity(&self) {
+    /// Every item's latest activity, as `event`: `Event::ItemActivity`
+    /// after something the reader did, `Event::ItemActivityPolled` after
+    /// something that happened on its own.
+    fn send_item_activity(&self, event: fn(Vec<perch_github::ItemActivity>) -> Event) {
         match self.with_cache(Cache::load_item_activity) {
             Some(Ok(activity)) => {
-                let _ = self.events.send(Event::ItemActivity(activity));
+                let _ = self.events.send(event(activity));
             }
             Some(Err(e)) => tracing::warn!(error = %e, "could not read item activity"),
             None => {}
@@ -4586,7 +4636,7 @@ impl Ctx {
         match self.with_cache(|c| c.record_item_activity(item_id, Timestamp::now(), &event)) {
             Some(Ok(())) => {
                 tracing::info!(item = item_id, ?event, "recorded item activity");
-                self.send_item_activity();
+                self.send_item_activity(Event::ItemActivityPolled);
                 true
             }
             Some(Err(e)) => {
@@ -4601,7 +4651,7 @@ impl Ctx {
     /// opened from.
     fn read_activity(&self, item_id: &str) {
         if let Some(Ok(true)) = self.with_cache(|c| c.read_item_activity(item_id)) {
-            self.send_item_activity();
+            self.send_item_activity(Event::ItemActivity);
         }
     }
 
@@ -6432,6 +6482,31 @@ async fn opening_scope(
     since: Option<&str>,
 ) -> perch_git::Scope {
     use perch_git::Scope;
+    // Opened from the inbox, at what happened: for this open only, so
+    // the menu's last pick stays what it was.
+    let landing = ctx
+        .landing
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.take_if(|(id, _)| id == item_id))
+        .map(|(_, landing)| landing);
+    match landing {
+        Some(crate::inbox::Landing::RunChanges { run_id }) => {
+            if let Some(run) = ctx.runs.load(&run_id) {
+                if let (Some(before), Some(after)) = (run.work_before, run.work_after) {
+                    return Scope::Run { before, after };
+                }
+            }
+        }
+        Some(crate::inbox::Landing::Since) => {
+            if let Some(from) = since.filter(|from| *from != checkout.head_sha) {
+                return Scope::SinceLastLooked {
+                    from: from.to_string(),
+                };
+            }
+        }
+        _ => {}
+    }
     let picked = ctx
         .with_cache(|c| c.meta(SCOPE_META_KEY).ok().flatten())
         .flatten();
@@ -14078,6 +14153,7 @@ mod tests {
             approvals: Default::default(),
             approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
             window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            landing: Default::default(),
         };
         (ctx, received)
     }
@@ -15619,6 +15695,29 @@ mod tests {
                 files: Some(1),
                 head: Some(git(&worktree, &["rev-parse", "HEAD"])),
             }
+        );
+
+        // Opened from its inbox row, the item lands on what the run
+        // changed, for that open only.
+        let checkout = ctx.slot.lock().unwrap().as_ref().unwrap().checkout.clone();
+        *ctx.landing.lock().unwrap() = Some((
+            item.id.clone(),
+            crate::inbox::Landing::RunChanges { run_id: run.id.clone() },
+        ));
+        assert_eq!(
+            opening_scope(&ctx, &item.id, &checkout, None).await,
+            perch_git::Scope::Run { before: before.clone(), after: after.clone() }
+        );
+        assert_eq!(opening_scope(&ctx, &item.id, &checkout, None).await, perch_git::Scope::Branch);
+        *ctx.landing.lock().unwrap() = Some((item.id.clone(), crate::inbox::Landing::Since));
+        assert_eq!(
+            opening_scope(&ctx, &item.id, &checkout, Some("older")).await,
+            perch_git::Scope::SinceLastLooked { from: "older".into() }
+        );
+        assert_eq!(
+            ctx.with_cache(|c| c.meta(SCOPE_META_KEY).unwrap()).unwrap(),
+            None,
+            "the menu's last pick is left alone"
         );
 
         delete_comment_thread(&ctx, &thread.id).await;

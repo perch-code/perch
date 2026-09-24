@@ -191,7 +191,7 @@ fn read_threads(state: AppState, item: &Item) -> Vec<String> {
     })
 }
 
-fn glyph(item: &Item) -> impl IntoView {
+pub(crate) fn glyph(item: &Item) -> impl IntoView {
     let state = state_of(item);
     let muted = item.is_archived();
     match state {
@@ -227,6 +227,33 @@ fn author(state: AppState, item: &Item) -> (impl Fn() -> String + 'static, Strin
 /// says of a branch. A branch with no pull request or issue has no
 /// number, and its name is already the title.
 fn byline(state: AppState, item: &Item) -> impl IntoView {
+    let reference = nav_row::reference(item.subject.as_ref().map(|subject| subject.number()));
+    byline_with(state, item, reference, None)
+}
+
+/// An item's byline as its inbox row draws it: the branch where a number
+/// would go on a branch of the reader's own, and after the pills, what
+/// happened there last.
+pub(crate) fn inbox_byline(
+    state: AppState,
+    item: &Item,
+    activity: &perch_github::ActivityEvent,
+) -> impl IntoView {
+    let reference = match &item.subject {
+        Some(subject) => nav_row::reference(Some(subject.number())),
+        None => item.branch().unwrap_or_default().to_string(),
+    };
+    byline_with(state, item, reference, Some(activity))
+}
+
+/// The byline, with `reference` after the repository and, when given,
+/// the activity's chip after the pills.
+fn byline_with(
+    state: AppState,
+    item: &Item,
+    reference: String,
+    activity: Option<&perch_github::ActivityEvent>,
+) -> impl IntoView {
     let (avatar_url, login) = author(state, item);
     // A checkout says how far it has gone from its base once the scan has
     // measured it; a pull request says what GitHub counts until then.
@@ -251,14 +278,26 @@ fn byline(state: AppState, item: &Item) -> impl IntoView {
         avatar_url,
         login,
         item.repo_full_name.clone(),
-        nav_row::reference(item.subject.as_ref().map(|subject| subject.number())),
+        reference,
         Stack::horizontal((
             nav_row::chips(state, checks, review),
+            activity_note(activity),
             nav_row::note(item.divergence().map(|d| d.label()), theme::DRAFT_YELLOW),
         ))
         .style(|s| s.items_center().min_width(0.0)),
         nav_row::churn(churn),
     )
+}
+
+/// What happened on the item last, as its inbox row says it: in the
+/// failure colour when a run or a review failed.
+pub(crate) fn activity_note(activity: Option<&perch_github::ActivityEvent>) -> impl IntoView {
+    let color = if activity.is_some_and(perch_github::ActivityEvent::failed) {
+        theme::CLOSED
+    } else {
+        theme::NAV_MUTED
+    };
+    nav_row::note(activity.map(crate::inbox::chip), color)
 }
 
 /// The title's right end: the pin, the bookmark, the unread dot and the
