@@ -221,6 +221,7 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .into_any()
         },
     )
+    .style(|s| s.width_full())
 }
 
 /// One line: what the branch has, and the way into the form.
@@ -363,7 +364,12 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
                 move || submit(),
             ),
         ))
-        .style(|s| s.width_full().items_center().gap(8.0))
+        .style(|s| {
+            s.width_full()
+                .items_center()
+                .gap(8.0)
+                .flex_wrap(floem::taffy::FlexWrap::Wrap)
+        })
     };
 
     let escape_id = item_id.clone();
@@ -1182,5 +1188,35 @@ mod tests {
         settle(&mut harness);
         assert_eq!(draft_of(app, "item-7").body, "Second body");
         assert!(find(harness.root_id(), "No claude").is_some());
+    }
+
+    #[test]
+    fn the_form_fits_a_narrow_column() {
+        for width in [480.0, 845.0] {
+            let root = TestRoot::new();
+            let app = AppState::new();
+            let state = state_on(branch());
+            let view = surface(app, state, Rc::new(Backend::detached()));
+            let mut harness = HeadlessHarness::new_with_size(root, view, width, 700.0);
+            state.pull_readiness.set(Some(Ok(readiness(2))));
+            settle(&mut harness);
+            click(&mut harness, "open-pull-request-unfold");
+            let form = named(harness.root_id(), "open-pull-request").unwrap();
+            let outer = harness.get_layout_rect(form);
+            for name in [
+                "open-pull-request-base",
+                "open-pull-request-draft",
+                "open-pull-request-write",
+                "open-pull-request-cancel",
+                "open-pull-request-submit",
+                "open-pull-request-title",
+            ] {
+                let id = named(harness.root_id(), name).unwrap();
+                let rect = id.get_visual_rect_no_clip();
+                assert!(outer.x1 <= width + 0.5, "the form spills past {width}: {outer:?}");
+                assert!(rect.x1 <= outer.x1 + 0.5, "{name} spills past {width}: {rect:?}");
+                assert!(rect.width() > 20.0, "{name} squeezed at {width}: {rect:?}");
+            }
+        }
     }
 }
