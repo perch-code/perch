@@ -1019,6 +1019,51 @@ impl GitHub {
         })
     }
 
+    /// Open a pull request on `repo_full_name` from `head`, which is
+    /// `owner:branch`, into `base`. The branch must be pushed already.
+    pub async fn create_pull_request(
+        &self,
+        repo_full_name: &str,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<PullRequest, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            title: &'a str,
+            body: &'a str,
+            head: &'a str,
+            base: &'a str,
+            draft: bool,
+        }
+
+        let path = format!("/repos/{owner}/{name}/pulls");
+        let request = Request {
+            title,
+            body,
+            head,
+            base,
+            draft,
+        };
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._post(&path, Some(&request))
+            .await
+            .map_err(map_octocrab_error)?;
+        let body = self
+            .finish_response(response, &[StatusCode::CREATED])
+            .await?;
+        let payload: PullPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(payload.into_pull_request(repo_full_name))
+    }
+
     /// Every page of a list endpoint, concatenated.
     ///
     /// Stops at the first short page rather than following `Link` headers,

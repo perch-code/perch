@@ -216,10 +216,11 @@ reads what else it wants from the worktree.
 ## Backend
 
 - `perch-git`: `Preparer::push_branch(worktree, remote, branch,
-  set_upstream, git)` taking the plain or token `Git`, `BatchMode` for
-  SSH, `--porcelain` so a rejection is told from an auth failure by
-  its status line rather than by git's prose. `readiness(worktree,
-  base, branch)` for `BranchReadiness`.
+  own_credentials)`, the plain `Git` with `BatchMode` SSH and
+  `--set-upstream` for a clone of the reader's, the token `Git`
+  otherwise. A rejection is told from an auth failure by what git
+  says, which `LC_ALL=C` keeps in English. `branch_readiness(git,
+  worktree, base)` for `BranchReadiness`.
 - `perch-github`: `create_pull_request(repo, head, base, title, body,
   draft)`, parsing the response with the parser `find_pull_for_branch`
   uses. `Pull requests: write`, which Submit review needs already.

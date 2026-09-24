@@ -358,6 +358,78 @@ fn sum_numstat(out: &str) -> (u32, u32) {
     })
 }
 
+/// How a worktree's branch stands for a pull request against `base`, a
+/// ref the worktree has.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchReadiness {
+    /// Commits on HEAD that `base` doesn't have.
+    pub ahead: u32,
+    /// Files `git status` lists: changed, staged or untracked. A pull
+    /// request made now would leave them out.
+    pub dirty_files: u32,
+    /// The branch HEAD is on; `None` when it is detached.
+    pub head_branch: Option<String>,
+    /// Each commit's subject and body, oldest first, the newest fifty.
+    pub commits: Vec<(String, String)>,
+}
+
+/// Read a worktree's [`BranchReadiness`]. Reads only.
+pub async fn branch_readiness(git: &Git, worktree: &Path, base: &str) -> Result<BranchReadiness, Error> {
+    let range = format!("{base}..HEAD");
+    let ahead = git
+        .run(Some(worktree), ["rev-list", "--count", &range], QUERY_TIMEOUT)
+        .await?;
+    let ahead = ahead
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| Error::Parse(format!("commit count {ahead:?}: {e}")))?;
+    let status = git
+        .run(
+            Some(worktree),
+            ["status", "--porcelain", "--untracked-files=normal"],
+            QUERY_TIMEOUT,
+        )
+        .await?;
+    let dirty_files = status
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with("!!"))
+        .count() as u32;
+    let head_branch = git
+        .run(Some(worktree), ["symbolic-ref", "--quiet", "--short", "HEAD"], QUERY_TIMEOUT)
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let log = git
+        .run(
+            Some(worktree),
+            ["log", "-n", "50", "--format=%s%x1f%b%x1e", &range],
+            QUERY_TIMEOUT,
+        )
+        .await?;
+    Ok(BranchReadiness {
+        ahead,
+        dirty_files,
+        head_branch,
+        commits: parse_subjects_and_bodies(&log),
+    })
+}
+
+/// `git log --format=%s%x1f%b%x1e`, newest first, as (subject, body)
+/// pairs oldest first.
+fn parse_subjects_and_bodies(log: &str) -> Vec<(String, String)> {
+    let mut commits: Vec<(String, String)> = log
+        .split('\x1e')
+        .filter_map(|record| {
+            let record = record.trim_start_matches('\n');
+            let (subject, body) = record.split_once('\x1f')?;
+            Some((subject.trim().to_string(), body.trim().to_string()))
+        })
+        .collect();
+    commits.reverse();
+    commits
+}
+
 /// When the commit at a worktree's HEAD was made. The last activity of a
 /// branch that has no pull request to carry an `updated_at`.
 pub async fn head_commit_time(git: &Git, worktree: &Path) -> Result<jiff::Timestamp, Error> {

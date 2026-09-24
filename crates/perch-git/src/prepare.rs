@@ -620,23 +620,13 @@ impl Preparer {
     /// or a host not yet known fails the fetch instead of waiting.
     pub async fn fetch_branch(&self, repo: &Path, remote: &str, branch: &str) -> Result<(), Error> {
         let plain = Git::plain();
-        let ssh = std::env::var("GIT_SSH_COMMAND").ok().filter(|s| !s.is_empty());
-        let ssh = match ssh {
-            Some(ssh) => ssh,
-            None => plain
-                .run(Some(repo), ["config", "--get", "core.sshCommand"], QUERY_TIMEOUT)
-                .await
-                .map(|s| s.trim().to_string())
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "ssh".to_string()),
-        };
+        let ssh = batch_ssh(&plain, repo).await;
         plain
             .run(
                 Some(repo),
                 [
                     "-c".to_string(),
-                    format!("core.sshCommand={ssh} -o BatchMode=yes"),
+                    ssh,
                     "fetch".to_string(),
                     "--no-tags".to_string(),
                     remote.to_string(),
@@ -646,6 +636,41 @@ impl Preparer {
             )
             .await?;
         Ok(())
+    }
+
+    /// Push the worktree's HEAD to `branch` on `remote`, never forcing.
+    ///
+    /// `own_credentials` is for a worktree of one of the reader's clones:
+    /// their credential helpers and SSH key, never Perch's token, SSH in
+    /// batch mode as `fetch_branch` has it, and the branch set to track
+    /// what it was pushed to, so a `git push` in a terminal goes to the
+    /// same place. Otherwise the worktree is of Perch's own clone, and the
+    /// push goes with Perch's git and token, and tracks nothing. A branch
+    /// the remote already has at HEAD pushes nothing and succeeds.
+    pub async fn push_branch(
+        &self,
+        worktree: &Path,
+        remote: &str,
+        branch: &str,
+        own_credentials: bool,
+    ) -> Result<(), PushError> {
+        let refspec = format!("HEAD:refs/heads/{branch}");
+        let pushed = if own_credentials {
+            let plain = Git::plain();
+            let ssh = batch_ssh(&plain, worktree).await;
+            plain
+                .run(
+                    Some(worktree),
+                    ["-c", &ssh, "push", "--set-upstream", remote, &refspec],
+                    FETCH_TIMEOUT,
+                )
+                .await
+        } else {
+            self.git
+                .run(Some(worktree), ["push", remote, &refspec], FETCH_TIMEOUT)
+                .await
+        };
+        pushed.map(|_| ()).map_err(PushError::from_git)
     }
 
     /// How long ago a ref's commit was made, as git says it: `3 days ago`.
@@ -978,6 +1003,68 @@ impl Preparer {
     }
 }
 
+/// `core.sshCommand=…` for a command in one of the reader's clones: the
+/// SSH they have set, in `GIT_SSH_COMMAND` or the clone's config, in batch
+/// mode, so a key that wants a passphrase or a host not yet known fails the
+/// command instead of waiting on a prompt nobody can see.
+async fn batch_ssh(plain: &Git, repo: &Path) -> String {
+    let ssh = std::env::var("GIT_SSH_COMMAND").ok().filter(|s| !s.is_empty());
+    let ssh = match ssh {
+        Some(ssh) => ssh,
+        None => plain
+            .run(Some(repo), ["config", "--get", "core.sshCommand"], QUERY_TIMEOUT)
+            .await
+            .map(|s| s.trim().to_string())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "ssh".to_string()),
+    };
+    format!("core.sshCommand={ssh} -o BatchMode=yes")
+}
+
+/// Why a push did not go.
+#[derive(Debug, thiserror::Error)]
+pub enum PushError {
+    /// The remote's branch has commits HEAD doesn't: a push would have to
+    /// force, and Perch never does.
+    #[error("the remote's branch has commits this one doesn't")]
+    Rejected,
+    /// The remote wouldn't take the credentials, or there were none that
+    /// could be given without a prompt.
+    #[error("could not authenticate: {0}")]
+    Auth(String),
+    #[error(transparent)]
+    Other(Error),
+}
+
+impl PushError {
+    /// Told apart by what git says, which is English whatever the
+    /// reader's locale: `Git` runs it with `LC_ALL=C`.
+    fn from_git(error: Error) -> Self {
+        let Error::Git { stderr, .. } = &error else {
+            return Self::Other(error);
+        };
+        let said = stderr.to_ascii_lowercase();
+        if said.contains("[rejected]") || said.contains("non-fast-forward") {
+            return Self::Rejected;
+        }
+        const AUTH: [&str; 8] = [
+            "permission denied",
+            "authentication failed",
+            "could not read username",
+            "could not read password",
+            "terminal prompts disabled",
+            "host key verification failed",
+            "invalid username or password",
+            "returned error: 403",
+        ];
+        if AUTH.iter().any(|needle| said.contains(needle)) {
+            return Self::Auth(stderr.clone());
+        }
+        Self::Other(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,6 +1108,175 @@ mod tests {
             .collect();
         let labels: Vec<String> = order_bases(&refs, None, "main").iter().map(BaseBranch::label).collect();
         assert_eq!(labels, ["main", "b", "a"]);
+    }
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// A bare remote with `main`, and a clone of it on `feature` one
+    /// commit past `main`.
+    fn clone_with_feature(dir: &Path) -> (PathBuf, PathBuf) {
+        let remote = dir.join("remote.git");
+        let seed = dir.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git(dir, &["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()]);
+        git(&seed, &["init", "-q", "-b", "main"]);
+        git(&seed, &["config", "user.name", "Perch Test"]);
+        git(&seed, &["config", "user.email", "perch@example.com"]);
+        std::fs::write(seed.join("a.txt"), "a\n").unwrap();
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-q", "-m", "first"]);
+        git(&seed, &["push", "-q", remote.to_str().unwrap(), "main"]);
+        let clone = dir.join("clone");
+        git(dir, &["clone", "-q", remote.to_str().unwrap(), clone.to_str().unwrap()]);
+        git(&clone, &["config", "user.name", "Perch Test"]);
+        git(&clone, &["config", "user.email", "perch@example.com"]);
+        git(&clone, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(clone.join("b.txt"), "b\n").unwrap();
+        git(&clone, &["add", "-A"]);
+        git(&clone, &["commit", "-q", "-m", "Add b", "-m", "Because b."]);
+        (remote, clone)
+    }
+
+    fn preparer(dir: &Path) -> Preparer {
+        Preparer::new(Store::new(dir.join("store")), None)
+    }
+
+    #[tokio::test]
+    async fn a_push_with_the_readers_git_sets_the_upstream_and_again_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, clone) = clone_with_feature(dir.path());
+        let preparer = preparer(dir.path());
+
+        preparer.push_branch(&clone, "origin", "feature", true).await.unwrap();
+
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/feature"]),
+            git(&clone, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(
+            git(&clone, &["rev-parse", "--abbrev-ref", "feature@{upstream}"]),
+            "origin/feature"
+        );
+        preparer.push_branch(&clone, "origin", "feature", true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_push_with_perchs_git_tracks_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, clone) = clone_with_feature(dir.path());
+
+        preparer(dir.path())
+            .push_branch(&clone, "origin", "feature", false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/feature"]),
+            git(&clone, &["rev-parse", "HEAD"])
+        );
+        let upstream = std::process::Command::new("git")
+            .current_dir(&clone)
+            .args(["rev-parse", "--abbrev-ref", "feature@{upstream}"])
+            .output()
+            .unwrap();
+        assert!(!upstream.status.success());
+    }
+
+    #[tokio::test]
+    async fn a_push_the_remote_is_ahead_of_is_refused_and_not_forced() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, clone) = clone_with_feature(dir.path());
+        // Someone else's commit on the remote's feature, one this clone
+        // doesn't have.
+        let other = dir.path().join("other");
+        git(dir.path(), &["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()]);
+        git(&other, &["config", "user.name", "Other"]);
+        git(&other, &["config", "user.email", "other@example.com"]);
+        git(&other, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(other.join("c.txt"), "c\n").unwrap();
+        git(&other, &["add", "-A"]);
+        git(&other, &["commit", "-q", "-m", "Add c"]);
+        git(&other, &["push", "-q", "origin", "feature"]);
+        let theirs = git(&other, &["rev-parse", "HEAD"]);
+
+        let pushed = preparer(dir.path())
+            .push_branch(&clone, "origin", "feature", true)
+            .await;
+
+        assert!(matches!(pushed, Err(PushError::Rejected)), "{pushed:?}");
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature"]), theirs);
+    }
+
+    #[test]
+    fn what_git_says_tells_a_refusal_from_a_credential_from_the_rest() {
+        let said = |stderr: &str| {
+            PushError::from_git(Error::Git {
+                status: 1,
+                stderr: stderr.into(),
+            })
+        };
+        assert!(matches!(
+            said(" ! [rejected]        HEAD -> feature (fetch first)"),
+            PushError::Rejected
+        ));
+        assert!(matches!(
+            said("git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."),
+            PushError::Auth(_)
+        ));
+        assert!(matches!(
+            said("fatal: could not read Username for 'https://github.com': terminal prompts disabled"),
+            PushError::Auth(_)
+        ));
+        assert!(matches!(
+            said(" ! [remote rejected] HEAD -> feature (protected branch hook declined)"),
+            PushError::Other(_)
+        ));
+        assert!(matches!(PushError::from_git(Error::Timeout), PushError::Other(Error::Timeout)));
+    }
+
+    #[tokio::test]
+    async fn readiness_counts_the_commits_the_dirt_and_names_the_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_remote, clone) = clone_with_feature(dir.path());
+        std::fs::write(clone.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(clone.join("new.txt"), "new\n").unwrap();
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "Second"]);
+
+        let ready = crate::branch_readiness(&Git::plain(), &clone, "origin/main")
+            .await
+            .unwrap();
+
+        assert_eq!(ready.ahead, 2);
+        assert_eq!(ready.dirty_files, 2);
+        assert_eq!(ready.head_branch.as_deref(), Some("feature"));
+        assert_eq!(
+            ready.commits,
+            [
+                ("Add b".to_string(), "Because b.".to_string()),
+                ("Second".to_string(), String::new()),
+            ]
+        );
+
+        git(&clone, &["checkout", "-q", "--detach"]);
+        let detached = crate::branch_readiness(&Git::plain(), &clone, "origin/main")
+            .await
+            .unwrap();
+        assert_eq!(detached.head_branch, None);
     }
 
     #[test]

@@ -15,7 +15,7 @@ pub mod tree;
 
 pub use diff::{file_diff, ChangeStatus, ChangedFile, DeletedRun, FileDiff, Hunk, LineStatus};
 pub use display::{DisplayBuffer, Row};
-pub use prepare::{home_ref, BaseBranch, Checkout, Cut, Preparer, Step};
+pub use prepare::{home_ref, BaseBranch, Checkout, Cut, Preparer, PushError, Step};
 pub use review_snapshot::{
     map_anchor_between, AnchorMapping, CaptureOutcome, DiffSide, MappedAnchor, MappingCandidate,
     MappingConfidence, MappingDocument, MappingEvidence, MappingMethod, MappingSnapshot, RangeDiff,
@@ -24,8 +24,8 @@ pub use review_snapshot::{
     MERGE_BASE_REF,
 };
 pub use scan::{
-    branch_churn, github_remote, head_commit_time, parse_remotes, parse_worktree_list, remotes,
-    repo_from_remote, scan_root, RootScan, WorktreeEntry,
+    branch_churn, branch_readiness, github_remote, head_commit_time, parse_remotes, parse_worktree_list, remotes,
+    repo_from_remote, scan_root, BranchReadiness, RootScan, WorktreeEntry,
 };
 pub use scope::{alignment, changed_files, dirt, log, read_side, Commit, Dirt, Rev, Scope};
 pub use store::{RepoId, Store};
