@@ -6758,7 +6758,7 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revis
     // was rebased, so the base is found again too. A pull request checkout
     // left stale by a dirty tree is not this.
     if !head.is_empty() && head != checkout.head_sha && checkout.stale.is_none() {
-        checkout.head_sha = head.clone();
+        let from = std::mem::replace(&mut checkout.head_sha, head.clone());
         if let Some(item) = ctx.item(item_id) {
             for base in base_revs_for(ctx, &item).await {
                 if let Ok(mb) = git
@@ -6832,6 +6832,12 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revis
             count_divergence(ctx.preparer.git(), &mut item).await;
             ctx.with_cache(|c| c.update_item(&item));
             ctx.send_items();
+        }
+        // The row's head moved here, so the scan won't see it move. With
+        // Perch's window in the background, the reader didn't see it
+        // either.
+        if !ctx.window_key.load(std::sync::atomic::Ordering::Relaxed) {
+            record_head_move(ctx, item_id, &checkout.worktree, &from, &head).await;
         }
         send_commits(
             ctx,
@@ -15427,6 +15433,44 @@ mod tests {
         ctx.window_key.store(false, std::sync::atomic::Ordering::Relaxed);
         git(&worktree, &["commit", "-q", "--allow-empty", "-m", "six"]);
         assert!(scan_roots(&ctx).await);
+        assert!(matches!(
+            activity(&ctx, &item.id).unwrap().event,
+            ActivityEvent::HeadMoved { commits: Some(1), .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_commit_under_the_open_item_counts_while_perch_is_in_the_background() {
+        use perch_github::ActivityEvent;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        assert!(scan_roots(&ctx).await);
+        let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        let head = git(&worktree, &["rev-parse", "HEAD"]);
+        open_in_slot_at(&ctx, &item, &head);
+        let navigation_id = ctx.navigation_requests.begin_item(&item.id);
+        {
+            let mut slot = ctx.slot.lock().unwrap();
+            let open = slot.as_mut().unwrap();
+            open.checkout.worktree = worktree.clone();
+            open.navigation_id = navigation_id;
+        }
+        let revision = ctx.scope_requests.stable_revision().unwrap();
+
+        // In front of the reader: they see it happen.
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        refresh_scope(&ctx, &item.id, navigation_id, revision).await;
+        assert_eq!(activity(&ctx, &item.id), None);
+
+        // In the background: the poll's refresh moves the row's head, so
+        // the scan never sees it move; the refresh says so instead.
+        ctx.window_key.store(false, std::sync::atomic::Ordering::Relaxed);
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "three"]);
+        refresh_scope(&ctx, &item.id, navigation_id, revision).await;
         assert!(matches!(
             activity(&ctx, &item.id).unwrap().event,
             ActivityEvent::HeadMoved { commits: Some(1), .. }

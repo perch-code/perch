@@ -1949,13 +1949,7 @@ impl AppState {
                     self.set_item_activity(activity);
                 }
             }
-            Event::ItemActivity(activity) => {
-                self.set_item_activity(by_item(activity));
-                if let Some(threads) = self.pending_notifications.get_untracked() {
-                    self.notifications.set(threads);
-                    self.pending_notifications.set(None);
-                }
-            }
+            Event::ItemActivity(activity) => self.set_item_activity(by_item(activity)),
             Event::ItemActivityPolled(activity) => {
                 let activity = by_item(activity);
                 if self.holds_item_activity(&activity) {
