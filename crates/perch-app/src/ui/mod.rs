@@ -467,10 +467,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         _ => {}
                     }
                 }
-                // Cmd-] and Cmd-[ step through the tabs, wrapping at the
-                // ends, as in VS Code. With none to step through, Cmd-[
-                // goes on to be the way back to the sidebar.
-                if key.modifiers == OS_MOD
+                // Cmd-} and Cmd-{ step through the tabs, wrapping at the
+                // ends, as in Safari and Xcode. Cmd-[ stays the way back
+                // to the sidebar.
+                if key.modifiers == OS_MOD | Modifiers::SHIFT
                     && matches!(key.code, Code::BracketLeft | Code::BracketRight)
                     && crate::review::tabs::step_tab(
                         review,
@@ -601,7 +601,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // as viewed, `]` and `[` go to the next and previous change,
                 // `}` and `{` open the next and previous unviewed file. Files
                 // only. The braces are shifted brackets: the physical codes
-                // with Shift alone, so Cmd-[ steps through the tabs.
+                // with Shift alone, so Cmd-{ steps through the tabs.
                 if review.tab.get() == crate::review::model::ItemTab::Code {
                     let shifted = key.modifiers == Modifiers::SHIFT;
                     match key.code {
@@ -710,11 +710,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         EventPropagation::Continue
                     }
                 }
-                // Back to the sidebar, when there are no tabs for Cmd-[ to
-                // step through. The capture handler's Stop does not keep
-                // the key from here when the root is its target.
-                Code::BracketLeft => {
-                    if review.is_showing() && !crate::review::tabs::has_tabs(review) {
+                // Back to the sidebar. Not Cmd-{, which steps through the
+                // tabs and reaches here too when the root is its target.
+                Code::BracketLeft if !key.modifiers.contains(Modifiers::SHIFT) => {
+                    if review.is_showing() {
                         let navigation_id = key_backend.close_review();
                         state.begin_close(review, navigation_id);
                         return EventPropagation::Stop;
@@ -1164,20 +1163,20 @@ mod tests {
         assert_eq!(review.tab.get(), crate::review::model::ItemTab::Code);
     }
 
-    /// Cmd-] and Cmd-[ step through Code's tabs in the strip's order,
+    /// Cmd-} and Cmd-{ step through Code's tabs in the strip's order,
     /// wrapping at both ends, from the code as from anywhere; from
-    /// Conversation they go to the first or the last. With no tab left,
-    /// Cmd-[ is the way back to the sidebar again.
+    /// Conversation they go to the first or the last. Cmd-[ goes back to
+    /// the sidebar, tabs or no.
     #[test]
-    fn cmd_brackets_step_through_the_tabs_and_wrap() {
+    fn cmd_braces_step_through_the_tabs_and_wrap() {
         use crate::review::model::ItemTab;
         let (mut harness, review) = window_with_a_file_open();
         review.open_tab("src/y.rs");
         review.open_tab("src/x.rs");
         harness.rebuild();
         harness.paint();
-        let next = || key(Code::BracketRight, Key::Character("]".into()), OS_MOD);
-        let previous = || key(Code::BracketLeft, Key::Character("[".into()), OS_MOD);
+        let next = || key(Code::BracketRight, Key::Character("}".into()), OS_MOD | Modifiers::SHIFT);
+        let previous = || key(Code::BracketLeft, Key::Character("{".into()), OS_MOD | Modifiers::SHIFT);
         let showing = |review: &ReviewState| match review.tab.get() {
             ItemTab::Conversation => "conversation".to_string(),
             ItemTab::Code => review.active.get().unwrap_or_default(),
@@ -1210,12 +1209,9 @@ mod tests {
         harness.rebuild();
         assert_eq!(showing(&review), "src/y.rs");
 
-        // With every tab closed, Cmd-[ leaves the item.
-        review.close_tab("src/x.rs");
-        review.close_tab("src/y.rs");
-        harness.rebuild();
+        // Cmd-[ leaves the item with its tabs still open.
         assert!(review.is_showing());
-        harness.dispatch_event(previous());
+        harness.dispatch_event(key(Code::BracketLeft, Key::Character("[".into()), OS_MOD));
         harness.rebuild();
         assert!(!review.is_showing(), "Cmd-[ did not go back to the sidebar");
     }

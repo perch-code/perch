@@ -122,7 +122,7 @@ Conversation cannot be closed.
 | Action | Key |
 |---|---|
 | Conversation, Code | `Cmd-Shift-1`, `Cmd-Shift-2` |
-| Next, previous file tab | `Cmd-]`, `Cmd-[` |
+| Next, previous file tab | `Cmd-}`, `Cmd-{` |
 | Close the file | `Cmd-W` |
 | The file tree | `Cmd-Shift-E` |
 | Agents | `Cmd-Shift-A` |

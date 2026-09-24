@@ -187,13 +187,8 @@ fn strip(state: ReviewState) -> Vec<String> {
     }
 }
 
-/// Whether the strip has a tab for Cmd-] and Cmd-[ to step to.
-pub fn has_tabs(state: ReviewState) -> bool {
-    !strip(state).is_empty()
-}
-
 /// Show the file's tab after the one showing, or before it, wrapping at
-/// the ends, as VS Code's Cmd-] and Cmd-[ do across its editors'. From
+/// the ends, as Safari's Cmd-} and Cmd-{ do across its tabs. From
 /// Conversation, the first or the last. False when there is no tab to go
 /// to.
 pub fn step_tab(state: ReviewState, backend: &Backend, forward: bool) -> bool {
