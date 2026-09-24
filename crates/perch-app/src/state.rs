@@ -1941,6 +1941,23 @@ impl AppState {
                     review.push_error.set(Some(message));
                 }
             }
+            Event::PullRequestDescription { item_id, outcome } => {
+                if review.is_item(&item_id) {
+                    review.describing.set(false);
+                    match &outcome {
+                        crate::backend::DescriptionOutcome::Written { title, body }
+                            if crate::review::open_pull::typed(*self, &item_id) =>
+                        {
+                            review.description_offer.set(Some((title.clone(), body.clone())));
+                        }
+                        crate::backend::DescriptionOutcome::Failed(message) => {
+                            review.description_error.set(Some(message.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+                self.apply(Event::PullRequestDescription { item_id, outcome });
+            }
             Event::PullRequestOpened {
                 item_id,
                 number,
@@ -1989,6 +2006,17 @@ impl AppState {
                     self.notice.set(Some(notice));
                 }
             }
+            // What the reader typed is never written over: the open item
+            // asks first, and one not open keeps its text.
+            Event::PullRequestDescription {
+                item_id,
+                outcome: crate::backend::DescriptionOutcome::Written { title, body },
+            } => {
+                if !crate::review::open_pull::typed(*self, &item_id) {
+                    crate::review::open_pull::take_description(*self, &item_id, title, body);
+                }
+            }
+            Event::PullRequestDescription { .. } => {}
             // The rest are about the open item, and wait for no one.
             Event::PullRequestReadiness { .. }
             | Event::PullRequestBases { .. }

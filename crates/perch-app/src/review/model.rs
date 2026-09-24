@@ -1284,6 +1284,11 @@ pub struct ReviewState {
     /// A Push to the pull request under way, and what stopped the last.
     pub push_pending: RwSignal<bool>,
     pub push_error: RwSignal<Option<String>>,
+    /// An agent writing the pull request's description, what stopped the
+    /// last, and an answer waiting on the reader because they had typed.
+    pub describing: RwSignal<bool>,
+    pub description_error: RwSignal<Option<String>>,
+    pub description_offer: RwSignal<Option<(String, String)>>,
     /// The (path, blob) pairs the reader has checked as viewed.
     pub viewed: RwSignal<Arc<std::collections::HashSet<(String, String)>>>,
     /// The open files the reader asked to see whole rather than folded to
@@ -1636,6 +1641,9 @@ impl ReviewState {
             pull_error: RwSignal::new(None),
             push_pending: RwSignal::new(false),
             push_error: RwSignal::new(None),
+            describing: RwSignal::new(false),
+            description_error: RwSignal::new(None),
+            description_offer: RwSignal::new(None),
             viewed: RwSignal::new(Arc::new(std::collections::HashSet::new())),
             whole: RwSignal::new(HashSet::new()),
             reveals: RwSignal::new(HashMap::new()),
@@ -1805,6 +1813,9 @@ impl ReviewState {
         self.pull_error.set(None);
         self.push_pending.set(false);
         self.push_error.set(None);
+        self.describing.set(false);
+        self.description_error.set(None);
+        self.description_offer.set(None);
         self.viewed.set(Arc::new(std::collections::HashSet::new()));
         // Only written when they change: the open editor rebuilds its
         // document on either, and it is about to go.

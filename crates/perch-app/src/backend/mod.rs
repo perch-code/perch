@@ -26,7 +26,7 @@ use perch_github::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
-pub use open_pull::{OpenStep, PullRequestReadiness};
+pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
 
 mod avatar;
 pub(crate) mod open_pull;
@@ -160,6 +160,19 @@ pub enum Command {
     /// Push the commits the item's open pull request doesn't have.
     /// `BranchPushed` or `BranchPushFailed` answers.
     PushBranch {
+        item_id: String,
+    },
+    /// Have an agent write the pull request's title and description,
+    /// reading the branch against `base` and changing nothing.
+    /// `PullRequestDescription` answers.
+    WritePullRequestDescription {
+        item_id: String,
+        base: String,
+        backend: perch_agent::Backend,
+        model: String,
+        effort: perch_agent::Effort,
+    },
+    StopPullRequestDescription {
         item_id: String,
     },
     /// Submit a final review of the exact pull request head the reader saw,
@@ -818,6 +831,10 @@ pub enum Event {
     BranchPushFailed {
         item_id: String,
         message: String,
+    },
+    PullRequestDescription {
+        item_id: String,
+        outcome: DescriptionOutcome,
     },
     /// The branches `repo` can start new work from, the base first, or why
     /// they could not be listed.
@@ -2165,6 +2182,27 @@ impl Backend {
         });
     }
 
+    pub fn write_pull_request_description(
+        &self,
+        item_id: &str,
+        base: &str,
+        (backend, model, effort): crate::review::model::AgentChoice,
+    ) {
+        let _ = self.commands.send(Command::WritePullRequestDescription {
+            item_id: item_id.to_string(),
+            base: base.to_string(),
+            backend,
+            model,
+            effort,
+        });
+    }
+
+    pub fn stop_pull_request_description(&self, item_id: &str) {
+        let _ = self.commands.send(Command::StopPullRequestDescription {
+            item_id: item_id.to_string(),
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn submit_pull_request_review(
         &self,
@@ -3332,6 +3370,21 @@ async fn run(
             Command::PushBranch { item_id } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { open_pull::push_to_pull(&ctx, &item_id).await });
+            }
+            Command::WritePullRequestDescription {
+                item_id,
+                base,
+                backend,
+                model,
+                effort,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    open_pull::describe(&ctx, &item_id, &base, backend, &model, effort).await
+                });
+            }
+            Command::StopPullRequestDescription { item_id } => {
+                open_pull::stop_describing(&item_id);
             }
             Command::SubmitPullRequestReview {
                 attempt_id,
@@ -19330,5 +19383,127 @@ read eof || true
         let env = std::fs::read_to_string(&seen).expect("the hook ran");
         assert!(!env.contains("PERCH_GIT_TOKEN"), "{env}");
         assert!(!env.contains("secret"), "{env}");
+    }
+
+    /// A `claude` that answers with `text` once, or sleeps first when
+    /// `sleep` is set, writing its arguments to `args` in `dir`.
+    fn describing_claude(dir: &Path, text: &str, sleep: bool) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("claude");
+        let message = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+            "session_id": "s1",
+        });
+        let result = serde_json::json!({
+            "type": "result", "subtype": "success", "result": text, "session_id": "s1",
+        });
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{args}'\n{nap}printf '%s\\n' '{init}' '{message}' '{result}'\n",
+                args = dir.join("args").display(),
+                nap = if sleep { "sleep 30\n" } else { "" },
+                init = r#"{"type":"system","subtype":"init","session_id":"s1","model":"sonnet"}"#,
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn description_of(received: &Receiver<Event>) -> open_pull::DescriptionOutcome {
+        received
+            .try_iter()
+            .find_map(|event| match event {
+                Event::PullRequestDescription { outcome, .. } => Some(outcome),
+                _ => None,
+            })
+            .expect("the run ends with an outcome")
+    }
+
+    #[tokio::test]
+    async fn an_agent_writes_the_description_from_the_branch_in_ask_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = describing_claude(dir.path(), "Add two\n\nIt adds two.txt.", false);
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let (item, _worktree, _remote) = pushable_branch(&ctx, dir.path());
+
+        open_pull::describe(
+            &ctx,
+            &item.id,
+            "main",
+            perch_agent::Backend::ClaudeCode,
+            "sonnet",
+            perch_agent::Effort::Medium,
+        )
+        .await;
+
+        assert_eq!(
+            description_of(&received),
+            open_pull::DescriptionOutcome::Written {
+                title: "Add two".into(),
+                body: "It adds two.txt.".into(),
+            }
+        );
+        let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
+        assert!(args.contains("The branch feature goes into main"), "{args}");
+        assert!(args.contains("- two"), "the commit is in the prompt: {args}");
+        assert!(args.contains("two.txt"), "the diff stat is in the prompt: {args}");
+        // Ask's tools, never Work's.
+        assert!(!args.contains("--permission-prompt-tool"), "{args}");
+        let spec = crate::ask::run_spec(
+            &ctx.config().agent,
+            perch_agent::Backend::ClaudeCode,
+            "sonnet",
+            perch_agent::Effort::Medium,
+            dir.path().into(),
+            &crate::ask::Prompt { system: None, user: "q".into() },
+            None,
+            perch_agent::Mode::Ask,
+        );
+        let ask_tools = spec.args().join("\n");
+        let tools_line = |all: &str| {
+            all.lines()
+                .skip_while(|l| *l != "--allowedTools")
+                .nth(1)
+                .map(str::to_string)
+        };
+        assert_eq!(tools_line(&args), tools_line(&ask_tools));
+        assert!(ctx.with_cache(|c| c.active_run_summaries().unwrap()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_description_run_stops_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = describing_claude(dir.path(), "Too late", true);
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let (item, _worktree, _remote) = pushable_branch(&ctx, dir.path());
+        let id = item.id.clone();
+        let stopper = tokio::spawn(async move {
+            for _ in 0..100 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                open_pull::stop_describing(&id);
+            }
+        });
+
+        let started = std::time::Instant::now();
+        open_pull::describe(
+            &ctx,
+            &item.id,
+            "main",
+            perch_agent::Backend::ClaudeCode,
+            "sonnet",
+            perch_agent::Effort::Medium,
+        )
+        .await;
+        stopper.abort();
+
+        assert_eq!(description_of(&received), open_pull::DescriptionOutcome::Stopped);
+        assert!(started.elapsed() < Duration::from_secs(20));
     }
 }

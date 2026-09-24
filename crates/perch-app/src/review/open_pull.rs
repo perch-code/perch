@@ -37,9 +37,34 @@ pub struct PullRequestDraft {
     pub unfolded: bool,
     /// Perch's fills have been put in, which happens once.
     pub filled: bool,
-    /// Rises when the description is replaced from outside the box, so
-    /// the box is built again with the new text.
-    pub body_generation: u64,
+    /// The reader has typed in the title or the description since Perch
+    /// last put text there.
+    pub title_typed: bool,
+    pub body_typed: bool,
+    /// Rises when the text is replaced from outside the form, so the form
+    /// is built again around the new text.
+    pub generation: u64,
+}
+
+/// Whether the reader has typed into the item's form.
+pub(crate) fn typed(app: AppState, item_id: &str) -> bool {
+    app.pull_request_drafts.with_untracked(|drafts| {
+        drafts
+            .get(item_id)
+            .is_some_and(|d| d.title_typed || d.body_typed)
+    })
+}
+
+/// Put an agent's title and description into the item's form.
+pub(crate) fn take_description(app: AppState, item_id: &str, title: String, body: String) {
+    update_draft(app, item_id, |draft| {
+        draft.title = title;
+        draft.body = body;
+        draft.title_typed = false;
+        draft.body_typed = false;
+        draft.filled = true;
+        draft.generation += 1;
+    });
 }
 
 /// Whether the item is a branch a pull request could be opened from: no
@@ -165,14 +190,17 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .and_then(|r| r.as_ref().ok())
                 .is_some_and(|r| r.ahead > 0 && r.base != r.branch)
         });
+        let generation = app
+            .pull_request_drafts
+            .with(|drafts| drafts.get(&item_id).map_or(0, |d| d.generation));
         (unfolded || has_commits || state.pull_step.with(Option::is_some))
-            .then_some((item_id, unfolded))
+            .then_some((item_id, unfolded, generation))
     });
 
     dyn_container(
         move || shown.get(),
         move |shown| {
-            let Some((item_id, unfolded)) = shown else {
+            let Some((item_id, unfolded, _)) = shown else {
                 return Empty::new().into_any();
             };
             let content = if unfolded {
@@ -236,7 +264,7 @@ pub(crate) fn unfold(app: AppState, state: ReviewState, backend: &Backend, item_
             if let Some(readiness) = &readiness {
                 draft.title = readiness.title.clone();
                 draft.body = readiness.body.clone();
-                draft.body_generation += 1;
+                draft.generation += 1;
                 draft.filled = true;
             }
         }
@@ -265,11 +293,14 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
         Effect::new(move |_| {
             let text = title.get();
             if draft_of(app, &item_id).title != text {
-                update_draft(app, &item_id, |draft| draft.title = text);
+                update_draft(app, &item_id, |draft| {
+                    draft.title = text;
+                    draft.title_typed = true;
+                });
             }
         });
     }
-    let pending = move || state.pull_step.with(Option::is_some);
+    let pending = move || state.pull_step.with(Option::is_some) || state.describing.get();
     let submit: Rc<dyn Fn()> = {
         let (backend, item_id) = (backend.clone(), item_id.clone());
         Rc::new(move || {
@@ -302,21 +333,7 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
                 .set_disabled(pending())
         });
 
-    let body_generation = {
-        let item_id = item_id.clone();
-        Memo::new(move |_| {
-            app.pull_request_drafts
-                .with(|drafts| drafts.get(&item_id).map_or(0, |d| d.body_generation))
-        })
-    };
-    let body = {
-        let (backend, item_id, submit) = (backend.clone(), item_id.clone(), submit.clone());
-        dyn_container(
-            move || body_generation.get(),
-            move |_| body_editor(app, state, backend.clone(), item_id.clone(), submit.clone()).into_any(),
-        )
-        .style(|s| s.width_full())
-    };
+    let body = body_editor(app, state, backend.clone(), item_id.clone(), submit.clone());
 
     let controls = {
         let (item_id, submit) = (item_id.clone(), submit.clone());
@@ -324,6 +341,7 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
         Stack::horizontal((
             base_chip(app, state, item_id.clone()),
             draft_box(app, item_id.clone()),
+            writer(app, state, backend.clone(), item_id.clone()),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
             action_button(
                 || "Cancel".to_string(),
@@ -359,6 +377,7 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
         title_input,
         body,
         notes(app, state, title),
+        offer(app, state, item_id.clone()),
         error_line(state),
         controls,
     ))
@@ -418,7 +437,9 @@ fn body_editor(
             if let Some(editor) = update.editor {
                 let text = editor.doc().text().to_string();
                 app.pull_request_drafts.update(|drafts| {
-                    drafts.entry(item_id.clone()).or_default().body = text;
+                    let draft = drafts.entry(item_id.clone()).or_default();
+                    draft.body = text;
+                    draft.body_typed = true;
                 });
             }
         })
@@ -446,6 +467,94 @@ fn body_editor(
         .debug_name("open-pull-request-body")
         .on_cleanup(move || mentioner.cleanup());
     editor_box(editor, || (96.0, theme::COMPOSER_GROWN_HEIGHT), true)
+}
+
+/// Write with Claude or Codex, whichever was last asked here, and Stop
+/// while it writes.
+fn writer(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String) -> impl IntoView {
+    let choice = move || {
+        state
+            .agent_last
+            .get()
+            .unwrap_or_else(|| crate::review::threads::defaults(app))
+    };
+    let stop_backend = backend.clone();
+    let stop_id = item_id.clone();
+    Stack::horizontal((
+        action_button(
+            move || {
+                if state.describing.get() {
+                    return "Writing…".to_string();
+                }
+                match choice().0 {
+                    perch_agent::Backend::ClaudeCode => "Write with Claude".to_string(),
+                    perch_agent::Backend::Codex => "Write with Codex".to_string(),
+                }
+            },
+            "open-pull-request-write",
+            false,
+            move || !state.describing.get() && state.pull_step.with(Option::is_none),
+            move || {
+                let Some(base) = base_of(app, state, &item_id) else {
+                    return;
+                };
+                state.describing.set(true);
+                state.description_error.set(None);
+                state.description_offer.set(None);
+                backend.write_pull_request_description(&item_id, &base, choice());
+            },
+        ),
+        action_button(
+            || "Stop".to_string(),
+            "open-pull-request-write-stop",
+            false,
+            || true,
+            move || stop_backend.stop_pull_request_description(&stop_id),
+        )
+        .style(move |s| s.apply_if(!state.describing.get(), |s| s.hide())),
+    ))
+    .style(|s| s.items_center().gap(6.0))
+}
+
+/// An agent's answer waiting because the reader had typed: Replace takes
+/// it, Keep leaves what they wrote.
+fn offer(app: AppState, state: ReviewState, item_id: String) -> impl IntoView {
+    let shown = move || state.description_offer.with(Option::is_some);
+    Stack::horizontal((
+        Label::derived(|| "The description is written. Replace what you wrote?".to_string())
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG)
+                    .min_width(0.0)
+                    .flex_grow(1.0_f32)
+            }),
+        action_button(
+            || "Keep mine".to_string(),
+            "open-pull-request-keep",
+            false,
+            || true,
+            move || state.description_offer.set(None),
+        ),
+        action_button(
+            || "Replace".to_string(),
+            "open-pull-request-replace",
+            false,
+            || true,
+            move || {
+                if let Some((title, body)) = state.description_offer.get_untracked() {
+                    state.description_offer.set(None);
+                    take_description(app, &item_id, title, body);
+                }
+            },
+        ),
+    ))
+    .debug_name("open-pull-request-offer")
+    .style(move |s| {
+        s.width_full()
+            .items_center()
+            .gap(8.0)
+            .apply_if(!shown(), |s| s.hide())
+    })
 }
 
 /// The base, picked from the repository's branches on GitHub.
@@ -590,7 +699,7 @@ fn notes(app: AppState, state: ReviewState, title: RwSignal<String>) -> impl Int
 
 fn error_line(state: ReviewState) -> impl IntoView {
     dyn_container(
-        move || state.pull_error.get(),
+        move || state.pull_error.get().or_else(|| state.description_error.get()),
         |message| -> AnyView {
             let Some(message) = message else {
                 return Empty::new().into_any();
@@ -1002,5 +1111,76 @@ mod tests {
             app.notice.get_untracked().as_deref(),
             Some("#12 was already open on this branch.")
         );
+    }
+
+    fn written(title: &str, body: &str) -> crate::backend::Event {
+        crate::backend::Event::PullRequestDescription {
+            item_id: "item-7".into(),
+            outcome: crate::backend::DescriptionOutcome::Written {
+                title: title.into(),
+                body: body.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn an_agents_description_fills_an_untouched_form_and_asks_over_typed_text() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_on(branch());
+        let (backend, mut commands) = Backend::recording();
+        let view = surface(app, state, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 900.0, 700.0);
+        state.pull_readiness.set(Some(Ok(readiness(2))));
+        settle(&mut harness);
+        click(&mut harness, "open-pull-request-unfold");
+        assert!(!typed(app, "item-7"), "Perch's own fill is not typing");
+        assert!(find(harness.root_id(), "Write with Claude").is_some());
+
+        commands_of(&mut commands);
+        click(&mut harness, "open-pull-request-write");
+        assert!(state.describing.get_untracked());
+        assert!(commands_of(&mut commands).iter().any(|c| matches!(
+            c,
+            Command::WritePullRequestDescription { item_id, base, .. }
+                if item_id == "item-7" && base == "main"
+        )));
+        assert!(find(harness.root_id(), "Writing…").is_some());
+
+        app.apply_with_review(written("Agent title", "Agent body"), state);
+        settle(&mut harness);
+        assert!(!state.describing.get_untracked());
+        let draft = draft_of(app, "item-7");
+        assert_eq!((draft.title.as_str(), draft.body.as_str()), ("Agent title", "Agent body"));
+        assert!(named(harness.root_id(), "open-pull-request-title").is_some());
+
+        // Typed over: the next answer waits for the reader.
+        update_draft(app, "item-7", |d| {
+            d.body = "Mine".into();
+            d.body_typed = true;
+        });
+        app.apply_with_review(written("Second", "Second body"), state);
+        settle(&mut harness);
+        assert_eq!(draft_of(app, "item-7").body, "Mine");
+        assert_eq!(
+            state.description_offer.get_untracked(),
+            Some(("Second".into(), "Second body".into()))
+        );
+        click(&mut harness, "open-pull-request-replace");
+        assert_eq!(draft_of(app, "item-7").body, "Second body");
+        assert!(!typed(app, "item-7"));
+        assert_eq!(state.description_offer.get_untracked(), None);
+
+        // A failure says why and leaves the text.
+        app.apply_with_review(
+            crate::backend::Event::PullRequestDescription {
+                item_id: "item-7".into(),
+                outcome: crate::backend::DescriptionOutcome::Failed("No claude".into()),
+            },
+            state,
+        );
+        settle(&mut harness);
+        assert_eq!(draft_of(app, "item-7").body, "Second body");
+        assert!(find(harness.root_id(), "No claude").is_some());
     }
 }
