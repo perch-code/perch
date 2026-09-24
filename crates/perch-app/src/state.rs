@@ -117,6 +117,9 @@ pub struct AppState {
     /// App-wide run summaries. The durable records live in the cache; this
     /// page is enough to draw Active and the first page of History.
     pub agent_runs: RwSignal<Arc<Vec<AgentRunSummary>>>,
+    /// What was typed into each branch's pull request form, by item, until
+    /// Perch quits or the pull request is opened.
+    pub pull_request_drafts: RwSignal<HashMap<String, crate::review::open_pull::PullRequestDraft>>,
     /// Ordered persisted events for details the reader has opened. The first
     /// history page does not pull every transcript into memory.
     pub agent_run_events:
@@ -263,6 +266,7 @@ impl AppState {
             viewer: RwSignal::new(None),
             reload: RwSignal::new(Vec::new()),
             agent_runs: RwSignal::new(Arc::new(Vec::new())),
+            pull_request_drafts: RwSignal::new(HashMap::new()),
             agent_run_events: RwSignal::new(HashMap::new()),
             agent_run_events_has_more: RwSignal::new(HashMap::new()),
             agent_run_events_loading: RwSignal::new(HashSet::new()),
@@ -1903,6 +1907,55 @@ impl AppState {
                     }
                 }
             }
+            Event::PullRequestReadiness { item_id, readiness } => {
+                if review.is_item(&item_id) {
+                    review.pull_readiness.set(Some(readiness));
+                }
+            }
+            Event::PullRequestBases { item_id, bases } => {
+                if review.is_item(&item_id) {
+                    review.pull_bases.set(Some(bases));
+                }
+            }
+            Event::OpenPullRequestStep { item_id, step } => {
+                if review.is_item(&item_id) {
+                    review.pull_step.set(Some(step));
+                    review.pull_error.set(None);
+                }
+            }
+            Event::OpenPullRequestFailed { item_id, message } => {
+                if review.is_item(&item_id) {
+                    review.pull_step.set(None);
+                    review.pull_error.set(Some(message));
+                }
+            }
+            Event::BranchPushed { item_id } => {
+                if review.is_item(&item_id) {
+                    review.push_pending.set(false);
+                    review.push_error.set(None);
+                }
+            }
+            Event::BranchPushFailed { item_id, message } => {
+                if review.is_item(&item_id) {
+                    review.push_pending.set(false);
+                    review.push_error.set(Some(message));
+                }
+            }
+            Event::PullRequestOpened {
+                item_id,
+                number,
+                notice,
+            } => {
+                if review.is_item(&item_id) {
+                    review.pull_step.set(None);
+                    review.pull_error.set(None);
+                }
+                self.apply(Event::PullRequestOpened {
+                    item_id,
+                    number,
+                    notice,
+                });
+            }
             Event::LspReferences { token, locations } => {
                 // Matched against the panel's own token: the shared counter
                 // moves on with every hover while the answer is on its way.
@@ -1927,6 +1980,22 @@ impl AppState {
                     m.insert(url, Arc::new(bytes));
                 });
             }
+            // What was typed went to GitHub, so the form's draft goes.
+            Event::PullRequestOpened { item_id, notice, .. } => {
+                self.pull_request_drafts.update(|drafts| {
+                    drafts.remove(&item_id);
+                });
+                if let Some(notice) = notice {
+                    self.notice.set(Some(notice));
+                }
+            }
+            // The rest are about the open item, and wait for no one.
+            Event::PullRequestReadiness { .. }
+            | Event::PullRequestBases { .. }
+            | Event::OpenPullRequestStep { .. }
+            | Event::OpenPullRequestFailed { .. }
+            | Event::BranchPushed { .. }
+            | Event::BranchPushFailed { .. } => {}
             // What the reader did sends the whole list, so whatever a poll
             // was holding back is in it.
             Event::Items(items) => {

@@ -5,7 +5,7 @@
 //! while this module owns only the process and the right to execute it.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -470,6 +470,18 @@ impl RunManager {
         for entry in entries {
             self.wait_entry_done(&entry).await;
         }
+    }
+
+    /// Whether a Work run is queued or running in `worktree`: it may
+    /// commit at any moment, which a push should not race.
+    pub(crate) fn has_active_work(&self, worktree: &Path) -> bool {
+        let worktree = worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf());
+        self.inner.entries.lock().is_ok_and(|entries| {
+            entries.values().any(|entry| {
+                entry.worktree.as_deref() == Some(worktree.as_path())
+                    && !entry.finished.load(Ordering::SeqCst)
+            })
+        })
     }
 
     pub(crate) fn has_active_owner(&self, item_id: &str, thread_id: Option<&str>) -> bool {

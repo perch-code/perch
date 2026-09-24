@@ -1273,6 +1273,17 @@ pub struct ReviewState {
     /// also carries the item and pull-request identity, so checkout resets can
     /// clear this without letting a different subject settle the new view.
     pub merge_attempt_id: RwSignal<Option<u64>>,
+    /// How the branch stands for a pull request, as the backend last
+    /// read it, or why it couldn't.
+    pub pull_readiness: RwSignal<Option<Result<crate::backend::PullRequestReadiness, String>>>,
+    /// The branches a pull request from the branch could go into.
+    pub pull_bases: RwSignal<Option<Result<Vec<String>, String>>>,
+    /// Where opening a pull request has got to, while it is under way.
+    pub pull_step: RwSignal<Option<crate::backend::OpenStep>>,
+    pub pull_error: RwSignal<Option<String>>,
+    /// A Push to the pull request under way, and what stopped the last.
+    pub push_pending: RwSignal<bool>,
+    pub push_error: RwSignal<Option<String>>,
     /// The (path, blob) pairs the reader has checked as viewed.
     pub viewed: RwSignal<Arc<std::collections::HashSet<(String, String)>>>,
     /// The open files the reader asked to see whole rather than folded to
@@ -1619,6 +1630,12 @@ impl ReviewState {
             merge_pending: RwSignal::new(false),
             merge_error: RwSignal::new(None),
             merge_attempt_id: RwSignal::new(None),
+            pull_readiness: RwSignal::new(None),
+            pull_bases: RwSignal::new(None),
+            pull_step: RwSignal::new(None),
+            pull_error: RwSignal::new(None),
+            push_pending: RwSignal::new(false),
+            push_error: RwSignal::new(None),
             viewed: RwSignal::new(Arc::new(std::collections::HashSet::new())),
             whole: RwSignal::new(HashSet::new()),
             reveals: RwSignal::new(HashMap::new()),
@@ -1782,6 +1799,12 @@ impl ReviewState {
         self.merge_pending.set(false);
         self.merge_error.set(None);
         self.merge_attempt_id.set(None);
+        self.pull_readiness.set(None);
+        self.pull_bases.set(None);
+        self.pull_step.set(None);
+        self.pull_error.set(None);
+        self.push_pending.set(false);
+        self.push_error.set(None);
         self.viewed.set(Arc::new(std::collections::HashSet::new()));
         // Only written when they change: the open editor rebuilds its
         // document on either, and it is about to go.

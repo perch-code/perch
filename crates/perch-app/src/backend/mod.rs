@@ -26,7 +26,10 @@ use perch_github::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
+pub use open_pull::{OpenStep, PullRequestReadiness};
+
 mod avatar;
+pub(crate) mod open_pull;
 pub(crate) mod reviews;
 pub(crate) mod runs;
 
@@ -132,6 +135,32 @@ pub enum Command {
         expected_head_sha: String,
         method: MergeMethod,
         bypass_requirements: bool,
+    },
+    /// How the branch stands for a pull request into `base`, or into its
+    /// own base, and what the form fills in. `PullRequestReadiness`
+    /// answers.
+    PullRequestReadiness {
+        item_id: String,
+        base: Option<String>,
+    },
+    /// The branches a pull request from the branch could go into.
+    /// `PullRequestBases` answers.
+    PullRequestBases {
+        item_id: String,
+    },
+    /// Push the branch and open a pull request from it. Steps, then
+    /// `PullRequestOpened` or `OpenPullRequestFailed`, answer.
+    CreatePullRequest {
+        item_id: String,
+        title: String,
+        body: String,
+        base: String,
+        draft: bool,
+    },
+    /// Push the commits the item's open pull request doesn't have.
+    /// `BranchPushed` or `BranchPushFailed` answers.
+    PushBranch {
+        item_id: String,
     },
     /// Submit a final review of the exact pull request head the reader saw,
     /// with the drafts in the cache: the backend reads them itself, so a
@@ -756,6 +785,40 @@ pub enum Event {
     /// An archive or delete stopped short of losing something git cannot
     /// bring back, and asks first.
     ConfirmLoss(LossPrompt),
+    /// How a branch stands for a pull request, or why that couldn't be
+    /// read.
+    PullRequestReadiness {
+        item_id: String,
+        readiness: Result<PullRequestReadiness, String>,
+    },
+    /// The branches a pull request from the item could go into.
+    PullRequestBases {
+        item_id: String,
+        bases: Result<Vec<String>, String>,
+    },
+    /// Opening a pull request got to `step`.
+    OpenPullRequestStep {
+        item_id: String,
+        step: OpenStep,
+    },
+    /// The branch's row is pull request `number` now. `notice` says so
+    /// when it was open already.
+    PullRequestOpened {
+        item_id: String,
+        number: u64,
+        notice: Option<String>,
+    },
+    OpenPullRequestFailed {
+        item_id: String,
+        message: String,
+    },
+    BranchPushed {
+        item_id: String,
+    },
+    BranchPushFailed {
+        item_id: String,
+        message: String,
+    },
     /// The branches `repo` can start new work from, the base first, or why
     /// they could not be listed.
     Bases {
@@ -2073,6 +2136,35 @@ impl Backend {
         }
     }
 
+    pub fn pull_request_readiness(&self, item_id: &str, base: Option<&str>) {
+        let _ = self.commands.send(Command::PullRequestReadiness {
+            item_id: item_id.to_string(),
+            base: base.map(str::to_string),
+        });
+    }
+
+    pub fn pull_request_bases(&self, item_id: &str) {
+        let _ = self.commands.send(Command::PullRequestBases {
+            item_id: item_id.to_string(),
+        });
+    }
+
+    pub fn create_pull_request(&self, item_id: &str, title: &str, body: &str, base: &str, draft: bool) {
+        let _ = self.commands.send(Command::CreatePullRequest {
+            item_id: item_id.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            base: base.to_string(),
+            draft,
+        });
+    }
+
+    pub fn push_branch(&self, item_id: &str) {
+        let _ = self.commands.send(Command::PushBranch {
+            item_id: item_id.to_string(),
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn submit_pull_request_review(
         &self,
@@ -3210,6 +3302,36 @@ async fn run(
                     .await;
                     ctx.merge_attempts.finish(&item_id, attempt_id);
                 });
+            }
+            Command::PullRequestReadiness { item_id, base } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let readiness = open_pull::readiness(&ctx, &item_id, base).await;
+                    let _ = ctx.events.send(Event::PullRequestReadiness { item_id, readiness });
+                });
+            }
+            Command::PullRequestBases { item_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let bases = open_pull::bases(&ctx, &item_id).await;
+                    let _ = ctx.events.send(Event::PullRequestBases { item_id, bases });
+                });
+            }
+            Command::CreatePullRequest {
+                item_id,
+                title,
+                body,
+                base,
+                draft,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    open_pull::create(&ctx, &item_id, &title, &body, &base, draft).await
+                });
+            }
+            Command::PushBranch { item_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { open_pull::push_to_pull(&ctx, &item_id).await });
             }
             Command::SubmitPullRequestReview {
                 attempt_id,
@@ -18935,5 +19057,278 @@ read eof || true
             !drafts(&ctx, &item.id, &snapshot).await,
             "a closed pull request takes no review"
         );
+    }
+
+    /// A root on `main` with a bare `origin` that has `main`, and a
+    /// worktree of it on `feature` one commit past, as a branch row of
+    /// `a/b`. The remote is a directory, so the push is real and local.
+    fn pushable_branch(ctx: &Ctx, dir: &Path) -> (Item, std::path::PathBuf, std::path::PathBuf) {
+        let root = dir.join("widgets");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let remote = dir.join("remote.git");
+        git(dir, &["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()]);
+        git(&root, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        let mut item = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        item.checkout = Some(ItemCheckout {
+            branch: "feature".into(),
+            base_ref: "main".into(),
+            head_sha: git(&worktree, &["rev-parse", "HEAD"]),
+            path: worktree.clone(),
+            owned: false,
+            on_disk: true,
+            churn: Some((1, 0)),
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        ctx.with_cache(|c| c.insert_item(&item)).unwrap().unwrap();
+        (item, worktree, remote)
+    }
+
+    fn opened_pull(number: u64, head: &str, state: &str) -> String {
+        format!(
+            r#"{{"number":{number},"title":"two","state":"{state}","draft":false,
+            "user":{{"login":"me","avatar_url":""}},
+            "head":{{"sha":"{head}","ref":"feature","repo":{{"full_name":"a/b"}}}},
+            "base":{{"sha":"m","ref":"main","repo":{{"full_name":"a/b"}}}},
+            "updated_at":"2026-09-16T11:40:00Z"}}"#
+        )
+    }
+
+    fn open_outcome(received: &Receiver<Event>) -> Result<(u64, Option<String>), String> {
+        received
+            .try_iter()
+            .find_map(|event| match event {
+                Event::PullRequestOpened { number, notice, .. } => Some(Ok((number, notice))),
+                Event::OpenPullRequestFailed { message, .. } => Some(Err(message)),
+                _ => None,
+            })
+            .expect("opening ends with an outcome")
+    }
+
+    #[tokio::test]
+    async fn opening_a_pull_request_pushes_the_branch_and_the_row_takes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let sent = Arc::new(Mutex::new(Vec::<String>::new()));
+        let bodies = sent.clone();
+        let head = Arc::new(Mutex::new(String::new()));
+        let pushed_head = head.clone();
+        let (base, paths) = serve_by_body(move |method, path, _, body| {
+            if method == "POST" && path == "/repos/a/b/pulls" {
+                bodies.lock().unwrap().push(body.to_string());
+                let head = pushed_head.lock().unwrap().clone();
+                ("201 Created", opened_pull(12, &head, "open"))
+            } else {
+                ("200 OK", "[]".to_string())
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let (item, worktree, remote) = pushable_branch(&ctx, dir.path());
+        *head.lock().unwrap() = git(&worktree, &["rev-parse", "HEAD"]);
+
+        let ready = open_pull::readiness(&ctx, &item.id, None).await.unwrap();
+        assert_eq!((ready.base.as_str(), ready.ahead, ready.dirty_files), ("main", 1, 0));
+        assert_eq!(ready.title, "two");
+
+        open_pull::create(&ctx, &item.id, "Add two", "Adds two.", "main", true).await;
+
+        assert_eq!(open_outcome(&received), Ok((12, None)));
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/feature"]),
+            git(&worktree, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(
+            git(&worktree, &["rev-parse", "--abbrev-ref", "feature@{upstream}"]),
+            "origin/feature"
+        );
+        let paths = paths.lock().unwrap().clone();
+        assert!(paths[0].starts_with("/repos/a/b/pulls?head=a%3Afeature"), "{paths:?}");
+        assert_eq!(paths[1], "/repos/a/b/pulls");
+        let body: serde_json::Value = serde_json::from_str(&sent.lock().unwrap()[0]).unwrap();
+        assert_eq!(body["head"], "a:feature");
+        assert_eq!(body["base"], "main");
+        assert_eq!(body["title"], "Add two");
+        assert_eq!(body["body"], "Adds two.");
+        assert_eq!(body["draft"], true);
+        let row = ctx.item(&item.id).unwrap();
+        assert_eq!(row.pull_request().map(|pr| pr.number), Some(12));
+        assert_eq!(row.checkout.as_ref().map(|c| c.branch.as_str()), Some("feature"));
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_already_open_is_attached_without_a_push() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_method(move |method, path, _| {
+            assert_ne!(method, "POST", "nothing is created");
+            assert!(path.starts_with("/repos/a/b/pulls?head="), "{path}");
+            ("200 OK", format!("[{}]", opened_pull(5, "h5", "open")))
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let (item, _worktree, remote) = pushable_branch(&ctx, dir.path());
+
+        open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
+
+        assert_eq!(
+            open_outcome(&received),
+            Ok((5, Some("#5 was already open on this branch.".into())))
+        );
+        assert_eq!(paths.lock().unwrap().len(), 1);
+        assert_eq!(ctx.item(&item.id).unwrap().pull_request().map(|pr| pr.number), Some(5));
+        let pushed = std::process::Command::new("git")
+            .current_dir(&remote)
+            .args(["rev-parse", "--verify", "--quiet", "refs/heads/feature"])
+            .output()
+            .unwrap();
+        assert!(!pushed.status.success(), "nothing was pushed");
+    }
+
+    #[tokio::test]
+    async fn github_saying_one_exists_attaches_it_and_a_closed_one_is_not_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = Arc::new(Mutex::new(0));
+        let count = asked.clone();
+        let (base, _paths) = serve_by_method(move |method, _path, _| {
+            if method == "POST" {
+                return (
+                    "422 Unprocessable Entity",
+                    r#"{"message":"Validation Failed","errors":[{"message":"A pull request already exists for a:feature."}]}"#.to_string(),
+                );
+            }
+            let mut asked = count.lock().unwrap();
+            *asked += 1;
+            // Closed at first, which is no reason to stop; open by the
+            // time GitHub says it exists.
+            if *asked == 1 {
+                ("200 OK", format!("[{}]", opened_pull(3, "h3", "closed")))
+            } else {
+                ("200 OK", format!("[{}]", opened_pull(8, "h8", "open")))
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let (item, _worktree, _remote) = pushable_branch(&ctx, dir.path());
+
+        open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
+
+        assert_eq!(open_outcome(&received), Ok((8, None)));
+        assert_eq!(ctx.item(&item.id).unwrap().pull_request().map(|pr| pr.number), Some(8));
+    }
+
+    #[tokio::test]
+    async fn a_refused_push_is_not_forced_and_opens_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("200 OK", "[]");
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let (item, _worktree, remote) = pushable_branch(&ctx, dir.path());
+        // Someone else's feature, already on the remote.
+        let other = dir.path().join("other");
+        git(dir.path(), &["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()]);
+        git(&other, &["checkout", "-q", "-b", "feature"]);
+        git(&other, &["commit", "-q", "--allow-empty", "-m", "theirs"]);
+        git(&other, &["push", "-q", "origin", "feature"]);
+        let theirs = git(&other, &["rev-parse", "HEAD"]);
+
+        open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
+
+        assert_eq!(
+            open_outcome(&received),
+            Err("The remote's feature has commits this worktree doesn't. Pull or rebase in a terminal, then try again.".into())
+        );
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature"]), theirs);
+        assert!(
+            paths.lock().unwrap().iter().all(|p| p != "/repos/a/b/pulls"),
+            "nothing was created"
+        );
+        assert!(ctx.item(&item.id).unwrap().subject.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_worktree_on_another_branch_or_an_empty_title_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let (item, worktree, _remote) = pushable_branch(&ctx, dir.path());
+
+        open_pull::create(&ctx, &item.id, "  ", "", "main", false).await;
+        assert_eq!(open_outcome(&received), Err("The pull request needs a title".into()));
+
+        git(&worktree, &["checkout", "-q", "-b", "elsewhere"]);
+        open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
+        assert_eq!(
+            open_outcome(&received),
+            Err("The worktree is on elsewhere, not feature.".into())
+        );
+        let ready = open_pull::readiness(&ctx, &item.id, None).await.unwrap();
+        assert_eq!(ready.head_branch.as_deref(), Some("elsewhere"));
+    }
+
+    #[tokio::test]
+    async fn push_sends_what_the_pull_request_lacks_and_fetches_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let head = Arc::new(Mutex::new(String::new()));
+        let fresh = head.clone();
+        let (base, paths) = serve_by_path(move |path| {
+            let head = fresh.lock().unwrap().clone();
+            assert_eq!(path, "/repos/a/b/pulls/12", "only the pull request is fetched");
+            ("200 OK", opened_pull(12, &head, "open"))
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let (mut item, worktree, remote) = pushable_branch(&ctx, dir.path());
+        git(&worktree, &["push", "-q", "-u", "origin", "feature"]);
+        let old = git(&worktree, &["rev-parse", "HEAD"]);
+        let mut pr = pull_request(12);
+        pr.head_sha = old.clone();
+        pr.head_ref = "feature".into();
+        pr.head_repo_full_name = Some("a/b".into());
+        item.subject = Some(perch_github::ItemSubject::PullRequest(pr));
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "three"]);
+        let new = git(&worktree, &["rev-parse", "HEAD"]);
+        item.checkout.as_mut().unwrap().head_sha = new.clone();
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+        assert!(ctx.item(&item.id).unwrap().divergence().is_some());
+        *head.lock().unwrap() = new.clone();
+
+        open_pull::push_to_pull(&ctx, &item.id).await;
+
+        assert!(received.try_iter().any(|e| matches!(e, Event::BranchPushed { .. })));
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature"]), new);
+        assert_eq!(paths.lock().unwrap().len(), 1);
+        assert_eq!(ctx.item(&item.id).unwrap().divergence(), None);
+    }
+
+    #[tokio::test]
+    async fn a_push_in_a_root_never_carries_perchs_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let head = Arc::new(Mutex::new(String::new()));
+        let pushed_head = head.clone();
+        let (base, _paths) = serve_by_method(move |method, _, _| {
+            if method == "POST" {
+                ("201 Created", opened_pull(12, &pushed_head.lock().unwrap(), "open"))
+            } else {
+                ("200 OK", "[]".to_string())
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        ctx.preparer.git().set_token(Some("secret".into()));
+        let (item, worktree, _remote) = pushable_branch(&ctx, dir.path());
+        *head.lock().unwrap() = git(&worktree, &["rev-parse", "HEAD"]);
+        // The hook runs inside the push and writes down what it was given.
+        let seen = dir.path().join("seen.txt");
+        let hooks = dir.path().join("widgets/.git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-push");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\nenv > '{}'\n", seen.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
+
+        assert_eq!(open_outcome(&received), Ok((12, None)));
+        let env = std::fs::read_to_string(&seen).expect("the hook ran");
+        assert!(!env.contains("PERCH_GIT_TOKEN"), "{env}");
+        assert!(!env.contains("secret"), "{env}");
     }
 }

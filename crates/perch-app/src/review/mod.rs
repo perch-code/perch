@@ -19,6 +19,7 @@ pub mod mention;
 pub mod merge;
 pub mod model;
 pub mod navigation;
+pub mod open_pull;
 pub mod picture;
 pub mod rail;
 pub mod references;
