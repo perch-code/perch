@@ -246,7 +246,8 @@ Using `gh auth login` is the simplest setup for the desktop app because a GUI
 launch does not normally inherit shell environment variables. The credential
 must be allowed to read and update notifications and to read the repositories
 you open. Merging a pull request also requires `Contents: write` permission on
-its repository. Commenting on, approving, or requesting changes on a pull
+its repository, as does pushing a branch from Perch's own clone; opening a pull
+request requires `Pull requests: write`. Commenting on, approving, or requesting changes on a pull
 request requires `Pull requests: write` permission, as do resolving a thread
 and reacting to a pull request or anything said on it; reacting on an issue
 requires `Issues: write`.
@@ -337,7 +338,8 @@ branch. A repository with a root is cut in the root, your own clone: the
 branch is its branch, with your remotes and config, and `git worktree list`
 there shows the worktree. Perch writes exactly this much in a root: the new
 branch, git's record of the worktree, a fetch of the one base branch from its
-remote, and on Delete that branch. The fetch uses your own credentials and
+remote, on Delete that branch, and when you open a pull request or press Push,
+a push of the branch and the upstream it then tracks. The fetch uses your own credentials and
 never Perch's token, and cannot prompt: a key that wants a passphrase fails it,
 and the cut goes ahead from what the clone had, with a notice saying how old
 that is. A GitHub repository with no root is cut in Perch's own clone, as
@@ -368,6 +370,54 @@ A worktree made for work can hold the only copy of it.
   worktree's own repository at each scan and open and fetches nothing to do
   it. **Submit review** and **Merge** are unavailable while the heads differ,
   since what is on screen isn't what GitHub would review or merge.
+
+## Opening a pull request
+
+A branch of your own with commits past its base has a **Pull request** line at
+the foot of Conversation, where a pull request has its checks and Merge:
+`Pull request · 3 commits ahead of main`. **Open pull request…** unfolds it
+into a form:
+
+- **Title**, filled in from the commit's subject when there is one commit, else
+  from the item's name.
+- **Description**, a composer's box going to GitHub, so `@` offers people and
+  files as code spans. Filled in from the repository's pull request template
+  (`.github/`, the root, then `docs/`), else the one commit's body, else the
+  commits' subjects as a list.
+- **Base**, the branch it goes into: the one the branch was cut from, or any
+  branch the repository has on GitHub.
+- **Draft**, off.
+- **Write with Claude**, or Codex, whichever the composer last used: the agent
+  reads the branch under Ask's rules and writes a title and description into
+  the form. Text you typed isn't written over; the form asks first. **Stop**
+  ends it. The run isn't kept with the item's runs.
+
+The form fills itself once, and keeps what you typed until Perch quits, whether
+it's folded or another item is open. `Cmd-Enter` in the description, or **Open
+pull request**, sends it:
+
+1. GitHub is asked whether the branch has a pull request open already, as one
+   opened on github.com that no poll has found yet. If it has, the row takes
+   that one, and nothing is pushed or created.
+2. The branch is pushed, never with force. A worktree of one of your clones
+   pushes with your own git credentials and SSH key, never Perch's token, and
+   the branch then tracks what it was pushed to. A worktree of Perch's own
+   clone pushes with Perch's token.
+3. The pull request is created, and the row becomes it in place, with its
+   threads and runs. The open item turns into the pull request.
+
+Uncommitted files are named and left out. A Work run in the worktree, a
+worktree switched to another branch, or an empty title keep the button off. A
+push the remote refuses, because its branch has commits yours doesn't, says to
+pull or rebase in a terminal. A push your credentials can't make, such as with
+an SSH key that wants a passphrase, says to push from a terminal; after that,
+Open pull request skips the push. Neither agent can push or open a pull
+request: Perch does it when you press the button.
+
+On a pull request of yours whose worktree is ahead of it and not behind, the
+Branch row has **Push** beside `3 unpushed`. It pushes the same way, and the
+pull request is fetched again, so Submit review and Merge come back. Behind or
+diverged has no button, since that push would need force.
 
 ## Agents
 

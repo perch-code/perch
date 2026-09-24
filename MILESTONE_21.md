@@ -76,8 +76,8 @@ branch's one bar action stays Review.
   branch has one commit, else from the item's title (its Rename, or the
   first line of the Start work message).
 - **Description**, the composer's box with the destination fixed to
-  GitHub, so `@` completes people and files as a GitHub composer does
-  and the grip sizes it. Filled in from the repository's pull request
+  GitHub, so `@` completes people and files as a GitHub composer does,
+  and `Cmd-Enter` sends. Filled in from the repository's pull request
   template when the worktree has one, in GitHub's order
   (`.github/pull_request_template.md`, then the root, then `docs/`,
   case-insensitively). Otherwise from the one commit's body, or with
@@ -108,7 +108,8 @@ Refusals disable Open pull request and say why in the same place:
   branch, or detached, in a terminal. `The worktree is on <other>, not
   <branch>.`
 - **Empty title.**
-- **No token.**
+- **No token**: the backend refuses when Open pull request is pressed,
+  and the error line says so.
 
 ### Opening
 
@@ -137,8 +138,9 @@ Refusals disable Open pull request and say why in the same place:
    `upstream` from a fork.
 
 On success the response goes straight into `take_pull_request`, under
-the one lock, as `attach_pull_requests` does, and the lookup's etag for
-the branch is cleared so the next poll asks afresh. The row keeps its
+the one lock, as `attach_pull_requests` does. A row with a subject
+isn't looked up by later polls, so its lookup etag needs nothing. The
+row keeps its
 place and becomes the pull request's: glyph, number, author. If the
 item is open, it stays open and turns into the pull request, as it
 would if a poll attached one while it was open: the bar gets the
@@ -193,25 +195,27 @@ reads what else it wants from the worktree.
 
 - The answer fills Title and Description. If either holds text you
   typed, Perch asks first: `Replace what you wrote?`
-- The button reads **Writing…** with a stop, while it runs. The
-  Agents dropdown lists the run. It's not a thread and draws no card on
-  Conversation.
+- The button reads **Writing…** with a Stop beside it while it runs.
+  It isn't an agent run: it has no thread, draws no card on
+  Conversation, and isn't in the Agents dropdown. See
+  [Backend](#backend) for why.
 - A failed or empty answer leaves the fields alone and says why.
 - Nothing is sent to GitHub until you press Open pull request.
 
 ## Model
 
-- `AppState` gains `pull_request_forms: RwSignal<HashMap<String,
-  PullRequestForm>>`, keyed by item, until Perch quits:
-  `PullRequestForm { title, body, base, draft, filled: Filled,
-  unfolded: bool }`, where `Filled` records which fields still hold
-  Perch's own fill.
-- The folded line's facts, `BranchReadiness { ahead_of_base: u32,
-  dirty_files: u32, head_branch: Option<String> }`, come from the
-  backend when the item opens and when its head moves, beside the
-  divergence count.
-- `RunOwner::Description { item_id }`, a third owner kind beside
-  `Discussion` and `Review`.
+- `AppState` gains `pull_request_drafts: RwSignal<HashMap<String,
+  PullRequestDraft>>`, keyed by item, until Perch quits or the pull
+  request opens: `PullRequestDraft { title, body, base, draft,
+  unfolded, filled, title_typed, body_typed, generation }`. `generation`
+  rises when text is put in from outside the form, which rebuilds it.
+- `ReviewState` gains `pull_readiness`, `pull_bases`, `pull_step`,
+  `pull_error`, `push_pending`, `push_error`, `describing`,
+  `description_error` and `description_offer`, for the open item.
+- `backend::PullRequestReadiness { branch, base, ahead, dirty_files,
+  head_branch, title, body }` is the folded line's facts and the fills.
+  The surface asks for it when the item, its head, its dirt or the
+  picked base changes.
 
 ## Backend
 
@@ -226,15 +230,22 @@ reads what else it wants from the worktree.
   uses. `Pull requests: write`, which Submit review needs already.
 - The commands `CreatePullRequest { item_id, title, body, base, draft }`
   (not `OpenPullRequest`, which opens a pull request by number),
-  `PushBranch { item_id }`, and `WriteDescription { item_id, backend,
-  model }` with its stop. Each reports progress and its outcome as an
-  event to the item.
+  `PushBranch { item_id }`, `WritePullRequestDescription { item_id,
+  base, backend, model, effort }` and `StopPullRequestDescription`,
+  with `PullRequestReadiness` and `PullRequestBases` for the form. Each
+  reports its outcome as an event to the item.
 - `CreatePullRequest` checks the refusals again in the backend, since
   the form's view of them may be old: a Work run admitted since, a
   branch switched since.
-- Schema 30: `runs.owner_kind` accepts `'description'`. The `CHECK`
-  constraint means rebuilding `runs`, in the preserving, transactional
-  way the earlier run migrations did.
+- No schema change. The plan was a third run owner kind for the
+  description run, but `runs.owner_kind` is a `CHECK` constraint, and
+  `run_events`, `comment_messages` and the review tables reference
+  `runs`. SQLite can't alter a `CHECK` in place, and rebuilding the
+  table needs foreign keys off for the migration, which the cache turns
+  on before it migrates. A description draft isn't worth that risk to
+  the reader's database, so the run is spawned directly with
+  `perch_agent::Run`, kept in memory by item for Stop, and forgotten
+  when it ends.
 
 ## Harness
 
@@ -262,9 +273,9 @@ server as `attach_pull_requests`' tests do.
   has no `PERCH_GIT_TOKEN`.
 - Push: shown for ahead only, pushes, recounts the divergence to none,
   and asks for the pull request. Not shown when behind or diverged.
-- The description: the run's answer splits into title and body; typed
-  text asks before replacing; the run has no thread and no card; the
-  migration keeps every run.
+- The description: the run's answer splits into title and body; the
+  prompt has the commits and the stat; it runs with Ask's tools and
+  records no run; Stop stops it; typed text asks before replacing.
 
 ## Build order
 
@@ -276,14 +287,14 @@ server as `attach_pull_requests`' tests do.
    warnings, refusals, progress and errors, and the open item turning
    into the pull request. Commit.
 4. Push on `N unpushed`. Commit.
-5. Schema 30 and Write with Claude. Commit.
+5. Write with Claude. Commit.
 6. README: an **Opening a pull request** section after Starting work;
    Starting work's list of what Perch writes in a root gains the push
-   and the upstream; Keeping work safe loses the line about a branch
-   pushed from Perch's clone not being seen as pushed, which now holds
-   only for a push from a terminal; Authentication names `Contents:
-   write` for a push from Perch's clone and `Pull requests: write` for
-   opening. Commit.
+   and the upstream; Authentication names `Contents: write` for a push
+   from Perch's clone and `Pull requests: write` for opening. Keeping
+   work safe keeps its line about a branch pushed from Perch's clone:
+   a push to a URL moves no remote-tracking ref, and the pull request
+   that follows brings the head back, as the line says. Commit.
 
 ## Acceptance
 
@@ -316,8 +327,6 @@ server as `attach_pull_requests`' tests do.
 - Press Write with Claude on a branch of several commits: the title and
   description fill in, and no card appears on Conversation. Type in the
   title, press it again: Perch asks before replacing.
-- Upgrade a database with runs of both owner kinds: they're all there
-  after schema 30.
 
 ## Things the implementer should not do
 
