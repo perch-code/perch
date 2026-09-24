@@ -415,6 +415,7 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
             source_repository: item.repo_full_name.clone(),
             branch_label: checkout.branch.clone(),
             requested_base: request.base_ref.clone(),
+            include_worktree: request.include_uncommitted,
         })
         .await
         .map_err(|error| format!("Could not capture the review source: {error}"))?;
@@ -455,7 +456,11 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
     }
 
     if attempts.is_empty() {
-        ctx.notice("No committed changes to review against that base");
+        ctx.notice(if request.include_uncommitted {
+            "No changes to review against that base"
+        } else {
+            "No committed changes to review against that base"
+        });
         send_group(ctx, &group_id);
         export_item(ctx, &request.item_id);
         return Ok(());
@@ -763,7 +768,7 @@ pub(super) async fn open_snapshot(ctx: &Ctx, group_id: &str, request_id: u64) {
                     ctx.notice(format!(
                         "Review #{} · {} against {} · read-only",
                         group.number,
-                        short_sha(&snapshot.head_sha),
+                        snapshot.head_label(),
                         snapshot.requested_base_ref
                     ));
                 });
@@ -1692,7 +1697,8 @@ fn stored_snapshot(item_id: &str, captured: &perch_git::ReviewSnapshot) -> Revie
         base_tip_sha: captured.manifest.range.base_tip.clone(),
         merge_base_sha: captured.manifest.range.merge_base.clone(),
         head_sha: captured.manifest.range.head.clone(),
-        dirty_edits_excluded: captured.manifest.range.dirty,
+        dirty_edits_excluded: captured.manifest.range.dirty
+            && captured.manifest.range.worktree_parent.is_none(),
         retention_key: captured.manifest.snapshot_id.clone(),
         retained_ref: Some(perch_git::HEAD_REF.to_string()),
         manifest_path: Some(
@@ -1704,6 +1710,7 @@ fn stored_snapshot(item_id: &str, captured: &perch_git::ReviewSnapshot) -> Revie
         ),
         diff_path: Some(captured.diff_path().to_string_lossy().into_owned()),
         created_at: captured.manifest.captured_at,
+        worktree_parent_sha: captured.manifest.range.worktree_parent.clone(),
     }
 }
 
@@ -1722,12 +1729,13 @@ fn stored_empty_snapshot(
         base_tip_sha: range.base_tip.clone(),
         merge_base_sha: range.merge_base.clone(),
         head_sha: range.head.clone(),
-        dirty_edits_excluded: range.dirty,
+        dirty_edits_excluded: range.dirty && range.worktree_parent.is_none(),
         retention_key: snapshot_id.to_string(),
         retained_ref: None,
         manifest_path: None,
         diff_path: None,
         created_at,
+        worktree_parent_sha: range.worktree_parent.clone(),
     }
 }
 
@@ -2822,6 +2830,52 @@ impl MappingCache {
     }
 }
 
+/// How findings from a review of uncommitted work reach the live Files
+/// view. That review's head is a commit Perch made, which no view shows,
+/// so a finding shows only where the lines it points at read the same in
+/// the view: on the right, in a file whose content is the one reviewed;
+/// on the left, when the view diffs from the review's merge base.
+pub(super) struct WorktreeProjection<'a> {
+    /// The commit the view diffs from.
+    left: &'a str,
+    files: &'a [perch_git::ChangedFile],
+}
+
+impl<'a> WorktreeProjection<'a> {
+    /// For Branch and Uncommitted, the two scopes whose head side is the
+    /// whole of a file as the reader has it; `None` for the others.
+    pub(super) fn of(
+        scope: &perch_git::Scope,
+        merge_base: &'a str,
+        head: &'a str,
+        files: &'a [perch_git::ChangedFile],
+    ) -> Option<Self> {
+        let left = match scope {
+            perch_git::Scope::Branch => merge_base,
+            perch_git::Scope::Uncommitted => head,
+            _ => return None,
+        };
+        Some(Self { left, files })
+    }
+
+    /// The newest review of uncommitted work over `head`; `snapshots`
+    /// come newest first.
+    pub(super) fn target(snapshots: Vec<ReviewSnapshot>, head: &str) -> Option<ReviewSnapshot> {
+        snapshots
+            .into_iter()
+            .find(|snapshot| snapshot.worktree_parent_sha.as_deref() == Some(head))
+    }
+
+    pub(super) fn shows(&self, snapshot: &ReviewSnapshot, anchor: &ReviewAnchor) -> bool {
+        match anchor.side {
+            perch_github::Side::Left => snapshot.merge_base_sha == self.left,
+            perch_github::Side::Right => self.files.iter().any(|file| {
+                file.path == anchor.path && file.head_blob.as_deref() == Some(&anchor.blob_sha)
+            }),
+        }
+    }
+}
+
 /// The lines of a review's snapshot a new finding goes on as the reader's
 /// draft rather than as the reviewer's message: those of the open pull
 /// request's diff, which GitHub takes a review comment on. There are none
@@ -3630,10 +3684,6 @@ fn launch_failed(ctx: &Ctx, item_id: &str, message: String) {
     });
 }
 
-fn short_sha(value: &str) -> &str {
-    &value[..value.len().min(8)]
-}
-
 pub(super) fn export_item(ctx: &Ctx, item_id: &str) {
     let Some(knowledge) = ctx.knowledge.as_ref() else {
         return;
@@ -3873,6 +3923,76 @@ mod tests {
     }
 
     #[test]
+    fn a_review_of_uncommitted_work_shows_where_the_view_reads_the_same() {
+        let now: Timestamp = "2026-09-24T12:00:00Z".parse().unwrap();
+        let range = perch_git::ResolvedReviewRange {
+            source_repository: "org/repo".into(),
+            branch_label: "feature".into(),
+            requested_base: "main".into(),
+            base_tip: "base".into(),
+            merge_base: "head".into(),
+            head: "work".into(),
+            dirty: true,
+            worktree_parent: Some("head".into()),
+        };
+        let snapshot = stored_empty_snapshot("item", "work-review", &range, now);
+        assert!(!snapshot.dirty_edits_excluded);
+        assert_eq!(snapshot.head_label(), "head + uncommitted");
+        let committed = stored_empty_snapshot(
+            "item",
+            "older",
+            &perch_git::ResolvedReviewRange {
+                head: "head".into(),
+                worktree_parent: None,
+                ..range.clone()
+            },
+            now,
+        );
+        assert_eq!(
+            WorktreeProjection::target(vec![committed.clone(), snapshot.clone()], "head")
+                .map(|found| found.id),
+            Some("work-review".into())
+        );
+        assert_eq!(WorktreeProjection::target(vec![snapshot.clone()], "moved"), None);
+
+        let file = |path: &str, blob: &str| perch_git::ChangedFile {
+            path: path.into(),
+            old_path: None,
+            status: perch_git::ChangeStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            head_blob: Some(blob.into()),
+        };
+        let anchor = |path: &str, side: perch_github::Side, blob: &str| ReviewAnchor {
+            snapshot_id: snapshot.id.clone(),
+            path: path.into(),
+            side,
+            start_line: 3,
+            end_line: 3,
+            commit_sha: "work".into(),
+            blob_sha: blob.into(),
+        };
+        let files = [file("a.rs", "reviewed"), file("b.rs", "edited-since")];
+        let right = perch_github::Side::Right;
+        let left = perch_github::Side::Left;
+
+        // Uncommitted diffs from HEAD, the review's merge base here.
+        let view = WorktreeProjection::of(&perch_git::Scope::Uncommitted, "mb", "head", &files).unwrap();
+        assert!(view.shows(&snapshot, &anchor("a.rs", right, "reviewed")));
+        assert!(!view.shows(&snapshot, &anchor("b.rs", right, "reviewed")), "edited since");
+        assert!(!view.shows(&snapshot, &anchor("c.rs", right, "reviewed")), "not in the view");
+        assert!(view.shows(&snapshot, &anchor("b.rs", left, "old")));
+
+        // Branch diffs from its merge base, which is not the review's.
+        let view = WorktreeProjection::of(&perch_git::Scope::Branch, "mb", "head", &files).unwrap();
+        assert!(view.shows(&snapshot, &anchor("a.rs", right, "reviewed")));
+        assert!(!view.shows(&snapshot, &anchor("a.rs", left, "old")));
+
+        assert!(WorktreeProjection::of(&perch_git::Scope::Staged, "mb", "head", &files).is_none());
+    }
+
+    #[test]
     fn only_a_typed_empty_group_can_open_without_retained_source() {
         let now: Timestamp = "2026-09-20T12:00:00Z".parse().unwrap();
         let range = perch_git::ResolvedReviewRange {
@@ -3883,6 +4003,7 @@ mod tests {
             merge_base: "merge-base".into(),
             head: "head".into(),
             dirty: false,
+            worktree_parent: None,
         };
         let snapshot = stored_empty_snapshot("item", "snapshot", &range, now);
         let mut group = perch_github::ReviewGroup {

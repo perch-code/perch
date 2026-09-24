@@ -134,6 +134,44 @@ fn tempfile_path(worktree: &Path) -> PathBuf {
     std::env::temp_dir().join(format!("perch-index-{:x}-{nanos}", hasher.finish()))
 }
 
+/// Commit a worktree as it is without touching it: an index of Perch's
+/// own is filled from `HEAD` and then with every tracked and untracked
+/// file that is not ignored, written as a tree, and committed with `HEAD`
+/// as its parent. The worktree's own index, `HEAD` and files are as they
+/// were. Nothing points at the commit, so a caller that keeps it past the
+/// next `gc` gives it a ref or copies it out.
+pub(crate) async fn commit_worktree(git: &Git, worktree: &Path, message: &str) -> Result<String, Error> {
+    let index = tempfile_path(worktree);
+    let result = commit_with_index(git, worktree, &index, message).await;
+    let _ = std::fs::remove_file(&index);
+    result
+}
+
+async fn commit_with_index(git: &Git, worktree: &Path, index: &Path, message: &str) -> Result<String, Error> {
+    let env: [(&str, &std::ffi::OsStr); 5] = [
+        ("GIT_INDEX_FILE", index.as_os_str()),
+        ("GIT_AUTHOR_NAME", "Perch".as_ref()),
+        ("GIT_AUTHOR_EMAIL", "perch@localhost".as_ref()),
+        ("GIT_COMMITTER_NAME", "Perch".as_ref()),
+        ("GIT_COMMITTER_EMAIL", "perch@localhost".as_ref()),
+    ];
+    git.run_env(Some(worktree), ["read-tree", "HEAD"], &env, QUERY_TIMEOUT).await?;
+    git.run_env(Some(worktree), ["add", "-A", "--", "."], &env, WORKTREE_TIMEOUT)
+        .await?;
+    let tree = git.run_env(Some(worktree), ["write-tree"], &env, QUERY_TIMEOUT).await?;
+    // `commit.gpgSign` would otherwise ask for a key for a commit no one
+    // else sees.
+    let commit = git
+        .run_env(
+            Some(worktree),
+            ["commit-tree", "--no-gpg-sign", tree.trim(), "-p", "HEAD", "-m", message],
+            &env,
+            QUERY_TIMEOUT,
+        )
+        .await?;
+    Ok(commit.trim().to_string())
+}
+
 /// Where `ensure_home` fetches a default branch's tip to in the bare clone.
 pub fn home_ref(branch: &str) -> String {
     format!("refs/perch/home/{branch}")
@@ -873,48 +911,13 @@ impl Preparer {
         Ok(entries)
     }
 
-    /// Record a worktree as it is, as a commit, without touching it: an
-    /// index of Perch's own is filled from `HEAD` and then with every
-    /// tracked and untracked file that is not ignored, written as a tree,
-    /// and committed with `HEAD` as its parent. The commit is kept at
-    /// `reference`, a ref under `refs/perch/`, so `gc` keeps it; the
-    /// worktree's own index, `HEAD` and files are as they were.
+    /// Record a worktree as it is, as a commit, without touching it, as
+    /// [`commit_worktree`] does. The commit is kept at `reference`, a ref
+    /// under `refs/perch/`, so `gc` keeps it.
     pub async fn record_worktree(&self, worktree: &Path, reference: &str, message: &str) -> Result<String, Error> {
-        let index = tempfile_path(worktree);
-        let result = self.record_with_index(worktree, &index, reference, message).await;
-        let _ = std::fs::remove_file(&index);
-        result
-    }
-
-    async fn record_with_index(
-        &self,
-        worktree: &Path,
-        index: &Path,
-        reference: &str,
-        message: &str,
-    ) -> Result<String, Error> {
-        let env: [(&str, &std::ffi::OsStr); 5] = [
-            ("GIT_INDEX_FILE", index.as_os_str()),
-            ("GIT_AUTHOR_NAME", "Perch".as_ref()),
-            ("GIT_AUTHOR_EMAIL", "perch@localhost".as_ref()),
-            ("GIT_COMMITTER_NAME", "Perch".as_ref()),
-            ("GIT_COMMITTER_EMAIL", "perch@localhost".as_ref()),
-        ];
-        let git = &self.git;
-        git.run_env(Some(worktree), ["read-tree", "HEAD"], &env, QUERY_TIMEOUT).await?;
-        git.run_env(Some(worktree), ["add", "-A", "--", "."], &env, WORKTREE_TIMEOUT)
-            .await?;
-        let tree = git.run_env(Some(worktree), ["write-tree"], &env, QUERY_TIMEOUT).await?;
-        let commit = git
-            .run_env(
-                Some(worktree),
-                ["commit-tree", tree.trim(), "-p", "HEAD", "-m", message],
-                &env,
-                QUERY_TIMEOUT,
-            )
-            .await?;
-        let commit = commit.trim().to_string();
-        git.run(Some(worktree), ["update-ref", reference, &commit], QUERY_TIMEOUT)
+        let commit = commit_worktree(&self.git, worktree, message).await?;
+        self.git
+            .run(Some(worktree), ["update-ref", reference, &commit], QUERY_TIMEOUT)
             .await?;
         Ok(commit)
     }

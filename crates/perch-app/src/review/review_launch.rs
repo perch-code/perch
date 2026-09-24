@@ -196,6 +196,7 @@ pub(crate) fn agents_section(
             },
         ),
         base_row(app, state),
+        head_row(state),
         instructions_box(state, run),
         launch_error(app, state),
         Stack::horizontal((
@@ -346,7 +347,9 @@ fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> imp
 
 fn scope_note(state: ReviewState) -> impl IntoView {
     Label::derived(move || {
-        if state.dirty.get().any() {
+        if includes_uncommitted(state) {
+            "Commits and uncommitted work, untracked files included".to_string()
+        } else if state.dirty.get().any() {
             "Committed changes only; local edits are excluded".to_string()
         } else {
             "Committed changes only".to_string()
@@ -571,6 +574,85 @@ fn base_row(app: AppState, state: ReviewState) -> impl IntoView {
     .style(|s| s.items_center().width_full().gap(8.0))
 }
 
+/// Why the working tree cannot be the head, or `None` when it can: it
+/// has to be on disk, have work in it, and sit on the head the item has.
+fn uncommitted_unavailable(state: ReviewState) -> Option<&'static str> {
+    let on_disk = state.item.with(|item| {
+        item.as_ref()
+            .and_then(|item| item.checkout.as_ref())
+            .is_some_and(|checkout| checkout.on_disk)
+    });
+    if !on_disk {
+        Some("not on disk")
+    } else if state.stale_head.with(Option::is_some) {
+        Some("head moved")
+    } else if !state.dirty.get().any() {
+        Some("clean")
+    } else {
+        None
+    }
+}
+
+/// Whether the next review reads the uncommitted work as well as the
+/// commits: the reader's pick, else yes when that work is what the Files
+/// view shows, or is all the branch has.
+fn includes_uncommitted(state: ReviewState) -> bool {
+    if uncommitted_unavailable(state).is_some() {
+        return false;
+    }
+    state.review_launcher_uncommitted.get().unwrap_or_else(|| {
+        matches!(
+            state.scope.get(),
+            perch_git::Scope::Uncommitted | perch_git::Scope::Unstaged | perch_git::Scope::Staged
+        ) || state.commits.with(|commits| commits.is_empty())
+    })
+}
+
+/// Where the reviewed range ends: the last commit, or the working tree
+/// over it.
+fn head_row(state: ReviewState) -> impl IntoView {
+    Stack::horizontal((
+        Label::derived(|| "Head".to_string()).style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG)
+                .min_width(70.0)
+        }),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        menu_button(
+            move || {
+                if includes_uncommitted(state) {
+                    "Working tree".into()
+                } else {
+                    "Last commit".into()
+                }
+            },
+            move || {
+                let included = includes_uncommitted(state);
+                let unavailable = uncommitted_unavailable(state);
+                let pick = move |uncommitted: bool| {
+                    move || state.review_launcher_uncommitted.set(Some(uncommitted))
+                };
+                let working_tree = match unavailable {
+                    Some(reason) => format!("Working tree ({reason})"),
+                    None => "Working tree".to_string(),
+                };
+                Menu::new()
+                    .item("Last commit", move |item| {
+                        item.checked(!included).action(pick(false))
+                    })
+                    .item(working_tree, move |item| {
+                        item.checked(included)
+                            .enabled(unavailable.is_none())
+                            .action(pick(true))
+                    })
+            },
+            "review-head".into(),
+        ),
+    ))
+    .style(|s| s.items_center().width_full().gap(8.0))
+}
+
 /// What the reviewers should focus on, such as one file of a branch that
 /// carries more. Cmd-Enter runs the review and Escape closes the popover,
 /// as in the summary box.
@@ -705,6 +787,7 @@ fn launch_validation(app: AppState, state: ReviewState) -> LaunchValidation {
             base_ref,
             reviewers,
             instructions,
+            include_uncommitted: includes_uncommitted(state),
         }),
         reason: None,
     }
@@ -1252,7 +1335,7 @@ fn group_title(summary: &ReviewGroupSummary) -> String {
     format!(
         "Review #{} · {} · against {} at {}",
         summary.group.number,
-        short_sha(&summary.snapshot.head_sha),
+        summary.snapshot.head_label(),
         summary.snapshot.requested_base_ref,
         short_sha(&summary.snapshot.base_tip_sha)
     )
@@ -1311,11 +1394,19 @@ fn count_summary(summary: &ReviewGroupSummary) -> String {
     )
 }
 
+/// Whether the checkout has moved past what a review read. A review of
+/// uncommitted work is judged by the commit it sat on; later edits to the
+/// work itself do not show here.
 fn newer_changes(state: ReviewState, summary: &ReviewGroupSummary) -> bool {
+    let reviewed = summary
+        .snapshot
+        .worktree_parent_sha
+        .as_deref()
+        .unwrap_or(&summary.snapshot.head_sha);
     state.item.with(|item| {
         item.as_ref()
             .and_then(|item| item.checkout.as_ref())
-            .is_some_and(|checkout| checkout.head_sha != summary.snapshot.head_sha)
+            .is_some_and(|checkout| checkout.head_sha != reviewed)
     })
 }
 
@@ -1571,6 +1662,7 @@ mod tests {
                 manifest_path: Some("manifest.json".into()),
                 diff_path: Some("review.diff".into()),
                 created_at,
+                worktree_parent_sha: None,
             },
             attempts: Vec::new(),
         }
@@ -1756,6 +1848,48 @@ mod tests {
             .review_launcher_draft
             .set(build_draft(app, state, "worktree"));
         assert!(launch_validation(app, state).request.unwrap().instructions.is_some());
+    }
+
+    #[test]
+    fn uncommitted_work_is_reviewed_when_it_is_what_the_reader_sees() {
+        let (app, state) = item_state();
+        state
+            .review_launcher_draft
+            .set(build_draft(app, state, "worktree"));
+        let included = || launch_validation(app, state).request.unwrap().include_uncommitted;
+        let commit = perch_git::Commit {
+            sha: "abcdef0123456789".into(),
+            subject: "Start".into(),
+            body: String::new(),
+            author: "Chris".into(),
+            authored_at: "2026-09-19T12:00:00Z".parse().unwrap(),
+        };
+
+        // A clean worktree has only its commits to give.
+        assert!(!included());
+        state.review_launcher_uncommitted.set(Some(true));
+        assert!(!included(), "a clean worktree cannot be picked");
+        state.review_launcher_uncommitted.set(None);
+
+        // With nothing committed, the work is all there is.
+        state.dirty.set(perch_git::Dirt { unstaged: true, staged: false });
+        assert!(included());
+
+        // Over commits it follows the Files view, until the reader picks.
+        state.commits.set(std::sync::Arc::new(vec![commit]));
+        assert!(!included());
+        state.scope.set(perch_git::Scope::Uncommitted);
+        assert!(included());
+        state.review_launcher_uncommitted.set(Some(false));
+        assert!(!included());
+        state.scope.set(perch_git::Scope::Branch);
+        state.review_launcher_uncommitted.set(Some(true));
+        assert!(included());
+
+        // A worktree left on an older head of its pull request is not.
+        state.stale_head.set(Some("newer".into()));
+        assert!(!included());
+        assert_eq!(uncommitted_unavailable(state), Some("head moved"));
     }
 
     #[test]

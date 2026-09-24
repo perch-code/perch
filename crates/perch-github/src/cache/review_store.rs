@@ -24,6 +24,7 @@ CREATE TABLE review_snapshots (
     manifest_path        TEXT,
     diff_path            TEXT,
     created_at           TEXT NOT NULL,
+    worktree_parent_sha  TEXT,
     UNIQUE (id, item_id)
 );
 CREATE INDEX review_snapshots_item ON review_snapshots(item_id, created_at DESC, id DESC);
@@ -215,6 +216,27 @@ pub(super) fn add_group_instructions(tx: &Transaction<'_>) -> Result<(), CacheEr
     Ok(())
 }
 
+/// Schema 30 keeps, for a review of uncommitted work, the `HEAD` it was
+/// captured over. A cache that reached review history through schema 18
+/// after this change already has the column.
+pub(super) fn add_snapshot_worktree_parent(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM pragma_table_info('review_snapshots')
+             WHERE name='worktree_parent_sha'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        tx.execute(
+            "ALTER TABLE review_snapshots ADD COLUMN worktree_parent_sha TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn migrate_18_to_19(tx: &Transaction<'_>) -> Result<(), CacheError> {
     let exists: bool = tx.query_row(
         "SELECT EXISTS(
@@ -236,7 +258,7 @@ pub(super) fn migrate_18_to_19(tx: &Transaction<'_>) -> Result<(), CacheError> {
 
 const SNAPSHOT_COLUMNS: &str = "id, item_id, repository, branch_label, requested_base_ref,
     base_tip_sha, merge_base_sha, head_sha, dirty_edits_excluded, retention_key, retained_ref,
-    manifest_path, diff_path, created_at";
+    manifest_path, diff_path, created_at, worktree_parent_sha";
 const GROUP_COLUMNS: &str = "id, item_id, snapshot_id, number, status, new_findings,
     still_present, verified_fixed, not_verified, created_at, started_at, ended_at, instructions";
 /// An attempt the extractor at version `?1` may read again: completed and
@@ -296,6 +318,7 @@ fn read_snapshot(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewSnapshot> {
         retained_ref: row.get(10)?,
         manifest_path: row.get(11)?,
         diff_path: row.get(12)?,
+        worktree_parent_sha: row.get(14)?,
         created_at: created.parse().map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 13,
@@ -583,8 +606,8 @@ fn insert_snapshot_on(
         "INSERT INTO review_snapshots
          (id, item_id, repository, branch_label, requested_base_ref, base_tip_sha,
           merge_base_sha, head_sha, dirty_edits_excluded, retention_key, retained_ref,
-          manifest_path, diff_path, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+          manifest_path, diff_path, created_at, worktree_parent_sha)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![
             snapshot.id,
             snapshot.item_id,
@@ -600,6 +623,7 @@ fn insert_snapshot_on(
             snapshot.manifest_path,
             snapshot.diff_path,
             snapshot.created_at.to_string(),
+            snapshot.worktree_parent_sha,
         ],
     )?;
     Ok(())
@@ -3043,6 +3067,7 @@ mod tests {
             manifest_path: Some(format!("{id}/manifest.json")),
             diff_path: Some(format!("{id}/review.diff")),
             created_at: stamp(second),
+            worktree_parent_sha: None,
         }
     }
 
@@ -3217,6 +3242,18 @@ mod tests {
         assert_eq!(group.instructions, admitted.instructions);
         assert_eq!(cache.load_review_group("g1").unwrap().unwrap(), group);
         assert_eq!(cache.list_review_groups("item", None, 10).unwrap(), [group]);
+    }
+
+    #[test]
+    fn a_snapshot_of_uncommitted_work_keeps_its_parent() {
+        let cache = Cache::open_in_memory().unwrap();
+        insert_item(&cache, "item");
+        let mut admitted = admission("g1", "s1", "item", vec![attempt("a1", "codex", 1)], 1);
+        admitted.snapshot.worktree_parent_sha = Some("head-0".into());
+        cache.admit_review_group(&admitted).unwrap();
+        let loaded = cache.load_review_snapshot("s1").unwrap().unwrap();
+        assert_eq!(loaded, admitted.snapshot);
+        assert_eq!(cache.list_review_snapshots("item").unwrap(), [admitted.snapshot]);
     }
 
     #[test]

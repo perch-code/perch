@@ -269,6 +269,25 @@ pub struct ReviewSnapshot {
     pub manifest_path: Option<String>,
     pub diff_path: Option<String>,
     pub created_at: Timestamp,
+    /// For a review of uncommitted work, the `HEAD` it was captured over;
+    /// `head_sha` is then a commit Perch made of the work, found only in
+    /// the retained snapshot.
+    pub worktree_parent_sha: Option<String>,
+}
+
+impl ReviewSnapshot {
+    /// What a review's title names as what it read: the head's short sha,
+    /// or for uncommitted work the commit it sits on and that it is more.
+    pub fn head_label(&self) -> String {
+        match self.worktree_parent_sha.as_deref() {
+            Some(parent) => format!("{} + uncommitted", short(parent)),
+            None => short(&self.head_sha).to_string(),
+        }
+    }
+}
+
+fn short(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

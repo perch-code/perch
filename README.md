@@ -614,14 +614,24 @@ there is a pull request to review, counts your drafts, and says how far a
 running review has got.
 
 Running the agents starts Claude Code and/or Codex's native review workflow
-against the full committed branch diff from the selected base's merge base to
-`HEAD`. It
+against the branch diff from the selected base's merge base to the head. It
 works for Perch-managed and registered external worktrees, with or without a
-pull request. A dirty worktree is reviewable, but staged and unstaged edits are
-not part of the snapshot; Perch labels this `Committed changes only; local
-edits are excluded`. Staged-only, individual-commit, and incremental-only
-review scopes are not supported. If the committed diff is empty, Perch records
-that result without launching an agent.
+pull request. **Head** in the settings says where the range ends: **Last
+commit** is `HEAD`, and **Working tree** adds the uncommitted work, staged,
+unstaged and untracked files alike, as a commit Perch makes over `HEAD`
+without touching the worktree, its index or its refs. Head starts on Working
+tree when the worktree is dirty and the branch has no commits yet, or the
+Files view shows an uncommitted scope; otherwise on Last commit, and Perch
+labels a dirty worktree `Committed changes only; local edits are excluded`.
+Staged-only, individual-commit, and incremental-only review scopes are not
+supported. If the diff is empty, Perch records that result without launching
+an agent.
+
+Findings from a review of the working tree show in the Files view under
+Uncommitted and Branch while the checkout is still on the commit the work sat
+on, each where its lines read the same as what was reviewed: on the new side,
+in a file unchanged since; on the old side, when the view diffs from the
+review's merge base. The rest stay in Conversation.
 
 The instructions box in the settings tells the reviewers what to focus on, such as
 "review rfcs/multi_get.md only" on a branch that also carries a prototype. The
@@ -655,7 +665,7 @@ them. Repeat reviews preserve every group, attempt, observation, failure, and
 valid zero-finding result while reconciling the same problem back to its
 existing thread. **Retry** creates another attempt with the original snapshot
 and settings. **Review latest** creates a new group and immutable snapshot from
-the branch's current committed state.
+the branch's current state.
 
 On an open pull request, a new finding on lines of its diff arrives as your
 draft on those lines, in place of the reviewer's message. It is a draft like

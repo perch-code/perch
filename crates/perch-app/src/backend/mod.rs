@@ -4392,20 +4392,21 @@ impl Ctx {
                         open.review_snapshot_id.clone(),
                         open.review_group_id.clone(),
                         open.review_request_id,
+                        open.files.clone(),
                     )
                 })
         });
         let review_fence = view
             .as_ref()
             .and_then(
-                |(_, _, _, _, group_id, request_id)| match (group_id, request_id) {
+                |(_, _, _, _, group_id, request_id, _)| match (group_id, request_id) {
                     (Some(group_id), Some(request_id)) => Some((group_id.clone(), *request_id)),
                     _ => None,
                 },
             );
         let threads = self.with_cache(|cache| -> Result<Vec<CommentThread>, CacheError> {
             let mut threads = cache.load_comment_threads(item_id)?;
-            let Some((scope, merge_base, head, exact_snapshot_id, historical_group_id, _)) =
+            let Some((scope, merge_base, head, exact_snapshot_id, historical_group_id, _, files)) =
                 view.as_ref()
             else {
                 return Ok(threads);
@@ -4416,24 +4417,36 @@ impl Ctx {
                 .map(|finding| finding.thread_id.clone())
                 .collect::<std::collections::HashSet<_>>();
 
-            // Durable review anchors describe a full committed branch
-            // snapshot. Commit and working-tree scopes show a different
-            // pair of Git sides, so their numeric lines are never safe
-            // inline there. Keep the thread available in Conversation as
-            // outdated/original evidence until Branch is selected again.
-            if *scope != perch_git::Scope::Branch {
-                Self::mark_review_threads_outdated(&mut threads, &finding_threads);
-                return Ok(threads);
-            }
-
-            let target_snapshot = match exact_snapshot_id.as_deref() {
-                Some(snapshot_id) => cache.load_review_snapshot(snapshot_id)?,
-                None => cache
-                    .list_review_snapshots(item_id)?
-                    .into_iter()
-                    .find(|snapshot| {
-                        snapshot.merge_base_sha == *merge_base && snapshot.head_sha == *head
-                    }),
+            // Durable review anchors describe a snapshot's pair of Git
+            // sides. A committed branch snapshot shows inline only under
+            // Branch at its exact range; a review of uncommitted work shows
+            // anchor by anchor, where the view reads the same as what was
+            // reviewed. Anything else stays in Conversation as
+            // outdated/original evidence.
+            let (target_snapshot, worktree) = match exact_snapshot_id.as_deref() {
+                Some(snapshot_id) if *scope == perch_git::Scope::Branch => {
+                    (cache.load_review_snapshot(snapshot_id)?, None)
+                }
+                Some(_) => (None, None),
+                None => {
+                    let snapshots = cache.list_review_snapshots(item_id)?;
+                    let committed = snapshots
+                        .iter()
+                        .find(|snapshot| {
+                            *scope == perch_git::Scope::Branch
+                                && snapshot.merge_base_sha == *merge_base
+                                && snapshot.head_sha == *head
+                        })
+                        .cloned();
+                    match (committed, reviews::WorktreeProjection::of(scope, merge_base, head, files)) {
+                        (Some(snapshot), _) => (Some(snapshot), None),
+                        (None, Some(projection)) => (
+                            reviews::WorktreeProjection::target(snapshots, head),
+                            Some(projection),
+                        ),
+                        (None, None) => (None, None),
+                    }
+                }
             };
 
             // A live checkout which has moved away from every retained
@@ -4518,6 +4531,11 @@ impl Ctx {
                     continue;
                 };
                 thread.outdated = true;
+                let projected = projected.filter(|anchor| {
+                    worktree
+                        .as_ref()
+                        .is_none_or(|worktree| worktree.shows(&target_snapshot, anchor))
+                });
                 let Some(projected) = projected else { continue };
                 thread.anchor = Some(perch_github::Anchor {
                     path: projected.path,
@@ -15591,6 +15609,7 @@ mod tests {
                 manifest_path: None,
                 diff_path: None,
                 created_at: now,
+                worktree_parent_sha: None,
             },
             attempts: vec![attempt("a1", "claude-code"), attempt("a2", "codex")],
             admitted_at: now,
@@ -18828,6 +18847,7 @@ read eof || true
                 source_repository: "a/b".into(),
                 branch_label: "feature".into(),
                 requested_base: "main".into(),
+                include_worktree: false,
             })
             .await
             .unwrap()

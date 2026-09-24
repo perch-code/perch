@@ -713,6 +713,7 @@ pub(crate) mod tests {
                 manifest_path: Some("manifest".into()),
                 diff_path: Some("diff".into()),
                 created_at,
+                worktree_parent_sha: None,
             },
             attempts: attempts.iter().map(|id| attempt(id)).collect(),
         }
@@ -1038,6 +1039,7 @@ pub(crate) mod tests {
                 manifest_path: Some("manifest".into()),
                 diff_path: Some("diff".into()),
                 created_at,
+                worktree_parent_sha: None,
             },
             attempts: vec![
                 attempt("attempt-claude", "claude-code"),

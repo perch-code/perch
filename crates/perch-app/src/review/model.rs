@@ -914,6 +914,8 @@ pub struct ReviewLaunchRequest {
     pub reviewers: Vec<ReviewLaunchChoice>,
     /// What to focus on, trimmed; `None` when the box was left empty.
     pub instructions: Option<String>,
+    /// Review the uncommitted work as well as the commits.
+    pub include_uncommitted: bool,
 }
 
 /// The launcher's editable, durable preference for one backend. An
@@ -1146,6 +1148,10 @@ pub struct ReviewState {
     /// rebuilt whenever a reviewer's support changes while it is open, and
     /// kept across closing it until another checkout opens.
     pub review_launcher_instructions: RwSignal<String>,
+    /// Whether the reader picked the working tree (`Some(true)`) or the
+    /// last commit as the head to review; `None` until they pick, when
+    /// the launcher decides. Kept like the instructions.
+    pub review_launcher_uncommitted: RwSignal<Option<bool>>,
     /// The reader's review for GitHub, under the agents' in the same
     /// popover. Its draft stays with the open pull request so a cancelled
     /// or failed submission can be resumed without retyping it.
@@ -1569,6 +1575,7 @@ impl ReviewState {
             review_agents_expanded: RwSignal::new(false),
             review_launcher_draft: RwSignal::new(None),
             review_launcher_instructions: RwSignal::new(String::new()),
+            review_launcher_uncommitted: RwSignal::new(None),
             submit_review_draft: RwSignal::new(String::new()),
             submit_review_event: RwSignal::new(PullReviewEvent::Comment),
             agents_dropdown_open: RwSignal::new(false),
@@ -1746,6 +1753,7 @@ impl ReviewState {
         self.review_agents_expanded.set(false);
         self.review_launcher_draft.set(None);
         self.review_launcher_instructions.set(String::new());
+        self.review_launcher_uncommitted.set(None);
         self.submit_review_draft.set(String::new());
         self.submit_review_event.set(PullReviewEvent::Comment);
         self.submit_review_focused.set(false);

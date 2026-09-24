@@ -604,10 +604,6 @@ fn actions(review: ReviewState, backend: Rc<Backend>, run: AgentRunSummary) -> i
     Stack::horizontal((thread, control)).style(|s| s.items_center().gap(2.0).flex_shrink(0.0_f32))
 }
 
-fn short_sha(sha: &str) -> String {
-    sha.chars().take(7).collect()
-}
-
 fn title_case_status(status: &str) -> String {
     let mut chars = status.chars();
     chars
@@ -631,7 +627,7 @@ fn review_group_row(
             let title = format!(
                 "Review #{} · {} · against {}",
                 summary.group.number,
-                short_sha(&summary.snapshot.head_sha),
+                summary.snapshot.head_label(),
                 summary.snapshot.requested_base_ref
             );
             let status = if summary.group.status.is_active() {

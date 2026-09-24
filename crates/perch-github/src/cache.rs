@@ -35,9 +35,10 @@ mod review_store;
 /// merge event and onto every event, for the rest of what GitHub's
 /// timeline lists. Version 23 keeps each GitHub thread's own id and
 /// whether the reader may resolve it. Version 24 keeps the instructions a
-/// worktree review was run with. Schemas 13 through 23 migrate in place so
+/// worktree review was run with. Version 30 keeps the `HEAD` a review of
+/// uncommitted work was captured over. Schemas 13 through 23 migrate in place so
 /// local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 29;
+pub const SCHEMA_VERSION: u32 = 30;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -444,6 +445,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             27 => add_divergence_column(&tx)?,
             // Empty: nothing that happened before is backfilled.
             28 => tx.execute_batch(ACTIVITY_SCHEMA)?,
+            29 => review_store::add_snapshot_worktree_parent(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -6142,6 +6144,34 @@ mod tests {
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
         assert_eq!(outcome, CacheOpen::Migrated { from: 28, to: SCHEMA_VERSION });
         assert!(cache.load_item_activity().unwrap().is_empty(), "nothing is backfilled");
+    }
+
+    #[test]
+    fn schema_29_gains_the_snapshot_worktree_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache
+                .conn
+                .execute("ALTER TABLE review_snapshots DROP COLUMN worktree_parent_sha", [])
+                .unwrap();
+            cache.set_meta("schema_version", "29").unwrap();
+        }
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 29, to: SCHEMA_VERSION });
+        let has_column: bool = cache
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pragma_table_info('review_snapshots')
+                     WHERE name='worktree_parent_sha'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_column);
     }
 
     #[test]

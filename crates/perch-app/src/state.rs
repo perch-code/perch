@@ -2613,6 +2613,7 @@ mod tests {
                 manifest_path: None,
                 diff_path: None,
                 created_at,
+                worktree_parent_sha: None,
             },
             attempts: Vec::new(),
         }

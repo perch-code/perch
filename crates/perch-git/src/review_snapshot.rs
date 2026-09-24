@@ -80,6 +80,10 @@ pub struct ResolvedReviewRange {
     pub merge_base: String,
     pub head: String,
     pub dirty: bool,
+    /// `HEAD` when `head` is a commit Perch made of the uncommitted work
+    /// over it, `None` when `head` is `HEAD` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_parent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +93,9 @@ pub struct SnapshotCapture {
     pub source_repository: String,
     pub branch_label: String,
     pub requested_base: String,
+    /// Review the uncommitted work too, tracked and untracked, as a commit
+    /// over `HEAD`. A clean worktree is reviewed at `HEAD` either way.
+    pub include_worktree: bool,
 }
 
 /// A clean result is distinct from an error: callers should show the empty
@@ -631,7 +638,31 @@ impl ReviewSnapshotStore {
     ) -> Result<ResolvedReviewRange, SnapshotError> {
         let base_spec = format!("{}^{{commit}}", request.requested_base);
         let base_tip = self.resolve_commit(source, &base_spec).await?;
-        let head = self.resolve_commit(source, "HEAD^{commit}").await?;
+        let dirty = !self
+            .git
+            .run(
+                Some(source),
+                ["status", "--porcelain", "--untracked-files=normal"],
+                QUERY_TIMEOUT,
+            )
+            .await?
+            .is_empty();
+        // Uncommitted work is reviewed as a commit of its own over `HEAD`,
+        // so everything past here reads a range of commits either way. Its
+        // parent is read back from it, in case `HEAD` moved meanwhile.
+        let (head, worktree_parent) = if request.include_worktree && dirty {
+            let commit = crate::prepare::commit_worktree(
+                &self.git,
+                source,
+                "Uncommitted work, as Perch captured it for review",
+            )
+            .await?;
+            let head = checked_object_id(&commit)?;
+            let parent = self.resolve_commit(source, &format!("{head}^1")).await?;
+            (head, Some(parent))
+        } else {
+            (self.resolve_commit(source, "HEAD^{commit}").await?, None)
+        };
         let merge_base = match self
             .git
             .run(
@@ -645,15 +676,6 @@ impl ReviewSnapshotStore {
             Err(crate::Error::Git { status: 1, .. }) => return Err(SnapshotError::NoMergeBase),
             Err(error) => return Err(error.into()),
         };
-        let dirty = !self
-            .git
-            .run(
-                Some(source),
-                ["status", "--porcelain", "--untracked-files=normal"],
-                QUERY_TIMEOUT,
-            )
-            .await?
-            .is_empty();
         Ok(ResolvedReviewRange {
             source_repository: request.source_repository.clone(),
             branch_label: request.branch_label.clone(),
@@ -662,6 +684,7 @@ impl ReviewSnapshotStore {
             merge_base,
             head,
             dirty,
+            worktree_parent,
         })
     }
 
@@ -1162,10 +1185,14 @@ fn validate_manifest(manifest: &SnapshotManifest) -> Result<(), SnapshotError> {
         ));
     }
     for oid in [
-        &manifest.range.base_tip,
-        &manifest.range.merge_base,
-        &manifest.range.head,
-    ] {
+        Some(&manifest.range.base_tip),
+        Some(&manifest.range.merge_base),
+        Some(&manifest.range.head),
+        manifest.range.worktree_parent.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         checked_object_id(oid)?;
     }
     for file in &manifest.files {
@@ -1721,6 +1748,7 @@ mod tests {
             source_repository: "local/test".into(),
             branch_label: "feature".into(),
             requested_base: "main".into(),
+            include_worktree: false,
         }
     }
 
@@ -1808,6 +1836,79 @@ mod tests {
             Err(SnapshotError::Manifest(_))
         ));
         assert!(store.release("dirty").unwrap());
+    }
+
+    #[tokio::test]
+    async fn uncommitted_work_is_reviewed_as_a_commit_over_head() {
+        let repo = repository();
+        std::fs::write(repo.path().join("code.rs"), "base\n").unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        commit_all(repo.path(), "base");
+        // A branch with nothing committed yet: all of its work is local.
+        git(repo.path(), &["checkout", "-q", "-b", "feature"]);
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("code.rs"), "base\nlocal edit\n").unwrap();
+        std::fs::write(repo.path().join("staged.rs"), "staged\n").unwrap();
+        git(repo.path(), &["add", "staged.rs"]);
+        std::fs::write(repo.path().join("untracked.rs"), "untracked\n").unwrap();
+        std::fs::write(repo.path().join("ignored.txt"), "ignored\n").unwrap();
+        let status_before = git(repo.path(), &["status", "--porcelain"]);
+
+        let storage = tempfile::tempdir().unwrap();
+        let store = ReviewSnapshotStore::new(storage.path());
+        let mut with_work = request("work", repo.path());
+        with_work.include_worktree = true;
+        let snapshot = captured(store.capture(with_work).await.unwrap());
+
+        let range = &snapshot.manifest.range;
+        assert!(range.dirty);
+        assert_eq!(range.worktree_parent.as_deref(), Some(head.as_str()));
+        assert_ne!(range.head, head);
+        assert_eq!(range.merge_base, head);
+        let paths: Vec<&str> = snapshot.manifest.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, ["code.rs", "staged.rs", "untracked.rs"]);
+        let diff = String::from_utf8(snapshot.read_diff().unwrap()).unwrap();
+        assert!(diff.contains("local edit"));
+        assert!(!diff.contains("ignored"));
+        assert_eq!(
+            std::fs::read_to_string(snapshot.checkout().join("untracked.rs")).unwrap(),
+            "untracked\n"
+        );
+
+        // The source is as it was: same head, same index, same files.
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo.path(), &["status", "--porcelain"]), status_before);
+
+        // Reopened from disk, the manifest still says what it reviewed.
+        let reopened = store.open("work").unwrap().unwrap();
+        assert_eq!(reopened.manifest.range.worktree_parent.as_deref(), Some(head.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_clean_worktree_with_work_included_is_reviewed_at_head() {
+        let repo = repository();
+        std::fs::write(repo.path().join("code.rs"), "base\n").unwrap();
+        commit_all(repo.path(), "base");
+        git(repo.path(), &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.path().join("code.rs"), "base\ncommitted\n").unwrap();
+        let head = commit_all(repo.path(), "feature");
+        let storage = tempfile::tempdir().unwrap();
+        let store = ReviewSnapshotStore::new(storage.path());
+
+        let mut with_work = request("clean", repo.path());
+        with_work.include_worktree = true;
+        let snapshot = captured(store.capture(with_work).await.unwrap());
+        assert_eq!(snapshot.manifest.range.head, head);
+        assert_eq!(snapshot.manifest.range.worktree_parent, None);
+
+        // Nothing committed and nothing local is still nothing to review.
+        git(repo.path(), &["checkout", "-q", "main"]);
+        let mut empty = request("nothing", repo.path());
+        empty.include_worktree = true;
+        assert!(matches!(
+            store.capture(empty).await.unwrap(),
+            CaptureOutcome::Empty(_)
+        ));
     }
 
     #[tokio::test]
