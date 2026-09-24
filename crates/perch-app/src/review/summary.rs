@@ -10,7 +10,7 @@
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{Memo, SignalGet, SignalWith};
+use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
 use perch_github::{CheckState, Item, ItemKind, ItemSubject, SubjectState};
@@ -91,7 +91,12 @@ pub fn summary(
             SidebarIcon::Branch,
             "Branch",
             move || !branches_text(state).is_empty(),
-            Stack::horizontal((branches(state), churn(state), divergence(state)))
+            Stack::horizontal((
+                branches(state),
+                churn(state),
+                divergence(state),
+                push_button(app, state, backend.clone()),
+            ))
                 .style(|s| s.items_center().min_width(0.0).col_gap(theme::SUMMARY_GAP)),
         ),
         dyn_row(
@@ -679,6 +684,66 @@ fn divergence(state: ReviewState) -> impl IntoView {
                 .selectable(false)
                 .apply_if(divergence_of(state).is_none(), |s| s.hide())
         })
+}
+
+/// Whether the worktree has commits the reader's own pull request lacks,
+/// and nothing the pull request has that the worktree doesn't: a push
+/// that needs no force.
+pub(crate) fn can_push(app: AppState, state: ReviewState) -> bool {
+    let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    state.item.with(|item| {
+        item.as_ref().is_some_and(|item| {
+            item.pull_request().is_some()
+                && crate::items::work_allowed(item, viewer.as_deref())
+                && item
+                    .divergence()
+                    .is_some_and(|d| d.ahead.is_some_and(|a| a > 0) && d.behind == Some(0))
+        })
+    })
+}
+
+/// Push, beside `3 unpushed`, and what stopped the last one.
+fn push_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    let shown = Memo::new(move |_| can_push(app, state) || state.push_pending.get());
+    Stack::horizontal((
+        crate::review::open_pull::action_button(
+            move || {
+                if state.push_pending.get() {
+                    "Pushing…".to_string()
+                } else {
+                    "Push".to_string()
+                }
+            },
+            "push-branch",
+            false,
+            move || !state.push_pending.get() && !state.offline.get(),
+            move || {
+                let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+                else {
+                    return;
+                };
+                state.push_pending.set(true);
+                state.push_error.set(None);
+                backend.push_branch(&item_id);
+            },
+        )
+        .style(|s| s.height(22.0).padding_horiz(8.0)),
+        Label::derived(move || state.push_error.get().unwrap_or_default())
+            .debug_name("push-branch-error")
+            .style(move |s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .color(theme::CLOSED)
+                    .min_width(0.0)
+                    .text_ellipsis()
+                    .apply_if(state.push_error.with(Option::is_none), |s| s.hide())
+            }),
+    ))
+    .style(move |s| {
+        s.items_center()
+            .gap(6.0)
+            .min_width(0.0)
+            .apply_if(!shown.get(), |s| s.hide())
+    })
 }
 
 fn churn_labels(
@@ -1730,5 +1795,45 @@ mod tests {
         ] {
             assert!(!state_word(s).is_empty(), "{s:?}");
         }
+    }
+
+    #[test]
+    fn push_is_offered_for_ones_own_pull_request_ahead_and_not_behind() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        app.viewer.set(Some(("u".into(), String::new())));
+        let state = ReviewState::new();
+        let with = |ahead: u32, behind: u32, author: &str| {
+            let mut item = Item::new("slatedb/slatedb", "2026-09-20T09:00:00Z".parse().unwrap());
+            let mut pr = pull_request(7);
+            pr.author_login = author.into();
+            item.subject = Some(ItemSubject::PullRequest(pr));
+            item.checkout = Some(perch_github::ItemCheckout {
+                branch: "feature".into(),
+                base_ref: "main".into(),
+                head_sha: "w".into(),
+                path: "/tmp/perch-push-test".into(),
+                owned: false,
+                on_disk: true,
+                churn: None,
+                last_seen_head: None,
+                divergence: Some(perch_github::Divergence {
+                    head: "w".into(),
+                    pr_head: "h".into(),
+                    ahead,
+                    behind,
+                }),
+                source: None,
+            });
+            state.item.set(Some(Arc::new(item)));
+        };
+        with(2, 0, "u");
+        assert!(can_push(app, state));
+        with(2, 1, "u");
+        assert!(!can_push(app, state), "a push there would need force");
+        with(0, 1, "u");
+        assert!(!can_push(app, state));
+        with(2, 0, "someone");
+        assert!(!can_push(app, state), "not the reader's pull request");
     }
 }
