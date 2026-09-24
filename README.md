@@ -57,6 +57,46 @@ mirror Done or Restore actions performed on github.com.
 These actions affect only the notification or its local reminder. They do not
 archive or delete a Perch item, worktree, or local conversation.
 
+### Local work in the inbox
+
+Notifications also has a row for an item when something happened there while
+you were looking elsewhere:
+
+- an agent run on it ended: finished, failed or cut off, but not one you
+  stopped or cancelled, or one that quitting Perch ended;
+- a worktree review ended, once however many reviewers it had;
+- the head of one of your worktrees moved, as when a Claude Code or Codex
+  session in it commits, or a worktree turned up that already had commits.
+  Perch sees agents it didn't start only through their commits, and a commit
+  you make yourself counts too. The first scan of a repository, after an
+  upgrade or when it is added, finds where things are without calling any of
+  it news.
+
+Nothing is recorded for the item open in the main pane while Perch's window is
+in front: you watched it happen. Each event replaces the item's last one, and
+the row's byline says what it was: `Claude · Work · 3 files`, `Codex · Ask`,
+`Review · 2 findings`, `2 new commits`, in the failure colour when a run
+failed.
+
+An item has one row. When GitHub has a thread about the item's pull request,
+that thread's row carries the local activity too: it is unread while either
+side is, and its age is the later. Otherwise the item has a row of its own,
+with its glyph, its title and its branch. GitHub's rows keep GitHub's order,
+and the rest fit in by time. Activity arriving while the list is up waits
+behind the pill, as a poll does. The reason filter's **agent** picks the rows
+with local activity.
+
+These rows are read and put away as a notification is. Opening the item, from
+any row, reads it. **Mark Unread** puts the reminder back. **Done** hides it
+until something newer happens, and on a shared row marks the thread done on
+GitHub as well. None of them archives the item or touches its worktree.
+
+Opening a row whose local side is newer lands where it happened, for that open
+only: Code on **What the run changed** after a Work run that changed files, or
+on **Since you last looked** after a head moved; the run, in the Agents row on
+Conversation, after any other run; Conversation after a review. The scope
+menu's last pick is left as it was.
+
 Perch does not crawl a repository's open items or history. A pull request or
 issue is fetched when a notification is opened or when the user opens it by
 repository and number. Its current data and discussion may be cached locally;
@@ -227,6 +267,9 @@ roots = ["~/Code/slatedb"]
 
 `name` is only the sidebar label. `roots` lets Perch discover existing local
 branches and worktrees. Neither setting causes a repository-wide GitHub crawl.
+A branch with no pull request is yours, so it is in **Authored**, whether Perch
+made it or found it under a root; the base branch never becomes a row. Once
+someone else's pull request attaches to it, the row goes by that author.
 A repository with roots and no GitHub remote is `local/<name>`: it has no pull
 requests or issues, and everything else works.
 
@@ -318,6 +361,13 @@ A worktree made for work can hold the only copy of it.
   the commit on disk is one the pull request had. A commit you made there
   and have not pushed keeps the worktree where it is, reported stale, as
   uncommitted changes do.
+- A worktree of your own is never moved to its pull request's head. When the
+  two are at different commits, the Branch row and the item's bylines say
+  how: `3 unpushed`, `2 behind PR`, both, or `PR head not fetched` when the
+  pull request's head isn't in the repository. Perch counts this in the
+  worktree's own repository at each scan and open and fetches nothing to do
+  it. **Submit review** and **Merge** are unavailable while the heads differ,
+  since what is on screen isn't what GitHub would review or merge.
 
 ## Agents
 
