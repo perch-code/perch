@@ -689,12 +689,14 @@ pub struct Draft {
 /// can be shown still while it goes; the token the answer names, so an
 /// answer to an older send is not taken for this one's; and which
 /// opening of the composer sent it, so the answer settles that composer
-/// and not one opened since.
+/// and not one opened since. `closing` when the text goes with a close
+/// of the pull request, or is empty and the close goes alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Posting {
     pub token: u64,
     pub opening: u64,
     pub body: String,
+    pub closing: bool,
 }
 
 /// Where a composer opens on, by the rules of the follow-up. Editing a
@@ -1459,6 +1461,10 @@ pub struct ReviewState {
     /// The composer's Comment was clicked once and the footer is asking
     /// whether to post to the pull request; the next Enter or Post does.
     pub composer_confirming: RwSignal<bool>,
+    /// What the confirm up is for, when `composer_confirming`: closing
+    /// the pull request, with the text as a comment when there is any,
+    /// rather than only posting the text. Read under the confirm only.
+    pub composer_closing: RwSignal<bool>,
     /// An issue comment in flight, with the token its answer carries. The
     /// composer stays open and still until the answer comes.
     pub posting: RwSignal<Option<Posting>>,
@@ -1697,6 +1703,7 @@ impl ReviewState {
             composer_height: RwSignal::new(None),
             composer_resizing: RwSignal::new(false),
             composer_confirming: RwSignal::new(false),
+            composer_closing: RwSignal::new(false),
             posting: RwSignal::new(None),
             composer_error: RwSignal::new(None),
             lsp_status: RwSignal::new(perch_lsp::Status::Absent),
@@ -3774,6 +3781,17 @@ impl ReviewState {
     /// conversation as an issue comment. That composer stays open and
     /// still until `settle_issue_comment` says how it went.
     pub fn start_posting(&self, token: u64, body: String) {
+        self.start_sending(token, body, false);
+    }
+
+    /// The pull request is being closed from the open composer, with
+    /// its text as a comment first when there is any. The composer is
+    /// still until `settle_issue_comment`, as for a comment.
+    pub fn start_closing(&self, token: u64, body: String) {
+        self.start_sending(token, body, true);
+    }
+
+    fn start_sending(&self, token: u64, body: String, closing: bool) {
         let opening = self
             .composer
             .with_untracked(|c| c.as_ref().map(|c| c.opening))
@@ -3784,6 +3802,7 @@ impl ReviewState {
             token,
             opening,
             body,
+            closing,
         }));
     }
 

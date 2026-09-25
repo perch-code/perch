@@ -525,6 +525,14 @@ pub enum Command {
         token: u64,
         body: String,
     },
+    /// Close the item's pull request without merging it, posting `body`
+    /// as an issue comment first when it says anything. `token` is the
+    /// same kind as `PostIssueComment`'s.
+    ClosePullRequest {
+        item_id: String,
+        token: u64,
+        body: String,
+    },
 }
 
 /// How the reader answered a request.
@@ -1075,6 +1083,14 @@ pub enum Event {
         item_id: String,
         token: u64,
         result: Result<Arc<perch_github::IssueComment>, String>,
+    },
+    /// The pull request was closed, or why nothing happened. A comment
+    /// that posted before a close GitHub refused is not a refusal: the
+    /// text is spent, and the notice says the close did not go.
+    PullRequestClosed {
+        item_id: String,
+        token: u64,
+        result: Result<(), String>,
     },
     /// The commits over the base and whether the checkout has work in it,
     /// for the scope menu, and the head as it was at the previous open,
@@ -2728,9 +2744,22 @@ impl Backend {
     /// comes back on `IssueCommentPosted`, so an answer to an older send
     /// can be told from this one's.
     pub fn post_issue_comment(&self, item_id: &str, body: &str) -> u64 {
-        static TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let token = TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let token = next_posting_token();
         let _ = self.commands.send(Command::PostIssueComment {
+            item_id: item_id.to_string(),
+            token,
+            body: body.to_string(),
+        });
+        token
+    }
+
+    /// Close the item's pull request, with `body` as a comment first
+    /// when it is not blank. The token comes back on `PullRequestClosed`
+    /// and is drawn with `post_issue_comment`'s, so the composer can
+    /// tell either answer from an older send's.
+    pub fn close_pull_request(&self, item_id: &str, body: &str) -> u64 {
+        let token = next_posting_token();
+        let _ = self.commands.send(Command::ClosePullRequest {
             item_id: item_id.to_string(),
             token,
             body: body.to_string(),
@@ -3869,6 +3898,16 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     post_issue_comment(&ctx, &item_id, token, &body).await;
+                });
+            }
+            Command::ClosePullRequest {
+                item_id,
+                token,
+                body,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    close_pull_request(&ctx, &item_id, token, &body).await;
                 });
             }
             Command::OpenFile {
@@ -8158,6 +8197,14 @@ fn resolved_in(thread: &CommentThread, finding: bool, verb: &str) -> Result<Reso
     Ok(ResolvedIn::Perch)
 }
 
+/// The next token for an issue comment or a close sent from the
+/// composer. One counter for both, as either answer settles the same
+/// send in flight.
+fn next_posting_token() -> u64 {
+    static TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Post an issue comment on the item's pull request and put what GitHub
 /// answered with in the kept discussion, so the conversation shows it
 /// the way it shows anyone else's. The comment goes on the cached
@@ -8195,15 +8242,94 @@ async fn post_issue_comment(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
             return;
         }
     };
+    show_posted_comment(ctx, item_id, &pull_request, &comment).await;
+    answer(Ok(Arc::new(comment)));
+}
+
+/// Put a comment GitHub just took in the kept discussion, or fetch the
+/// discussion whole with it when none was kept.
+async fn show_posted_comment(
+    ctx: &Ctx,
+    item_id: &str,
+    pull_request: &PullRequest,
+    comment: &perch_github::IssueComment,
+) {
     let appended = ctx
         .discussion_requests
-        .fence_with(item_id, || append_cached_issue_comment(ctx, item_id, &comment))
+        .fence_with(item_id, || append_cached_issue_comment(ctx, item_id, comment))
         .unwrap_or(false);
     if !appended {
         let discussion_generation = ctx.discussion_requests.begin(item_id);
+        fetch_discussion(ctx, item_id, pull_request, discussion_generation).await;
+    }
+}
+
+/// Close the item's pull request, saying `body` in its conversation
+/// first when there is anything to say, as GitHub's Close with comment
+/// does. The answer is a refusal only while nothing has happened on
+/// GitHub; once the comment is up the composer's text is spent, and a
+/// close refused after it is told as a notice. Closed, the pull request
+/// GitHub answered with replaces the kept one and the discussion is
+/// fetched again for the close in its timeline.
+async fn close_pull_request(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
+    let answer = |result: Result<(), String>| {
+        if let Err(message) = &result {
+            tracing::info!(item = item_id, %message, "pull request not closed");
+        }
+        let _ = ctx.events.send(Event::PullRequestClosed {
+            item_id: item_id.to_string(),
+            token,
+            result,
+        });
+    };
+    let pull_request = ctx.item(item_id).and_then(|item| item.pull_request().cloned());
+    let Some(pull_request) = pull_request else {
+        answer(Err("Only a pull request can be closed from here".into()));
+        return;
+    };
+    if !pull_request.is_open() || pull_request.merged {
+        answer(Err("This pull request is no longer open".into()));
+        return;
+    }
+    let Some(github) = ctx.github() else {
+        answer(Err("GitHub is unavailable while Perch is offline".into()));
+        return;
+    };
+    let repo_full_name = pull_request.repo_full_name.clone();
+    let number = pull_request.number;
+
+    let body = body.trim();
+    let commented = !body.is_empty();
+    if commented {
+        match github.create_issue_comment(&repo_full_name, number, body).await {
+            Ok(comment) => show_posted_comment(ctx, item_id, &pull_request, &comment).await,
+            Err(error) => {
+                answer(Err(format!("GitHub could not post the comment: {error}")));
+                return;
+            }
+        }
+    }
+
+    let closed = match github.close_pull_request(&repo_full_name, number).await {
+        Ok(closed) => closed,
+        Err(error) => {
+            let message = format!("GitHub could not close the pull request: {error}");
+            if commented {
+                ctx.notice(format!("Posted the comment, but {message}"));
+                answer(Ok(()));
+            } else {
+                answer(Err(message));
+            }
+            return;
+        }
+    };
+    let installed = install_pull_request_snapshot(ctx, item_id, closed, None);
+    ctx.notice(format!("Closed {repo_full_name}#{number}"));
+    answer(Ok(()));
+    if let Some((_, pull_request)) = installed {
+        let discussion_generation = ctx.discussion_requests.begin(item_id);
         fetch_discussion(ctx, item_id, &pull_request, discussion_generation).await;
     }
-    answer(Ok(Arc::new(comment)));
 }
 
 /// Put a comment GitHub just made at the end of the kept discussion's
@@ -17350,6 +17476,103 @@ read eof || true
         assert_eq!(kept.comments.len(), 2);
         assert_eq!(kept.comments[1].body, "Looks good");
         assert!(!ctx.discussion_requests.is_current(&item.id, older_read));
+    }
+
+    /// What GitHub answers a close of `a/b#7` with.
+    fn closed_pull_json() -> String {
+        serde_json::json!({
+            "number": 7,
+            "state": "closed",
+            "merged": false,
+            "updated_at": "2026-09-25T10:00:00Z",
+            "closed_at": "2026-09-25T10:00:00Z",
+            "head": { "sha": "h7", "ref": "branch-7", "repo": { "full_name": "a/b" } },
+            "base": { "sha": "m", "ref": "main", "repo": { "full_name": "a/b" } },
+        })
+        .to_string()
+    }
+
+    /// Close with comment posts the comment, then closes, and the closed
+    /// pull request replaces the kept one before the answer goes.
+    #[tokio::test]
+    async fn close_with_comment_posts_then_closes_and_keeps_the_closed_pull() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_method(move |method, path, _| match (method, path) {
+            ("POST", "/repos/a/b/issues/7/comments") => {
+                ("201 Created", issue_comment_json(911, "Superseded"))
+            }
+            ("PATCH", "/repos/a/b/pulls/7") => ("200 OK", closed_pull_json()),
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_commented_discussion(&ctx, &item);
+        open_in_slot(&ctx, &item);
+
+        close_pull_request(&ctx, &item.id, 9, "  Superseded  ").await;
+
+        let paths = paths.lock().unwrap().clone();
+        assert_eq!(&paths[..2], ["/repos/a/b/issues/7/comments", "/repos/a/b/pulls/7"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        let updated = events.iter().position(|e| {
+            matches!(e, Event::PullRequestUpdated { pull_request, .. } if !pull_request.is_open())
+        });
+        let answered = events.iter().position(|e| {
+            matches!(e, Event::PullRequestClosed { token: 9, result: Ok(()), .. })
+        });
+        assert!(updated.is_some() && answered.is_some(), "{events:?}");
+        assert!(updated < answered, "the closed pull request is in before the answer");
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Event::Notice(m) if m == "Closed a/b#7")));
+        let kept = ctx.item(&item.id).unwrap();
+        assert_eq!(kept.pull_request().unwrap().state, "closed");
+    }
+
+    /// A close GitHub refuses after the comment posted is not the
+    /// composer's to retry, since the comment is up: it is answered as
+    /// done and told as a notice. Refused with nothing said, it is the
+    /// composer's refusal.
+    #[tokio::test]
+    async fn a_refused_close_is_a_notice_after_a_comment_and_a_refusal_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _) = serve_by_method(move |method, path, _| match (method, path) {
+            ("POST", "/repos/a/b/issues/7/comments") => {
+                ("201 Created", issue_comment_json(912, "Closing"))
+            }
+            ("PATCH", "/repos/a/b/pulls/7") => (
+                "403 Forbidden",
+                r#"{"message":"Resource not accessible by personal access token"}"#.to_string(),
+            ),
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_commented_discussion(&ctx, &item);
+        open_in_slot(&ctx, &item);
+
+        close_pull_request(&ctx, &item.id, 10, "Closing").await;
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::Notice(m) if m.starts_with("Posted the comment, but") && m.contains("not accessible")
+        )), "{events:?}");
+        assert!(matches!(
+            events.last(),
+            Some(Event::PullRequestClosed { token: 10, result: Ok(()), .. })
+        ));
+
+        close_pull_request(&ctx, &item.id, 11, "   ").await;
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [Event::PullRequestClosed { token: 11, result: Err(message), .. }]
+                    if message.contains("could not close")
+            ),
+            "{events:?}"
+        );
+        assert!(ctx.item(&item.id).unwrap().pull_request().unwrap().is_open());
     }
 
     #[tokio::test]

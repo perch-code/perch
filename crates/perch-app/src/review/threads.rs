@@ -315,7 +315,10 @@ pub fn composer_view(
                 return;
             }
             let question = read_text();
-            if question.trim().is_empty() {
+            // A close needs nothing said; everything else does.
+            let closing = state.composer_confirming.get_untracked()
+                && state.composer_closing.get_untracked();
+            if question.trim().is_empty() && !closing {
                 return;
             }
             let Some(composer) = state.composer.get() else {
@@ -326,12 +329,20 @@ pub fn composer_view(
             };
             // An issue comment posts at once, so it is asked about first:
             // the footer names the pull request, and the next send goes.
+            // A close was asked about when its button was clicked.
             if composer.destination.is_github() && state.posts_issue_comment(&composer) {
                 if !state.composer_confirming.get_untracked() {
+                    state.composer_closing.set(false);
                     state.composer_confirming.set(true);
                     return;
                 }
                 let body = question.trim().to_string();
+                if closing {
+                    let token = backend.close_pull_request(&item_id, &body);
+                    state.last_destination[face.index()].set(Some(composer.destination.clone()));
+                    state.start_closing(token, body);
+                    return;
+                }
                 let token = backend.post_issue_comment(&item_id, &body);
                 state.last_destination[face.index()].set(Some(composer.destination.clone()));
                 state.start_posting(token, body);
@@ -405,7 +416,10 @@ pub fn composer_view(
                 if state.composer_error.with_untracked(Option::is_some) {
                     state.composer_error.set(None);
                 }
-                if empty && state.composer_confirming.get_untracked() {
+                if empty
+                    && state.composer_confirming.get_untracked()
+                    && !state.composer_closing.get_untracked()
+                {
                     state.composer_confirming.set(false);
                 }
             }
@@ -757,8 +771,9 @@ enum FooterMode {
 
 /// The line under the box: the destination, the effort and Send. When
 /// Comment was clicked once, the same line asks `Post to
-/// github.com/owner/repo/pull/12?` with Post and Cancel; while this
-/// composer's comment goes, it says so and offers nothing.
+/// github.com/owner/repo/pull/12?` with Post and Cancel, and after Close
+/// with comment it asks whether to close; while this composer's comment
+/// or close goes, it says so and offers nothing.
 fn composer_footer(
     app: AppState,
     state: ReviewState,
@@ -794,6 +809,7 @@ fn composer_footer(
                 },
             ),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
+            close_button(app, state),
             send_button(move || send_label(state), send.clone()).debug_name("composer-send"),
         ))
         .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
@@ -807,7 +823,13 @@ fn composer_footer(
                         })
                         .unwrap_or_else(|| "GitHub".to_string())
                 });
-                format!("Post to {target}?")
+                if !state.composer_closing.get() {
+                    format!("Post to {target}?")
+                } else if state.composer_draft.with(|d| d.trim().is_empty()) {
+                    format!("Close {target}?")
+                } else {
+                    format!("Comment on and close {target}?")
+                }
             })
             .style(|s| {
                 s.font_size(theme::TEXT_META)
@@ -823,12 +845,28 @@ fn composer_footer(
                 state.composer_confirming.set(false)
             })
             .debug_name("composer-cancel-post"),
-            send_button(|| "Post".to_string(), send.clone()).debug_name("composer-post"),
+            send_button(
+                move || {
+                    if state.composer_closing.get() {
+                        "Close".to_string()
+                    } else {
+                        "Post".to_string()
+                    }
+                },
+                send.clone(),
+            )
+            .debug_name("composer-post"),
         ))
         .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
         .into_any(),
         FooterMode::Posting => Stack::horizontal((
-            Label::derived(|| "Posting\u{2026}".to_string())
+            Label::derived(move || {
+                if state.posting.with(|p| p.as_ref().is_some_and(|p| p.closing)) {
+                    "Closing\u{2026}".to_string()
+                } else {
+                    "Posting\u{2026}".to_string()
+                }
+            })
                 .style(|s| {
                     s.font_size(theme::TEXT_META)
                         .color(theme::FG_MUTED)
@@ -840,6 +878,73 @@ fn composer_footer(
         .style(|s| s.items_center().width_full().height(30.0).margin_top(8.0))
         .into_any(),
     })
+}
+
+/// Close with comment, beside Comment, as GitHub has it: on an open pull
+/// request the reader may close, while the text is bound for its
+/// conversation. It reads Close pull request while the box is empty.
+/// A click asks first, on the footer's line, as Comment does.
+fn close_button(app: AppState, state: ReviewState) -> impl IntoView {
+    let offered = Memo::new(move |_| close_offered(app, state));
+    Container::new(
+        text_button(
+            move || {
+                if state.composer_draft.with(|d| d.trim().is_empty()) {
+                    "Close pull request".to_string()
+                } else {
+                    "Close with comment".to_string()
+                }
+            },
+            SidebarIcon::Close,
+            move || {
+                if state.posting.with_untracked(Option::is_some) {
+                    return;
+                }
+                state.composer_closing.set(true);
+                state.composer_confirming.set(true);
+            },
+        )
+        .debug_name("pull-request-close"),
+    )
+    .style(move |s| s.apply_if(!offered.get(), |s| s.hide()))
+}
+
+/// Whether the open composer offers to close the pull request: its text
+/// goes to the conversation as an issue comment, the pull request is
+/// open and GitHub is reachable, and the reader wrote it or may write to
+/// its repository. Tracked.
+fn close_offered(app: AppState, state: ReviewState) -> bool {
+    use perch_github::RepositoryPermission;
+
+    let to_conversation = state.composer.with(|c| {
+        c.as_ref()
+            .is_some_and(|c| c.destination.is_github() && state.posts_issue_comment(c))
+    });
+    if !to_conversation || state.offline.get() {
+        return false;
+    }
+    let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let (open, author) = state.pull_request.with(|pull| match pull {
+        Some(pull) => (
+            pull.is_open() && !pull.merged,
+            viewer.as_deref() == Some(pull.author_login.as_str()),
+        ),
+        None => (false, false),
+    });
+    let may_write = state.pull_request_overview.with(|overview| {
+        overview.as_ref().is_some_and(|overview| {
+            matches!(
+                overview.viewer_permission,
+                Some(
+                    RepositoryPermission::Admin
+                        | RepositoryPermission::Maintain
+                        | RepositoryPermission::Write
+                        | RepositoryPermission::Triage
+                )
+            )
+        })
+    });
+    open && (author || may_write)
 }
 
 /// What the send does, on its button: `Send` to an agent, `Add to
@@ -5395,6 +5500,91 @@ mod tests {
             state.composer.get().unwrap().destination,
             Destination::agent(sonnet_medium())
         );
+    }
+
+    /// Close with comment sits beside Comment for the pull request's
+    /// author, asks first, and sends the text with the close; while it
+    /// goes the footer says Closing. Emptied, the box offers the close
+    /// alone. It is not offered to a reader who may not close the pull
+    /// request, nor on one already closed.
+    #[test]
+    fn close_with_comment_asks_then_closes_with_the_text() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        app.viewer.set(Some(("octocat".into(), String::new())));
+        let state = state_with_pull_request();
+        state.open_composer(None, None, "Superseded by #43".into(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "pull-request-close"));
+        assert!(find(harness.root_id(), "Label: \"Close with comment\"").is_some());
+
+        click(&mut harness, "pull-request-close");
+        assert!(commands.try_recv().is_err(), "nothing closed before the yes");
+        assert!(state.composer_confirming.get());
+        assert!(find(harness.root_id(), "Comment on and close github.com/acme/repo/pull/42?").is_some());
+
+        click(&mut harness, "composer-post");
+        let token = match commands.try_recv() {
+            Ok(Command::ClosePullRequest { item_id, token, body }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(body, "Superseded by #43");
+                token
+            }
+            other => panic!("Close did not close: {other:?}"),
+        };
+        let posting = state.posting.get().expect("the close is in flight");
+        assert!(posting.closing);
+        assert_eq!(posting.token, token);
+        assert!(find(harness.root_id(), "Closing").is_some());
+
+        state.settle_issue_comment(token, Ok(()));
+        assert!(state.composer.get().is_none(), "closed, the composer goes");
+
+        // Someone else's pull request, with read access only: no close.
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        assert!(close_offered(app, state));
+        app.viewer.set(Some(("reader".into(), String::new())));
+        assert!(!close_offered(app, state));
+        // Nor on a pull request that is closed already.
+        app.viewer.set(Some(("octocat".into(), String::new())));
+        let mut closed = pull();
+        closed.state = "closed".into();
+        state.pull_request.set(Some(Arc::new(closed)));
+        assert!(!close_offered(app, state));
+    }
+
+    /// With nothing typed the button reads Close pull request, and the
+    /// yes closes with no comment.
+    #[test]
+    fn an_empty_box_closes_the_pull_request_alone() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        app.viewer.set(Some(("octocat".into(), String::new())));
+        let state = state_with_pull_request();
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Label: \"Close pull request\"").is_some());
+
+        click(&mut harness, "pull-request-close");
+        assert!(find(harness.root_id(), "Close github.com/acme/repo/pull/42?").is_some());
+        click(&mut harness, "composer-post");
+        match commands.try_recv() {
+            Ok(Command::ClosePullRequest { body, .. }) => assert_eq!(body, ""),
+            other => panic!("Close did not close: {other:?}"),
+        }
     }
 
     /// Cancel under the ask gives the footer back, and picking a

@@ -199,7 +199,10 @@ last, is kept out of the review: the rest posts, and it stays a draft, named
 by its lines on the form.
 
 At the foot of Conversation, a message to GitHub is an issue comment and
-posts at once, after one confirmation naming the pull request.
+posts at once, after one confirmation naming the pull request. Beside
+**Comment**, **Close with comment** posts it and closes the pull request, or
+reads **Close pull request** while the box is empty. It is there on an open
+pull request you opened or can write to, and asks once too.
 
 GitHub's review threads are drawn beside Perch's own with the same cards, in
 both Code and Conversation, so one thread can hold a reviewer's comment, your

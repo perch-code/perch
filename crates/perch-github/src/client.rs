@@ -408,6 +408,35 @@ impl GitHub {
         serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))
     }
 
+    /// Close a pull request without merging it: `PATCH /pulls/{number}`
+    /// with `state: closed`, which answers with the pull request as it
+    /// now stands.
+    pub async fn close_pull_request(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<PullRequest, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+
+        #[derive(serde::Serialize)]
+        struct Request {
+            state: &'static str,
+        }
+
+        let path = format!("/repos/{owner}/{name}/pulls/{number}");
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._patch(&path, Some(&Request { state: "closed" }))
+            .await
+            .map_err(map_octocrab_error)?;
+        let body = self.finish_response(response, &[StatusCode::OK]).await?;
+        let payload: PullPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(payload.into_pull_request(repo_full_name))
+    }
+
     /// Submit a final review of exactly the pull-request head the reader saw,
     /// with `comments` opening threads on its lines.
     ///

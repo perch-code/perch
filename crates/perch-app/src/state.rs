@@ -1829,6 +1829,17 @@ impl AppState {
                     review.settle_issue_comment(token, result.map(|_| ()));
                 }
             }
+            // The closed pull request came in a `PullRequestUpdated`
+            // before this.
+            Event::PullRequestClosed {
+                item_id,
+                token,
+                result,
+            } => {
+                if review.is_item(&item_id) {
+                    review.settle_issue_comment(token, result);
+                }
+            }
             Event::CommitsReady {
                 navigation_id,
                 scope_gen,
@@ -2190,6 +2201,7 @@ impl AppState {
             | Event::PullRequestReviewSubmitted { .. }
             | Event::PullRequestReviewFailed { .. }
             | Event::IssueCommentPosted { .. }
+            | Event::PullRequestClosed { .. }
             | Event::CommitsReady { .. }
             | Event::ScopeReady { .. }
             | Event::ViewedReady { .. }

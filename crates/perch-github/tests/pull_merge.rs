@@ -455,3 +455,26 @@ async fn graphql_errors_are_not_mistaken_for_empty_overviews() {
         Err(Error::Graphql(message)) if message.contains("Resource not accessible")
     ));
 }
+
+#[tokio::test]
+async fn closing_patches_the_pull_request_closed_and_reads_back_its_state() {
+    let (base, requests) = spawn(vec![Response::new(
+        "200 OK",
+        r#"{"number":42,"state":"closed","merged":false,"closed_at":"2026-09-25T10:00:00Z",
+            "head":{"sha":"abc123","ref":"feature","repo":{"full_name":"a/b"}},
+            "base":{"sha":"base","ref":"main","repo":{"full_name":"a/b"}}}"#,
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let closed = github.close_pull_request("a/b", 42).await.unwrap();
+    assert_eq!(closed.state, "closed");
+    assert!(!closed.is_open());
+    assert!(!closed.merged);
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "PATCH");
+    assert_eq!(requests[0].path, "/repos/a/b/pulls/42");
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(body, serde_json::json!({ "state": "closed" }));
+}
