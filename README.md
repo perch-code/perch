@@ -653,11 +653,12 @@ worktree's git directories become writable, apart from each one's `config`,
 directories under `worktrees/` (and the `commondir` and `config.worktree` of
 any added while the run goes), and its submodules' under `modules/`. The run is
 told it may commit but not push.
-With or without the grant, a Claude Code Work run can't write a `.git` below
-the top of its worktree: git would take a directory holding one for a
-submodule and, the next time it runs there outside the sandbox, use a config
-the run wrote. A run that needs a repository of its own makes it in the
-temporary directory.
+With or without the grant, a Work run, Claude Code's or Codex's, can't write a
+`.git` below the top of its worktree: git would take a directory holding one
+for a submodule and, the next time it runs there outside the sandbox, use a
+config the run wrote. Codex can't read one there either, since its profile
+only denies a pattern outright. A run that needs a repository of its own makes
+it in the temporary directory.
 `[repo.work] trust = true` loads the repository's own agent configuration for
 Work runs: Claude Code reads its project and local settings and its
 `.mcp.json`, and Codex treats the worktree as trusted, so its `.codex/` loads.

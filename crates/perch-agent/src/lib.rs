@@ -405,6 +405,13 @@ pub const CODEX_WORK_PROFILE: &str = "perch_work";
 /// named here outranks the workspace it is in. The profile names no
 /// network, and a profile without one has none: a command that needs it
 /// asks.
+///
+/// A `.git` below the worktree's top is denied (see [`nested_git`]).
+/// Codex takes a glob only as `deny`, which stops reads as well as
+/// writes; its `**/` matches no directory too, so without the `*/` the
+/// glob would hide the top-level `.git` from git itself. The deny holds
+/// against a bare `git init` or `git clone`, which Codex otherwise lets
+/// past the profile the way it does `git commit`.
 pub fn codex_work_entries(cwd: &std::path::Path, grant: &WorkGrant) -> Vec<(String, &'static str)> {
     let real = real_path(cwd);
     let mut entries = vec![
@@ -421,6 +428,7 @@ pub fn codex_work_entries(cwd: &std::path::Path, grant: &WorkGrant) -> Vec<(Stri
     for dir in linked_git_dirs(&real) {
         entries.push((dir.to_string_lossy().into_owned(), "read"));
     }
+    entries.push((nested_git(&real).to_string_lossy().into_owned(), "deny"));
     entries
 }
 
@@ -2220,6 +2228,7 @@ mod tests {
         assert_eq!(filesystem["/opt/cache"], "write");
         assert_eq!(filesystem[format!("{root}/.git")], "read");
         assert_eq!(filesystem[format!("{root}/.claude")], "read");
+        assert_eq!(filesystem[format!("{root}/*/**/.git")], "deny");
         assert!(filesystem.get("network").is_none());
         assert_eq!(config["projects"][root.as_str()]["trust_level"], "untrusted");
 
@@ -2231,6 +2240,35 @@ mod tests {
         let ask = RunSpec { mode: Mode::Ask, ..work(Backend::Codex, WorkGrant::default(), None) }.args();
         assert_eq!(ask[0], "exec", "a question stays on exec");
         assert!(ask.windows(2).any(|w| w == ["-s", "read-only"]));
+    }
+
+    #[test]
+    fn codex_work_denies_a_git_below_the_worktree_s_top_and_reads_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let common = real.join("repo/.git");
+        let own = common.join("worktrees/wt");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("commondir"), "../..\n").unwrap();
+        let worktree = real.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", own.display())).unwrap();
+
+        for grant in [WorkGrant::default(), full_grant()] {
+            let entries = codex_work_entries(&worktree, &grant);
+            let access = |path: &std::path::Path| {
+                entries.iter().find(|(p, _)| *p == path.to_string_lossy()).map(|(_, a)| *a)
+            };
+            assert_eq!(access(&worktree.join("*/**/.git")), Some("deny"), "{entries:?}");
+            assert_eq!(access(&worktree.join(".git")), Some("read"), "{entries:?}");
+            assert_eq!(access(&own), Some("read"), "{entries:?}");
+            assert_eq!(access(&common), Some("read"), "{entries:?}");
+            // Codex's `**/` matches no directory too, and a deny there
+            // would keep git from reading the worktree's own `.git`.
+            let denied: Vec<_> = entries.iter().filter(|(_, a)| *a == "deny").collect();
+            assert_eq!(denied.len(), 1, "{denied:?}");
+            assert!(denied.iter().all(|(p, _)| p.ends_with("/*/**/.git")), "{denied:?}");
+        }
     }
 
     fn server_thread(server: &interactive::CodexServer) -> interactive::CodexThread {
