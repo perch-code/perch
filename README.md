@@ -658,7 +658,11 @@ With or without the grant, a Work run, Claude Code's or Codex's, can't write a
 for a submodule and, the next time it runs there outside the sandbox, use a
 config the run wrote. Codex can't read one there either, since its profile
 only denies a pattern outright. A run that needs a repository of its own makes
-it in the temporary directory.
+it in the temporary directory. Neither sandbox stops a run moving in a
+directory that already holds a `.git`, so Perch's own `git status` and
+`git diff` never look inside a submodule for edits: one shows as changed only
+when its commit does, and one with a `.git` in it keeps its worktree from
+being reset or removed.
 `[repo.work] trust = true` loads the repository's own agent configuration for
 Work runs: Claude Code reads its project and local settings and its
 `.mcp.json`, and Codex treats the worktree as trusted, so its `.codex/` loads.

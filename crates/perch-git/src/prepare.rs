@@ -851,12 +851,27 @@ impl Preparer {
     ///
     /// This is the check that makes it safe for anything to write into a
     /// worktree: nothing here resets or removes one that answers yes.
+    ///
+    /// `status` passes over edits inside a submodule (see
+    /// `guard_submodules` in `cmd.rs`), so a submodule whose directory
+    /// holds a `.git` counts as dirty whatever is in it.
     pub async fn is_dirty(&self, worktree: &Path) -> Result<bool, Error> {
         let status = self
             .git
             .run(Some(worktree), ["status", "--porcelain"], QUERY_TIMEOUT)
             .await?;
-        Ok(!status.trim().is_empty())
+        if !status.trim().is_empty() {
+            return Ok(true);
+        }
+        let staged = self
+            .git
+            .run(Some(worktree), ["ls-files", "--stage", "-z"], QUERY_TIMEOUT)
+            .await?;
+        Ok(staged
+            .split('\0')
+            .filter_map(|entry| entry.strip_prefix("160000 "))
+            .filter_map(|entry| entry.split_once('\t'))
+            .any(|(_, path)| worktree.join(path).join(".git").symlink_metadata().is_ok()))
     }
 
     /// Remove a worktree's directory and git's record of it, keeping the
