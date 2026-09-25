@@ -642,10 +642,15 @@ summary of an item that takes Work runs lists its repository's grants in a
 
 Without the commit grant, a Work run is told to commit only when you ask it
 to, and a Claude Code run then asks to run its `git commit` outside the
-sandbox; **Always let Work commit here** on that request is the grant.
+sandbox; **Always let Work commit here** on that request is the grant. A
+request counts as a commit only when it is plain git: no option before the
+subcommand, such as `-c` or `-C`, and none after it that signs, runs a program
+or sets config, such as `-S`, `--exec` or `--template`. Anything else is asked
+for as its own command, and the grant does not answer it.
 The commit grant also changes the sandbox of later Claude Code Work runs: their
 worktree's git directories become writable, apart from each one's `config`,
-`config.worktree` and `hooks`, and the run is told it may commit but not push.
+`config.worktree`, `commondir` and `hooks`, and the run is told it may commit
+but not push.
 `[repo.work] trust = true` loads the repository's own agent configuration for
 Work runs: Claude Code reads its project and local settings and its
 `.mcp.json`, and Codex treats the worktree as trusted, so its `.codex/` loads.

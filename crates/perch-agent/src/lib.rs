@@ -291,7 +291,10 @@ pub fn linked_git_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
 
 /// Where a commit writes, and what in there must stay read-only, for a
 /// worktree whose repository the reader lets Work commit in: the
-/// worktree's git directories, and each one's config and hooks.
+/// worktree's git directories, and each one's config and hooks, and its
+/// `commondir`, which git follows to the config and hooks it uses: a
+/// rewritten one makes the next `git commit` outside the sandbox run
+/// hooks the run wrote.
 fn commit_paths(worktree: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let dirs = match linked_git_dirs(worktree) {
         dirs if !dirs.is_empty() => dirs,
@@ -299,7 +302,7 @@ fn commit_paths(worktree: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     };
     let guarded = dirs
         .iter()
-        .flat_map(|dir| ["config", "config.worktree", "hooks"].map(|name| dir.join(name)))
+        .flat_map(|dir| ["config", "config.worktree", "commondir", "hooks"].map(|name| dir.join(name)))
         .collect();
     (dirs, guarded)
 }
@@ -2211,7 +2214,7 @@ mod tests {
         let has = |list: &Vec<serde_json::Value>, path: &std::path::Path| list.contains(&serde_json::json!(path.to_string_lossy()));
         assert!(has(allow, &common) && has(allow, &own), "{allow:?}");
         assert!(!has(deny, &common) && !has(deny, &own), "{deny:?}");
-        for guarded in [common.join("config"), common.join("hooks"), own.join("config.worktree")] {
+        for guarded in [common.join("config"), common.join("hooks"), own.join("config.worktree"), own.join("commondir")] {
             assert!(has(deny, &guarded), "{} in {deny:?}", guarded.display());
         }
         assert!(has(deny, &worktree.join(".git")), "the pointer file itself stays read-only");
