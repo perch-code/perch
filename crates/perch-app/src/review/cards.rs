@@ -205,10 +205,11 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
 }
 
 /// The right end of a GitHub byline: whatever the caller puts first, a
-/// Reply on a review comment; Ask about this and the reaction picker
-/// while the card is hovered, and the permalink always. `react` is the
-/// subject's node id; an entry an older build kept without one has no
-/// picker, since GitHub could not be told what it was for.
+/// Reply on a review comment or Quote reply on a card; Ask about this
+/// and the reaction picker while the card is hovered, and the permalink
+/// always. `react` is the subject's node id; an entry an older build kept
+/// without one has no picker, since GitHub could not be told what it was
+/// for.
 pub(crate) fn actions(
     state: ReviewState,
     backend: Rc<Backend>,
@@ -865,6 +866,52 @@ fn ask_about(
     state.open_composer_with(None, anchor, quote, Destination::agent(agent), None);
 }
 
+/// Quote reply at the head of a card's actions: the composer at the foot
+/// of Conversation, bound for GitHub, with the text quoted as GitHub's own
+/// Quote reply quotes it. GitHub keeps no thread under a comment, a review
+/// or the description, so a reply is a new comment at the end, and the
+/// quote says what it answers. A draft already bound for GitHub there
+/// keeps its text, the quote under it. Absent where there is no pull
+/// request to post to, as Reply is.
+fn quote_reply_button(state: ReviewState, hovered: RwSignal<bool>, body: String) -> floem::AnyView {
+    let quote: Rc<dyn Fn()> = Rc::new(move || quote_reply(state, &body));
+    let offered = Memo::new(move |_| state.pull_request.with(Option::is_some));
+    dyn_container(
+        move || offered.get(),
+        move |offered| {
+            if !offered {
+                return Empty::new().into_any();
+            }
+            text_action(hovered, SidebarIcon::Reply, "Quote reply", "quote-reply", quote.clone())
+                .into_any()
+        },
+    )
+    .into_any()
+}
+
+/// Open the foot composer bound for GitHub with `body` quoted, under
+/// whatever the reader had typed there for GitHub.
+fn quote_reply(state: ReviewState, body: &str) {
+    let quote = crate::ask::quote_reply(body);
+    let typed = state
+        .composer
+        .with_untracked(|c| {
+            c.as_ref().is_some_and(|c| {
+                c.thread_id.is_none()
+                    && c.anchor.is_none()
+                    && c.editing.is_none()
+                    && c.destination.is_github()
+            })
+        })
+        .then(|| state.composer_draft.get_untracked())
+        .filter(|d| !d.trim().is_empty());
+    let draft = match typed {
+        Some(typed) => format!("{}\n\n{quote}", typed.trim_end()),
+        None => quote,
+    };
+    state.open_composer_with(None, None, draft, Destination::GitHub, None);
+}
+
 // ---------------------------------------------------------------------
 // GitHub's cards
 // ---------------------------------------------------------------------
@@ -886,6 +933,7 @@ pub fn description_card(
     } else {
         markdown::render_linked(&body, state).into_any()
     };
+    let quote = (!body.trim().is_empty()).then(|| quote_reply_button(state, hovered, body.clone()));
     let react = reactable(&node_id);
     let reactions = reactions_under(state, backend.clone(), &react);
     track_hover(
@@ -898,7 +946,7 @@ pub fn description_card(
                             .color(theme::FG)
                     }),
                     Empty::new().style(|s| s.flex_grow(1.0_f32)),
-                    actions(state, backend, hovered, None, None, react, String::new()),
+                    actions(state, backend, hovered, quote, None, react, String::new()),
                 ))
                 .style(|s| s.items_center().width_full().min_width(0.0)),
             ),
@@ -932,6 +980,7 @@ pub fn comment_card(
         comment.body.clone(),
     );
     let ask: Rc<dyn Fn()> = Rc::new(move || ask_about(app, state, None, &author, &url, &body));
+    let quote = quote_reply_button(state, hovered, comment.body.clone());
     let react = reactable(&comment.node_id);
     let reactions = reactions_under(state, backend.clone(), &react);
     track_hover(
@@ -939,7 +988,7 @@ pub fn comment_card(
             byline_strip(byline(
                 app,
                 who,
-                actions(state, backend, hovered, None, Some(ask), react, comment.html_url.clone()),
+                actions(state, backend, hovered, Some(quote), Some(ask), react, comment.html_url.clone()),
             )),
             Stack::vertical((markdown::render_linked(&comment.body, state), reactions))
                 .style(|s| s.flex_col().width_full())
@@ -983,6 +1032,9 @@ pub fn review_card(
         let (author, url) = (login.clone(), url.clone());
         Rc::new(move || ask_about(app, state, None, &author, &url, &body)) as Rc<dyn Fn()>
     });
+    let quote = summary
+        .clone()
+        .map(|body| quote_reply_button(state, hovered, body));
     // A review with no summary has nothing to react to; GitHub allows it,
     // but there would be nothing to draw the pills under.
     let react = summary.as_ref().and_then(|_| reactable(&review.node_id));
@@ -999,7 +1051,7 @@ pub fn review_card(
 
     track_hover(
         card(
-            byline_strip(byline(app, who, actions(state, backend, hovered, None, ask, react, url))),
+            byline_strip(byline(app, who, actions(state, backend, hovered, quote, ask, react, url))),
             body,
         ),
         hovered,

@@ -1429,6 +1429,42 @@ mod tests {
         );
     }
 
+    /// Quote reply on a comment opens the composer at the foot of the
+    /// column, bound for GitHub, with the comment quoted and room under
+    /// it; Quote reply on the review then quotes it under what the reader
+    /// typed, rather than throwing that away.
+    #[test]
+    fn quote_reply_quotes_a_card_into_the_composer_for_github() {
+        let (mut harness, _, state) = app_harness();
+        let quote = |harness: &mut HeadlessHarness, card: &str| {
+            let card = find(harness.root_id(), card).unwrap();
+            card.scroll_to(None);
+            harness.rebuild();
+            harness.paint();
+            let c = card.get_visual_rect_no_clip().center();
+            harness.pointer_move(c.x, c.y);
+            harness.rebuild();
+            harness.paint();
+            let button = find(card, "quote-reply").expect("the card offers Quote reply");
+            click_on(harness, button);
+        };
+
+        quote(&mut harness, "card:comment");
+        let composer = state.composer.get().expect("the composer opened");
+        assert_eq!((composer.thread_id, composer.anchor), (None, None), "at the foot");
+        assert!(composer.destination.is_github());
+        assert_eq!(state.composer_draft.get(), "> Thanks\n\n");
+        let foot = find(harness.root_id(), "composer").unwrap();
+        assert!(find(foot, "composer-box").is_some(), "the box is open at the foot");
+
+        state.composer_draft.set("> Thanks\n\nYou're welcome.".into());
+        quote(&mut harness, "card:review");
+        assert_eq!(
+            state.composer_draft.get(),
+            "> Thanks\n\nYou're welcome.\n\n> Looks right.\n\n"
+        );
+    }
+
     /// Conversation is the home for local threads that have no inline card:
     /// item-level threads, stale anchors, and anchors in another file.
     #[test]

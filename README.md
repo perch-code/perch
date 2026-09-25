@@ -202,7 +202,10 @@ At the foot of Conversation, a message to GitHub is an issue comment and
 posts at once, after one confirmation naming the pull request. Beside
 **Comment**, **Close with comment** posts it and closes the pull request, or
 reads **Close pull request** while the box is empty. It is there on an open
-pull request you opened or can write to, and asks once too.
+pull request you opened or can write to, and asks once too. GitHub has no
+threads under a comment, a review's summary or the description, so each offers
+**Quote reply** under the pointer, which opens that composer with the text
+quoted as github.com quotes it, below anything already typed there for GitHub.
 
 GitHub's review threads are drawn beside Perch's own with the same cards, in
 both Code and Conversation, so one thread can hold a reviewer's comment, your
