@@ -1283,6 +1283,11 @@ pub struct ReviewState {
     /// Where opening a pull request has got to, while it is under way.
     pub pull_step: RwSignal<Option<crate::backend::OpenStep>>,
     pub pull_error: RwSignal<Option<String>>,
+    /// How tall the reader has dragged the description's box, and whether
+    /// they are dragging it, as `composer_height` and
+    /// `composer_resizing` are for a comment's.
+    pub pull_body_height: RwSignal<Option<f64>>,
+    pub pull_body_resizing: RwSignal<bool>,
     /// A Push to the pull request under way, and what stopped the last.
     pub push_pending: RwSignal<bool>,
     pub push_error: RwSignal<Option<String>>,
@@ -1645,6 +1650,8 @@ impl ReviewState {
             pull_bases: RwSignal::new(None),
             pull_step: RwSignal::new(None),
             pull_error: RwSignal::new(None),
+            pull_body_height: RwSignal::new(None),
+            pull_body_resizing: RwSignal::new(false),
             push_pending: RwSignal::new(false),
             push_error: RwSignal::new(None),
             describing: RwSignal::new(false),

@@ -553,10 +553,10 @@ pub fn composer_view(
             }),
         ))
         .style(|s| s.items_center().width_full().margin_bottom(8.0)),
-        composer_editor_box(state, editor, face == ThreadFace::Inline),
+        resizable_editor_box(Grip::composer(state), editor, face == ThreadFace::Inline),
         composer_error_line(state),
         composer_footer(app, state, send, posting_here),
-        resize_cursor_sheet(state),
+        resize_cursor_sheet(Grip::composer(state)),
     ))
     .debug_name("composer-box")
     .style(move |s| {
@@ -582,28 +582,57 @@ pub fn composer_view(
     })
 }
 
-/// The box the question is typed into, with the grip along the inside
-/// of its bottom edge that drags it taller or shorter.
+/// A box the reader drags taller or shorter by the grip along the
+/// inside of its bottom edge: where the dragged height is kept, and the
+/// heights the box keeps to.
 ///
-/// Until it is dragged the box opens at `COMPOSER_HEIGHT` and grows with
-/// what is typed, as GitHub's does. A drag fixes it at a height of the
-/// reader's, which it keeps whatever is typed into it, and which the
-/// next composer opens at.
-fn composer_editor_box(
-    state: ReviewState,
+/// Until it is dragged the box opens at `opens_at` and grows with what
+/// is typed as far as `grows_to`, as GitHub's does. A drag fixes it at a
+/// height of the reader's, between `shortest` and `tallest`, which it
+/// keeps whatever is typed into it, and which the next such box opens at.
+#[derive(Clone, Copy)]
+pub(crate) struct Grip {
+    pub height: RwSignal<Option<f64>>,
+    /// Whether the box's bottom edge is being dragged, for the sheet
+    /// that keeps the cursor up.
+    pub resizing: RwSignal<bool>,
+    pub opens_at: f64,
+    pub grows_to: f64,
+    pub shortest: f64,
+    pub tallest: f64,
+}
+
+impl Grip {
+    /// The composer's box, five lines tall until dragged.
+    fn composer(state: ReviewState) -> Self {
+        Self {
+            height: state.composer_height,
+            resizing: state.composer_resizing,
+            opens_at: theme::COMPOSER_HEIGHT,
+            grows_to: theme::COMPOSER_GROWN_HEIGHT,
+            shortest: theme::COMPOSER_MIN_HEIGHT,
+            tallest: theme::COMPOSER_MAX_HEIGHT,
+        }
+    }
+}
+
+/// An editor in its box, with the grip along the inside of its bottom
+/// edge that drags it taller or shorter.
+pub(crate) fn resizable_editor_box(
+    grip: Grip,
     editor: impl IntoView + 'static,
     bordered: bool,
 ) -> impl IntoView {
     let boxed = editor_box(
         editor,
-        move || match state.composer_height.get() {
+        move || match grip.height.get() {
             Some(height) => (height, height),
-            None => (theme::COMPOSER_HEIGHT, theme::COMPOSER_GROWN_HEIGHT),
+            None => (grip.opens_at, grip.grows_to),
         },
         bordered,
     );
     let box_id = floem::View::id(&boxed);
-    Stack::vertical((boxed, resize_handle(state, box_id)))
+    Stack::vertical((boxed, resize_handle(grip, box_id)))
         .debug_name("composer editor box")
         .style(|s| s.width_full())
 }
@@ -621,11 +650,11 @@ fn composer_editor_box(
 /// pointer has gone since, measured from the grab rather than from the
 /// last move, so a fast drag cannot drift. A box that has not been
 /// dragged is grabbed at whatever height it has grown to.
-fn resize_handle(state: ReviewState, box_id: floem::ViewId) -> impl IntoView {
+fn resize_handle(grip: Grip, box_id: floem::ViewId) -> impl IntoView {
     use floem::event::DragConfig;
     use floem::style::Position;
 
-    let grab = RwSignal::new(theme::COMPOSER_HEIGHT);
+    let grab = RwSignal::new(grip.opens_at);
     let hovered = RwSignal::new(false);
 
     // The grip is drawn by a child of the band and takes no pointer
@@ -638,7 +667,7 @@ fn resize_handle(state: ReviewState, box_id: floem::ViewId) -> impl IntoView {
                 .height(theme::COMPOSER_GRIP_MARK)
                 .border_radius(theme::COMPOSER_GRIP_MARK / 2.0)
                 .pointer_events_none()
-                .background(match (state.composer_resizing.get(), hovered.get()) {
+                .background(match (grip.resizing.get(), hovered.get()) {
                     (true, _) => theme::ACCENT,
                     (false, true) => theme::FG_SUBTLE,
                     (false, false) => theme::BORDER,
@@ -649,11 +678,10 @@ fn resize_handle(state: ReviewState, box_id: floem::ViewId) -> impl IntoView {
     .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
     .on_event_stop(el::PointerDown, move |cx, e: &PointerButtonEvent| {
         grab.set(
-            state
-                .composer_height
+            grip.height
                 .get_untracked()
                 .or_else(|| box_id.get_size().map(|size| size.height))
-                .unwrap_or(theme::COMPOSER_HEIGHT),
+                .unwrap_or(grip.opens_at),
         );
         if let Some(pointer) = e.pointer.pointer_id {
             if pointer.is_primary_pointer() {
@@ -677,19 +705,18 @@ fn resize_handle(state: ReviewState, box_id: floem::ViewId) -> impl IntoView {
         );
     })
     .on_event_stop(el::DragStart, move |_, _: &floem::event::DragStartEvent| {
-        state.composer_resizing.set(true);
+        grip.resizing.set(true);
     })
     .on_event_stop(el::DragMove, move |_, e: &floem::event::DragMoveEvent| {
         let dy = e.current_state.logical_point().y - e.start_state.logical_point().y;
-        let height = (grab.get_untracked() + dy)
-            .clamp(theme::COMPOSER_MIN_HEIGHT, theme::COMPOSER_MAX_HEIGHT);
-        state.composer_height.set(Some(height));
+        let height = (grab.get_untracked() + dy).clamp(grip.shortest, grip.tallest);
+        grip.height.set(Some(height));
     })
     .on_event_stop(el::DragEnd, move |_, _: &floem::event::DragEndEvent| {
-        state.composer_resizing.set(false);
+        grip.resizing.set(false);
     })
     .on_event_stop(el::DragCancel, move |_, _: &floem::event::DragCancelEvent| {
-        state.composer_resizing.set(false);
+        grip.resizing.set(false);
     })
     .debug_name("composer resize handle")
     .style(|s| {
@@ -713,7 +740,7 @@ fn resize_handle(state: ReviewState, box_id: floem::ViewId) -> impl IntoView {
 /// as far above and below the box as the drag can take the pointer.
 /// Pointer events still go to the grip, which holds capture; the sheet
 /// only takes the hover.
-fn resize_cursor_sheet(state: ReviewState) -> impl IntoView {
+pub(crate) fn resize_cursor_sheet(grip: Grip) -> impl IntoView {
     use floem::style::Position;
 
     Empty::new()
@@ -722,11 +749,11 @@ fn resize_cursor_sheet(state: ReviewState) -> impl IntoView {
             s.position(Position::Absolute)
                 .inset_left(0.0)
                 .inset_right(0.0)
-                .inset_top(-theme::COMPOSER_MAX_HEIGHT)
-                .inset_bottom(-theme::COMPOSER_MAX_HEIGHT)
+                .inset_top(-grip.tallest)
+                .inset_bottom(-grip.tallest)
                 .z_index(100)
                 .cursor(CursorStyle::RowResize)
-                .apply_if(!state.composer_resizing.get(), |s| s.hide())
+                .apply_if(!grip.resizing.get(), |s| s.hide())
         })
 }
 

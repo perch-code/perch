@@ -486,6 +486,12 @@ pub const COMPOSER_GROWN_HEIGHT: f64 = 220.0;
 /// shortest is two lines: the one being typed and the one above it.
 pub const COMPOSER_MIN_HEIGHT: f64 = composer_lines(2.0);
 pub const COMPOSER_MAX_HEIGHT: f64 = 520.0;
+/// How tall a pull request's description box opens: ten lines, about
+/// what GitHub gives one. It grows with what is typed as far as
+/// `PULL_BODY_GROWN_HEIGHT`, and drags as tall as `PULL_BODY_MAX_HEIGHT`.
+pub const PULL_BODY_HEIGHT: f64 = composer_lines(10.0);
+pub const PULL_BODY_GROWN_HEIGHT: f64 = 420.0;
+pub const PULL_BODY_MAX_HEIGHT: f64 = 900.0;
 /// The band along the inside of the box's bottom edge that the drag
 /// happens in, which is the room under the last line, and the grip
 /// drawn in the middle of it.

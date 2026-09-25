@@ -22,9 +22,10 @@ use perch_github::Item;
 use crate::backend::{Backend, OpenStep, PullRequestReadiness};
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
+use crate::review::threads::{resizable_editor_box, resize_cursor_sheet, Grip};
 use crate::state::{AppState, Checked};
 use crate::theme;
-use crate::ui::widgets::{checkbox, clickable, editor_box, lay_out_every_line, sidebar_glyph};
+use crate::ui::widgets::{checkbox, clickable, lay_out_every_line, sidebar_glyph};
 
 /// What the reader has put into one branch's form.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -386,6 +387,7 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
         offer(app, state, item_id.clone()),
         error_line(state),
         controls,
+        resize_cursor_sheet(pull_body_grip(state)),
     ))
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
         if key.code == Code::Escape && key.modifiers.is_empty() && !pending() {
@@ -472,7 +474,20 @@ fn body_editor(
         })
         .debug_name("open-pull-request-body")
         .on_cleanup(move || mentioner.cleanup());
-    editor_box(editor, || (96.0, theme::COMPOSER_GROWN_HEIGHT), true)
+    resizable_editor_box(pull_body_grip(state), editor, true)
+}
+
+/// The description's box, which opens about as tall as GitHub's and
+/// drags taller, as a comment's does.
+fn pull_body_grip(state: ReviewState) -> Grip {
+    Grip {
+        height: state.pull_body_height,
+        resizing: state.pull_body_resizing,
+        opens_at: theme::PULL_BODY_HEIGHT,
+        grows_to: theme::PULL_BODY_GROWN_HEIGHT,
+        shortest: theme::COMPOSER_MIN_HEIGHT,
+        tallest: theme::PULL_BODY_MAX_HEIGHT,
+    }
 }
 
 /// Write with Claude or Codex, whichever was last asked here, and Stop
@@ -1218,5 +1233,37 @@ mod tests {
                 assert!(rect.width() > 20.0, "{name} squeezed at {width}: {rect:?}");
             }
         }
+    }
+
+    /// The description opens about as tall as GitHub's, and its grip
+    /// drags it taller, as a comment's does, and keeps the height.
+    #[test]
+    fn the_description_opens_tall_and_drags_taller() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_on(branch());
+        let view = surface(app, state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 1200.0);
+        state.pull_readiness.set(Some(Ok(readiness(2))));
+        settle(&mut harness);
+        click(&mut harness, "open-pull-request-unfold");
+
+        let text_box = named(harness.root_id(), "open-pull-request-body")
+            .and_then(|body| body.parent())
+            .expect("the description's box");
+        let height = move || text_box.get_size().expect("laid out").height;
+        assert_eq!(height(), theme::PULL_BODY_HEIGHT);
+
+        let grip = find(harness.root_id(), "composer resize handle").expect("the grip");
+        let center = grip.get_visual_rect_no_clip().center();
+        harness.pointer_down(center.x, center.y);
+        harness.pointer_move(center.x, center.y + 150.0);
+        assert!(state.pull_body_resizing.get());
+        harness.pointer_up(center.x, center.y + 150.0);
+        settle(&mut harness);
+        assert!(!state.pull_body_resizing.get());
+        assert_eq!(state.pull_body_height.get(), Some(theme::PULL_BODY_HEIGHT + 150.0));
+        assert_eq!(height(), theme::PULL_BODY_HEIGHT + 150.0);
+        assert_eq!(state.composer_height.get(), None, "a comment's box is its own");
     }
 }
