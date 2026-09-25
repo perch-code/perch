@@ -247,7 +247,7 @@ pub const WORK_PROTECTED: &[&str] = &[".git", ".claude", ".codex", ".mcp.json"];
 
 /// Permission rules scoping the editing tools to the worktree, in Claude
 /// Code's absolute-path form (`//` before the path), with the protected
-/// paths in it denied. `(allowed, denied)`.
+/// paths in it denied, and a `.git` at any depth. `(allowed, denied)`.
 pub fn work_edit_rules(cwd: &std::path::Path) -> (Vec<String>, Vec<String>) {
     let real = real_path(cwd);
     let root = real.to_string_lossy();
@@ -259,15 +259,32 @@ pub fn work_edit_rules(cwd: &std::path::Path) -> (Vec<String>, Vec<String>) {
     let denied = EDIT_TOOLS
         .iter()
         .flat_map(|tool| {
-            WORK_PROTECTED.iter().flat_map(move |name| {
-                [
-                    format!("{tool}(/{root}/{name})"),
-                    format!("{tool}(/{root}/{name}/**)"),
-                ]
-            })
+            WORK_PROTECTED
+                .iter()
+                .flat_map(move |name| {
+                    [
+                        format!("{tool}(/{root}/{name})"),
+                        format!("{tool}(/{root}/{name}/**)"),
+                    ]
+                })
+                .chain([
+                    format!("{tool}(/{root}/**/.git)"),
+                    format!("{tool}(/{root}/**/.git/**)"),
+                ])
         })
         .collect();
     (allowed, denied)
+}
+
+/// A `.git` anywhere below the worktree's top, as a sandbox glob. Git
+/// takes a directory holding one, at a path the index has as a gitlink,
+/// for a submodule, and a `git status` or `git commit` outside the
+/// sandbox then runs git in there under that `.git`'s config, which the
+/// run wrote. The `*/` keeps the pattern off the top-level `.git`, which
+/// the commit grant opens when it is the repository's git directory:
+/// Claude Code's `**/` also matches no directory at all.
+fn nested_git(worktree: &std::path::Path) -> PathBuf {
+    worktree.join("*/**/.git")
 }
 
 /// The git directories a linked worktree uses, which live outside it:
@@ -295,15 +312,36 @@ pub fn linked_git_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
 /// `commondir`, which git follows to the config and hooks it uses: a
 /// rewritten one makes the next `git commit` outside the sandbox run
 /// hooks the run wrote.
+///
+/// The repository's git directory also holds what git uses elsewhere,
+/// which stays read-only too: every other worktree's directory under
+/// `worktrees/`, whose `commondir` and `config.worktree` would steer git
+/// in that worktree, and `modules/`, the submodules' git directories.
+/// A deny outranks an allow, so the run's own directory there can't be
+/// carved out of a denied `worktrees/`; the others are named one by one,
+/// and the globs cover a worktree added while the run is going.
 fn commit_paths(worktree: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let dirs = match linked_git_dirs(worktree) {
         dirs if !dirs.is_empty() => dirs,
         _ => vec![worktree.join(".git")],
     };
-    let guarded = dirs
+    let mut guarded: Vec<PathBuf> = dirs
         .iter()
         .flat_map(|dir| ["config", "config.worktree", "commondir", "hooks"].map(|name| dir.join(name)))
         .collect();
+    let common = dirs.last().expect("one git directory at least");
+    let worktrees = common.join("worktrees");
+    guarded.extend(["commondir", "config.worktree"].map(|name| worktrees.join("*").join(name)));
+    if let Ok(entries) = std::fs::read_dir(&worktrees) {
+        let mut others: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| real_path(&entry.path()))
+            .filter(|dir| !dirs.contains(dir))
+            .collect();
+        others.sort();
+        guarded.extend(others);
+    }
+    guarded.push(common.join("modules"));
     (dirs, guarded)
 }
 
@@ -312,9 +350,10 @@ fn commit_paths(worktree: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
 /// to leave it, or a connection to a host the grant does not list, comes
 /// to Perch as a request rather than being refused. No sandbox means no
 /// run. Writes go to the worktree, the temporary directory and the
-/// grant, never to the protected paths in the worktree nor, unless the
-/// reader lets Work commit, to the git directories it uses; with that,
-/// the git directories are writable but their config and hooks are not.
+/// grant, never to the protected paths in the worktree or a `.git` below
+/// its top nor, unless the reader lets Work commit, to the git
+/// directories it uses; with that, the git directories are writable but
+/// their config and hooks are not (see [`commit_paths`]).
 pub fn claude_work_settings(cwd: &std::path::Path, grant: &WorkGrant) -> String {
     let real = real_path(cwd);
     let mut allow_write = vec![real.clone(), real_path(&std::env::temp_dir())];
@@ -328,6 +367,7 @@ pub fn claude_work_settings(cwd: &std::path::Path, grant: &WorkGrant) -> String 
         .filter(|name| !(grant.commit && git_is_dir && **name == ".git"))
         .map(|name| real.join(name))
         .collect();
+    deny_write.push(nested_git(&real));
     if grant.commit {
         let (dirs, guarded) = commit_paths(&real);
         allow_write.extend(dirs);
@@ -2101,10 +2141,12 @@ mod tests {
                 for tool in ["WebFetch", "WebSearch"] {
                     assert!(denied.contains(&tool.to_string()), "{tool}: {denied:?}");
                 }
-                for name in [".git", ".claude", ".codex", ".mcp.json"] {
+                for name in [".git", ".claude", ".codex", ".mcp.json", "**/.git"] {
                     assert!(denied.contains(&format!("Write(/{root}/{name}/**)")), "{name}: {denied:?}");
                 }
                 let sandbox = &settings_of(&args)["sandbox"];
+                let deny_write = sandbox["filesystem"]["denyWrite"].as_array().unwrap();
+                assert!(deny_write.contains(&serde_json::json!(format!("{root}/*/**/.git"))), "{deny_write:?}");
                 assert_eq!(sandbox["enabled"], true);
                 assert_eq!(sandbox["autoAllowBashIfSandboxed"], true);
                 assert_eq!(sandbox["allowUnsandboxedCommands"], true, "it may ask to leave");
@@ -2201,7 +2243,9 @@ mod tests {
         let real = dir.path().canonicalize().unwrap();
         let common = real.join("repo/.git");
         let own = common.join("worktrees/wt");
+        let other = common.join("worktrees/other");
         std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
         std::fs::write(own.join("commondir"), "../..\n").unwrap();
         let worktree = real.join("wt");
         std::fs::create_dir_all(&worktree).unwrap();
@@ -2218,6 +2262,42 @@ mod tests {
             assert!(has(deny, &guarded), "{} in {deny:?}", guarded.display());
         }
         assert!(has(deny, &worktree.join(".git")), "the pointer file itself stays read-only");
+
+        // What git uses elsewhere: the other worktrees, the ones added
+        // later, the submodules, and a `.git` the run makes below its own.
+        for guarded in [
+            other.clone(),
+            common.join("worktrees/*/commondir"),
+            common.join("worktrees/*/config.worktree"),
+            common.join("modules"),
+            worktree.join("*/**/.git"),
+        ] {
+            assert!(has(deny, &guarded), "{} in {deny:?}", guarded.display());
+        }
+        assert!(!has(deny, &common.join("worktrees")), "denying it would deny the run's own: {deny:?}");
+    }
+
+    #[test]
+    fn the_commit_grant_in_a_main_checkout_keeps_its_git_directory_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().canonicalize().unwrap();
+        let git = worktree.join(".git");
+        let linked = git.join("worktrees/elsewhere");
+        std::fs::create_dir_all(&linked).unwrap();
+
+        let grant = WorkGrant { commit: true, ..WorkGrant::default() };
+        let settings: serde_json::Value = serde_json::from_str(&claude_work_settings(&worktree, &grant)).unwrap();
+        let allow = settings["sandbox"]["filesystem"]["allowWrite"].as_array().unwrap();
+        let deny = settings["sandbox"]["filesystem"]["denyWrite"].as_array().unwrap();
+        let has = |list: &Vec<serde_json::Value>, path: &std::path::Path| list.contains(&serde_json::json!(path.to_string_lossy()));
+        assert!(has(allow, &git) && !has(deny, &git), "{allow:?} {deny:?}");
+        for guarded in [git.join("config"), git.join("hooks"), linked, git.join("modules"), worktree.join("*/**/.git")] {
+            assert!(has(deny, &guarded), "{} in {deny:?}", guarded.display());
+        }
+        assert!(
+            !deny.iter().any(|path| path.as_str().is_some_and(|p| p.ends_with("/**/.git") && !p.ends_with("/*/**/.git"))),
+            "`**/.git` would match the top-level `.git` too: {deny:?}"
+        );
     }
 
     #[test]

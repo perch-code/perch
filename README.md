@@ -649,8 +649,15 @@ or sets config, such as `-S`, `--exec` or `--template`. Anything else is asked
 for as its own command, and the grant does not answer it.
 The commit grant also changes the sandbox of later Claude Code Work runs: their
 worktree's git directories become writable, apart from each one's `config`,
-`config.worktree`, `commondir` and `hooks`, and the run is told it may commit
-but not push.
+`config.worktree`, `commondir` and `hooks`, the repository's other worktrees'
+directories under `worktrees/` (and the `commondir` and `config.worktree` of
+any added while the run goes), and its submodules' under `modules/`. The run is
+told it may commit but not push.
+With or without the grant, a Claude Code Work run can't write a `.git` below
+the top of its worktree: git would take a directory holding one for a
+submodule and, the next time it runs there outside the sandbox, use a config
+the run wrote. A run that needs a repository of its own makes it in the
+temporary directory.
 `[repo.work] trust = true` loads the repository's own agent configuration for
 Work runs: Claude Code reads its project and local settings and its
 `.mcp.json`, and Codex treats the worktree as trusted, so its `.codex/` loads.
