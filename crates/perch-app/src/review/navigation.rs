@@ -20,6 +20,7 @@ use floem::kurbo::Point;
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
+use floem::ui_events::pointer::PointerButton;
 use floem::views::editor::core::buffer::rope_text::RopeText;
 use floem::views::editor::core::cursor::CursorAffinity;
 use floem::views::editor::Editor;
@@ -74,7 +75,9 @@ pub fn navigable(
             phases: floem::context::Phases::CAPTURE,
         },
         move |cx, e: &PointerButtonEvent| {
-            if !e.pointer.is_primary_pointer() || !command_held(&e.state.modifiers) {
+            // The button, not `is_primary_pointer`: every mouse button is
+            // the primary pointer, and a Cmd-right-click opens the menu.
+            if e.button != Some(PointerButton::Primary) || !command_held(&e.state.modifiers) {
                 return EventPropagation::Continue;
             }
             let window_point = cx.world_transform.inverse() * e.state.logical_point();

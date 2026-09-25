@@ -113,11 +113,16 @@ codegen-units = 4
 # first, drew a stem two thirds as wide as its `l`, with slabs smeared
 # over two grey rows, and so did 91 more of its glyphs (ì, í, ½) and
 # about 50 of SF Pro's (Ě, Ž). vger now bolds the outline itself, the
-# direction taken contour by contour as FreeType does. Last, one that
+# direction taken contour by contour as FreeType does. Then one that
 # reports a Control click on macOS as a secondary click. winit reports
 # the left button with Control held, and floem opens a context menu for
 # the secondary button alone, so a Control click opened no menu on a
-# symbol, an item or a notification, and did whatever a click does. Drop a
+# symbol, an item or a notification, and did whatever a click does. Last,
+# one that keeps the editor from taking a right press for a left one: it
+# asked `is_primary_pointer`, which is true of every mouse button, so a
+# right-click started a drag selection whose release the context menu
+# swallowed, and the selection followed the pointer after the menu
+# closed. It also collapsed the selection a right-click landed in. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
