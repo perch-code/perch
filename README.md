@@ -640,6 +640,9 @@ never writes Claude Code's settings or Codex's rules to remember one. The
 summary of an item that takes Work runs lists its repository's grants in a
 **Work may** row, each with a × that takes it back from the next request on.
 
+Without the commit grant, a Work run is told to commit only when you ask it
+to, and a Claude Code run then asks to run its `git commit` outside the
+sandbox; **Always let Work commit here** on that request is the grant.
 The commit grant also changes the sandbox of later Claude Code Work runs: their
 worktree's git directories become writable, apart from each one's `config`,
 `config.worktree` and `hooks`, and the run is told it may commit but not push.

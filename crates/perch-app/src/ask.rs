@@ -642,8 +642,10 @@ pub fn work_framing(
         "You may commit on this branch; do not push, switch branches, or change git's config or \
 hooks."
     } else {
-        "Do not commit, push, or switch branches: the git directory is read-only to you, and the \
-reader commits."
+        "Commit only when the reader asks you to, and never push, switch branches, or change \
+git's config or hooks. The git directory is read-only in the sandbox, so a commit is something \
+you ask for: run it as a plain `git add ... && git commit -m ...`, with the message in `-m` \
+arguments and no shell substitution, and ask to run it outside the sandbox."
     };
     format!(
         "You are working inside a code review tool, in a git worktree of {repository} \

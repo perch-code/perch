@@ -15661,7 +15661,7 @@ mod tests {
         assert_eq!(runs[0].status, RunStatus::Completed, "{:?}", runs[0].error);
         let args = std::fs::read_to_string(dir.path().join("args-1")).unwrap();
         assert!(args.contains("\"autoAllowBashIfSandboxed\":true"), "{args}");
-        assert!(args.contains("Do not commit, push, or switch branches"), "{args}");
+        assert!(args.contains("Commit only when the reader asks you to"), "{args}");
         assert!(args.contains("on the branch chris/readme, which started from main"), "{args}");
         assert!(args.contains("--permission-mode\nauto\n"), "the automatic reviewer by default: {args}");
         assert!(args.contains("an automatic reviewer decides it"), "{args}");
@@ -15678,7 +15678,7 @@ mod tests {
         ask_it(&branch, Some(thread.id.clone()), RunMode::Work).await;
         let args = std::fs::read_to_string(dir.path().join("args-3")).unwrap();
         assert!(!args.contains("--resume"), "{args}");
-        assert!(args.contains("Do not commit, push, or switch branches"), "{args}");
+        assert!(args.contains("Commit only when the reader asks you to"), "{args}");
         ask_it(&branch, Some(thread.id.clone()), RunMode::Work).await;
         let args = std::fs::read_to_string(dir.path().join("args-4")).unwrap();
         assert!(args.contains("--resume"), "the Work session is resumed: {args}");
