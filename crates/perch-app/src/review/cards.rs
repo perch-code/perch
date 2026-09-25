@@ -1352,12 +1352,19 @@ fn more_row(more: usize) -> impl IntoView {
 /// One line, no card chrome: what was done to the pull request or the
 /// issue. The dot sits where the cards' avatars do, and the text where
 /// their logins do. `author` is who opened the pull request, for the
-/// Opened line, which GitHub's timeline sends without an actor.
+/// Opened line, which GitHub's timeline sends without an actor. `link` is
+/// the pull request's or the issue's number and page, which the Opened
+/// line names after "opened" and opens.
 ///
 /// Everything after the name is the event's own pieces: words, a label
 /// in its colours, a commit in the code face, or a reference to open. The
 /// line ends with when it happened.
-pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> impl IntoView {
+pub fn event_row(
+    app: AppState,
+    event: PullEvent,
+    author: Option<String>,
+    link: Option<(u64, String)>,
+) -> impl IntoView {
     let who = match &event.kind {
         // A commit is signed by a name out of git, which is nobody's
         // profile.
@@ -1375,6 +1382,7 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
     };
     let at = event.at;
     let pieces = event_pieces(&event);
+    let link = link.filter(|_| event.kind == PullEventKind::Opened);
     // Half an avatar puts the dot under the byline avatars; the text then
     // starts where their logins do.
     let dot_left = theme::CARD_AVATAR / 2.0 - theme::EVENT_DOT / 2.0;
@@ -1406,6 +1414,27 @@ pub fn event_row(app: AppState, event: PullEvent, author: Option<String>) -> imp
             |(_, piece)| event_piece(piece),
         )
         .style(|s| s.items_center().gap(4.0).min_width(0.0)),
+        match link {
+            Some((number, url)) => Label::derived(move || format!("#{number}"))
+                .debug_name("opened link")
+                .on_event_stop(el::Click, move |_, _| open_in_browser(&url))
+                // Underlined under the pointer, as a name is.
+                .style(|s| {
+                    clickable(
+                        s.font_size(theme::TEXT_META)
+                            .font_weight(theme::weight_emphasis())
+                            .color(theme::FG)
+                            .margin_left(4.0)
+                            .flex_shrink(0.0_f32)
+                            .padding_top(1.0)
+                            .border_bottom(1.0)
+                            .border_color(Color::TRANSPARENT),
+                    )
+                    .hover(|s| s.border_color(theme::FG_MUTED))
+                })
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
         Label::derived(move || timefmt::relative(at, app.now.get())).style(|s| {
             s.font_size(theme::TEXT_META)
                 .color(theme::FG_MUTED)

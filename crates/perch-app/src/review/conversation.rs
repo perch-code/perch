@@ -308,7 +308,11 @@ fn card_view(
         Card::Comment(comment) => cards::comment_card(app, state, backend, comment).into_any(),
         Card::Review { review } => cards::review_card(app, state, backend, review).into_any(),
         Card::Event(event) => {
-            cards::event_row(app, event, pull.map(|p| p.author_login.clone())).into_any()
+            let link = state.item.with_untracked(|i| {
+                let item = i.as_deref()?;
+                Some((item.subject.as_ref()?.number(), crate::ui::items::github_url(item)?))
+            });
+            cards::event_row(app, event, pull.map(|p| p.author_login.clone()), link).into_any()
         }
         Card::Thread(thread) => {
             let card_id = crate::review::doc::CardId::Thread(thread.id.clone());
@@ -1302,6 +1306,23 @@ mod tests {
         assert_eq!(linked.get(Cursor), Some(CursorStyle::Pointer));
         click(&mut harness, me);
         assert_eq!(opened(), vec!["https://github.com/me".to_string()]);
+    }
+
+    /// The Opened line names the pull request's number after "opened",
+    /// and the number opens it on github.com.
+    #[test]
+    fn the_opened_line_links_the_pull_requests_number() {
+        let (mut harness, ..) = app_harness();
+        let opened = crate::ui::widgets::opened;
+        opened();
+        let link = find(harness.root_id(), "opened link").expect("a number on the Opened line");
+        assert!(
+            find(harness.root_id(), "Label: \"#57\"").is_some(),
+            "the number reads #57"
+        );
+        let c = link.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        assert_eq!(opened(), ["https://github.com/criccomini/perch/pull/57"]);
     }
 
     /// Code a comment names is a link to it in Files. A path and a line in
