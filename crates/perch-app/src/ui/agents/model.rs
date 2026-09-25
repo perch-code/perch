@@ -1,4 +1,4 @@
-//! The small, app-wide projection the Agents row and dropdown draw.
+//! The small, app-wide projection the Agents section and dropdown draw.
 //!
 //! A durable run remains the backend's record.  These summaries are what the
 //! window needs in order to group, filter and inspect one without loading an
@@ -513,7 +513,7 @@ fn working(run: &AgentRunSummary, active_review_attempts: &HashSet<&str>) -> boo
             .is_some_and(|attempt| active_review_attempts.contains(attempt))
 }
 
-/// One item's runs as its Agents row lists them: what is working first,
+/// One item's runs as its Agents section lists them: what is working first,
 /// in the order it was admitted with queued work last, then what has
 /// finished, newest first. A reviewer attempt whose review is still going
 /// counts as working, so a review's attempts stay together.
@@ -534,7 +534,7 @@ pub fn item_runs(
     active
 }
 
-/// What an item's runs are doing, for the pill on its Agents row.
+/// What an item's runs are doing, for the header of its Agents section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RunCounts {
     pub running: usize,

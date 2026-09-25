@@ -269,7 +269,7 @@ fn reviewers_summary(app: AppState, state: ReviewState) -> String {
     }
 }
 
-/// What the agents are doing, with Show to go to them in the Agents row;
+/// What the agents are doing, with Show to go to them in the Agents section;
 /// else, folded, why Run cannot go; else what the last review found.
 fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> impl IntoView {
     #[derive(Clone, PartialEq)]
@@ -1309,7 +1309,7 @@ pub(crate) fn progress_label(summary: &ReviewGroupSummary) -> String {
 }
 
 /// While a review runs, Show in the Review popover goes to it in the
-/// item's Agents row: the row unfolds, and the review's first attempt with
+/// item's Agents section: the section unfolds, and the review's first attempt with
 /// a run opens at the top of the page.
 fn show_in_agents(app: AppState, state: ReviewState, summary: &ReviewGroupSummary) {
     crate::review::review_menu::close(state, false);

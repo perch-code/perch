@@ -22,7 +22,7 @@ pub enum Checked {
     Full,
 }
 
-/// Where an item's history stands on its Agents row.
+/// Where an item's history stands on its Agents section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ItemRunsPage {
     /// Older runs are left to load.
@@ -40,7 +40,7 @@ pub struct PendingAgentNavigation {
     pub navigation_id: u64,
     pub item_id: String,
     pub review_attempt_id: Option<String>,
-    /// A run to open in the item's Agents row once it is there.
+    /// A run to open in the item's Agents section once it is there.
     pub run_id: Option<String>,
 }
 
@@ -159,7 +159,7 @@ pub struct AppState {
     /// authoritative page clears this again.
     pub agent_history_load_failed: RwSignal<bool>,
     pub agent_history_load_token: RwSignal<u64>,
-    /// Each item's history for its Agents row, by item: whether older runs
+    /// Each item's history for its Agents section, by item: whether older runs
     /// are left to load, and whether a page is on its way.
     pub item_runs: RwSignal<HashMap<String, ItemRunsPage>>,
     /// Review group rows are expanded by default; this records the explicit
@@ -333,7 +333,7 @@ impl AppState {
         self.agent_history_load_failed.set(false);
     }
 
-    /// Ask for a page of an item's runs for its Agents row: the first, or
+    /// Ask for a page of an item's runs for its Agents section: the first, or
     /// the one after the oldest it has.
     pub fn load_item_runs(&self, backend: &crate::backend::Backend, item_id: &str, older: bool) {
         const PAGE: usize = 20;
@@ -677,7 +677,7 @@ impl AppState {
 
     /// Keep an open run's detail live without retaining every transcript
     /// in the app signal: a run's events are here once its detail has been
-    /// asked for, by opening it in an Agents row. The same event already
+    /// asked for, by opening it in an Agents section. The same event already
     /// committed before AgentStep was published; its authoritative sequence
     /// comes from AgentRunUpdated.
     fn append_open_agent_event(&self, run_id: &str, event: &perch_agent::RunEvent) {
@@ -2946,7 +2946,7 @@ mod tests {
     }
 
     /// A run on another item: the item opens on Conversation, whatever it
-    /// was left on, and the run is asked for in its Agents row once its
+    /// was left on, and the run is asked for in its Agents section once its
     /// threads are here.
     #[test]
     fn a_run_on_another_item_opens_it_on_conversation_asking_for_the_run() {

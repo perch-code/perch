@@ -1,4 +1,4 @@
-//! Agent activity: each item's runs in its Agents row on Conversation
+//! Agent activity: each item's runs in its Agents section on Conversation
 //! (`section`), every item's in the dropdown from the bar's Agents button
 //! (`dropdown`), what a run did as its row opens to it (`detail`), and the
 //! notice a run leaves as it finishes.

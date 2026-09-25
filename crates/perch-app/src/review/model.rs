@@ -135,7 +135,7 @@ pub enum ItemTab {
 
 /// An item's pane as it was left: which of Conversation and Code was
 /// showing, the file tabs, the files shown whole, where the reader was on
-/// each tab, and the Agents row, unfolded or not and the runs open in it. The item opens on it again; the first time,
+/// each tab, and the Agents section, unfolded or not and the runs open in it. The item opens on it again; the first time,
 /// on Conversation alone.
 #[derive(Debug, Clone)]
 pub struct Pane {
@@ -1195,12 +1195,12 @@ pub struct ReviewState {
     /// Each item's pane as it was last left, by item, for the life of the
     /// app.
     pub panes: RwSignal<HashMap<String, Pane>>,
-    /// Whether the Agents row on Conversation is unfolded into the item's
+    /// Whether the Agents section on Conversation is unfolded into the item's
     /// runs.
     pub agents_unfolded: RwSignal<bool>,
-    /// The runs open in the Agents row, showing what they did.
+    /// The runs open in the Agents section, showing what they did.
     pub agents_open_runs: RwSignal<HashSet<String>>,
-    /// A run to bring into view in the Agents row, once its row is laid
+    /// A run to bring into view in the Agents section, once its row is laid
     /// out: unfolded, open, and at the top of the page.
     pub pending_run_reveal: RwSignal<Option<String>>,
     /// How far down Conversation was scrolled, kept as it scrolls, so the
@@ -5477,7 +5477,7 @@ mod tests {
         assert!(state.whole.get().is_empty());
     }
 
-    /// The Agents row, unfolded or not and the runs open in it, waits with
+    /// The Agents section, unfolded or not and the runs open in it, waits with
     /// the item's pane while another item is open.
     #[test]
     fn the_agents_row_waits_with_the_items_pane() {

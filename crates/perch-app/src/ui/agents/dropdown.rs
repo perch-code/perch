@@ -192,7 +192,7 @@ pub fn close(review: ReviewState, restore_focus: bool) {
     }
 }
 
-/// Go to a run: its item, on Conversation, with the Agents row unfolded
+/// Go to a run: its item, on Conversation, with the Agents section unfolded
 /// and the run open at the top of the page. The item open already has
 /// it brought into view in place; another is opened first.
 pub fn go_to_run(app: AppState, review: ReviewState, backend: &Backend, run: &AgentRunSummary) {
@@ -653,7 +653,7 @@ mod tests {
     }
 
     /// A run on the open item goes to it in place: Conversation, the
-    /// Agents row unfolded and the run open.
+    /// Agents section unfolded and the run open.
     #[test]
     fn a_run_on_the_open_item_opens_in_its_agents_row() {
         let (mut harness, _app, review) = window();

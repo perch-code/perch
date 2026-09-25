@@ -92,7 +92,6 @@ pub fn view(
         Stack::vertical((
             conversation_title(state),
             crate::review::summary::summary(app, state, summary_backend.clone(), open_item),
-            crate::ui::agents::section::list(app, state, summary_backend),
             finding_filters(app, state),
             dyn_stack(
                 cards,
@@ -109,6 +108,7 @@ pub fn view(
                 },
             )
             .style(|s| s.flex_col().width_full()),
+            crate::ui::agents::section::section(app, state, summary_backend),
             crate::review::review_launch::history(app, state, backend.clone()),
             crate::review::merge::surface(state, backend.clone()),
             crate::review::open_pull::surface(app, state, backend.clone()),
@@ -317,7 +317,7 @@ fn card_view(
         Card::Thread(thread) => {
             let card_id = crate::review::doc::CardId::Thread(thread.id.clone());
             let view = cards::thread_card(app, state, backend, open_file, thread).into_any();
-            // Asked for from elsewhere on the page, the Agents row's Show
+            // Asked for from elsewhere on the page, the Agents section's Show
             // in thread say, the card comes into view as it flashes. The
             // first run only subscribes, as the flash's does.
             let id = view.view_id();

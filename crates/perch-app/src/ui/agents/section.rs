@@ -1,6 +1,6 @@
-//! An item's runs, on its Conversation: the Agents row in the summary,
-//! whose pill says what they are doing, and the list it unfolds into
-//! under the rows.
+//! An item's runs, on its Conversation: the Agents section over REVIEW
+//! HISTORY, whose header says what they are doing and folds the list
+//! under it.
 //!
 //! The list is the item's runs, working first and then its history,
 //! with a review's attempts under a row for the review. A run opens in
@@ -66,7 +66,7 @@ fn waiting(review: ReviewState) -> HashSet<String> {
 }
 
 /// Whether the open item has had a run. Tracked.
-pub fn present(app: AppState, review: ReviewState) -> bool {
+fn present(app: AppState, review: ReviewState) -> bool {
     let Some(item_id) = item_id(review) else {
         return false;
     };
@@ -76,10 +76,10 @@ pub fn present(app: AppState, review: ReviewState) -> bool {
     })
 }
 
-/// The Agents row's value: a pill with what the runs are doing, the
-/// busiest first, that folds and unfolds the list. The item's runs are
-/// asked for as it opens, the first time.
-pub fn pill(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// The section's header: its name and what the runs are doing, the
+/// busiest first, and a chevron. It folds and unfolds the list. The
+/// item's runs are asked for as it opens, the first time.
+fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let item = Memo::new(move |_| item_id(review));
     Effect::new(move |_| {
         if let Some(id) = item.get() {
@@ -94,6 +94,28 @@ pub fn pill(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl In
     let counts = Memo::new(move |_| RunCounts::of(&runs_of(app, review), &waiting(review)));
     let toggle = move || review.agents_unfolded.update(|open| *open = !*open);
     Stack::horizontal((
+        dyn_container(
+            move || review.agents_unfolded.get(),
+            |open| {
+                sidebar_glyph(
+                    if open {
+                        SidebarIcon::ChevronDown
+                    } else {
+                        SidebarIcon::ChevronRight
+                    },
+                    theme::FG_SUBTLE,
+                )
+                .style(|s| s.size(10.0, 10.0))
+            },
+        )
+        .style(|s| s.margin_right(6.0)),
+        Label::derived(|| "AGENTS".to_string()).style(|s| {
+            s.font_size(theme::TEXT_SECTION)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG_SUBTLE)
+                .selectable(false)
+                .flex_grow(1.0_f32)
+        }),
         Empty::new().style(move |s| {
             let counts = counts.get();
             let color = if counts.running > 0 {
@@ -119,21 +141,6 @@ pub fn pill(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl In
                 .selectable(false)
                 .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
-        dyn_container(
-            move || review.agents_unfolded.get(),
-            |open| {
-                sidebar_glyph(
-                    if open {
-                        SidebarIcon::ChevronUp
-                    } else {
-                        SidebarIcon::ChevronDown
-                    },
-                    theme::FG_SUBTLE,
-                )
-                .style(|s| s.size(10.0, 10.0))
-            },
-        )
-        .style(|s| s.margin_left(6.0)),
     ))
     .on_event_stop(el::Click, move |_, _| toggle())
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
@@ -144,20 +151,15 @@ pub fn pill(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl In
             EventPropagation::Continue
         }
     })
-    .debug_name("agents pill")
+    .debug_name("agents header")
     .style(|s| {
         clickable(s)
             .items_center()
+            .width_full()
             .height(22.0)
-            .padding_horiz(8.0)
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER_MUTED)
             .border_radius(theme::RADIUS)
-            .flex_shrink(0.0_f32)
             .keyboard_navigable()
             .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-            .hover(|s| s.background(theme::CANVAS_HOVER))
     })
 }
 
@@ -193,8 +195,25 @@ fn entry_key(entry: &AgentRunEntry) -> String {
     }
 }
 
-/// The list under the summary's rows while the Agents row is unfolded.
-pub fn list(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// The Agents section, over REVIEW HISTORY: its header, and the list
+/// under it while unfolded. Absent until the item has had a run.
+pub fn section(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    Stack::vertical((section_header(app, review, backend.clone()), list(app, review, backend)))
+        .debug_name("agents section")
+        .style(move |s| {
+            s.flex_col()
+                .width_full()
+                .gap(10.0)
+                .padding_top(18.0)
+                .padding_bottom(18.0)
+                .border_top(1.0)
+                .border_color(theme::BORDER_MUTED)
+                .apply_if(!present(app, review), |s| s.hide())
+        })
+}
+
+/// The section's list while it is unfolded.
+fn list(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // A run to bring into view: its row unfolds, opens and, in a review,
     // its group opens too. The row scrolls itself to the top once laid out.
     let reveal_backend = backend.clone();
@@ -274,7 +293,6 @@ pub fn list(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl In
         let shown = review.agents_unfolded.get() && entries.with(|e| !e.is_empty());
         s.flex_col()
             .width_full()
-            .margin_bottom(theme::CONVERSATION_TITLE_GAP)
             .border(1.0)
             .border_color(theme::BORDER_MUTED)
             .border_radius(theme::RADIUS)
@@ -833,13 +851,14 @@ mod tests {
         named(harness.root_id(), name).is_some_and(|id| id.get_visual_rect_no_clip().height() > 0.0)
     }
 
-    /// The row is absent until the item has had a run. Its pill says what
-    /// the runs are doing, and folds and unfolds the list under the rows,
-    /// working first, then finished.
+    /// The section is absent until the item has had a run. Its header
+    /// says what the runs are doing, and folds and unfolds the list,
+    /// working first, then finished. It sits over REVIEW HISTORY, not in
+    /// the summary's rows.
     #[test]
-    fn the_agents_row_comes_with_a_run_and_its_pill_unfolds_the_list() {
+    fn the_agents_section_comes_with_a_run_and_its_header_unfolds_the_list() {
         let (mut harness, app, review) = pull_request_harness();
-        assert!(!shown(&harness, "summary row Agents"), "a row with no runs");
+        assert!(!shown(&harness, "agents section"), "a section with no runs");
         assert!(
             app.item_runs
                 .with(|pages| pages.get("pr").is_some_and(|page| page.loading)),
@@ -854,25 +873,26 @@ mod tests {
             ],
         );
         settle(&mut harness);
-        assert!(shown(&harness, "summary row Agents"));
+        assert!(shown(&harness, "agents section"));
+        assert!(named(harness.root_id(), "summary row Agents").is_none());
         assert!(named(harness.root_id(), "\"1 running · 1 done\"").is_some());
         assert!(
             !shown(&harness, "agents list"),
             "unfolded before it was asked"
         );
 
-        click(&mut harness, "agents pill");
+        click(&mut harness, "agents header");
         assert!(review.agents_unfolded.get());
         let list = rect(&harness, "agents list");
         assert!(list.height() > 0.0);
         assert!(
-            list.y0 >= rect(&harness, "item summary").y1 - 0.5,
-            "the list is under the rows"
+            list.y0 >= rect(&harness, "card:description").y1 - 0.5,
+            "the list is over the cards"
         );
         let (a, b) = (rect(&harness, "agent-run:a"), rect(&harness, "agent-run:b"));
         assert!(b.y1 <= a.y0, "the running one is first");
 
-        click(&mut harness, "agents pill");
+        click(&mut harness, "agents header");
         assert!(!review.agents_unfolded.get());
         assert!(!shown(&harness, "agents list"));
     }
@@ -896,13 +916,16 @@ mod tests {
         review.agents_unfolded.set(true);
         settle(&mut harness);
 
-        let header = |harness: &HeadlessHarness, id: &str| {
+        // The list is down the page, so a header is brought into view
+        // before it is clicked.
+        let header = |harness: &mut HeadlessHarness, id: &str| {
             let row = named(harness.root_id(), &format!("agent-run:{id}")).unwrap();
-            named(row, "agent-run-header")
-                .unwrap()
-                .get_visual_rect_no_clip()
+            let header = named(row, "agent-run-header").unwrap();
+            header.scroll_to(None);
+            settle(harness);
+            header.get_visual_rect_no_clip()
         };
-        let a = header(&harness, "a");
+        let a = header(&mut harness, "a");
         harness.click(a.x0 + 20.0, a.y0 + 14.0);
         settle(&mut harness);
         assert!(review.agents_open_runs.with(|open| open.contains("a")));
@@ -913,14 +936,14 @@ mod tests {
             "the open run is taller than the cap: {body:?}"
         );
 
-        let b = header(&harness, "b");
+        let b = header(&mut harness, "b");
         harness.click(b.x0 + 20.0, b.y0 + 14.0);
         settle(&mut harness);
         assert!(review
             .agents_open_runs
             .with(|open| open.contains("a") && open.contains("b")));
 
-        let a = header(&harness, "a");
+        let a = header(&mut harness, "a");
         harness.click(a.x0 + 20.0, a.y0 + 14.0);
         settle(&mut harness);
         assert!(review
@@ -1011,7 +1034,7 @@ mod tests {
     }
 
     /// While a review runs, the bar's Review says so, and Show in its
-    /// popover goes to it in the Agents row.
+    /// popover goes to it in the Agents section.
     #[test]
     fn review_goes_to_a_running_review_in_the_agents_row() {
         let (mut harness, app, review) = pull_request_harness();
@@ -1048,7 +1071,7 @@ mod tests {
             .with(|open| open.contains("claude-run")));
     }
 
-    /// A run asked for from elsewhere comes into view: the row unfolds,
+    /// A run asked for from elsewhere comes into view: the section unfolds,
     /// the run opens, and the ask is done with once the row is laid out.
     #[test]
     fn a_run_asked_for_unfolds_the_row_and_opens() {
