@@ -182,7 +182,8 @@ fn search_row(state: AppState) -> impl IntoView {
                 // The glyph takes the left padding, and the text starts at
                 // the same optical inset as the item titles below it.
                 .padding_left(34.0)
-                .padding_right(10.0)
+                // Room for the clear button, so text never runs under it.
+                .padding_right(32.0)
                 .background(theme::NAV_CANVAS)
                 .border(1.0)
                 .border_color(theme::NAV_CONTROL_BORDER)
@@ -204,8 +205,29 @@ fn search_row(state: AppState) -> impl IntoView {
     // is a click in the box.
     let glyph = sidebar_glyph(SidebarIcon::Search, theme::NAV_SUBTLE)
         .style(|s| s.size(15.0, 15.0).position(Position::Absolute).inset_left(10.0).pointer_events_none());
-    let search_box =
-        Stack::horizontal((input, glyph)).style(|s| s.items_center().flex_grow(1.0_f32).min_width(0.0));
+    // Shown once there is something to clear. Emptying the box leaves the
+    // keyboard in it, ready for the next query.
+    let clear = Container::new(
+        sidebar_glyph(SidebarIcon::Clear, theme::NAV_SUBTLE).style(|s| s.size(15.0, 15.0).pointer_events_none()),
+    )
+    .on_event_stop(el::Click, move |_, _| {
+        state.item_query.set(String::new());
+        id.request_focus();
+    })
+    .debug_name("sidebar search clear")
+    .style(move |s| {
+        crate::ui::widgets::clickable(s)
+            .size(22.0, 22.0)
+            .items_center()
+            .justify_center()
+            .border_radius(11.0)
+            .position(Position::Absolute)
+            .inset_right(6.0)
+            .hover(|s| s.background(theme::NAV_HOVER))
+            .apply_if(state.item_query.with(String::is_empty), |s| s.hide())
+    });
+    let search_box = Stack::horizontal((input, glyph, clear))
+        .style(|s| s.items_center().flex_grow(1.0_f32).min_width(0.0));
 
     Stack::horizontal((search_box, filter_button(state)))
         .style(|s| s.items_center().width_full().gap(8.0).padding_horiz(theme::NAV_GUTTER).padding_top(16.0))
@@ -847,6 +869,25 @@ mod tests {
         // A real paint exercises the rounded backgrounds and SVG glyphs in
         // addition to the style and layout passes above.
         harness.paint();
+    }
+
+    #[test]
+    fn the_clear_button_shows_with_a_query_and_empties_the_box() {
+        let (mut harness, state) = harness();
+        let clear = find(harness.root_id(), "sidebar search clear").unwrap();
+        assert!(clear.get_visual_rect_no_clip().is_zero_area(), "shown with nothing to clear");
+
+        state.item_query.set("wal".into());
+        harness.rebuild();
+        harness.paint();
+        let search = find(harness.root_id(), "sidebar search").unwrap().get_visual_rect_no_clip();
+        let rect = clear.get_visual_rect_no_clip();
+        assert_eq!((rect.width(), rect.height()), (22.0, 22.0));
+        assert!(rect.x1 < search.x1 && rect.x0 > search.center().x, "not at the box's right: {rect:?}");
+        assert_eq!(rect.center().y, search.center().y);
+
+        harness.click(rect.center().x, rect.center().y);
+        assert_eq!(state.item_query.get(), "");
     }
 
     #[test]
