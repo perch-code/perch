@@ -1,0 +1,1 @@
+The new binding forwards confirmation and errors to the existing implementation, and the generated Go code follows established patterns. The added test covers dry runs, checkpoint release, deletion, and repeated deletion. No actionable defects were found; tests were not run in the read-only environment.

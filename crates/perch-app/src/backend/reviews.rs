@@ -1275,7 +1275,7 @@ async fn execute_attempt(
                     return;
                 }
             };
-            let extraction = perch_agent::extract_review(&native_raw, &manifest);
+            let extraction = perch_agent::extract_review(backend, &native_raw, &manifest);
             let prior = verification_prior_findings(ctx, &snapshot_id);
             let verification_input = ReviewVerificationInput {
                 finding_ids: prior
@@ -2611,8 +2611,10 @@ async fn saved_extraction<'a>(
         .map_or((raw, None), |(native, verification)| {
             (native, Some(verification))
         });
+    let backend = AgentBackend::parse(&attempt.backend)
+        .ok_or_else(|| "The saved review backend is unsupported".to_string())?;
     let manifest = extraction_manifest(&snapshot).await?;
-    let extraction = perch_agent::extract_review(native_raw, &manifest);
+    let extraction = perch_agent::extract_review(backend, native_raw, &manifest);
     Ok(SavedExtraction {
         snapshot,
         group,

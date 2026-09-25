@@ -1,0 +1,9 @@
+Both changed expressions violate the functions' documented behavior on ordinary non-empty input.
+
+Full review comments:
+
+- [P1] Use the last valid list index — /private/perch-review/src/lib.rs:3-3
+  For every non-empty list, `len(items)` is one past the final valid index, so this raises `IndexError` instead of returning the last element. Use `items[-1]` or `items[len(items) - 1]`.
+
+- [P1] Preserve the arithmetic mean — /private/perch-review/src/lib.rs:8-8
+  For non-integral means this floors the quotient and adds one, producing an incorrect result (for example, `average([1, 2])` returns `2` instead of `1.5`); it also returns `1` for values whose sum is zero. Keep true division to return the documented mean.
