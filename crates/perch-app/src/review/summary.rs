@@ -309,12 +309,27 @@ fn status_row(state: ReviewState) -> impl IntoView {
                     state_pill(state),
                     Label::derived(move || repo_of(state))
                         .debug_name("repository line")
+                        .on_event_stop(el::Click, move |_, _| {
+                            if let Some(url) = url_of(state) {
+                                open_in_browser(&url);
+                            }
+                        })
                         .style(move |s| {
+                            let opens = url_of(state).is_some();
                             s.font_size(theme::TEXT_META)
                                 .color(theme::FG_MUTED)
                                 .selectable(false)
                                 .margin_bottom(theme::OPTICAL_TEXT_LIFT)
                                 .apply_if(repo_of(state).is_empty(), |s| s.hide())
+                                .apply_if(opens, |s| {
+                                    // Underlined under the pointer, as a
+                                    // name is.
+                                    clickable(s)
+                                        .padding_top(1.0)
+                                        .border_bottom(1.0)
+                                        .border_color(floem::peniko::Color::TRANSPARENT)
+                                        .hover(|s| s.border_color(theme::FG_MUTED))
+                                })
                         }),
                 ))
                 .style(|s| s.items_center().col_gap(theme::SUMMARY_GAP)),
@@ -342,6 +357,14 @@ fn repo_of(state: ReviewState) -> String {
     state
         .item
         .with(|i| i.as_deref().map(repo_line).unwrap_or_default())
+}
+
+/// The pull request's or the issue's page, which the repository line
+/// opens. A branch has none.
+fn url_of(state: ReviewState) -> Option<String> {
+    state
+        .item
+        .with(|i| i.as_deref().and_then(crate::ui::items::github_url))
 }
 
 /// A commit as a base reads as its short hash; a branch as its name.
@@ -1760,6 +1783,24 @@ mod tests {
             repo.x0,
             row.x0 + theme::SUMMARY_NAME_WIDTH,
             "the repository at {repo:?} is not where the values start"
+        );
+        // A branch has no page, and its repository leads nowhere.
+        crate::ui::widgets::opened();
+        harness.click(repo.center().x, repo.center().y);
+        assert_eq!(crate::ui::widgets::opened(), Vec::<String>::new());
+    }
+
+    /// The repository and number after the pill open the pull request on
+    /// github.com.
+    #[test]
+    fn the_status_rows_number_opens_the_pull_request() {
+        let (mut harness, ..) = pull_request_harness();
+        let repo = rect(&harness, "repository line");
+        crate::ui::widgets::opened();
+        harness.click(repo.center().x, repo.center().y);
+        assert_eq!(
+            crate::ui::widgets::opened(),
+            ["https://github.com/slatedb/slatedb/pull/812"]
         );
     }
 
