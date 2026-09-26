@@ -3,12 +3,12 @@
 //! over and copied.
 //!
 //! The text comes from an agent or from GitHub, so a link's words say
-//! nothing reliable about where it goes. Nothing happens on hover but a
-//! tooltip with the whole destination, and a click opens an address in
-//! the browser, HTTP(S) only, or a place in the worktree in Files. floem's
-//! rich text view keeps its layout to itself, so this wraps one and lays
-//! the same text out again for hit-testing, at the width the wrapped view
-//! was given.
+//! nothing reliable about where it goes. Nothing happens on hover but an
+//! underline and a tooltip with the whole destination, and a click opens
+//! an address in the browser, HTTP(S) only, or a place in the worktree
+//! in Files. floem's rich text view keeps its layout to itself, so this
+//! wraps one and lays the same text out again for hit-testing, at the
+//! width the wrapped view was given.
 //!
 //! floem's text attributes have no strikethrough either, and the rich
 //! text view draws only glyphs. So the same second layout says where a
@@ -105,6 +105,14 @@ impl PartialEq for Target {
 
 /// A byte range to strike through, and the colour of its text.
 pub type Strike = (Range<usize>, Color);
+
+/// Where a rule sits on the glyphs it runs under: through them, for a
+/// strike, or under them, for the link the pointer is over.
+#[derive(Clone, Copy)]
+enum Rule {
+    Strike,
+    Underline,
+}
 
 floem::prop_extractor! {
     SelectProps {
@@ -414,6 +422,7 @@ impl LinkedText {
     fn set_hovered(&mut self, link: Option<usize>) {
         if self.hovered.get() != link {
             self.hovered.set(link);
+            self.id.request_paint();
         }
     }
 
@@ -817,14 +826,26 @@ impl View for LinkedText {
                 cx.fill(&rect, theme::SELECTION_BG, 0.0);
             }
         }
-        if self.strikes.is_empty() {
+        // The link under the pointer is underlined in its own colour, as
+        // a browser underlines one on hover.
+        let underline: Vec<Strike> = self
+            .hovered
+            .get_untracked()
+            .and_then(|i| self.links.get(i))
+            .map(|link| {
+                let ink = self.leaf.attrs.get_span(link.range.start).get_color();
+                vec![(link.range.clone(), ink.unwrap_or(theme::LINK))]
+            })
+            .unwrap_or_default();
+        if self.strikes.is_empty() && underline.is_empty() {
             return;
         }
         let len = self.leaf.text.len();
         let rules = self
             .with_shadow(|layout, origin| {
-                rules(layout, len, &self.strikes)
-                    .into_iter()
+                let mut out = rules(layout, len, &self.strikes, Rule::Strike);
+                out.extend(rules(layout, len, &underline, Rule::Underline));
+                out.into_iter()
                     .map(|(rule, color)| (rule + origin.to_vec2(), color))
                     .collect::<Vec<_>>()
             })
@@ -928,10 +949,11 @@ impl View for LinkedText {
 }
 
 /// One rule per run of glyphs a strike crosses, at that run's strikeout
-/// position and thickness, so a code span keeps its own rule and a line
-/// that wraps gets one rule per visual line. A break's own cluster and
-/// the whitespace hanging off a line's end carry no rule.
-fn rules(layout: &TextLayout, len: usize, strikes: &[Strike]) -> Vec<(Rect, Color)> {
+/// or underline position and thickness, as `rule` says, so a code span
+/// keeps its own rule and a line that wraps gets one rule per visual
+/// line. A break's own cluster and the whitespace hanging off a line's
+/// end carry no rule.
+fn rules(layout: &TextLayout, len: usize, strikes: &[Strike], rule: Rule) -> Vec<(Rect, Color)> {
     let mut out = Vec::new();
     for line in layout.parley_layout().lines() {
         let baseline = line.metrics().baseline;
@@ -943,8 +965,12 @@ fn rules(layout: &TextLayout, len: usize, strikes: &[Strike]) -> Vec<(Rect, Colo
             next += run.advance();
             let covered = run.text_range();
             let metrics = run.metrics();
-            let top = baseline - metrics.strikethrough_offset;
-            let thickness = metrics.strikethrough_size.max(1.0) as f64;
+            let (offset, size) = match rule {
+                Rule::Strike => (metrics.strikethrough_offset, metrics.strikethrough_size),
+                Rule::Underline => (metrics.underline_offset, metrics.underline_size),
+            };
+            let top = baseline - offset;
+            let thickness = size.max(1.0) as f64;
             for (range, color) in strikes {
                 let lo = range.start.max(covered.start);
                 let hi = range.end.min(covered.end).min(len);
@@ -1114,7 +1140,7 @@ mod tests {
         width: f32,
         strikes: &[Strike],
     ) -> Vec<(Rect, Color)> {
-        rules(&layout_at(text, attrs.clone(), width), text.len(), strikes)
+        rules(&layout_at(text, attrs.clone(), width), text.len(), strikes, Rule::Strike)
     }
 
     fn natural_width(text: &str) -> f32 {
@@ -1139,6 +1165,20 @@ mod tests {
         // Somewhere in the line's 21px, not on its edge.
         assert!(line.y0 > 0.0 && line.y1 < 21.0, "{line:?}");
         assert!(line.height() >= 1.0, "{line:?}");
+    }
+
+    #[test]
+    fn an_underline_runs_below_the_strike_and_inside_the_line() {
+        let text = "keep link keep";
+        let layout = layout_at(text, prose(15.0), 1000.0);
+        let strike = rules(&layout, text.len(), &one(5..9), Rule::Strike);
+        let under = rules(&layout, text.len(), &one(5..9), Rule::Underline);
+        assert_eq!((strike.len(), under.len()), (1, 1), "{strike:?} {under:?}");
+        let (strike, under) = (strike[0].0, under[0].0);
+        assert_eq!((under.x0, under.x1), (strike.x0, strike.x1));
+        assert!(under.y0 > strike.y1, "{under:?} under {strike:?}");
+        let height = layout.size().height;
+        assert!(under.y1 < height && under.height() >= 1.0, "{under:?} in {height}");
     }
 
     #[test]

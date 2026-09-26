@@ -58,6 +58,9 @@ pub const UNREAD: Color = Color::from_rgb8(0x09, 0x69, 0xda);
 /// What is on GitHub, or will be: a draft's mark and the gutter's mark
 /// on a line that holds one. GitHub's own blue, the same as `UNREAD`.
 pub const GITHUB: Color = Color::from_rgb8(0x09, 0x69, 0xda);
+/// A link in rendered markdown: GitHub's own link blue, so a link reads
+/// as one against the prose rather than as a darker word.
+pub const LINK: Color = Color::from_rgb8(0x09, 0x69, 0xda);
 /// The wash under a Draft pill: the blue GitHub washes its own marks
 /// with, the same as `REACTED_BG`.
 pub const GITHUB_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);

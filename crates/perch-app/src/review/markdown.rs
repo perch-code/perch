@@ -1218,7 +1218,7 @@ fn code_attrs(size: f32, links: &[(Range<usize>, Target)]) -> AttrsList {
     };
     let mut list = AttrsList::new(base());
     for (range, _) in links {
-        list.add_span(range.clone(), base().color(theme::ACCENT));
+        list.add_span(range.clone(), base().color(theme::LINK));
     }
     list
 }
@@ -1436,7 +1436,7 @@ fn layout(
         for piece in cuts.windows(2).map(|pair| pair[0]..pair[1]) {
             let linked = span.footnote
                 || links.iter().any(|(link, _)| link.start <= piece.start && piece.end <= link.end);
-            let ink = if linked { theme::ACCENT } else { color };
+            let ink = if linked { theme::LINK } else { color };
             if span.strike {
                 match strikes.last_mut() {
                     Some((last, tint)) if last.end == piece.start && *tint == ink => last.end = piece.end,
@@ -1851,7 +1851,7 @@ mod tests {
         ];
         let (_, links, strikes) = laid(&spans);
         assert_eq!(links, vec![(1..2, Target::Url("https://x".into()))]);
-        assert_eq!(strikes, vec![(0..1, theme::FG), (1..2, theme::ACCENT)]);
+        assert_eq!(strikes, vec![(0..1, theme::FG), (1..2, theme::LINK)]);
     }
 
     #[test]
@@ -1948,7 +1948,7 @@ mod tests {
         let size = small_size(14.0);
         let code = |i: usize| attrs.get_span(i).font_size;
         assert_eq!((code(5), code(25), code(29)), (size, size, size));
-        assert_eq!(attrs.get_span(25).get_color(), Some(theme::ACCENT));
+        assert_eq!(attrs.get_span(25).get_color(), Some(theme::LINK));
         assert_eq!(attrs.get_span(5).get_color(), Some(theme::FG));
     }
 
