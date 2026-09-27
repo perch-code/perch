@@ -4,9 +4,10 @@
 //! between Conversation and Code, and the things a reader reaches for from
 //! anywhere in an item: GitHub, an agent's review of the branch, every
 //! item's agents, the item's one action (Submit review, or Start work on
-//! an issue), and the whole window. Everything else about the item, its state and
-//! number, branches, checks and worktree, and what GitHub says about it,
-//! is `review::summary`, under Conversation's title.
+//! an issue), the whole window, and closing the item. Everything else
+//! about the item, its state and number, branches, checks and worktree,
+//! and what GitHub says about it, is `review::summary`, under
+//! Conversation's title.
 
 use std::rc::Rc;
 
@@ -131,13 +132,14 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
 }
 
 /// What is reached for from anywhere in an item: GitHub, every item's
-/// agents, the item's one action, and the whole window.
+/// agents, the item's one action, the whole window, and closing it.
 fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         github_button(state),
         crate::ui::agents::dropdown::button(app, state, backend.clone()),
-        primary_action(app, state, backend),
+        primary_action(app, state, backend.clone()),
         expand_button(app),
+        close_button(app, state, backend),
     ))
     .style(move |s| {
         side(s)
@@ -208,6 +210,23 @@ fn expand_button(app: AppState) -> impl IntoView {
         },
     )
     .debug_name("expand button")
+    .style(control)
+}
+
+/// Close the item, as Cmd-[ does, and leave the main area empty.
+fn close_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    tip(
+        icon_button(
+            || SidebarIcon::Close,
+            || theme::FG_MUTED,
+            move || {
+                let navigation_id = backend.close_review();
+                app.begin_close(state, navigation_id);
+            },
+        ),
+        "Close (⌘[)".to_string(),
+    )
+    .debug_name("close button")
     .style(control)
 }
 
@@ -411,7 +430,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_bar_is_the_title_the_switch_and_four_controls_in_a_row() {
+    fn the_bar_is_the_title_the_switch_and_five_controls_in_a_row() {
         let (mut harness, app, _) = pull_request_harness();
         let bar = rect(&harness, "item bar");
         assert_eq!(bar.height(), theme::REVIEW_HEADER_HEIGHT);
@@ -423,13 +442,14 @@ pub(crate) mod tests {
         assert_eq!(bar.y0, 0.0, "and at the window's top: it is the title bar");
 
         // Left to right: the title, the switch, then GitHub, Agents,
-        // Review and the expand control against the right edge.
+        // Review, the expand control, and close against the right edge.
         let title = rect(&harness, "item title");
         let switch = rect(&harness, "item switch");
         let github = rect(&harness, "github button");
         let agents = rect(&harness, "agents-button");
         let review = rect(&harness, "review-control");
         let expand = rect(&harness, "expand button");
+        let close = rect(&harness, "close button");
         for (name, r) in [
             ("title", title),
             ("switch", switch),
@@ -437,6 +457,7 @@ pub(crate) mod tests {
             ("agents", agents),
             ("review", review),
             ("expand", expand),
+            ("close", close),
         ] {
             assert!(within(r, bar), "{name} at {r:?} is not in the bar {bar:?}");
             assert!(r.width() > 0.0, "{name} has no width");
@@ -446,10 +467,11 @@ pub(crate) mod tests {
         assert!(github.x1 <= agents.x0);
         assert!(agents.x1 <= review.x0);
         assert!(review.x1 <= expand.x0);
+        assert!(expand.x1 <= close.x0);
         assert_eq!(
-            expand.x1,
+            close.x1,
             bar.x1 - theme::REVIEW_HEADER_PADDING,
-            "expand sits against the bar's padding"
+            "close sits against the bar's padding"
         );
         // With the drawer open there is no lane before the title: the
         // state glyph and its gap are all that is.
@@ -488,7 +510,7 @@ pub(crate) mod tests {
             "the title pushed the switch off the centre"
         );
         assert_eq!(
-            rect(&harness, "expand button").x1,
+            rect(&harness, "close button").x1,
             bar.x1 - theme::REVIEW_HEADER_PADDING
         );
     }
@@ -677,15 +699,30 @@ pub(crate) mod tests {
         let github = rect(&harness, "github button");
         let start = rect(&harness, "start work button");
         let expand = rect(&harness, "expand button");
+        let close = rect(&harness, "close button");
         for (name, r) in [
             ("github", github),
             ("start work", start),
             ("expand", expand),
+            ("close", close),
         ] {
             assert!(within(r, bar), "{name} at {r:?} is not in the bar {bar:?}");
             assert!(r.width() > 0.0, "{name} has no width");
         }
-        assert!(github.x1 <= start.x0 && start.x1 <= expand.x0);
+        assert!(github.x1 <= start.x0 && start.x1 <= expand.x0 && expand.x1 <= close.x0);
+    }
+
+    /// The X closes the item, as Cmd-[ does.
+    #[test]
+    fn the_close_button_closes_the_item() {
+        let (mut harness, app, state) = pull_request_harness();
+        app.open_item.set(Some("pr".into()));
+        let close = rect(&harness, "close button").center();
+        harness.click(close.x, close.y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(app.open_item.get(), None);
+        assert!(!state.is_showing(), "the item is still showing");
     }
 
     pub(crate) fn pull_request(number: u64) -> perch_github::PullRequest {
