@@ -1288,10 +1288,10 @@ mod tests {
     }
 
     /// Cmd-Shift-1 and Cmd-Shift-2 pick Conversation and Code. Code with
-    /// no file open opens the first change; with none, the tree opens
-    /// beside a pane that says so.
+    /// no file open opens the first change; with none, the pane says so,
+    /// and the tree stays shut.
     #[test]
-    fn the_mode_keys_switch_and_code_opens_the_first_change_or_the_tree() {
+    fn the_mode_keys_switch_and_code_opens_the_first_change() {
         use crate::review::model::ItemTab;
         use std::sync::Arc;
         let (mut harness, review) = window_with_a_file_open();
@@ -1299,8 +1299,6 @@ mod tests {
             let (code, c) = if n == 1 { (Code::Digit1, "!") } else { (Code::Digit2, "@") };
             key(code, Key::Character(c.into()), OS_MOD | Modifiers::SHIFT)
         };
-        // Closed from Conversation, so the tree does not come for an
-        // empty Code.
         harness.dispatch_event(mode(1));
         review.close_tab("src/x.rs");
         review.changed_files.set(Arc::new(vec![perch_git::ChangedFile {
@@ -1324,8 +1322,8 @@ mod tests {
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"), "the first change opened");
         assert!(named(harness.root_id(), "files-panel").is_none(), "the tree opened over a file");
 
-        // With no changes and nothing open, the tree comes, and the pane
-        // says there is nothing changed.
+        // With no changes and nothing open, the pane says there is
+        // nothing changed.
         harness.dispatch_event(mode(1));
         review.close_tab("src/x.rs");
         review.changed_files.set(Arc::new(Vec::new()));
@@ -1334,7 +1332,7 @@ mod tests {
         harness.paint();
         assert_eq!(review.tab.get(), ItemTab::Code);
         assert_eq!(review.active.get(), None);
-        assert!(named(harness.root_id(), "files-panel").is_some(), "no tree beside an empty Code");
+        assert!(named(harness.root_id(), "files-panel").is_none(), "the tree opened by itself");
         assert!(
             named(harness.root_id(), "\"No changes\"").is_some(),
             "the pane does not say there are no changes"

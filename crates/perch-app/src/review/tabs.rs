@@ -654,9 +654,7 @@ mod tests {
     }
 
     /// A tree asked for stays shut on an issue, which has no Code, and
-    /// comes back on the next item that has; the wish is kept. While an
-    /// item is on its way the drawer's column stays, so opening one pull
-    /// request after another does not move the pane twice.
+    /// while the next item is on its way; the wish is kept for Code.
     #[test]
     fn a_tree_stays_shut_on_an_issue_and_keeps_its_wish() {
         let (mut harness, app, state) = issue_harness();
@@ -671,8 +669,9 @@ mod tests {
         state.begin("Reading the issue");
         harness.rebuild();
         harness.paint();
-        assert!(app.tree_available(), "an item on its way may have a tree");
-        assert!(app.tree_shown());
+        assert!(!app.tree_available(), "an item on its way has no tree");
+        assert!(app.tree_open.get() && !app.tree_shown());
+        assert_eq!(rect(&harness, "pane-body").x1, 1400.0, "the body has the window");
     }
 
     /// Code's strip is the files' tabs, the first at its left edge, then

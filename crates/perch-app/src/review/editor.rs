@@ -110,19 +110,6 @@ pub fn editor_pane(
         });
     }
 
-    // Code with no file open has the tree beside it, to pick one from: as
-    // it comes with none, or once the last tab closes. Only as that
-    // happens, so a tree the reader shuts stays shut.
-    {
-        let backend = backend.clone();
-        Effect::new(move |_| {
-            let none = state.active.with(Option::is_none) && state.pending_open.with(Option::is_none);
-            if none && !app.tree_open.get_untracked() {
-                crate::ui::drawer::show(app, &backend, None);
-            }
-        });
-    }
-
     // The find bar's matches follow the file and the query from here,
     // beside the jump: one effect for the pane, whichever editor is up.
     find::wire(state);

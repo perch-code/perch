@@ -905,17 +905,14 @@ impl AppState {
         self.drop_toasts(|kind| matches!(kind, ToastKind::AgentRun(id) if removed.contains(id)));
     }
 
-    /// Whether the open item has a tree to show: it is on Code, or still
-    /// on its way, which keeps the drawer's column from going and coming
-    /// back while a pull request opens after another. `opening` alone
-    /// stays set for as long as the item is open, so on its way is also
-    /// still preparing. Tracked.
+    /// Whether the open item has a tree to show: it is open, on Code, with
+    /// files. An item on its way has none, so the tree waits for Code.
+    /// Tracked.
     pub fn tree_available(&self) -> bool {
         self.review.get().is_some_and(|review| {
-            (review.opening.get() && review.phase.get() == crate::review::model::Phase::Preparing)
-                || (review.is_open()
-                    && review.tab.get() == crate::review::model::ItemTab::Code
-                    && review.has_files())
+            review.is_open()
+                && review.tab.get() == crate::review::model::ItemTab::Code
+                && review.has_files()
         })
     }
 
