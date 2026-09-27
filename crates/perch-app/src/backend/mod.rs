@@ -8205,13 +8205,13 @@ fn next_posting_token() -> u64 {
     TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Post an issue comment on the item's pull request and put what GitHub
-/// answered with in the kept discussion, so the conversation shows it
-/// the way it shows anyone else's. The comment goes on the cached
-/// discussion when there is one; when there is none, the discussion is
-/// fetched whole with the comment in it, since a fetch that was already
-/// under way is fenced off by the post. The event carries the comment
-/// or the reason it did not post.
+/// Post an issue comment on the item's pull request or issue and put
+/// what GitHub answered with in the kept discussion, so the conversation
+/// shows it the way it shows anyone else's. The comment goes on the
+/// cached discussion when there is one; when there is none, the
+/// discussion is fetched whole with the comment in it, since a fetch
+/// that was already under way is fenced off by the post. The event
+/// carries the comment or the reason it did not post.
 async fn post_issue_comment(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
     let answer = |result: Result<Arc<perch_github::IssueComment>, String>| {
         if let Err(message) = &result {
@@ -8223,27 +8223,69 @@ async fn post_issue_comment(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
             result,
         });
     };
-    let pull_request = ctx.item(item_id).and_then(|item| item.pull_request().cloned());
-    let Some(pull_request) = pull_request else {
-        answer(Err("Only a pull request takes a comment from here".into()));
-        return;
+    let item = ctx.item(item_id);
+    let pull_request = item.as_ref().and_then(|item| item.pull_request().cloned());
+    let issue = item.as_ref().and_then(|item| item.issue().cloned());
+    let (repo_full_name, number) = match (&pull_request, &issue) {
+        (Some(pull), _) => (pull.repo_full_name.clone(), pull.number),
+        (None, Some(issue)) => (issue.repo_full_name.clone(), issue.number),
+        (None, None) => {
+            answer(Err("Only a pull request or an issue takes a comment from here".into()));
+            return;
+        }
     };
     let Some(github) = ctx.github() else {
         answer(Err("GitHub is unavailable while Perch is offline".into()));
         return;
     };
-    let comment = match github
-        .create_issue_comment(&pull_request.repo_full_name, pull_request.number, body)
-        .await
-    {
+    let comment = match github.create_issue_comment(&repo_full_name, number, body).await {
         Ok(comment) => comment,
         Err(error) => {
             answer(Err(format!("GitHub could not post the comment: {error}")));
             return;
         }
     };
-    show_posted_comment(ctx, item_id, &pull_request, &comment).await;
+    match &pull_request {
+        Some(pull_request) => show_posted_comment(ctx, item_id, pull_request, &comment).await,
+        None => show_posted_issue_comment(ctx, item_id, &comment).await,
+    }
     answer(Ok(Arc::new(comment)));
+}
+
+/// Put a comment GitHub just took on an issue in its kept comments, the
+/// open item's prompt context and the view, the way a fetch of them
+/// would. With nothing kept to add it to, the issue is fetched again.
+async fn show_posted_issue_comment(ctx: &Ctx, item_id: &str, comment: &perch_github::IssueComment) {
+    let cached = ctx
+        .with_cache(|cache| cache.load_discussion(item_id))
+        .and_then(Result::ok)
+        .flatten();
+    let Some((_, mut discussion)) = cached else {
+        refresh_open_item(ctx, item_id).await;
+        return;
+    };
+    if !discussion.comments.iter().any(|c| c.id == comment.id) {
+        discussion.comments.push(comment.clone());
+        if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
+            tracing::warn!(item = item_id, %error, "could not cache the posted comment");
+        }
+    }
+    if let Ok(mut guard) = ctx.slot.lock() {
+        if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+            if let Some(kept) = open.issue.as_ref() {
+                open.issue = Some(Arc::new((kept.0.clone(), discussion.comments.clone())));
+            }
+        }
+    }
+    if ctx.is_open(item_id) {
+        ctx.want_avatars(discussion.comments.iter().map(|c| c.user_avatar_url.clone()));
+        let _ = ctx.events.send(Event::IssueComments {
+            item_id: item_id.to_string(),
+            comments: Arc::new(discussion.comments),
+            events: Arc::new(discussion.events),
+            body_reactions: discussion.reactions,
+        });
+    }
 }
 
 /// Put a comment GitHub just took in the kept discussion, or fetch the
@@ -17607,7 +17649,7 @@ read eof || true
     }
 
     #[tokio::test]
-    async fn an_issue_comment_offline_or_on_an_issue_is_refused_before_github() {
+    async fn an_issue_comment_offline_or_on_no_subject_is_refused_before_github() {
         let dir = tempfile::tempdir().unwrap();
         let (base, paths) = serve("201 Created", "{}");
         let (ctx, received) = ctx(dir.path(), &base, &[]);
@@ -17624,16 +17666,58 @@ read eof || true
             ),
         );
 
-        let issue = store_issue(&ctx, 8);
-        post_issue_comment(&ctx, &issue.id, 8, "Looks good").await;
+        post_issue_comment(&ctx, "gone", 8, "Looks good").await;
         assert!(
             matches!(
                 received.try_recv(),
                 Ok(Event::IssueCommentPosted { token: 8, result: Err(message), .. })
-                    if message.contains("pull request")
+                    if message.contains("pull request or an issue")
             ),
         );
         assert!(paths.lock().unwrap().is_empty(), "GitHub was not asked");
+    }
+
+    /// A comment on an issue goes to the issue's own comments, is kept
+    /// after the ones already there, and reaches the view and the next
+    /// question's prompt as the issue's comments before the answer.
+    #[tokio::test]
+    async fn a_comment_on_an_issue_is_kept_and_shown_as_its_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_method(move |method, path, _| match (method, path) {
+            ("POST", "/repos/a/b/issues/8/comments") => {
+                ("201 Created", issue_comment_json(920, "Thanks"))
+            }
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let issue = store_issue(&ctx, 8);
+        store_commented_discussion(&ctx, &issue);
+        open_in_slot(&ctx, &issue);
+        let snapshot = issue.issue().cloned().unwrap();
+        ctx.slot.lock().unwrap().as_mut().unwrap().issue = Some(Arc::new((snapshot, Vec::new())));
+
+        post_issue_comment(&ctx, &issue.id, 9, "Thanks").await;
+
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/repos/a/b/issues/8/comments"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    Event::IssueComments { item_id, comments, .. },
+                    Event::IssueCommentPosted { token: 9, result: Ok(posted), .. },
+                ] if item_id == &issue.id
+                    && comments.iter().map(|c| c.id).collect::<Vec<_>>() == [1, 920]
+                    && posted.id == 920
+            ),
+            "{events:?}"
+        );
+        let kept = ctx
+            .with_cache(|c| c.load_discussion(&issue.id).unwrap().unwrap().1)
+            .unwrap();
+        assert_eq!(kept.comments.iter().map(|c| c.id).collect::<Vec<_>>(), [1, 920]);
+        let prompted = ctx.slot.lock().unwrap().as_ref().unwrap().issue.clone().unwrap();
+        assert_eq!(prompted.1.len(), 2, "the next question sees it");
     }
 
     /// With no discussion kept, the comment has nowhere to be appended,

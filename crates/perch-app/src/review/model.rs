@@ -3910,8 +3910,9 @@ impl ReviewState {
     /// Whether GitHub is a destination for `composer`: it has lines to
     /// land on or its thread is on GitHub, and the pull request is open
     /// to take the review the draft would ride in; or it is about a pull
-    /// request as a whole, where it posts as an issue comment. About an
-    /// issue, or lines of a branch, there is nowhere to go. Untracked.
+    /// request or an issue as a whole, where it posts as an issue
+    /// comment. About lines of a branch there is nowhere to go.
+    /// Untracked.
     pub fn github_offered(&self, composer: &Composer) -> bool {
         self.github_offered_for(composer.thread_id.as_deref(), composer.anchor.as_ref())
     }
@@ -3933,8 +3934,9 @@ impl ReviewState {
         if on_github {
             return open_pull;
         }
-        self.pull_request.with_untracked(Option::is_some)
-            && self.posts_issue_comment_about(thread_id, anchor)
+        let subject = self.pull_request.with_untracked(Option::is_some)
+            || self.issue.with_untracked(Option::is_some);
+        subject && self.posts_issue_comment_about(thread_id, anchor)
     }
 
     /// Whether a message from `thread` has anywhere on GitHub to go, as
@@ -3943,13 +3945,15 @@ impl ReviewState {
     /// pull request has to be open to take one. A thread of Perch's own
     /// with neither has nowhere to reply, so it posts as an issue
     /// comment about the pull request instead, which a closed one takes
-    /// as well. What Post to GitHub on an agent's message is offered on,
-    /// and Reply on a reviewer's. A tracked read of the pull request,
-    /// which lands after the threads do.
+    /// as well. An issue takes only the comment. What Post to GitHub on
+    /// an agent's message is offered on, and Reply on a reviewer's. A
+    /// tracked read of the pull request and the issue, which land after
+    /// the threads do.
     pub fn github_offered_on(&self, thread: &CommentThread) -> bool {
         let takes_draft = thread.anchor.is_some() || thread.github_id.is_some();
+        let on_issue = self.issue.with(Option::is_some);
         self.pull_request.with(|pull| match pull.as_ref() {
-            None => false,
+            None => on_issue && !takes_draft,
             Some(pull) => !takes_draft || pull.is_open(),
         })
     }

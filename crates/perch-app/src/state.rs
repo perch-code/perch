@@ -1819,7 +1819,8 @@ impl AppState {
                     review.fail_submit_review(attempt_id, message);
                 }
             }
-            // The comment itself came in a `DiscussionReady` before this.
+            // The comment itself came in a `DiscussionReady`, or an
+            // `IssueComments` for an issue, before this.
             Event::IssueCommentPosted {
                 item_id,
                 token,

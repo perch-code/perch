@@ -328,7 +328,8 @@ pub fn composer_view(
                 return;
             };
             // An issue comment posts at once, so it is asked about first:
-            // the footer names the pull request, and the next send goes.
+            // the footer names the pull request or issue, and the next
+            // send goes.
             // A close was asked about when its button was clicked.
             if composer.destination.is_github() && state.posts_issue_comment(&composer) {
                 if !state.composer_confirming.get_untracked() {
@@ -798,7 +799,8 @@ enum FooterMode {
 
 /// The line under the box: the destination, the effort and Send. When
 /// Comment was clicked once, the same line asks `Post to
-/// github.com/owner/repo/pull/12?` with Post and Cancel, and after Close
+/// github.com/owner/repo/pull/12?` (or `.../issues/12`) with Post and
+/// Cancel, and after Close
 /// with comment it asks whether to close; while this composer's comment
 /// or close goes, it says so and offers nothing.
 fn composer_footer(
@@ -843,13 +845,19 @@ fn composer_footer(
         .into_any(),
         FooterMode::Confirming => Stack::horizontal((
             Label::derived(move || {
-                let target = state.pull_request.with(|pull| {
-                    pull.as_ref()
-                        .map(|pull| {
-                            format!("github.com/{}/pull/{}", pull.repo_full_name, pull.number)
-                        })
-                        .unwrap_or_else(|| "GitHub".to_string())
+                let pull = state.pull_request.with(|pull| {
+                    pull.as_ref().map(|pull| {
+                        format!("github.com/{}/pull/{}", pull.repo_full_name, pull.number)
+                    })
                 });
+                let issue = move || {
+                    state.issue.with(|issue| {
+                        issue.as_ref().map(|issue| {
+                            format!("github.com/{}/issues/{}", issue.repo_full_name, issue.number)
+                        })
+                    })
+                };
+                let target = pull.or_else(issue).unwrap_or_else(|| "GitHub".to_string());
                 if !state.composer_closing.get() {
                     format!("Post to {target}?")
                 } else if state.composer_draft.with(|d| d.trim().is_empty()) {
@@ -1119,10 +1127,10 @@ pub fn subject_word(state: ReviewState) -> &'static str {
 /// keeps the effort where the model takes it. GitHub can be picked where
 /// a draft has somewhere to land, a composer on lines or under a thread
 /// that is on GitHub, and where the text posts at once as an issue
-/// comment: the foot of a pull request's conversation, or under a thread
-/// with neither lines nor a place on GitHub. A draft being edited stays a
-/// draft: the models are greyed out, since sending would replace its
-/// body, not ask.
+/// comment: the foot of a pull request's or an issue's conversation, or
+/// under a thread with neither lines nor a place on GitHub. A draft being
+/// edited stays a draft: the models are greyed out, since sending would
+/// replace its body, not ask.
 fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
     use floem::menu::Menu;
 
@@ -2681,8 +2689,8 @@ fn agent_actions(
         );
     });
     let copy: Rc<dyn Fn()> = Rc::new(move || crate::ui::widgets::copy_to_clipboard(body.clone()));
-    // Absent, not greyed, where the message has nowhere to go: an item
-    // that is not a pull request at all, or a closed one under a thread
+    // Absent, not greyed, where the message has nowhere to go: a branch,
+    // an issue thread with lines, or a closed pull request under a thread
     // whose draft would need a review. The pull request lands after the
     // threads, so this follows it rather than the message's own rebuild.
     let offered = Memo::new(move |_| state.github_offered_on(&thread));
@@ -4618,7 +4626,10 @@ mod tests {
         assert!(state.github_offered_on(&neither), "a closed pull request still takes a comment");
 
         state.pull_request.set(None);
-        assert!(!state.github_offered_on(&neither), "an issue has none of it yet");
+        assert!(!state.github_offered_on(&neither), "a branch has nowhere to post");
+        state.issue.set(Some(Arc::new(issue())));
+        assert!(state.github_offered_on(&neither), "an issue takes the comment");
+        assert!(!state.github_offered_on(&lines), "but no draft");
     }
 
     /// A finding's thread as the reviewer leaves it: Perch's own, on the
@@ -4899,6 +4910,26 @@ mod tests {
         let root_id = harness.root_id();
         assert_eq!(find_all(root_id, "perch-only").len(), 2, "the question and the answer are labelled");
         assert!(find(root_id, "draft-pill").is_some());
+    }
+
+    fn issue() -> perch_github::Issue {
+        perch_github::Issue {
+            node_id: String::new(),
+            reactions: Default::default(),
+            number: 43,
+            title: "Fence the manifest".into(),
+            body: String::new(),
+            state: "open".into(),
+            state_reason: None,
+            author_login: "octocat".into(),
+            author_avatar_url: String::new(),
+            labels: vec![],
+            assignees: vec![],
+            comments: 0,
+            created_at: None,
+            updated_at: "2026-09-16T11:40:00Z".parse().unwrap(),
+            repo_full_name: "acme/repo".into(),
+        }
     }
 
     fn pull() -> perch_github::PullRequest {
@@ -5394,8 +5425,14 @@ mod tests {
 
         state.pull_request.set(None);
         state.open_composer(None, None, String::new(), sonnet_medium());
-        let issue = state.composer.get().unwrap();
-        assert!(!state.github_offered(&issue), "an issue takes no comment yet");
+        let branch = state.composer.get().unwrap();
+        assert!(!state.github_offered(&branch), "a branch takes no comment");
+
+        state.issue.set(Some(Arc::new(issue())));
+        state.open_composer(Some("ours".into()), None, String::new(), sonnet_medium());
+        let on_issue = state.composer.get().unwrap();
+        assert!(state.github_offered(&on_issue), "an issue takes a comment");
+        assert!(state.posts_issue_comment(&on_issue));
     }
 
     /// With GitHub picked at the foot the button reads Comment. The first
