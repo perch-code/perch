@@ -8,7 +8,6 @@
 //! because that is what floem's `update_signal_from_channel` consumes.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender as EventSender;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,15 +22,18 @@ use perch_github::{
     RunHistoryFilter, RunLabels, RunMode, RunOwner, RunPurpose, RunRecord, RunStatus, RunSummary,
     SubjectKind, TerminalReason, Thread, ThreadOrigin,
 };
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Semaphore;
 
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
+pub use windows::{EventSender, WindowId, NO_WINDOW};
+use windows::{CommandSender, View, Views};
 
 mod avatar;
 pub(crate) mod open_pull;
 pub(crate) mod reviews;
 pub(crate) mod runs;
+mod windows;
 
 /// How many avatar downloads may be in flight at once.
 const AVATAR_CONCURRENCY: usize = 6;
@@ -114,11 +116,19 @@ pub enum Command {
     MarkItemActivityUnread {
         item_id: String,
     },
-    /// Whether Perch's window is the key window. Activity on the open item
+    /// Whether the window is the key window. Activity on its open item
     /// isn't recorded while it is: the reader watched it happen.
     WindowKey {
         key: bool,
     },
+    /// A new window, with a view of its own: nothing open, and its own
+    /// navigation sequence.
+    WindowOpened {
+        navigation_requests: Arc<NavigationRequests>,
+        scope_requests: Arc<ScopeRequests>,
+    },
+    /// The window is gone, and its open item with it.
+    WindowClosed,
     /// Ignore future notifications for the thread, then remove this one
     /// from GitHub's inbox.
     UnsubscribeNotification {
@@ -1179,6 +1189,48 @@ pub enum Event {
     },
 }
 
+impl Event {
+    /// Whether the event is for the window whose view sent it alone: its
+    /// navigation's answers, its language server's, and what it asked to
+    /// be told. Everything else, the rows, the inbox, the agents and the
+    /// news about an item, every window hears, and a window with some
+    /// other item open ignores what is about the item.
+    pub fn for_one_window(&self) -> bool {
+        matches!(
+            self,
+            Event::ReviewProgress { .. }
+                | Event::ReviewReady { .. }
+                | Event::ReviewFailed { .. }
+                | Event::IssueReady { .. }
+                | Event::FileLoaded { .. }
+                | Event::FileFailed { .. }
+                | Event::CommitsReady { .. }
+                | Event::ScopeReady { .. }
+                | Event::NavigationCancelled { .. }
+                | Event::AgentReviewNavigationReady { .. }
+                | Event::AgentReviewNavigationFailed { .. }
+                | Event::HistoricalReviewReady { .. }
+                | Event::HistoricalReviewFailed { .. }
+                | Event::LspStatus { .. }
+                | Event::LspHover { .. }
+                | Event::LspDefinition { .. }
+                | Event::LspTypeDefinition { .. }
+                | Event::LspImplementation { .. }
+                | Event::LspReferences { .. }
+                | Event::LspDocumentHighlight { .. }
+                | Event::LspCallHierarchy { .. }
+                | Event::LspCalls { .. }
+                | Event::LspNames { .. }
+                | Event::MentionableUsers { .. }
+                | Event::Notice(_)
+                | Event::ConfirmLoss(_)
+                | Event::RepositoryAdded(_)
+                | Event::Bases { .. }
+                | Event::Grants { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     /// No usable token. The app shows setup instructions instead of a list.
@@ -1199,9 +1251,12 @@ pub enum Status {
     },
 }
 
-/// Handle the UI keeps. Dropping it ends the worker.
+/// Handle the UI keeps, one per window. Dropping the last ends the worker.
 pub struct Backend {
-    commands: UnboundedSender<Command>,
+    commands: CommandSender,
+    window: WindowId,
+    /// The last window handed out, shared by every handle.
+    windows: Arc<std::sync::atomic::AtomicU64>,
     navigation_requests: Arc<NavigationRequests>,
     scope_requests: Arc<ScopeRequests>,
     merge_attempts: Arc<MergeAttempts>,
@@ -1248,7 +1303,7 @@ pub struct SuspendedNavigation {
 /// owner jumps, and historical snapshots all share this one sequence so task
 /// scheduling cannot reverse the reader's click order.
 #[derive(Debug, Default)]
-struct NavigationRequests {
+pub(crate) struct NavigationRequests {
     next_id: std::sync::atomic::AtomicU64,
     latest: std::sync::Mutex<Option<NavigationRequest>>,
     archive_fences: std::sync::Mutex<std::collections::HashMap<String, ArchiveFence>>,
@@ -1262,6 +1317,15 @@ struct ArchiveFence {
 }
 
 impl NavigationRequests {
+    /// A window's sequence, in a range of its own, so that no two windows
+    /// ever wait on the same id.
+    fn for_window(window: WindowId) -> Self {
+        Self {
+            next_id: std::sync::atomic::AtomicU64::new(window << 40),
+            ..Self::default()
+        }
+    }
+
     fn begin_current(&self) -> u64 {
         self.begin_target(NavigationTarget::Current)
     }
@@ -1763,7 +1827,7 @@ struct ScopeRequest {
 /// so a slower earlier Git query cannot overwrite a later scope or publish
 /// finding anchors projected for the wrong pair of sides.
 #[derive(Debug, Default)]
-struct ScopeRequests {
+pub(crate) struct ScopeRequests {
     state: std::sync::Mutex<ScopeRequestState>,
 }
 
@@ -2071,6 +2135,39 @@ impl PullRequestReviewAttempts {
 }
 
 impl Backend {
+    /// A handle for a new window, whose view the worker makes now.
+    pub fn open_window(&self) -> Backend {
+        let window = self
+            .windows
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        let navigation_requests = Arc::new(NavigationRequests::for_window(window));
+        let scope_requests = Arc::<ScopeRequests>::default();
+        let commands = self.commands.for_window(window);
+        let _ = commands.send(Command::WindowOpened {
+            navigation_requests: navigation_requests.clone(),
+            scope_requests: scope_requests.clone(),
+        });
+        Backend {
+            commands,
+            window,
+            windows: self.windows.clone(),
+            navigation_requests,
+            scope_requests,
+            merge_attempts: self.merge_attempts.clone(),
+            pull_request_review_attempts: self.pull_request_review_attempts.clone(),
+        }
+    }
+
+    /// The window is closing: its view goes, and its language server.
+    pub fn close_window(&self) {
+        let _ = self.commands.send(Command::WindowClosed);
+    }
+
+    pub fn window(&self) -> WindowId {
+        self.window
+    }
+
     /// Fetch the open item again, after the view said GitHub has news.
     pub fn refresh_open_item(&self, item_id: &str) {
         let _ = self.commands.send(Command::RefreshOpenItem {
@@ -2819,7 +2916,9 @@ impl Backend {
     pub fn recording() -> (Self, tokio::sync::mpsc::UnboundedReceiver<Command>) {
         let (commands, received) = tokio::sync::mpsc::unbounded_channel();
         let backend = Backend {
-            commands,
+            commands: CommandSender::Plain(commands),
+            window: 1,
+            windows: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             navigation_requests: Arc::default(),
             scope_requests: Arc::default(),
             merge_attempts: Arc::default(),
@@ -2829,10 +2928,12 @@ impl Backend {
     }
 }
 
-/// Start the worker thread. Returns the command handle and the event receiver.
-pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
+/// Start the worker thread. Returns a handle windows are opened from, and
+/// the events, each with the window whose view sent it.
+pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = std::sync::mpsc::channel();
+    let evt_tx = EventSender::routed(evt_tx);
     let navigation_requests = Arc::<NavigationRequests>::default();
     let worker_navigation_requests = navigation_requests.clone();
     let scope_requests = Arc::<ScopeRequests>::default();
@@ -2871,7 +2972,12 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
 
     (
         Backend {
-            commands: cmd_tx,
+            commands: CommandSender::Routed {
+                tx: cmd_tx,
+                window: NO_WINDOW,
+            },
+            window: NO_WINDOW,
+            windows: Arc::default(),
             navigation_requests,
             scope_requests,
             merge_attempts,
@@ -2882,7 +2988,7 @@ pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<Event>) {
 }
 
 async fn run(
-    mut commands: UnboundedReceiver<Command>,
+    mut commands: UnboundedReceiver<(WindowId, Command)>,
     events: EventSender<Event>,
     navigation_requests: Arc<NavigationRequests>,
     scope_requests: Arc<ScopeRequests>,
@@ -3074,8 +3180,10 @@ async fn run(
         asked_subjects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         approvals: Default::default(),
         approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
-        window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        window_key: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         landing: Default::default(),
+        window: NO_WINDOW,
+        views: Default::default(),
     };
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
@@ -3158,22 +3266,27 @@ async fn run(
     let mut next_notification_reconcile = next_auto_poll;
     let mut pending_notification_reconcile = false;
 
+    let base = ctx;
     loop {
-        let command = tokio::select! {
-            _ = tokio::time::sleep_until(next_auto_poll) => Command::Refresh,
+        let (window, command) = tokio::select! {
+            _ = tokio::time::sleep_until(next_auto_poll) => (NO_WINDOW, Command::Refresh),
             cmd = commands.recv() => match cmd {
                 Some(cmd) => cmd,
                 // The UI is gone.
                 None => {
-                    ctx.runs.shutdown().await;
+                    base.runs.shutdown().await;
                     // Deferred archive waiters are detached tasks. Complete
                     // their local work synchronously before this runtime can
                     // disappear underneath them.
-                    retire_archived_checkouts(&ctx).await;
+                    retire_archived_checkouts(&base).await;
                     return;
                 },
             },
         };
+        // The command runs in the view of the window that sent it.
+        let ctx = base.for_window(window);
+        let checkout = ctx.slot.clone();
+        let language_server = ctx.language_server.clone();
 
         if !matches!(&command, Command::Refresh | Command::Hover { .. }) {
             tracing::debug!(command = ?command, "command");
@@ -3199,20 +3312,22 @@ async fn run(
                         pending_notification_reconcile = true;
                     }
                 }
-                let open = ctx
-                    .slot
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
-                if let Some(item_id) = open {
-                    let ctx = ctx.clone();
-                    if let (Some(navigation_id), Some(scope_revision)) = (
-                        ctx.navigation_requests.current_id(),
-                        ctx.scope_requests.stable_revision(),
-                    ) {
-                        tokio::spawn(async move {
-                            refresh_scope(&ctx, &item_id, navigation_id, scope_revision).await
-                        });
+                // Every window's open item, not just the asker's.
+                for ctx in ctx.views() {
+                    let open = ctx
+                        .slot
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|c| c.item_id.clone()));
+                    if let Some(item_id) = open {
+                        if let (Some(navigation_id), Some(scope_revision)) = (
+                            ctx.navigation_requests.current_id(),
+                            ctx.scope_requests.stable_revision(),
+                        ) {
+                            tokio::spawn(async move {
+                                refresh_scope(&ctx, &item_id, navigation_id, scope_revision).await
+                            });
+                        }
                     }
                 }
                 let ctx = ctx.clone();
@@ -3302,6 +3417,27 @@ async fn run(
             }
             Command::WindowKey { key } => {
                 ctx.window_key.store(key, std::sync::atomic::Ordering::Relaxed);
+            }
+            Command::WindowOpened {
+                navigation_requests,
+                scope_requests,
+            } => {
+                if let Ok(mut views) = base.views.lock() {
+                    views.push(View::new(window, navigation_requests, scope_requests));
+                }
+            }
+            Command::WindowClosed => {
+                if let Ok(mut views) = base.views.lock() {
+                    views.retain(|view| view.window != window);
+                }
+                // `ctx` is still the window's, and nothing else holds its
+                // view now but work already under way. A newer navigation
+                // fences that off, so an open still going cannot fill the
+                // slot and start a language server nobody will stop.
+                if ctx.window != NO_WINDOW {
+                    ctx.navigation_requests.begin_closed();
+                    tokio::spawn(async move { ctx.close_review().await });
+                }
             }
             Command::DoneNotification { thread_id } => {
                 ctx.clear_notice();
@@ -4518,10 +4654,16 @@ struct Ctx {
     /// time, so one it could not resolve is not asked about again at
     /// every poll until the thread moves on.
     asked_subjects: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
-    /// Whether Perch's window is the key window, as the UI last said.
+    /// Whether this window is the key window, as the UI last said.
     window_key: Arc<std::sync::atomic::AtomicBool>,
     /// Where the next open of an item, from its inbox row, lands.
     landing: Arc<std::sync::Mutex<Option<(String, crate::inbox::Landing)>>>,
+    /// The window whose view `slot`, `language_server`, the request
+    /// sequences, `landing` and `window_key` are, and whose events these
+    /// are. `NO_WINDOW` for the worker's own work, whose slot stays empty.
+    window: WindowId,
+    /// Every window's view.
+    views: Views,
 }
 
 /// The GitHub client and the token it was built on.
@@ -4595,6 +4737,11 @@ impl Ctx {
     }
 
     fn send_threads(&self, item_id: &str) {
+        // The threads are drawn against the window's open view of the item.
+        let view = self.view_for(item_id);
+        if view.window != self.window {
+            return view.send_threads(item_id);
+        }
         let view = self.slot.lock().ok().and_then(|slot| {
             slot.as_ref()
                 .filter(|open| open.item_id == item_id)
@@ -4862,7 +5009,10 @@ impl Ctx {
     /// reader is looking at it: open in the main pane, with Perch's window
     /// key. Whether it was recorded.
     fn record_activity(&self, item_id: &str, event: perch_github::ActivityEvent) -> bool {
-        if self.is_open(item_id) && self.window_key.load(std::sync::atomic::Ordering::Relaxed) {
+        let watched = self.views().iter().any(|ctx| {
+            ctx.is_open(item_id) && ctx.window_key.load(std::sync::atomic::Ordering::Relaxed)
+        });
+        if watched {
             return false;
         }
         match self.with_cache(|c| c.record_item_activity(item_id, Timestamp::now(), &event)) {
@@ -5132,12 +5282,80 @@ impl Ctx {
         let _ = self.events.send(Event::Notice(String::new()));
     }
 
-    /// Whether the open review is this item.
+    /// This context as `view`'s window has it.
+    fn in_view(&self, view: &View) -> Ctx {
+        Ctx {
+            slot: view.slot.clone(),
+            language_server: view.language_server.clone(),
+            navigation_requests: view.navigation_requests.clone(),
+            scope_requests: view.scope_requests.clone(),
+            review_navigation: view.review_navigation.clone(),
+            landing: view.landing.clone(),
+            window_key: view.window_key.clone(),
+            events: self.events.for_window(view.window),
+            window: view.window,
+            ..self.clone()
+        }
+    }
+
+    /// The context `window`'s commands run in: its view, or the worker's
+    /// own when the window has gone.
+    fn for_window(&self, window: WindowId) -> Ctx {
+        let view = self
+            .views
+            .lock()
+            .ok()
+            .and_then(|views| views.iter().find(|v| v.window == window).cloned());
+        match view {
+            Some(view) => self.in_view(&view),
+            None => self.clone(),
+        }
+    }
+
+    /// Every window's context. Only this one when no window has a view,
+    /// as in a test.
+    fn views(&self) -> Vec<Ctx> {
+        let views = self.views.lock().map(|v| v.clone()).unwrap_or_default();
+        if views.is_empty() {
+            return vec![self.clone()];
+        }
+        views.iter().map(|view| self.in_view(view)).collect()
+    }
+
+    /// The context of the window with `item_id` open, so work on the item
+    /// that no window asked for, a poll's or an agent's, reaches the view
+    /// that shows it. This one when no window has it open.
+    fn view_for(&self, item_id: &str) -> Ctx {
+        if self.is_open(item_id) {
+            return self.clone();
+        }
+        let view = self.views.lock().ok().and_then(|views| {
+            views
+                .iter()
+                .find(|v| v.open_item().as_deref() == Some(item_id))
+                .cloned()
+        });
+        match view {
+            Some(view) => self.in_view(&view),
+            None => self.clone(),
+        }
+    }
+
+    /// Whether this window's open review is this item.
     fn is_open(&self, item_id: &str) -> bool {
         self.slot
             .lock()
             .ok()
             .is_some_and(|g| g.as_ref().is_some_and(|c| c.item_id == item_id))
+    }
+
+    /// Close the item in whichever windows have it open.
+    async fn close_everywhere(&self, item_id: &str) {
+        for ctx in self.views() {
+            if ctx.is_open(item_id) {
+                ctx.close_review().await;
+            }
+        }
     }
 
     /// Drop the open review and stop its language server.
@@ -5813,9 +6031,7 @@ async fn archive_item(
             return Ok(());
         }
     }
-    if ctx.is_open(id) {
-        ctx.close_review().await;
-    }
+    ctx.close_everywhere(id).await;
 
     // Persist the archive first. Admission validates this row under the
     // cache mutex, so work admitted before this point is visible to the run
@@ -6029,9 +6245,7 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
                 {
                     return Err(format!("{} has uncommitted changes", checkout.branch));
                 }
-                if ctx.is_open(id) {
-                    ctx.close_review().await;
-                }
+                ctx.close_everywhere(id).await;
                 ctx.preparer
                     .remove_worktree(&bare, &checkout.path)
                     .await
@@ -6045,8 +6259,8 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
                 }
             }
         }
-    } else if ctx.is_open(id) {
-        ctx.close_review().await;
+    } else {
+        ctx.close_everywhere(id).await;
     }
 
     let context_before = context_dirs(ctx);
@@ -6812,6 +7026,8 @@ async fn follow_last_run(ctx: &Ctx, run: &RunRecord) {
         RunOwner::Discussion { item_id, .. } | RunOwner::Review { item_id, .. } => item_id.clone(),
         RunOwner::Unavailable { .. } => return,
     };
+    let view = ctx.view_for(&item_id);
+    let ctx = &view;
     let live = |open: &ReviewContext| {
         open.item_id == item_id
             && open.review_snapshot_id.is_none()
@@ -7164,6 +7380,8 @@ async fn root_base_revs(ctx: &Ctx, path: &Path, base: &str) -> Vec<String> {
 /// open. Mergeability and permissions stay live-only: a stale authorization
 /// answer must never enable a remote mutation.
 fn begin_pull_request_status(ctx: &Ctx, item_id: &str, pr: &PullRequest) -> u64 {
+    let view = ctx.view_for(item_id);
+    let ctx = &view;
     let status_generation = ctx.status_requests.begin(item_id);
     if ctx.is_open(item_id) {
         let _ = ctx.events.send(Event::PullRequestOverviewLoading {
@@ -7184,6 +7402,8 @@ async fn fetch_checks(
     pr: &PullRequest,
     status_generation: u64,
 ) -> bool {
+    let view = ctx.view_for(item_id);
+    let ctx = &view;
     let Some(github) = ctx.github() else {
         return false;
     };
@@ -8598,6 +8818,8 @@ fn install_pull_request_snapshot(
     fetched: PullRequest,
     merge_attempt_id: Option<u64>,
 ) -> Option<(Arc<Item>, Arc<PullRequest>)> {
+    let view = ctx.view_for(item_id);
+    let ctx = &view;
     let mut item = ctx.item(item_id)?;
     let current = item.pull_request()?;
     if current.repo_full_name != fetched.repo_full_name || current.number != fetched.number {
@@ -9548,7 +9770,9 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
         // A CI notification for the open pull request's branch is the one
         // time the checks are asked about again.
         if thread.subject.kind == SubjectKind::CheckSuite {
-            refresh_open_checks(ctx, thread).await;
+            for ctx in ctx.views() {
+                refresh_open_checks(&ctx, thread).await;
+            }
             continue;
         }
         let kind = match thread.subject.kind {
@@ -9569,7 +9793,7 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
         // Something was said about the item that is open. The view offers
         // to fetch it rather than moving under the reader. Once per
         // notification, as with CI.
-        if ctx.is_open(&item.id) {
+        if ctx.view_for(&item.id).is_open(&item.id) {
             let key = (thread.id.clone(), thread.updated_at);
             let fresh = ctx
                 .seen_notifications
@@ -9756,6 +9980,8 @@ async fn look_for_runs(ctx: &Ctx) {
 /// Fetch again what the open item shows from GitHub: the pull request and
 /// its discussion and checks, or the issue's comments.
 async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
+    let view = ctx.view_for(item_id);
+    let ctx = &view;
     // One at a time per item: two notifications in one poll would fetch
     // and archive the same discussion twice, side by side.
     let taken = ctx
@@ -9769,7 +9995,7 @@ async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
     refresh_open_item_inner(ctx, item_id).await;
     if let Ok(mut s) = ctx.refreshing.lock() {
         s.remove(item_id);
-    }
+    };
 }
 
 async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
@@ -11239,6 +11465,8 @@ async fn fetch_discussion(
 /// state layer also retains an accepted review if navigation changes
 /// after the cache commit but before this event is handled.
 fn publish_discussion(ctx: &Ctx, item_id: &str, discussion: perch_github::Discussion) {
+    let view = ctx.view_for(item_id);
+    let ctx = &view;
     if ctx.is_open(item_id) {
         ctx.send_threads(item_id);
     }
@@ -14481,6 +14709,7 @@ mod tests {
         let mut config = Config::default();
         config.repo = repos;
         let cache = Some(Arc::new(std::sync::Mutex::new(cache)));
+        let events = EventSender::from(events);
         let runs = runs::RunManager::new(4, cache.clone(), events.clone());
         let ctx = Ctx {
             session: Arc::new(std::sync::RwLock::new(Some(Session {
@@ -14521,6 +14750,8 @@ mod tests {
             approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
             window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             landing: Default::default(),
+            window: NO_WINDOW,
+            views: Default::default(),
         };
         (ctx, received)
     }
@@ -15575,6 +15806,76 @@ mod tests {
             review_group_id: None,
             review_request_id: None,
         });
+    }
+
+    /// Give windows 1 and 2 views, as opening them does.
+    fn two_windows(ctx: &Ctx) {
+        let mut views = ctx.views.lock().unwrap();
+        for window in [1, 2] {
+            views.push(View::new(
+                window,
+                Arc::new(NavigationRequests::for_window(window)),
+                Arc::default(),
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn news_about_an_item_reaches_the_window_that_has_it_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let (events, received) = std::sync::mpsc::channel();
+        ctx.events = EventSender::routed(events);
+        two_windows(&ctx);
+        let item = store_pull(&ctx, 7);
+        open_in_slot(&ctx.for_window(2), &item);
+
+        // From the worker's own context, as a poll would.
+        publish_discussion(&ctx, &item.id, perch_github::Discussion::default());
+
+        let sent: Vec<_> = received.try_iter().collect();
+        assert!(sent
+            .iter()
+            .any(|(window, event)| *window == 2
+                && matches!(event, Event::DiscussionReady { item_id, .. } if *item_id == item.id)));
+        assert!(!sent.iter().any(|(window, _)| *window == 1));
+    }
+
+    #[tokio::test]
+    async fn activity_is_not_recorded_while_any_window_shows_the_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        two_windows(&ctx);
+        let item = store_pull(&ctx, 7);
+        let second = ctx.for_window(2);
+        open_in_slot(&second, &item);
+        ctx.for_window(1)
+            .window_key
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        let event = perch_github::ActivityEvent::HeadMoved {
+            from: "a".into(),
+            to: "b".into(),
+            commits: None,
+        };
+        assert!(!ctx.record_activity(&item.id, event.clone()));
+        second
+            .window_key
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(ctx.record_activity(&item.id, event));
+    }
+
+    #[tokio::test]
+    async fn archiving_closes_the_item_in_whichever_window_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        two_windows(&ctx);
+        let item = store_pull(&ctx, 7);
+        open_in_slot(&ctx.for_window(2), &item);
+
+        ctx.for_window(1).close_everywhere(&item.id).await;
+
+        assert!(!ctx.for_window(2).is_open(&item.id));
     }
 
     /// A kept discussion with one conversation comment, `IC_1`.
@@ -19268,7 +19569,7 @@ read eof || true
         let cache = Arc::new(std::sync::Mutex::new(cache));
         let (events, received) = std::sync::mpsc::channel();
 
-        spawn_avatar(None, Some(cache.clone()), events, Arc::new(Semaphore::new(1)), url.clone());
+        spawn_avatar(None, Some(cache.clone()), events.into(), Arc::new(Semaphore::new(1)), url.clone());
 
         let Ok(Event::Avatar { url: face_url, bytes }) = received.try_recv() else {
             panic!("no face was sent");

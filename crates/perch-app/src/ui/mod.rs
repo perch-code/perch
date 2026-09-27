@@ -41,6 +41,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let open_item: items::OpenItem = Rc::new({
         let backend = backend.clone();
         move |item: &perch_github::Item| {
+            // An item open in another window is looked at there.
+            if crate::windows::raise_holding(&item.id, backend.window()) {
+                return;
+            }
             state.pending_agent_navigation.set(None);
             state.agent_archived_owner.set(None);
             let message = match &item.subject {
@@ -317,6 +321,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // Cmd-N opens the new-work view, from anywhere.
                 if key.code == Code::KeyN && key.modifiers == OS_MOD {
                     new_work::open(state, key_backend);
+                    return EventPropagation::Stop;
+                }
+                // Cmd-Shift-N opens another window, laid out as this one.
+                if key.code == Code::KeyN && key.modifiers == OS_MOD | Modifiers::SHIFT {
+                    crate::windows::open(Some(state));
                     return EventPropagation::Stop;
                 }
                 // Cmd-P puts it up, app-wide, as the tree's key is; Escape

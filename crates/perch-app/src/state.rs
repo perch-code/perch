@@ -335,6 +335,51 @@ impl AppState {
         }
     }
 
+    /// Start a new window from what `data` has heard from the backend, the
+    /// rows, the inbox and the agents, and with `settings`' way of showing
+    /// them. The backend sends most of it once, at launch.
+    pub fn seed_from(&self, data: &AppState, settings: &AppState) {
+        fn copy<T: Clone + 'static>(to: RwSignal<T>, from: RwSignal<T>) {
+            to.set(from.get_untracked());
+        }
+        copy(self.avatars, data.avatars);
+        copy(self.repos, data.repos);
+        copy(self.items, data.items);
+        copy(self.notifications, data.notifications);
+        copy(self.item_activity, data.item_activity);
+        copy(self.notifications_polled, data.notifications_polled);
+        copy(self.agent, data.agent);
+        copy(self.viewer, data.viewer);
+        copy(self.agent_runs, data.agent_runs);
+        copy(self.agent_run_events, data.agent_run_events);
+        copy(self.agent_run_events_has_more, data.agent_run_events_has_more);
+        copy(self.agent_history_has_more, data.agent_history_has_more);
+        copy(self.item_runs, data.item_runs);
+        copy(self.review_capabilities, data.review_capabilities);
+        copy(self.review_preferences, data.review_preferences);
+        copy(self.review_base_refs, data.review_base_refs);
+        copy(self.review_groups, data.review_groups);
+        copy(self.review_findings, data.review_findings);
+        copy(self.status, data.status);
+        copy(self.now, data.now);
+        copy(self.new_work.prefix, data.new_work.prefix);
+        copy(self.item_filters, settings.item_filters);
+        copy(self.tree_open, settings.tree_open);
+        copy(self.drawer_width, settings.drawer_width);
+        copy(self.sidebar_open, settings.sidebar_open);
+        copy(self.sidebar_width, settings.sidebar_width);
+        if let (Some(to), Some(data), Some(settings)) = (
+            self.review.get_untracked(),
+            data.review.get_untracked(),
+            settings.review.get_untracked(),
+        ) {
+            copy(to.approvals, data.approvals);
+            copy(to.grants, data.grants);
+            copy(to.run_changes, data.run_changes);
+            copy(to.layout, settings.layout);
+        }
+    }
+
     /// Replace the summaries loaded at startup or by History pagination.
     /// Active records win by id; repeated pages are harmless.
     pub fn merge_agent_runs(

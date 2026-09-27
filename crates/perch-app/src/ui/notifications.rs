@@ -267,6 +267,9 @@ fn open_at(state: AppState, backend: &Backend, local: &Local) {
         return;
     };
     let item = &local.item;
+    if crate::windows::raise_holding(&item.id, backend.window()) {
+        return;
+    }
     let landing = crate::inbox::landing(&local.activity.event);
     if let Landing::Run { run_id } = &landing {
         if !item.is_archived() {

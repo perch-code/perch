@@ -30,7 +30,7 @@ struct Inner {
     admission: Mutex<AdmissionGate>,
     entries: Mutex<HashMap<String, Arc<Entry>>>,
     cache: SharedCache,
-    events: std::sync::mpsc::Sender<Event>,
+    events: super::EventSender<Event>,
 }
 
 #[derive(Default)]
@@ -94,7 +94,7 @@ impl RunManager {
     pub(crate) fn new(
         limit: usize,
         cache: SharedCache,
-        events: std::sync::mpsc::Sender<Event>,
+        events: super::EventSender<Event>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -839,7 +839,7 @@ mod tests {
         });
         cache.insert_item(&item).unwrap();
         let (events, _) = std::sync::mpsc::channel();
-        RunManager::new(limit, Some(Arc::new(Mutex::new(cache))), events)
+        RunManager::new(limit, Some(Arc::new(Mutex::new(cache))), events.into())
     }
 
     fn add_request(manager: &RunManager, thread_id: &str, request_id: &str) {

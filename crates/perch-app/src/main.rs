@@ -18,16 +18,10 @@ mod state;
 mod theme;
 mod timefmt;
 mod ui;
+mod windows;
 
-use std::rc::Rc;
-
-use floem::ext_event::update_signal_from_channel;
-use floem::kurbo::Size;
-use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::window::WindowConfig;
-use floem::Application;
-
-use crate::state::AppState;
+use floem::reactive::SignalWith;
+use floem::{Application, IntoView};
 
 mod dump;
 mod scan_cli;
@@ -89,7 +83,7 @@ fn main() {
     theme::install_code_font();
 
     let (backend, events) = backend::spawn();
-    let backend = Rc::new(backend);
+    let mut started = Some((backend, events));
 
     // A development hook: open a pull request at launch rather than by
     // clicking, so the whole chain can be exercised from a terminal.
@@ -101,28 +95,26 @@ fn main() {
     tracing::info!(hook = ?open_at_launch, "launch hook");
 
     Application::new()
+        // A click on the Dock icon with every window shut opens one.
+        .on_event(|event| {
+            if let floem::AppEvent::Reopen {
+                has_visible_windows: false,
+            } = event
+            {
+                windows::open(None);
+            }
+        })
         .window(
             move |_| {
                 app_icon::install();
-                let state = AppState::new();
-                let mut review = review::model::ReviewState::new();
-                review.agent = state.agent;
-                state.review.set(Some(review));
-
-                // Backend events arrive on a std channel. floem drains it on
-                // the UI thread and writes each one into this signal; the
-                // effect below folds them into app state one at a time.
-                let incoming = RwSignal::new(None::<backend::Event>);
-                update_signal_from_channel(incoming.write_only(), events);
-                floem::reactive::Effect::new(move |_| {
-                    if let Some(event) = incoming.get() {
-                        // Folding an event is not a derivation. Untracked, so
-                        // that a signal this happens to read on the way past
-                        // cannot subscribe the effect to its own output and
-                        // have the last event applied twice.
-                        floem::reactive::Effect::untrack(|| state.apply_with_review(event, review));
-                    }
-                });
+                // Backend events arrive on a std channel, which floem drains
+                // on the UI thread into the windows' state.
+                if let Some((backend, events)) = started.take() {
+                    windows::start(backend, events);
+                }
+                let Some((state, review, backend)) = windows::window(None) else {
+                    return floem::views::Empty::new().into_any();
+                };
 
                 // PERCH_OPEN_BRANCH=owner/repo:branch opens a branch item once
                 // the cache has painted it. Its id is not known until then.
@@ -216,30 +208,9 @@ fn main() {
                     }
                 }
 
-                ui::app_view(state, review, backend.clone())
+                windows::view(state, review, backend).into_any()
             },
-            Some(
-                WindowConfig::default()
-                    .size(Size::new(1280.0, 820.0))
-                    .min_size(Size::new(900.0, 600.0))
-                    .title("Perch")
-                    .with_mac_os_config(|mac| {
-                        // No title bar: the content runs to the top of the
-                        // window and the app draws its own strip, with the
-                        // traffic lights sitting in it.
-                        //
-                        // The offset is absolute. floem pins the red button's
-                        // left edge here and places each next one 6px after
-                        // the previous, at macOS's 14pt width, so the three
-                        // span 54px. The Codex-shaped navigation leaves 16px
-                        // at the window edge and centres the lights in its
-                        // 56px title strip.
-                        mac.full_size_content_view(true)
-                            .transparent_title_bar(true)
-                            .hide_title(true)
-                            .traffic_lights_offset((16.0, 21.0))
-                    }),
-            ),
+            Some(windows::config()),
         )
         .run();
 }
