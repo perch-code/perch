@@ -114,6 +114,7 @@ pub fn view(
             crate::review::review_launch::history(app, state, backend.clone()),
             crate::review::merge::surface(state, backend.clone()),
             crate::review::open_pull::surface(app, state, backend.clone()),
+            crate::review::close_as_issue::surface(app, state, backend.clone()),
             Label::derived(|| "Nothing here yet. Ask about the branch below.".to_string()).style(
                 move |s| {
                     // Hidden rather than absent, so it takes no share of the

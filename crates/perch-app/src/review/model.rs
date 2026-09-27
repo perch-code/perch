@@ -1298,6 +1298,18 @@ pub struct ReviewState {
     pub describing: RwSignal<bool>,
     pub description_error: RwSignal<Option<String>>,
     pub description_offer: RwSignal<Option<(String, String)>>,
+    /// Close as issue under way, and what stopped the last.
+    pub issue_closing: RwSignal<bool>,
+    pub issue_error: RwSignal<Option<String>>,
+    /// How tall the reader has dragged the issue's body, and whether they
+    /// are dragging it.
+    pub issue_body_height: RwSignal<Option<f64>>,
+    pub issue_body_resizing: RwSignal<bool>,
+    /// An agent writing the issue, what stopped the last, and an answer
+    /// waiting on the reader because they had typed.
+    pub issue_drafting: RwSignal<bool>,
+    pub issue_draft_error: RwSignal<Option<String>>,
+    pub issue_draft_offer: RwSignal<Option<(String, String)>>,
     /// The (path, blob) pairs the reader has checked as viewed.
     pub viewed: RwSignal<Arc<std::collections::HashSet<(String, String)>>>,
     /// The open files the reader asked to see whole rather than folded to
@@ -1678,6 +1690,13 @@ impl ReviewState {
             describing: RwSignal::new(false),
             description_error: RwSignal::new(None),
             description_offer: RwSignal::new(None),
+            issue_closing: RwSignal::new(false),
+            issue_error: RwSignal::new(None),
+            issue_body_height: RwSignal::new(None),
+            issue_body_resizing: RwSignal::new(false),
+            issue_drafting: RwSignal::new(false),
+            issue_draft_error: RwSignal::new(None),
+            issue_draft_offer: RwSignal::new(None),
             viewed: RwSignal::new(Arc::new(std::collections::HashSet::new())),
             whole: RwSignal::new(HashSet::new()),
             reveals: RwSignal::new(HashMap::new()),
@@ -1856,6 +1875,11 @@ impl ReviewState {
         self.describing.set(false);
         self.description_error.set(None);
         self.description_offer.set(None);
+        self.issue_closing.set(false);
+        self.issue_error.set(None);
+        self.issue_drafting.set(false);
+        self.issue_draft_error.set(None);
+        self.issue_draft_offer.set(None);
         self.viewed.set(Arc::new(std::collections::HashSet::new()));
         // Only written when they change: the open editor rebuilds its
         // document on either, and it is about to go.

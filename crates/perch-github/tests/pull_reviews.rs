@@ -412,6 +412,55 @@ async fn an_issue_comment_posts_to_the_conversation_and_decodes_the_comment() {
 }
 
 #[tokio::test]
+async fn an_issue_opens_with_its_title_and_body_and_decodes_the_issue() {
+    let (base, requests) = spawn(vec![Response::new(
+        "201 Created",
+        serde_json::json!({
+            "number": 58,
+            "node_id": "I_58",
+            "title": "The manifest races",
+            "body": "Two writers.",
+            "state": "open",
+            "user": { "login": "reader", "avatar_url": "https://avatars/reader" },
+            "comments": 0,
+            "created_at": "2026-09-27T10:00:00Z",
+            "updated_at": "2026-09-27T10:00:00Z",
+        })
+        .to_string(),
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let issue = github
+        .create_issue("a/b", "The manifest races", "Two writers.")
+        .await
+        .unwrap();
+    assert_eq!(issue.number, 58);
+    assert_eq!(issue.title, "The manifest races");
+    assert_eq!(issue.repo_full_name, "a/b");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/repos/a/b/issues");
+    let json: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({ "title": "The manifest races", "body": "Two writers." })
+    );
+}
+
+#[tokio::test]
+async fn an_issue_without_a_title_is_refused_before_the_request() {
+    let (base, requests) = spawn(vec![]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+    assert!(matches!(
+        github.create_issue("a/b", "  ", "body").await,
+        Err(Error::Decode(_))
+    ));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn an_empty_issue_comment_is_refused_before_the_request() {
     let (base, requests) = spawn(vec![]);
     let github = GitHub::with_base_uri("token", &base).unwrap();

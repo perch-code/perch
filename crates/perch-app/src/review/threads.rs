@@ -845,10 +845,20 @@ fn composer_footer(
                 },
             ),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
+            close_as_issue_button(app, state),
             close_button(app, state),
             send_button(move || send_label(state), send.clone()).debug_name("composer-send"),
         ))
-        .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
+        // In a narrow column the buttons that close go under the pickers,
+        // at the right, rather than past the card's edge.
+        .style(|s| {
+            s.items_center()
+                .width_full()
+                .gap(6.0)
+                .flex_wrap(floem::taffy::FlexWrap::Wrap)
+                .justify_end()
+                .margin_top(8.0)
+        })
         .into_any(),
         FooterMode::Confirming => Stack::horizontal((
             Label::derived(move || {
@@ -947,6 +957,31 @@ fn close_button(app: AppState, state: ReviewState) -> impl IntoView {
             },
         )
         .debug_name("pull-request-close"),
+    )
+    .style(move |s| s.apply_if(!offered.get(), |s| s.hide()))
+}
+
+/// Close as issue…, beside Close, where the pull request may be closed:
+/// it unfolds the form at the foot of Conversation that opens an issue
+/// for what the pull request found, then comments and closes.
+fn close_as_issue_button(app: AppState, state: ReviewState) -> impl IntoView {
+    let offered = Memo::new(move |_| close_offered(app, state));
+    Container::new(
+        text_button(
+            || "Close as issue…".to_string(),
+            SidebarIcon::Issue,
+            move || {
+                if state.posting.with_untracked(Option::is_some) {
+                    return;
+                }
+                let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+                else {
+                    return;
+                };
+                crate::review::close_as_issue::unfold(app, state, &item_id);
+            },
+        )
+        .debug_name("close-as-issue-unfold"),
     )
     .style(move |s| s.apply_if(!offered.get(), |s| s.hide()))
 }
@@ -5629,6 +5664,72 @@ mod tests {
         closed.state = "closed".into();
         state.pull_request.set(Some(Arc::new(closed)));
         assert!(!close_offered(app, state));
+    }
+
+    /// With both closes offered, the footer keeps to the card in the
+    /// narrowest column the window allows, putting what doesn't fit on a
+    /// second line, and to one line where there is room.
+    #[test]
+    fn the_footer_with_both_closes_keeps_inside_a_narrow_card() {
+        for width in [480.0, 800.0] {
+            let root = TestRoot::new();
+            let app = AppState::new();
+            app.viewer.set(Some(("octocat".into(), String::new())));
+            let state = state_with_pull_request();
+            state.open_composer(None, None, "Superseded".into(), sonnet_medium());
+            state.set_destination(Destination::GitHub);
+            let composer = state.composer.get().unwrap();
+            let backend = Rc::new(crate::backend::Backend::detached());
+            let view = composer_view(app, state, backend, composer, ThreadFace::Card);
+            let mut harness = HeadlessHarness::new_with_size(root, view, width, 400.0);
+            harness.rebuild();
+            harness.paint();
+            let rects: Vec<_> = ["close-as-issue-unfold", "pull-request-close", "composer-send"]
+                .into_iter()
+                .map(|name| find(harness.root_id(), name).unwrap().get_visual_rect_no_clip())
+                .collect();
+            for rect in &rects {
+                assert!(rect.x1 <= width, "past the card at {width}: {rect:?}");
+            }
+            if width == 800.0 {
+                assert!(rects.iter().all(|r| (r.center().y - rects[0].center().y).abs() < 2.0));
+            }
+        }
+    }
+
+    /// Close as issue… sits beside Close for whoever may close the pull
+    /// request, and unfolds the form without sending anything.
+    #[test]
+    fn close_as_issue_sits_beside_close_and_unfolds_the_form() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        app.viewer.set(Some(("octocat".into(), String::new())));
+        let state = state_with_pull_request();
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "close-as-issue-unfold"));
+        let item_id = state.item.get().unwrap().id.clone();
+        assert!(!app
+            .issue_drafts
+            .with(|d| d.get(&item_id).is_some_and(|d| d.unfolded)));
+
+        click(&mut harness, "close-as-issue-unfold");
+        assert!(commands.try_recv().is_err(), "nothing goes from the button");
+        assert!(app
+            .issue_drafts
+            .with(|d| d.get(&item_id).is_some_and(|d| d.unfolded)));
+
+        // Not for a reader who may not close the pull request.
+        app.viewer.set(Some(("reader".into(), String::new())));
+        harness.rebuild();
+        harness.paint();
+        assert!(!shown(&harness, "close-as-issue-unfold"));
     }
 
     /// With nothing typed the button reads Close pull request, and the

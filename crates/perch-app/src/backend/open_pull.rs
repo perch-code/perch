@@ -271,8 +271,9 @@ pub enum DescriptionOutcome {
     Stopped,
 }
 
-/// Description runs under way, by item, so Stop can reach them. They are
-/// not in the run registry: nothing about one is kept once it ends.
+/// Description runs under way, and issue drafts, by item, so Stop can
+/// reach them. They are not in the run registry: nothing about one is
+/// kept once it ends.
 static WRITERS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<perch_agent::Run>>>,
 > = std::sync::LazyLock::new(Default::default);
@@ -302,7 +303,7 @@ pub(super) async fn describe(
     });
 }
 
-/// Stop the item's description run, if it has one.
+/// Stop the item's description run or issue draft, if it has one.
 pub(super) fn stop_describing(item_id: &str) {
     let run = WRITERS.lock().ok().and_then(|w| w.get(item_id).cloned());
     if let Some(run) = run {
@@ -325,13 +326,28 @@ async fn describe_inner(
     let Some(worktree) = ctx.item(item_id).and_then(|i| i.checkout).map(|c| c.path) else {
         return DescriptionOutcome::Failed("The item is gone".into());
     };
+    write_title_and_body(ctx, item_id, worktree, &prompt, backend, model, effort).await
+}
+
+/// Run `prompt` in `worktree` under Ask's rules and split the answer into
+/// a title and a body. The run is kept by item for Stop until it ends;
+/// one item has one at a time.
+pub(super) async fn write_title_and_body(
+    ctx: &Ctx,
+    item_id: &str,
+    worktree: std::path::PathBuf,
+    prompt: &crate::ask::Prompt,
+    backend: perch_agent::Backend,
+    model: &str,
+    effort: perch_agent::Effort,
+) -> DescriptionOutcome {
     let spec = crate::ask::run_spec(
         &ctx.config().agent,
         backend,
         model,
         effort,
         worktree,
-        &prompt,
+        prompt,
         None,
         perch_agent::Mode::Ask,
     );
@@ -351,7 +367,7 @@ async fn describe_inner(
     });
     if !taken {
         run.cancel_and_wait().await;
-        return DescriptionOutcome::Failed("A description is being written already".into());
+        return DescriptionOutcome::Failed("An agent is writing here already".into());
     }
     let mut said = String::new();
     while let Some(event) = received.recv().await {

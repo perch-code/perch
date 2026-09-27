@@ -128,6 +128,9 @@ pub struct AppState {
     /// What was typed into each branch's pull request form, by item, until
     /// Perch quits or the pull request is opened.
     pub pull_request_drafts: RwSignal<HashMap<String, crate::review::open_pull::PullRequestDraft>>,
+    /// What was typed into each pull request's Close as issue form, by
+    /// item, until Perch quits or the issue is opened.
+    pub issue_drafts: RwSignal<HashMap<String, crate::review::close_as_issue::IssueDraft>>,
     /// Ordered persisted events for details the reader has opened. The first
     /// history page does not pull every transcript into memory.
     pub agent_run_events:
@@ -272,6 +275,7 @@ impl AppState {
             reload: RwSignal::new(Vec::new()),
             agent_runs: RwSignal::new(Arc::new(Vec::new())),
             pull_request_drafts: RwSignal::new(HashMap::new()),
+            issue_drafts: RwSignal::new(HashMap::new()),
             agent_run_events: RwSignal::new(HashMap::new()),
             agent_run_events_has_more: RwSignal::new(HashMap::new()),
             agent_run_events_loading: RwSignal::new(HashSet::new()),
@@ -2059,6 +2063,30 @@ impl AppState {
                 }
                 self.apply(Event::PullRequestDescription { item_id, outcome });
             }
+            Event::IssueDraft { item_id, outcome } => {
+                if review.is_item(&item_id) {
+                    review.issue_drafting.set(false);
+                    match &outcome {
+                        crate::backend::DescriptionOutcome::Written { title, body }
+                            if crate::review::close_as_issue::typed(*self, &item_id) =>
+                        {
+                            review.issue_draft_offer.set(Some((title.clone(), body.clone())));
+                        }
+                        crate::backend::DescriptionOutcome::Failed(message) => {
+                            review.issue_draft_error.set(Some(message.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+                self.apply(Event::IssueDraft { item_id, outcome });
+            }
+            Event::ClosedAsIssue { item_id, result } => {
+                if review.is_item(&item_id) {
+                    review.issue_closing.set(false);
+                    review.issue_error.set(result.as_ref().err().cloned());
+                }
+                self.apply(Event::ClosedAsIssue { item_id, result });
+            }
             Event::PullRequestOpened {
                 item_id,
                 number,
@@ -2118,6 +2146,25 @@ impl AppState {
                 }
             }
             Event::PullRequestDescription { .. } => {}
+            // The issue is open, so what was typed for it is spent.
+            Event::ClosedAsIssue {
+                item_id,
+                result: Ok(_),
+            } => {
+                self.issue_drafts.update(|drafts| {
+                    drafts.remove(&item_id);
+                });
+            }
+            Event::ClosedAsIssue { .. } => {}
+            Event::IssueDraft {
+                item_id,
+                outcome: crate::backend::DescriptionOutcome::Written { title, body },
+            } => {
+                if !crate::review::close_as_issue::typed(*self, &item_id) {
+                    crate::review::close_as_issue::take_draft(*self, &item_id, title, body);
+                }
+            }
+            Event::IssueDraft { .. } => {}
             // The rest are about the open item, and wait for no one.
             Event::PullRequestReadiness { .. }
             | Event::PullRequestBases { .. }

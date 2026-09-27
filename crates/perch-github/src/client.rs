@@ -625,6 +625,41 @@ impl GitHub {
         Ok(IssueComment::from(comment))
     }
 
+    /// Open an issue on `repo_full_name`, `POST /issues`, which answers
+    /// `201 Created` with the issue it made.
+    pub async fn create_issue(
+        &self,
+        repo_full_name: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<Issue, Error> {
+        if title.trim().is_empty() {
+            return Err(Error::Decode("an issue requires a title".into()));
+        }
+        let (owner, name) = repo_parts(repo_full_name)?;
+
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            title: &'a str,
+            body: &'a str,
+        }
+
+        let path = format!("/repos/{owner}/{name}/issues");
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._post(&path, Some(&Request { title, body }))
+            .await
+            .map_err(map_octocrab_error)?;
+        let body = self
+            .finish_response(response, &[StatusCode::CREATED])
+            .await?;
+        let payload: IssuePayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(payload.into_issue(repo_full_name))
+    }
+
     /// The workflow runs for one commit, newest first. What the checks
     /// pill is set from. One page: a head with more than a hundred runs is
     /// not a head anyone is reviewing.

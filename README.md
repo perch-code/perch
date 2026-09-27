@@ -171,6 +171,19 @@ threads under a comment, a review's summary or the description, so each offers
 **Quote reply** under the pointer, which opens that composer with the text
 quoted as github.com quotes it, below anything already typed there for GitHub.
 
+**Close as issue…**, beside it, is for a pull request that found a real bug
+but isn't worth merging. It unfolds a form above the composer: the issue's
+title and body, filled from the pull request with a closing `Found in #12.`
+that links the two, and the comment the pull request gets, where `{issue}`
+becomes the new issue's number. **Write with Claude**, or Codex, has the agent
+read the pull request's checkout and diff under Ask's rules and describe the
+bug as it stands on the base branch, in its own words rather than the pull
+request's. The answer fills the title and body for you to edit, asking first
+if you have typed there. Nothing goes to GitHub until **Open issue and close**,
+which opens the issue, comments and closes. Once the issue is open the form is
+spent, so a comment or close GitHub refuses after it is told as a notice, not
+retried.
+
 GitHub's review threads are drawn beside Perch's own with the same cards, in
 both Code and Conversation, so one thread can hold a reviewer's comment, your
 reply to them, and an agent's private take on both. A thread looks as it does
@@ -220,7 +233,7 @@ its repository, as does pushing a branch from Perch's own clone; opening a pull
 request requires `Pull requests: write`. Commenting on, approving, or requesting changes on a pull
 request requires `Pull requests: write` permission, as do resolving a thread
 and reacting to a pull request or anything said on it; reacting on an issue
-requires `Issues: write`.
+requires `Issues: write`, as does Close as issue.
 
 ## Configuration
 
