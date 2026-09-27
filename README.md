@@ -107,3 +107,11 @@ file your user can.
 Everything lives under `~/.perch` (or `$PERCH_HOME`): the config, a SQLite
 database, worktrees, clones, and agent state. The database holds your local
 conversations, drafts and review history, so don't treat it as a cache.
+
+Perch removes the worktrees it made under `~/.perch` once they're done
+with: when nothing in one is modified or untracked, its branch has no
+commit that isn't somewhere else, and its pull request has merged or
+closed or you haven't opened it in 14 days. The branch stays, and Restore
+Worktree brings the directory back. Like `git worktree remove`, it counts
+files git ignores, such as `.env`, as disposable. Worktrees under your
+`roots` are yours, and Perch never removes them.
