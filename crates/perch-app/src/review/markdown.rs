@@ -1,7 +1,8 @@
 //! Markdown, rendered the way GitHub renders it: paragraphs with inline
 //! styles and bare addresses linked, headings by level, lists that nest
 //! and carry task boxes, quotes and alerts, tables, fenced code, rules,
-//! and footnotes.
+//! and footnotes. An issue or pull request written as `#12` or
+//! `owner/repo#12` links to it on GitHub, as GitHub links one.
 //!
 //! pulldown-cmark does the parsing, with the extensions GitHub turns on.
 //! Its events become a tree of blocks, which the column then draws.
@@ -112,7 +113,16 @@ pub enum Align {
 
 /// Parse markdown into the blocks the column draws.
 pub fn parse(text: &str) -> Vec<Block> {
+    parse_in(text, None)
+}
+
+/// Parse markdown written in `repo`, `owner/name`, so that a bare `#12`
+/// links to that repository's issue or pull request. With no repository,
+/// or a local one, only `owner/repo#12` is linked.
+pub fn parse_in(text: &str, repo: Option<&str>) -> Vec<Block> {
+    let repo = repo.filter(|r| r.contains('/') && !perch_github::config::is_local(r));
     let mut builder = Builder {
+        repo,
         events: Parser::new_ext(text, OPTIONS).peekable(),
         numbers: Vec::new(),
         definitions: HashMap::new(),
@@ -137,6 +147,8 @@ pub fn parse(text: &str) -> Vec<Block> {
 
 struct Builder<'a> {
     events: Peekable<Parser<'a>>,
+    /// The repository a bare `#12` is an issue of.
+    repo: Option<&'a str>,
     /// Footnote labels in the order they were first referenced; a label's
     /// number is its index plus one.
     numbers: Vec<String>,
@@ -382,9 +394,9 @@ impl<'a> Builder<'a> {
         self.inline(event, spans, style);
     }
 
-    /// The gathered text, with any bare address in it linked, as GitHub
-    /// links one and the parser does not. Inside a link the address is
-    /// the link's own text.
+    /// The gathered text, with any bare address or issue reference in it
+    /// linked, as GitHub links one and the parser does not. Inside a link
+    /// they are the link's own text.
     fn flush_text(&mut self, spans: &mut Vec<Span>, style: &Marks) {
         if self.text.is_empty() {
             return;
@@ -395,12 +407,18 @@ impl<'a> Builder<'a> {
             return;
         }
         for (run, address) in autolink(&text) {
+            if !address {
+                for (piece, link) in issue_refs(run, self.repo) {
+                    push_text(spans, &Span { link, ..style.span() }, piece);
+                }
+                continue;
+            }
             // A `www.` address opens over http, as GitHub opens one.
-            let link = address.then(|| match run.strip_prefix("www.") {
+            let link = match run.strip_prefix("www.") {
                 Some(_) => format!("http://{run}"),
                 None => run.to_string(),
-            });
-            let s = Span { link, ..style.span() };
+            };
+            let s = Span { link: Some(link), ..style.span() };
             push_text(spans, &s, run);
         }
     }
@@ -881,17 +899,79 @@ fn next_address(text: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// The blocks, stacked, at the body size.
-pub fn render(text: &str) -> impl IntoView {
-    render_blocks(parse(text), theme::TEXT_BODY)
+/// Split `text` into runs, with the issue and pull request references
+/// GitHub would link given their address: `#12` in `repo`, and
+/// `owner/repo#12` anywhere. A reference stands alone as a word: `a#12`,
+/// `#12a` and `x/y/z#12` are left as written.
+fn issue_refs<'t>(text: &'t str, repo: Option<&str>) -> Vec<(&'t str, Option<String>)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    for (hash, _) in text.match_indices('#') {
+        let digits = text[hash + 1..].find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len() - hash - 1);
+        let end = hash + 1 + digits;
+        if digits == 0 || text[hash + 1..].starts_with('0') {
+            continue;
+        }
+        if text[end..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let named = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '/');
+        let start = text[..hash]
+            .char_indices()
+            .rfind(|&(_, c)| !named(c))
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        if start < from {
+            continue;
+        }
+        // Not glued to a word, an entity or another `#`.
+        if text[..start].chars().next_back().is_some_and(|c| c.is_alphanumeric() || matches!(c, '&' | '#' | '@')) {
+            continue;
+        }
+        let number = &text[hash + 1..end];
+        let url = match &text[start..hash] {
+            "" => match repo {
+                Some(repo) => format!("https://github.com/{repo}/issues/{number}"),
+                None => continue,
+            },
+            name => match name.split_once('/') {
+                Some((owner, repo))
+                    if !owner.is_empty()
+                        && !repo.is_empty()
+                        && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                        && repo.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')) =>
+                {
+                    format!("https://github.com/{name}/issues/{number}")
+                }
+                _ => continue,
+            },
+        };
+        if start > from {
+            out.push((&text[from..start], None));
+        }
+        out.push((&text[start..end], Some(url)));
+        from = end;
+    }
+    if from < text.len() {
+        out.push((&text[from..], None));
+    }
+    out
+}
+
+/// The blocks, stacked, at the body size, with `#12` linked to `repo`'s
+/// issue or pull request.
+pub fn render_in(text: &str, repo: &str) -> impl IntoView {
+    render_blocks(parse_in(text, Some(repo)), theme::TEXT_BODY)
 }
 
 /// The blocks, stacked, at the body size, with the files, lines and
 /// symbols of the review's worktree they name linked to Code. The same
-/// as `render` for an item with no checkout.
+/// as `render_in` for an item with no checkout.
 pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
+    let repo = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.repo_full_name.clone()));
     passage(stack(
-        parse(text),
+        parse_in(text, repo.as_deref()),
         Ctx {
             size: theme::TEXT_BODY,
             color: theme::FG,
@@ -1642,6 +1722,46 @@ mod tests {
     }
 
     #[test]
+    fn issue_references_link_to_github_as_github_links_them() {
+        let issue = |text: &str, url: &str| Span { text: text.into(), link: Some(url.into()), ..Default::default() };
+        assert_eq!(
+            parse_in("Fixes #2118 (and slatedb/slatedb#7).", Some("criccomini/perch")),
+            vec![Block::Paragraph(vec![
+                plain("Fixes "),
+                issue("#2118", "https://github.com/criccomini/perch/issues/2118"),
+                plain(" (and "),
+                issue("slatedb/slatedb#7", "https://github.com/slatedb/slatedb/issues/7"),
+                plain(")."),
+            ])]
+        );
+        // With no repository to read it in, or a local one, a bare
+        // number is left alone and a named one still links.
+        for repo in [None, Some("local/perch")] {
+            assert_eq!(
+                parse_in("#1 and o/r#2", repo),
+                vec![Block::Paragraph(vec![plain("#1 and "), issue("o/r#2", "https://github.com/o/r/issues/2")])]
+            );
+        }
+        let linked = |text: &str| -> Vec<String> {
+            issue_refs(text, Some("o/r")).into_iter().filter(|(_, l)| l.is_some()).map(|(t, _)| t.to_string()).collect()
+        };
+        assert_eq!(linked("#1, #22: #3."), vec!["#1", "#22", "#3"]);
+        assert!(linked("a#1 #1a #0 # #x x/y/z#1 &#1 #1_ o/r/#1 é#1 /#1 -#1").is_empty());
+        assert_eq!(linked("(#4) [#5] \"#6\" *#7*"), vec!["#4", "#5", "#6", "#7"]);
+        // Not inside a link, a code span or an address.
+        assert_eq!(
+            parse_in("[#1](https://x.y) `#2` https://x.y/#3", Some("o/r")),
+            vec![Block::Paragraph(vec![
+                Span { text: "#1".into(), link: Some("https://x.y".into()), ..Default::default() },
+                plain(" "),
+                Span { text: "#2".into(), code: true, ..Default::default() },
+                plain(" "),
+                Span { text: "https://x.y/#3".into(), link: Some("https://x.y/#3".into()), ..Default::default() },
+            ])]
+        );
+    }
+
+    #[test]
     fn nested_lists_sit_inside_their_item() {
         let blocks = parse("1. a\n   - b\n   - c\n2. d");
         assert_eq!(
@@ -1979,7 +2099,7 @@ mod tests {
         /// The markdown laid out in a column `width` wide.
         fn harness_at(markdown: &str, width: f64) -> HeadlessHarness {
             let root = TestRoot::new();
-            let view = Container::new(render(markdown)).style(move |s| s.width(width).padding(0.0));
+            let view = Container::new(render_blocks(parse(markdown), theme::TEXT_BODY)).style(move |s| s.width(width).padding(0.0));
             let mut harness = HeadlessHarness::new_with_size(root, view, width, 2000.0);
             harness.rebuild();
             harness.paint();

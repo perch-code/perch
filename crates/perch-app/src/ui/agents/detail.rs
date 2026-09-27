@@ -446,6 +446,7 @@ fn result_content(
     has_more: bool,
 ) -> impl IntoView {
     let (result, incomplete) = response_text(&run, &events, has_more);
+    let repository = run.repository.clone();
     let error = (!matches!(run.status, AgentRunStatus::Completed))
         .then(|| run.terminal_display())
         .flatten();
@@ -472,7 +473,7 @@ fn result_content(
                     .border_color(outcome_color.with_alpha(0.30))
                     .border_radius(theme::RADIUS)
             }),
-            crate::review::markdown::render(&result),
+            crate::review::markdown::render_in(&result, &repository),
         ))
         .style(|s| s.flex_col().width_full().gap(12.0))
         .into_any(),
@@ -503,7 +504,7 @@ fn result_content(
         })
         .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE))
         .into_any(),
-        (None, false) => crate::review::markdown::render(&result).into_any(),
+        (None, false) => crate::review::markdown::render_in(&result, &repository).into_any(),
     };
     let content = if let Some(message) = incomplete {
         Stack::vertical((
