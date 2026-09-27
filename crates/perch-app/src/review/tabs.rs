@@ -587,6 +587,8 @@ mod tests {
     #[test]
     fn the_tree_tile_opens_and_shuts_the_tree_beside_the_pane() {
         let (mut harness, app, state) = pull_request_harness();
+        // As a real open leaves it: `opening` stays set while the item is.
+        state.opening.set(true);
         // The sidebar shut, so the window has the room to dock, and a file
         // open on Code, where the tiles are, so Code does not open the tree
         // for want of one.
