@@ -1,7 +1,7 @@
 # Perch: Milestone 10, One list
 
 > Historical specification. Perch now uses GitHub's notification inbox as a
-> first-class list; see [README.md](README.md).
+> first-class list; see [README.md](../README.md).
 
 ## Goal
 
