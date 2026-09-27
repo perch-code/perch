@@ -89,7 +89,7 @@ pub enum BrowseView {
     /// The open pull requests and issues of the repository picked beside
     /// it.
     Repository,
-    /// What was opened lately and has no worktree. Local.
+    /// What was opened lately, worktree or not. Local.
     #[default]
     Recent,
 }
@@ -425,7 +425,6 @@ fn parse_flag(s: &str) -> Option<bool> {
 }
 
 /// Whether the item is a worktree on disk, and so a row of Worktrees.
-/// Everything else is Recent's.
 pub fn in_worktrees(item: &Item) -> bool {
     !item.is_archived() && item.checkout.as_ref().is_some_and(|c| c.on_disk)
 }
@@ -453,12 +452,22 @@ pub fn worktree_items(items: &[Item], filters: &ItemFilters) -> Vec<Item> {
 /// How many unpinned rows Recent shows.
 pub const RECENT_LIMIT: usize = 50;
 
-/// Recent: what has no worktree on disk, pinned first, then the
-/// `RECENT_LIMIT` most recently opened. The search narrows what is shown;
-/// an older row is found by opening it again, which brings it back.
+/// Whether the reader has opened the item. A pull request, an issue or
+/// a worktree Perch made was opened, or made, by the reader. One the root
+/// scan found is a checkout of the reader's own that Perch only noticed,
+/// until it is opened, which moves `last_opened_at` past when it was
+/// found.
+fn opened(item: &Item) -> bool {
+    item.checkout.as_ref().is_none_or(|c| c.owned) || item.last_opened_at > item.created_at
+}
+
+/// Recent: everything opened, worktree or not, pinned first, then the
+/// `RECENT_LIMIT` most recently opened. A worktree is in Worktrees as
+/// well. The search narrows what is shown; an older row is found by
+/// opening it again, which brings it back.
 pub fn recent_items(items: &[Item], query: &str) -> Vec<Item> {
     let (mut pinned, mut rest): (Vec<&Item>, Vec<&Item>) =
-        items.iter().filter(|item| !in_worktrees(item)).partition(|item| item.is_pinned());
+        items.iter().filter(|item| opened(item)).partition(|item| item.is_pinned());
     sort_pins(&mut pinned);
     rest.sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at).then_with(|| a.id.cmp(&b.id)));
     rest.truncate(RECENT_LIMIT);
@@ -705,19 +714,19 @@ mod tests {
     }
 
     #[test]
-    fn worktrees_are_the_checkouts_on_disk_and_recent_is_the_rest() {
+    fn worktrees_are_the_checkouts_on_disk_and_recent_is_everything_opened() {
         let (_, items) = fixture();
         assert_eq!(ids(&worktree_items(&items, &ItemFilters::default())), ["pr-wanted", "branch"]);
         // By when each was last opened, which the fixture leaves at when
-        // it was made.
+        // it was made. The worktrees are in both.
         assert_eq!(
             ids(&recent_items(&items, "")),
-            ["slatedb-pr", "issue", "pr-closed", "pr-merged", "branch-archived"]
+            ["branch", "slatedb-pr", "issue", "pr-closed", "pr-wanted", "pr-merged", "branch-archived"]
         );
     }
 
     #[test]
-    fn a_worktree_that_goes_moves_to_recent() {
+    fn a_worktree_that_goes_leaves_worktrees_and_stays_in_recent() {
         let (_, mut items) = fixture();
         items[5].checkout.as_mut().unwrap().on_disk = false;
         assert_eq!(ids(&worktree_items(&items, &ItemFilters::default())), ["pr-wanted"]);
@@ -727,6 +736,18 @@ mod tests {
         items[0].archived_at = Some(at("2026-09-18T10:00:00Z"));
         assert_eq!(ids(&worktree_items(&items, &ItemFilters::default())), ["branch"]);
         assert!(ids(&recent_items(&items, "")).contains(&"pr-wanted"));
+    }
+
+    /// A worktree the root scan found is the reader's checkout, noticed:
+    /// it is in Worktrees at once and in Recent once it is opened.
+    #[test]
+    fn a_scanned_worktree_is_recent_once_opened() {
+        let (_, mut items) = fixture();
+        items[5].checkout.as_mut().unwrap().owned = false;
+        assert!(ids(&worktree_items(&items, &ItemFilters::default())).contains(&"branch"));
+        assert!(!ids(&recent_items(&items, "")).contains(&"branch"), "found, not opened");
+        items[5].last_opened_at = at("2026-09-20T10:00:00Z");
+        assert_eq!(ids(&recent_items(&items, ""))[0], "branch", "opened");
     }
 
     #[test]
@@ -777,11 +798,9 @@ mod tests {
     fn search_hits_the_number_titles_branch_and_repository() {
         let (_, mut items) = fixture();
         items[0].name = Some("the fence one".into());
-        let everything = |query: &str| {
-            let mut rows = worktree_items(&items, &ItemFilters { query: query.into(), ..Default::default() });
-            rows.extend(recent_items(&items, query));
-            rows
-        };
+        // Recent has every row of the fixture; the worktrees are opened
+        // Perch-made ones.
+        let everything = |query: &str| recent_items(&items, query);
         assert_eq!(ids(&everything("#57")), ["pr-wanted"]);
         assert_eq!(ids(&everything("57")), ["pr-wanted"]);
         assert_eq!(ids(&everything("fence the manifest")), ["pr-wanted"]);

@@ -835,14 +835,14 @@ mod tests {
         assert_eq!(restored.tab, SidebarTab::Inbox);
         assert_eq!(restored.repository.as_deref(), Some("org/one"));
 
-        // Browse › Recent: what was opened and has no worktree, in any
+        // Browse › Recent: everything opened, worktree or not, in any
         // repository.
         click_tab(&mut harness, SidebarTab::Browse);
         assert_eq!(state.item_filters.get().browse, BrowseView::Recent);
         assert!(find(harness.root_id(), "Issue mine").is_some());
         assert!(find(harness.root_id(), "Issue notification").is_some());
         assert!(find(harness.root_id(), "Issue elsewhere").is_some());
-        assert!(find(harness.root_id(), "Pull pr").is_none());
+        assert!(find(harness.root_id(), "Pull pr").is_some(), "a worktree is in both");
         assert!(find(harness.root_id(), "Read discussion").is_none());
 
         click_tab(&mut harness, SidebarTab::Worktrees);
@@ -862,9 +862,10 @@ mod tests {
         assert!(find(harness.root_id(), "Unread pull request").is_some());
     }
 
-    /// A worktree whose directory goes leaves Worktrees for Recent.
+    /// A worktree whose directory goes leaves Worktrees and stays in
+    /// Recent.
     #[test]
-    fn a_worktree_that_goes_moves_to_recent() {
+    fn a_worktree_that_goes_stays_in_recent() {
         let (mut harness, state) = harness();
         assert!(find(harness.root_id(), "item row:quiet").is_some());
         state.items.update(|items| {

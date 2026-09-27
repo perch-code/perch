@@ -2,7 +2,7 @@
 //!
 //! Prints a sidebar tab's local list from the cache the app uses, with
 //! pinned items first: Worktrees unless `tab` says otherwise, or Browse ›
-//! Recent. The keys are the filter menu's, in `ItemFilters::to_meta`'s
+//! Recent, which is everything opened. The keys are the filter menu's, in `ItemFilters::to_meta`'s
 //! form: `tab` (`worktrees` or `browse`), `browse` (`recent`),
 //! `repository`, `sort`, `show_pr_status` and `direction`, plus `query`
 //! for the search box. It is how `items::local_items` is checked against
@@ -205,14 +205,14 @@ mod tests {
     }
 
     #[test]
-    fn worktrees_print_the_checkouts_and_recent_the_rest() {
+    fn worktrees_print_the_checkouts_and_recent_everything_opened() {
         assert_eq!(
             text(&worktrees("")),
             "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n"
         );
         assert_eq!(
             text(&worktrees("tab=browse;browse=recent")),
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested\n"
+            "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested\n"
         );
         assert_eq!(text(&worktrees("tab=inbox")), "", "the inbox lists no items");
     }

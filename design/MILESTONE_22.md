@@ -99,7 +99,7 @@ entry. Issues never appear; they have no checkout.
   (see [Cleanup](#cleanup)).
 - When a worktree goes, by Remove Worktree, the sweep or the root scan,
   its row leaves the tab. The item itself stays, with its threads and
-  runs, and is listed in Recent.
+  runs, and is still in Recent.
 
 ### Browse
 
@@ -146,11 +146,12 @@ names rather than retrying.
 
 ### Recent
 
-Every item without a worktree on disk, most recently opened first: pull
-requests and issues you opened, and branches whose worktree went. Pinned
-rows first, and they never drop off. Then the 50 most recently opened.
-Older ones aren't shown, and aren't deleted; opening one again brings it
-back to the top.
+Everything you opened, most recently opened first, whether it has a
+worktree or not: a pull request you opened is in Worktrees and in Recent.
+A worktree the root scan found is left out until you open it; one Perch
+made counts as opened when it is made. Pinned rows first, and they never
+drop off. Then the 50 most recently opened. Older ones aren't shown, and
+aren't deleted; opening one again brings it back to the top.
 
 Recent has no Open/Closed toggle and no filter. Each row shows its
 state.
@@ -268,8 +269,9 @@ Headless tests in the style of the ones they sit beside.
   Save.
 - Worktrees: lists owned and scanned checkouts on disk and nothing
   else; a removed worktree's item moves to Recent with its threads.
-- Recent: items without a worktree, by `last_opened_at`, capped at 50
-  with pins on top and exempt; opening an old one brings it back.
+- Recent: everything opened, worktree or not, by `last_opened_at`,
+  capped at 50 with pins on top and exempt; a scanned worktree only once
+  opened; opening an old one brings it back.
 - Browse: each view builds its query with `is:open` or `is:closed`;
   results parse, including draft and merged; a refetch that reorders
   rows is held back; Show more asks for the next page; a search `403`
