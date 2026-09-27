@@ -12,7 +12,7 @@
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{SignalGet, SignalWith};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
@@ -263,6 +263,7 @@ fn progress_bar(percent: impl Fn() -> Option<u8> + 'static) -> impl IntoView {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use floem::reactive::SignalUpdate;
 
     use std::sync::Arc;
 
