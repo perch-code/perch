@@ -92,8 +92,7 @@ so Perch assumes any of it might try to steer them.
   `[repo.work]`), and can't push or reach GitHub. Anything outside the sandbox (a network host, a command, a
   commit) goes to the CLI's auto-reviewer or to you as an approval card with
   Allow once, Always, and Deny. `approvals = "never"` under a repository's
-  `[repo.work]` allows all of it without asking; Perch won't take it under
-  `[work]`.
+  `[repo.work]` allows all activity without ever asking for approval.
 - A repository's own `.claude/`, `.mcp.json` and `.codex/` config is ignored
   unless you set `trust = true` for it.
 - Agents don't get your GitHub token or other `*_TOKEN`/`*_SECRET`-style
