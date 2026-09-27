@@ -55,13 +55,28 @@ enum OpenExpectation {
     Closed,
 }
 
-/// A terminal transition worth surfacing wherever the reader is. The
-/// monotonically increasing token keeps an old dismissal timer from clearing
-/// a newer completion.
+/// Something worth surfacing wherever the reader is, in the popup at the
+/// window's bottom right. The monotonically increasing token keeps an old
+/// dismissal timer from clearing a newer toast.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentCompletionNotice {
-    pub run_id: String,
+pub struct Toast {
+    pub kind: ToastKind,
     pub token: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToastKind {
+    /// An agent run reached a terminal state.
+    AgentRun(String),
+    /// A line of news: something that could not be done, or was.
+    Message { text: String, tone: Tone },
+}
+
+/// The colour of a message's dot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Error,
+    Warning,
 }
 
 #[derive(Clone, Copy)]
@@ -100,9 +115,6 @@ pub struct AppState {
     /// The agent section of config.toml: binary, defaults, and the models
     /// the picker offers.
     pub agent: RwSignal<AgentConfig>,
-    /// Something a worktree action could not do, for the status line.
-    /// Cleared by the next act the reader takes.
-    pub notice: RwSignal<Option<String>>,
     /// The review view's state, once the window has made it, so a menu
     /// that ends in something being opened can put the progress card up.
     pub review: RwSignal<Option<crate::review::model::ReviewState>>,
@@ -176,10 +188,10 @@ pub struct AppState {
     /// Keep it open across the normal Items refresh without restoring its
     /// checkout or changing its archived state.
     pub agent_archived_owner: RwSignal<Option<String>>,
-    /// Completion notices are queued so simultaneous terminal transitions do
-    /// not erase one another before the reader can see them.
-    pub agent_completion_notices: RwSignal<VecDeque<AgentCompletionNotice>>,
-    pub agent_completion_token: RwSignal<u64>,
+    /// Toasts are queued so simultaneous ones do not erase one another
+    /// before the reader can see them.
+    pub toasts: RwSignal<VecDeque<Toast>>,
+    pub toast_token: RwSignal<u64>,
 
     /// Review capability/preferences are global; bases, groups, and launch
     /// errors are keyed by their stable item id so opening another item never
@@ -224,6 +236,9 @@ pub struct AppState {
     pub pending_meta: RwSignal<Option<(String, String)>>,
 
     pub status: RwSignal<Status>,
+    /// The message of the poll failure last popped up, so the same one on
+    /// every poll pops up once. None once a poll goes through.
+    pub last_poll_problem: RwSignal<Option<String>>,
     /// Ticks forward on refresh, to re-render relative timestamps.
     pub now: RwSignal<Timestamp>,
     /// Whether the left drawer is showing.
@@ -261,7 +276,6 @@ impl AppState {
             notifications_polled: RwSignal::new(false),
             notification_reason: RwSignal::new(None),
             open_item: RwSignal::new(None),
-            notice: RwSignal::new(None),
             review: RwSignal::new(None),
             viewer: RwSignal::new(None),
             reload: RwSignal::new(Vec::new()),
@@ -290,8 +304,8 @@ impl AppState {
             expected_navigation_id: RwSignal::new(None),
             open_expectation: RwSignal::new(OpenExpectation::Any),
             agent_archived_owner: RwSignal::new(None),
-            agent_completion_notices: RwSignal::new(VecDeque::new()),
-            agent_completion_token: RwSignal::new(0),
+            toasts: RwSignal::new(VecDeque::new()),
+            toast_token: RwSignal::new(0),
             review_capabilities: RwSignal::new(Arc::new(Vec::new())),
             review_preferences: RwSignal::new(Arc::new(Vec::new())),
             review_base_refs: RwSignal::new(HashMap::new()),
@@ -312,6 +326,7 @@ impl AppState {
             item_query: RwSignal::new(String::new()),
             pending_meta: RwSignal::new(None),
             status: RwSignal::new(Status::Refreshing),
+            last_poll_problem: RwSignal::new(None),
             now: RwSignal::new(Timestamp::now()),
             sidebar_open: RwSignal::new(true),
             sidebar_width: RwSignal::new(crate::theme::SIDEBAR_WIDTH),
@@ -560,48 +575,95 @@ impl AppState {
     }
 
     fn show_agent_completion(&self, run_id: String) {
-        let token = self.agent_completion_token.get_untracked().wrapping_add(1);
-        self.agent_completion_token.set(token);
-        let was_empty = self
-            .agent_completion_notices
-            .with_untracked(VecDeque::is_empty);
-        self.agent_completion_notices
-            .update(|notices| notices.push_back(AgentCompletionNotice { run_id, token }));
-        if was_empty {
-            self.schedule_agent_completion_dismissal(token);
+        self.show_toast(ToastKind::AgentRun(run_id));
+    }
+
+    /// Put `text` up in the popup. It replaces any message still up or
+    /// waiting, so a burst of complaints ends with the latest; an empty
+    /// one only takes the old ones down.
+    pub fn notify(&self, text: impl Into<String>, tone: Tone) {
+        let text = text.into();
+        self.drop_toasts(|kind| matches!(kind, ToastKind::Message { .. }));
+        if !text.is_empty() {
+            self.show_toast(ToastKind::Message { text, tone });
         }
     }
 
-    pub fn current_agent_completion(&self) -> Option<AgentCompletionNotice> {
-        self.agent_completion_notices
-            .with(|notices| notices.front().cloned())
+    /// Something that could not be done, in the popup.
+    pub fn complain(&self, text: impl Into<String>) {
+        self.notify(text, Tone::Error);
     }
 
-    pub fn dismiss_agent_completion(&self, token: u64) {
+    /// The message up or waiting in the popup, if any.
+    #[cfg(test)]
+    pub fn notice(&self) -> Option<String> {
+        self.toasts.with(|toasts| {
+            toasts.iter().find_map(|toast| match &toast.kind {
+                ToastKind::Message { text, .. } => Some(text.clone()),
+                ToastKind::AgentRun(_) => None,
+            })
+        })
+    }
+
+    fn show_toast(&self, kind: ToastKind) {
+        let token = self.toast_token.get_untracked().wrapping_add(1);
+        self.toast_token.set(token);
+        let was_empty = self.toasts.with_untracked(VecDeque::is_empty);
+        self.toasts
+            .update(|toasts| toasts.push_back(Toast { kind, token }));
+        if was_empty {
+            self.schedule_toast_dismissal(token);
+        }
+    }
+
+    pub fn current_toast(&self) -> Option<Toast> {
+        self.toasts.with(|toasts| toasts.front().cloned())
+    }
+
+    pub fn dismiss_toast(&self, token: u64) {
         let mut next = None;
-        self.agent_completion_notices.update(|notices| {
-            let Some(index) = notices.iter().position(|notice| notice.token == token) else {
+        self.toasts.update(|toasts| {
+            let Some(index) = toasts.iter().position(|toast| toast.token == token) else {
                 return;
             };
             let was_front = index == 0;
-            notices.remove(index);
+            toasts.remove(index);
             if was_front {
-                next = notices.front().map(|notice| notice.token);
+                next = toasts.front().map(|toast| toast.token);
             }
         });
         if let Some(next) = next {
-            self.schedule_agent_completion_dismissal(next);
+            self.schedule_toast_dismissal(next);
         }
     }
 
-    fn schedule_agent_completion_dismissal(&self, token: u64) {
+    /// Take down every toast `drop` picks, and start the clock on the one
+    /// that comes to the front for it.
+    fn drop_toasts(&self, drop: impl Fn(&ToastKind) -> bool) {
+        if !self
+            .toasts
+            .with_untracked(|toasts| toasts.iter().any(|toast| drop(&toast.kind)))
+        {
+            return;
+        }
+        let front = |toasts: &VecDeque<Toast>| toasts.front().map(|toast| toast.token);
+        let before = self.toasts.with_untracked(front);
+        self.toasts
+            .update(|toasts| toasts.retain(|toast| !drop(&toast.kind)));
+        let next = self.toasts.with_untracked(front);
+        if let Some(next) = next.filter(|next| Some(*next) != before) {
+            self.schedule_toast_dismissal(next);
+        }
+    }
+
+    fn schedule_toast_dismissal(&self, token: u64) {
         let state = *self;
         floem::action::exec_after(Duration::from_secs(8), move |_| {
             if state
-                .current_agent_completion()
-                .is_some_and(|notice| notice.token == token)
+                .toasts
+                .with_untracked(|toasts| toasts.front().is_some_and(|toast| toast.token == token))
             {
-                state.dismiss_agent_completion(token);
+                state.dismiss_toast(token);
             }
         });
     }
@@ -800,15 +862,7 @@ impl AppState {
             .update(|pages| pages.retain(|run_id, _| !removed.contains(run_id)));
         self.agent_run_events_loading
             .update(|runs| runs.retain(|run_id| !removed.contains(run_id)));
-        let front = self.current_agent_completion().map(|notice| notice.token);
-        self.agent_completion_notices
-            .update(|notices| notices.retain(|notice| !removed.contains(&notice.run_id)));
-        if let Some(front) = front {
-            let next = self.current_agent_completion();
-            if next.as_ref().is_some_and(|notice| notice.token != front) {
-                self.schedule_agent_completion_dismissal(next.unwrap().token);
-            }
-        }
+        self.drop_toasts(|kind| matches!(kind, ToastKind::AgentRun(id) if removed.contains(id)));
     }
 
     /// Whether the open item has a tree to show: it is on Code, or still
@@ -1187,7 +1241,7 @@ impl AppState {
                     } else if review.ready.get_untracked() {
                         review.set_phase(Phase::Ready);
                     }
-                    self.notice.set(Some(message));
+                    self.complain(message);
                 }
             }
             Event::NavigationCancelled {
@@ -1319,7 +1373,7 @@ impl AppState {
                             }
                         }
                     }
-                    self.notice.set(Some(message));
+                    self.complain(message);
                 }
             }
             Event::Items(items) => {
@@ -1394,6 +1448,11 @@ impl AppState {
                     // the status reaches it.
                     if status == perch_lsp::Status::Ready {
                         review.forget_missing_names();
+                    }
+                    if let perch_lsp::Status::Failed { .. } = &status {
+                        if review.lsp_status.get_untracked() != status {
+                            self.complain(status.describe());
+                        }
                     }
                     review.lsp_status.set(status);
                 }
@@ -1512,7 +1571,7 @@ impl AppState {
             }
             // A complaint may be about the send a sent question's card is
             // waiting on, whose thread is then not coming; the card's
-            // rows go with it. The notice itself is the status bar's.
+            // rows go with it. The notice itself is the popup's.
             Event::Notice(message) => {
                 review.drop_sent_placeholder();
                 self.apply(Event::Notice(message));
@@ -1784,9 +1843,9 @@ impl AppState {
                     let review_of = submitted.as_deref().cloned();
                     if !review.finish_submit_review(attempt_id, review_of, outcome.clone()) {
                         // The form that sent it is gone; what did not
-                        // post is still said, in the status bar.
+                        // post is still said, in the popup.
                         if let Some(outcome) = outcome {
-                            self.notice.set(Some(outcome));
+                            self.complain(outcome);
                         }
                     }
                 }
@@ -2001,7 +2060,7 @@ impl AppState {
         }
     }
 
-    /// Fold one event into what the sidebar and the status bar read.
+    /// Fold one event into what the sidebar and the popup read.
     pub fn apply(&self, event: Event) {
         match event {
             Event::Avatar { url, bytes } => {
@@ -2015,7 +2074,7 @@ impl AppState {
                     drafts.remove(&item_id);
                 });
                 if let Some(notice) = notice {
-                    self.notice.set(Some(notice));
+                    self.complain(notice);
                 }
             }
             // What the reader typed is never written over: the open item
@@ -2112,7 +2171,7 @@ impl AppState {
             },
             // An empty notice is the backend saying the last one has been
             // read: the reader has moved on to something else.
-            Event::Notice(message) => self.notice.set(Some(message).filter(|m| !m.is_empty())),
+            Event::Notice(message) => self.complain(message),
             Event::Bases { repo, bases } => self.new_work.take_bases(repo, bases),
             Event::WorkDefaults(work) => self.new_work.prefix.set(work.branch_prefix),
             Event::RepositoryAdded(identity) => self.added_repo.set(Some(identity)),
@@ -2208,8 +2267,7 @@ impl AppState {
             | Event::ViewedReady { .. }
             | Event::LspReferences { .. } => {}
             Event::Status(status) => {
-                // Polls are quiet once one has gone through: the line keeps
-                // saying when the list was last current.
+                // Polls are quiet once one has gone through.
                 if status == Status::Refreshing
                     && self.status.with_untracked(|s| matches!(s, Status::Idle { .. }))
                 {
@@ -2217,6 +2275,22 @@ impl AppState {
                 }
                 if let Status::Idle { at, .. } = &status {
                     self.now.set(*at);
+                }
+                // A failed poll is said once, when it starts failing or
+                // fails another way; the next poll failing the same way
+                // is not news. A missing token has a screen of its own.
+                let said = |s: &Status| match s {
+                    Status::Error { message } => Some((message.clone(), Tone::Error)),
+                    Status::RateLimited { message } => Some((message.clone(), Tone::Warning)),
+                    _ => None,
+                };
+                let last = self.last_poll_problem.get_untracked();
+                let now = said(&status).map(|(message, _)| message);
+                if status != Status::Refreshing {
+                    if let Some((message, tone)) = said(&status).filter(|_| now != last) {
+                        self.notify(message, tone);
+                    }
+                    self.last_poll_problem.set(now);
                 }
                 self.status.set(status);
             }
@@ -2892,7 +2966,7 @@ mod tests {
     }
 
     #[test]
-    fn a_poll_after_one_has_gone_through_leaves_the_status_line_alone() {
+    fn a_poll_after_one_has_gone_through_leaves_the_status_alone() {
         let app = AppState::new();
         let at = "2026-09-19T12:00:00Z".parse().unwrap();
         let idle = Status::Idle {
@@ -3336,6 +3410,8 @@ mod tests {
 
     #[test]
     fn cross_item_attempt_failure_retains_the_new_live_owner() {
+        // The popup times its messages out, which needs a root.
+        let _root = floem::headless::TestRoot::new();
         let app = AppState::new();
         let review = review_of("old-owner");
         app.expect_item_navigation("old-owner", 50);
@@ -3965,6 +4041,8 @@ mod tests {
 
     #[test]
     fn a_submission_with_no_review_settles_the_form_and_adds_no_review() {
+        // The popup times its messages out, which needs a root.
+        let _root = floem::headless::TestRoot::new();
         let app = AppState::new();
         let review = review_of_pull("wt", 7, "head");
         review
@@ -3994,7 +4072,7 @@ mod tests {
         assert!(review.discussion.get().unwrap().reviews.is_empty());
 
         // The form that sent it is gone: what did not post goes to the
-        // status bar instead.
+        // popup instead.
         review.begin_submit_review(7);
         review.submit_review_pending.set(None);
         app.apply_with_review(
@@ -4013,7 +4091,7 @@ mod tests {
             review,
         );
         assert_eq!(review.submit_review_outcome.get(), None);
-        assert_eq!(app.notice.get().as_deref(), Some("1 comment did not post: offline."));
+        assert_eq!(app.notice().as_deref(), Some("1 comment did not post: offline."));
     }
 
     /// The answer to an issue comment lands on the composer that sent it:
@@ -4247,6 +4325,8 @@ mod tests {
 
     #[test]
     fn a_failed_historical_load_rolls_back_only_its_optimistic_selection() {
+        // The popup times its messages out, which needs a root.
+        let _root = floem::headless::TestRoot::new();
         let app = AppState::new();
         let review = review_of("wt");
         review
@@ -4297,11 +4377,13 @@ mod tests {
         assert_eq!(review.historical_review_request.get(), Some(7));
         assert!(review.historical_findings.with(Option::is_some));
         assert_eq!(app.expected_navigation_id.get(), Some(7));
-        assert_eq!(app.notice.get().as_deref(), Some("retained source missing"));
+        assert_eq!(app.notice().as_deref(), Some("retained source missing"));
     }
 
     #[test]
     fn an_older_historical_load_cannot_replace_threads_or_files_before_the_latest_fails() {
+        // The popup times its messages out, which needs a root.
+        let _root = floem::headless::TestRoot::new();
         let app = AppState::new();
         let review = review_of("wt");
         review
@@ -4381,7 +4463,7 @@ mod tests {
         assert!(review.historical_review_request.with(Option::is_none));
         assert_eq!(review.comment_threads.get()[0].id, "current-thread");
         assert_eq!(review.changed_files.get()[0].path, "src/current.rs");
-        assert_eq!(app.notice.get().as_deref(), Some("group B failed"));
+        assert_eq!(app.notice().as_deref(), Some("group B failed"));
     }
 
     #[test]
@@ -4465,7 +4547,9 @@ mod tests {
     }
 
     #[test]
-    fn a_notice_reaches_the_status_bar_and_gives_up_a_sent_questions_rows() {
+    fn a_notice_reaches_the_popup_and_gives_up_a_sent_questions_rows() {
+        // The popup times its messages out, which needs a root.
+        let _root = floem::headless::TestRoot::new();
         let app = AppState::new();
         let review = review_of("wt");
         let file = crate::backend::build_loaded_file(
@@ -4508,7 +4592,7 @@ mod tests {
             review,
         );
         assert_eq!(
-            app.notice.get().as_deref(),
+            app.notice().as_deref(),
             Some("Could not save the question: disk full")
         );
         assert!(review.sent_composer.get().is_none());
@@ -4522,13 +4606,46 @@ mod tests {
         app.show_agent_completion("first".into());
         app.show_agent_completion("second".into());
 
-        let first = app.current_agent_completion().unwrap();
-        assert_eq!(first.run_id, "first");
-        app.dismiss_agent_completion(first.token);
+        let first = app.current_toast().unwrap();
+        assert_eq!(first.kind, ToastKind::AgentRun("first".into()));
+        app.dismiss_toast(first.token);
         assert_eq!(
-            app.current_agent_completion().map(|notice| notice.run_id),
-            Some("second".into())
+            app.current_toast().map(|toast| toast.kind),
+            Some(ToastKind::AgentRun("second".into()))
         );
+    }
+
+    #[test]
+    fn a_message_replaces_the_one_before_and_an_empty_one_takes_it_down() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        app.show_agent_completion("run".into());
+        app.apply(Event::Notice("first".into()));
+        app.apply(Event::Notice("second".into()));
+        assert_eq!(app.toasts.with(VecDeque::len), 2, "the run and one message");
+        assert_eq!(app.notice().as_deref(), Some("second"));
+
+        app.apply(Event::Notice(String::new()));
+        assert_eq!(app.notice(), None);
+        assert_eq!(
+            app.current_toast().map(|toast| toast.kind),
+            Some(ToastKind::AgentRun("run".into()))
+        );
+    }
+
+    #[test]
+    fn a_poll_error_pops_up_once_and_not_again_while_it_lasts() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let error = Status::Error {
+            message: "GitHub is down".into(),
+        };
+        app.apply(Event::Status(error.clone()));
+        assert_eq!(app.notice().as_deref(), Some("GitHub is down"));
+        app.dismiss_toast(app.current_toast().unwrap().token);
+        app.apply(Event::Status(Status::Refreshing));
+        app.apply(Event::Status(error));
+        assert_eq!(app.notice(), None, "the same error, still going");
     }
 
     #[test]

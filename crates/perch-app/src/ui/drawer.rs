@@ -156,7 +156,7 @@ pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
         match placement.get() {
             Placement::Docked(width) => s.width(width),
             // Over the body's right edge, from under the tabs to the
-            // status bar, with a shadow to say so.
+            // window's bottom, with a shadow to say so.
             Placement::Overlay(width) => s
                 .width(width)
                 .max_width_full()

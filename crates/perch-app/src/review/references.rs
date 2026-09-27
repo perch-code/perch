@@ -68,7 +68,7 @@ pub fn symbol_at_cursor(state: ReviewState) -> Option<Symbol> {
 /// Ask where a symbol is: its references, or its implementations. The
 /// panel opens at once, empty under the kind's heading, and fills when the
 /// answer comes back with the same token. Nothing while the server is not
-/// there: the status line already says so.
+/// there.
 pub fn find(state: ReviewState, backend: &Backend, symbol: &Symbol, kind: Locations) {
     if !state.lsp_status.with(|s| s.is_usable()) {
         return;
@@ -927,10 +927,10 @@ mod window {
         })
     }
 
-    /// Where the panel's top edge sits: the pane ends above the status
-    /// bar, and the panel is its own height up from there.
+    /// Where the panel's top edge sits: the pane ends at the window's
+    /// bottom, and the panel is its own height up from there.
     fn panel_top() -> f64 {
-        HEIGHT - crate::theme::STATUS_HEIGHT - crate::theme::REFERENCES_HEIGHT
+        HEIGHT - crate::theme::REFERENCES_HEIGHT
     }
 
     #[test]

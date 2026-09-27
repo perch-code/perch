@@ -1,7 +1,7 @@
 //! Agent activity: each item's runs in its Agents section on Conversation
 //! (`section`), every item's in the dropdown from the bar's Agents button
 //! (`dropdown`), what a run did as its row opens to it (`detail`), and the
-//! notice a run leaves as it finishes.
+//! toast a run leaves as it finishes.
 
 pub mod model;
 
@@ -16,8 +16,7 @@ use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Effect, SignalGet, SignalUpdate, SignalWith};
-use floem::style::Position;
-use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
+use floem::views::{Container, Decorators, Label, Stack};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -189,106 +188,62 @@ fn tick_clock(state: AppState) {
     });
 }
 
-/// A terminal transition stays lightweight: enough context to identify it,
-/// plus a path into the durable detail. A later completion replaces an older
-/// one, and AppState's tokenized timer dismisses only the notice it scheduled.
-pub fn completion_notice(
+/// A terminal transition stays lightweight in the popup: enough context to
+/// identify it, plus a path into the durable detail.
+pub(crate) fn completion_toast(
     state: AppState,
     review: ReviewState,
     backend: Rc<Backend>,
+    token: u64,
+    run: AgentRunSummary,
 ) -> impl IntoView {
-    dyn_container(
+    let color = status_color(run.status);
+    let title = format!(
+        "{} {}",
+        run.backend_label(),
+        run.status.label().to_lowercase()
+    );
+    let context = {
+        let group = run.group_label();
+        if group.is_empty() {
+            run.purpose.label().to_string()
+        } else {
+            format!("{} · {group}", run.purpose.label())
+        }
+    };
+    let view = text_action(
+        || "View".to_string(),
+        true,
         move || {
-            state.current_agent_completion().and_then(|notice| {
-                state
-                    .agent_run(&notice.run_id)
-                    .map(|run| (notice.token, run))
-            })
+            state.dismiss_toast(token);
+            dropdown::go_to_run(state, review, &backend, &run);
         },
-        move |notice| {
-            let Some((token, run)) = notice else {
-                return Empty::new().into_any();
-            };
-            let color = status_color(run.status);
-            let title = format!(
-                "{} {}",
-                run.backend_label(),
-                run.status.label().to_lowercase()
-            );
-            let context = {
-                let group = run.group_label();
-                if group.is_empty() {
-                    run.purpose.label().to_string()
-                } else {
-                    format!("{} · {group}", run.purpose.label())
-                }
-            };
-            let view_backend = backend.clone();
-            let view_run = run.clone();
-            let view = text_action(
-                || "View".to_string(),
-                true,
-                move || {
-                    state.dismiss_agent_completion(token);
-                    dropdown::go_to_run(state, review, &view_backend, &view_run);
-                },
-            );
-            let dismiss = icon_action(SidebarIcon::Close, "Dismiss agent completion", move || {
-                state.dismiss_agent_completion(token)
-            });
-            Container::new(
-                Stack::horizontal((
-                    Empty::new().style(move |s| {
-                        s.size(9.0, 9.0)
-                            .border_radius(5.0)
-                            .background(color)
-                            .flex_shrink(0.0_f32)
-                    }),
-                    Stack::vertical((
-                        Label::derived(move || title.clone()).style(|s| {
-                            s.font_size(theme::TEXT_BODY)
-                                .font_weight(theme::weight_emphasis())
-                                .color(theme::FG)
-                                .selectable(false)
-                        }),
-                        Label::derived(move || context.clone()).style(|s| {
-                            s.font_size(theme::TEXT_BADGE)
-                                .color(theme::FG_SUBTLE)
-                                .text_ellipsis()
-                                .min_width(0.0)
-                                .selectable(false)
-                        }),
-                    ))
-                    .style(|s| s.flex_col().gap(3.0).min_width(0.0).flex_grow(1.0_f32)),
-                    view,
-                    dismiss,
-                ))
-                .style(|s| s.items_center().width_full().gap(9.0)),
-            )
-            .style(|s| {
-                s.width(328.0)
-                    .max_width_full()
-                    .padding_left(13.0)
-                    .padding_right(7.0)
-                    .padding_vert(9.0)
-                    .background(theme::CANVAS)
-                    .border(1.0)
-                    .border_color(theme::BORDER)
-                    .border_radius(8.0)
-                    .box_shadow_blur(18.0)
-                    .box_shadow_v_offset(5.0)
-                    .box_shadow_color(theme::SHADOW)
-            })
-            .into_any()
-        },
-    )
-    .style(|s| {
-        s.position(Position::Absolute)
-            .inset_right(12.0)
-            .inset_bottom(theme::STATUS_HEIGHT + 12.0)
-            .z_index(80)
-    })
-    .debug_name("agent-completion-notice")
+    );
+    let dismiss = icon_action(SidebarIcon::Close, "Dismiss agent completion", move || {
+        state.dismiss_toast(token)
+    });
+    Stack::horizontal((
+        crate::ui::toast::dot(color),
+        Stack::vertical((
+            Label::derived(move || title.clone()).style(|s| {
+                s.font_size(theme::TEXT_BODY)
+                    .font_weight(theme::weight_emphasis())
+                    .color(theme::FG)
+                    .selectable(false)
+            }),
+            Label::derived(move || context.clone()).style(|s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .color(theme::FG_SUBTLE)
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .selectable(false)
+            }),
+        ))
+        .style(|s| s.flex_col().gap(3.0).min_width(0.0).flex_grow(1.0_f32)),
+        view,
+        dismiss,
+    ))
+    .style(|s| s.items_center().width_full().gap(9.0))
 }
 
 #[cfg(test)]

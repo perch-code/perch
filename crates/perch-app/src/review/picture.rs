@@ -63,6 +63,7 @@ impl Picture {
     }
 
     /// The side the file is now: the head, or the base of a deletion.
+    #[cfg(test)]
     pub fn current(&self) -> Option<&Result<Drawing, String>> {
         self.head.as_ref().or(self.base.as_ref())
     }
@@ -653,13 +654,8 @@ mod window {
         assert!(state.docs.get().is_none());
         assert!(state.selection.get().is_none());
         assert!(state.anchor_from_selection().is_none());
-        // The strip has the Source tile, and the status line says what
-        // the picture is.
+        // The strip has the Source tile.
         assert!(find(root, "source tile").is_some());
-        assert_eq!(
-            super::super::status_line(state, 0).before,
-            "assets/logo.svg  \u{b7}  SVG  \u{b7}  24 \u{d7} 24  \u{b7}  1 change"
-        );
     }
 
     #[test]
@@ -691,9 +687,6 @@ mod window {
             find(root, "source tile").is_some(),
             "the tile stays, to flip back"
         );
-        assert!(super::super::status_line(state, 0)
-            .before
-            .contains("Plain text"));
         assert!(
             find(root, "Label: \"1 change\"").is_some(),
             "the markup has changes to jump between"
@@ -720,15 +713,11 @@ mod window {
         assert_eq!(drawn().len(), 1);
         drop(harness);
 
-        let (harness, state) = window_with("old.svg", "", SQUARE, Some(ChangeStatus::Deleted));
+        let (harness, _) = window_with("old.svg", "", SQUARE, Some(ChangeStatus::Deleted));
         let root = harness.root_id();
         assert!(find(root, "picture side after").is_none());
         let before = find(root, "picture side before").expect("the base alone");
         assert!(find(before, "Label: \"Deleted \u{b7} 32 \u{d7} 16\"").is_some());
-        assert_eq!(
-            super::super::status_line(state, 0).before,
-            "old.svg  \u{b7}  SVG  \u{b7}  32 \u{d7} 16  \u{b7}  1 change"
-        );
         drop(harness);
 
         // A file outside the changed list draws whole, with no caption.
@@ -754,7 +743,7 @@ mod window {
 
     #[test]
     fn a_side_that_does_not_parse_says_so_beside_the_one_that_does() {
-        let (harness, state) = window_with(
+        let (harness, _) = window_with(
             "assets/logo.svg",
             "<svg",
             CIRCLE,
@@ -767,8 +756,5 @@ mod window {
         let drawn = drawn();
         assert_eq!(drawn.len(), 1, "only the base drew: {drawn:?}");
         assert_eq!(drawn[0].0, Size::new(24.0, 24.0));
-        assert!(super::super::status_line(state, 0)
-            .before
-            .contains("not drawn"));
     }
 }

@@ -114,10 +114,6 @@ impl std::fmt::Debug for LoadedFile {
 }
 
 impl LoadedFile {
-    pub fn line_count(&self) -> usize {
-        self.buffer.len()
-    }
-
     pub fn change_count(&self) -> usize {
         self.buffer.change_starts.len()
     }
@@ -1345,7 +1341,7 @@ pub struct ReviewState {
     /// Paths whose load is in flight, so a tab can show a spinner and a
     /// second click does not queue the work twice.
     pub loading: RwSignal<HashMap<String, ()>>,
-    /// Display line the cursor sits on, for the status line.
+    /// Display line the cursor sits on.
     pub cursor_line: RwSignal<usize>,
     /// Bumped whenever the active file's content changes, to rebuild the
     /// editor view: another file is another editor.
@@ -2676,8 +2672,8 @@ impl ReviewState {
     }
 
     /// The active file's picture, when it has one and is drawn: what the
-    /// pane shows in place of the editor, and what the status line and
-    /// the strip's tile describe.
+    /// pane shows in place of the editor, and what the strip's tile
+    /// describes.
     pub fn drawn_picture(&self) -> Option<Picture> {
         let file = self.active_file()?;
         if self.shows_source(&file.path) {
@@ -3493,6 +3489,7 @@ impl ReviewState {
     /// document the editor is laying out: the stacked one, or the head
     /// side of a split. Nothing when no editor is open, when the file is
     /// shown whole, or when the entry is an editor's since rebuilt.
+    #[cfg(test)]
     pub fn hidden_lines(&self) -> usize {
         self.docs
             .with(|docs| {

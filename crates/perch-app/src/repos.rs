@@ -22,7 +22,7 @@ use perch_github::Config;
 /// time it runs, not a reason to call a GitHub checkout local. A root
 /// whose remotes cannot be read is a warning and the entry is local, so
 /// the entry is still there to be named in the sidebar and the reason is
-/// in the status bar. Then repeated identities are dropped: a roots-only
+/// in the popup. Then repeated identities are dropped: a roots-only
 /// entry may have turned out to be a repository declared above it.
 pub async fn resolve(config: &mut Config, git: &Git) {
     let hosts = config.github_hosts();

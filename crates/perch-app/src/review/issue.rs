@@ -1,13 +1,12 @@
-//! What is an issue's alone: Start work, the state its glyph is drawn in,
-//! and the status line's word on it. The body is Conversation, drawn from
-//! `review::cards`, and the header over it is the same bar every item has.
+//! What is an issue's alone: Start work and the state its glyph is drawn
+//! in. The body is Conversation, drawn from `review::cards`, and the header
+//! over it is the same bar every item has.
 
 use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::SignalWith;
 use floem::views::{dyn_container, Decorators, Empty};
-use perch_github::Issue;
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -41,10 +40,3 @@ pub fn start_work_button(app: AppState, state: ReviewState, backend: Rc<Backend>
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
-/// So the status line can name the issue.
-pub fn describe(issue: &Issue) -> String {
-    format!(
-        "{}#{}  \u{00b7}  {} comments",
-        issue.repo_full_name, issue.number, issue.comments
-    )
-}

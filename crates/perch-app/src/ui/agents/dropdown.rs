@@ -202,9 +202,7 @@ pub fn go_to_run(app: AppState, review: ReviewState, backend: &Backend, run: &Ag
         .clone()
         .filter(|item_id| run.source_available && app.item(item_id).is_some())
     else {
-        app.notice.set(Some(
-            "The source for this run is no longer available".into(),
-        ));
+        app.complain("The source for this run is no longer available");
         return;
     };
     let same_item = app
@@ -727,15 +725,15 @@ mod tests {
         assert!(!review.review_open.get());
     }
 
-    /// The notice a run leaves as it finishes goes to it as a row does.
+    /// The toast a run leaves as it finishes goes to it as a row does.
     #[test]
-    fn a_finished_runs_notice_goes_to_it() {
+    fn a_finished_runs_toast_goes_to_it() {
         let (mut harness, app, review) = window();
         review.show_tab(ItemTab::Code);
         app.update_agent_run(&record("c", "pr", perch_github::RunStatus::Completed, 2));
         settle(&mut harness);
-        let notice = named(harness.root_id(), "agent-completion-notice").expect("no notice");
-        let view = named(notice, "\"View\"").expect("no View on the notice");
+        let toast = named(harness.root_id(), "toast").expect("no toast");
+        let view = named(toast, "\"View\"").expect("no View on the toast");
         let at = view.get_visual_rect_no_clip().center();
         harness.click(at.x, at.y);
         settle(&mut harness);

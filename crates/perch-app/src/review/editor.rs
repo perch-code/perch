@@ -1442,7 +1442,7 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
         .style(|s| s.size_full().min_width(0.0))
 }
 
-/// The cursor's line goes to the status line, the selection becomes the
+/// The cursor's line is kept, the selection becomes the
 /// lines a thread would be anchored on, and the head position under the
 /// caret is kept for the keys that act on the symbol there. Reading the
 /// editor's own cursor rather than the pointer means floem's hit-testing
@@ -2556,8 +2556,7 @@ mod window {
         )
     }
 
-    /// A pull request for the item, so the status bar draws the review's
-    /// line rather than the item count.
+    /// A pull request for the item, so the window draws the review.
     fn pull_request() -> perch_github::PullRequest {
         perch_github::PullRequest {
             number: 812,
@@ -2595,8 +2594,6 @@ mod window {
     fn show_whole_unfolds_every_run_and_folding_again_keeps_the_reveals() {
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
-        // With a pull request open the status bar carries the review's
-        // line, and with it the hidden count.
         state.pull_request.set(Some(Arc::new(pull_request())));
         harness.rebuild();
         harness.paint();
@@ -2628,7 +2625,7 @@ mod window {
         assert_eq!(
             state.hidden_lines(),
             0,
-            "nothing hidden, so the status line says nothing"
+            "nothing hidden"
         );
         assert_eq!(laid_out_text(&live), doc.text);
 

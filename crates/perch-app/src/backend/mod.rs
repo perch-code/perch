@@ -732,7 +732,7 @@ pub enum Event {
         /// True when the fetch failed and this is the snapshot alone.
         offline: bool,
     },
-    /// Something worth a line in the status bar and nothing more.
+    /// Something worth a line in the popup and nothing more.
     Notice(String),
     /// What config.toml says about the agent, for the pickers.
     AgentConfig(perch_github::AgentConfig),
@@ -4530,7 +4530,7 @@ struct Session {
     github: Arc<GitHub>,
     /// Kept to tell a rotated token from the same one resolved again.
     token: String,
-    /// Where the token came from, named in the status bar.
+    /// Where the token came from.
     source: String,
 }
 
@@ -11196,7 +11196,7 @@ async fn open_own_checkout(
 }
 
 /// Fetch what was said on a pull request and cache it for the reader.
-/// A fetch error is a line in the status bar, not a failed review.
+/// A fetch error is a line in the popup, not a failed review.
 async fn fetch_discussion(
     ctx: &Ctx,
     item_id: &str,
@@ -14140,7 +14140,7 @@ fn describe_error(e: &perch_github::Error) -> Status {
     }
 }
 
-/// Wall-clock time in the user's zone, for the status bar.
+/// Wall-clock time in the user's zone.
 pub(crate) fn local_clock_time(epoch: i64) -> Option<String> {
     let ts = Timestamp::from_second(epoch).ok()?;
     let zoned = ts.to_zoned(jiff::tz::TimeZone::system());

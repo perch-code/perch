@@ -256,7 +256,7 @@ pub fn cmd_click(
 
 /// Ask where a symbol is defined. The answer opens one location, lists
 /// several as "Definitions of", and does nothing for none. Nothing while
-/// the server is not there: the status line already says so.
+/// the server is not there.
 pub fn go_to_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) {
     if !state.lsp_status.with_untracked(|s| s.is_usable()) {
         return;

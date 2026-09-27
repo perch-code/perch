@@ -14,7 +14,6 @@ use fontique::FontInfoOverride;
 /// Surfaces.
 pub const CANVAS: Color = Color::from_rgb8(0xff, 0xff, 0xff);
 pub const CANVAS_SUBTLE: Color = Color::from_rgb8(0xf7, 0xf7, 0xf5);
-pub const CANVAS_SIDEBAR: Color = Color::from_rgb8(0xf8, 0xf8, 0xf6);
 pub const CANVAS_HOVER: Color = Color::from_rgb8(0xee, 0xee, 0xeb);
 
 /// The left navigation uses Codex's quieter, neutral surface treatment.
@@ -175,7 +174,6 @@ pub const SIDEBAR_MAX_WIDTH: f64 = 520.0;
 pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
 /// An item row in the sidebar: two lines of text and the glyph beside them.
 pub const ROW_HEIGHT: f64 = 68.0;
-pub const STATUS_HEIGHT: f64 = 34.0;
 /// The drawer on the right, which holds the open item's files as a tree,
 /// on Code. Docked beside the main pane while the window has the room, and
 /// over it while it does not.

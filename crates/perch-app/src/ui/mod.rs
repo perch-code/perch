@@ -7,7 +7,7 @@ pub mod nav_row;
 pub mod new_work;
 pub mod notifications;
 pub mod sidebar;
-pub mod status;
+pub mod toast;
 pub mod titlebar;
 pub mod widgets;
 
@@ -255,8 +255,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .width_full()
                 .position(floem::style::Position::Relative)
         }),
-        status::status_bar(state, review),
-        agents::completion_notice(state, review, capture_backend.clone()),
+        toast::toast(state, review, capture_backend.clone()),
         // An `@`'s list, over the composer it is typed in.
         crate::review::mention::popup(state, review),
         // Cmd-P's palette, over everything but a drag's cursor.

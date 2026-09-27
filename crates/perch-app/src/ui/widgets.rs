@@ -494,11 +494,6 @@ pub fn centered_message(
     .style(|s| s.size_full().items_center().justify_center().padding(40.0))
 }
 
-/// A horizontal spacer that pushes what follows to the right.
-pub fn spacer() -> impl IntoView {
-    Empty::new().style(|s| s.flex_grow(1.0_f32))
-}
-
 /// A pill over the top of a list or a pane, saying GitHub has something
 /// newer than what is on screen, with Refresh to show it. It floats, so
 /// nothing moves until the reader asks; the parent is its positioning box.

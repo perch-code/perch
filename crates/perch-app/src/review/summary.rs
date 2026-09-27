@@ -589,7 +589,7 @@ fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             // under a root is the reader's. The backend closes the review
             // itself when the archive goes through, and the Items event
             // that follows closes the view. A refusal leaves everything as
-            // it was, with the reason in the status line.
+            // it was, with the reason in the popup.
             let archive = checkout.owned.then(|| {
                 let backend = backend.clone();
                 Rc::new(move || {

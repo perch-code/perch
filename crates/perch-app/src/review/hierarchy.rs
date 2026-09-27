@@ -33,7 +33,7 @@ use crate::ui::widgets::{clickable, sidebar_glyph};
 /// Ask what a symbol is for a call hierarchy. The panel opens when the
 /// server names a function, as its callers; on a struct, a type or a
 /// local the server names nothing and nothing opens. Nothing while the
-/// server is not there: the status line already says so.
+/// server is not there.
 pub fn show(state: ReviewState, backend: &Backend, symbol: &Symbol) {
     if !state.lsp_status.with_untracked(|s| s.is_usable()) {
         return;

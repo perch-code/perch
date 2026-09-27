@@ -1129,7 +1129,7 @@ mod tests {
         assert_eq!(state.pull_error.get_untracked(), None);
         assert_eq!(draft_of(app, "item-7"), PullRequestDraft::default());
         assert_eq!(
-            app.notice.get_untracked().as_deref(),
+            app.notice().as_deref(),
             Some("#12 was already open on this branch.")
         );
     }
