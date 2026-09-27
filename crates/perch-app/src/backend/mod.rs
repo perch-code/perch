@@ -12191,9 +12191,11 @@ async fn ask(
     .await;
 }
 
-/// A Work run asks. A grant of the repository's that covers the request
-/// answers it at once; otherwise the reader is asked, and the request is
-/// denied if they have not answered in `approval_timeout`.
+/// A Work run asks. A repository set to `approvals = "never"`, or a
+/// grant of its that covers the request, answers it at once; otherwise
+/// the reader is asked, and the request is denied if they have not
+/// answered in `approval_timeout`. The setting is read now, not when the
+/// run started, so turning it off holds for the next request.
 async fn on_approval(
     ctx: &Ctx,
     run: &RunRecord,
@@ -12209,6 +12211,11 @@ async fn on_approval(
         .and_then(Result::ok)
         .unwrap_or_default();
     let line = crate::approvals::one_line(request);
+    if ctx.config().approvals_for(&repo) == perch_github::Approvals::Never {
+        handle.answer(id, perch_agent::Decision::Allow);
+        record_approval_step(ctx, &run.id, &format!("approval-{id}"), &format!("Allowed without asking: {line}"), Some(true));
+        return;
+    }
     if crate::approvals::covering(&grants, request).is_some() {
         handle.answer(id, perch_agent::Decision::Allow);
         record_approval_step(ctx, &run.id, &format!("approval-{id}"), &format!("Allowed by a grant: {line}"), Some(true));
@@ -12449,12 +12456,14 @@ fn work_setup(
         .with_cache(|c| c.grants_for(&item.repo_full_name))
         .and_then(Result::ok)
         .unwrap_or_default();
+    let approvals = config.approvals_for(&item.repo_full_name);
     let grant = perch_agent::WorkGrant {
         write: repo.map(|r| r.work.write_paths()).unwrap_or_default(),
         network: repo.map(|r| r.work.network.clone()).unwrap_or_default(),
         commit: crate::approvals::commits_granted(&grants),
         trust: repo.is_some_and(|r| r.work.trust),
-        auto_review: config.work.approvals == perch_github::Approvals::Auto,
+        // Under `never` every request comes to Perch, which allows it.
+        auto_review: approvals == perch_github::Approvals::Auto,
     };
     // Codex's profile has no allowlist, so it starts with no network
     // whatever the grant says, and asks for each host.
@@ -12475,7 +12484,7 @@ fn work_setup(
         &base,
         &network,
         grant.commit,
-        grant.auto_review,
+        approvals,
     );
     Ok((perch_agent::Mode::Work(grant), framing))
 }
@@ -16264,6 +16273,51 @@ read eof || true
         ] {
             assert!(steps.iter().any(|s| s == want), "{want} in {steps:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_repository_set_to_never_has_every_request_allowed_without_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = asking_claude(
+            dir.path(),
+            r#"{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push","dangerouslyDisableSandbox":true}}"#,
+        );
+        let mut repo = perch_github::RepoConfig::default();
+        repo.github = Some("a/b".into());
+        repo.work.approvals = Some(perch_github::Approvals::Never);
+        config.repo.push(repo);
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let item = work_branch(&ctx, &worktree);
+
+        ask(
+            &ctx,
+            item.id.clone(),
+            None,
+            None,
+            "Push it".into(),
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".into(),
+            perch_agent::Effort::Medium,
+            RunMode::Work,
+        )
+        .await;
+
+        assert!(
+            !received.try_iter().any(|e| matches!(e, Event::ApprovalRequested(_))),
+            "nobody was asked"
+        );
+        let answers = std::fs::read_to_string(dir.path().join("answers")).unwrap();
+        assert!(answers.contains("\"behavior\":\"allow\""), "{answers}");
+        let steps = step_summaries(&ctx, &item);
+        assert!(
+            steps.iter().any(|s| s == "Allowed without asking: Run outside the sandbox: git push [ok]"),
+            "{steps:?}"
+        );
+        assert!(ctx.with_cache(|c| c.grants_for("a/b").unwrap()).unwrap().is_empty());
     }
 
     #[tokio::test]

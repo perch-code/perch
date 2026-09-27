@@ -631,12 +631,14 @@ pub fn work_framing(
     base: &str,
     network: &str,
     commit: bool,
-    auto_review: bool,
+    approvals: perch_github::Approvals,
 ) -> String {
-    let who = if auto_review {
-        "an automatic reviewer decides it, and passes to the reader what it will not"
-    } else {
-        "the reader sees the request and answers it"
+    let who = match approvals {
+        perch_github::Approvals::Auto => {
+            "an automatic reviewer decides it, and passes to the reader what it will not"
+        }
+        perch_github::Approvals::Ask => "the reader sees the request and answers it",
+        perch_github::Approvals::Never => "the request is allowed without the reader seeing it first",
     };
     let git = if commit {
         "You may commit on this branch; do not push, switch branches, or change git's config or \

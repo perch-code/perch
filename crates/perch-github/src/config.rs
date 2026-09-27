@@ -205,7 +205,8 @@ pub struct WorkDefaults {
     /// `chris/`. A name the reader types is taken as typed.
     #[serde(default)]
     pub branch_prefix: String,
-    /// Who decides what a Work run's sandbox refuses.
+    /// Who decides what a Work run's sandbox refuses. `never` is taken
+    /// only from `[repo.work]`, one repository at a time.
     #[serde(default)]
     pub approvals: Approvals,
 }
@@ -220,6 +221,10 @@ pub enum Approvals {
     Auto,
     /// Every request comes to the reader.
     Ask,
+    /// Perch allows every request without asking. The sandbox still
+    /// holds what the run does without a request, and the protected paths
+    /// stay denied.
+    Never,
 }
 
 /// `[repo.work]`: what a Work run may reach outside its worktree, in one
@@ -238,6 +243,9 @@ pub struct RepoWork {
     /// as the reader, outside any sandbox.
     #[serde(default)]
     pub trust: bool,
+    /// Overrides `[work] approvals` for this repository.
+    #[serde(default)]
+    pub approvals: Option<Approvals>,
 }
 
 impl RepoWork {
@@ -439,6 +447,14 @@ impl Config {
         self.entry(identity).is_some()
     }
 
+    /// Who decides a Work run's requests in the repository with an
+    /// identity: its `[repo.work] approvals`, else `[work] approvals`.
+    pub fn approvals_for(&self, identity: &str) -> Approvals {
+        self.entry(identity)
+            .and_then(|r| r.work.approvals)
+            .unwrap_or(self.work.approvals)
+    }
+
     /// The declared roots of the repository with an identity, `~` expanded.
     /// Empty when nothing declares it, or the entry has none.
     pub fn roots_for(&self, identity: &str) -> Vec<PathBuf> {
@@ -563,6 +579,13 @@ impl Config {
             return Ok(refused);
         }
         c.keep_well_formed_repos();
+        if c.work.approvals == Approvals::Never {
+            c.work.approvals = Approvals::Auto;
+            c.warnings.push(
+                "config.toml: [work] approvals = \"never\" was read as \"auto\"; set it under a repository's [repo.work] instead"
+                    .to_string(),
+            );
+        }
         Ok(c)
     }
 
@@ -725,6 +748,23 @@ mod tests {
         assert_eq!(Config::parse("").unwrap().work.approvals, Approvals::Auto);
         let ask = Config::parse("[work]\napprovals = \"ask\"\n").unwrap();
         assert_eq!(ask.work.approvals, Approvals::Ask);
+    }
+
+    #[test]
+    fn never_asking_is_per_repository() {
+        let config = Config::parse(
+            "[work]\napprovals = \"ask\"\n\n[[repo]]\ngithub = \"a/one\"\n[repo.work]\napprovals = \"never\"\n\n[[repo]]\ngithub = \"a/two\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.approvals_for("a/one"), Approvals::Never);
+        assert_eq!(config.approvals_for("A/One"), Approvals::Never);
+        assert_eq!(config.approvals_for("a/two"), Approvals::Ask);
+        assert_eq!(config.approvals_for("a/undeclared"), Approvals::Ask);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+
+        let global = Config::parse("[work]\napprovals = \"never\"\n").unwrap();
+        assert_eq!(global.work.approvals, Approvals::Auto);
+        assert_eq!(global.warnings.len(), 1, "{:?}", global.warnings);
     }
 
     #[test]
