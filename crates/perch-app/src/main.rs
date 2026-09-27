@@ -3,6 +3,7 @@
 
 mod agents_cli;
 mod app_icon;
+mod app_menu;
 mod approvals;
 mod ask;
 mod backend;
@@ -101,12 +102,13 @@ fn main() {
                 has_visible_windows: false,
             } = event
             {
-                windows::open(None);
+                windows::reopen();
             }
         })
         .window(
             move |_| {
                 app_icon::install();
+                app_menu::install();
                 // Backend events arrive on a std channel, which floem drains
                 // on the UI thread into the windows' state.
                 if let Some((backend, events)) = started.take() {

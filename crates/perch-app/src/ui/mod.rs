@@ -331,11 +331,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     new_work::open(state, key_backend);
                     return EventPropagation::Stop;
                 }
-                // Cmd-Shift-N opens another window, laid out as this one.
-                if key.code == Code::KeyN && key.modifiers == OS_MOD | Modifiers::SHIFT {
-                    crate::windows::open(Some(state));
-                    return EventPropagation::Stop;
-                }
                 // Cmd-P puts it up, app-wide, as the tree's key is; Escape
                 // gives the keyboard back to whatever had it.
                 if key.code == Code::KeyP
@@ -637,7 +632,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 }
 
-                // Cmd-W closes the open file, as in any editor; `v` checks it
+                // Cmd-W closes the open file, as in any editor, and the
+                // window once there is none; `v` checks it
                 // as viewed, `]` and `[` go to the next and previous change,
                 // `}` and `{` open the next and previous unviewed file. Files
                 // only. The braces are shifted brackets: the physical codes
@@ -692,6 +688,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         }
                         _ => {}
                     }
+                }
+                // Cmd-W with no file to close closes the window. The Dock
+                // icon and the Perch menu's New Window open another.
+                if key.code == Code::KeyW && key.modifiers == OS_MOD {
+                    if let Some(window) = root_id.window_id() {
+                        floem::close_window(window);
+                    }
+                    return EventPropagation::Stop;
                 }
                 EventPropagation::Continue
             },
@@ -1216,12 +1220,18 @@ mod tests {
         assert!(review.tabs.with(Vec::is_empty), "the tab is still there");
         // Code stays, with nothing open, rather than going to Conversation.
         assert_eq!(review.tab.get(), crate::review::model::ItemTab::Code);
+        assert_eq!(
+            floem::take_close_window_event_count(harness.window_id()),
+            0,
+            "closing the file closed the window"
+        );
 
-        // With nothing open, the key is left for whoever else wants it.
+        // With nothing open, the key closes the window.
         harness.dispatch_event(cmd_w());
         harness.rebuild();
         assert_eq!(review.active.get(), None);
         assert_eq!(review.tab.get(), crate::review::model::ItemTab::Code);
+        assert_eq!(floem::take_close_window_event_count(harness.window_id()), 1);
     }
 
     /// Cmd-} and Cmd-{ step through Code's tabs in the strip's order,
@@ -1331,10 +1341,10 @@ mod tests {
         );
     }
 
-    /// On Conversation, Cmd-W does nothing: Conversation cannot be closed,
-    /// and the file's tab behind it stays.
+    /// On Conversation, Cmd-W closes the window: Conversation cannot be
+    /// closed, and the file's tab behind it stays.
     #[test]
-    fn cmd_w_on_conversation_closes_nothing() {
+    fn cmd_w_on_conversation_closes_the_window() {
         use crate::review::model::ItemTab;
         let (mut harness, review) = window_with_a_file_open();
         review.show_tab(ItemTab::Conversation);
@@ -1348,6 +1358,7 @@ mod tests {
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
         assert_eq!(review.tabs.with(Vec::len), 1);
         assert!(named(harness.root_id(), "conversation-title").is_some());
+        assert_eq!(floem::take_close_window_event_count(harness.window_id()), 1);
     }
 
     /// The agents' instructions in Review are a text box: `a` typed there

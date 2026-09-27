@@ -1,9 +1,10 @@
-//! Perch's windows. Cmd-Shift-N opens another, each with an item of its own
-//! open. They share the one backend: every window hears what is about the
-//! rows, the inbox and the agents, and a window alone hears the answers to
-//! what it asked (`Event::for_one_window`).
+//! Perch's windows. Cmd-Shift-N, New Window in the Perch menu, opens
+//! another, each with an item of its own open; Cmd-W closes one. They
+//! share the one backend: every window hears what is about the rows, the
+//! inbox and the agents, and a window alone hears the answers to what it
+//! asked (`Event::for_one_window`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use floem::ext_event::update_signal_from_channel;
@@ -24,6 +25,9 @@ struct App {
     /// sends most of it once, at launch, and a new window starts from it.
     model: AppState,
     windows: RefCell<Vec<Window>>,
+    /// The window that last had the keyboard, for New Window to take its
+    /// layout.
+    focused: Cell<Option<WindowId>>,
 }
 
 #[derive(Clone, Copy)]
@@ -63,6 +67,7 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             backend,
             model,
             windows: RefCell::new(Vec::new()),
+            focused: Cell::new(None),
         })));
     });
 }
@@ -127,6 +132,11 @@ pub fn view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
         raise.style(|s| s.absolute()),
     ))
     .style(|s| s.size_full())
+    .on_event_cont(floem::event::listener::WindowGainedFocus, move |_, _| {
+        if let Some(app) = app() {
+            app.focused.set(Some(id));
+        }
+    })
     .on_event_cont(floem::event::listener::WindowClosed, move |_, _| {
         if let Some(app) = app() {
             app.windows.borrow_mut().retain(|w| w.id != id);
@@ -144,6 +154,28 @@ pub fn open(from: Option<AppState>) {
         },
         Some(config()),
     );
+}
+
+/// New Window, from the Perch menu: laid out as the window in front, or
+/// as the first window was with none left.
+pub fn open_new() {
+    let from = app().and_then(|app| {
+        let focused = app.focused.get()?;
+        app.windows
+            .borrow()
+            .iter()
+            .find(|w| w.id == focused)
+            .map(|w| w.state)
+    });
+    open(from);
+}
+
+/// A click on the Dock icon opens a window when none is left. A minimized
+/// one macOS brings back itself.
+pub fn reopen() {
+    if app().is_some_and(|app| app.windows.borrow().is_empty()) {
+        open(None);
+    }
 }
 
 /// Bring to the front the window, other than `asking`, that has `item_id`
