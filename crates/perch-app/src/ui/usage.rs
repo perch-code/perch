@@ -143,8 +143,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 }
             },
         )
-        // Four pixels under the bar's controls, as the Agents dropdown
-        // hangs from its taller button.
+        // Six pixels under the button, as the Agents dropdown hangs.
         .style(|s| {
             s.position(Position::Absolute)
                 .inset_top(32.0)

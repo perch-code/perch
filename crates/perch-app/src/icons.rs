@@ -264,13 +264,14 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M7.1 5.5 L4.9 10 M8.9 5.5 L11.1 10 M5.8 11.5 H10.2" fill="none"
                      stroke="{c}" stroke-width="1.3" stroke-linecap="round"/>"#
         ),
-        // A dial's arc with its needle past the middle.
+        // A dial's 240° arc with its needle past the middle. The hub sits
+        // low so the drawing's box, caps included, is centred on 8,8.
         SidebarIcon::Gauge => format!(
-            r#"<path d="M2.3 12 A5.9 5.9 0 0 1 13.7 12" fill="none" stroke="{c}"
+            r#"<path d="M2.98 12.35 A5.8 5.8 0 1 1 13.02 12.35" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linecap="round"/>
-               <path d="M8 11.2 L10.9 7.1" fill="none" stroke="{c}" stroke-width="1.4"
+               <path d="M8 9.45 L10.5 6.95" fill="none" stroke="{c}" stroke-width="1.4"
                      stroke-linecap="round"/>
-               <circle cx="8" cy="11.2" r="1.2" fill="{c}"/>"#
+               <circle cx="8" cy="9.45" r="1.3" fill="{c}"/>"#
         ),
         SidebarIcon::Thread => format!(
             r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="{c}"
@@ -404,21 +405,6 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M9.4 2.5 H13.5 V6.6 M13.5 2.5 L7.6 8.4" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
-        // Two arrows on the diagonal, pointing out: the pane to the whole
-        // window.
-        SidebarIcon::Expand => format!(
-            r#"<path d="M9.4 2.5 H13.5 V6.6 M13.5 2.5 L9 7" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-               <path d="M6.6 13.5 H2.5 V9.4 M2.5 13.5 L7 9" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
-        ),
-        // The same arrows pointing in: the drawer back.
-        SidebarIcon::Contract => format!(
-            r#"<path d="M9 2.9 V7 H13.1 M9 7 L13.5 2.5" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-               <path d="M7 13.1 V9 H2.9 M7 9 L2.5 13.5" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
-        ),
         SidebarIcon::Person => format!(
             r#"<circle cx="8" cy="5.3" r="2.7" fill="none" stroke="{c}" stroke-width="1.4"/>
                <path d="M2.8 13.6 C2.8 10.6 5.1 9.1 8 9.1 S13.2 10.6 13.2 13.6" fill="none"
@@ -502,10 +488,6 @@ pub enum SidebarIcon {
     Drawer,
     /// A box with an arrow leaving it: open on GitHub.
     External,
-    /// Two diagonal arrows pointing out: the pane to the whole window.
-    Expand,
-    /// Two diagonal arrows pointing in: the drawer back.
-    Contract,
     /// A head and shoulders: the reviewers and the assignees.
     Person,
     /// A luggage tag: the labels.
@@ -557,7 +539,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 58] = [
+    pub const ALL: [SidebarIcon; 56] = [
         SidebarIcon::Heading,
         SidebarIcon::Bold,
         SidebarIcon::Italic,
@@ -584,8 +566,6 @@ impl SidebarIcon {
         SidebarIcon::Caution,
         SidebarIcon::Drawer,
         SidebarIcon::External,
-        SidebarIcon::Expand,
-        SidebarIcon::Contract,
         SidebarIcon::Link,
         SidebarIcon::ThreadHollow,
         SidebarIcon::ChangesRequested,

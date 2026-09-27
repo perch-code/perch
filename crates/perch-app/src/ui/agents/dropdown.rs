@@ -19,6 +19,7 @@ use floem::views::{dyn_container, Container, Decorators, Empty, Label, ScrollExt
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
+use crate::review::cards::tip;
 use crate::review::model::{ItemTab, ReviewState};
 use crate::state::AppState;
 use crate::theme;
@@ -40,27 +41,25 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
         running + queued
     };
     let waiting = move || review.approvals.with(|pending| !pending.is_empty());
-    let inner = Stack::horizontal((
-        sidebar_glyph(SidebarIcon::Agents, theme::FG_MUTED)
-            .style(|s| s.size(13.0, 13.0).margin_right(6.0).pointer_events_none()),
-        Label::derived(|| "Agents".to_string()).style(|s| {
-            s.font_size(theme::TEXT_META)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
-                .selectable(false)
-                .pointer_events_none()
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-        }),
+    // The glyph alone, as the gauge beside it, with the count and the dot
+    // pinned to its corners.
+    let button = Stack::new((
+        sidebar_glyph(SidebarIcon::Agents, theme::FG_MUTED).style(|s| s.pointer_events_none()),
         Label::derived(move || count().to_string())
             .debug_name("agents count")
             .style(move |s| {
-                s.font_size(theme::TEXT_SECTION)
+                s.position(Position::Absolute)
+                    .inset_top(-3.0)
+                    .inset_right(-5.0)
+                    .font_size(10.0)
                     .font_weight(theme::weight_emphasis())
                     .color(theme::FG_MUTED)
-                    .height(18.0)
-                    .padding_horiz(6.0)
-                    .margin_left(6.0)
-                    .border_radius(9.0)
+                    .height(15.0)
+                    .min_width(15.0)
+                    .padding_horiz(3.0)
+                    .border(1.5)
+                    .border_color(theme::CANVAS)
+                    .border_radius(7.5)
                     .background(theme::BADGE_BG)
                     .items_center()
                     .justify_center()
@@ -69,16 +68,18 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                     .apply_if(count() == 0, |s| s.hide())
             }),
         Empty::new().debug_name("agents waiting").style(move |s| {
-            s.size(6.0, 6.0)
-                .border_radius(3.0)
+            s.position(Position::Absolute)
+                .inset_bottom(1.0)
+                .inset_right(1.0)
+                .size(8.0, 8.0)
+                .border(1.5)
+                .border_color(theme::CANVAS)
+                .border_radius(4.0)
                 .background(theme::ACCENT)
-                .margin_left(6.0)
                 .pointer_events_none()
                 .apply_if(!waiting(), |s| s.hide())
         }),
-    ))
-    .style(|s| s.items_center().pointer_events_none());
-    let button = Container::new(inner);
+    ));
     let button_id = button.view_id();
     let click_backend = backend.clone();
     let key_backend = backend.clone();
@@ -95,26 +96,20 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
             }
         })
         .style(move |s| {
-            let base = clickable(s)
-                .height(30.0)
-                .padding_horiz(10.0)
+            clickable(s)
+                .size(26.0, 26.0)
                 .items_center()
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(9.0)
+                .justify_center()
+                .border_radius(13.0)
                 .keyboard_navigable()
                 .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-                .hover(|s| s.background(theme::CANVAS_HOVER));
-            if review.agents_dropdown_open.get() {
-                base.background(theme::BADGE_BG)
-            } else {
-                base.background(theme::CANVAS)
-            }
+                .hover(|s| s.background(theme::BADGE_BG))
+                .apply_if(review.agents_dropdown_open.get(), |s| s.background(theme::BADGE_BG))
         })
         .debug_name("agents-button");
 
     let stack = Stack::new((
-        button,
+        tip(button, "Agents".to_string()),
         dyn_container(
             move || review.agents_dropdown_open.get(),
             move |open| {
@@ -127,7 +122,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
         )
         .style(|s| {
             s.position(Position::Absolute)
-                .inset_top(34.0)
+                .inset_top(32.0)
                 .inset_right(0.0)
                 .z_index(100)
         }),

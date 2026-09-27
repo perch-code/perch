@@ -4,7 +4,7 @@
 //! between Conversation and Code, and the things a reader reaches for from
 //! anywhere in an item: GitHub, plan usage, an agent's review of the
 //! branch, every item's agents, the item's one action (Submit review, or
-//! Start work on an issue), the whole window, and closing the item.
+//! Start work on an issue), and closing the item.
 //! Everything else about the item, its state and number, branches, checks
 //! and worktree, and what GitHub says about it, is `review::summary`,
 //! under Conversation's title.
@@ -17,7 +17,7 @@ use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::review::cards::{tip, tip_with};
+use crate::review::cards::tip;
 use crate::review::model::{Phase, ReviewState};
 use crate::review::summary::subject_state;
 use crate::state::AppState;
@@ -132,15 +132,13 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
 }
 
 /// What is reached for from anywhere in an item: GitHub, plan usage,
-/// every item's agents, the item's one action, the whole window, and
-/// closing it.
+/// every item's agents, the item's one action, and closing it.
 fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         github_button(state),
         crate::ui::usage::button(app, state, backend.clone()),
         crate::ui::agents::dropdown::button(app, state, backend.clone()),
         primary_action(app, state, backend.clone()),
-        expand_button(app),
         close_button(app, state, backend),
     ))
     .style(move |s| {
@@ -185,33 +183,6 @@ fn primary_action(app: AppState, state: ReviewState, backend: Rc<Backend>) -> im
             crate::review::review_menu::control(app, state, backend.clone()).into_any()
         }
     })
-    .style(control)
-}
-
-/// The pane to the whole window, and the drawer back.
-fn expand_button(app: AppState) -> impl IntoView {
-    let open = move || app.sidebar_open.get();
-    tip_with(
-        icon_button(
-            move || {
-                if open() {
-                    SidebarIcon::Expand
-                } else {
-                    SidebarIcon::Contract
-                }
-            },
-            || theme::FG_MUTED,
-            move || app.sidebar_open.update(|open| *open = !*open),
-        ),
-        move || {
-            if open() {
-                "Hide the sidebar".to_string()
-            } else {
-                "Show the sidebar".to_string()
-            }
-        },
-    )
-    .debug_name("expand button")
     .style(control)
 }
 
@@ -444,13 +415,12 @@ pub(crate) mod tests {
         assert_eq!(bar.y0, 0.0, "and at the window's top: it is the title bar");
 
         // Left to right: the title, the switch, then GitHub, Agents,
-        // Review, the expand control, and close against the right edge.
+        // Review, and close against the right edge.
         let title = rect(&harness, "item title");
         let switch = rect(&harness, "item switch");
         let github = rect(&harness, "github button");
         let agents = rect(&harness, "agents-button");
         let review = rect(&harness, "review-control");
-        let expand = rect(&harness, "expand button");
         let close = rect(&harness, "close button");
         for (name, r) in [
             ("title", title),
@@ -458,7 +428,6 @@ pub(crate) mod tests {
             ("github", github),
             ("agents", agents),
             ("review", review),
-            ("expand", expand),
             ("close", close),
         ] {
             assert!(within(r, bar), "{name} at {r:?} is not in the bar {bar:?}");
@@ -468,8 +437,7 @@ pub(crate) mod tests {
         assert!(switch.x1 <= github.x0);
         assert!(github.x1 <= agents.x0);
         assert!(agents.x1 <= review.x0);
-        assert!(review.x1 <= expand.x0);
-        assert!(expand.x1 <= close.x0);
+        assert!(review.x1 <= close.x0);
         assert_eq!(
             close.x1,
             bar.x1 - theme::REVIEW_HEADER_PADDING,
@@ -659,11 +627,10 @@ pub(crate) mod tests {
         let hit = harness.element_id_at(x, y).expect("nothing under the bar");
         assert_eq!(hit.owning_id(), bar, "the bar's side took the press");
 
-        // The expand control shuts the drawer: the bar then runs from the
-        // window's edge, with the lights lane and the drawer control
-        // before the title, and the control brings the drawer back.
-        let expand = rect(&harness, "expand button").center();
-        harness.click(expand.x, expand.y);
+        // With the drawer shut the bar runs from the window's edge, with
+        // the lights lane and the drawer control before the title, and the
+        // control brings the drawer back.
+        app.sidebar_open.set(false);
         harness.rebuild();
         harness.paint();
         assert!(!app.sidebar_open.get());
@@ -700,18 +667,16 @@ pub(crate) mod tests {
         assert!(named(harness.root_id(), "review-control").is_none());
         let github = rect(&harness, "github button");
         let start = rect(&harness, "start work button");
-        let expand = rect(&harness, "expand button");
         let close = rect(&harness, "close button");
         for (name, r) in [
             ("github", github),
             ("start work", start),
-            ("expand", expand),
             ("close", close),
         ] {
             assert!(within(r, bar), "{name} at {r:?} is not in the bar {bar:?}");
             assert!(r.width() > 0.0, "{name} has no width");
         }
-        assert!(github.x1 <= start.x0 && start.x1 <= expand.x0 && expand.x1 <= close.x0);
+        assert!(github.x1 <= start.x0 && start.x1 <= close.x0);
     }
 
     /// The X closes the item, as Cmd-[ does.
