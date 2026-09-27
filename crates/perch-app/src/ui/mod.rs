@@ -479,6 +479,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 let typing = typing || review.find_focused.get();
                 if typing || !review.is_open() {
+                    if key.code == Code::KeyW && key.modifiers == OS_MOD {
+                        close_item_or_window(state, review, key_backend, root_id);
+                        return EventPropagation::Stop;
+                    }
                     return EventPropagation::Continue;
                 }
                 // Cmd-Shift-1 shows Conversation and Cmd-Shift-2 Code, as the
@@ -632,8 +636,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                 }
 
-                // Cmd-W closes the open file, as in any editor, and the
-                // window once there is none; `v` checks it
+                // Cmd-W closes the open file, as in any editor, then the
+                // item, then the window; `v` checks it
                 // as viewed, `]` and `[` go to the next and previous change,
                 // `}` and `{` open the next and previous unviewed file. Files
                 // only. The braces are shifted brackets: the physical codes
@@ -689,12 +693,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         _ => {}
                     }
                 }
-                // Cmd-W with no file to close closes the window. The Dock
-                // icon and the Perch menu's New Window open another.
+                // Cmd-W with no file to close closes the item, as the X does.
                 if key.code == Code::KeyW && key.modifiers == OS_MOD {
-                    if let Some(window) = root_id.window_id() {
-                        floem::close_window(window);
-                    }
+                    close_item_or_window(state, review, key_backend, root_id);
                     return EventPropagation::Stop;
                 }
                 EventPropagation::Continue
@@ -836,6 +837,24 @@ fn empty_pane(
         }),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0))
+}
+
+/// Cmd-W past the open file: close the item, as the X does, and with none
+/// open, the window. All of it in the one handler, as a key whose target is
+/// the root reaches the root's other handlers even once this one stops it.
+/// The Dock icon and the Perch menu's New Window open another window.
+fn close_item_or_window(
+    state: AppState,
+    review: ReviewState,
+    backend: &Backend,
+    root_id: floem::ViewId,
+) {
+    if review.is_showing() {
+        let navigation_id = backend.close_review();
+        state.begin_close(review, navigation_id);
+    } else if let Some(window) = root_id.window_id() {
+        floem::close_window(window);
+    }
 }
 
 /// Shut the Agents dropdown and the usage popover when a press with
@@ -1226,11 +1245,21 @@ mod tests {
             "closing the file closed the window"
         );
 
-        // With nothing open, the key closes the window.
+        // With no file open, the key closes the item, as the X does, and
+        // leaves the window.
         harness.dispatch_event(cmd_w());
         harness.rebuild();
-        assert_eq!(review.active.get(), None);
-        assert_eq!(review.tab.get(), crate::review::model::ItemTab::Code);
+        harness.paint();
+        assert!(!review.is_showing(), "the item is still showing");
+        assert_eq!(
+            floem::take_close_window_event_count(harness.window_id()),
+            0,
+            "closing the item closed the window"
+        );
+
+        // With nothing open at all, it closes the window.
+        harness.dispatch_event(cmd_w());
+        harness.rebuild();
         assert_eq!(floem::take_close_window_event_count(harness.window_id()), 1);
     }
 
@@ -1339,10 +1368,23 @@ mod tests {
         );
     }
 
-    /// On Conversation, Cmd-W closes the window: Conversation cannot be
-    /// closed, and the file's tab behind it stays.
+    /// With nothing focused the key's target is the root, whose handlers
+    /// all hear it: Cmd-W still closes the file alone.
     #[test]
-    fn cmd_w_on_conversation_closes_the_window() {
+    fn cmd_w_with_nothing_focused_closes_only_the_file() {
+        let (mut harness, review) = window_with_a_file_open();
+        harness.dispatch_event(cmd_w());
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(review.active.get(), None, "the file is still open");
+        assert!(review.is_showing(), "the item closed with the file");
+        assert_eq!(floem::take_close_window_event_count(harness.window_id()), 0);
+    }
+
+    /// On Conversation, Cmd-W closes the item, not the file's tab behind
+    /// it: Conversation cannot be closed. The window stays.
+    #[test]
+    fn cmd_w_on_conversation_closes_the_item() {
         use crate::review::model::ItemTab;
         let (mut harness, review) = window_with_a_file_open();
         review.show_tab(ItemTab::Conversation);
@@ -1352,11 +1394,8 @@ mod tests {
         harness.dispatch_event(cmd_w());
         harness.rebuild();
         harness.paint();
-        assert_eq!(review.tab.get(), ItemTab::Conversation);
-        assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
-        assert_eq!(review.tabs.with(Vec::len), 1);
-        assert!(named(harness.root_id(), "conversation-title").is_some());
-        assert_eq!(floem::take_close_window_event_count(harness.window_id()), 1);
+        assert!(!review.is_showing(), "the item is still showing");
+        assert_eq!(floem::take_close_window_event_count(harness.window_id()), 0);
     }
 
     /// The agents' instructions in Review are a text box: `a` typed there
