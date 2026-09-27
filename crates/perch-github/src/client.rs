@@ -995,6 +995,27 @@ impl GitHub {
         Ok(payload.into_issue(repo_full_name))
     }
 
+    /// Whether a number in a repository is a pull request or an issue.
+    /// GitHub numbers the two together, and the issues endpoint answers
+    /// for both, with a `pull_request` key on a pull request.
+    pub async fn subject_kind(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<crate::items::SubjectKind, Error> {
+        repo_parts(repo_full_name)?;
+        let body = self
+            .get_text(&format!("/repos/{repo_full_name}/issues/{number}"))
+            .await?;
+        let payload: IssuePayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(if payload.is_pull_request() {
+            crate::items::SubjectKind::PullRequest
+        } else {
+            crate::items::SubjectKind::Issue
+        })
+    }
+
     /// Who the token belongs to: the login and the avatar, for the
     /// reader's own byline.
     pub async fn viewer(&self) -> Result<crate::model::UserPayload, Error> {

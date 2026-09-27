@@ -28,6 +28,9 @@ struct App {
     /// The window that last had the keyboard, for New Window to take its
     /// layout.
     focused: Cell<Option<WindowId>>,
+    /// Open… was asked for with no window open: the next one opens with
+    /// the box up.
+    open_box_on_open: Cell<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -68,6 +71,7 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             model,
             windows: RefCell::new(Vec::new()),
             focused: Cell::new(None),
+            open_box_on_open: Cell::new(false),
         })));
     });
 }
@@ -109,6 +113,9 @@ pub fn window(settings: Option<AppState>) -> Option<(AppState, ReviewState, Rc<B
     let state = new_state();
     state.seed_from(&app.model, settings.as_ref().unwrap_or(&app.model));
     let review = state.review.get_untracked()?;
+    if app.open_box_on_open.replace(false) {
+        crate::ui::open_box::show(state, None);
+    }
     let backend = Rc::new(app.backend.open_window());
     Some((state, review, backend))
 }
@@ -168,6 +175,30 @@ pub fn open_new() {
             .map(|w| w.state)
     });
     open(from);
+}
+
+/// Open…, from the Perch menu: the box in the window that last had the
+/// keyboard, or in a new one with none left.
+pub fn show_open_box() {
+    let Some(app) = app() else {
+        return;
+    };
+    let focused = app.focused.get();
+    let window = {
+        let windows = app.windows.borrow();
+        windows
+            .iter()
+            .find(|w| Some(w.id) == focused)
+            .or(windows.first())
+            .copied()
+    };
+    match window {
+        Some(window) => crate::ui::open_box::show(window.state, None),
+        None => {
+            app.open_box_on_open.set(true);
+            open(None);
+        }
+    }
 }
 
 /// A click on the Dock icon opens a window when none is left. A minimized

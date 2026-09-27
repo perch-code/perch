@@ -1,5 +1,6 @@
-//! New Window in the Perch menu. The menu is winit's; the item's target is
-//! Perch's own, not a window's, so it still opens one with none left.
+//! New Window and Open… in the Perch menu. The menu is winit's; the items'
+//! target is Perch's own, not a window's, so they still work with no
+//! window left.
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -22,6 +23,11 @@ mod mac {
             fn new_window(&self, _sender: Option<&AnyObject>) {
                 crate::windows::open_new();
             }
+
+            #[unsafe(method(openReference:))]
+            fn open_reference(&self, _sender: Option<&AnyObject>) {
+                crate::windows::show_open_box();
+            }
         }
     );
 
@@ -30,7 +36,8 @@ mod mac {
             return;
         };
         let app = NSApplication::sharedApplication(mtm);
-        // About, a separator, then New Window and a separator of its own.
+        // About, a separator, then New Window, Open… and a separator of
+        // their own.
         let Some(menu) = app
             .mainMenu()
             .and_then(|bar| bar.itemAtIndex(0))
@@ -51,9 +58,20 @@ mod mac {
             NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
         );
         unsafe { item.setTarget(Some(&target)) };
+        let open = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                ns_string!("Open…"),
+                Some(sel!(openReference:)),
+                ns_string!("o"),
+            )
+        };
+        open.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        unsafe { open.setTarget(Some(&target)) };
         let at = menu.numberOfItems().min(2);
         menu.insertItem_atIndex(&item, at);
-        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), at + 1);
+        menu.insertItem_atIndex(&open, at + 1);
+        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), at + 2);
         // A menu item holds its target weakly, and this one is for the
         // app's life.
         std::mem::forget(target);

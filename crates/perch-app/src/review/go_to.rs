@@ -1180,7 +1180,7 @@ fn wire(state: ReviewState) {
 /// width: centred over the main pane, as wide as VS Code's or as the pane
 /// allows with room at its sides. Before the pane has been laid out, over
 /// the window.
-fn placement(pane: (f64, f64), window: f64) -> (f64, f64) {
+pub(crate) fn placement(pane: (f64, f64), window: f64) -> (f64, f64) {
     let (left, right) = if pane.1 > pane.0 { pane } else { (0.0, window) };
     let width = theme::GO_TO_WIDTH.min((right - left - 2.0 * GUTTER).max(0.0));
     (left + (right - left - width) / 2.0, width)

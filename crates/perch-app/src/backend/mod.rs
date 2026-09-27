@@ -88,6 +88,16 @@ pub enum Command {
         number: u64,
         navigation_id: u64,
     },
+    /// Open…: a pull request or an issue the reader named. A URL says
+    /// which it is; a reference doesn't, and GitHub is asked first. What
+    /// comes of that is `OpenReferenceResolved` or `OpenReferenceFailed`,
+    /// then the open itself as `OpenSubject`'s.
+    OpenReference {
+        repo_full_name: String,
+        number: u64,
+        kind: Option<ItemKind>,
+        navigation_id: u64,
+    },
     /// Mark a GitHub notification read and open its pull request or issue.
     /// Other subject kinds are opened by the UI in the browser instead.
     OpenNotification {
@@ -680,6 +690,20 @@ pub enum Event {
     Repos(Vec<perch_github::DeclaredRepo>),
     /// `[work]` from the config, for the new-work view.
     WorkDefaults(perch_github::WorkDefaults),
+    /// The hosts a pull request's or an issue's URL is read on, for
+    /// Open… and the Browse search box.
+    GithubHosts(Vec<String>),
+    /// Open… named a pull request or an issue GitHub has: the box goes
+    /// and the open goes ahead under `navigation_id`.
+    OpenReferenceResolved {
+        navigation_id: u64,
+        kind: ItemKind,
+    },
+    /// Open… named something that can't be opened. The box says why.
+    OpenReferenceFailed {
+        navigation_id: u64,
+        message: String,
+    },
     /// Add repository put this one in the config.
     RepositoryAdded(String),
     /// A Work run asks the reader something.
@@ -1232,6 +1256,8 @@ impl Event {
                 | Event::Notice(_)
                 | Event::ConfirmLoss(_)
                 | Event::RepositoryAdded(_)
+                | Event::OpenReferenceResolved { .. }
+                | Event::OpenReferenceFailed { .. }
                 | Event::Bases { .. }
                 | Event::Grants { .. }
         )
@@ -2197,6 +2223,20 @@ impl Backend {
         navigation_id
     }
 
+    /// Open… : open what the reader named, asking GitHub first whether
+    /// it is a pull request or an issue when `kind` is not known.
+    pub fn open_reference(&self, repo_full_name: &str, number: u64, kind: Option<ItemKind>) -> u64 {
+        let navigation_id = self.navigation_requests.begin_current();
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::OpenReference {
+            repo_full_name: repo_full_name.to_string(),
+            number,
+            kind,
+            navigation_id,
+        });
+        navigation_id
+    }
+
     pub fn open_notification(&self, thread: &Thread) -> Option<u64> {
         let opens_inside = matches!(
             thread.subject.kind,
@@ -3078,6 +3118,7 @@ async fn run(
     }
     let _ = events.send(Event::Repos(config.declared_repos()));
     let _ = events.send(Event::WorkDefaults(config.work.clone()));
+    let _ = events.send(Event::GithubHosts(config.github_hosts()));
     let mut initial_notifications = Vec::new();
     let mut initial_items = Vec::new();
     if let Some(cache) = cache.as_ref() {
@@ -3384,6 +3425,43 @@ async fn run(
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
+                    if open_subject_navigation(&ctx, repo_full_name, kind, number, navigation_id)
+                        .await
+                    {
+                        start_language_server(
+                            ctx.slot,
+                            ctx.language_server,
+                            ctx.events,
+                            ctx.navigation_requests,
+                            navigation_id,
+                        )
+                        .await;
+                    }
+                });
+            }
+            Command::OpenReference {
+                repo_full_name,
+                number,
+                kind,
+                navigation_id,
+            } => {
+                ctx.clear_notice();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let kind = match resolve_reference(&ctx, &repo_full_name, number, kind).await {
+                        Ok(kind) => kind,
+                        Err(message) => {
+                            let _ = ctx.events.send(Event::OpenReferenceFailed {
+                                navigation_id,
+                                message,
+                            });
+                            return;
+                        }
+                    };
+                    let _ = ctx.events.send(Event::OpenReferenceResolved {
+                        navigation_id,
+                        kind,
+                    });
                     if open_subject_navigation(&ctx, repo_full_name, kind, number, navigation_id)
                         .await
                     {
@@ -10600,6 +10678,36 @@ fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<
 /// repository has neither: a launch hook naming one under the reserved
 /// owner is told so rather than asked of GitHub, where `local` could be
 /// somebody's account.
+/// Whether Open… can go ahead with what it was given, and as which kind.
+/// A URL's kind is taken as it says; a reference's is asked of GitHub,
+/// which also tells a number it doesn't have.
+async fn resolve_reference(
+    ctx: &Ctx,
+    repo_full_name: &str,
+    number: u64,
+    kind: Option<ItemKind>,
+) -> Result<ItemKind, String> {
+    if perch_github::is_local(repo_full_name) {
+        return Err(format!(
+            "{} is not on GitHub",
+            ctx.config().display_name(repo_full_name)
+        ));
+    }
+    if let Some(kind) = kind {
+        return Ok(kind);
+    }
+    let Some(github) = ctx.github() else {
+        return Err("A GitHub token is required to open it".into());
+    };
+    match github.subject_kind(repo_full_name, number).await {
+        Ok(kind) => Ok(kind),
+        Err(perch_github::Error::Status { status: 404, .. }) => {
+            Err(format!("No #{number} in {repo_full_name}"))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 async fn open_subject_navigation(
     ctx: &Ctx,
     repo_full_name: String,
@@ -19914,5 +20022,39 @@ read eof || true
 
         assert_eq!(description_of(&received), open_pull::DescriptionOutcome::Stopped);
         assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    /// Open… asks GitHub what a reference's number is, and says so when
+    /// there is none; a URL's kind is taken as it says, with no request.
+    #[tokio::test]
+    async fn a_reference_is_asked_after_and_a_url_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_path(|path| {
+            if path.starts_with("/repos/a/b/issues/7") {
+                ("200 OK", r#"{"number":7,"updated_at":"2026-09-16T11:40:00Z","pull_request":{}}"#.into())
+            } else if path.starts_with("/repos/a/b/issues/42") {
+                ("200 OK", r#"{"number":42,"updated_at":"2026-09-16T11:40:00Z"}"#.into())
+            } else {
+                ("404 Not Found", r#"{"message":"Not Found"}"#.into())
+            }
+        });
+        let (ctx, _events) = ctx(dir.path(), &base, &["a/b"]);
+
+        assert_eq!(resolve_reference(&ctx, "a/b", 7, None).await, Ok(ItemKind::PullRequest));
+        assert_eq!(resolve_reference(&ctx, "a/b", 42, None).await, Ok(ItemKind::Issue));
+        assert_eq!(
+            resolve_reference(&ctx, "a/b", 9, None).await,
+            Err("No #9 in a/b".to_string())
+        );
+        let asked = paths.lock().unwrap().len();
+        assert_eq!(asked, 3);
+        assert_eq!(
+            resolve_reference(&ctx, "a/b", 5, Some(ItemKind::Issue)).await,
+            Ok(ItemKind::Issue)
+        );
+        assert_eq!(paths.lock().unwrap().len(), asked, "the URL said, so nothing was asked");
+
+        let local = resolve_reference(&ctx, "local/notes", 5, Some(ItemKind::Issue)).await;
+        assert!(local.unwrap_err().ends_with("is not on GitHub"));
     }
 }

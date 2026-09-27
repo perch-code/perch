@@ -6,6 +6,7 @@ pub mod items;
 pub mod nav_row;
 pub mod new_work;
 pub mod notifications;
+pub mod open_box;
 pub mod sidebar;
 pub mod toast;
 pub mod titlebar;
@@ -265,6 +266,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         crate::review::mention::popup(state, review),
         // Cmd-P's palette, over everything but a drag's cursor.
         crate::review::go_to::palette(state, review, backend.clone()),
+        // Open…'s box, as modal as the palette.
+        open_box::overlay(state),
         // Over everything, and only while a drawer's edge is being dragged.
         sidebar::resize_cursor_sheet(state),
         drawer::resize_cursor_sheet(state),
@@ -325,6 +328,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // box's.
                 if review.go_to.open.get() {
                     return crate::review::go_to::key(review, &go_to_file, key);
+                }
+                if state.open_box.open.get() {
+                    return open_box::key(state, key_backend, key);
                 }
                 // Cmd-N opens the new-work view, from anywhere.
                 if key.code == Code::KeyN && key.modifiers == OS_MOD {
@@ -704,8 +710,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // Window-level shortcuts. Key events bubble from whatever has focus, so
         // a handler on the root view catches them wherever the reader is.
         .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-            // None of these while Cmd-P's palette is up: it is modal.
-            if review.go_to.open.get() {
+            // None of these while Cmd-P's palette or Open… is up: they
+            // are modal.
+            if review.go_to.open.get() || state.open_box.open.get() {
                 return EventPropagation::Continue;
             }
             // Escape puts away whatever the sidebar has open under a row.
@@ -1113,6 +1120,44 @@ mod tests {
             repeat: false,
             is_composing: false,
         })
+    }
+
+    /// Open…'s box comes up over the window with the keyboard in it, says
+    /// what's wrong with an Enter it can't read, and goes on Escape.
+    #[test]
+    fn the_open_box_takes_the_keyboard_complains_and_goes_on_escape() {
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.review.set(Some(review));
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "open-box-panel").is_none());
+
+        open_box::show(state, None);
+        harness.rebuild();
+        harness.paint();
+        harness.rebuild();
+        harness.paint();
+        let panel = named(harness.root_id(), "open-box-panel").expect("no box");
+        assert!(panel.get_visual_rect_no_clip().width() > 0.0);
+        let text = named(harness.root_id(), "open-box-text").unwrap();
+        assert!(harness.is_focused(text), "the box has the keyboard");
+
+        state.open_box.text.set("fence".into());
+        harness.dispatch_event(key(Code::Enter, Key::Named(NamedKey::Enter), Modifiers::empty()));
+        harness.rebuild();
+        harness.paint();
+        assert!(state.open_box.error.get().is_some());
+        assert!(state.open_box.open.get());
+
+        harness.dispatch_event(key(Code::Escape, Key::Named(NamedKey::Escape), Modifiers::empty()));
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.open_box.open.get());
+        assert!(named(harness.root_id(), "open-box-panel").is_none());
     }
 
     /// Cmd-W as the window receives it.

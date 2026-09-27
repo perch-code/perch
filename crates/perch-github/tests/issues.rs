@@ -6,7 +6,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use perch_github::{Error, GitHub};
+use perch_github::{Error, GitHub, ItemKind};
 
 fn read_path(stream: &mut TcpStream) -> Option<String> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
@@ -156,6 +156,18 @@ async fn a_missing_issue_is_a_status_error() {
     let gh = GitHub::with_base_uri("token", &base).unwrap();
     assert!(matches!(
         gh.fetch_issue("a/b", 999).await.unwrap_err(),
+        Error::Status { status: 404, .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_number_is_told_a_pull_request_or_an_issue() {
+    let (base, _) = spawn(0);
+    let gh = GitHub::with_base_uri("token", &base).unwrap();
+    assert_eq!(gh.subject_kind("a/b", 42).await.unwrap(), ItemKind::Issue);
+    assert_eq!(gh.subject_kind("a/b", 7).await.unwrap(), ItemKind::PullRequest);
+    assert!(matches!(
+        gh.subject_kind("a/b", 999).await.unwrap_err(),
         Error::Status { status: 404, .. }
     ));
 }

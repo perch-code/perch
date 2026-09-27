@@ -87,6 +87,10 @@ pub struct AppState {
     /// Declared repository identities and display names, also offered by
     /// the sidebar's Repository filter when they have no cached items.
     pub repos: RwSignal<Vec<DeclaredRepo>>,
+    /// The hosts a pull request's or an issue's URL is read on.
+    pub github_hosts: RwSignal<Vec<String>>,
+    /// Open…'s box.
+    pub open_box: crate::ui::open_box::OpenBox,
     /// Every item, active and archived.
     pub items: RwSignal<Vec<Item>>,
     /// Perch's visible notification list, in GitHub response order after local
@@ -263,6 +267,8 @@ impl AppState {
         Self {
             avatars: RwSignal::new(HashMap::new()),
             repos: RwSignal::new(Vec::new()),
+            github_hosts: RwSignal::new(vec!["github.com".to_string()]),
+            open_box: crate::ui::open_box::OpenBox::new(),
             items: RwSignal::new(Vec::new()),
             notifications: RwSignal::new(Vec::new()),
             pending_items: RwSignal::new(None),
@@ -339,6 +345,7 @@ impl AppState {
         }
         copy(self.avatars, data.avatars);
         copy(self.repos, data.repos);
+        copy(self.github_hosts, data.github_hosts);
         copy(self.items, data.items);
         copy(self.notifications, data.notifications);
         copy(self.notifications_polled, data.notifications_polled);
@@ -990,7 +997,7 @@ impl AppState {
         token
     }
 
-    fn accepts_navigation(&self, navigation_id: u64) -> bool {
+    pub(crate) fn accepts_navigation(&self, navigation_id: u64) -> bool {
         self.expected_navigation_id.get_untracked() == Some(navigation_id)
     }
 
@@ -2196,6 +2203,14 @@ impl AppState {
                 }
             }
             Event::Repos(repos) => self.repos.set(repos),
+            Event::GithubHosts(hosts) => self.github_hosts.set(hosts),
+            Event::OpenReferenceResolved { navigation_id, kind } => {
+                crate::ui::open_box::resolved(*self, navigation_id, kind)
+            }
+            Event::OpenReferenceFailed {
+                navigation_id,
+                message,
+            } => crate::ui::open_box::failed(*self, navigation_id, message),
             Event::Meta { key, value } => match key.as_str() {
                 "item_filters" => match crate::items::ItemFilters::parse(&value) {
                     Ok(f) => self.item_filters.set(f),

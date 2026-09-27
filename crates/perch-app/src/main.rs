@@ -12,6 +12,7 @@ mod icons;
 mod inbox;
 mod items;
 mod items_cli;
+mod reference;
 mod repos;
 mod review;
 mod scrollers;
@@ -89,10 +90,7 @@ fn main() {
     // A development hook: open a pull request at launch rather than by
     // clicking, so the whole chain can be exercised from a terminal.
     //   PERCH_OPEN_PR=slatedb/slatedb#2092 perch
-    let open_at_launch = std::env::var("PERCH_OPEN_PR").ok().and_then(|spec| {
-        let (repo, number) = spec.split_once('#')?;
-        Some((repo.to_string(), number.parse::<u64>().ok()?))
-    });
+    let open_at_launch = std::env::var("PERCH_OPEN_PR").ok().and_then(|spec| reference::launch_hook(&spec));
     tracing::info!(hook = ?open_at_launch, "launch hook");
 
     Application::new()
@@ -155,10 +153,7 @@ fn main() {
 
                 // PERCH_OPEN_ISSUE=owner/repo#N opens an issue the same way.
                 if let Some((repo, number)) =
-                    std::env::var("PERCH_OPEN_ISSUE").ok().and_then(|spec| {
-                        let (repo, number) = spec.split_once('#')?;
-                        Some((repo.to_string(), number.parse::<u64>().ok()?))
-                    })
+                    std::env::var("PERCH_OPEN_ISSUE").ok().and_then(|spec| reference::launch_hook(&spec))
                 {
                     let navigation_id =
                         backend.open_subject(&repo, perch_github::ItemKind::Issue, number);
