@@ -2,8 +2,7 @@
 
 Perch is a native macOS coding and review tool. It combines agent-driven
 worktrees, code browsing and LSP support, GitHub reviews and issues, and local
-human/agent conversations in a compact Rust application built with Floem and
-Kenn Forge.
+human/agent conversations in a compact Rust application built with Floem.
 
 ## GitHub inbox
 
