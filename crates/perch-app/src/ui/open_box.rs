@@ -80,8 +80,9 @@ pub fn close(state: AppState, restore_focus: bool) {
     }
 }
 
-/// The repository a bare `#57` is in: the open item's, else the only
-/// GitHub repository configured.
+/// The repository a bare `#57` is in: the open item's, else the one
+/// Browse › By repository is showing, else the only GitHub repository
+/// configured.
 pub fn default_repo(state: AppState) -> Option<String> {
     let open = state.review.get_untracked().and_then(|review| {
         review
@@ -89,6 +90,12 @@ pub fn default_repo(state: AppState) -> Option<String> {
             .with_untracked(|item| item.as_ref().map(|item| item.repo_full_name.clone()))
     });
     if let Some(repo) = open.filter(|repo| !perch_github::is_local(repo)) {
+        return Some(repo);
+    }
+    if let Some(repo) = state
+        .item_filters
+        .with_untracked(|f| f.browse_repository().map(str::to_string))
+    {
         return Some(repo);
     }
     let github: Vec<String> = state.repos.with_untracked(|repos| {
@@ -328,12 +335,20 @@ mod tests {
             "the only GitHub repository"
         );
 
+        state.item_filters.update(|f| {
+            f.tab = crate::items::SidebarTab::Browse;
+            f.browse = crate::items::BrowseView::Repository;
+            f.browse_repository = Some("c/picked".into());
+        });
+        assert_eq!(target(state, "#5").unwrap().0, "c/picked", "the one Browse is showing");
+
         let review = crate::review::model::ReviewState::new();
         review.item.set(Some(std::sync::Arc::new(Item::new(
             "b/open",
             "2026-09-20T12:00:00Z".parse().unwrap(),
         ))));
         state.review.set(Some(review));
+
         assert_eq!(target(state, "57").unwrap().0, "b/open", "the open item's");
 
         assert_eq!(

@@ -38,7 +38,7 @@ mod review_store;
 /// worktree review was run with. Version 30 keeps the `HEAD` a review of
 /// uncommitted work was captured over. Schemas 13 through 23 migrate in place so
 /// local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 30;
+pub const SCHEMA_VERSION: u32 = 31;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -446,6 +446,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             // Empty: nothing that happened before is backfilled.
             28 => tx.execute_batch(ACTIVITY_SCHEMA)?,
             29 => review_store::add_snapshot_worktree_parent(&tx)?,
+            30 => fold_saved_into_pinned(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -459,6 +460,18 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
         from: version,
         to: SCHEMA_VERSION,
     })
+}
+
+/// Save folded into Pin. A saved row with no pin is pinned as of when it
+/// was last opened, so it sorts among the pins by that; one already
+/// pinned keeps its pin. The column stays, always 0: dropping it would
+/// mean rebuilding `items`, which other tables reference.
+fn fold_saved_into_pinned(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    tx.execute_batch(
+        "UPDATE items SET pinned_at = last_opened_at WHERE saved != 0 AND pinned_at IS NULL;
+         UPDATE items SET saved = 0 WHERE saved != 0;",
+    )?;
+    Ok(())
 }
 
 /// Schema 15 existed on main with the legacy run table, while rebased
@@ -3663,7 +3676,8 @@ impl Cache {
                 c.subject_kind, c.subject_number, c.subject_json,
                 c.branch, c.base_ref, c.head_sha, c.checkout_path, c.owned, c.on_disk,
                 item.from_item_id, item.name,
-                item.saved as i64,
+                // Saved folded into Pin; the column stays, always 0.
+                0_i64,
                 item.pinned_at.map(|t| t.to_string()),
                 item.archived_at.map(|t| t.to_string()),
                 item.created_at.to_string(),
@@ -3710,7 +3724,7 @@ impl Cache {
                 c.on_disk,
                 item.from_item_id,
                 item.name,
-                item.saved as i64,
+                0_i64,
                 item.pinned_at.map(|t| t.to_string()),
                 item.archived_at.map(|t| t.to_string()),
                 item.last_opened_at.to_string(),
@@ -4280,7 +4294,6 @@ fn read_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         checkout,
         from_item_id: r.get(11)?,
         name: r.get(12)?,
-        saved: r.get::<_, i64>(13)? != 0,
         pinned_at: stamp(r.get(14)?),
         archived_at: stamp(r.get(15)?),
         created_at: created.parse().unwrap_or(Timestamp::UNIX_EPOCH),
@@ -5899,7 +5912,6 @@ mod tests {
             source: None,
         });
         i.name = Some("the fence".into());
-        i.saved = true;
         i.pinned_at = Some(stamp_of("2026-09-18T11:00:00Z"));
         c.insert_item(&i).unwrap();
         assert_eq!(c.load_items().unwrap(), vec![i.clone()]);
@@ -5976,18 +5988,18 @@ mod tests {
     }
 
     #[test]
-    fn saved_and_deletion() {
+    fn pinned_and_deletion() {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         let mut cut = branch_item("perch/pr-7-2");
         cut.from_item_id = Some(pr_item(7).id);
         c.insert_item(&cut).unwrap();
-        // Saved is a column of the row, written the way every other edit is.
+        // A pin is a column of the row, written the way every other edit is.
         let mut marked = pr_item(7);
-        marked.saved = true;
+        marked.pinned_at = Some(stamp_of("2026-09-18T11:00:00Z"));
         c.update_item(&marked).unwrap();
         let i = c.load_item(&pr_item(7).id).unwrap().unwrap();
-        assert!(i.saved);
+        assert!(i.is_pinned());
 
         c.delete_item(&pr_item(7).id).unwrap();
         assert!(c.load_item(&pr_item(7).id).unwrap().is_none());
@@ -6144,6 +6156,43 @@ mod tests {
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
         assert_eq!(outcome, CacheOpen::Migrated { from: 28, to: SCHEMA_VERSION });
         assert!(cache.load_item_activity().unwrap().is_empty(), "nothing is backfilled");
+    }
+
+    /// Save folded into Pin: a saved row is pinned as of its last open,
+    /// one already pinned keeps its pin, and the column is left at 0.
+    #[test]
+    fn schema_30_pins_what_was_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let saved = pr_item(7);
+        let mut both = pr_item(8);
+        both.pinned_at = Some(stamp_of("2026-09-01T09:00:00Z"));
+        let plain = pr_item(9);
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            for item in [&saved, &both, &plain] {
+                cache.insert_item(item).unwrap();
+            }
+            cache
+                .conn
+                .execute(
+                    "UPDATE items SET saved = 1 WHERE id IN (?1, ?2)",
+                    params![saved.id, both.id],
+                )
+                .unwrap();
+            cache.set_meta("schema_version", "30").unwrap();
+        }
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 30, to: SCHEMA_VERSION });
+        let pinned = |id: &str| cache.load_item(id).unwrap().unwrap().pinned_at;
+        assert_eq!(pinned(&saved.id), Some(saved.last_opened_at));
+        assert_eq!(pinned(&both.id), both.pinned_at, "an existing pin stays");
+        assert_eq!(pinned(&plain.id), None);
+        let still_saved: i64 = cache
+            .conn
+            .query_row("SELECT COUNT(*) FROM items WHERE saved != 0", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(still_saved, 0);
     }
 
     #[test]

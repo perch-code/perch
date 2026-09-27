@@ -331,7 +331,6 @@ pub struct Item {
     pub from_item_id: Option<String>,
     /// A name of the reader's own, from Rename.
     pub name: Option<String>,
-    pub saved: bool,
     pub pinned_at: Option<Timestamp>,
     pub archived_at: Option<Timestamp>,
     pub created_at: Timestamp,
@@ -348,7 +347,6 @@ impl Item {
             checkout: None,
             from_item_id: None,
             name: None,
-            saved: false,
             pinned_at: None,
             archived_at: None,
             created_at: now,

@@ -260,9 +260,8 @@ fn byline(state: AppState, item: &Item) -> impl IntoView {
     )
 }
 
-/// The title's right end: the pin, the bookmark, the unread dot and the
-/// age, or, while the pointer is over the row, Save and the menu in
-/// their place.
+/// The title's right end: the pin, the unread dot and the age, or, while
+/// the pointer is over the row, Pin and the menu in their place.
 fn row_trailing(
     state: AppState,
     backend: Rc<Backend>,
@@ -271,7 +270,6 @@ fn row_trailing(
 ) -> impl IntoView {
     let id = item.id.clone();
     let hovering = move || state.hovered_item.with(|h| h.as_deref() == Some(id.as_str()));
-    let saved = item.saved;
     let pinned = item.is_pinned();
     let at = item.last_activity();
 
@@ -283,27 +281,23 @@ fn row_trailing(
                 } else {
                     Empty::new().into_any()
                 },
-                if saved {
-                    nav_row::mark(SidebarIcon::BookmarkFilled, theme::ACCENT).into_any()
-                } else {
-                    Empty::new().into_any()
-                },
                 nav_row::unread_dot(unread.clone()),
                 nav_row::age(state, at),
             ))
             .style(|s| s.items_center().flex_shrink(0.0_f32))
             .into_any();
         }
-        let save_id = item.id.clone();
-        let save_backend = backend.clone();
+        let pin_id = item.id.clone();
+        let pin_backend = backend.clone();
         let menu_item = item.clone();
         let menu_backend = backend.clone();
         Stack::horizontal((
             icon_button(
-                move || if saved { SidebarIcon::BookmarkFilled } else { SidebarIcon::Bookmark },
-                move || if saved { theme::ACCENT } else { theme::FG_SUBTLE },
-                move || save_backend.mark_saved(&save_id, !saved),
-            ),
+                move || SidebarIcon::Pin,
+                move || if pinned { theme::ACCENT } else { theme::FG_SUBTLE },
+                move || pin_backend.pin_item(&pin_id, !pinned),
+            )
+            .debug_name("row pin"),
             nav_row::more_button(move || item_menu(state, menu_backend.clone(), menu_item.clone())),
         ))
         .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(4.0))
@@ -446,13 +440,15 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
 
     {
         let (b, i) = (backend.clone(), id.clone());
-        // An unowned checkout that has gone from disk cannot come back.
-        let restorable = !archived
-            || item.checkout.as_ref().is_none_or(|c| c.owned || c.on_disk);
-        menu = menu.item(if archived { "Restore" } else { "Archive" }, move |m| {
+        // A worktree Perch made can be removed, and put back once it has
+        // gone. One the root scan found is the reader's own checkout, and
+        // comes and goes with it.
+        let on_disk = crate::items::in_worktrees(&item);
+        let owned = item.checkout.as_ref().is_some_and(|c| c.owned);
+        menu = menu.item(if on_disk { "Remove Worktree" } else { "Restore Worktree" }, move |m| {
             let (b, i) = (b.clone(), i.clone());
-            m.enabled(restorable).accelerator(key(KeyCode::KeyA)).action(move || {
-                if archived {
+            m.enabled(owned).accelerator(key(KeyCode::KeyA)).action(move || {
+                if !on_disk {
                     let navigation_id = b.restore_item(&i);
                     if let Some(review) = state.review.get_untracked() {
                         state.begin_item_review(

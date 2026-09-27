@@ -728,14 +728,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
             }
 
-            // `s` saves the sidebar row under the pointer, else the selected
-            // row.
+            // `p` pins the sidebar row under the pointer, else the selected
+            // row, or unpins it.
             if key.modifiers.is_empty()
                 && !state.search_focused.get()
                 && !review.composer_focused.get()
                 && !review.review_open.get()
                 && !review.find_focused.get()
-                && key.code == Code::KeyS
+                && key.code == Code::KeyP
             {
                 let target = state
                     .hovered_item
@@ -743,7 +743,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     .or_else(|| state.open_item.get())
                     .and_then(|id| state.item(&id));
                 if let Some(item) = target {
-                    key_backend.mark_saved(&item.id, !item.saved);
+                    key_backend.pin_item(&item.id, !item.is_pinned());
                     return EventPropagation::Stop;
                 }
             }

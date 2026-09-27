@@ -1,5 +1,5 @@
-//! The sidebar's flat list: filtering and sorting items. Pure functions
-//! over the declared repositories and the items the cache holds.
+//! The sidebar's tabs and their lists: filtering and sorting items. Pure
+//! functions over the declared repositories and the items the cache holds.
 //!
 //! Everything here runs in memory. Changing a setting never refetches, and
 //! the sidebar is paintable from the cache alone.
@@ -8,117 +8,6 @@ use std::collections::HashSet;
 
 use jiff::Timestamp;
 use perch_github::{DeclaredRepo, Item, ItemSubject};
-
-/// The Status row of the filter menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ItemStatus {
-    #[default]
-    Active,
-    Closed,
-    Archived,
-    All,
-}
-
-impl ItemStatus {
-    pub const ALL: [ItemStatus; 4] =
-        [ItemStatus::Active, ItemStatus::Closed, ItemStatus::Archived, ItemStatus::All];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ItemStatus::Active => "Active",
-            ItemStatus::Closed => "Closed",
-            ItemStatus::Archived => "Archived",
-            ItemStatus::All => "All",
-        }
-    }
-
-    /// Whether the status shows archived items. Pinned uses this rather
-    /// than `accepts`: pinned rows ignore the status filter otherwise,
-    /// but an archived item was put away on purpose and should not keep
-    /// nagging from the top of the list.
-    pub fn shows_archived(self) -> bool {
-        matches!(self, ItemStatus::Archived | ItemStatus::All)
-    }
-
-    fn accepts(self, item: &Item) -> bool {
-        match self {
-            ItemStatus::Active => item.is_active(),
-            ItemStatus::Closed => item.is_closed() && !item.is_archived(),
-            ItemStatus::Archived => item.is_archived(),
-            ItemStatus::All => true,
-        }
-    }
-
-    fn key(self) -> &'static str {
-        match self {
-            ItemStatus::Active => "active",
-            ItemStatus::Closed => "closed",
-            ItemStatus::Archived => "archived",
-            ItemStatus::All => "all",
-        }
-    }
-
-    fn from_key(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|v| v.key() == s)
-    }
-}
-
-impl std::fmt::Display for ItemStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// The Kind row: a multi-select, so three flags rather than an enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ItemKinds {
-    pub pull_requests: bool,
-    pub issues: bool,
-    pub branches: bool,
-}
-
-impl Default for ItemKinds {
-    fn default() -> Self {
-        Self { pull_requests: true, issues: true, branches: true }
-    }
-}
-
-impl ItemKinds {
-    pub fn accepts(self, item: &Item) -> bool {
-        match RowKind::of(item) {
-            RowKind::PullRequest => self.pull_requests,
-            RowKind::Issue => self.issues,
-            RowKind::Branch => self.branches,
-        }
-    }
-
-    fn key(self) -> String {
-        let mut parts = Vec::new();
-        if self.pull_requests {
-            parts.push("pr");
-        }
-        if self.issues {
-            parts.push("issue");
-        }
-        if self.branches {
-            parts.push("branch");
-        }
-        parts.join(",")
-    }
-
-    fn from_key(s: &str) -> Option<Self> {
-        let mut kinds = Self { pull_requests: false, issues: false, branches: false };
-        for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-            match part {
-                "pr" => kinds.pull_requests = true,
-                "issue" => kinds.issues = true,
-                "branch" => kinds.branches = true,
-                _ => return None,
-            }
-        }
-        Some(kinds)
-    }
-}
 
 /// What an item's shape makes it. Not stored anywhere: derived from which
 /// parts the item has, as the spec asks.
@@ -148,54 +37,34 @@ impl RowKind {
     }
 }
 
-/// The three scopes above the sidebar search box.
+/// The three tabs at the top of the sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ItemScope {
+pub enum SidebarTab {
+    /// GitHub's notifications.
     #[default]
-    All,
-    Notifications,
-    Authored,
+    Inbox,
+    /// Every worktree on disk.
+    Worktrees,
+    /// GitHub's fixed views, and what was opened lately.
+    Browse,
 }
 
-impl ItemScope {
-    pub const ALL: [ItemScope; 3] = [ItemScope::All, ItemScope::Notifications, ItemScope::Authored];
+impl SidebarTab {
+    pub const ALL: [SidebarTab; 3] = [SidebarTab::Inbox, SidebarTab::Worktrees, SidebarTab::Browse];
 
     pub fn label(self) -> &'static str {
         match self {
-            ItemScope::All => "All",
-            ItemScope::Notifications => "Notifications",
-            ItemScope::Authored => "Authored",
-        }
-    }
-
-    fn accepts(self, item: &Item, viewer: Option<&str>) -> bool {
-        match self {
-            ItemScope::All => true,
-            // Notifications are GitHub Thread rows, rendered separately
-            // from the durable Items this module filters.
-            ItemScope::Notifications => false,
-            // A branch with no pull request is always the reader's: Perch
-            // made it, or the root scan found it under one of their roots,
-            // which never makes a row for the base branch. One with someone
-            // else's pull request goes by that author once it attaches.
-            ItemScope::Authored => {
-                let author = match &item.subject {
-                    Some(ItemSubject::PullRequest(pr)) => &pr.author_login,
-                    Some(ItemSubject::Issue(issue)) => &issue.author_login,
-                    None => return item.checkout.is_some(),
-                };
-                viewer
-                    .filter(|login| !login.is_empty())
-                    .is_some_and(|viewer| author.eq_ignore_ascii_case(viewer))
-            }
+            SidebarTab::Inbox => "Inbox",
+            SidebarTab::Worktrees => "Worktrees",
+            SidebarTab::Browse => "Browse",
         }
     }
 
     fn key(self) -> &'static str {
         match self {
-            ItemScope::All => "all",
-            ItemScope::Notifications => "notifications",
-            ItemScope::Authored => "authored",
+            SidebarTab::Inbox => "inbox",
+            SidebarTab::Worktrees => "worktrees",
+            SidebarTab::Browse => "browse",
         }
     }
 
@@ -204,7 +73,65 @@ impl ItemScope {
     }
 }
 
-impl std::fmt::Display for ItemScope {
+impl std::fmt::Display for SidebarTab {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// What Browse lists: one of GitHub's fixed views, or Recent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BrowseView {
+    ReviewRequested,
+    Yours,
+    Assigned,
+    Mentioned,
+    /// The open pull requests and issues of the repository picked beside
+    /// it.
+    Repository,
+    /// What was opened lately and has no worktree. Local.
+    #[default]
+    Recent,
+}
+
+impl BrowseView {
+    pub const ALL: [BrowseView; 6] = [
+        BrowseView::ReviewRequested,
+        BrowseView::Yours,
+        BrowseView::Assigned,
+        BrowseView::Mentioned,
+        BrowseView::Repository,
+        BrowseView::Recent,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BrowseView::ReviewRequested => "Review requested",
+            BrowseView::Yours => "Yours",
+            BrowseView::Assigned => "Assigned",
+            BrowseView::Mentioned => "Mentioned",
+            BrowseView::Repository => "By repository",
+            BrowseView::Recent => "Recent",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            BrowseView::ReviewRequested => "review_requested",
+            BrowseView::Yours => "yours",
+            BrowseView::Assigned => "assigned",
+            BrowseView::Mentioned => "mentioned",
+            BrowseView::Repository => "repository",
+            BrowseView::Recent => "recent",
+        }
+    }
+
+    fn from_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.key() == s)
+    }
+}
+
+impl std::fmt::Display for BrowseView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
     }
@@ -293,33 +220,38 @@ impl std::fmt::Display for Direction {
     }
 }
 
-/// Everything the filter menu and the search box hold.
+/// Everything the tabs, their filter menus and the search box hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemFilters {
-    pub status: ItemStatus,
-    pub kinds: ItemKinds,
-    pub scope: ItemScope,
-    /// Repository identity; `None` includes every repository.
+    pub tab: SidebarTab,
+    /// Repository identity for Inbox and Worktrees; `None` includes every
+    /// repository.
     pub repository: Option<String>,
     pub sort: ItemSort,
     pub show_pr_status: bool,
-    /// Only saved items, whatever the status.
-    pub saved_only: bool,
     pub direction: Direction,
+    /// Inbox's Show: only the unread threads.
+    pub inbox_unread_only: bool,
+    pub browse: BrowseView,
+    /// The repository Browse › By repository lists, last picked.
+    pub browse_repository: Option<String>,
+    /// Browse's Open · Closed toggle.
+    pub browse_closed: bool,
     pub query: String,
 }
 
 impl Default for ItemFilters {
     fn default() -> Self {
         Self {
-            status: ItemStatus::Active,
-            kinds: ItemKinds::default(),
-            scope: ItemScope::All,
+            tab: SidebarTab::Inbox,
             repository: None,
             sort: ItemSort::LastActivity,
             show_pr_status: true,
-            saved_only: false,
             direction: Direction::Newest,
+            inbox_unread_only: false,
+            browse: BrowseView::Recent,
+            browse_repository: None,
+            browse_closed: false,
             query: String::new(),
         }
     }
@@ -331,20 +263,22 @@ impl ItemFilters {
     /// so local names can contain delimiters, percent signs, or spaces.
     pub fn to_meta(&self) -> String {
         format!(
-            "status={};kinds={};scope={};repository={};sort={};show_pr_status={};saved={};direction={}",
-            self.status.key(),
-            self.kinds.key(),
-            self.scope.key(),
+            "tab={};repository={};sort={};show_pr_status={};direction={};unread={};browse={};browse_repository={};closed={}",
+            self.tab.key(),
             self.repository.as_deref().map(encode_meta_value).unwrap_or_default(),
             self.sort.key(),
             u8::from(self.show_pr_status),
-            u8::from(self.saved_only),
             self.direction.key(),
+            u8::from(self.inbox_unread_only),
+            self.browse.key(),
+            self.browse_repository.as_deref().map(encode_meta_value).unwrap_or_default(),
+            u8::from(self.browse_closed),
         )
     }
 
-    /// Missing keys keep their defaults. Legacy grouping settings are
-    /// validated and ignored.
+    /// Missing keys keep their defaults. The old scopes map onto the tabs:
+    /// All is Worktrees, Notifications is Inbox, and Authored is Browse ›
+    /// Yours. Settings that have gone are validated and ignored.
     pub fn parse(s: &str) -> Result<Self, String> {
         let mut out = Self::default();
         for pair in s.split(';').map(str::trim).filter(|p| !p.is_empty()) {
@@ -352,23 +286,49 @@ impl ItemFilters {
                 pair.split_once('=').ok_or_else(|| format!("expected key=value, got {pair:?}"))?;
             let (key, value) = (key.trim(), value.trim());
             let bad = || format!("bad value for {key}: {value:?}");
+            let repository = |value: &str| -> Result<Option<String>, String> {
+                if value.is_empty() {
+                    Ok(None)
+                } else {
+                    decode_meta_value(value).map(Some).ok_or_else(bad)
+                }
+            };
             match key {
-                "status" => out.status = ItemStatus::from_key(value).ok_or_else(bad)?,
-                "kinds" => out.kinds = ItemKinds::from_key(value).ok_or_else(bad)?,
-                "scope" => out.scope = ItemScope::from_key(value).ok_or_else(bad)?,
-                "repository" => {
-                    out.repository =
-                        if value.is_empty() { None } else { Some(decode_meta_value(value).ok_or_else(bad)?) };
+                "tab" => out.tab = SidebarTab::from_key(value).ok_or_else(bad)?,
+                "scope" => match value {
+                    "all" => out.tab = SidebarTab::Worktrees,
+                    "notifications" => out.tab = SidebarTab::Inbox,
+                    "authored" => {
+                        out.tab = SidebarTab::Browse;
+                        out.browse = BrowseView::Yours;
+                    }
+                    _ => return Err(bad()),
+                },
+                "repository" => out.repository = repository(value)?,
+                "status" if matches!(value, "active" | "closed" | "archived" | "all") => {}
+                "status" => return Err(bad()),
+                "kinds" => {
+                    let known = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .all(|p| matches!(p, "pr" | "issue" | "branch"));
+                    if !known {
+                        return Err(bad());
+                    }
                 }
                 "group" if matches!(value, "repo" | "owner" | "date") => {}
                 "group" => return Err(bad()),
-                "show_empty" => {
+                "show_empty" | "saved" => {
                     parse_flag(value).ok_or_else(bad)?;
                 }
                 "sort" => out.sort = ItemSort::from_key(value).ok_or_else(bad)?,
                 "show_pr_status" => out.show_pr_status = parse_flag(value).ok_or_else(bad)?,
-                "saved" => out.saved_only = parse_flag(value).ok_or_else(bad)?,
                 "direction" => out.direction = Direction::from_key(value).ok_or_else(bad)?,
+                "unread" => out.inbox_unread_only = parse_flag(value).ok_or_else(bad)?,
+                "browse" => out.browse = BrowseView::from_key(value).ok_or_else(bad)?,
+                "browse_repository" => out.browse_repository = repository(value)?,
+                "closed" => out.browse_closed = parse_flag(value).ok_or_else(bad)?,
                 "query" => out.query = value.to_string(),
                 _ => return Err(format!("unknown key {key:?}")),
             }
@@ -376,37 +336,33 @@ impl ItemFilters {
         Ok(out)
     }
 
-    /// Whether the search matches the item. Case-insensitive substring over
-    /// the title as shown, the title before any Rename, the number, the
-    /// branch, and the repository's `owner/repo`, so a renamed pull request
-    /// is found by either name and `#57` finds number 57.
-    fn matches_query(&self, item: &Item) -> bool {
-        let needle = self.query.trim().to_lowercase();
-        if needle.is_empty() {
-            return true;
-        }
-        let number = item.subject.as_ref().map(|s| format!("#{}", s.number())).unwrap_or_default();
-        [
-            item.title(),
-            item.given_title(),
-            number.as_str(),
-            item.branch().unwrap_or(""),
-            item.repo_full_name.as_str(),
-        ]
-        .iter()
-        .any(|hay| !hay.is_empty() && hay.to_lowercase().contains(&needle))
+    /// The repository Browse is listing, while it shows By repository.
+    pub fn browse_repository(&self) -> Option<&str> {
+        (self.tab == SidebarTab::Browse && self.browse == BrowseView::Repository)
+            .then_some(self.browse_repository.as_deref())
+            .flatten()
     }
+}
 
-    /// Scope, repository, and saved state narrow pinned and unpinned items
-    /// alike.
-    fn narrows_to(&self, item: &Item, viewer: Option<&str>) -> bool {
-        self.scope.accepts(item, viewer)
-            && self
-                .repository
-                .as_ref()
-                .is_none_or(|repo| repo.to_lowercase() == item.repo_full_name.to_lowercase())
-            && (!self.saved_only || item.saved)
+/// Whether the search matches the item. Case-insensitive substring over
+/// the title as shown, the title before any Rename, the number, the
+/// branch, and the repository's `owner/repo`, so a renamed pull request
+/// is found by either name and `#57` finds number 57.
+fn matches_query(item: &Item, query: &str) -> bool {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return true;
     }
+    let number = item.subject.as_ref().map(|s| format!("#{}", s.number())).unwrap_or_default();
+    [
+        item.title(),
+        item.given_title(),
+        number.as_str(),
+        item.branch().unwrap_or(""),
+        item.repo_full_name.as_str(),
+    ]
+    .iter()
+    .any(|hay| !hay.is_empty() && hay.to_lowercase().contains(&needle))
 }
 
 fn encode_meta_value(value: &str) -> String {
@@ -444,29 +400,60 @@ fn parse_flag(s: &str) -> Option<bool> {
     }
 }
 
-/// Build one list, most recently pinned first and then globally sorted.
-/// Pins retain their existing status/kind exceptions: only archived pins
-/// require a matching status. All other filters apply to every row.
-pub fn visible_items(items: &[Item], filters: &ItemFilters, viewer: Option<&str>) -> Vec<Item> {
-    let searched: Vec<&Item> =
-        items.iter().filter(|item| filters.matches_query(item) && filters.narrows_to(item, viewer)).collect();
-    let mut pinned: Vec<&Item> = searched
+/// Whether the item is a worktree on disk, and so a row of Worktrees.
+/// Everything else is Recent's.
+pub fn in_worktrees(item: &Item) -> bool {
+    !item.is_archived() && item.checkout.as_ref().is_some_and(|c| c.on_disk)
+}
+
+/// Worktrees: every worktree on disk under the repository filter and the
+/// search, most recently pinned first and then by the sort.
+pub fn worktree_items(items: &[Item], filters: &ItemFilters) -> Vec<Item> {
+    let rows: Vec<&Item> = items
         .iter()
-        .copied()
-        .filter(|item| item.is_pinned() && (!item.is_archived() || filters.status.shows_archived()))
-        .collect();
-    pinned.sort_by(|a, b| b.pinned_at.cmp(&a.pinned_at).then_with(|| a.id.cmp(&b.id)));
-    let pinned_ids: HashSet<&str> = pinned.iter().map(|item| item.id.as_str()).collect();
-    let mut rows: Vec<&Item> = searched
-        .into_iter()
         .filter(|item| {
-            !pinned_ids.contains(item.id.as_str())
-                && filters.status.accepts(item)
-                && filters.kinds.accepts(item)
+            in_worktrees(item)
+                && matches_query(item, &filters.query)
+                && filters
+                    .repository
+                    .as_ref()
+                    .is_none_or(|repo| repo.eq_ignore_ascii_case(&item.repo_full_name))
         })
         .collect();
-    sort_items(&mut rows, filters.sort, filters.direction);
-    pinned.into_iter().chain(rows).cloned().collect()
+    let (mut pinned, mut rest): (Vec<&Item>, Vec<&Item>) = rows.into_iter().partition(|item| item.is_pinned());
+    sort_pins(&mut pinned);
+    sort_items(&mut rest, filters.sort, filters.direction);
+    pinned.into_iter().chain(rest).cloned().collect()
+}
+
+/// How many unpinned rows Recent shows.
+pub const RECENT_LIMIT: usize = 50;
+
+/// Recent: what has no worktree on disk, pinned first, then the
+/// `RECENT_LIMIT` most recently opened. The search narrows what is shown;
+/// an older row is found by opening it again, which brings it back.
+pub fn recent_items(items: &[Item], query: &str) -> Vec<Item> {
+    let (mut pinned, mut rest): (Vec<&Item>, Vec<&Item>) =
+        items.iter().filter(|item| !in_worktrees(item)).partition(|item| item.is_pinned());
+    sort_pins(&mut pinned);
+    rest.sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at).then_with(|| a.id.cmp(&b.id)));
+    rest.truncate(RECENT_LIMIT);
+    pinned
+        .into_iter()
+        .chain(rest)
+        .filter(|item| matches_query(item, query))
+        .cloned()
+        .collect()
+}
+
+/// The local items the tab in `filters` lists: Worktrees, Browse ›
+/// Recent, or none, for Inbox and Browse's GitHub views.
+pub fn local_items(items: &[Item], filters: &ItemFilters) -> Vec<Item> {
+    match (filters.tab, filters.browse) {
+        (SidebarTab::Worktrees, _) => worktree_items(items, filters),
+        (SidebarTab::Browse, BrowseView::Recent) => recent_items(items, &filters.query),
+        _ => Vec::new(),
+    }
 }
 
 /// Whether a Work run may be sent on an item: a branch of the reader's
@@ -502,6 +489,11 @@ pub fn repository_options(declared: &[DeclaredRepo], items: &[Item]) -> Vec<Stri
         .collect();
     repositories.sort_by_key(|identity| identity.to_lowercase());
     repositories
+}
+
+/// Most recently pinned first, ties by id.
+fn sort_pins(items: &mut [&Item]) {
+    items.sort_by(|a, b| b.pinned_at.cmp(&a.pinned_at).then_with(|| a.id.cmp(&b.id)));
 }
 
 /// Newest first, ties by id so the order never jitters between refreshes,
@@ -674,53 +666,91 @@ mod tests {
     }
 
     #[test]
-    fn rows_are_sorted_globally_across_repositories() {
+    fn worktrees_are_the_checkouts_on_disk_and_recent_is_the_rest() {
         let (_, items) = fixture();
-        let rows = visible_items(&items, &ItemFilters::default(), None);
-        assert_eq!(ids(&rows), ["pr-wanted", "issue", "branch", "slatedb-pr"]);
-
-        let filters = ItemFilters { sort: ItemSort::Created, ..Default::default() };
+        assert_eq!(ids(&worktree_items(&items, &ItemFilters::default())), ["pr-wanted", "branch"]);
+        // By when each was last opened, which the fixture leaves at when
+        // it was made.
         assert_eq!(
-            ids(&visible_items(&items, &filters, None)),
-            ["branch", "slatedb-pr", "issue", "pr-wanted"]
+            ids(&recent_items(&items, "")),
+            ["slatedb-pr", "issue", "pr-closed", "pr-merged", "branch-archived"]
         );
     }
 
     #[test]
-    fn status_filters_separate_closed_and_archived_from_active() {
-        let (_, items) = fixture();
-        let under = |status| visible_items(&items, &ItemFilters { status, ..Default::default() }, None);
-        assert_eq!(ids(&under(ItemStatus::Closed)), ["pr-closed", "pr-merged"]);
-        assert_eq!(ids(&under(ItemStatus::Archived)), ["branch-archived"]);
-        assert_eq!(under(ItemStatus::All).len(), items.len());
-    }
-
-    #[test]
-    fn kinds_come_from_the_shape_of_the_item() {
-        let (_, items) = fixture();
-        let filters = ItemFilters {
-            status: ItemStatus::All,
-            kinds: ItemKinds { pull_requests: false, issues: false, branches: true },
-            ..Default::default()
-        };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["branch", "branch-archived"]);
-        let filters = ItemFilters {
-            status: ItemStatus::All,
-            kinds: ItemKinds { pull_requests: false, issues: true, branches: false },
-            ..Default::default()
-        };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["issue"]);
-    }
-
-    #[test]
-    fn repository_filter_uses_the_item_identity_case_insensitively() {
+    fn a_worktree_that_goes_moves_to_recent() {
         let (_, mut items) = fixture();
+        items[5].checkout.as_mut().unwrap().on_disk = false;
+        assert_eq!(ids(&worktree_items(&items, &ItemFilters::default())), ["pr-wanted"]);
+        assert!(ids(&recent_items(&items, "")).contains(&"branch"));
+
+        let (_, mut items) = fixture();
+        items[0].archived_at = Some(at("2026-09-18T10:00:00Z"));
+        assert_eq!(ids(&worktree_items(&items, &ItemFilters::default())), ["branch"]);
+        assert!(ids(&recent_items(&items, "")).contains(&"pr-wanted"));
+    }
+
+    #[test]
+    fn worktrees_sort_and_pin_and_filter_by_repository() {
+        let (_, mut items) = fixture();
+        let filters = ItemFilters { sort: ItemSort::Created, ..Default::default() };
+        assert_eq!(ids(&worktree_items(&items, &filters)), ["branch", "pr-wanted"]);
+        let filters = ItemFilters { direction: Direction::Oldest, ..filters };
+        assert_eq!(ids(&worktree_items(&items, &filters)), ["pr-wanted", "branch"]);
+
+        items[0].pinned_at = Some(at("2026-09-18T10:00:00Z"));
+        let filters = ItemFilters { sort: ItemSort::Created, ..Default::default() };
+        assert_eq!(ids(&worktree_items(&items, &filters)), ["pr-wanted", "branch"], "the pin leads");
+
         items[0].repo_full_name = "chris/perch".into();
         let filters = ItemFilters { repository: Some("CHRIS/Perch".into()), ..Default::default() };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["pr-wanted"]);
-        assert_eq!(full_reference(&items[0]), "chris/perch #57 · fence");
+        assert_eq!(ids(&worktree_items(&items, &filters)), ["pr-wanted"]);
         let filters = ItemFilters { repository: Some("missing/repo".into()), ..Default::default() };
-        assert!(visible_items(&items, &filters, None).is_empty());
+        assert!(worktree_items(&items, &filters).is_empty());
+    }
+
+    #[test]
+    fn recent_keeps_pins_on_top_and_the_fifty_last_opened_after_them() {
+        let base: Timestamp = at("2026-09-01T00:00:00Z");
+        let mut items: Vec<Item> = (0..60)
+            .map(|n| {
+                let mut i = item(&format!("r{n:02}"), "a/b", "2026-09-01T00:00:00Z");
+                i.subject = Some(issue(n + 1, "t", "open", "2026-09-01T00:00:00Z"));
+                i.last_opened_at = base + jiff::SignedDuration::from_hours(n as i64);
+                i
+            })
+            .collect();
+        // The oldest two, pinned: they stay, however old.
+        items[0].pinned_at = Some(at("2026-09-20T00:00:00Z"));
+        items[1].pinned_at = Some(at("2026-09-21T00:00:00Z"));
+        let rows = recent_items(&items, "");
+        assert_eq!(rows.len(), 2 + RECENT_LIMIT);
+        assert_eq!(ids(&rows)[..4], ["r01", "r00", "r59", "r58"]);
+        assert!(!ids(&rows).contains(&"r09"), "fifty after the pins, the rest not shown");
+        assert!(ids(&rows).contains(&"r10"));
+
+        // Opening an old one brings it back to the top.
+        items[5].last_opened_at = at("2026-09-25T00:00:00Z");
+        assert_eq!(ids(&recent_items(&items, ""))[2], "r05");
+    }
+
+    #[test]
+    fn search_hits_the_number_titles_branch_and_repository() {
+        let (_, mut items) = fixture();
+        items[0].name = Some("the fence one".into());
+        let everything = |query: &str| {
+            let mut rows = worktree_items(&items, &ItemFilters { query: query.into(), ..Default::default() });
+            rows.extend(recent_items(&items, query));
+            rows
+        };
+        assert_eq!(ids(&everything("#57")), ["pr-wanted"]);
+        assert_eq!(ids(&everything("57")), ["pr-wanted"]);
+        assert_eq!(ids(&everything("fence the manifest")), ["pr-wanted"]);
+        assert_eq!(ids(&everything("fence one")), ["pr-wanted"]);
+        assert_eq!(ids(&everything("ISSUE-42")), ["branch"]);
+        assert_eq!(ids(&everything("slatedb")), ["slatedb-pr"]);
+        assert_eq!(everything("criccomini/").len(), 6);
+        assert!(everything("nothing like this").is_empty());
     }
 
     #[test]
@@ -780,97 +810,6 @@ mod tests {
     }
 
     #[test]
-    fn notification_scope_contributes_no_durable_items() {
-        let (_, mut items) = fixture();
-        items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
-        let filters = ItemFilters { scope: ItemScope::Notifications, ..Default::default() };
-        assert!(visible_items(&items, &filters, None).is_empty());
-    }
-
-    #[test]
-    fn authored_uses_pr_and_issue_authors_and_takes_every_branch() {
-        let (_, mut items) = fixture();
-        if let Some(ItemSubject::Issue(issue)) = &mut items[3].subject {
-            issue.author_login = "A".into();
-        }
-        if let Some(ItemSubject::PullRequest(pr)) = &mut items[6].subject {
-            pr.author_login = "someone-else".into();
-        }
-        items[6].pinned_at = Some(at("2026-09-18T10:00:00Z"));
-        let filters = ItemFilters { scope: ItemScope::Authored, ..Default::default() };
-        assert_eq!(ids(&visible_items(&items, &filters, Some("a"))), ["pr-wanted", "issue", "branch"]);
-        assert_eq!(ids(&visible_items(&items, &filters, Some("A"))), ["pr-wanted", "issue", "branch"]);
-        // A branch is the reader's whether or not GitHub has said who
-        // they are.
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["branch"]);
-        assert_eq!(ids(&visible_items(&items, &filters, Some(""))), ["branch"]);
-    }
-
-    #[test]
-    fn a_branch_that_gains_someone_elses_pull_request_leaves_authored() {
-        let (_, mut items) = fixture();
-        let filters = ItemFilters { scope: ItemScope::Authored, ..Default::default() };
-        assert!(ids(&visible_items(&items, &filters, Some("a"))).contains(&"branch"));
-        let mut pr = items[0].subject.clone();
-        if let Some(ItemSubject::PullRequest(pr)) = &mut pr {
-            pr.author_login = "someone-else".into();
-        }
-        items[5].subject = pr;
-        assert!(!ids(&visible_items(&items, &filters, Some("a"))).contains(&"branch"));
-    }
-
-    #[test]
-    fn pins_lead_once_in_pin_order_and_ignore_status_and_kind_except_archived() {
-        let (_, mut items) = fixture();
-        items[1].pinned_at = Some(at("2026-09-17T10:00:00Z"));
-        items[4].pinned_at = Some(at("2026-09-18T11:00:00Z"));
-        items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
-        let filters = ItemFilters {
-            kinds: ItemKinds { pull_requests: false, issues: true, branches: false },
-            ..Default::default()
-        };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["branch", "pr-closed", "issue"]);
-        let filters = ItemFilters { status: ItemStatus::Archived, ..filters };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["branch-archived", "branch", "pr-closed"]);
-    }
-
-    #[test]
-    fn pins_respect_repository_saved_and_search_filters() {
-        let (_, mut items) = fixture();
-        for i in [0, 3, 5, 6] {
-            items[i].pinned_at = Some(at("2026-09-18T10:00:00Z"));
-        }
-        items[0].saved = true;
-        items[6].saved = true;
-        let filters = ItemFilters { repository: Some("slatedb/slatedb".into()), ..Default::default() };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["slatedb-pr"]);
-        let filters = ItemFilters { saved_only: true, ..Default::default() };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["pr-wanted", "slatedb-pr"]);
-        let filters = ItemFilters { query: "checkpoint".into(), ..Default::default() };
-        assert_eq!(ids(&visible_items(&items, &filters, None)), ["slatedb-pr"]);
-    }
-
-    #[test]
-    fn sort_and_direction_change_unpinned_order_but_leave_pin_order_alone() {
-        let (_, mut items) = fixture();
-        items[3].last_opened_at = at("2026-09-18T11:00:00Z");
-        items[5].last_opened_at = at("2026-09-18T10:00:00Z");
-        items[0].last_opened_at = at("2026-09-18T09:00:00Z");
-        let filters = ItemFilters { sort: ItemSort::LastOpened, ..Default::default() };
-        assert_eq!(
-            ids(&visible_items(&items, &filters, None)),
-            ["issue", "branch", "pr-wanted", "slatedb-pr"]
-        );
-        items[3].pinned_at = Some(at("2026-09-17T10:00:00Z"));
-        items[5].pinned_at = Some(at("2026-09-18T10:00:00Z"));
-        let newest = visible_items(&items, &ItemFilters::default(), None);
-        let filters = ItemFilters { direction: Direction::Oldest, ..Default::default() };
-        let oldest = visible_items(&items, &filters, None);
-        assert_eq!(ids(&newest), ["branch", "issue", "pr-wanted", "slatedb-pr"]);
-        assert_eq!(ids(&oldest), ["branch", "issue", "slatedb-pr", "pr-wanted"]);
-    }
-
-    #[test]
     fn the_second_line_always_names_the_repository_and_pr_head_branch() {
         let (_, items) = fixture();
         assert_eq!(full_reference(&items[0]), "criccomini/perch #57 · fence");
@@ -880,83 +819,62 @@ mod tests {
     }
 
     #[test]
-    fn search_hits_the_number_titles_branch_and_repository() {
-        let (_, mut items) = fixture();
-        items[0].name = Some("the fence one".into());
-        let hits = |query: &str| {
-            visible_items(
-                &items,
-                &ItemFilters { status: ItemStatus::All, query: query.into(), ..Default::default() },
-                None,
-            )
-        };
-        assert_eq!(ids(&hits("#57")), ["pr-wanted"]);
-        assert_eq!(ids(&hits("57")), ["pr-wanted"]);
-        assert_eq!(ids(&hits("fence the manifest")), ["pr-wanted"]);
-        assert_eq!(ids(&hits("fence one")), ["pr-wanted"]);
-        assert_eq!(ids(&hits("ISSUE-42")), ["branch"]);
-        assert_eq!(ids(&hits("slatedb")), ["slatedb-pr"]);
-        assert_eq!(hits("criccomini/").len(), 6);
-        assert!(hits("nothing like this").is_empty());
-    }
-
-    #[test]
     fn filters_round_trip_with_all_preferences_and_safe_repository_encoding() {
         let filters = ItemFilters {
-            status: ItemStatus::Closed,
-            kinds: ItemKinds { pull_requests: true, issues: false, branches: true },
-            scope: ItemScope::Authored,
+            tab: SidebarTab::Browse,
             repository: Some("local/notes;scope=all% ☃ ".into()),
             sort: ItemSort::LastOpened,
             show_pr_status: false,
-            saved_only: true,
             direction: Direction::Oldest,
+            inbox_unread_only: true,
+            browse: BrowseView::Repository,
+            browse_repository: Some("slatedb/slatedb".into()),
+            browse_closed: true,
             query: String::new(),
         };
         let meta = filters.to_meta();
         assert!(meta.contains("repository=local/notes%3Bscope%3Dall%25%20%E2%98%83%20;"));
         assert_eq!(ItemFilters::parse(&meta).unwrap(), filters);
+        assert_eq!(filters.browse_repository(), Some("slatedb/slatedb"));
         assert_eq!(ItemFilters::parse("").unwrap(), ItemFilters::default());
         assert_eq!(ItemFilters::parse(&ItemFilters::default().to_meta()).unwrap(), ItemFilters::default());
+        assert_eq!(ItemFilters::default().tab, SidebarTab::Inbox, "Inbox is where it opens");
         assert_eq!(
             ItemFilters::parse("repository=owner/repo").unwrap().repository.as_deref(),
             Some("owner/repo")
         );
         assert_eq!(ItemFilters::parse("repository=").unwrap().repository, None);
-        assert!(!meta.contains(";group="));
-        assert!(!meta.contains(";show_empty="));
-        assert!(!meta.contains(";attention="));
+        for gone in [";group=", ";show_empty=", ";status=", ";kinds=", ";saved=", ";scope="] {
+            assert!(!meta.contains(gone), "{gone}");
+        }
     }
 
     #[test]
-    fn legacy_grouping_preferences_are_ignored_without_losing_other_filters() {
-        let old = "status=closed;kinds=pr;group=owner;sort=created;show_empty=1;show_pr_status=0;saved=1;direction=oldest";
+    fn the_old_scopes_map_onto_the_tabs_and_gone_settings_are_ignored() {
+        let old = "status=closed;kinds=pr;scope=all;group=owner;sort=created;show_empty=1;show_pr_status=0;saved=1;direction=oldest";
         let filters = ItemFilters::parse(old).unwrap();
-        assert_eq!(filters.status, ItemStatus::Closed);
-        assert_eq!(filters.kinds, ItemKinds { pull_requests: true, issues: false, branches: false });
-        assert_eq!(filters.scope, ItemScope::All);
-        assert_eq!(filters.repository, None);
+        assert_eq!(filters.tab, SidebarTab::Worktrees);
         assert_eq!(filters.sort, ItemSort::Created);
         assert!(!filters.show_pr_status);
-        assert!(filters.saved_only);
         assert_eq!(filters.direction, Direction::Oldest);
+
+        assert_eq!(ItemFilters::parse("scope=notifications").unwrap().tab, SidebarTab::Inbox);
+        let authored = ItemFilters::parse("scope=authored").unwrap();
+        assert_eq!((authored.tab, authored.browse), (SidebarTab::Browse, BrowseView::Yours));
         for group in ["repo", "owner", "date"] {
             assert_eq!(
                 ItemFilters::parse(&format!("group={group};show_empty=0")).unwrap(),
                 ItemFilters::default()
             );
         }
+        assert_eq!(ItemFilters::parse("kinds=").unwrap(), ItemFilters::default());
     }
 
     #[test]
-    fn search_is_transient_and_empty_kinds_means_none() {
+    fn search_is_transient() {
         let filters = ItemFilters { query: "fence".into(), ..Default::default() };
         assert!(!filters.to_meta().contains("fence"));
         assert_eq!(ItemFilters::parse("query=fence").unwrap().query, "fence");
-        assert_eq!(
-            ItemFilters::parse("kinds=").unwrap().kinds,
-            ItemKinds { pull_requests: false, issues: false, branches: false }
-        );
     }
 
     #[test]
@@ -968,13 +886,17 @@ mod tests {
             ("group=bogus", "group"),
             ("show_empty=maybe", "show_empty"),
             ("saved=yes", "saved"),
+            ("unread=yes", "unread"),
+            ("closed=maybe", "closed"),
             ("attention=maybe", "attention"),
             ("reason=bogus", "reason"),
             ("direction=sideways", "direction"),
             ("scope=reviewing", "scope"),
+            ("tab=elsewhere", "tab"),
+            ("browse=everything", "browse"),
             ("repository=local/%", "repository"),
             ("repository=%ZZ", "repository"),
-            ("repository=%FF", "repository"),
+            ("browse_repository=%FF", "browse_repository"),
             ("nonsense", "key=value"),
         ] {
             assert!(ItemFilters::parse(setting).unwrap_err().contains(key), "{setting}");
@@ -983,12 +905,12 @@ mod tests {
 
     #[test]
     fn every_option_has_a_label_and_a_key_that_reads_back() {
-        for value in ItemStatus::ALL {
-            assert_eq!(ItemStatus::from_key(value.key()), Some(value));
+        for value in SidebarTab::ALL {
+            assert_eq!(SidebarTab::from_key(value.key()), Some(value));
             assert_eq!(value.to_string(), value.label());
         }
-        for value in ItemScope::ALL {
-            assert_eq!(ItemScope::from_key(value.key()), Some(value));
+        for value in BrowseView::ALL {
+            assert_eq!(BrowseView::from_key(value.key()), Some(value));
             assert_eq!(value.to_string(), value.label());
         }
         for value in ItemSort::ALL {

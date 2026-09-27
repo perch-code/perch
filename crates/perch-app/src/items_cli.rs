@@ -1,11 +1,12 @@
-//! `perch --items ["status=closed;direction=oldest;query=fence"]`
+//! `perch --items ["tab=browse;browse=recent;query=fence"]`
 //!
-//! Prints the sidebar's flat list from the cache the app uses, with pinned
-//! items first. The keys are the filter menu's, in `ItemFilters::to_meta`'s
-//! form: `scope` (`all`, `notifications` or `authored`), `repository`,
-//! `status`, `kinds`, `sort`, `show_pr_status`, `saved` and `direction`,
-//! plus `query` for the search box. It is how
-//! `items::visible_items` is checked against real data without a window.
+//! Prints a sidebar tab's local list from the cache the app uses, with
+//! pinned items first: Worktrees unless `tab` says otherwise, or Browse ›
+//! Recent. The keys are the filter menu's, in `ItemFilters::to_meta`'s
+//! form: `tab` (`worktrees` or `browse`), `browse` (`recent`),
+//! `repository`, `sort`, `show_pr_status` and `direction`, plus `query`
+//! for the search box. It is how `items::local_items` is checked against
+//! real data without a window.
 
 use perch_github::{Cache, CheckStatus, Item, ItemSubject};
 
@@ -13,15 +14,14 @@ use crate::items::{self, ItemFilters, RowKind};
 
 pub fn run(args: &[String]) {
     let filters = match args {
-        [] => ItemFilters::default(),
-        [spec] => match ItemFilters::parse(spec) {
+        [] => worktrees(""),
+        [spec] => match ItemFilters::parse(&worktrees_unless_said(spec)) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("bad filters: {e}");
                 eprintln!(
-                    "keys: scope (all, notifications, authored), repository, \
-                     status (active, closed, archived, all), kinds, sort, show_pr_status, saved, \
-                     direction (newest, oldest), query"
+                    "keys: tab (worktrees, browse), browse (recent), repository, sort, \
+                     show_pr_status, direction (newest, oldest), query"
                 );
                 std::process::exit(2);
             }
@@ -37,6 +37,25 @@ pub fn run(args: &[String]) {
     }
 }
 
+/// The filters, on Worktrees.
+fn worktrees(spec: &str) -> ItemFilters {
+    ItemFilters::parse(&worktrees_unless_said(spec)).unwrap_or_default()
+}
+
+/// `spec` with `tab=worktrees` in front when it names no tab: the
+/// window opens on Inbox, which lists no items.
+fn worktrees_unless_said(spec: &str) -> String {
+    let said = spec
+        .split(';')
+        .filter_map(|pair| pair.split_once('='))
+        .any(|(key, _)| matches!(key.trim(), "tab" | "scope"));
+    if said {
+        spec.to_string()
+    } else {
+        format!("tab=worktrees;{spec}")
+    }
+}
+
 fn print(filters: &ItemFilters) -> Result<(), String> {
     let path = perch_github::config::db_path().ok_or("no data dir")?;
     if !path.exists() {
@@ -44,8 +63,7 @@ fn print(filters: &ItemFilters) -> Result<(), String> {
     }
     let (cache, _) = Cache::open_with_outcome(&path, None).map_err(|e| e.to_string())?;
     let items = cache.load_items().map_err(|e| e.to_string())?;
-    let viewer = cache.meta("viewer.login").map_err(|e| e.to_string())?;
-    let visible = items::visible_items(&items, filters, viewer.as_deref());
+    let visible = items::local_items(&items, filters);
 
     // What the list below was made under, on stderr so stdout stays the
     // sidebar alone.
@@ -180,84 +198,39 @@ mod tests {
     }
 
     fn text(filters: &ItemFilters) -> String {
-        let visible = items::visible_items(&fixture(), filters, Some("a"));
+        let visible = items::local_items(&fixture(), filters);
         let mut out = String::new();
         render(&mut out, &visible, filters);
         out
     }
 
     #[test]
-    fn the_sidebar_prints_flat_rows_with_pins_first() {
-        let got = text(&ItemFilters::default());
-        let want = [
-            "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned",
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested",
-            "",
-        ]
-        .join("\n");
-        assert_eq!(got, want);
+    fn worktrees_print_the_checkouts_and_recent_the_rest() {
+        assert_eq!(
+            text(&worktrees("")),
+            "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n"
+        );
+        assert_eq!(
+            text(&worktrees("tab=browse;browse=recent")),
+            "  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested\n"
+        );
+        assert_eq!(text(&worktrees("tab=inbox")), "", "the inbox lists no items");
     }
 
     #[test]
     fn chips_go_when_pr_status_is_off_and_the_row_still_names_its_repository() {
-        let f = ItemFilters {
-            show_pr_status: false,
-            query: "fence".into(),
-            ..Default::default()
-        };
-        let got = text(&f);
-        assert_eq!(
-            got,
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]\n"
-        );
+        let got = text(&worktrees("tab=browse;show_pr_status=0;query=fence"));
+        assert_eq!(got, "  P  Fence the manifest  [criccomini/perch #57 · fence]\n");
     }
 
     #[test]
     fn repository_filter_limits_the_printed_list() {
-        let got = text(&ItemFilters::parse("repository=criccomini/perch").unwrap());
-        assert_eq!(got, text(&ItemFilters::default()));
-        let got = text(&ItemFilters::parse("repository=slatedb/slatedb").unwrap());
-        assert_eq!(got, "");
+        assert_eq!(text(&worktrees("repository=criccomini/perch")), text(&worktrees("")));
+        assert_eq!(text(&worktrees("repository=slatedb/slatedb")), "");
     }
 
     #[test]
-    fn searching_for_a_pin_prints_only_its_row() {
-        let f = ItemFilters {
-            query: "issue-42".into(),
-            ..Default::default()
-        };
-        let got = text(&f);
-        assert_eq!(
-            got,
-            "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n"
-        );
-    }
-
-    #[test]
-    fn the_new_keys_narrow_the_printed_list_the_way_the_window_does() {
-        // Notification threads are rendered by their own view; durable
-        // items contribute no rows to this scope.
-        let got = text(&ItemFilters::parse("scope=notifications;direction=oldest").unwrap());
-        assert_eq!(got, "");
-
-        // Nothing is saved.
-        let got = text(&ItemFilters::parse("saved=1").unwrap());
-        assert_eq!(got, "");
-    }
-
-    #[test]
-    fn authored_scope_uses_the_viewer_and_takes_local_branches() {
-        let filters = ItemFilters::parse("scope=authored").unwrap();
-        assert_eq!(
-            text(&filters),
-            "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested\n"
-        );
-
-        // With no viewer, only the branches, which are the reader's
-        // whoever they are.
-        let visible = items::visible_items(&fixture(), &filters, None);
-        let mut out = String::new();
-        render(&mut out, &visible, &filters);
-        assert_eq!(out, "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n");
+    fn a_search_that_misses_prints_nothing() {
+        assert_eq!(text(&worktrees("query=nothing")), "");
     }
 }

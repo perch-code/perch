@@ -186,8 +186,8 @@ pub(crate) fn copied() -> Vec<String> {
 
 /// The menu every worktree offers: where it is, and how to get there.
 ///
-/// Archive is appended when the caller passes a way to do it; the review
-/// header offers it, the archived rows of the list do not.
+/// Remove Worktree is appended when the caller passes a way to do it: the
+/// review header offers it for a worktree Perch made.
 pub fn worktree_menu(
     path: std::path::PathBuf,
     on_archive: Option<std::rc::Rc<dyn Fn()>>,
@@ -204,7 +204,7 @@ pub fn worktree_menu(
     if let Some(archive) = on_archive {
         menu = menu
             .separator()
-            .item("Archive", move |item| item.action(move || archive()));
+            .item("Remove Worktree", move |item| item.action(move || archive()));
     }
     menu
 }

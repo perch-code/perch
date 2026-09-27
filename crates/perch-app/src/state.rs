@@ -13,6 +13,7 @@ use jiff::Timestamp;
 use perch_github::{AgentConfig, DeclaredRepo, Item, Thread};
 
 use crate::backend::{Event, Status};
+use crate::items::{BrowseView, SidebarTab};
 use crate::ui::agents::model::AgentRunSummary;
 
 /// Whether a box is checked.
@@ -2490,12 +2491,19 @@ impl AppState {
         })
     }
 
-    /// The flat sidebar under the current scope, filters and search.
+    /// Whether the drawer is showing local items: Worktrees, or Browse ›
+    /// Recent.
+    fn shows_items(&self) -> bool {
+        self.item_filters.with_untracked(|f| {
+            f.tab == SidebarTab::Worktrees || (f.tab == SidebarTab::Browse && f.browse == BrowseView::Recent)
+        })
+    }
+
     /// Whether a poll's items would change which rows the drawer shows,
     /// or their order. Changes inside a row go straight in; so does
-    /// anything while the drawer shows notifications, or nothing yet.
+    /// anything while the drawer shows no items, or nothing yet.
     fn holds_items(&self, incoming: &[Item]) -> bool {
-        self.item_filters.with_untracked(|f| f.scope) != crate::items::ItemScope::Notifications
+        self.shows_items()
             && !self.items.with_untracked(Vec::is_empty)
             && self.items.with_untracked(|shown| self.visible_item_ids(shown))
                 != self.visible_item_ids(incoming)
@@ -2503,7 +2511,7 @@ impl AppState {
 
     /// The same for notifications, while the drawer shows them.
     fn holds_notifications(&self, incoming: &[Thread]) -> bool {
-        self.item_filters.with_untracked(|f| f.scope) == crate::items::ItemScope::Notifications
+        self.item_filters.with_untracked(|f| f.tab) == SidebarTab::Inbox
             && !self.notifications.with_untracked(Vec::is_empty)
             && self.notifications.with_untracked(|shown| self.visible_thread_ids(shown))
                 != self.visible_thread_ids(incoming)
@@ -2511,64 +2519,58 @@ impl AppState {
 
     /// GitHub's threads under the drawer's filters.
     pub fn visible_inbox(&self) -> Vec<Thread> {
-        let repository = self.item_filters.with(|f| f.repository.clone());
+        let (unread, repository) = self.item_filters.with(|f| (f.inbox_unread_only, f.repository.clone()));
         let reason = self.notification_reason.get();
         let query = self.item_query.get();
         self.notifications.with(|threads| {
-            crate::inbox::filter(threads, repository.as_deref(), reason.as_deref(), &query)
+            crate::inbox::filter(threads, unread, repository.as_deref(), reason.as_deref(), &query)
         })
     }
 
     /// The ids of the threads `threads` would give under the drawer's
     /// filters, in order.
     fn visible_thread_ids(&self, threads: &[Thread]) -> Vec<String> {
-        let repository = self.item_filters.with_untracked(|f| f.repository.clone());
+        let (unread, repository) =
+            self.item_filters.with_untracked(|f| (f.inbox_unread_only, f.repository.clone()));
         let reason = self.notification_reason.get_untracked();
         let query = self.item_query.get_untracked();
-        crate::inbox::filter(threads, repository.as_deref(), reason.as_deref(), &query)
+        crate::inbox::filter(threads, unread, repository.as_deref(), reason.as_deref(), &query)
             .into_iter()
             .map(|thread| thread.id)
             .collect()
     }
 
-    /// The ids of the rows `items` would give under the drawer's filters,
-    /// in order.
+    /// The ids of the rows `items` would give on the drawer's tab, in
+    /// order.
     fn visible_item_ids(&self, items: &[Item]) -> Vec<String> {
         let mut filters = self.item_filters.get_untracked();
         filters.query = self.item_query.get_untracked();
-        self.viewer.with_untracked(|viewer| {
-            let viewer = viewer.as_ref().map(|(login, _)| login.as_str());
-            crate::items::visible_items(items, &filters, viewer)
-                .into_iter()
-                .map(|item| item.id)
-                .collect()
-        })
+        crate::items::local_items(items, &filters).into_iter().map(|item| item.id).collect()
     }
 
     /// What the drawer's pill says while a poll is held back for the list
     /// it shows: how many rows are new, or that there is activity when
     /// the rows only moved. `None` when nothing is held back.
     pub fn held_back_news(&self) -> Option<String> {
-        let (new, noun) =
-            if self.item_filters.with(|f| f.scope) == crate::items::ItemScope::Notifications {
-                let incoming = self.pending_notifications.get()?;
-                let shown: HashSet<String> = self
-                    .notifications
-                    .with_untracked(|shown| self.visible_thread_ids(shown))
-                    .into_iter()
-                    .collect();
-                let ids = self.visible_thread_ids(&incoming);
-                (ids.iter().filter(|id| !shown.contains(*id)).count(), "notification")
-            } else {
-                let incoming = self.pending_items.get()?;
-                let shown: HashSet<String> = self
-                    .items
-                    .with_untracked(|shown| self.visible_item_ids(shown))
-                    .into_iter()
-                    .collect();
-                let ids = self.visible_item_ids(&incoming);
-                (ids.iter().filter(|id| !shown.contains(*id)).count(), "item")
-            };
+        let (new, noun) = if self.item_filters.with(|f| f.tab) == SidebarTab::Inbox {
+            let incoming = self.pending_notifications.get()?;
+            let shown: HashSet<String> = self
+                .notifications
+                .with_untracked(|shown| self.visible_thread_ids(shown))
+                .into_iter()
+                .collect();
+            let ids = self.visible_thread_ids(&incoming);
+            (ids.iter().filter(|id| !shown.contains(*id)).count(), "notification")
+        } else {
+            let incoming = self.pending_items.get()?;
+            let shown: HashSet<String> = self
+                .items
+                .with_untracked(|shown| self.visible_item_ids(shown))
+                .into_iter()
+                .collect();
+            let ids = self.visible_item_ids(&incoming);
+            (ids.iter().filter(|id| !shown.contains(*id)).count(), "item")
+        };
         Some(match new {
             0 => "New activity".to_string(),
             1 => format!("1 new {noun}"),
@@ -2579,7 +2581,7 @@ impl AppState {
     /// Put up whatever the drawer's pill is holding back for the list it
     /// shows.
     pub fn show_held_back(&self) {
-        if self.item_filters.with_untracked(|f| f.scope) == crate::items::ItemScope::Notifications {
+        if self.item_filters.with_untracked(|f| f.tab) == SidebarTab::Inbox {
             self.show_pending_notifications();
         } else {
             self.show_pending_items();
@@ -2604,18 +2606,12 @@ impl AppState {
         }
     }
 
+    /// The local rows the drawer shows on its tab, under its filters and
+    /// search: Worktrees, or Browse › Recent.
     pub fn visible_items(&self) -> Vec<Item> {
         let mut filters = self.item_filters.get();
         filters.query = self.item_query.get();
-        self.viewer.with(|viewer| {
-            self.items.with(|items| {
-                crate::items::visible_items(
-                    items,
-                    &filters,
-                    viewer.as_ref().map(|(login, _)| login.as_str()),
-                )
-            })
-        })
+        self.items.with(|items| crate::items::local_items(items, &filters))
     }
 
     pub fn avatar_for(&self, url: &str) -> Option<Arc<Vec<u8>>> {
@@ -2825,7 +2821,7 @@ mod tests {
     }
 
     fn showing_notifications(app: &AppState) {
-        app.item_filters.update(|f| f.scope = crate::items::ItemScope::Notifications);
+        app.item_filters.update(|f| f.tab = SidebarTab::Inbox);
     }
 
     fn ids(threads: &[Thread]) -> Vec<&str> {
@@ -2910,6 +2906,7 @@ mod tests {
     #[test]
     fn a_poll_of_a_list_not_on_screen_goes_straight_in() {
         let app = AppState::new();
+        app.item_filters.update(|f| f.tab = SidebarTab::Worktrees);
         app.apply(Event::NotificationsPolled(vec![notification("1", true)]));
         app.apply(Event::NotificationsPolled(vec![
             notification("2", true),
@@ -2926,6 +2923,8 @@ mod tests {
             item
         };
         let app = AppState::new();
+        // Browse › Recent, where items with no worktree are.
+        app.item_filters.update(|f| f.tab = SidebarTab::Browse);
         app.apply(Event::Items(vec![item("a")]));
 
         app.apply(Event::ItemsPolled(vec![item("a"), item("b")]));

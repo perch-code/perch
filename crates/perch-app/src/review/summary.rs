@@ -585,9 +585,9 @@ fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             let id = state
                 .item
                 .with(|i| i.as_ref().map(|i| i.id.clone()).unwrap_or_default());
-            // Only a checkout Perch owns can be archived from here; one
+            // Only a worktree Perch made can be removed from here; one
             // under a root is the reader's. The backend closes the review
-            // itself when the archive goes through, and the Items event
+            // itself when the removal goes through, and the Items event
             // that follows closes the view. A refusal leaves everything as
             // it was, with the reason in the popup.
             let archive = checkout.owned.then(|| {

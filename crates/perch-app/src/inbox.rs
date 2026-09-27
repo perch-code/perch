@@ -4,9 +4,11 @@
 
 use perch_github::Thread;
 
-/// The threads under the repository, reason and search filters, in order.
+/// The threads under the Show, repository, reason and search filters, in
+/// order.
 pub fn filter(
     threads: &[Thread],
+    unread_only: bool,
     repository: Option<&str>,
     reason: Option<&str>,
     query: &str,
@@ -14,6 +16,7 @@ pub fn filter(
     let query = query.trim().to_lowercase();
     threads
         .iter()
+        .filter(|thread| !unread_only || thread.unread)
         .filter(|thread| {
             repository.is_none_or(|repo| thread.repository.full_name.eq_ignore_ascii_case(repo))
         })
@@ -125,7 +128,7 @@ mod tests {
                 true,
             ),
         ];
-        let visible = filter(&threads, None, None, "");
+        let visible = filter(&threads, false, None, None, "");
         assert_eq!(
             visible
                 .iter()
@@ -134,6 +137,16 @@ mod tests {
             ["3", "2", "1"]
         );
         assert!(!visible[0].unread);
+
+        // Show › Unread leaves the read one out, in the same order.
+        let unread = filter(&threads, true, None, None, "");
+        assert_eq!(
+            unread
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            ["2", "1"]
+        );
     }
 
     #[test]
@@ -164,7 +177,7 @@ mod tests {
                 true,
             ),
         ];
-        let visible = filter(&threads, Some("ORG/ONE"), Some("mention"), "manifest");
+        let visible = filter(&threads, false, Some("ORG/ONE"), Some("mention"), "manifest");
         assert_eq!(
             visible
                 .iter()

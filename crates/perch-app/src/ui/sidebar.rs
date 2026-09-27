@@ -1,7 +1,7 @@
 //! The drawer on the left, which is the whole navigation.
 //!
-//! Top to bottom: the title strip, All / Notifications / Authored, search
-//! and filters, then one flat list with pinned items first.
+//! Top to bottom: the title strip with Inbox / Worktrees / Browse, search
+//! and filters, then the tab's list.
 
 use std::rc::Rc;
 
@@ -14,7 +14,7 @@ use floem::views::{
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::items::{Direction, ItemScope, ItemSort, ItemStatus};
+use crate::items::{BrowseView, Direction, ItemSort, SidebarTab};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::{item_row, OpenItem};
@@ -41,7 +41,7 @@ pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl
 }
 
 /// The strip the traffic lights sit over, followed by the drawer control,
-/// the three scopes, and `+` for new work.
+/// the three tabs, and `+` for new work.
 fn lights_strip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     title_bar(
         Stack::horizontal((
@@ -125,18 +125,18 @@ fn items_nav(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl I
         .style(|s| s.size_full().flex_col())
 }
 
-/// The three inbox scopes. Selection uses the same persistence path as
-/// the filter menu, so changing tabs leaves the other filters intact.
+/// Inbox, Worktrees and Browse. Selection uses the same persistence path
+/// as the filter menu, so changing tabs leaves the other filters intact.
 fn scope_tabs(state: AppState) -> impl IntoView {
     dyn_stack(
-        || ItemScope::ALL,
-        |scope| scope.label(),
-        move |scope| {
-            Button::new(Label::new(scope.label()).style(|s| s.pointer_events_none()))
-                .action(move || set_filters(state, move |f| f.scope = scope))
-                .debug_name(format!("scope:{}", scope.label()))
+        || SidebarTab::ALL,
+        |tab| tab.label(),
+        move |tab| {
+            Button::new(Label::new(tab.label()).style(|s| s.pointer_events_none()))
+                .action(move || set_filters(state, move |f| f.tab = tab))
+                .debug_name(format!("tab:{}", tab.label()))
                 .style(move |s| {
-                    let selected = state.item_filters.with(|f| f.scope == scope);
+                    let selected = state.item_filters.with(|f| f.tab == tab);
                     crate::ui::widgets::clickable(s)
                         .height(31.0)
                         .padding_horiz(9.0)
@@ -236,20 +236,18 @@ fn search_row(state: AppState) -> impl IntoView {
 /// The filter menu, in the shape of a settings menu: one row per setting,
 /// each a submenu with its options checked.
 fn filter_button(state: AppState) -> impl IntoView {
-    // Anything the current list is narrowed by lights the button. Item-only
-    // filters do not make the notification button appear active.
+    // Anything the current list is narrowed or ordered by lights the
+    // button. Browse has its own chips and no menu.
     let narrowed = move || {
-        state.item_filters.with(|f| {
-            if f.scope == ItemScope::Notifications {
-                return f.repository.is_some() || state.notification_reason.with(Option::is_some);
+        state.item_filters.with(|f| match f.tab {
+            SidebarTab::Inbox => {
+                f.inbox_unread_only || f.repository.is_some() || state.notification_reason.with(Option::is_some)
             }
-            let d = crate::items::ItemFilters::default();
-            f.status != d.status
-                || f.kinds != d.kinds
-                || f.repository.is_some()
-                || f.sort != d.sort
-                || f.saved_only
-                || f.direction != d.direction
+            SidebarTab::Worktrees => {
+                let d = crate::items::ItemFilters::default();
+                f.repository.is_some() || f.sort != d.sort || f.direction != d.direction
+            }
+            SidebarTab::Browse => false,
         })
     };
     // The menu is on the button, and a click lands on the deepest view
@@ -264,7 +262,7 @@ fn filter_button(state: AppState) -> impl IntoView {
         .style(|s| s.pointer_events_none()),
     )
     .popout_menu(move || {
-        if state.item_filters.with(|f| f.scope == ItemScope::Notifications) {
+        if state.item_filters.with(|f| f.tab == SidebarTab::Inbox) {
             notification_filter_menu(state)
         } else {
             item_filter_menu(state)
@@ -272,7 +270,9 @@ fn filter_button(state: AppState) -> impl IntoView {
     })
     .debug_name("sidebar filter")
     .style(move |s| {
+        let browsing = state.item_filters.with(|f| f.tab == SidebarTab::Browse);
         crate::ui::widgets::clickable(s)
+            .apply_if(browsing, |s| s.hide())
             .size(32.0, 32.0)
             .items_center()
             .justify_center()
@@ -283,6 +283,8 @@ fn filter_button(state: AppState) -> impl IntoView {
     })
 }
 
+/// Worktrees' menu: the repository, the order, and the pull request
+/// status on each row.
 fn item_filter_menu(state: AppState) -> Menu {
     let f = state.item_filters.get_untracked();
     // One writer, so every change lands in the meta table the same way.
@@ -291,20 +293,6 @@ fn item_filter_menu(state: AppState) -> Menu {
     });
 
     let mut menu = Menu::new();
-    menu = menu.submenu("Status", {
-        let set = set.clone();
-        let current = f.status;
-        move |mut sub| {
-            for status in ItemStatus::ALL {
-                let set = set.clone();
-                sub = sub.item(status.label(), move |m| {
-                    let set = set.clone();
-                    m.checked(status == current).action(move || set(Box::new(move |f| f.status = status)))
-                });
-            }
-            sub
-        }
-    });
     menu = menu.submenu("Repository", {
         let set = set.clone();
         let current = f.repository.clone();
@@ -339,37 +327,8 @@ fn item_filter_menu(state: AppState) -> Menu {
             sub
         }
     });
-    menu = menu.submenu("Kind", {
-        let set = set.clone();
-        let kinds = f.kinds;
-        move |sub| {
-            let (a, b, c) = (set.clone(), set.clone(), set.clone());
-            sub.item("Pull Requests", move |m| {
-                let a = a.clone();
-                m.checked(kinds.pull_requests)
-                    .action(move || a(Box::new(|f| f.kinds.pull_requests = !f.kinds.pull_requests)))
-            })
-            .item("Issues", move |m| {
-                let b = b.clone();
-                m.checked(kinds.issues).action(move || b(Box::new(|f| f.kinds.issues = !f.kinds.issues)))
-            })
-            .item("Branches", move |m| {
-                let c = c.clone();
-                m.checked(kinds.branches)
-                    .action(move || c(Box::new(|f| f.kinds.branches = !f.kinds.branches)))
-            })
-        }
-    });
-    // The separators group the menu: what is listed, what it is narrowed
-    // to, how it is arranged, and what is shown.
-    menu = menu.separator();
-    {
-        let set = set.clone();
-        menu = menu.item("Saved only", move |m| {
-            let set = set.clone();
-            m.checked(f.saved_only).action(move || set(Box::new(|f| f.saved_only = !f.saved_only)))
-        });
-    }
+    // The separators group the menu: what it is narrowed to, how it is
+    // arranged, and what is shown.
     menu = menu.separator();
     menu = menu.submenu("Sort By", {
         let set = set.clone();
@@ -407,9 +366,9 @@ fn item_filter_menu(state: AppState) -> Menu {
     menu
 }
 
-/// Notifications share repository and reason with local items. The rest of
-/// the item menu describes local state and ordering, so it stays out of this
-/// scope.
+/// Inbox's menu: Show, then the repository and the reason. The repository
+/// is shared with Worktrees; the rest of Worktrees' menu is about local
+/// order, so it stays out of this one.
 fn notification_filter_menu(state: AppState) -> Menu {
     let f = state.item_filters.get_untracked();
     let set = Rc::new(move |edit: Box<dyn Fn(&mut crate::items::ItemFilters)>| {
@@ -426,7 +385,23 @@ fn notification_filter_menu(state: AppState) -> Menu {
         }
     }
 
-    let mut menu = Menu::new().submenu("Repository", {
+    let unread_only = f.inbox_unread_only;
+    let mut menu = Menu::new().submenu("Show", {
+        let set = set.clone();
+        move |sub| {
+            let (unread, all) = (set.clone(), set.clone());
+            sub.item("Unread", move |item| {
+                item.checked(unread_only)
+                    .action(move || unread(Box::new(|f| f.inbox_unread_only = true)))
+            })
+            .item("All", move |item| {
+                item.checked(!unread_only)
+                    .action(move || all(Box::new(|f| f.inbox_unread_only = false)))
+            })
+        }
+    });
+    menu = menu.separator();
+    menu = menu.submenu("Repository", {
         let set = set.clone();
         move |mut sub| {
             let all = set.clone();
@@ -477,18 +452,24 @@ fn notification_filter_menu(state: AppState) -> Menu {
     menu
 }
 
-/// Notifications are GitHub's ordered thread list. The other scopes are
-/// views over Perch's local items.
+/// Inbox is GitHub's ordered thread list. Worktrees and Browse › Recent
+/// are views over Perch's local items.
 ///
 /// A poll that would move the rows is held back, and the pill over the
 /// list says so until the reader asks for it.
 fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
     Stack::vertical((
         dyn_container(
-            move || state.item_filters.with(|filters| filters.scope),
-            move |scope| match scope {
-                ItemScope::Notifications => crate::ui::notifications::notification_list(state, backend.clone()).into_any(),
-                ItemScope::All | ItemScope::Authored => local_item_list(state, backend.clone(), on_open.clone()).into_any(),
+            move || state.item_filters.with(|filters| (filters.tab, filters.browse)),
+            move |(tab, browse)| match (tab, browse) {
+                (SidebarTab::Inbox, _) => crate::ui::notifications::notification_list(state, backend.clone()).into_any(),
+                (SidebarTab::Worktrees, _) => {
+                    local_item_list(state, backend.clone(), on_open.clone(), "No worktrees").into_any()
+                }
+                (SidebarTab::Browse, BrowseView::Recent) => {
+                    local_item_list(state, backend.clone(), on_open.clone(), "Nothing opened yet").into_any()
+                }
+                (SidebarTab::Browse, _) => Empty::new().into_any(),
             },
         )
         .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
@@ -508,14 +489,23 @@ fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl I
 }
 
 /// One scrolling local-item list. Pinning changes order and the row's pin
-/// indicator without adding a separate heading.
-fn local_item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
+/// indicator without adding a separate heading. `empty` is what it says
+/// with nothing to list and nothing searched for.
+fn local_item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem, empty: &'static str) -> impl IntoView {
     Stack::vertical((
         dyn_container(
-            move || state.visible_items().is_empty(),
-            |empty| {
-                if empty {
-                    Label::new("No matching items")
+            move || {
+                if !state.visible_items().is_empty() {
+                    None
+                } else if state.item_query.with(|q| q.trim().is_empty()) {
+                    Some(empty)
+                } else {
+                    Some("No matching items")
+                }
+            },
+            |message| {
+                if let Some(message) = message {
+                    Label::new(message)
                         .style(|s| s.font_size(theme::TEXT_META).color(theme::NAV_SUBTLE).padding(24.0))
                         .into_any()
                 } else {
@@ -702,6 +692,26 @@ mod tests {
         item
     }
 
+    /// A branch of the reader's own, checked out, with no pull request.
+    fn branch(id: &str, repo: &str) -> Item {
+        let mut item = Item::new(repo, "2026-09-19T12:00:00Z".parse().unwrap());
+        item.id = id.into();
+        item.name = Some(format!("Branch {id}"));
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: id.into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: format!("/x/{id}").into(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        item
+    }
+
     fn notification(id: &str, repo: &str, title: &str, kind: SubjectKind, unread: bool) -> Thread {
         Thread {
             id: id.into(),
@@ -735,6 +745,7 @@ mod tests {
             issue("notification", "org/one", "someone"),
             issue("elsewhere", "org/two", "me"),
             pull_request("pr", "org/one", "me"),
+            branch("quiet", "org/one"),
         ]);
         // The pull request has been looked at: someone opened it, it
         // changes a few lines, and a review is still wanted.
@@ -752,7 +763,10 @@ mod tests {
             looked,
             notification("10", "org/two", "Other repository", SubjectKind::Issue, true),
         ]);
-        state.item_filters.update(|f| f.repository = Some("org/one".into()));
+        state.item_filters.update(|f| {
+            f.repository = Some("org/one".into());
+            f.tab = SidebarTab::Worktrees;
+        });
         let view = sidebar(state, Rc::new(Backend::detached()), Rc::new(|_| {}));
         let mut harness = HeadlessHarness::new_with_size(root, view, theme::SIDEBAR_MIN_WIDTH, 600.0);
         harness.rebuild();
@@ -767,14 +781,14 @@ mod tests {
         id.children().into_iter().find_map(|child| find(child, text))
     }
 
-    fn click_scope(harness: &mut HeadlessHarness, scope: ItemScope) {
-        let id = find(harness.root_id(), &format!("scope:{}", scope.label())).unwrap();
+    fn click_tab(harness: &mut HeadlessHarness, tab: SidebarTab) {
+        let id = find(harness.root_id(), &format!("tab:{}", tab.label())).unwrap();
         let rect = id.get_visual_rect_no_clip();
         assert!(rect.width() > 0.0 && rect.height() > 0.0);
         assert!(
             rect.x0 >= 0.0 && rect.x1 <= theme::SIDEBAR_MIN_WIDTH,
             "{} must fit at minimum sidebar width: {rect:?}",
-            scope.label()
+            tab.label()
         );
         let center = rect.center();
         harness.click(center.x, center.y);
@@ -785,33 +799,64 @@ mod tests {
     #[test]
     fn tabs_filter_rendered_rows_and_persist_without_clearing_repository() {
         let (mut harness, state) = harness();
-        assert!(find(harness.root_id(), "Issue mine").is_some());
-        assert!(find(harness.root_id(), "Issue notification").is_some());
-        assert!(find(harness.root_id(), "Issue elsewhere").is_none());
+        // Worktrees: what is on disk, in the filtered repository.
+        assert!(find(harness.root_id(), "Pull pr").is_some());
+        assert!(find(harness.root_id(), "item row:quiet").is_some());
+        assert!(find(harness.root_id(), "Issue mine").is_none(), "an issue has no worktree");
 
-        click_scope(&mut harness, ItemScope::Notifications);
-        assert_eq!(state.item_filters.get().scope, ItemScope::Notifications);
-        assert!(find(harness.root_id(), "Issue mine").is_none());
-        assert!(find(harness.root_id(), "Issue notification").is_none());
+        click_tab(&mut harness, SidebarTab::Inbox);
+        assert_eq!(state.item_filters.get().tab, SidebarTab::Inbox);
+        assert!(find(harness.root_id(), "Pull pr").is_none());
         assert!(find(harness.root_id(), "Read discussion").is_some(), "read and unsupported subjects stay listed");
         assert!(find(harness.root_id(), "Unread pull request").is_some());
         assert!(find(harness.root_id(), "Other repository").is_none());
         let (key, value) = state.pending_meta.get().unwrap();
         assert_eq!(key, "item_filters");
         let restored = crate::items::ItemFilters::parse(&value).unwrap();
-        assert_eq!(restored.scope, ItemScope::Notifications);
+        assert_eq!(restored.tab, SidebarTab::Inbox);
         assert_eq!(restored.repository.as_deref(), Some("org/one"));
 
-        click_scope(&mut harness, ItemScope::Authored);
-        assert_eq!(state.item_filters.get().scope, ItemScope::Authored);
-        assert!(find(harness.root_id(), "Issue mine").is_some());
-        assert!(find(harness.root_id(), "Issue notification").is_none());
-        assert!(find(harness.root_id(), "Issue elsewhere").is_none());
-        assert!(find(harness.root_id(), "Read discussion").is_none());
-
-        click_scope(&mut harness, ItemScope::All);
+        // Browse › Recent: what was opened and has no worktree, in any
+        // repository.
+        click_tab(&mut harness, SidebarTab::Browse);
+        assert_eq!(state.item_filters.get().browse, BrowseView::Recent);
         assert!(find(harness.root_id(), "Issue mine").is_some());
         assert!(find(harness.root_id(), "Issue notification").is_some());
+        assert!(find(harness.root_id(), "Issue elsewhere").is_some());
+        assert!(find(harness.root_id(), "Pull pr").is_none());
+        assert!(find(harness.root_id(), "Read discussion").is_none());
+
+        click_tab(&mut harness, SidebarTab::Worktrees);
+        assert!(find(harness.root_id(), "Pull pr").is_some());
+    }
+
+    /// Inbox's Show › Unread leaves the read threads out.
+    #[test]
+    fn inbox_can_show_only_the_unread() {
+        let (mut harness, state) = harness();
+        click_tab(&mut harness, SidebarTab::Inbox);
+        assert!(find(harness.root_id(), "Read discussion").is_some());
+        set_filters(state, |f| f.inbox_unread_only = true);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Read discussion").is_none());
+        assert!(find(harness.root_id(), "Unread pull request").is_some());
+    }
+
+    /// A worktree whose directory goes leaves Worktrees for Recent.
+    #[test]
+    fn a_worktree_that_goes_moves_to_recent() {
+        let (mut harness, state) = harness();
+        assert!(find(harness.root_id(), "item row:quiet").is_some());
+        state.items.update(|items| {
+            let quiet = items.iter_mut().find(|i| i.id == "quiet").unwrap();
+            quiet.archived_at = Some("2026-09-20T12:00:00Z".parse().unwrap());
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "item row:quiet").is_none());
+        click_tab(&mut harness, SidebarTab::Browse);
+        assert!(find(harness.root_id(), "item row:quiet").is_some());
     }
 
     #[test]
@@ -838,7 +883,7 @@ mod tests {
     fn codex_dock_geometry_holds_at_the_minimum_width() {
         let (mut harness, _) = harness();
 
-        let all = find(harness.root_id(), "scope:All").unwrap().get_visual_rect_no_clip();
+        let all = find(harness.root_id(), "tab:Inbox").unwrap().get_visual_rect_no_clip();
         assert_eq!(all.height(), 31.0);
         assert!(
             all.y0 >= 0.0 && all.y1 <= theme::TITLEBAR_HEIGHT,
@@ -857,7 +902,7 @@ mod tests {
         assert_eq!((filter.width(), filter.height()), (32.0, 32.0));
         assert!(filter.x1 <= theme::SIDEBAR_MIN_WIDTH - theme::NAV_GUTTER);
 
-        let row = find(harness.root_id(), "item row:mine")
+        let row = find(harness.root_id(), "item row:quiet")
             .unwrap()
             .get_visual_rect_no_clip();
         assert_eq!(row.height(), theme::ROW_HEIGHT);
@@ -890,24 +935,37 @@ mod tests {
         assert_eq!(state.item_query.get(), "");
     }
 
+    /// An empty list says what it is; one emptied by the search says so.
     #[test]
-    fn authored_list_updates_when_viewer_arrives_and_empty_filters_show_feedback() {
+    fn empty_lists_say_why() {
         let (mut harness, state) = harness();
-        state.viewer.set(None);
-        click_scope(&mut harness, ItemScope::Authored);
-        assert_eq!(state.item_filters.get().scope, ItemScope::Authored);
-        assert!(find(harness.root_id(), "No matching items").is_some());
-        state.viewer.set(Some(("ME".into(), String::new())));
-        harness.rebuild();
-        harness.paint();
-        assert!(find(harness.root_id(), "Issue mine").is_some());
-        assert!(find(harness.root_id(), "No matching items").is_none());
-
         state.item_query.set("no such item".into());
         harness.rebuild();
         harness.paint();
         assert!(find(harness.root_id(), "No matching items").is_some());
-        assert!(find(harness.root_id(), "Issue mine").is_none());
+        assert!(find(harness.root_id(), "Pull pr").is_none());
+
+        state.item_query.set(String::new());
+        state.items.set(Vec::new());
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "No worktrees").is_some());
+        click_tab(&mut harness, SidebarTab::Browse);
+        assert!(find(harness.root_id(), "Nothing opened yet").is_some());
+    }
+
+    /// Over a row, Pin takes the place of the age; Save is gone.
+    #[test]
+    fn a_hovered_row_offers_pin() {
+        let (mut harness, state) = harness();
+        let row = find(harness.root_id(), "item row:quiet").unwrap();
+        assert!(find(row, "row pin").is_none());
+        state.hovered_item.set(Some("quiet".into()));
+        harness.rebuild();
+        harness.paint();
+        let row = find(harness.root_id(), "item row:quiet").unwrap();
+        let pin = find(row, "row pin").expect("no pin on hover");
+        assert!(pin.get_visual_rect_no_clip().width() > 0.0);
     }
 
     /// A poll with a new row floats a pill over the list and moves
@@ -915,18 +973,18 @@ mod tests {
     #[test]
     fn a_held_back_poll_floats_a_pill_and_refresh_shows_it() {
         let (mut harness, state) = harness();
-        let row = find(harness.root_id(), "Issue mine").unwrap();
+        let row = find(harness.root_id(), "item row:quiet").unwrap();
         let before = row.get_visual_rect_no_clip();
         let pill = find(harness.root_id(), "news pill").unwrap();
         assert!(pill.get_visual_rect_no_clip().is_zero_area(), "hidden with nothing held");
 
         let mut polled = state.items.get();
-        polled.push(issue("new", "org/one", "ME"));
+        polled.push(branch("fresh", "org/one"));
         state.apply(crate::backend::Event::ItemsPolled(polled));
         harness.rebuild();
         harness.paint();
 
-        assert!(find(harness.root_id(), "Issue new").is_none());
+        assert!(find(harness.root_id(), "item row:fresh").is_none());
         assert_eq!(row.get_visual_rect_no_clip(), before, "the rows stay put");
         let shown = pill.get_visual_rect_no_clip();
         assert!(shown.width() > 0.0 && shown.height() > 0.0);
@@ -937,7 +995,7 @@ mod tests {
         harness.click(center.x, center.y);
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "Issue new").is_some());
+        assert!(find(harness.root_id(), "item row:fresh").is_some());
         assert!(state.pending_items.get().is_none());
     }
 
@@ -971,7 +1029,7 @@ mod tests {
         // A notification row has the same bones at the same inset, and
         // says the same things of its pull request once it has been
         // looked at.
-        click_scope(&mut harness, ItemScope::Notifications);
+        click_tab(&mut harness, SidebarTab::Inbox);
         let thread = find(harness.root_id(), "notification row:11").unwrap();
         let thread_rect = thread.get_visual_rect_no_clip();
         assert_eq!((thread_rect.x0, thread_rect.x1), (rect.x0, rect.x1));
@@ -1031,8 +1089,8 @@ mod tests {
         let age = find(row, "row age").unwrap().get_visual_rect_no_clip();
         assert!(dot_rect.x1 <= age.x0, "before the age");
 
-        let other = find(harness.root_id(), "item row:mine").unwrap();
-        let other_title = find(other, "Issue mine").unwrap();
+        let other = find(harness.root_id(), "item row:quiet").unwrap();
+        let other_title = find(other, "Branch quiet").unwrap();
         assert_eq!(
             harness.get_computed_style(other_title).get(FontWeight),
             Some(theme::weight_read()),
@@ -1092,7 +1150,7 @@ mod tests {
         use floem::style::{FontWeight, TextColor};
 
         let (mut harness, state) = harness();
-        click_scope(&mut harness, ItemScope::Notifications);
+        click_tab(&mut harness, SidebarTab::Inbox);
         let row = find(harness.root_id(), "notification row:11").unwrap();
         let title = find(row, "Unread pull request").unwrap();
         assert_eq!(harness.get_computed_style(title).get(FontWeight), Some(theme::weight_emphasis()));
@@ -1114,7 +1172,7 @@ mod tests {
     #[test]
     fn a_notifications_face_is_whoever_opened_it_and_the_repositorys_until_known() {
         let (mut harness, _) = harness();
-        click_scope(&mut harness, ItemScope::Notifications);
+        click_tab(&mut harness, SidebarTab::Inbox);
 
         // No picture has arrived, so each face is its seed's initial.
         let looked = find(harness.root_id(), "notification row:11").unwrap();

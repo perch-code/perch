@@ -360,11 +360,6 @@ pub enum Command {
         /// The reader has seen what it loses (see `LossPrompt`) and said go.
         accept_loss: bool,
     },
-    /// Keep or remove a local bookmark for an item.
-    SetSaved {
-        id: String,
-        saved: bool,
-    },
     PinItem {
         id: String,
         pinned: bool,
@@ -2595,13 +2590,6 @@ impl Backend {
         });
     }
 
-    pub fn mark_saved(&self, id: &str, saved: bool) {
-        let _ = self.commands.send(Command::SetSaved {
-            id: id.to_string(),
-            saved,
-        });
-    }
-
     pub fn pin_item(&self, id: &str, pinned: bool) {
         let _ = self.commands.send(Command::PinItem {
             id: id.to_string(),
@@ -3813,11 +3801,6 @@ async fn run(
                         tracing::warn!(id, %message, "could not delete item");
                         let _ = ctx.events.send(Event::Notice(message));
                     }
-                });
-            }
-            Command::SetSaved { id, saved } => {
-                edit_item(&ctx, &id, |item| {
-                    item.saved = saved;
                 });
             }
             Command::PinItem { id, pinned } => {
@@ -10657,7 +10640,6 @@ fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<
             return Ok(false);
         }
         tracing::info!(item = %item.id, from = %holder.id, number = pr.number, "the branch takes the pull request from the subject-only row");
-        item.saved |= holder.saved;
         if item.pinned_at.is_none() {
             item.pinned_at = holder.pinned_at;
         }
