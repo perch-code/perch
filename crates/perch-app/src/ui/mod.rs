@@ -269,8 +269,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         drawer::resize_cursor_sheet(state),
     ));
     let root_id = root.view_id();
-    let focus_backend = backend.clone();
-    let blur_backend = backend.clone();
     // macOS's scroll bar setting, read again whenever it changes.
     let scroller_style = floem::ext_event::create_trigger();
     crate::scrollers::watch(scroller_style);
@@ -295,10 +293,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 state.main_pane.set((pane.x0, pane.x1));
             }
         })
-        // Whether the reader can see the window: activity on the open
-        // item isn't recorded while they can.
-        .on_event_cont(el::WindowGainedFocus, move |_, _| focus_backend.set_window_key(true))
-        .on_event_cont(el::WindowLostFocus, move |_, _| blur_backend.set_window_key(false))
         // The keys the code editor would otherwise keep. The editor stops
         // every key once it has focus, and these are pressed right after
         // clicking in it, so they are caught on the way down to it rather

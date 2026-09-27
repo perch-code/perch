@@ -154,21 +154,20 @@ pub fn item_row(
 }
 
 /// Whether the inbox has an unread notification about the item's pull
-/// request or issue, or the item has local activity it hasn't been
-/// opened since: what bolds the title and draws the dot, as the
-/// Notifications scope's row has them. Read each time, so viewing the
-/// item, which reads both, clears them without the row being rebuilt.
+/// request or issue: what bolds the title and draws the dot, as the
+/// Notifications scope's row for the same thread has them. Read from
+/// the inbox each time, so viewing the item, which reads the thread,
+/// clears both without the row being rebuilt. A branch with no subject
+/// has nothing to be unread.
 fn unread(state: AppState, item: &Item) -> impl Fn() -> bool + Clone + 'static {
     let about = item
         .subject
         .as_ref()
         .map(|subject| (subject.repo_full_name().to_string(), subject.kind(), subject.number()));
-    let id = item.id.clone();
     move || {
-        state.activity_unread(&id)
-            || about
-                .as_ref()
-                .is_some_and(|(repo, kind, number)| state.subject_unread(repo, *kind, *number))
+        about
+            .as_ref()
+            .is_some_and(|(repo, kind, number)| state.subject_unread(repo, *kind, *number))
     }
 }
 
@@ -227,33 +226,6 @@ fn author(state: AppState, item: &Item) -> (impl Fn() -> String + 'static, Strin
 /// says of a branch. A branch with no pull request or issue has no
 /// number, and its name is already the title.
 fn byline(state: AppState, item: &Item) -> impl IntoView {
-    let reference = nav_row::reference(item.subject.as_ref().map(|subject| subject.number()));
-    byline_with(state, item, reference, None)
-}
-
-/// An item's byline as its inbox row draws it: the branch where a number
-/// would go on a branch of the reader's own, and after the pills, what
-/// happened there last.
-pub(crate) fn inbox_byline(
-    state: AppState,
-    item: &Item,
-    activity: &perch_github::ActivityEvent,
-) -> impl IntoView {
-    let reference = match &item.subject {
-        Some(subject) => nav_row::reference(Some(subject.number())),
-        None => item.branch().unwrap_or_default().to_string(),
-    };
-    byline_with(state, item, reference, Some(activity))
-}
-
-/// The byline, with `reference` after the repository and, when given,
-/// the activity's chip after the pills.
-fn byline_with(
-    state: AppState,
-    item: &Item,
-    reference: String,
-    activity: Option<&perch_github::ActivityEvent>,
-) -> impl IntoView {
     let (avatar_url, login) = author(state, item);
     // A checkout says how far it has gone from its base once the scan has
     // measured it; a pull request says what GitHub counts until then.
@@ -278,26 +250,14 @@ fn byline_with(
         avatar_url,
         login,
         item.repo_full_name.clone(),
-        reference,
+        nav_row::reference(item.subject.as_ref().map(|subject| subject.number())),
         Stack::horizontal((
             nav_row::chips(state, checks, review),
-            activity_note(activity),
             nav_row::note(item.divergence().map(|d| d.label()), theme::DRAFT_YELLOW),
         ))
         .style(|s| s.items_center().min_width(0.0)),
         nav_row::churn(churn),
     )
-}
-
-/// What happened on the item last, as its inbox row says it: in the
-/// failure colour when a run or a review failed.
-pub(crate) fn activity_note(activity: Option<&perch_github::ActivityEvent>) -> impl IntoView {
-    let color = if activity.is_some_and(perch_github::ActivityEvent::failed) {
-        theme::CLOSED
-    } else {
-        theme::NAV_MUTED
-    };
-    nav_row::note(activity.map(crate::inbox::chip), color)
 }
 
 /// The title's right end: the pin, the bookmark, the unread dot and the
@@ -436,26 +396,19 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         });
     }
     {
-        // Put the unread reminder back on the subject's notification and
-        // on the item's own activity, the way the Notifications scope's
-        // row does. Greyed while there is neither to put it on, or both
-        // are still unread.
+        // Put the unread reminder back on the subject's notification,
+        // the way the Notifications scope's row does. Greyed while there
+        // is none to put it on: a branch, a subject the inbox has nothing
+        // about, or one still unread.
         let read = read_threads(state, &item);
-        let activity_read = state.item_activity.with_untracked(|all| {
-            all.get(&item.id).is_some_and(|a| a.is_visible() && !a.is_unread())
-        });
         let b = backend.clone();
-        let activity_id = item.id.clone();
         menu = menu.item("Mark Unread", move |m| {
-            let (b, read, activity_id) = (b.clone(), read.clone(), activity_id.clone());
-            m.enabled(!read.is_empty() || activity_read)
+            let (b, read) = (b.clone(), read.clone());
+            m.enabled(!read.is_empty())
                 .accelerator(key(KeyCode::KeyU))
                 .action(move || {
                     for thread_id in &read {
                         b.mark_notification_unread(thread_id);
-                    }
-                    if activity_read {
-                        b.mark_item_activity_unread(&activity_id);
                     }
                 })
         });

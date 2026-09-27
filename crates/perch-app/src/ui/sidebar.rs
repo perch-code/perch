@@ -418,7 +418,7 @@ fn notification_filter_menu(state: AppState) -> Menu {
 
     let current_repo = f.repository.clone();
     let mut repositories =
-        crate::inbox::repository_options(&state.inbox_rows());
+        state.notifications.with(|threads| crate::inbox::repository_options(threads));
     if let Some(selected) = current_repo.as_ref() {
         if !repositories.iter().any(|repo| repo.eq_ignore_ascii_case(selected)) {
             repositories.push(selected.clone());
@@ -450,7 +450,7 @@ fn notification_filter_menu(state: AppState) -> Menu {
     });
 
     let current_reason = state.notification_reason.get_untracked();
-    let mut reasons = crate::inbox::reason_options(&state.inbox_rows());
+    let mut reasons = state.notifications.with(|threads| crate::inbox::reason_options(threads));
     if let Some(selected) = current_reason.as_ref() {
         if !reasons.iter().any(|(wire, _)| wire == selected) {
             reasons.push((selected.clone(), selected.clone()));
@@ -1082,160 +1082,6 @@ mod tests {
         );
         assert_eq!(harness.get_computed_style(title).get(TextColor), Some(theme::NAV_FG));
         assert_eq!(dot.get_visual_rect_no_clip().width(), 7.0);
-    }
-
-    /// Local activity the reader hasn't opened the item since bolds its
-    /// row as an unread notification does, and reading it clears that.
-    #[test]
-    fn an_item_row_is_bold_and_dotted_while_its_local_activity_is_unread() {
-        use floem::style::FontWeight;
-
-        let (mut harness, state) = harness();
-        let mut activity = perch_github::ItemActivity {
-            item_id: "mine".into(),
-            at: "2026-09-20T11:00:00Z".parse().unwrap(),
-            event: perch_github::ActivityEvent::HeadMoved {
-                from: "a".into(),
-                to: "b".into(),
-                commits: Some(1),
-            },
-            read_at: None,
-            done_at: None,
-            local_unread: false,
-        };
-        state
-            .item_activity
-            .update(|all| drop(all.insert("mine".into(), activity.clone())));
-        harness.rebuild();
-        harness.paint();
-        let row = find(harness.root_id(), "item row:mine").unwrap();
-        let title = find(row, "Issue mine").unwrap();
-        let dot = find(row, "unread dot").unwrap();
-        assert_eq!(
-            harness.get_computed_style(title).get(FontWeight),
-            Some(theme::weight_emphasis())
-        );
-        assert_eq!(dot.get_visual_rect_no_clip().width(), 7.0);
-
-        activity.read_at = Some(activity.at);
-        state
-            .item_activity
-            .update(|all| drop(all.insert("mine".into(), activity.clone())));
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(harness.get_computed_style(title).get(FontWeight), Some(theme::weight_read()));
-        assert_eq!(dot.get_visual_rect_no_clip().width(), 0.0);
-    }
-
-    fn moved(item_id: &str, at: &str) -> perch_github::ItemActivity {
-        perch_github::ItemActivity {
-            item_id: item_id.into(),
-            at: at.parse().unwrap(),
-            event: perch_github::ActivityEvent::HeadMoved {
-                from: "a".into(),
-                to: "b".into(),
-                commits: Some(2),
-            },
-            read_at: None,
-            done_at: None,
-            local_unread: false,
-        }
-    }
-
-    fn branch(id: &str) -> Item {
-        let mut item = Item::new("org/one", "2026-09-19T12:00:00Z".parse().unwrap());
-        item.id = id.into();
-        item.checkout = Some(perch_github::ItemCheckout {
-            branch: format!("fix-{id}"),
-            base_ref: "main".into(),
-            head_sha: "h".into(),
-            path: "/x".into(),
-            owned: false,
-            on_disk: true,
-            churn: None,
-            last_seen_head: None,
-            divergence: None,
-            source: None,
-        });
-        item
-    }
-
-    /// A branch with local activity is a row of its own; a pull request
-    /// with local activity shares its thread's row, and says what happened
-    /// in the byline.
-    #[test]
-    fn the_inbox_has_a_row_for_local_work_and_one_row_per_item() {
-        let (mut harness, state) = harness();
-        state.items.update(|items| items.push(branch("b1")));
-        let mut about_pr =
-            notification("57", "org/one", "About the pull", SubjectKind::PullRequest, false);
-        about_pr.subject.url = Some("https://api.github.com/repos/org/one/pulls/57".into());
-        state.notifications.update(|threads| threads.insert(0, about_pr));
-        state.item_activity.update(|all| {
-            all.insert("b1".into(), moved("b1", "2026-09-20T11:00:00Z"));
-            all.insert("pr".into(), moved("pr", "2026-09-19T10:00:00Z"));
-        });
-        click_scope(&mut harness, ItemScope::Notifications);
-
-        let local = find(harness.root_id(), "notification row:item:b1").expect("a row for the branch");
-        assert!(find(local, "fix-b1").is_some(), "its title is the branch");
-        assert!(find(local, "2 new commits").is_some(), "and it says what happened");
-        assert_eq!(find(local, "unread dot").unwrap().get_visual_rect_no_clip().width(), 7.0);
-        assert!(
-            find(harness.root_id(), "notification row:item:pr").is_none(),
-            "the pull request has no second row"
-        );
-        let merged = find(harness.root_id(), "notification row:57").unwrap();
-        assert!(find(merged, "2 new commits").is_some());
-        assert_eq!(
-            find(merged, "unread dot").unwrap().get_visual_rect_no_clip().width(),
-            7.0,
-            "unread while either side is"
-        );
-        // The newest is first.
-        assert!(local.get_visual_rect_no_clip().y0 < merged.get_visual_rect_no_clip().y0);
-
-        // Done on the branch's activity: the row goes, the item stays.
-        state.item_activity.update(|all| {
-            let a = all.get_mut("b1").unwrap();
-            a.done_at = Some(a.at);
-        });
-        harness.rebuild();
-        harness.paint();
-        assert!(find(harness.root_id(), "notification row:item:b1").is_none());
-        assert!(state.item("b1").is_some());
-    }
-
-    /// Activity that happens on its own and would add a row waits behind
-    /// the pill, as a poll's notifications do.
-    #[test]
-    fn a_run_that_ends_while_the_inbox_is_up_waits_behind_the_pill() {
-        let (mut harness, state) = harness();
-        state.items.update(|items| items.push(branch("b1")));
-        click_scope(&mut harness, ItemScope::Notifications);
-        state.apply(crate::backend::Event::ItemActivityPolled(vec![moved(
-            "b1",
-            "2026-09-20T11:00:00Z",
-        )]));
-        harness.rebuild();
-        harness.paint();
-        assert!(find(harness.root_id(), "notification row:item:b1").is_none());
-        assert_eq!(state.held_back_news().as_deref(), Some("1 new notification"));
-
-        let refresh = find(harness.root_id(), "news refresh").unwrap();
-        let center = refresh.get_visual_rect_no_clip().center();
-        harness.click(center.x, center.y);
-        harness.rebuild();
-        harness.paint();
-        assert!(find(harness.root_id(), "notification row:item:b1").is_some());
-        assert!(state.pending_item_activity.get().is_none());
-
-        // Reading it only changes the row in place, so it goes straight in.
-        let mut read = moved("b1", "2026-09-20T11:00:00Z");
-        read.read_at = Some(read.at);
-        state.apply(crate::backend::Event::ItemActivityPolled(vec![read]));
-        assert!(state.pending_item_activity.get().is_none());
-        assert!(!state.item_activity.with(|all| all["b1"].is_unread()));
     }
 
     /// A notification row is bold and full black with the dot while
