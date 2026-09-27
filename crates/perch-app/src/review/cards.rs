@@ -25,7 +25,8 @@ use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::views::{
-    dyn_container, dyn_stack, Container, Decorators, Empty, Label, Overlay, Stack, TooltipExt,
+    dyn_container, dyn_stack, Container, Decorators, Empty, Label, Overlay, Stack, TooltipClass,
+    TooltipExt,
 };
 use perch_git::{LineStatus, Row};
 use perch_github::{
@@ -752,7 +753,54 @@ pub fn tip_with<V: IntoView + 'static>(
     view: V,
     text: impl Fn() -> String + Clone + 'static,
 ) -> impl IntoView {
-    view.tooltip(move || tip_body(text.clone()))
+    view.tooltip(move || within_window(tip_body(text.clone()).class(TooltipClass)))
+}
+
+/// How far a tip can move left or up to stay in the window: more than
+/// any tip is wide or tall.
+const TIP_REACH: f64 = 1000.0;
+
+/// A tip placed at a window point, moved left and up as far as it takes
+/// to stay inside the window. floem's tooltip and a link's tip set the
+/// point as the overlay's `inset_left` and `inset_top` and clamp nothing,
+/// so a tip opened near the right edge ran off it.
+///
+/// The frame starts `TIP_REACH` left of and above the point and runs to
+/// the window's right and bottom edges. A spacer as long as the reach
+/// puts the tip at the point, and gives way when the tip would overrun
+/// the far edge. The frame is invisible to the pointer and takes none of
+/// the chrome floem's theme gives a tooltip; that stays on the tip.
+pub fn within_window<V: IntoView + 'static>(tip: V) -> Stack {
+    let spacer = |horizontal: bool| {
+        Empty::new().style(move |s| {
+            let s = s.flex_shrink(1.0_f32).pointer_events_none();
+            if horizontal {
+                s.width(TIP_REACH).min_width(0.0)
+            } else {
+                s.height(TIP_REACH).min_height(0.0)
+            }
+        })
+    };
+    Stack::vertical((
+        spacer(false),
+        Stack::horizontal((
+            spacer(true),
+            tip.into_view().style(|s| s.flex_shrink(0.0_f32)),
+        ))
+        .style(|s| s.flex_shrink(0.0_f32).pointer_events_none()),
+    ))
+    .debug_name("within window")
+    .style(|s| {
+        s.margin_left(-TIP_REACH)
+            .margin_top(-TIP_REACH)
+            .inset_right(0.0)
+            .inset_bottom(0.0)
+            .padding(0.0)
+            .border(0.0)
+            .background(Color::TRANSPARENT)
+            .apply_box_shadows(Vec::new())
+            .pointer_events_none()
+    })
 }
 
 /// The tooltip itself, for a view that shows one on its own terms.
@@ -2026,6 +2074,60 @@ pub fn ask_box(app: AppState, state: ReviewState) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use floem::action::add_overlay;
+    use floem::headless::{HeadlessHarness, TestRoot};
+
+    use crate::review::header::tests::{named, rect};
+
+    /// Where a tip opened at `at` in a 400 by 300 window lands, and the
+    /// view under a point beside it. The frame is given the class and
+    /// place floem's tooltip gives it.
+    fn tip_at(at: (f64, f64)) -> (Rect, Option<floem::ViewId>) {
+        let root = TestRoot::new();
+        let page = Empty::new().debug_name("page").style(|s| s.size_full());
+        let mut harness = HeadlessHarness::new_with_size(root, page, 400.0, 300.0);
+        add_overlay(
+            within_window(tip_body(|| "Agents".to_string()).debug_name("tip"))
+                .class(TooltipClass)
+                .style(move |s| s.inset_left(at.0).inset_top(at.1)),
+        );
+        for _ in 0..2 {
+            harness.rebuild();
+            harness.paint();
+        }
+        let page = named(harness.root_id(), "page").unwrap();
+        let hit = harness
+            .element_id_at(5.0, 5.0)
+            .map(|e| e.owning_id())
+            .filter(|id| *id == page);
+        (rect(&harness, "tip"), hit)
+    }
+
+    #[test]
+    fn a_tip_stays_inside_the_window() {
+        let (tip, hit) = tip_at((20.0, 20.0));
+        assert_eq!(
+            (tip.x0, tip.y0),
+            (20.0, 20.0),
+            "room to spare: at the point"
+        );
+        assert!(hit.is_some(), "the frame lets the pointer through");
+
+        let (tip, _) = tip_at((390.0, 20.0));
+        assert_eq!(
+            (tip.x1.round(), tip.y0),
+            (400.0, 20.0),
+            "moved left to the right edge"
+        );
+
+        let (tip, _) = tip_at((20.0, 295.0));
+        assert_eq!(
+            (tip.x0, tip.y1.round()),
+            (20.0, 300.0),
+            "moved up to the bottom edge"
+        );
+    }
 
     #[test]
     fn a_hunks_last_lines_are_numbered_on_the_side_they_count_in() {

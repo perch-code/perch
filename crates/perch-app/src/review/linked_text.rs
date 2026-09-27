@@ -59,7 +59,7 @@ use floem::ui_events::pointer::{PointerButton, PointerButtonEvent, PointerEvent,
 use floem::views::{rich_text, Decorators};
 use floem::{IntoView, Renderer, View, ViewId};
 
-use crate::review::cards::tip_body;
+use crate::review::cards::{tip_body, within_window};
 use crate::theme;
 use crate::ui::widgets::{copy_to_clipboard, open_in_browser};
 use crate::ui::OS_MOD;
@@ -967,7 +967,8 @@ impl View for LinkedText {
         };
         let at = self.id.get_visual_origin() + point.to_vec2() + (0.0, 14.0);
         let overlay = add_overlay(
-            tip_body(move || text.clone()).style(move |s| s.inset_left(at.x).inset_top(at.y)),
+            within_window(tip_body(move || text.clone()))
+                .style(move |s| s.inset_left(at.x).inset_top(at.y)),
         );
         overlay.set_style_parent(self.id);
         *self.tip.borrow_mut() = Some(overlay);
