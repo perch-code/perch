@@ -1159,6 +1159,10 @@ pub struct ReviewState {
     /// keyboard back to when it shuts.
     pub agents_dropdown_open: RwSignal<bool>,
     pub agents_dropdown_opener: RwSignal<Option<floem::ViewId>>,
+    /// The plan usage popover under the bar's gauge, and what to give the
+    /// keyboard back to when it shuts.
+    pub usage_open: RwSignal<bool>,
+    pub usage_opener: RwSignal<Option<floem::ViewId>>,
     pub submit_review_focused: RwSignal<bool>,
     pub submit_review_autofocus: RwSignal<bool>,
     /// The backend-assigned attempt currently in flight, if any.
@@ -1618,6 +1622,8 @@ impl ReviewState {
             submit_review_event: RwSignal::new(PullReviewEvent::Comment),
             agents_dropdown_open: RwSignal::new(false),
             agents_dropdown_opener: RwSignal::new(None),
+            usage_open: RwSignal::new(false),
+            usage_opener: RwSignal::new(None),
             submit_review_focused: RwSignal::new(false),
             submit_review_autofocus: RwSignal::new(true),
             submit_review_pending: RwSignal::new(None),

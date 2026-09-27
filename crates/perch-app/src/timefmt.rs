@@ -80,6 +80,25 @@ pub fn short(when: Timestamp, now: Timestamp) -> String {
     }
 }
 
+/// When something ahead of `now` happens, as a clock would say it: "3:00
+/// PM" later today, "tomorrow 9:00 AM", "Sat 9:58 AM" within the week,
+/// "Oct 3" after that.
+pub fn ahead(when: Timestamp, now: Timestamp) -> String {
+    ahead_in(when, now, jiff::tz::TimeZone::system())
+}
+
+fn ahead_in(when: Timestamp, now: Timestamp, tz: jiff::tz::TimeZone) -> String {
+    let when = when.to_zoned(tz.clone());
+    let now = now.to_zoned(tz);
+    let clock = when.strftime("%-I:%M %p").to_string();
+    match days_between(&now, &when) {
+        d if d <= 0 => clock,
+        1 => format!("tomorrow {clock}"),
+        2..=6 => format!("{} {clock}", when.strftime("%a")),
+        _ => format!("{} {}", month_name(when.month()), when.day()),
+    }
+}
+
 fn month_name(m: i8) -> &'static str {
     const NAMES: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -93,6 +112,19 @@ pub(crate) mod tests {
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn ahead_says_the_time_the_day_or_the_date() {
+        let utc = jiff::tz::TimeZone::UTC;
+        let now = ts("2026-09-27T17:00:00Z");
+        assert_eq!(ahead_in(ts("2026-09-27T22:00:00Z"), now, utc.clone()), "10:00 PM");
+        assert_eq!(
+            ahead_in(ts("2026-09-28T09:05:00Z"), now, utc.clone()),
+            "tomorrow 9:05 AM"
+        );
+        assert_eq!(ahead_in(ts("2026-10-03T16:58:29Z"), now, utc.clone()), "Sat 4:58 PM");
+        assert_eq!(ahead_in(ts("2026-10-12T00:00:00Z"), now, utc), "Oct 12");
     }
 
     #[test]

@@ -188,6 +188,8 @@ pub const MAIN_MIN_WIDTH: f64 = 620.0;
 /// and as tall as this before it scrolls.
 pub const AGENTS_DROPDOWN_WIDTH: f64 = 430.0;
 pub const AGENTS_DROPDOWN_MAX_HEIGHT: f64 = 460.0;
+/// The plan usage popover under the bar's gauge.
+pub const USAGE_POPOVER_WIDTH: f64 = 320.0;
 /// The strip at the top of the drawer, where the traffic lights sit.
 ///
 /// The lights and the scope controls share this strip, and the bar over

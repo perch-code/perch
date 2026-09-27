@@ -11,6 +11,7 @@ mod discover;
 mod interactive;
 mod parse;
 mod review;
+pub mod usage;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -902,6 +903,7 @@ impl Parser {
         }
         let value = serde_json::from_str::<serde_json::Value>(line)
             .map_err(|error| format!("The agent emitted malformed JSON: {error}"))?;
+        usage::observe(self.backend(), &value);
         if let Some(conversation) = self.conversation.as_mut() {
             let reply = conversation.after_line(&value);
             self.outbox.extend(reply.writes);
@@ -952,6 +954,13 @@ impl Parser {
                 events
             }
             ParserKind::Codex(p) => p.parse_line(line),
+        }
+    }
+
+    fn backend(&self) -> Backend {
+        match self.kind {
+            ParserKind::Claude { .. } => Backend::ClaudeCode,
+            ParserKind::Codex(_) => Backend::Codex,
         }
     }
 

@@ -2,12 +2,12 @@
 //!
 //! The bar is the window's title bar. It holds what is open, the switch
 //! between Conversation and Code, and the things a reader reaches for from
-//! anywhere in an item: GitHub, an agent's review of the branch, every
-//! item's agents, the item's one action (Submit review, or Start work on
-//! an issue), the whole window, and closing the item. Everything else
-//! about the item, its state and number, branches, checks and worktree,
-//! and what GitHub says about it, is `review::summary`, under
-//! Conversation's title.
+//! anywhere in an item: GitHub, plan usage, an agent's review of the
+//! branch, every item's agents, the item's one action (Submit review, or
+//! Start work on an issue), the whole window, and closing the item.
+//! Everything else about the item, its state and number, branches, checks
+//! and worktree, and what GitHub says about it, is `review::summary`,
+//! under Conversation's title.
 
 use std::rc::Rc;
 
@@ -131,11 +131,13 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
-/// What is reached for from anywhere in an item: GitHub, every item's
-/// agents, the item's one action, the whole window, and closing it.
+/// What is reached for from anywhere in an item: GitHub, plan usage,
+/// every item's agents, the item's one action, the whole window, and
+/// closing it.
 fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         github_button(state),
+        crate::ui::usage::button(app, state, backend.clone()),
         crate::ui::agents::dropdown::button(app, state, backend.clone()),
         primary_action(app, state, backend.clone()),
         expand_button(app),

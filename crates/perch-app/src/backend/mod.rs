@@ -371,6 +371,9 @@ pub enum Command {
         approval_id: String,
         answer: ApprovalAnswer,
     },
+    /// Ask the agent CLIs for plan usage again, unless they were asked a
+    /// minute ago.
+    RefreshUsage,
     /// A repository's grants, for the item's summary.
     ListGrants {
         repo: String,
@@ -714,6 +717,8 @@ pub enum Event {
     Notice(String),
     /// What config.toml says about the agent, for the pickers.
     AgentConfig(perch_github::AgentConfig),
+    /// How much of each CLI's plan limits is used, whenever that changes.
+    Usage(perch_agent::usage::Board),
     /// Every thread on an item. Whole, like `Items`.
     CommentThreads {
         item_id: String,
@@ -2559,6 +2564,10 @@ impl Backend {
         });
     }
 
+    pub fn refresh_usage(&self) {
+        let _ = self.commands.send(Command::RefreshUsage);
+    }
+
     pub fn list_grants(&self, repo: &str) {
         let _ = self.commands.send(Command::ListGrants {
             repo: repo.to_string(),
@@ -2869,6 +2878,37 @@ impl Backend {
     }
 }
 
+/// How often the agent CLIs are asked for plan usage. Runs report it too,
+/// so this is the most it can lag while nothing runs.
+const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Ask every installed CLI for plan usage now and on a timer, and send the
+/// board on whenever it changes, by a poll or by a run.
+fn watch_usage(agent: &perch_github::AgentConfig, data_root: &Path, events: &EventSender<Event>) {
+    let installed = |binary: &str, models: &[String]| {
+        (!models.is_empty()).then(|| PathBuf::from(binary))
+    };
+    perch_agent::usage::keep_fresh(perch_agent::usage::Poll {
+        claude: installed(&agent.binary, &agent.models),
+        codex: installed(&agent.codex.binary, &agent.codex.models),
+        cwd: data_root.to_path_buf(),
+        every: USAGE_POLL_INTERVAL,
+    });
+    let mut board = perch_agent::usage::subscribe();
+    let events = events.clone();
+    tokio::spawn(async move {
+        loop {
+            let now = board.borrow_and_update().clone();
+            if events.send(Event::Usage(now)).is_err() {
+                return;
+            }
+            if board.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+}
+
 /// Start the worker thread. Returns a handle windows are opened from, and
 /// the events, each with the window whose view sent it.
 pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
@@ -3063,6 +3103,7 @@ async fn run(
     if let Ok(agent) = agents.await {
         config.agent = agent;
     }
+    watch_usage(&config.agent, &data_root, &events);
     let (claude_review, codex_review) = tokio::join!(
         perch_agent::detect_review_capability(
             perch_agent::Backend::ClaudeCode,
@@ -3709,6 +3750,7 @@ async fn run(
                     settle_approval(&ctx, &run_id, &approval_id, Settle::Answered(answer)).await;
                 });
             }
+            Command::RefreshUsage => perch_agent::usage::refresh_soon(),
             Command::ListGrants { repo } => send_grants(&ctx, &repo),
             Command::RevokeGrant { id } => {
                 if let Some(Ok(Some(repo))) = ctx.with_cache(|c| c.delete_grant(&id)) {

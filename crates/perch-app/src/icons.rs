@@ -222,6 +222,14 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M7.1 5.5 L4.9 10 M8.9 5.5 L11.1 10 M5.8 11.5 H10.2" fill="none"
                      stroke="{c}" stroke-width="1.3" stroke-linecap="round"/>"#
         ),
+        // A dial's arc with its needle past the middle.
+        SidebarIcon::Gauge => format!(
+            r#"<path d="M2.3 12 A5.9 5.9 0 0 1 13.7 12" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round"/>
+               <path d="M8 11.2 L10.9 7.1" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-linecap="round"/>
+               <circle cx="8" cy="11.2" r="1.2" fill="{c}"/>"#
+        ),
         SidebarIcon::Thread => format!(
             r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="{c}"
                      stroke="{c}" stroke-width="1.2" stroke-linejoin="round"/>"#
@@ -423,6 +431,8 @@ pub enum SidebarIcon {
     Stop,
     /// Three connected points: app-wide agent activity.
     Agents,
+    /// A dial with its needle: how much of a plan's limits is used.
+    Gauge,
     /// A speech bubble with a dot: a thread anchored here.
     Thread,
     Pin,
@@ -495,7 +505,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 50] = [
+    pub const ALL: [SidebarIcon; 51] = [
         SidebarIcon::Clear,
         SidebarIcon::Unfold,
         SidebarIcon::Copy,
@@ -529,6 +539,7 @@ impl SidebarIcon {
         SidebarIcon::Plus,
         SidebarIcon::Stop,
         SidebarIcon::Agents,
+        SidebarIcon::Gauge,
         SidebarIcon::Thread,
         SidebarIcon::Branch,
         SidebarIcon::Trash,

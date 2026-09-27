@@ -106,8 +106,8 @@ pub fn parse_line(line: &str) -> Vec<RunEvent> {
                 events
             }
         }
-        // thinking_tokens, task_summary, task_started and its progress,
-        // rate limits, and whatever comes next.
+        // thinking_tokens, task_summary, task_started and its progress, rate
+        // limits (the board in `usage` takes those), and whatever comes next.
         _ => Vec::new(),
     }
 }

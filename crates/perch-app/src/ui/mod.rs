@@ -9,6 +9,7 @@ pub mod notifications;
 pub mod sidebar;
 pub mod toast;
 pub mod titlebar;
+pub mod usage;
 pub mod widgets;
 
 use std::rc::Rc;
@@ -371,6 +372,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     && review.agents_dropdown_open.get_untracked()
                 {
                     agents::dropdown::close(review, true);
+                    return EventPropagation::Stop;
+                }
+                // And the usage popover.
+                if key.code == Code::Escape
+                    && key.modifiers.is_empty()
+                    && review.usage_open.get_untracked()
+                {
+                    usage::close(review, true);
                     return EventPropagation::Stop;
                 }
                 // Page Up and Page Down go to the top and the end of
@@ -799,6 +808,7 @@ fn empty_pane(
                 sidebar::lights_lane(state, theme::REVIEW_HEADER_PADDING)
                     .style(move |s| s.apply_if(state.sidebar_open.get(), |s| s.hide())),
                 Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
+                usage::button(state, review, backend.clone()),
                 agents::dropdown::button(state, review, backend),
             ))
             .debug_name("empty bar"),

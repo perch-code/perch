@@ -172,6 +172,7 @@ pub fn open(state: ReviewState, opener: Option<floem::ViewId>) {
         return;
     }
     crate::ui::agents::dropdown::close(state, false);
+    crate::ui::usage::close(state, false);
     state.review_opener.set(opener);
     state.review_open.set(true);
 }

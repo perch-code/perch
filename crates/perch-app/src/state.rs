@@ -109,6 +109,8 @@ pub struct AppState {
     /// The agent section of config.toml: binary, defaults, and the models
     /// the picker offers.
     pub agent: RwSignal<AgentConfig>,
+    /// How much of each agent CLI's plan limits is used, as last heard.
+    pub usage: RwSignal<perch_agent::usage::Board>,
     /// The review view's state, once the window has made it, so a menu
     /// that ends in something being opened can put the progress card up.
     pub review: RwSignal<Option<crate::review::model::ReviewState>>,
@@ -302,6 +304,7 @@ impl AppState {
             review_launch_errors: RwSignal::new(HashMap::new()),
             review_dashboard_loading: RwSignal::new(HashSet::new()),
             agent: RwSignal::new(AgentConfig::default()),
+            usage: RwSignal::new(Default::default()),
             hovered_item: RwSignal::new(None),
             item_filters: RwSignal::new(crate::items::ItemFilters::default()),
             renaming: RwSignal::new(None),
@@ -336,6 +339,7 @@ impl AppState {
         copy(self.notifications, data.notifications);
         copy(self.notifications_polled, data.notifications_polled);
         copy(self.agent, data.agent);
+        copy(self.usage, data.usage);
         copy(self.viewer, data.viewer);
         copy(self.agent_runs, data.agent_runs);
         copy(self.agent_run_events, data.agent_run_events);
@@ -2221,6 +2225,7 @@ impl AppState {
                 self.confirm_loss.set(Some(prompt));
             }
             Event::AgentConfig(agent) => self.agent.set(agent),
+            Event::Usage(board) => self.usage.set(board),
             Event::CommentThreads { .. }
             | Event::AgentStep { .. }
             | Event::AgentRuns { .. }
