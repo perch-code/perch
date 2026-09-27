@@ -121,7 +121,6 @@ async fn perch_never_runs_git_inside_a_populated_submodule() {
     branch_readiness(&git, &f.repo, "HEAD").await.unwrap();
     let preparer = f.preparer();
     preparer.is_dirty(&f.repo).await.unwrap();
-    preparer.ignored_entries(&f.repo).await.unwrap();
     git.run(
         Some(&f.repo),
         ["--no-optional-locks", "status", "--porcelain"],

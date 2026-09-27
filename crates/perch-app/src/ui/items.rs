@@ -20,7 +20,7 @@ use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{Container, Decorators, Empty, Label, Stack, TextInput, dyn_container};
 use perch_github::{Item, ItemSubject, SubjectState};
 
-use crate::backend::{Backend, LossAction, LossPrompt};
+use crate::backend::{Backend, LossPrompt};
 use crate::icons::{self, SidebarIcon};
 use crate::state::AppState;
 use crate::theme;
@@ -462,7 +462,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
                     }
                 } else {
                     state.confirm_loss.set(None);
-                    b.archive_item(&i, false);
+                    b.archive_item(&i);
                 }
             })
         });
@@ -577,46 +577,26 @@ enum Under {
 
 /// What a loss prompt says: the question, then what goes.
 fn loss_text(title: &str, prompt: &LossPrompt) -> (String, String, &'static str) {
-    match prompt.action {
-        LossAction::Delete => {
-            let commits = match prompt.commits {
-                1 => "1 commit".to_string(),
-                n => format!("{n} commits"),
-            };
-            (
-                format!("Delete {title} and its commits?"),
-                format!(
-                    "{} has {commits} that no other branch, tag or remote Perch knows of holds. \
-                     Deleting the branch loses them.",
-                    prompt.branch
-                ),
-                "Delete anyway",
-            )
-        }
-        LossAction::Archive => {
-            const SHOWN: usize = 10;
-            let mut names = prompt.ignored.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
-            if prompt.ignored.len() > SHOWN {
-                names.push_str(&format!(", and {} more", prompt.ignored.len() - SHOWN));
-            }
-            (
-                format!("Archive {title}?"),
-                format!(
-                    "Archiving removes the directory, and with it what git ignores there: {names}. \
-                     The branch and its commits stay."
-                ),
-                "Archive",
-            )
-        }
-    }
+    let commits = match prompt.commits {
+        1 => "1 commit".to_string(),
+        n => format!("{n} commits"),
+    };
+    (
+        format!("Delete {title} and its commits?"),
+        format!(
+            "{} has {commits} that no other branch, tag or remote Perch knows of holds. \
+             Deleting the branch loses them.",
+            prompt.branch
+        ),
+        "Delete anyway",
+    )
 }
 
-/// The backend's question before an archive or delete that would lose
-/// what git cannot bring back.
+/// The backend's question before a delete that would lose what git
+/// cannot bring back.
 fn loss_confirmation(state: AppState, backend: Rc<Backend>, title: String, prompt: LossPrompt) -> impl IntoView {
     let (question, what, go) = loss_text(&title, &prompt);
     let id = prompt.item_id.clone();
-    let action = prompt.action;
     Stack::vertical((
         Label::derived(move || question.clone()).style(|s| {
             s.font_size(theme::TEXT_META).font_weight(theme::weight_emphasis()).color(theme::FG).selectable(false)
@@ -627,18 +607,10 @@ fn loss_confirmation(state: AppState, backend: Rc<Backend>, title: String, promp
         Stack::horizontal((
             text_button(
                 move || go.to_string(),
-                match action {
-                    LossAction::Delete => SidebarIcon::Trash,
-                    LossAction::Archive => SidebarIcon::Folder,
-                },
+                SidebarIcon::Trash,
                 move || {
                     state.confirm_loss.set(None);
-                    match action {
-                        LossAction::Delete => backend.delete_item(&id, true),
-                        LossAction::Archive => {
-                            backend.archive_item(&id, true);
-                        }
-                    }
+                    backend.delete_item(&id, true);
                 },
             ),
             text_button(|| "Cancel".to_string(), SidebarIcon::Close, move || state.confirm_loss.set(None)),
@@ -665,24 +637,15 @@ mod tests {
 
     #[test]
     fn a_loss_prompt_names_what_goes() {
-        let mut prompt = LossPrompt {
+        let prompt = LossPrompt {
             item_id: "i".into(),
-            action: LossAction::Delete,
             branch: "chris/work".into(),
             commits: 1,
-            ignored: Vec::new(),
         };
         let (question, what, go) = loss_text("Work", &prompt);
         assert_eq!(question, "Delete Work and its commits?");
         assert!(what.starts_with("chris/work has 1 commit that"), "{what}");
         assert_eq!(go, "Delete anyway");
-
-        prompt.action = LossAction::Archive;
-        prompt.ignored = (0..12).map(|n| format!("f{n}")).collect();
-        let (_, what, _) = loss_text("Work", &prompt);
-        assert!(what.contains("f0, f1"), "{what}");
-        assert!(what.contains("f9, and 2 more."), "{what}");
-        assert!(!what.contains("f10"), "{what}");
     }
 
     #[test]

@@ -339,14 +339,11 @@ pub enum Command {
         navigation_id: u64,
     },
 
-    /// Leave Active. An owned checkout's directory goes too, refused when
-    /// there is uncommitted work in it; a checkout under a root is left
-    /// alone and only the row is hidden.
+    /// Remove Worktree: an owned checkout's directory goes, refused when
+    /// there is uncommitted work in it. The row moves to Recent.
     ArchiveItem {
         id: String,
         suspended_navigation: SuspendedNavigation,
-        /// The reader has seen what it loses (see `LossPrompt`) and said go.
-        accept_loss: bool,
     },
     /// Back to Active, and an owned checkout back on disk.
     RestoreItem {
@@ -620,26 +617,15 @@ pub struct FirstRun {
     pub effort: perch_agent::Effort,
 }
 
-/// What archiving or deleting an item would lose that git keeps no copy
-/// of, for the reader to see before it goes.
+/// What deleting an item would lose that git keeps no copy of, for the
+/// reader to see before it goes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LossPrompt {
     pub item_id: String,
-    pub action: LossAction,
     pub branch: String,
     /// Commits no other branch, tag or remote-tracking ref holds, which
-    /// deleting the branch takes with it. Delete only.
+    /// deleting the branch takes with it.
     pub commits: u64,
-    /// What git ignores in the directory, which removing it takes with
-    /// it. Archive only; Delete removes the directory as well, and says
-    /// so already.
-    pub ignored: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LossAction {
-    Archive,
-    Delete,
 }
 
 /// The meta key the scope the reader last picked from the menu is kept
@@ -2553,7 +2539,7 @@ impl Backend {
         navigation_id
     }
 
-    pub fn archive_item(&self, id: &str, accept_loss: bool) -> u64 {
+    pub fn archive_item(&self, id: &str) -> u64 {
         let suspended_navigation = self.navigation_requests.suspend_item(id);
         self.scope_requests.clear_item(id);
         let fence_id = suspended_navigation.fence_id;
@@ -2562,7 +2548,6 @@ impl Backend {
             .send(Command::ArchiveItem {
                 id: id.to_string(),
                 suspended_navigation: suspended_navigation.clone(),
-                accept_loss,
             })
             .is_err()
         {
@@ -3306,14 +3291,10 @@ async fn run(
     // stray and removed from under it. It is a directory listing and at
     // most a prune, so the first poll is not kept waiting.
     reconcile_checkouts(&ctx, reset).await;
-    {
-        // Then put away whatever nobody has opened in a fortnight. Archived,
-        // not deleted: the branch and the row stay, so restoring is a
-        // checkout. Only owned checkouts are touched, so this can run
-        // beside whatever the reader does next.
-        let ctx = ctx.clone();
-        tokio::spawn(async move { sweep_items(&ctx).await });
-    }
+    // Then remove the worktrees nobody needs: see `sweep_items`. Only
+    // owned checkouts are touched, so this can run beside whatever the
+    // reader does next. It runs again after every poll.
+    spawn_sweep(&ctx);
 
     // Scan roots before entering the command loop so local work is available
     // immediately. Pull-request lookups for those branches run separately.
@@ -3780,13 +3761,12 @@ async fn run(
             Command::ArchiveItem {
                 id,
                 suspended_navigation,
-                accept_loss,
             } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if let Err(message) =
-                        archive_item(&ctx, &id, Some(&suspended_navigation), accept_loss).await
+                        archive_item(&ctx, &id, Some(&suspended_navigation)).await
                     {
                         tracing::warn!(id, %message, "could not archive item");
                         let _ = ctx.events.send(Event::Notice(message));
@@ -4668,8 +4648,8 @@ fn spawn_calls(
     });
 }
 
-/// How long an owned checkout stays on disk without being opened before
-/// the sweep archives its item.
+/// How long a worktree Perch made stays on disk without being opened
+/// before the sweep removes it.
 const CHECKOUT_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 /// Everything an item operation needs, so a spawned task takes one clone
@@ -5389,6 +5369,11 @@ impl Ctx {
             .is_some_and(|g| g.as_ref().is_some_and(|c| c.item_id == item_id))
     }
 
+    /// Whether any window has the item open.
+    fn is_open_anywhere(&self, item_id: &str) -> bool {
+        self.views().iter().any(|ctx| ctx.is_open(item_id))
+    }
+
     /// Close the item in whichever windows have it open.
     async fn close_everywhere(&self, item_id: &str) {
         for ctx in self.views() {
@@ -5967,8 +5952,16 @@ async fn prune_every_clone(ctx: &Ctx) {
     }
 }
 
-/// Archive items whose owned checkout has sat unopened for too long. An
-/// issue, or a checkout under a root, is archived only by hand.
+/// Remove Perch's own worktrees once they are done with. One is removed
+/// when it is `removable` and either its pull request has merged or
+/// closed, or it has gone `CHECKOUT_MAX_AGE` unopened; `last_opened_at`
+/// is set when the item is made, so a new one has the whole fortnight.
+/// The branch and its commits stay in the repository, and the row moves
+/// to Recent, from where Restore Worktree brings it back.
+///
+/// A worktree under a root is the reader's and is never touched. One open
+/// in a window, or with an agent working in it, waits for a later sweep,
+/// as does one that turned dirty since it was looked at.
 ///
 /// Age is the row's `last_opened_at`, which is what the rule is about. A
 /// directory's mtime is not: an agent reading it, or a fetch touching
@@ -5981,21 +5974,146 @@ async fn sweep_items(ctx: &Ctx) {
     let cutoff =
         Timestamp::now() - jiff::SignedDuration::try_from(CHECKOUT_MAX_AGE).unwrap_or_default();
 
-    for item in &items {
-        let owned = item.checkout.as_ref().is_some_and(|c| c.owned && c.on_disk);
-        // A branch with no pull request or issue behind it can hold the
-        // only copy of someone's work, ignored files and all. It is put
-        // away when the reader says so, never by age.
-        let branch = item.subject.is_none();
-        if !owned || branch || item.is_archived() || item.last_opened_at > cutoff {
+    for item in items.iter().filter(|item| sweep_due(item, cutoff)) {
+        if ctx.is_open_anywhere(&item.id) || ctx.runs.has_active_owner(&item.id, None) {
             continue;
         }
-        match archive_item(ctx, &item.id, None, false).await {
-            Ok(()) => tracing::info!(id = %item.id, "archived a stale checkout"),
-            // Dirty, most likely. It stays; the reader has work in it.
-            Err(message) => tracing::info!(id = %item.id, %message, "left a stale checkout alone"),
+        match removable(ctx, item).await {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(message) => {
+                tracing::info!(id = %item.id, %message, "could not tell whether a checkout is removable");
+                continue;
+            }
+        }
+        match archive_item(ctx, &item.id, None).await {
+            Ok(()) => tracing::info!(id = %item.id, "removed a worktree nobody needs"),
+            // Dirty since, most likely. It stays; the next sweep looks again.
+            Err(message) => tracing::info!(id = %item.id, %message, "left a worktree alone"),
         }
     }
+}
+
+/// Whether the sweep should look at the item: a worktree Perch made, on
+/// disk, whose pull request has closed or which has gone unopened since
+/// `cutoff`.
+fn sweep_due(item: &Item, cutoff: Timestamp) -> bool {
+    let owned = item.checkout.as_ref().is_some_and(|c| c.owned && c.on_disk);
+    owned && !item.is_archived() && (item.is_closed() || item.last_opened_at <= cutoff)
+}
+
+/// Whether removing the worktree loses nothing git doesn't hold: no
+/// modified or untracked files, and no commits on its branch that no
+/// other branch, tag, remote or fetched pull request head has. What git
+/// ignores doesn't count, as `git worktree remove` doesn't count it.
+async fn removable(ctx: &Ctx, item: &Item) -> Result<bool, String> {
+    let Some(checkout) = item.checkout.as_ref() else {
+        return Ok(false);
+    };
+    if checkout.path.join(".git").exists()
+        && ctx
+            .preparer
+            .is_dirty(&checkout.path)
+            .await
+            .map_err(|e| e.to_string())?
+    {
+        return Ok(false);
+    }
+    let Some(repo) = owned_repo(ctx.preparer.store(), item) else {
+        return Ok(false);
+    };
+    let commits = ctx
+        .preparer
+        .commits_only_on(&repo, &checkout.branch)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(commits == 0)
+}
+
+/// Ask GitHub again after the pull request of each worktree Perch made
+/// whose pull request was open when last seen, so one merged or closed
+/// without Perch looking is seen by the sweep. Conditional, so a pull
+/// request that hasn't moved costs a 304. Only the state is taken: the
+/// checks and the review on the row are the open item's to refresh.
+async fn refresh_checkout_pulls(ctx: &Ctx) {
+    let Some(github) = ctx.github() else {
+        return;
+    };
+    let items = ctx
+        .with_cache(|c| c.load_items().ok())
+        .flatten()
+        .unwrap_or_default();
+    let mut changed = false;
+    for item in items {
+        let owned = item.checkout.as_ref().is_some_and(|c| c.owned && c.on_disk);
+        let Some(pr) = item.pull_request().filter(|pr| pr.is_open()) else {
+            continue;
+        };
+        if !owned || item.is_archived() || ctx.is_open_anywhere(&item.id) {
+            continue;
+        }
+        let fresh = match github.fetch_pull_request(&pr.repo_full_name, pr.number).await {
+            Ok(fresh) => fresh,
+            Err(e) => {
+                tracing::debug!(id = %item.id, error = %e, "could not ask after a checkout's pull request");
+                if matches!(e, perch_github::Error::RateLimited { .. }) {
+                    break;
+                }
+                continue;
+            }
+        };
+        if fresh.is_open() {
+            continue;
+        }
+        let _lifecycle = ctx.item_lifecycle.lock().await;
+        let Some(mut item) = ctx.item(&item.id) else {
+            continue;
+        };
+        if let Some(ItemSubject::PullRequest(pr)) = item.subject.as_mut() {
+            pr.state = fresh.state.clone();
+            pr.merged = fresh.merged;
+            pr.merged_at = fresh.merged_at;
+            pr.merged_by = fresh.merged_by.clone();
+            pr.closed_at = fresh.closed_at;
+            pr.updated_at = fresh.updated_at.or(pr.updated_at);
+        }
+        if ctx.with_cache(|c| c.update_item(&item)).is_some() {
+            changed = true;
+        }
+    }
+    if changed {
+        ctx.send_polled_items();
+    }
+}
+
+/// How often the sweep asks after the checkouts' pull requests. Each is
+/// a request, even a 304, and they queue behind the reader's own.
+const CHECKOUT_PULL_REFRESH: Duration = Duration::from_secs(5 * 60);
+
+/// The sweep after a poll, one at a time: a slow one is not stacked on by
+/// the next poll. The pull requests are asked after first, at most every
+/// `CHECKOUT_PULL_REFRESH`.
+fn spawn_sweep(ctx: &Ctx) {
+    static SWEEPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static REFRESHED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if SWEEPING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let refresh = REFRESHED.lock().is_ok_and(|mut at| {
+        let due = at.is_none_or(|at| at.elapsed() >= CHECKOUT_PULL_REFRESH);
+        if due {
+            *at = Some(std::time::Instant::now());
+        }
+        due
+    });
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        if refresh {
+            refresh_checkout_pulls(&ctx).await;
+        }
+        sweep_items(&ctx).await;
+        SWEEPING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
 }
 
 /// Leave Active. The row, branch, discussions, and run history stay. An
@@ -6004,7 +6122,6 @@ async fn archive_item(
     ctx: &Ctx,
     id: &str,
     suspended_navigation: Option<&SuspendedNavigation>,
-    accept_loss: bool,
 ) -> Result<(), String> {
     let lifecycle = ctx.item_lifecycle.lock().await;
     if suspended_navigation.is_some_and(|suspended| {
@@ -6036,28 +6153,8 @@ async fn archive_item(
                 }
                 return Err(format!("{} has uncommitted changes", checkout.branch));
             }
-            // A pull request's checkout can be made again from GitHub; a
-            // branch's ignored files, a `.env` or notes, cannot.
-            if item.subject.is_none() && !accept_loss {
-                let ignored = ctx
-                    .preparer
-                    .ignored_entries(&checkout.path)
-                    .await
-                    .unwrap_or_default();
-                if !ignored.is_empty() {
-                    if let Some(suspended) = suspended_navigation {
-                        ctx.navigation_requests.restore_suspended(suspended);
-                    }
-                    let _ = ctx.events.send(Event::ConfirmLoss(LossPrompt {
-                        item_id: id.to_string(),
-                        action: LossAction::Archive,
-                        branch: checkout.branch.clone(),
-                        commits: 0,
-                        ignored,
-                    }));
-                    return Ok(());
-                }
-            }
+            // What git ignores goes with the directory, as `git worktree
+            // remove` takes it: a build's output, and a `.env` too.
         }
     }
     if let Some(suspended) = suspended_navigation {
@@ -6253,10 +6350,8 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
             if commits > 0 {
                 let _ = ctx.events.send(Event::ConfirmLoss(LossPrompt {
                     item_id: id.to_string(),
-                    action: LossAction::Delete,
                     branch: checkout.branch.clone(),
                     commits,
-                    ignored: Vec::new(),
                 }));
                 return Ok(());
             }
@@ -9831,6 +9926,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
                     look_for_runs(&ctx).await;
                 });
             }
+            spawn_sweep(ctx);
 
             let _ = events.send(Event::Status(Status::Idle {
                 at: Timestamp::now(),
@@ -18862,7 +18958,7 @@ read eof || true
         let admission = ctx.runs.admit(run).unwrap();
         let lease = ctx.runs.start(admission).await.unwrap();
 
-        tokio::time::timeout(Duration::from_secs(2), archive_item(&ctx, &item.id, None, false))
+        tokio::time::timeout(Duration::from_secs(2), archive_item(&ctx, &item.id, None))
             .await
             .expect("archive did not wait on the active run")
             .unwrap();
@@ -19019,7 +19115,6 @@ read eof || true
             })
             .collect();
         assert_eq!(prompts.len(), 1, "{prompts:?}");
-        assert_eq!(prompts[0].action, LossAction::Delete);
         assert_eq!(prompts[0].commits, 1);
         assert!(ctx.item(&id).is_some(), "nothing was deleted yet");
         assert!(checkout.path.exists());
@@ -20038,5 +20133,201 @@ read eof || true
 
         let local = resolve_reference(&ctx, "local/notes", 5, Some(ItemKind::Issue)).await;
         assert!(local.unwrap_err().ends_with("is not on GitHub"));
+    }
+
+    /// Perch's clone of a/b, on `main` with a `.gitignore` naming `.env`,
+    /// where the store keeps it.
+    fn owned_clone(ctx: &Ctx, dir: &Path) -> PathBuf {
+        let repo = RepoId::parse("a/b").unwrap();
+        let source = dir.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-q", "-b", "main"]);
+        std::fs::write(source.join("one.txt"), "one\n").unwrap();
+        std::fs::write(source.join(".gitignore"), ".env\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-q", "-m", "one"]);
+        let bare = ctx.preparer.store().bare_path(&repo);
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(&source, &["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
+        bare
+    }
+
+    /// A worktree Perch made in the clone on a new `branch` at `main`,
+    /// given to `item`, opened `days` ago, and the item in the cache.
+    fn owned_worktree(ctx: &Ctx, bare: &Path, branch: &str, mut item: Item, days: i64) -> (Item, PathBuf) {
+        let repo = RepoId::parse("a/b").unwrap();
+        let worktree = ctx.preparer.store().worktree_path(&repo, branch);
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        git(bare, &["worktree", "add", "-q", "-b", branch, worktree.to_str().unwrap(), "main"]);
+        let head = git(&worktree, &["rev-parse", "HEAD"]);
+        item.checkout = Some(ItemCheckout {
+            branch: branch.into(),
+            base_ref: "main".into(),
+            head_sha: head,
+            path: worktree.clone(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        item.last_opened_at = Timestamp::now() - jiff::SignedDuration::from_hours(24 * days);
+        ctx.with_cache(|c| {
+            if c.load_item(&item.id).unwrap().is_some() {
+                c.update_item(&item)
+            } else {
+                c.insert_item(&item)
+            }
+        })
+        .unwrap()
+        .unwrap();
+        (item, worktree)
+    }
+
+    fn branch_item(name: &str) -> Item {
+        let mut item = Item::new("a/b", Timestamp::now());
+        item.id = name.into();
+        item
+    }
+
+    fn removed(ctx: &Ctx, item: &Item, worktree: &Path) -> bool {
+        let archived = ctx.item(&item.id).unwrap().is_archived();
+        assert_eq!(archived, !worktree.exists(), "the row and the directory agree");
+        archived
+    }
+
+    /// The sweep removes a worktree Perch made once it is clean and its
+    /// pull request has merged, or once it has gone a fortnight unopened,
+    /// a branch of the reader's own included; the branch stays in the
+    /// clone. A new one, and one opened within the fortnight, stay.
+    #[tokio::test]
+    async fn the_sweep_removes_clean_worktrees_that_are_done_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let bare = owned_clone(&ctx, dir.path());
+
+        let mut merged = store_pull(&ctx, 7);
+        if let Some(ItemSubject::PullRequest(pr)) = merged.subject.as_mut() {
+            pr.state = "closed".into();
+            pr.merged = true;
+        }
+        let (merged, merged_dir) = owned_worktree(&ctx, &bare, "perch/pr-7", merged, 0);
+        let (open, open_dir) = owned_worktree(&ctx, &bare, "perch/pr-8", store_pull(&ctx, 8), 0);
+        let (old, old_dir) = owned_worktree(&ctx, &bare, "chris/old", branch_item("old"), 15);
+        let (recent, recent_dir) = owned_worktree(&ctx, &bare, "chris/recent", branch_item("recent"), 13);
+        let (fresh, fresh_dir) = owned_worktree(&ctx, &bare, "chris/fresh", branch_item("fresh"), 0);
+        let (ignored, ignored_dir) = owned_worktree(&ctx, &bare, "chris/env", branch_item("env"), 15);
+        std::fs::write(ignored_dir.join(".env"), "SECRET=1\n").unwrap();
+
+        sweep_items(&ctx).await;
+
+        assert!(removed(&ctx, &merged, &merged_dir), "merged and clean");
+        assert!(!removed(&ctx, &open, &open_dir), "open and new");
+        assert!(removed(&ctx, &old, &old_dir), "a branch unopened for fifteen days");
+        assert!(!removed(&ctx, &recent, &recent_dir), "thirteen days");
+        assert!(!removed(&ctx, &fresh, &fresh_dir), "a new worktree");
+        assert!(removed(&ctx, &ignored, &ignored_dir), "what git ignores doesn't count");
+        for branch in ["perch/pr-7", "chris/old", "chris/env"] {
+            assert_eq!(git(&bare, &["branch", "--list", branch]).trim_start_matches(['*', '+', ' ']), branch);
+        }
+    }
+
+    /// The sweep never takes what git doesn't hold, nor a worktree the
+    /// reader or an agent is using, nor one under a root.
+    #[tokio::test]
+    async fn the_sweep_leaves_worktrees_with_work_in_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let bare = owned_clone(&ctx, dir.path());
+
+        let (dirty, dirty_dir) = owned_worktree(&ctx, &bare, "chris/dirty", branch_item("dirty"), 15);
+        std::fs::write(dirty_dir.join("one.txt"), "changed\n").unwrap();
+        let (untracked, untracked_dir) = owned_worktree(&ctx, &bare, "chris/new-file", branch_item("new-file"), 15);
+        std::fs::write(untracked_dir.join("notes.txt"), "mine\n").unwrap();
+        let (unpushed, unpushed_dir) = owned_worktree(&ctx, &bare, "chris/unpushed", branch_item("unpushed"), 15);
+        std::fs::write(unpushed_dir.join("two.txt"), "two\n").unwrap();
+        git(&unpushed_dir, &["add", "."]);
+        git(&unpushed_dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "two"]);
+        let (scanned, scanned_dir) = owned_worktree(&ctx, &bare, "chris/scanned", branch_item("scanned"), 15);
+        let mut theirs = scanned.clone();
+        theirs.checkout.as_mut().unwrap().owned = false;
+        ctx.with_cache(|c| c.update_item(&theirs)).unwrap().unwrap();
+        let (working, working_dir) = owned_worktree(&ctx, &bare, "chris/working", branch_item("working"), 15);
+        let run = RunRecord {
+            id: "sweep-run".into(),
+            owner: RunOwner::Review {
+                item_id: working.id.clone(),
+                reviewer_run_id: "reviewer-run".into(),
+            },
+            purpose: RunPurpose::WorktreeReview,
+            backend: "codex".into(),
+            requested_model: "gpt".into(),
+            model: "gpt".into(),
+            requested_effort: "high".into(),
+            effort: "high".into(),
+            original_request: "Review this worktree".into(),
+            working_directory: Some(working_dir.to_string_lossy().into_owned()),
+            queued_at: Timestamp::now(),
+            ..RunRecord::default()
+        };
+        let admission = ctx.runs.admit(run).unwrap();
+        let lease = ctx.runs.start(admission).await.unwrap();
+
+        sweep_items(&ctx).await;
+
+        assert!(!removed(&ctx, &dirty, &dirty_dir), "a modified file");
+        assert!(!removed(&ctx, &untracked, &untracked_dir), "an untracked file");
+        assert!(!removed(&ctx, &unpushed, &unpushed_dir), "a commit no other ref has");
+        assert!(!removed(&ctx, &scanned, &scanned_dir), "the reader's own checkout");
+        assert!(!removed(&ctx, &working, &working_dir), "an agent working in it");
+
+        ctx.runs.transition(
+            "sweep-run",
+            RunStatus::Failed,
+            Some(TerminalReason::Other),
+            Some("fixture complete".into()),
+        );
+        ctx.runs.finish(lease);
+    }
+
+    /// The sweep asks after the pull request of each worktree Perch made
+    /// that was open when last seen, and takes only its state.
+    #[tokio::test]
+    async fn a_checkouts_pull_request_merged_elsewhere_is_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let merged = PULL_7
+            .replace(r#""state":"open""#, r#""state":"closed","merged":true,"merged_at":"2026-09-20T10:00:00Z""#);
+        let merged: &'static str = Box::leak(merged.into_boxed_str());
+        let (base, paths) = serve_by_path(move |path| {
+            if path.starts_with("/repos/a/b/pulls/7") {
+                ("200 OK", merged.to_string())
+            } else {
+                ("404 Not Found", r#"{"message":"Not Found"}"#.into())
+            }
+        });
+        let (ctx, _received) = ctx(dir.path(), &base, &["a/b"]);
+        let mut item = store_pull(&ctx, 7);
+        item.checkout = Some(ItemCheckout {
+            branch: "perch/pr-7".into(),
+            base_ref: "main".into(),
+            head_sha: "h7".into(),
+            path: dir.path().join("wt"),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+        // Viewed, never checked out: not the sweep's.
+        store_pull(&ctx, 8);
+
+        refresh_checkout_pulls(&ctx).await;
+
+        assert!(ctx.item(&item.id).unwrap().is_closed());
+        assert_eq!(paths.lock().unwrap().len(), 1, "only the checkout's pull request was asked after");
+        assert!(sweep_due(&ctx.item(&item.id).unwrap(), Timestamp::now() - jiff::SignedDuration::from_hours(24 * 14)));
     }
 }

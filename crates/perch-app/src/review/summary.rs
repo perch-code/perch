@@ -593,7 +593,7 @@ fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             let archive = checkout.owned.then(|| {
                 let backend = backend.clone();
                 Rc::new(move || {
-                    backend.archive_item(&id, false);
+                    backend.archive_item(&id);
                 }) as Rc<dyn Fn()>
             });
 

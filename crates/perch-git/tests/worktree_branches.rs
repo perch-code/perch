@@ -345,22 +345,3 @@ async fn commits_only_on_counts_what_deleting_the_branch_loses() {
     git(&f.bare(), &["update-ref", "refs/perch/pull/9/head", &head]);
     assert_eq!(f.preparer.commits_only_on(&f.bare(), &cut.branch).await.unwrap(), 0);
 }
-
-#[tokio::test]
-async fn ignored_entries_are_what_git_would_not_keep() {
-    let f = Fixture::new();
-    let head = f.push_commit("pr");
-    let checkout = f.prepare(&head).await;
-    assert!(f.preparer.ignored_entries(&checkout.worktree).await.unwrap().is_empty());
-
-    std::fs::write(checkout.worktree.join(".gitignore"), ".env\ntarget/\n").unwrap();
-    std::fs::write(checkout.worktree.join(".env"), "SECRET=1").unwrap();
-    std::fs::create_dir_all(checkout.worktree.join("target/debug")).unwrap();
-    std::fs::write(checkout.worktree.join("target/debug/x"), "x").unwrap();
-    std::fs::write(checkout.worktree.join("notes.txt"), "untracked, not ignored").unwrap();
-
-    assert_eq!(
-        f.preparer.ignored_entries(&checkout.worktree).await.unwrap(),
-        vec![".env".to_string(), "target/".to_string()]
-    );
-}

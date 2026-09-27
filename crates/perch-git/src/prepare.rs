@@ -929,28 +929,6 @@ impl Preparer {
             .map_err(|_| Error::Io(format!("git rev-list --count said {:?}", out.trim())))
     }
 
-    /// What in a worktree git ignores, as `status` names it: a directory
-    /// that is ignored whole is one entry ending in `/`. Removing the
-    /// directory removes these too, and git keeps no copy of them.
-    pub async fn ignored_entries(&self, worktree: &Path) -> Result<Vec<String>, Error> {
-        let out = self
-            .git
-            .run(
-                Some(worktree),
-                ["status", "--porcelain", "-z", "--ignored=matching", "--untracked-files=normal"],
-                QUERY_TIMEOUT,
-            )
-            .await?;
-        let mut entries: Vec<String> = out
-            .split('\0')
-            .filter_map(|entry| entry.strip_prefix("!! "))
-            .map(str::to_string)
-            .collect();
-        entries.sort();
-        entries.dedup();
-        Ok(entries)
-    }
-
     /// Record a worktree as it is, as a commit, without touching it, as
     /// [`commit_worktree`] does. The commit is kept at `reference`, a ref
     /// under `refs/perch/`, so `gc` keeps it.
