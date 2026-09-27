@@ -199,7 +199,7 @@ pub fn editor_pane(
             // The find bar hangs from the top right of the code, over it and
             // outside the container that swaps editors, so it stays up with
             // its text and its keyboard from one file to the next.
-            find::bar(state),
+            find::bar(state, find::Pane::Code),
         ))
         .style(|s| {
             s.flex_grow(1.0_f32)

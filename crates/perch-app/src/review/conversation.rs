@@ -9,8 +9,8 @@
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{SignalGet, SignalWith};
-use floem::style::CursorStyle;
+use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
+use floem::style::{CursorStyle, Position};
 use floem::views::scroll::ScrollChanged;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
@@ -18,6 +18,7 @@ use floem::views::{
 
 use crate::backend::Backend;
 use crate::review::cards;
+use crate::review::{conversation_find, find};
 use crate::review::model::{ReviewFindingFilter, ReviewState};
 use crate::review::threads::{self, ThreadFace};
 use crate::review::timeline::{timeline, Card};
@@ -26,7 +27,8 @@ use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::clickable;
 
-/// One scrolling column, centred, on the page grey.
+/// One scrolling column, centred, on the page grey, with the find bar
+/// hung over its top right.
 pub fn view(
     app: AppState,
     state: ReviewState,
@@ -88,7 +90,7 @@ pub fn view(
                 .is_none_or(|item_id| app.review_groups_for(&item_id).is_empty())
     };
 
-    Container::new(
+    let page = Container::new(
         Stack::vertical((
             conversation_title(state),
             crate::review::summary::summary(app, state, summary_backend.clone(), open_item),
@@ -178,7 +180,23 @@ pub fn view(
             .min_height(0.0)
             .background(theme::CANVAS)
             .focusable()
-    })
+    });
+
+    // Cmd-F's bar looks through the page and scrolls it; its matches
+    // follow the query from here, and the page's text as it is laid out.
+    let page_id = page.id();
+    state.conversation_page.set(Some(page_id));
+    conversation_find::wire(state);
+    Stack::new((page, find::bar(state, find::Pane::Conversation)))
+        .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+            conversation_find::laid_out(state)
+        })
+        .on_cleanup(move || {
+            if state.conversation_page.get_untracked() == Some(page_id) {
+                state.conversation_page.set(None);
+            }
+        })
+        .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
 }
 
 fn finding_filters(app: AppState, state: ReviewState) -> impl IntoView {

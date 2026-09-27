@@ -19,6 +19,11 @@
 //! its keyboard; `wire` follows the file and the query from the review
 //! state, and the actions reach whichever editor is up through the live
 //! documents it registers.
+//!
+//! Conversation has the same bar over its page, with the same query and
+//! toggles; what it finds there, and how it walks it, is
+//! [`conversation_find`]'s. Each [`Pane`] has its bar up or down on its
+//! own.
 
 use std::sync::Arc;
 
@@ -36,6 +41,7 @@ use floem::views::{
 
 use crate::icons::SidebarIcon;
 use crate::review::cards::tip;
+use crate::review::conversation_find;
 use crate::review::doc::Doc;
 use crate::review::editor;
 use crate::review::hover;
@@ -52,6 +58,47 @@ pub struct Match {
     pub display: usize,
     pub start: usize,
     pub end: usize,
+}
+
+/// Which bar: the one over the code, or the one over Conversation's page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    Code,
+    Conversation,
+}
+
+impl Pane {
+    /// Whether this pane's bar is up.
+    fn open_signal(self, state: ReviewState) -> floem::reactive::RwSignal<bool> {
+        match self {
+            Pane::Code => state.find_open,
+            Pane::Conversation => state.conversation_find_open,
+        }
+    }
+
+    /// How many matches there are, tracked.
+    fn found(self, state: ReviewState) -> usize {
+        match self {
+            Pane::Code => state.find_matches.with(|m| m.len()),
+            Pane::Conversation => state.conversation_find_hits.with(|h| h.len()),
+        }
+    }
+
+    /// Which match the bar is on, tracked.
+    fn current(self, state: ReviewState) -> Option<usize> {
+        match self {
+            Pane::Code => state.find_current.get(),
+            Pane::Conversation => state.conversation_find_current.get(),
+        }
+    }
+
+    /// Why the pattern matched nothing, tracked.
+    fn error(self, state: ReviewState) -> Option<String> {
+        match self {
+            Pane::Code => state.find_error.get(),
+            Pane::Conversation => state.conversation_find_error.get(),
+        }
+    }
 }
 
 /// How the query is read: as itself or as a regular expression, and with
@@ -74,46 +121,65 @@ pub struct Options {
 /// pattern like `a*` has at every column, is no match: there is nothing
 /// to tint or select.
 pub fn matches(text: &str, query: &str, options: Options) -> Result<Vec<Match>, String> {
-    if query.is_empty() {
+    let Some(regex) = pattern(query, options)? else {
         return Ok(Vec::new());
+    };
+    let mut found = Vec::new();
+    // The lines as the document has them: without a carriage return, and
+    // without an empty last one after the final newline.
+    for (display, line) in text.lines().enumerate() {
+        for (start, end) in line_matches(&regex, line, options.whole_word) {
+            found.push(Match {
+                display,
+                start,
+                end,
+            });
+        }
+    }
+    Ok(found)
+}
+
+/// The query as `options` read it, ready to match: `None` for a query
+/// that is nothing, and the error in a line for a regular expression
+/// that does not parse.
+pub fn pattern(query: &str, options: Options) -> Result<Option<regex::Regex>, String> {
+    if query.is_empty() {
+        return Ok(None);
     }
     let pattern = if options.regex {
         query.to_string()
     } else {
         regex::escape(query)
     };
-    let regex = regex::RegexBuilder::new(&pattern)
+    regex::RegexBuilder::new(&pattern)
         .case_insensitive(!options.match_case)
         .build()
-        .map_err(|e| describe(&e))?;
+        .map(Some)
+        .map_err(|e| describe(&e))
+}
 
+/// Every match of `regex` along one line, as byte columns, the end
+/// exclusive.
+pub fn line_matches(regex: &regex::Regex, line: &str, whole_word: bool) -> Vec<(usize, usize)> {
     let mut found = Vec::new();
-    // The lines as the document has them: without a carriage return, and
-    // without an empty last one after the final newline.
-    for (display, line) in text.lines().enumerate() {
-        let mut at = 0usize;
-        while at <= line.len() {
-            let Some(m) = regex.find_at(line, at) else {
-                break;
-            };
-            let (start, end) = (m.start(), m.end());
-            let whole = !options.whole_word || is_whole_word(line, start, end);
-            if start < end && whole {
-                found.push(Match {
-                    display,
-                    start,
-                    end,
-                });
-                at = end;
-            } else {
-                // Past the first character of what was found, so that a
-                // match ruled out for the word around it, or one of no
-                // length, does not hide one starting a character on.
-                at = next_char(line, start);
-            }
+    let mut at = 0usize;
+    while at <= line.len() {
+        let Some(m) = regex.find_at(line, at) else {
+            break;
+        };
+        let (start, end) = (m.start(), m.end());
+        let whole = !whole_word || is_whole_word(line, start, end);
+        if start < end && whole {
+            found.push((start, end));
+            at = end;
+        } else {
+            // Past the first character of what was found, so that a
+            // match ruled out for the word around it, or one of no
+            // length, does not hide one starting a character on.
+            at = next_char(line, start);
         }
     }
-    Ok(found)
+    found
 }
 
 /// Whether the text around a match makes it a word of its own, by VS
@@ -323,11 +389,18 @@ pub fn wire(state: ReviewState) {
 /// typed over. What is selected in the editor, when it is on one line,
 /// or else the word the caret is on, becomes the query, as VS Code's
 /// does; read as a pattern, it is made to stand for itself.
-pub fn open(state: ReviewState, keyboard: bool) {
-    if !state.find_open.get_untracked() {
-        state.find_open.set(true);
+///
+/// Over Conversation's page, the query is what it was.
+pub fn open(state: ReviewState, pane: Pane, keyboard: bool) {
+    let open = pane.open_signal(state);
+    if !open.get_untracked() {
+        open.set(true);
     }
-    if let Some(text) = seed(state) {
+    let seed = match pane {
+        Pane::Code => seed(state),
+        Pane::Conversation => None,
+    };
+    if let Some(text) = seed {
         let text = if state.find_options.get_untracked().regex {
             regex::escape(&text)
         } else {
@@ -350,8 +423,13 @@ pub fn open(state: ReviewState, keyboard: bool) {
 }
 
 /// Escape, or Close: the bar away, its tints with it, and the keyboard
-/// back to the code. The match the bar was on stays selected.
-pub fn close(state: ReviewState) {
+/// back to the code, or the page. The match the bar was on over the
+/// code stays selected.
+pub fn close(state: ReviewState, pane: Pane) {
+    if pane == Pane::Conversation {
+        conversation_find::close(state);
+        return;
+    }
     let text_box = state.find_box.get_untracked();
     state.find_open.set(false);
     // The box goes with the bar, and a view taken down is told nothing;
@@ -373,8 +451,13 @@ pub fn close(state: ReviewState) {
 /// the selection, or the one before its start, wrapping at either end,
 /// as VS Code walks them. From a match the bar selected, that is the
 /// next or the one before; from wherever the reader has since clicked,
-/// it is the nearest from there.
-pub fn walk(state: ReviewState, forward: bool) {
+/// it is the nearest from there. Over the page, see
+/// [`conversation_find::walk`].
+pub fn walk(state: ReviewState, pane: Pane, forward: bool) {
+    if pane == Pane::Conversation {
+        conversation_find::walk(state, forward);
+        return;
+    }
     let found = state.find_matches.get_untracked();
     let Some(from) = caret(state, forward) else {
         return;
@@ -409,7 +492,7 @@ fn take_keyboard(id: floem::ViewId) {
 /// The keyboard back to the box after a click on one of the bar's
 /// tiles, which took it from the box as a click on anything does, so
 /// Enter and the next letters go on working.
-fn keep_keyboard(state: ReviewState) {
+pub(crate) fn keep_keyboard(state: ReviewState) {
     if let Some(id) = state.find_box.get_untracked() {
         id.request_focus();
     }
@@ -509,18 +592,22 @@ fn go_to(state: ReviewState, m: Match) {
 /// text, hung from the top right of the code, clear of the scrollbar,
 /// and nothing while there is not: it waits out a picture and no file at
 /// all, and is back over the next editor. The one view stays through a
-/// change of file, with its text and its keyboard.
-pub fn bar(state: ReviewState) -> impl IntoView {
-    let shown = Memo::new(move |_| {
-        state.find_open.get()
-            && state.active.with(Option::is_some)
-            && state.drawn_picture().is_none()
+/// change of file, with its text and its keyboard. Over Conversation's
+/// page, it is there while it is up.
+pub fn bar(state: ReviewState, pane: Pane) -> impl IntoView {
+    let shown = Memo::new(move |_| match pane {
+        Pane::Code => {
+            state.find_open.get()
+                && state.active.with(Option::is_some)
+                && state.drawn_picture().is_none()
+        }
+        Pane::Conversation => state.conversation_find_open.get(),
     });
     dyn_container(
         move || shown.get(),
         move |shown| {
             if shown {
-                body(state).into_any()
+                body(state, pane).into_any()
             } else {
                 Empty::new().into_any()
             }
@@ -534,13 +621,13 @@ pub fn bar(state: ReviewState) -> impl IntoView {
     })
 }
 
-fn body(state: ReviewState) -> impl IntoView {
+fn body(state: ReviewState, pane: Pane) -> impl IntoView {
     Stack::horizontal((
         query_box(state),
-        count(state),
-        arrow(state, false),
-        arrow(state, true),
-        close_button(state),
+        count(state, pane),
+        arrow(state, pane, false),
+        arrow(state, pane, true),
+        close_button(state, pane),
     ))
     // The keys of the bar, caught on the way down to the box: the box
     // keeps every key once it has the keyboard, and would take Enter for
@@ -554,11 +641,11 @@ fn body(state: ReviewState) -> impl IntoView {
             let plain = key.modifiers.is_empty();
             match key.code {
                 Code::Enter if plain || key.modifiers == Modifiers::SHIFT => {
-                    walk(state, plain);
+                    walk(state, pane, plain);
                     EventPropagation::Stop
                 }
                 Code::Escape if plain => {
-                    close(state);
+                    close(state, pane);
                     EventPropagation::Stop
                 }
                 _ => EventPropagation::Continue,
@@ -724,9 +811,9 @@ fn toggle_tile(
 /// "3 of 8", "? of 8" before the bar has walked to one, "No results",
 /// red when there was something to look for, or why a pattern did not
 /// parse.
-fn count(state: ReviewState) -> impl IntoView {
-    let text = move || count_text(state).0;
-    let red = move || count_text(state).1;
+fn count(state: ReviewState, pane: Pane) -> impl IntoView {
+    let text = move || count_text(state, pane).0;
+    let red = move || count_text(state, pane).1;
     let label = Label::derived(text)
         .debug_name("find-count")
         .style(move |s| {
@@ -752,19 +839,19 @@ fn count(state: ReviewState) -> impl IntoView {
 
 /// The count's words, and whether they are bad news. Nothing while the
 /// file is still on its way.
-fn count_text(state: ReviewState) -> (String, bool) {
-    if let Some(error) = state.find_error.get() {
+fn count_text(state: ReviewState, pane: Pane) -> (String, bool) {
+    if let Some(error) = pane.error(state) {
         return (error, true);
     }
-    if state.active_file().is_none() {
+    if pane == Pane::Code && state.active_file().is_none() {
         return (String::new(), false);
     }
-    let n = state.find_matches.with(|m| m.len());
+    let n = pane.found(state);
     if n == 0 {
         let empty = state.find_query.with(|q| q.is_empty());
         return ("No results".to_string(), !empty);
     }
-    match state.find_current.get() {
+    match pane.current(state) {
         Some(i) => (format!("{} of {n}", i + 1), false),
         None => (format!("? of {n}"), false),
     }
@@ -772,16 +859,16 @@ fn count_text(state: ReviewState) -> (String, bool) {
 
 /// Previous or next, as the strip's chevrons; greyed with nothing to
 /// walk.
-fn arrow(state: ReviewState, forward: bool) -> impl IntoView {
+fn arrow(state: ReviewState, pane: Pane, forward: bool) -> impl IntoView {
     let glyph = if forward {
         SidebarIcon::ChevronDown
     } else {
         SidebarIcon::ChevronUp
     };
-    let none = move || state.find_matches.with(|m| m.is_empty());
+    let none = move || pane.found(state) == 0;
     let tile = Container::new(sidebar_glyph(glyph, theme::FG_MUTED))
         .on_event_stop(el::Click, move |_, _| {
-            walk(state, forward);
+            walk(state, pane, forward);
             keep_keyboard(state);
         })
         .debug_name(if forward {
@@ -809,11 +896,11 @@ fn arrow(state: ReviewState, forward: bool) -> impl IntoView {
     tip(tile, text.to_string())
 }
 
-fn close_button(state: ReviewState) -> impl IntoView {
+fn close_button(state: ReviewState, pane: Pane) -> impl IntoView {
     let tile = Container::new(
         sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE).style(|s| s.size(11.0, 11.0)),
     )
-    .on_event_stop(el::Click, move |_, _| close(state))
+    .on_event_stop(el::Click, move |_, _| close(state, pane))
     .debug_name("find-close")
     .style(|s| {
         clickable(s)

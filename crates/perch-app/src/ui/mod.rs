@@ -401,32 +401,46 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 let typing = state.search_focused.get()
                     || review.composer_focused.get()
                     || review.review_open.get();
-                // The find bar's keys, from the code and from the bar alike:
-                // Cmd-F puts the bar up over the code, or gives it the
-                // keyboard again; Cmd-G and Cmd-Shift-G walk the matches,
-                // putting the bar up without the keyboard when it is down;
-                // Alt-Cmd-C, -W and -R are its toggles. Code only, with a
-                // file that has an editor to find anything in; a text box
-                // elsewhere keeps its own keys.
-                let finding = !typing
-                    && review.is_open()
-                    && review.tab.get() == crate::review::model::ItemTab::Code
-                    && review.active.with(Option::is_some)
-                    && review.drawn_picture().is_none();
-                if finding {
+                // The find bar's keys, from the page and from the bar alike:
+                // Cmd-F puts the bar up over the code or Conversation's
+                // page, or gives it the keyboard again; Cmd-G and
+                // Cmd-Shift-G walk the matches, putting the bar up without
+                // the keyboard when it is down; Alt-Cmd-C, -W and -R are its
+                // toggles. On Code, only with a file that has an editor to
+                // find anything in; a text box elsewhere keeps its own keys.
+                let finding = if typing || !review.is_open() {
+                    None
+                } else {
+                    match review.tab.get() {
+                        crate::review::model::ItemTab::Code => (review.active.with(Option::is_some)
+                            && review.drawn_picture().is_none())
+                        .then_some(crate::review::find::Pane::Code),
+                        crate::review::model::ItemTab::Conversation => {
+                            Some(crate::review::find::Pane::Conversation)
+                        }
+                    }
+                };
+                let find_open = match finding {
+                    Some(crate::review::find::Pane::Code) => review.find_open.get(),
+                    Some(crate::review::find::Pane::Conversation) => {
+                        review.conversation_find_open.get()
+                    }
+                    None => false,
+                };
+                if let Some(pane) = finding {
                     let cmd = key.modifiers == OS_MOD;
                     let cmd_shift = key.modifiers == OS_MOD | Modifiers::SHIFT;
-                    let alt_cmd = key.modifiers == OS_MOD | Modifiers::ALT && review.find_open.get();
+                    let alt_cmd = key.modifiers == OS_MOD | Modifiers::ALT && find_open;
                     match key.code {
                         Code::KeyF if cmd => {
-                            crate::review::find::open(review, true);
+                            crate::review::find::open(review, pane, true);
                             return EventPropagation::Stop;
                         }
                         Code::KeyG if cmd || cmd_shift => {
-                            if !review.find_open.get() {
-                                crate::review::find::open(review, false);
+                            if !find_open {
+                                crate::review::find::open(review, pane, false);
                             }
-                            crate::review::find::walk(review, cmd);
+                            crate::review::find::walk(review, pane, cmd);
                             return EventPropagation::Stop;
                         }
                         Code::KeyC if alt_cmd => {
@@ -517,12 +531,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     review.confirm_thread.set(None);
                     return EventPropagation::Stop;
                 }
-                // Then puts the find bar away, from the code; the bar takes
-                // its own Escape. A bar out of sight, on Conversation, is
-                // not what Escape is about.
-                if key.code == Code::Escape && key.modifiers.is_empty() && finding && review.find_open.get() {
-                    crate::review::find::close(review);
-                    return EventPropagation::Stop;
+                // Then puts the find bar away, from the code or the page;
+                // the bar takes its own Escape. A bar out of sight, on the
+                // other tab, is not what Escape is about.
+                if key.code == Code::Escape && key.modifiers.is_empty() && find_open {
+                    if let Some(pane) = finding {
+                        crate::review::find::close(review, pane);
+                        return EventPropagation::Stop;
+                    }
                 }
                 // Escape closes the panel under the editor, references or
                 // the call hierarchy, when nothing else claims it: a

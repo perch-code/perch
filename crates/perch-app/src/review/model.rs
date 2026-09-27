@@ -1525,6 +1525,21 @@ pub struct ReviewState {
     /// box takes it once it is in the tree, as the sidebar's search box
     /// does with `focus_search`.
     pub find_focus: RwSignal<bool>,
+    /// Whether the find bar is over Conversation's page. Its query and
+    /// toggles are the code's bar's; the box, its keyboard and the rest
+    /// above are shared too, since only one of the bars is ever built.
+    pub conversation_find_open: RwSignal<bool>,
+    /// Every match of the query on the page, in the order it reads; the
+    /// page's text tints them. Empty while the bar is closed.
+    pub conversation_find_hits: RwSignal<std::rc::Rc<Vec<crate::review::conversation_find::Hit>>>,
+    /// Which of `conversation_find_hits` the bar is on, when it has
+    /// walked to one.
+    pub conversation_find_current: RwSignal<Option<usize>>,
+    /// Why a pattern matched nothing on the page, when it did not parse.
+    pub conversation_find_error: RwSignal<Option<String>>,
+    /// The page's scroll while Conversation is up, for the bar to look
+    /// through, scroll and give the keyboard back to.
+    pub conversation_page: RwSignal<Option<floem::ViewId>>,
     /// Cmd-P's palette.
     pub go_to: crate::review::go_to::GoTo,
     /// The list an `@` in a composer puts up.
@@ -1728,6 +1743,11 @@ impl ReviewState {
             find_focused: RwSignal::new(false),
             find_box: RwSignal::new(None),
             find_focus: RwSignal::new(false),
+            conversation_find_open: RwSignal::new(false),
+            conversation_find_hits: RwSignal::new(std::rc::Rc::new(Vec::new())),
+            conversation_find_current: RwSignal::new(None),
+            conversation_find_error: RwSignal::new(None),
+            conversation_page: RwSignal::new(None),
             go_to: crate::review::go_to::GoTo::new(),
             mentions: crate::review::mention::Mentions::new(),
             recent_files: RwSignal::new(HashMap::new()),
@@ -1897,6 +1917,7 @@ impl ReviewState {
         if !self.find_matches.with_untracked(|m| m.is_empty()) {
             self.find_matches.set(Arc::new(Vec::new()));
         }
+        self.conversation_find_open.set(false);
         // Cmd-P's palette goes too; what each item had open stays.
         self.go_to.reset();
         // And an `@`'s list, with the people GitHub found in the item's

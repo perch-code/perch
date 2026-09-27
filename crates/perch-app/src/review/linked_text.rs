@@ -34,6 +34,10 @@
 //! line breaks, or tabs between the cells of a row. The view the drag
 //! began in keeps the focus and so owns the selection; each view paints
 //! what that one has taken of it while it has the focus.
+//!
+//! Cmd-F on Conversation looks through the linked text shown on the page,
+//! which is its prose, and each view tints what was found in it, under
+//! the selection, as the code's editor tints its matches.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -151,6 +155,9 @@ struct Leaf {
     taken: RefCell<Option<(ViewId, Range<usize>)>>,
     /// Whether the text may be selected, as the view last styled it.
     selectable: Cell<bool>,
+    /// The byte ranges the find bar found in the text, in order, and
+    /// which of them it is on.
+    found: RefCell<(Vec<Range<usize>>, Option<usize>)>,
 }
 
 thread_local! {
@@ -199,6 +206,67 @@ fn leaves_under(id: ViewId, out: &mut Vec<Rc<Leaf>>) {
             None => leaves_under(child, out),
         }
     }
+}
+
+/// The linked text views shown under `id`, in the order they read,
+/// whether or not they may be selected: what the find bar looks through.
+pub fn shown_under(id: ViewId) -> Vec<ViewId> {
+    fn walk(id: ViewId, out: &mut Vec<ViewId>) {
+        for child in id.children() {
+            if child.is_hidden() {
+                continue;
+            }
+            match leaf(child) {
+                Some(_) => out.push(child),
+                None => walk(child, out),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(id, &mut out);
+    out
+}
+
+/// `with` run on the text of the linked text view `id`, if it is one.
+pub fn with_text<T>(id: ViewId, with: impl FnOnce(&str) -> T) -> Option<T> {
+    leaf(id).map(|leaf| with(&leaf.text))
+}
+
+/// Tint `ranges` of the linked text view `id`'s text as found, the one
+/// at `current` as the one the find bar is on; none clears them.
+pub fn mark_found(id: ViewId, ranges: Vec<Range<usize>>, current: Option<usize>) {
+    let Some(leaf) = leaf(id) else { return };
+    let found = (ranges, current);
+    if *leaf.found.borrow() != found {
+        *leaf.found.borrow_mut() = found;
+        id.request_paint();
+    }
+}
+
+/// Where `range` of the linked text view `id`'s text is drawn, in the
+/// view's own coordinates: the box around every line of it. `None`
+/// before the view is laid out.
+pub fn range_rect(id: ViewId, range: Range<usize>) -> Option<Rect> {
+    let leaf = leaf(id)?;
+    leaf.with_shadow(|layout, origin| {
+        let selection = layout.selection_from_byte_range(range.start, range.end);
+        let mut bounds: Option<Rect> = None;
+        layout.selection_geometry_with_line_metrics(&selection, |x0, y0, x1, y1| {
+            let rect = Rect::new(x0, y0, x1, y1) + origin.to_vec2();
+            bounds = Some(bounds.map_or(rect, |b| b.union(rect)));
+        });
+        bounds
+    })
+    .flatten()
+}
+
+/// What the find bar tinted in the linked text view `id`: the ranges,
+/// and which is the one it is on.
+#[cfg(test)]
+pub(crate) fn found_in(id: ViewId) -> (Vec<Range<usize>>, Option<usize>) {
+    leaf(id)
+        .map(|leaf| leaf.found.borrow().clone())
+        .unwrap_or_default()
 }
 
 /// A rich text view with links, see the module.
@@ -253,6 +321,7 @@ pub fn linked_text(
         shadow: RefCell::new(None),
         taken: RefCell::new(None),
         selectable: Cell::new(true),
+        found: RefCell::new((Vec::new(), None)),
     });
     LEAVES.with_borrow_mut(|leaves| {
         leaves.retain(|_, leaf| leaf.strong_count() > 0);
@@ -799,8 +868,31 @@ impl View for LinkedText {
     }
 
     fn paint(&mut self, cx: &mut PaintCx) {
-        // The selection goes down first, under the rules and the glyphs:
-        // this view's own, or what a drag from another took of it.
+        // What the find bar found goes down first, then the selection,
+        // under the rules and the glyphs.
+        let found = self
+            .with_shadow(|layout, origin| {
+                let (ranges, current) = &*self.leaf.found.borrow();
+                let mut rects = Vec::new();
+                for (i, range) in ranges.iter().enumerate() {
+                    let color = if Some(i) == *current {
+                        theme::FIND_CURRENT_BG
+                    } else {
+                        theme::FIND_MATCH_BG
+                    };
+                    let selection = layout.selection_from_byte_range(range.start, range.end);
+                    layout.selection_geometry_with_line_metrics(&selection, |x0, y0, x1, y1| {
+                        rects.push((Rect::new(x0, y0, x1, y1) + origin.to_vec2(), color));
+                    });
+                }
+                rects
+            })
+            .unwrap_or_default();
+        for (rect, color) in found {
+            cx.fill(&rect, color, 0.0);
+        }
+        // The selection: this view's own, or what a drag from another
+        // took of it.
         let taken = self.leaf.taken.borrow().clone();
         let taken = taken.and_then(|(owner, range)| {
             (!range.is_empty() && cx.window_state.is_focused(owner)).then_some(range)
