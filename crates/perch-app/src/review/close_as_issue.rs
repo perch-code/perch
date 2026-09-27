@@ -236,8 +236,9 @@ fn form(
                 draft.body_typed = true;
             })
         },
+        move |editor| resizable_editor_box(body_grip(state), editor, true),
+        theme::PULL_BODY_MAX_HEIGHT,
     );
-    let body = resizable_editor_box(body_grip(state), body, true);
 
     let comment_id = item_id.clone();
     let comment = markdown_box(
@@ -249,11 +250,14 @@ fn form(
         "close-as-issue-comment",
         submit.clone(),
         move |text| update_draft(app, &comment_id, |draft| draft.comment = text),
-    );
-    let comment = editor_box(
-        comment,
-        || (theme::COMPOSER_MIN_HEIGHT, theme::COMPOSER_GROWN_HEIGHT),
-        true,
+        |editor| {
+            editor_box(
+                editor,
+                || (theme::COMPOSER_MIN_HEIGHT, theme::COMPOSER_GROWN_HEIGHT),
+                true,
+            )
+        },
+        theme::COMPOSER_MAX_HEIGHT,
     );
 
     let controls = {
@@ -355,9 +359,11 @@ fn refused(state: ReviewState, title: RwSignal<String>) -> impl IntoView {
 }
 
 /// A box of Markdown going to GitHub, so `@` offers people, and files as
-/// code spans. `Cmd-Enter` submits the form.
+/// code spans, under Write, Preview and the text styles. `boxed` puts the
+/// editor in its box, which Preview takes the place of, up to `tallest`.
+/// `Cmd-Enter` submits the form.
 #[allow(clippy::too_many_arguments)]
-fn markdown_box(
+fn markdown_box<B: IntoView + 'static>(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
@@ -366,6 +372,8 @@ fn markdown_box(
     debug: &'static str,
     submit: Rc<dyn Fn()>,
     on_text: impl Fn(String) + 'static,
+    boxed: impl FnOnce(AnyView) -> B,
+    tallest: f64,
 ) -> impl IntoView {
     use floem::views::editor::command::CommandExecuted;
 
@@ -387,7 +395,11 @@ fn markdown_box(
     let focus_mentioner = mentioner.clone();
     let blur_mentioner = mentioner.clone();
     let key_mentioner = mentioner.clone();
-    editor
+    let tabs = crate::review::markdown_toolbar::Tabs::new(editor.editor(), move || {
+        state.issue_closing.get()
+    });
+    let key_tabs = tabs.clone();
+    let editor = editor
         .pre_command(move |cmd| {
             if cmd_enter(&cmd) {
                 submit();
@@ -408,7 +420,7 @@ fn markdown_box(
                 phases: floem::context::Phases::CAPTURE,
             },
             move |_, key: &KeyboardEvent| {
-                if key_mentioner.key(key) {
+                if key_mentioner.key(key) || key_tabs.key(key) {
                     EventPropagation::Stop
                 } else {
                     EventPropagation::Continue
@@ -422,7 +434,8 @@ fn markdown_box(
                 .set_disabled(state.issue_closing.get())
         })
         .debug_name(debug)
-        .on_cleanup(move || mentioner.cleanup())
+        .on_cleanup(move || mentioner.cleanup());
+    tabs.view(state, boxed(editor.into_any()), tallest)
 }
 
 /// The body's box, which opens as tall as a pull request description's
@@ -845,6 +858,65 @@ mod tests {
         settle(&mut harness);
         assert_eq!(draft_of(app, "item-7").body, "Third body");
         assert!(find(harness.root_id(), "No claude").is_some());
+    }
+
+    fn all(id: floem::ViewId, text: &str, found: &mut Vec<floem::ViewId>) {
+        if id.debug_name().contains(text) {
+            found.push(id);
+        }
+        for child in id.children() {
+            all(child, text, found);
+        }
+    }
+
+    fn nth(harness: &HeadlessHarness, text: &str, n: usize) -> floem::ViewId {
+        let mut found = Vec::new();
+        all(harness.root_id(), text, &mut found);
+        found[n]
+    }
+
+    fn shown(harness: &HeadlessHarness, id: floem::ViewId) -> bool {
+        harness.get_layout_rect(id).height() > 0.0
+    }
+
+    /// The body and the comment each have Write, Preview and the styles,
+    /// as the composer has, and each bar works on its own box.
+    #[test]
+    fn both_boxes_have_the_styles_and_their_own_preview() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_on_pull();
+        let view = surface(app, state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 1000.0);
+        unfold(app, state, "item-7");
+        settle(&mut harness);
+        let mut bars = Vec::new();
+        all(harness.root_id(), "composer-format:bold", &mut bars);
+        assert_eq!(bars.len(), 2, "one bar over each box");
+
+        // The comment's Bold styles the comment and leaves the body.
+        let before = draft_of(app, "item-7");
+        let bold = nth(&harness, "composer-format:bold", 1);
+        let center = bold.get_visual_rect_no_clip().center();
+        harness.click(center.x, center.y);
+        settle(&mut harness);
+        let after = draft_of(app, "item-7");
+        assert_eq!(after.comment.len(), before.comment.len() + 4);
+        assert!(after.comment.contains("**"));
+        assert_eq!(after.body, before.body);
+
+        // The body's Preview draws the body and leaves the comment's box.
+        let preview = nth(&harness, "composer-tab:Preview", 0);
+        let center = preview.get_visual_rect_no_clip().center();
+        harness.click(center.x, center.y);
+        settle(&mut harness);
+        assert!(shown(&harness, nth(&harness, "composer-preview", 0)));
+        assert!(!shown(&harness, nth(&harness, "composer editor box", 0)));
+        assert!(shown(
+            &harness,
+            named(harness.root_id(), "close-as-issue-comment").unwrap()
+        ));
+        assert!(find(harness.root_id(), "Found in").is_some());
     }
 
     #[test]
