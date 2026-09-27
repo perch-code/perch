@@ -1633,6 +1633,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_style_buttons_edit_the_draft_and_preview_shows_it_read() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        state.open_composer(
+            None,
+            None,
+            "why?".into(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
+        let backend = Rc::new(crate::backend::Backend::detached());
+        let view = crate::review::threads::composer_view(
+            app,
+            state,
+            backend,
+            state.composer.get().unwrap(),
+            ThreadFace::Card,
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "composer-format:bold"));
+
+        // The caret is after the draft, so Bold leaves empty marks to
+        // type between.
+        let bold = find(harness.root_id(), "composer-format:bold").unwrap();
+        click_on(&mut harness, bold);
+        assert_eq!(state.composer_draft.get(), "why?****");
+
+        let preview = find(harness.root_id(), "composer-tab:Preview").unwrap();
+        click_on(&mut harness, preview);
+        assert!(shown(&harness, "composer-preview"));
+        assert!(!shown(&harness, "composer editor box"));
+        assert!(!shown(&harness, "composer-format:bold"), "no styles to put on in Preview");
+
+        let write = find(harness.root_id(), "composer-tab:Write").unwrap();
+        click_on(&mut harness, write);
+        assert!(!shown(&harness, "composer-preview"));
+        assert!(shown(&harness, "composer editor box"));
+        assert_eq!(state.composer_draft.get(), "why?****");
+
+        // Cmd-B again, with the caret still between the marks, takes
+        // them off; Cmd-Shift-P goes to Preview and back.
+        let cmd = |code, c: &str, shift: bool| {
+            let mut modifiers = crate::ui::OS_MOD;
+            if shift {
+                modifiers |= floem::prelude::Modifiers::SHIFT;
+            }
+            floem::event::Event::Key(floem::prelude::KeyboardEvent {
+                state: floem::prelude::KeyState::Down,
+                key: floem::prelude::Key::Character(c.into()),
+                code,
+                location: Default::default(),
+                modifiers,
+                repeat: false,
+                is_composing: false,
+            })
+        };
+        harness.dispatch_event(cmd(floem::prelude::Code::KeyB, "b", false));
+        harness.rebuild();
+        assert_eq!(state.composer_draft.get(), "why?");
+        harness.dispatch_event(cmd(floem::prelude::Code::KeyP, "p", true));
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "composer-preview"));
+        harness.dispatch_event(cmd(floem::prelude::Code::KeyP, "p", true));
+        harness.rebuild();
+        harness.paint();
+        assert!(!shown(&harness, "composer-preview"));
+    }
+
     /// The thread views build for Conversation and inline, from the same thread.
     #[test]
     fn a_thread_draws_with_both_faces() {

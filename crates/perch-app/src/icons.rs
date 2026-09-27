@@ -173,6 +173,48 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M2.8 7.2 H9.2 a4 4 0 0 1 4 4 V13" fill="none" stroke="{c}"
                      stroke-width="1.5" stroke-linecap="round"/>"#
         ),
+        // The text styles over a composer, drawn after GitHub's: a letter
+        // for each of the three that change a word, and for the rest a
+        // few lines with what starts each one.
+        SidebarIcon::Heading => format!(
+            r#"<path d="M3.8 2.8 V13.2 M12.2 2.8 V13.2 M3.8 8 H12.2" fill="none" stroke="{c}"
+                     stroke-width="1.6" stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::Bold => format!(
+            r#"<path d="M4.5 2.9 H8.7 a2.55 2.55 0 0 1 0 5.1 H4.5 Z M4.5 8 H9.4 a2.55 2.55 0 0 1 0 5.1 H4.5 Z"
+                     fill="none" stroke="{c}" stroke-width="1.9" stroke-linejoin="round"/>"#
+        ),
+        SidebarIcon::Italic => format!(
+            r#"<path d="M7 2.8 H12.2 M3.8 13.2 H9 M9.6 2.8 L6.4 13.2" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::Quote => format!(
+            r#"<path d="M2.8 4 V12 M6.2 4 H13.2 M6.2 8 H13.2 M6.2 12 H11" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::NumberedList => format!(
+            r#"<path d="M7 4 H13.5 M7 8 H13.5 M7 12 H13.5" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round"/>
+               <path d="M2.7 3.1 L3.7 2.5 V6.4" fill="none" stroke="{c}" stroke-width="1.1"
+                     stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M2.5 10.1 a1.05 1.05 0 0 1 2.1 0.1 c0 0.8 -2.1 1.6 -2.1 3 H4.7" fill="none"
+                     stroke="{c}" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
+        SidebarIcon::BulletList => format!(
+            r#"<circle cx="3.3" cy="4" r="1.05" fill="{c}"/>
+               <circle cx="3.3" cy="8" r="1.05" fill="{c}"/>
+               <circle cx="3.3" cy="12" r="1.05" fill="{c}"/>
+               <path d="M6.5 4 H13.5 M6.5 8 H13.5 M6.5 12 H13.5" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::TaskList => format!(
+            r#"<path d="M2.2 2.4 H6.2 V6.4 H2.2 Z M2.2 9.6 H6.2 V13.6 H2.2 Z" fill="none" stroke="{c}"
+                     stroke-width="1.2" stroke-linejoin="round"/>
+               <path d="M3.1 4.4 L3.9 5.2 L5.4 3.5" fill="none" stroke="{c}" stroke-width="1.1"
+                     stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M8.5 4.4 H13.8 M8.5 11.6 H13.8" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round"/>"#
+        ),
         // A pencil at a slant: edit.
         SidebarIcon::Pencil => format!(
             r#"<path d="M3 13 l0.9 -3.4 l7.2 -7.2 a1.2 1.2 0 0 1 1.7 0 l0.8 0.8 a1.2 1.2 0 0 1 0 1.7 l-7.2 7.2 z"
@@ -499,13 +541,30 @@ pub enum SidebarIcon {
     Reply,
     /// A cross in a ring: empty the search box.
     Clear,
+    /// An H, a B and an I: a heading, bold and italics.
+    Heading,
+    Bold,
+    Italic,
+    /// Lines behind a rule: a quote.
+    Quote,
+    /// Lines with a 1 and a 2, with dots, and with boxes: the three lists.
+    NumberedList,
+    BulletList,
+    TaskList,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 51] = [
+    pub const ALL: [SidebarIcon; 58] = [
+        SidebarIcon::Heading,
+        SidebarIcon::Bold,
+        SidebarIcon::Italic,
+        SidebarIcon::Quote,
+        SidebarIcon::NumberedList,
+        SidebarIcon::BulletList,
+        SidebarIcon::TaskList,
         SidebarIcon::Clear,
         SidebarIcon::Unfold,
         SidebarIcon::Copy,

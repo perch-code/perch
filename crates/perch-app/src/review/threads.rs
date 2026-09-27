@@ -388,8 +388,8 @@ pub fn composer_view(
 
     // The box is still while an issue comment is posting; the text stays
     // for the answer to keep or give back.
-    let still = editor.editor().read_only;
-    Effect::new(move |_| still.set(posting_here()));
+    let tabs = crate::review::markdown_toolbar::Tabs::new(editor.editor(), posting_here);
+    let key_tabs = tabs.clone();
     let editor = editor
         // Cmd-Enter sends, before the editor can take it for a line. While
         // the footer is asking whether to post, Enter alone is the yes;
@@ -447,6 +447,9 @@ pub fn composer_view(
                 // An `@`'s list has the keys it moves and takes by, and
                 // Escape puts it away before anything else.
                 if key_mentioner.key(key) {
+                    return floem::event::EventPropagation::Stop;
+                }
+                if key_tabs.key(key) {
                     return floem::event::EventPropagation::Stop;
                 }
                 if key.code == Code::Escape && key.modifiers.is_empty() {
@@ -554,7 +557,11 @@ pub fn composer_view(
             }),
         ))
         .style(|s| s.items_center().width_full().margin_bottom(8.0)),
-        resizable_editor_box(Grip::composer(state), editor, face == ThreadFace::Inline),
+        tabs.view(
+            state,
+            resizable_editor_box(Grip::composer(state), editor, face == ThreadFace::Inline),
+            theme::COMPOSER_MAX_HEIGHT,
+        ),
         composer_error_line(state),
         composer_footer(app, state, send, posting_here),
         resize_cursor_sheet(Grip::composer(state)),

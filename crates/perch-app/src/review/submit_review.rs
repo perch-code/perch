@@ -456,7 +456,7 @@ fn review_editor(
     state: ReviewState,
     backend: Rc<Backend>,
     submit: Rc<dyn Fn()>,
-) -> impl View {
+) -> impl IntoView {
     use floem::views::editor::command::CommandExecuted;
 
     use crate::review::threads::cmd_enter;
@@ -485,6 +485,8 @@ fn review_editor(
     let blur_mentioner = mentioner.clone();
     let key_mentioner = mentioner.clone();
     let key_submit = submit.clone();
+    let tabs = crate::review::markdown_toolbar::Tabs::new(editor.editor(), || false);
+    let key_tabs = tabs.clone();
     let editor = editor
         // Cmd-Enter submits, before the editor can take it for a line.
         .pre_command(move |cmd| {
@@ -516,7 +518,7 @@ fn review_editor(
                 phases: floem::context::Phases::CAPTURE,
             },
             move |_, key: &KeyboardEvent| {
-                if key_mentioner.key(key) {
+                if key_mentioner.key(key) || key_tabs.key(key) {
                     return EventPropagation::Stop;
                 }
                 if key.code == Code::Escape && key.modifiers.is_empty() {
@@ -548,11 +550,12 @@ fn review_editor(
             }
         }
     });
-    editor_box(editor, || (96.0, theme::COMPOSER_GROWN_HEIGHT), true).style(move |s| {
+    let boxed = editor_box(editor, || (96.0, theme::COMPOSER_GROWN_HEIGHT), true).style(move |s| {
         s.apply_if(state.submit_review_pending.with(Option::is_some), |s| {
             s.opacity(0.6_f32)
         })
-    })
+    });
+    tabs.view(state, boxed, theme::COMPOSER_GROWN_HEIGHT)
 }
 
 #[derive(Clone, Copy)]
@@ -1587,6 +1590,49 @@ mod tests {
             other => panic!("Cmd-Enter did not submit: {other:?}"),
         }
         assert!(state.submit_review_pending.get().is_some());
+    }
+
+    /// The review box has the composer's styles and Preview; Escape from
+    /// Preview goes back to Write and leaves the popover up.
+    #[test]
+    fn the_review_box_takes_styles_and_escape_leaves_preview_first() {
+        let root = TestRoot::new();
+        let state = review_state();
+        state.submit_review_autofocus.set(true);
+        state.submit_review_draft.set("Looks good".into());
+        open(state, None);
+        let view = control(AppState::new(), state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
+        harness.rebuild();
+        harness.paint();
+        let cmd_shift = |code, c: &str| {
+            floem::event::Event::Key(KeyboardEvent {
+                state: KeyState::Down,
+                key: Key::Character(c.into()),
+                code,
+                location: Default::default(),
+                modifiers: crate::ui::OS_MOD | Modifiers::SHIFT,
+                repeat: false,
+                is_composing: false,
+            })
+        };
+
+        harness.dispatch_event(cmd_shift(Code::Digit8, "8"));
+        harness.rebuild();
+        assert_eq!(state.submit_review_draft.get(), "- Looks good");
+
+        harness.dispatch_event(cmd_shift(Code::KeyP, "p"));
+        harness.rebuild();
+        harness.paint();
+        let shown = |harness: &HeadlessHarness, name: &str| {
+            named(harness.root_id(), name).is_some_and(|id| harness.get_layout_rect(id).height() > 0.0)
+        };
+        assert!(shown(&harness, "composer-preview"));
+        harness.dispatch_event(key(Code::Escape));
+        harness.rebuild();
+        harness.paint();
+        assert!(!shown(&harness, "composer-preview"));
+        assert!(state.review_open.get(), "Escape from Preview closed the review");
     }
 
     #[test]

@@ -433,6 +433,8 @@ fn body_editor(
     let focus_mentioner = mentioner.clone();
     let blur_mentioner = mentioner.clone();
     let key_mentioner = mentioner.clone();
+    let tabs = crate::review::markdown_toolbar::Tabs::new(editor.editor(), || false);
+    let key_tabs = tabs.clone();
     let editor = editor
         .pre_command(move |cmd| {
             if cmd_enter(&cmd) {
@@ -459,7 +461,7 @@ fn body_editor(
                 phases: floem::context::Phases::CAPTURE,
             },
             move |_, key: &KeyboardEvent| {
-                if key_mentioner.key(key) {
+                if key_mentioner.key(key) || key_tabs.key(key) {
                     EventPropagation::Stop
                 } else {
                     EventPropagation::Continue
@@ -474,7 +476,11 @@ fn body_editor(
         })
         .debug_name("open-pull-request-body")
         .on_cleanup(move || mentioner.cleanup());
-    resizable_editor_box(pull_body_grip(state), editor, true)
+    tabs.view(
+        state,
+        resizable_editor_box(pull_body_grip(state), editor, true),
+        theme::PULL_BODY_MAX_HEIGHT,
+    )
 }
 
 /// The description's box, which opens about as tall as GitHub's and

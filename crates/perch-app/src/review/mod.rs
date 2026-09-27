@@ -16,6 +16,7 @@ pub mod hover;
 pub mod issue;
 pub mod linked_text;
 pub mod markdown;
+pub mod markdown_toolbar;
 pub mod mention;
 pub mod merge;
 pub mod model;
