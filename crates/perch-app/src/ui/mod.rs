@@ -294,6 +294,19 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 state.main_pane.set((pane.x0, pane.x1));
             }
         })
+        // A press outside the Agents dropdown or the usage popover shuts
+        // it, and goes on to whatever it landed on. Caught on the way down,
+        // as most controls stop their presses.
+        .on_event_with_config(
+            el::PointerDown,
+            floem::context::EventCallbackConfig {
+                phases: floem::context::Phases::CAPTURE,
+            },
+            move |cx, _: &PointerButtonEvent| {
+                dismiss_popovers(review, cx.hit_path.as_deref());
+                EventPropagation::Continue
+            },
+        )
         // The keys the code editor would otherwise keep. The editor stops
         // every key once it has focus, and these are pressed right after
         // clicking in it, so they are caught on the way down to it rather
@@ -819,6 +832,26 @@ fn empty_pane(
         }),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0))
+}
+
+/// Shut the Agents dropdown and the usage popover when a press with
+/// `hit_path` lands outside the button each hangs from.
+fn dismiss_popovers(review: ReviewState, hit_path: Option<&[floem::ElementId]>) {
+    let inside = |anchor: Option<floem::ViewId>| {
+        let (Some(anchor), Some(leaf)) = (anchor, hit_path.and_then(|path| path.last())) else {
+            return false;
+        };
+        std::iter::successors(Some(leaf.owning_id()), floem::ViewId::parent)
+            .any(|id| id == anchor)
+    };
+    if review.agents_dropdown_open.get_untracked()
+        && !inside(review.agents_dropdown_anchor.get_untracked())
+    {
+        agents::dropdown::close(review, false);
+    }
+    if review.usage_open.get_untracked() && !inside(review.usage_anchor.get_untracked()) {
+        usage::close(review, false);
+    }
 }
 
 /// Floem exposes focus membership rather than its private current-focus slot.

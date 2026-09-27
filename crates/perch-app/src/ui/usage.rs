@@ -12,7 +12,7 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
-use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate};
+use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate};
 use floem::style::Position;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use jiff::Timestamp;
@@ -131,7 +131,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
         })
         .debug_name("usage-button");
 
-    Stack::new((
+    let stack = Stack::new((
         tip(button, "Plan usage".to_string()),
         dyn_container(
             move || review.usage_open.get(),
@@ -151,23 +151,34 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 .inset_right(0.0)
                 .z_index(100)
         }),
-    ))
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if key.code == Code::Escape && key.modifiers.is_empty() && review.usage_open.get_untracked()
-        {
-            close(review, true);
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
+    ));
+    // A press outside the button and what hangs from it shuts it: see
+    // `ui::dismiss_popovers`.
+    let anchor = stack.view_id();
+    Effect::new(move |_| {
+        if review.usage_open.get() {
+            review.usage_anchor.set(Some(anchor));
         }
-    })
-    // The bar it sits in lets the pointer through everywhere but its
-    // controls; this is one.
-    .style(|s| {
-        s.position(Position::Relative)
-            .flex_shrink(0.0_f32)
-            .pointer_events_auto()
-    })
+    });
+    stack
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            if key.code == Code::Escape
+                && key.modifiers.is_empty()
+                && review.usage_open.get_untracked()
+            {
+                close(review, true);
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
+        })
+        // The bar it sits in lets the pointer through everywhere but its
+        // controls; this is one.
+        .style(|s| {
+            s.position(Position::Relative)
+                .flex_shrink(0.0_f32)
+                .pointer_events_auto()
+        })
 }
 
 /// Open the popover, or shut it when it is open. `opener` gets the
@@ -556,5 +567,30 @@ mod tests {
         open(&mut harness);
         assert!(review.usage_open.get());
         assert!(!review.agents_dropdown_open.get());
+    }
+
+    #[test]
+    fn a_press_outside_shuts_the_popover_and_the_agents_dropdown() {
+        let (mut harness, _app, review) = window_with_usage();
+        open(&mut harness);
+        // Inside it stays.
+        let popover = rect(&harness, "usage-popover").center();
+        harness.click(popover.x, popover.y);
+        settle(&mut harness);
+        assert!(review.usage_open.get(), "a press in it shut it");
+
+        // Anywhere else, the page under the bar, it goes.
+        let page = rect(&harness, "usage-button");
+        harness.click(page.x0 - 300.0, page.y1 + 400.0);
+        settle(&mut harness);
+        assert!(!review.usage_open.get(), "a press outside left it up");
+
+        let agents = rect(&harness, "agents-button").center();
+        harness.click(agents.x, agents.y);
+        settle(&mut harness);
+        assert!(review.agents_dropdown_open.get());
+        harness.click(page.x0 - 300.0, page.y1 + 400.0);
+        settle(&mut harness);
+        assert!(!review.agents_dropdown_open.get(), "a press outside left it up");
     }
 }

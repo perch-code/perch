@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use floem::event::EventPropagation;
 use floem::prelude::*;
-use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::Position;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, ScrollExt, Stack};
 
@@ -113,7 +113,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
         })
         .debug_name("agents-button");
 
-    Stack::new((
+    let stack = Stack::new((
         button,
         dyn_container(
             move || review.agents_dropdown_open.get(),
@@ -131,25 +131,34 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 .inset_right(0.0)
                 .z_index(100)
         }),
-    ))
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if key.code == Code::Escape
-            && key.modifiers.is_empty()
-            && review.agents_dropdown_open.get_untracked()
-        {
-            close(review, true);
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
+    ));
+    // A press outside the button and what hangs from it shuts it: see
+    // `ui::dismiss_popovers`.
+    let anchor = stack.view_id();
+    Effect::new(move |_| {
+        if review.agents_dropdown_open.get() {
+            review.agents_dropdown_anchor.set(Some(anchor));
         }
-    })
-    // The bar it sits in lets the pointer through everywhere but its
-    // controls; this is one.
-    .style(|s| {
-        s.position(Position::Relative)
-            .flex_shrink(0.0_f32)
-            .pointer_events_auto()
-    })
+    });
+    stack
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            if key.code == Code::Escape
+                && key.modifiers.is_empty()
+                && review.agents_dropdown_open.get_untracked()
+            {
+                close(review, true);
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
+        })
+        // The bar it sits in lets the pointer through everywhere but its
+        // controls; this is one.
+        .style(|s| {
+            s.position(Position::Relative)
+                .flex_shrink(0.0_f32)
+                .pointer_events_auto()
+        })
 }
 
 /// Open the dropdown, or shut it when it is open. `opener` gets the
