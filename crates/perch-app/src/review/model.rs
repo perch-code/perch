@@ -2441,14 +2441,20 @@ impl ReviewState {
     /// line and column it names, or, named alone, as the tree opens it,
     /// with no jump to unfold anything. The place left is remembered for
     /// `Ctrl--`, unless the file named alone is the one open, which
-    /// leaves nothing.
+    /// leaves nothing. A line is gone to straight: Code with no file open
+    /// does not open its first change on the way.
     pub fn go_to_file(&self, path: &str, at: Option<(usize, usize)>) {
-        if self.tab.get_untracked() != ItemTab::Code {
-            self.show_tab(ItemTab::Code);
-        }
         match at {
-            Some((line, column)) => self.navigate_to(path, line, column),
+            Some((line, column)) => {
+                self.navigate_to(path, line, column);
+                if self.tab.get_untracked() != ItemTab::Code {
+                    self.tab.set(ItemTab::Code);
+                }
+            }
             None => {
+                if self.tab.get_untracked() != ItemTab::Code {
+                    self.show_tab(ItemTab::Code);
+                }
                 let from = self.current_place().filter(|from| from.path != path);
                 if let Some(from) = from {
                     self.history.update(|h| h.push(from));

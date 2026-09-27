@@ -1022,6 +1022,40 @@ mod tests {
         assert_eq!(state.active.get().as_deref(), Some("src/x.rs"));
     }
 
+    /// A line named from Conversation with no file open goes to that file
+    /// alone, not by way of the first change Code opens on.
+    #[test]
+    fn a_line_named_with_no_file_open_opens_only_its_file() {
+        let (mut harness, state, mut commands) = recording_harness();
+        let changed = |path: &str| perch_git::ChangedFile {
+            path: path.into(),
+            old_path: None,
+            status: perch_git::ChangeStatus::Modified,
+            additions: 1,
+            deletions: 1,
+            binary: false,
+            head_blob: Some(format!("blob-{path}")),
+        };
+        state.set_changed_files(Arc::new(vec![changed("src/a.rs"), changed("src/y.rs")]));
+        state.close_tab("src/x.rs");
+        state.tab.set(crate::review::model::ItemTab::Conversation);
+        harness.rebuild();
+        while commands.try_recv().is_ok() {}
+
+        state.go_to_file("src/y.rs", Some((2, 0)));
+        harness.rebuild();
+        harness.paint();
+        let mut opened = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let Command::OpenFile { path, .. } = command {
+                opened.push(path);
+            }
+        }
+        assert_eq!(opened, vec!["src/y.rs".to_string()]);
+        assert_eq!(state.active.get().as_deref(), Some("src/y.rs"));
+        assert_eq!(state.jump_to_line.get(), Some(2));
+    }
+
     #[test]
     fn the_keys_type_nothing_and_open_nothing_while_a_composer_has_the_keyboard() {
         let (mut harness, state, mut commands) = recording_harness();

@@ -321,7 +321,8 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
 /// One draft: where it goes, in the code font, `written against` its
 /// commit when that is not the head and the draft opens a thread there
 /// (a reply carries no commit), the start of its text, and a delete while
-/// the pointer is over it.
+/// the pointer is over it. Where it goes is a link: it shuts the popover
+/// and opens Code on the draft's first line.
 fn draft_row(
     state: ReviewState,
     backend: Rc<Backend>,
@@ -333,6 +334,11 @@ fn draft_row(
     let reply = draft.reply;
     let commit = draft.commit_sha.clone();
     let excerpt = excerpt(&draft.body);
+    let lines = draft
+        .anchor
+        .as_ref()
+        .map(|a| (a.path.clone(), a.start_line.min(a.line) as usize));
+    let linked = lines.is_some();
     let message_id = draft.message_id.clone();
     let delete = move || {
         if state.submit_review_pending.with_untracked(Option::is_some) {
@@ -358,13 +364,20 @@ fn draft_row(
                 })
                 .debug_name("draft-reply-glyph"),
             Label::derived(move || location.clone())
+                .on_event_stop(el::Click, move |_, _| {
+                    if let Some((path, line)) = &lines {
+                        review_menu::close(state, false);
+                        state.go_to_file(path, Some((line.saturating_sub(1), 0)));
+                    }
+                })
                 .debug_name("draft-location")
-                .style(|s| {
+                .style(move |s| {
                     s.font_size(theme::TEXT_BADGE)
                         .font_family(theme::CODE_FONT_STACK.to_string())
                         .color(theme::FG)
                         .flex_shrink(0.0_f32)
                         .selectable(false)
+                        .apply_if(linked, |s| clickable(s).hover(|s| s.color(theme::GITHUB)))
                 }),
             dyn_container(written_against, |note| match note {
                 Some(note) => Label::derived(move || note.clone())
@@ -1310,6 +1323,23 @@ mod tests {
             }
             other => panic!("delete did not reach the backend: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_drafts_location_shuts_the_popover_and_goes_to_its_line() {
+        let root = TestRoot::new();
+        let state = review_state();
+        state.comment_threads.set(Arc::new(vec![draft_thread("t1", "head-42", None, "one")]));
+        open(state, None);
+        let view = control(AppState::new(), state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
+        harness.rebuild();
+        harness.paint();
+
+        click(&mut harness, "draft-location");
+        assert!(!state.review_open.get());
+        assert_eq!(state.tab.get(), crate::review::model::ItemTab::Code);
+        assert_eq!(state.pending_jump.get(), Some(("src/x.rs".into(), 40, 0)));
     }
 
     #[test]
