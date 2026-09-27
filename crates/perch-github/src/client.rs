@@ -114,6 +114,9 @@ pub struct GitHub {
     /// Shared by every clone so one rate-limit response gates all later API
     /// calls, including item fetches spawned outside the poll loop.
     rate_limit_until: Arc<AtomicI64>,
+    /// The search API's own window, thirty requests a minute. A search
+    /// that spends it gates the next search, not the rest of the API.
+    search_limit_until: Arc<AtomicI64>,
     /// The bodies of recent reads and their tags, shared by every clone,
     /// so a read of an unchanged path costs a 304.
     responses: Arc<std::sync::Mutex<Responses>>,
@@ -153,6 +156,7 @@ impl GitHub {
             http,
             api_request_lock: Arc::new(tokio::sync::Mutex::new(())),
             rate_limit_until: Arc::new(AtomicI64::new(0)),
+            search_limit_until: Arc::new(AtomicI64::new(0)),
             responses: Arc::new(std::sync::Mutex::new(Responses::new(BUDGET_BYTES))),
         })
     }
@@ -1014,6 +1018,62 @@ impl GitHub {
         } else {
             crate::items::SubjectKind::Issue
         })
+    }
+
+    /// One page of GitHub's issue search, which finds pull requests too,
+    /// most recently updated first. `page` counts from 1.
+    ///
+    /// The search API has a window of its own. A search that finds it
+    /// spent is refused until GitHub's reset, without asking, and no
+    /// other request is held up by it.
+    pub async fn search_issues(
+        &self,
+        query: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<crate::search::SearchPage, Error> {
+        let q = percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC);
+        let path = format!("/search/issues?q={q}&sort=updated&order=desc&per_page={per_page}&page={page}");
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let until = self.search_limit_until.load(Ordering::SeqCst);
+        if until > Timestamp::now().as_second() {
+            return Err(Error::RateLimited {
+                reset_epoch: Some(until),
+                retry_after_secs: None,
+            });
+        }
+        let response = self
+            .octo
+            ._get_with_headers(&path, None)
+            .await
+            .map_err(map_octocrab_error)?;
+        let status = response.status();
+        let (remaining, reset, retry_after) = rate_headers(response.headers());
+        let body = body_text(response).await;
+        let spent = |reset_epoch, retry_after_secs| {
+            self.search_limit_until.fetch_max(
+                rate_limit_deadline(reset_epoch, retry_after_secs),
+                Ordering::SeqCst,
+            );
+        };
+        if !status.is_success() {
+            let error = classify(status, remaining, reset, retry_after, body);
+            if let Error::RateLimited {
+                reset_epoch,
+                retry_after_secs,
+            } = &error
+            {
+                spent(*reset_epoch, *retry_after_secs);
+            }
+            return Err(error);
+        }
+        if remaining == Some(0) || retry_after.is_some() {
+            spent(reset, retry_after);
+        }
+        let payload: crate::search::SearchPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(payload.into_page(page, per_page))
     }
 
     /// Who the token belongs to: the login and the avatar, for the

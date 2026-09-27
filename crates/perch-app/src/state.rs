@@ -92,6 +92,12 @@ pub struct AppState {
     pub github_hosts: RwSignal<Vec<String>>,
     /// Open…'s box.
     pub open_box: crate::ui::open_box::OpenBox,
+    /// What Browse's GitHub views have found, by search, until Perch
+    /// quits.
+    pub browse: RwSignal<HashMap<String, BrowsePage>>,
+    /// Rises with every poll that goes through, for the Browse view on
+    /// screen to be asked for again.
+    pub polls: RwSignal<u64>,
     /// Every item, active and archived.
     pub items: RwSignal<Vec<Item>>,
     /// Perch's visible notification list, in GitHub response order after local
@@ -270,6 +276,8 @@ impl AppState {
             repos: RwSignal::new(Vec::new()),
             github_hosts: RwSignal::new(vec!["github.com".to_string()]),
             open_box: crate::ui::open_box::OpenBox::new(),
+            browse: RwSignal::new(HashMap::new()),
+            polls: RwSignal::new(0),
             items: RwSignal::new(Vec::new()),
             notifications: RwSignal::new(Vec::new()),
             pending_items: RwSignal::new(None),
@@ -347,6 +355,7 @@ impl AppState {
         copy(self.avatars, data.avatars);
         copy(self.repos, data.repos);
         copy(self.github_hosts, data.github_hosts);
+        copy(self.browse, data.browse);
         copy(self.items, data.items);
         copy(self.notifications, data.notifications);
         copy(self.notifications_polled, data.notifications_polled);
@@ -2212,6 +2221,12 @@ impl AppState {
                 navigation_id,
                 message,
             } => crate::ui::open_box::failed(*self, navigation_id, message),
+            Event::BrowseResults {
+                query,
+                page,
+                poll,
+                result,
+            } => self.browse.update(|all| all.entry(query).or_default().take(page, poll, result)),
             Event::Meta { key, value } => match key.as_str() {
                 "item_filters" => match crate::items::ItemFilters::parse(&value) {
                     Ok(f) => self.item_filters.set(f),
@@ -2352,6 +2367,7 @@ impl AppState {
                 }
                 if let Status::Idle { at, .. } = &status {
                     self.now.set(*at);
+                    self.polls.update(|n| *n += 1);
                 }
                 // A failed poll is said once, when it starts failing or
                 // fails another way; the next poll failing the same way
@@ -2552,7 +2568,15 @@ impl AppState {
     /// it shows: how many rows are new, or that there is activity when
     /// the rows only moved. `None` when nothing is held back.
     pub fn held_back_news(&self) -> Option<String> {
-        let (new, noun) = if self.item_filters.with(|f| f.tab) == SidebarTab::Inbox {
+        let (new, noun) = if let Some(query) = self.item_filters.with(|f| f.browse_query()) {
+            let held = self.browse.with(|all| all.get(&query).and_then(|page| page.held.clone()))?;
+            let shown: HashSet<(String, u64)> = self.browse.with_untracked(|all| {
+                all.get(&query)
+                    .map(|page| page.hits.iter().map(hit_key).collect())
+                    .unwrap_or_default()
+            });
+            (held.0.iter().filter(|hit| !shown.contains(&hit_key(hit))).count(), "result")
+        } else if self.item_filters.with(|f| f.tab) == SidebarTab::Inbox {
             let incoming = self.pending_notifications.get()?;
             let shown: HashSet<String> = self
                 .notifications
@@ -2581,7 +2605,13 @@ impl AppState {
     /// Put up whatever the drawer's pill is holding back for the list it
     /// shows.
     pub fn show_held_back(&self) {
-        if self.item_filters.with_untracked(|f| f.tab) == SidebarTab::Inbox {
+        if let Some(query) = self.item_filters.with_untracked(|f| f.browse_query()) {
+            self.browse.update(|all| {
+                if let Some(page) = all.get_mut(&query) {
+                    page.show_held();
+                }
+            });
+        } else if self.item_filters.with_untracked(|f| f.tab) == SidebarTab::Inbox {
             self.show_pending_notifications();
         } else {
             self.show_pending_items();
@@ -2620,6 +2650,73 @@ impl AppState {
         }
         self.avatars.with(|m| m.get(url).cloned())
     }
+}
+
+/// A Browse view's results so far.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowsePage {
+    pub hits: Vec<perch_github::SearchHit>,
+    /// Whether Show more has anything to show.
+    pub more: bool,
+    /// How many pages `hits` is.
+    pub pages: u32,
+    /// Why the last search didn't answer. The results before it stay.
+    pub error: Option<String>,
+    /// A refetch's first page that would move the rows, and its `more`,
+    /// until the reader asks for it.
+    pub held: Option<(Vec<perch_github::SearchHit>, bool)>,
+}
+
+impl BrowsePage {
+    /// Take what a search answered. The first page replaces what is
+    /// shown, unless a poll's refetch would add, remove or reorder the
+    /// rows, which waits behind the pill; a change inside a row goes
+    /// straight in. A later page is added when it is the next one.
+    fn take(&mut self, page: u32, poll: bool, result: Result<perch_github::SearchPage, String>) {
+        let found = match result {
+            Ok(found) => found,
+            Err(message) => {
+                self.error = Some(message);
+                return;
+            }
+        };
+        self.error = None;
+        if page == 1 {
+            let first = (found.hits.len()).min(self.hits.len());
+            let same_rows = self.hits.len() >= found.hits.len()
+                && self.hits[..first].iter().map(hit_key).eq(found.hits.iter().map(hit_key));
+            if poll && self.pages > 0 && !same_rows {
+                self.held = Some((found.hits, found.more));
+            } else if poll && same_rows && self.pages > 1 {
+                self.hits.splice(..first, found.hits);
+                self.held = None;
+            } else {
+                self.hits = found.hits;
+                self.more = found.more;
+                self.pages = 1;
+                self.held = None;
+            }
+        } else if page == self.pages + 1 {
+            let known: HashSet<(String, u64)> = self.hits.iter().map(hit_key).collect();
+            self.hits.extend(found.hits.into_iter().filter(|hit| !known.contains(&hit_key(hit))));
+            self.more = found.more;
+            self.pages = page;
+        }
+    }
+
+    /// Put up what a poll's refetch was holding back.
+    fn show_held(&mut self) {
+        if let Some((hits, more)) = self.held.take() {
+            self.hits = hits;
+            self.more = more;
+            self.pages = 1;
+        }
+    }
+}
+
+/// A search result's identity: its repository and number.
+fn hit_key(hit: &perch_github::SearchHit) -> (String, u64) {
+    (hit.repo_full_name.to_lowercase(), hit.number)
 }
 
 #[cfg(test)]
@@ -2913,6 +3010,86 @@ mod tests {
             notification("1", true),
         ]));
         assert_eq!(ids(&app.notifications.get()), ["2", "1"]);
+    }
+
+    fn hit(number: u64, title: &str) -> perch_github::SearchHit {
+        perch_github::SearchHit {
+            kind: perch_github::ItemKind::PullRequest,
+            repo_full_name: "a/b".into(),
+            number,
+            title: title.into(),
+            state: "open".into(),
+            state_reason: None,
+            draft: false,
+            merged: false,
+            author_login: "u".into(),
+            author_avatar_url: String::new(),
+            updated_at: "2026-09-20T10:00:00Z".parse().unwrap(),
+            html_url: String::new(),
+        }
+    }
+
+    fn found(hits: Vec<perch_github::SearchHit>, more: bool) -> Result<perch_github::SearchPage, String> {
+        Ok(perch_github::SearchPage { hits, more })
+    }
+
+    fn numbers(page: &BrowsePage) -> Vec<u64> {
+        page.hits.iter().map(|hit| hit.number).collect()
+    }
+
+    /// A view's first page goes straight in; a poll's refetch that would
+    /// move the rows waits behind the pill, and one that changes only
+    /// inside a row doesn't; Show more adds the next page; a failure
+    /// keeps what was there.
+    #[test]
+    fn a_browse_view_holds_back_a_refetch_that_moves_its_rows() {
+        let mut page = BrowsePage::default();
+        page.take(1, false, found(vec![hit(1, "one"), hit(2, "two")], true));
+        assert_eq!(numbers(&page), [1, 2]);
+        assert!(page.more);
+
+        page.take(2, false, found(vec![hit(3, "three")], false));
+        assert_eq!(numbers(&page), [1, 2, 3]);
+        assert_eq!(page.pages, 2);
+        page.take(2, false, found(vec![hit(9, "late")], false));
+        assert_eq!(numbers(&page), [1, 2, 3], "a page already taken is not taken again");
+
+        page.take(1, true, found(vec![hit(1, "one, renamed"), hit(2, "two")], true));
+        assert_eq!(page.hits[0].title, "one, renamed", "a change inside a row goes in");
+        assert_eq!(numbers(&page), [1, 2, 3], "and the later page stays");
+        assert!(page.held.is_none());
+
+        page.take(1, true, found(vec![hit(4, "four"), hit(1, "one"), hit(2, "two")], true));
+        assert_eq!(numbers(&page), [1, 2, 3], "the rows stay put");
+        assert!(page.held.is_some());
+        page.show_held();
+        assert_eq!(numbers(&page), [4, 1, 2]);
+        assert_eq!(page.pages, 1);
+
+        page.take(1, false, Err("Offline".into()));
+        assert_eq!(page.error.as_deref(), Some("Offline"));
+        assert_eq!(numbers(&page), [4, 1, 2], "the last results stay");
+        page.take(1, false, found(vec![hit(5, "five")], false));
+        assert!(page.error.is_none());
+        assert_eq!(numbers(&page), [5], "picking the view again takes what it finds");
+    }
+
+    #[test]
+    fn the_pill_counts_new_browse_results() {
+        let app = AppState::new();
+        app.item_filters.update(|f| {
+            f.tab = SidebarTab::Browse;
+            f.browse = BrowseView::Yours;
+        });
+        let query = app.item_filters.with(|f| f.browse_query()).unwrap();
+        let result = |hits, poll| Event::BrowseResults { query: query.clone(), page: 1, poll, result: found(hits, false) };
+        app.apply(result(vec![hit(1, "one")], false));
+        assert_eq!(app.held_back_news(), None);
+        app.apply(result(vec![hit(2, "two"), hit(1, "one")], true));
+        assert_eq!(app.held_back_news().as_deref(), Some("1 new result"));
+        app.show_held_back();
+        assert_eq!(app.held_back_news(), None);
+        assert_eq!(app.browse.with(|all| numbers(&all[&query])), [2, 1]);
     }
 
     #[test]

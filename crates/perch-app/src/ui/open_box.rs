@@ -131,6 +131,14 @@ pub fn open_text(state: AppState, backend: &Backend, text: &str) -> Result<u64, 
     Ok(backend.open_reference(&repo, reference.number, reference.kind))
 }
 
+/// The Browse search box's Open row: the box, with what was typed in
+/// it, asked to open it, so it says what is wrong if it can't.
+pub fn open_from_search(state: AppState, backend: &Backend, text: &str) {
+    show(state, None);
+    state.open_box.text.set(text.trim().to_string());
+    submit(state, backend);
+}
+
 /// Enter.
 fn submit(state: AppState, backend: &Backend) {
     if state.open_box.waiting.get_untracked().is_some() {

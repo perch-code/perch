@@ -1,6 +1,7 @@
 //! Window layout.
 
 pub mod agents;
+pub mod browse;
 pub mod drawer;
 pub mod items;
 pub mod nav_row;

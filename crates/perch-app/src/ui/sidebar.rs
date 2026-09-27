@@ -5,6 +5,7 @@
 
 use std::rc::Rc;
 
+use floem::event::EventPropagation;
 use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
@@ -121,7 +122,7 @@ fn toggle_button(state: AppState) -> impl IntoView {
 // ---------------------------------------------------------------------
 
 fn items_nav(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
-    Stack::vertical((search_row(state), item_list(state, backend, on_open)))
+    Stack::vertical((search_row(state, backend.clone()), item_list(state, backend, on_open)))
         .style(|s| s.size_full().flex_col())
 }
 
@@ -160,13 +161,14 @@ fn scope_tabs(state: AppState) -> impl IntoView {
     })
 }
 
-fn set_filters(state: AppState, edit: impl FnOnce(&mut crate::items::ItemFilters)) {
+pub(crate) fn set_filters(state: AppState, edit: impl FnOnce(&mut crate::items::ItemFilters)) {
     state.item_filters.update(edit);
     state.pending_meta.set(Some(("item_filters".into(), state.item_filters.get_untracked().to_meta())));
 }
 
-/// The search box and the filter button.
-fn search_row(state: AppState) -> impl IntoView {
+/// The search box and the filter button. On Browse, Enter opens what the
+/// box holds when Open… would read it.
+fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     use floem::style::Position;
 
     let input = TextInput::new(state.item_query)
@@ -174,6 +176,17 @@ fn search_row(state: AppState) -> impl IntoView {
         .debug_name("sidebar search")
         .on_event_cont(el::FocusGained, move |_, _| state.search_focused.set(true))
         .on_event_cont(el::FocusLost, move |_, _| state.search_focused.set(false))
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            let enter = matches!(key.code, Code::Enter | Code::NumpadEnter) && key.modifiers.is_empty();
+            let browsing = state.item_filters.with_untracked(|f| f.tab == SidebarTab::Browse);
+            let text = state.item_query.get_untracked();
+            let hosts = state.github_hosts.get_untracked();
+            if enter && browsing && crate::reference::parse(&text, &hosts).is_some() {
+                crate::ui::open_box::open_from_search(state, &backend, &text);
+                return EventPropagation::Stop;
+            }
+            EventPropagation::Continue
+        })
         .style(|s| {
             s.width_full()
                 .min_width(0.0)
@@ -453,23 +466,24 @@ fn notification_filter_menu(state: AppState) -> Menu {
 }
 
 /// Inbox is GitHub's ordered thread list. Worktrees and Browse › Recent
-/// are views over Perch's local items.
+/// are views over Perch's local items; Browse's other views are GitHub's
+/// searches.
 ///
 /// A poll that would move the rows is held back, and the pill over the
 /// list says so until the reader asks for it.
 fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
+    // A memo: every filter change writes the filters, and a container
+    // keyed on the signal would build its list again on each.
+    let tab = floem::reactive::Memo::new(move |_| state.item_filters.with(|filters| filters.tab));
     Stack::vertical((
         dyn_container(
-            move || state.item_filters.with(|filters| (filters.tab, filters.browse)),
-            move |(tab, browse)| match (tab, browse) {
-                (SidebarTab::Inbox, _) => crate::ui::notifications::notification_list(state, backend.clone()).into_any(),
-                (SidebarTab::Worktrees, _) => {
+            move || tab.get(),
+            move |tab| match tab {
+                SidebarTab::Inbox => crate::ui::notifications::notification_list(state, backend.clone()).into_any(),
+                SidebarTab::Worktrees => {
                     local_item_list(state, backend.clone(), on_open.clone(), "No worktrees").into_any()
                 }
-                (SidebarTab::Browse, BrowseView::Recent) => {
-                    local_item_list(state, backend.clone(), on_open.clone(), "Nothing opened yet").into_any()
-                }
-                (SidebarTab::Browse, _) => Empty::new().into_any(),
+                SidebarTab::Browse => crate::ui::browse::browse(state, backend.clone(), on_open.clone()).into_any(),
             },
         )
         .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
@@ -491,7 +505,12 @@ fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl I
 /// One scrolling local-item list. Pinning changes order and the row's pin
 /// indicator without adding a separate heading. `empty` is what it says
 /// with nothing to list and nothing searched for.
-fn local_item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem, empty: &'static str) -> impl IntoView {
+pub(crate) fn local_item_list(
+    state: AppState,
+    backend: Rc<Backend>,
+    on_open: OpenItem,
+    empty: &'static str,
+) -> impl IntoView {
     Stack::vertical((
         dyn_container(
             move || {

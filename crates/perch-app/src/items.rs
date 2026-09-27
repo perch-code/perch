@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use jiff::Timestamp;
-use perch_github::{DeclaredRepo, Item, ItemSubject};
+use perch_github::{DeclaredRepo, Item, ItemSubject, SearchHit};
 
 /// What an item's shape makes it. Not stored anywhere: derived from which
 /// parts the item has, as the spec asks.
@@ -113,6 +113,22 @@ impl BrowseView {
             BrowseView::Repository => "By repository",
             BrowseView::Recent => "Recent",
         }
+    }
+
+    /// The search a GitHub view runs, open or closed, leaving out archived
+    /// repositories. `None` for Recent, which is local, and for By
+    /// repository with none picked.
+    pub fn query(self, repository: Option<&str>, closed: bool) -> Option<String> {
+        let what = match self {
+            BrowseView::ReviewRequested => "is:pr review-requested:@me".to_string(),
+            BrowseView::Yours => "author:@me".to_string(),
+            BrowseView::Assigned => "assignee:@me".to_string(),
+            BrowseView::Mentioned => "mentions:@me".to_string(),
+            BrowseView::Repository => format!("repo:{}", repository?),
+            BrowseView::Recent => return None,
+        };
+        let state = if closed { "is:closed" } else { "is:open" };
+        Some(format!("{what} {state} archived:false"))
     }
 
     fn key(self) -> &'static str {
@@ -336,6 +352,14 @@ impl ItemFilters {
         Ok(out)
     }
 
+    /// The search Browse is showing, while it shows one of GitHub's views.
+    pub fn browse_query(&self) -> Option<String> {
+        if self.tab != SidebarTab::Browse {
+            return None;
+        }
+        self.browse.query(self.browse_repository.as_deref(), self.browse_closed)
+    }
+
     /// The repository Browse is listing, while it shows By repository.
     pub fn browse_repository(&self) -> Option<&str> {
         (self.tab == SidebarTab::Browse && self.browse == BrowseView::Repository)
@@ -454,6 +478,21 @@ pub fn local_items(items: &[Item], filters: &ItemFilters) -> Vec<Item> {
         (SidebarTab::Browse, BrowseView::Recent) => recent_items(items, &filters.query),
         _ => Vec::new(),
     }
+}
+
+/// A GitHub view's results under the search box, over the title, the
+/// number and the repository, in GitHub's order.
+pub fn search_hits(hits: &[SearchHit], query: &str) -> Vec<SearchHit> {
+    let needle = query.trim().to_lowercase();
+    hits.iter()
+        .filter(|hit| {
+            needle.is_empty()
+                || hit.title.to_lowercase().contains(&needle)
+                || format!("#{}", hit.number).contains(&needle)
+                || hit.repo_full_name.to_lowercase().contains(&needle)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Whether a Work run may be sent on an item: a branch of the reader's
@@ -901,6 +940,37 @@ mod tests {
         ] {
             assert!(ItemFilters::parse(setting).unwrap_err().contains(key), "{setting}");
         }
+    }
+
+    #[test]
+    fn each_github_view_is_a_search_open_or_closed() {
+        assert_eq!(
+            BrowseView::ReviewRequested.query(None, false).as_deref(),
+            Some("is:pr review-requested:@me is:open archived:false")
+        );
+        assert_eq!(
+            BrowseView::Yours.query(None, true).as_deref(),
+            Some("author:@me is:closed archived:false")
+        );
+        assert_eq!(
+            BrowseView::Assigned.query(None, false).as_deref(),
+            Some("assignee:@me is:open archived:false")
+        );
+        assert_eq!(
+            BrowseView::Mentioned.query(None, false).as_deref(),
+            Some("mentions:@me is:open archived:false")
+        );
+        assert_eq!(
+            BrowseView::Repository.query(Some("slatedb/slatedb"), false).as_deref(),
+            Some("repo:slatedb/slatedb is:open archived:false")
+        );
+        assert_eq!(BrowseView::Repository.query(None, false), None, "none picked");
+        assert_eq!(BrowseView::Recent.query(Some("a/b"), false), None, "local");
+
+        let mut filters = ItemFilters { browse: BrowseView::Yours, ..Default::default() };
+        assert_eq!(filters.browse_query(), None, "not while Browse is not showing");
+        filters.tab = SidebarTab::Browse;
+        assert_eq!(filters.browse_query().as_deref(), Some("author:@me is:open archived:false"));
     }
 
     #[test]

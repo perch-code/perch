@@ -17,6 +17,7 @@ pub mod pulls;
 pub mod reactions;
 pub mod reviews;
 mod responses;
+pub mod search;
 mod subjects;
 pub mod timeline;
 pub mod workflow_runs;
@@ -54,6 +55,7 @@ pub use pulls::{
     PullRequestOverview, RepositoryPermission, ReviewDecision, Reviewer,
 };
 pub use reactions::{ReactionGroup, ReactionKind, Reactions};
+pub use search::{SearchHit, SearchPage};
 pub use reviews::{
     AnchorMapping, AnchorMappingMethod, AnchorMappingStatus, DeletedReviewHistory, Finding,
     FindingAuditAction, FindingAuditEntry, FindingDisposition, FindingSeverity, FindingTarget,

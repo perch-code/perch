@@ -98,6 +98,14 @@ pub enum Command {
         kind: Option<ItemKind>,
         navigation_id: u64,
     },
+    /// One page of a Browse view's search. `poll` when it is the refetch
+    /// after a notification poll, which may be held back, rather than the
+    /// reader picking the view or asking for more.
+    Browse {
+        query: String,
+        page: u32,
+        poll: bool,
+    },
     /// Mark a GitHub notification read and open its pull request or issue.
     /// Other subject kinds are opened by the UI in the browser instead.
     OpenNotification {
@@ -684,6 +692,13 @@ pub enum Event {
     OpenReferenceFailed {
         navigation_id: u64,
         message: String,
+    },
+    /// A page of a Browse view's search, or why there is none.
+    BrowseResults {
+        query: String,
+        page: u32,
+        poll: bool,
+        result: Result<perch_github::SearchPage, String>,
     },
     /// Add repository put this one in the config.
     RepositoryAdded(String),
@@ -2218,6 +2233,15 @@ impl Backend {
         navigation_id
     }
 
+    /// A page of a Browse view: see `Command::Browse`.
+    pub fn browse(&self, query: &str, page: u32, poll: bool) {
+        let _ = self.commands.send(Command::Browse {
+            query: query.to_string(),
+            page,
+            poll,
+        });
+    }
+
     pub fn open_notification(&self, thread: &Thread) -> Option<u64> {
         let opens_inside = matches!(
             thread.subject.kind,
@@ -3443,6 +3467,18 @@ async fn run(
                         )
                         .await;
                     }
+                });
+            }
+            Command::Browse { query, page, poll } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let result = browse(&ctx, &query, page).await;
+                    let _ = ctx.events.send(Event::BrowseResults {
+                        query,
+                        page,
+                        poll,
+                        result,
+                    });
                 });
             }
             Command::OpenNotification {
@@ -10756,6 +10792,34 @@ fn take_pull_request(cache: &Cache, item: &mut Item, pr: PullRequest) -> Result<
 /// repository has neither: a launch hook naming one under the reserved
 /// owner is told so rather than asked of GitHub, where `local` could be
 /// somebody's account.
+/// How many results a Browse page holds.
+pub const BROWSE_PAGE: u32 = 50;
+
+/// One page of a Browse view's search, the faces on it asked for.
+async fn browse(ctx: &Ctx, query: &str, page: u32) -> Result<perch_github::SearchPage, String> {
+    let Some(github) = ctx.github() else {
+        return Err("Set GITHUB_TOKEN, or run `gh auth login` in a terminal.".into());
+    };
+    match github.search_issues(query, page, BROWSE_PAGE).await {
+        Ok(found) => {
+            ctx.want_avatars(found.hits.iter().map(|hit| hit.author_avatar_url.clone()));
+            Ok(found)
+        }
+        Err(perch_github::Error::Network(_)) => Err("Offline".into()),
+        Err(perch_github::Error::RateLimited {
+            reset_epoch,
+            retry_after_secs,
+        }) => {
+            let until = backoff_until(reset_epoch, retry_after_secs);
+            Err(format!(
+                "GitHub's search limit is spent; trying again in {}s",
+                until.as_secs().max(1)
+            ))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Whether Open… can go ahead with what it was given, and as which kind.
 /// A URL's kind is taken as it says; a reference's is asked of GitHub,
 /// which also tells a number it doesn't have.
