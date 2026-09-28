@@ -44,6 +44,7 @@ use crate::icons::SidebarIcon;
 use crate::review::code_refs::{self, linked_run, Plan, Refs};
 use crate::review::linked_text::{linked_text, passage, Strike, Target};
 use crate::review::model::ReviewState;
+use crate::review::suggestion::Original;
 use crate::theme;
 use crate::ui::widgets::sidebar_glyph;
 
@@ -81,6 +82,10 @@ pub enum Block {
     List { start: Option<u64>, tight: bool, items: Vec<Item> },
     /// Fenced or indented code, with the fence's language if it named one.
     Code { lang: Option<String>, text: String },
+    /// A review comment's suggested change: a fence named `suggestion`,
+    /// with the lines it replaces where they are known. Only
+    /// [`render_suggesting`] makes one, from a fence under a line.
+    Suggestion { text: String, original: Option<Original> },
     Table { align: Vec<Align>, head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>> },
     Rule,
     /// The footnotes, in the order they were first referenced, drawn after
@@ -981,6 +986,47 @@ pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
     ))
 }
 
+/// [`render_linked`] for a comment on lines, where a `suggestion` fence
+/// is a suggested change to them, drawn against `original`, the lines
+/// as they are, when those are known.
+pub fn render_suggesting(text: &str, state: ReviewState, original: Option<Original>) -> impl IntoView {
+    let repo = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.repo_full_name.clone()));
+    passage(stack(
+        suggesting(parse_in(text, repo.as_deref()), &original),
+        Ctx {
+            size: theme::TEXT_BODY,
+            color: theme::FG,
+            depth: 0,
+            refs: Refs::of(state),
+        },
+    ))
+}
+
+/// The blocks with each `suggestion` fence made a suggested change to
+/// `original`, in quotes and lists too, as github.com finds one there.
+fn suggesting(blocks: Vec<Block>, original: &Option<Original>) -> Vec<Block> {
+    blocks
+        .into_iter()
+        .map(|block| match block {
+            Block::Code { lang: Some(lang), text } if lang == "suggestion" => {
+                Block::Suggestion { text, original: original.clone() }
+            }
+            Block::Quote { alert, blocks } => Block::Quote { alert, blocks: suggesting(blocks, original) },
+            Block::List { start, tight, items } => Block::List {
+                start,
+                tight,
+                items: items
+                    .into_iter()
+                    .map(|item| Item { checked: item.checked, blocks: suggesting(item.blocks, original) })
+                    .collect(),
+            },
+            other => other,
+        })
+        .collect()
+}
+
 /// Blocks already parsed, stacked, with the prose at `size`. A fenced
 /// block is drawn in the code font at Codex's small size, as a
 /// conversation card draws one; a tooltip hands its blocks here at the
@@ -1019,7 +1065,8 @@ fn small_size(size: f32) -> f32 {
 fn gap_before(prev: &Block, block: &Block) -> f64 {
     match (prev, block) {
         (Block::Rule, _) | (_, Block::Rule) => 7.0,
-        (Block::Code { .. }, _) | (_, Block::Code { .. }) => 5.0,
+        (Block::Code { .. } | Block::Suggestion { .. }, _)
+        | (_, Block::Code { .. } | Block::Suggestion { .. }) => 5.0,
         (_, Block::Heading { .. }) => 4.0,
         (Block::Heading { level, .. }, _) => match level {
             1 | 5 | 6 => 2.0,
@@ -1064,6 +1111,7 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
         Block::Quote { alert: Some(alert), blocks } => alert_view(alert, blocks, ctx),
         Block::List { start, tight, items } => list_view(start, tight, items, ctx),
         Block::Code { lang, text } => code_view(text, lang, ctx),
+        Block::Suggestion { text, original } => suggestion_view(text, original),
         Block::Table { align, head, rows } => table_view(align, head, rows, ctx),
         Block::Rule => Empty::new()
             .style(|s| s.width_full().height(1.0).background(theme::BORDER).margin_vert(4.0))
@@ -1282,6 +1330,52 @@ fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
             .into_any()
     });
     Container::new(run).style(code_box).into_any()
+}
+
+/// A suggested change as github.com draws one: headed Suggested change,
+/// the lines it replaces, removed, over what it puts in their place,
+/// added, each numbered from the first commented line. Without the
+/// lines it replaces, what it puts in is all there is to show.
+fn suggestion_view(text: String, original: Option<Original>) -> AnyView {
+    use crate::review::cards::{code_row, CodeLine, Tint};
+    let first = original.as_ref().map(|o| o.first as usize);
+    let line = |i: usize, tint: Tint, text: &str| CodeLine {
+        number: first.map(|f| f + i),
+        tint,
+        text: text.to_string(),
+    };
+    let mut rows: Vec<AnyView> = Vec::new();
+    for (i, old) in original.iter().flat_map(|o| o.lines.iter()).enumerate() {
+        rows.push(code_row(line(i, Tint::Removed, old)).into_any());
+    }
+    // An empty fence suggests taking the lines out.
+    if !text.is_empty() {
+        for (i, new) in text.split('\n').enumerate() {
+            rows.push(code_row(line(i, Tint::Added, new)).into_any());
+        }
+    }
+    let header = Label::new("Suggested change").style(|s| {
+        s.width_full()
+            .padding_horiz(12.0)
+            .padding_vert(6.0)
+            .font_size(theme::TEXT_BADGE)
+            .color(theme::FG_MUTED)
+            .background(theme::CANVAS_SUBTLE)
+            .border_bottom(1.0)
+            .border_color(theme::BORDER_MUTED)
+            .selectable(false)
+    });
+    Stack::vertical((header, Stack::vertical_from_iter(rows).style(|s| s.flex_col().width_full())))
+        .debug_name("suggested-change")
+        .clip()
+        .style(|s| {
+            s.flex_col()
+                .width_full()
+                .border(1.0)
+                .border_color(theme::BORDER_MUTED)
+                .border_radius(theme::RADIUS)
+        })
+        .into_any()
 }
 
 /// A fenced block's text in the code font, its links in the links'

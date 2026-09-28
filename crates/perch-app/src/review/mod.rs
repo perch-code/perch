@@ -31,6 +31,7 @@ pub mod review_menu;
 pub mod scope;
 pub mod styling;
 pub mod submit_review;
+pub mod suggestion;
 pub mod summary;
 pub mod switch;
 pub mod tabs;

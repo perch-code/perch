@@ -1737,6 +1737,111 @@ mod tests {
         assert!(!shown(&harness, "composer-preview"));
     }
 
+    /// Suggest is there on a composer on lines, puts the lines in a
+    /// suggestion fence, and Preview draws the change against them; a
+    /// composer on the item as a whole has no lines to suggest on.
+    #[test]
+    fn suggest_fences_the_lines_and_preview_draws_the_change() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let file = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "a\n    mut manifest,\nc\n".into(),
+            "a\n    manifest,\nc\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(file));
+        });
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        let anchor = Anchor {
+            path: "src/x.rs".into(),
+            start_line: 2,
+            line: 2,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        };
+        state.open_composer(None, Some(anchor), String::new(), choice.clone());
+        let backend = Rc::new(crate::backend::Backend::detached());
+        let view = crate::review::threads::composer_view(
+            app,
+            state,
+            backend,
+            state.composer.get().unwrap(),
+            ThreadFace::Card,
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(shown(&harness, "composer-suggest"));
+
+        let suggest = find(harness.root_id(), "composer-suggest").unwrap();
+        click_on(&mut harness, suggest);
+        assert_eq!(
+            state.composer_draft.get(),
+            "```suggestion\n    mut manifest,\n```"
+        );
+
+        let preview = find(harness.root_id(), "composer-tab:Preview").unwrap();
+        click_on(&mut harness, preview);
+        assert!(shown(&harness, "suggested-change"));
+
+        // On the item as a whole there are no lines to suggest on.
+        state.open_composer(None, None, String::new(), choice);
+        harness.rebuild();
+        harness.paint();
+        assert!(!shown(&harness, "composer-suggest"));
+    }
+
+    /// A comment from GitHub with a suggestion in it is drawn as the
+    /// change, against the lines its hunk ends on.
+    #[test]
+    fn a_suggestion_from_github_is_drawn_against_its_hunk() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut thread = thread();
+        thread.anchor = Some(Anchor {
+            path: "src/manifest.rs".into(),
+            start_line: 40,
+            line: 40,
+            side: Side::Right,
+            commit_sha: "h".into(),
+        });
+        thread.messages.truncate(1);
+        let message = &mut thread.messages[0];
+        message.origin = ThreadOrigin::GitHub;
+        message.author = Author::GitHubUser("rohan".into());
+        message.github_id = Some(7);
+        message.run = None;
+        message.body = "```suggestion\nlet c = 3;\n```".into();
+        message.diff_hunk = Some("@@ -39,2 +39,2 @@\n a\n-b\n+let c = 2;".into());
+        state.comment_threads.set(Arc::new(vec![thread]));
+        let backend = Rc::new(crate::backend::Backend::detached());
+        let view = crate::review::threads::messages_view(
+            app,
+            state,
+            backend,
+            "t1".into(),
+            ThreadFace::Card,
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let change = find(harness.root_id(), "suggested-change").expect("drawn as a change");
+        // The header, then the line it replaces and the line it suggests.
+        let rows = change.children()[1].children().len();
+        assert_eq!(rows, 2);
+    }
+
     /// The thread views build for Conversation and inline, from the same thread.
     #[test]
     fn a_thread_draws_with_both_faces() {

@@ -202,6 +202,14 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M6.5 4 H13.5 M6.5 8 H13.5 M6.5 12 H13.5" fill="none" stroke="{c}"
                      stroke-width="1.5" stroke-linecap="round"/>"#
         ),
+        // A page with a plus over a minus: suggest a change to the lines,
+        // after GitHub's file-diff.
+        SidebarIcon::Suggest => format!(
+            r#"<path d="M3.2 2.8 a1 1 0 0 1 1 -1 H9.6 L12.8 5 V13.2 a1 1 0 0 1 -1 1 H4.2 a1 1 0 0 1 -1 -1 Z"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M8 4.8 V9 M5.9 6.9 H10.1 M5.9 11.3 H10.1" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
         SidebarIcon::TaskList => format!(
             r#"<path d="M2.2 2.4 H6.2 V6.4 H2.2 Z M2.2 9.6 H6.2 V13.6 H2.2 Z" fill="none" stroke="{c}"
                      stroke-width="1.2" stroke-linejoin="round"/>
@@ -527,13 +535,16 @@ pub enum SidebarIcon {
     NumberedList,
     BulletList,
     TaskList,
+    /// A page with a plus over a minus: suggest a change.
+    Suggest,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 55] = [
+    pub const ALL: [SidebarIcon; 56] = [
+        SidebarIcon::Suggest,
         SidebarIcon::Heading,
         SidebarIcon::Bold,
         SidebarIcon::Italic,

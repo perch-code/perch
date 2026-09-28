@@ -388,7 +388,24 @@ pub fn composer_view(
 
     // The box is still while an issue comment is posting; the text stays
     // for the answer to keep or give back.
-    let tabs = crate::review::markdown_toolbar::Tabs::new(editor.editor(), posting_here);
+    // A composer on lines has Suggest, on its thread's lines where it is
+    // a follow-up, since those are the ones GitHub's hunk has.
+    let tabs = crate::review::markdown_toolbar::Tabs::new(editor.editor(), posting_here)
+        .suggesting(move || {
+            let (thread_id, anchor) = state
+                .composer
+                .with(|c| c.as_ref().map(|c| (c.thread_id.clone(), c.anchor.clone())))?;
+            let anchor = anchor?;
+            let thread = thread_id.and_then(|id| {
+                state
+                    .comment_threads
+                    .with(|t| t.iter().find(|t| t.id == id).cloned())
+            });
+            match thread {
+                Some(thread) => crate::review::suggestion::original_of(state, &thread),
+                None => crate::review::suggestion::original(state, &anchor, false, None),
+            }
+        });
     let key_tabs = tabs.clone();
     let editor = editor
         // Cmd-Enter sends, before the editor can take it for a line. While
@@ -2439,7 +2456,7 @@ pub fn message_view(
         return draft_message_view(app, state, backend, &thread, &message, face, place);
     }
     if message.from_github() {
-        return posted_message_view(app, state, backend, &message, face, place);
+        return posted_message_view(app, state, backend, &thread, &message, face, place);
     }
     local_message_view(app, state, backend, thread, message, face, place, lane != Lane::Flush)
 }
@@ -2651,25 +2668,25 @@ fn local_message_view(
         && !body.trim().is_empty()
         && (finished || message.run.is_none());
     let actions = if settled {
-        agent_actions(state, thread, body.clone(), hovered)
+        agent_actions(state, thread.clone(), body.clone(), hovered)
     } else {
         Empty::new().into_any()
     };
     let content = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
             run_surface(steps_view(state, run.clone())),
-            crate::review::markdown::render_linked(&body, state),
+            message_body(state, &thread, &body),
             run_footer(backend, run),
         ))
         .style(|s| s.flex_col().width_full().gap(8.0))
         .into_any(),
         Some(run) => Stack::vertical((
-            crate::review::markdown::render_linked(&body, state),
+            message_body(state, &thread, &body),
             run_block(state, backend, run),
         ))
         .style(|s| s.flex_col().width_full().gap(8.0))
         .into_any(),
-        None => crate::review::markdown::render_linked(&body, state).into_any(),
+        None => message_body(state, &thread, &body),
     };
     let author = message.author.clone();
     let mut after = vec![when_label(app, message.created_at, face, "comment-when").into_any()];
@@ -2816,10 +2833,7 @@ fn github_message_view(
         login,
     )
     .into_any();
-    let body = Stack::vertical((
-        crate::review::markdown::render_linked(&message.body, state),
-        reactions,
-    ))
+    let body = Stack::vertical((message_body(state, thread, &message.body), reactions))
     .style(|s| s.flex_col().width_full())
     .into_any();
     cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
@@ -2878,7 +2892,7 @@ fn draft_message_view(
         ],
         actions,
     );
-    let body = crate::review::markdown::render_linked(&message.body, state).into_any();
+    let body = message_body(state, thread, &message.body);
     let avatar = viewer_avatar(app, face.avatar()).into_any();
     cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
 }
@@ -2891,6 +2905,7 @@ fn posted_message_view(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
+    thread: &CommentThread,
     message: &CommentMessage,
     face: ThreadFace,
     place: Place,
@@ -2907,14 +2922,29 @@ fn posted_message_view(
         ],
         cards::actions(state, backend, hovered, None, None, react, url),
     );
-    let body = Stack::vertical((
-        crate::review::markdown::render_linked(&message.body, state),
-        reactions,
-    ))
+    let body = Stack::vertical((message_body(state, thread, &message.body), reactions))
     .style(|s| s.flex_col().width_full())
     .into_any();
     let avatar = viewer_avatar(app, face.avatar()).into_any();
     cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
+}
+
+/// A message's text, a suggestion in it drawn as the change it makes to
+/// the thread's lines, which follow the file as it loads.
+fn message_body(state: ReviewState, thread: &CommentThread, body: &str) -> floem::AnyView {
+    if thread.anchor.is_none() || !crate::review::suggestion::has_suggestion(body) {
+        return crate::review::markdown::render_linked(body, state).into_any();
+    }
+    let (thread, body) = (thread.clone(), body.to_string());
+    let original = Memo::new(move |_| crate::review::suggestion::original_of(state, &thread));
+    dyn_container(
+        move || original.get(),
+        move |original| {
+            crate::review::markdown::render_suggesting(&body, state, original).into_any()
+        },
+    )
+    .style(|s| s.width_full())
+    .into_any()
 }
 
 /// The Draft mark after a draft's author, in GitHub's colour: this is

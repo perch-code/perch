@@ -6,12 +6,16 @@
 //! the start of each line it touches for a heading, a quote and the
 //! lists. A second press takes the marks off again. The edit goes in as
 //! if typed, so Cmd-Z takes it back.
+//!
+//! A box for a comment on lines has Suggest first, as github.com does:
+//! the lines as they are, in a `suggestion` fence, to edit into what they
+//! should read. Preview draws it as the change it suggests.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate};
+use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate};
 use floem::views::editor::Editor;
 use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
 use floem::views::editor::core::selection::Selection;
@@ -20,6 +24,7 @@ use floem::views::{Container, Decorators, Empty, Label, Scroll, Stack, dyn_conta
 use crate::icons::SidebarIcon;
 use crate::review::cards::tip;
 use crate::review::model::ReviewState;
+use crate::review::suggestion::{self, Original};
 use crate::theme;
 use crate::ui::widgets::{clickable, icon_in};
 
@@ -361,6 +366,21 @@ fn lines(format: Format, text: &str, (start, end): (usize, usize)) -> (String, (
 /// Put `format` on the editor's selection, as typed, and leave the
 /// keyboard in the box.
 pub fn format(editor: &Editor, format: Format) {
+    edit(editor, |text, selection| apply(format, text, selection));
+}
+
+/// Put a suggestion of `original`'s lines in at the caret, as typed,
+/// with the caret after the last of them.
+pub fn suggest(editor: &Editor, original: &Original) {
+    edit(editor, |text, selection| {
+        let (out, at) = suggestion::insert(text, selection, &original.lines);
+        (out, (at, at))
+    });
+}
+
+/// Make the edit `change` works out from the text and the selection, as
+/// typed, select what it says, and leave the keyboard in the box.
+fn edit(editor: &Editor, change: impl FnOnce(&str, (usize, usize)) -> (String, (usize, usize))) {
     if editor.read_only.get_untracked() {
         return;
     }
@@ -371,7 +391,7 @@ pub fn format(editor: &Editor, format: Format) {
             .map(|(a, b, _)| (a.min(b), a.max(b)))
             .unwrap_or((c.offset(), c.offset()))
     });
-    let (new, (from, to)) = apply(format, &text, selection);
+    let (new, (from, to)) = change(&text, selection);
     // Only the bytes that changed are replaced, so the undo is the edit
     // and the caret does not jump.
     let head = text
@@ -422,6 +442,9 @@ pub struct Tabs {
     /// Back from Preview, the box takes the keyboard again once it is
     /// laid out: asked for while it is still hidden, focus goes nowhere.
     refocus: Rc<Cell<bool>>,
+    /// The lines a suggestion in this box would change, for a box with
+    /// Suggest; `None` from it while there are none to suggest on.
+    original: Option<Rc<dyn Fn() -> Option<Original>>>,
 }
 
 impl Tabs {
@@ -444,15 +467,38 @@ impl Tabs {
             previewing,
             editor: editor.clone(),
             refocus,
+            original: None,
         }
     }
 
+    /// Give the box Suggest, on the lines `original` says, for as long as
+    /// it says some. Tracked, so the button follows the composer.
+    pub fn suggesting(mut self, original: impl Fn() -> Option<Original> + 'static) -> Self {
+        self.original = Some(Rc::new(original));
+        self
+    }
+
+    /// The lines a suggestion would change, now.
+    fn original_now(&self) -> Option<Original> {
+        let original = self.original.clone()?;
+        Effect::untrack(move || original())
+    }
+
     /// The keys the bar answers to while the box has the keyboard: a
-    /// style's, Cmd-Shift-P between Write and Preview, and Escape from
-    /// Preview back to Write. Whether one was taken. In Preview the
-    /// styles' keys do nothing, as there is nothing to style.
+    /// style's, Cmd-G for a suggestion as github.com has it, where there
+    /// are lines to suggest on, Cmd-Shift-P between Write and Preview,
+    /// and Escape from Preview back to Write. Whether one was taken. In
+    /// Preview the styles' keys do nothing, as there is nothing to style.
     pub fn key(&self, key: &KeyboardEvent) -> bool {
         let previewing = self.previewing;
+        if key.modifiers == crate::ui::OS_MOD && key.code == Code::KeyG {
+            if let Some(original) = self.original_now() {
+                if !previewing.get_untracked() {
+                    suggest(&self.editor, &original);
+                }
+                return true;
+            }
+        }
         if key.modifiers == crate::ui::OS_MOD | Modifiers::SHIFT && key.code == Code::KeyP {
             previewing.update(|p| *p = !*p);
             focus(&self.editor);
@@ -496,12 +542,14 @@ impl Tabs {
             .style(move |s| s.width_full().apply_if(previewing.get(), |s| s.hide()));
         let write_id = floem::View::id(&write);
         let editor = self.editor.clone();
+        let original = self.original.clone();
         Stack::vertical((
-            bar(self.editor.clone(), previewing),
+            bar(self.editor.clone(), previewing, self.original.clone()),
             write,
             preview(
                 state,
                 move || editor.doc().text().to_string(),
+                original,
                 previewing,
                 move || {
                     write_id
@@ -516,9 +564,15 @@ impl Tabs {
 }
 
 /// Write and Preview on the left, and while writing, the styles on the
-/// right, in two groups as GitHub has them.
-fn bar(editor: Editor, previewing: RwSignal<bool>) -> impl IntoView {
+/// right, in two groups as GitHub has them, after Suggest where the box
+/// has it.
+fn bar(
+    editor: Editor,
+    previewing: RwSignal<bool>,
+    original: Option<Rc<dyn Fn() -> Option<Original>>>,
+) -> impl IntoView {
     let tab_editor = editor.clone();
+    let suggest_editor = editor.clone();
     let tab = move |label: &'static str, preview: bool| {
         let editor = tab_editor.clone();
         Label::new(label)
@@ -543,17 +597,14 @@ fn bar(editor: Editor, previewing: RwSignal<bool>) -> impl IntoView {
                     .apply_if(!on, |s| s.hover(|s| s.color(theme::FG)))
             })
     };
-    let button = move |style: Format| {
-        let editor = editor.clone();
+    let icon = |glyph: SidebarIcon, name: String, tip_text: &str, action: Box<dyn Fn()>| {
         tip(
             Container::new(icon_in(
-                move || crate::icons::sidebar_icon(style.glyph(), theme::FG_MUTED),
+                move || crate::icons::sidebar_icon(glyph, theme::FG_MUTED),
                 || theme::FG_MUTED,
             ))
-            .on_event_stop(floem::event::listener::Click, move |_, _| {
-                format(&editor, style)
-            })
-            .debug_name(format!("composer-format:{}", style.name()))
+            .on_event_stop(floem::event::listener::Click, move |_, _| action())
+            .debug_name(name)
             .style(|s| {
                 clickable(s)
                     .size(26.0, 26.0)
@@ -562,9 +613,36 @@ fn bar(editor: Editor, previewing: RwSignal<bool>) -> impl IntoView {
                     .border_radius(6.0)
                     .hover(|s| s.background(theme::BADGE_BG))
             }),
-            style.tip().to_string(),
+            tip_text.to_string(),
         )
     };
+    let button = move |style: Format| {
+        let editor = editor.clone();
+        icon(
+            style.glyph(),
+            format!("composer-format:{}", style.name()),
+            style.tip(),
+            Box::new(move || format(&editor, style)),
+        )
+    };
+    // Suggest is there while there are lines to suggest on: a composer's
+    // anchor can go as its thread moves.
+    let offered = {
+        let original = original.clone();
+        Memo::new(move |_| original.as_ref().is_some_and(|o| o().is_some()))
+    };
+    let suggest_button = Container::new(icon(
+        SidebarIcon::Suggest,
+        "composer-suggest".to_string(),
+        "Add a suggestion (\u{2318}G)",
+        Box::new(move || {
+            let lines = original.as_ref().and_then(|o| Effect::untrack(|| o()));
+            if let Some(lines) = lines {
+                suggest(&suggest_editor, &lines);
+            }
+        }),
+    ))
+    .style(move |s| s.apply_if(!offered.get(), |s| s.hide()));
     let rule = || {
         Empty::new().style(|s| {
             s.width(1.0)
@@ -588,6 +666,7 @@ fn bar(editor: Editor, previewing: RwSignal<bool>) -> impl IntoView {
             }),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         Stack::horizontal((
+            suggest_button,
             button(Format::Heading),
             button(Format::Bold),
             button(Format::Italic),
@@ -618,6 +697,7 @@ fn bar(editor: Editor, previewing: RwSignal<bool>) -> impl IntoView {
 fn preview(
     state: ReviewState,
     text: impl Fn() -> String + 'static,
+    original: Option<Rc<dyn Fn() -> Option<Original>>>,
     previewing: RwSignal<bool>,
     height: impl Fn() -> f64 + 'static,
     tallest: f64,
@@ -634,6 +714,9 @@ fn preview(
                 Label::new("Nothing to preview")
                     .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG_MUTED))
                     .into_any()
+            } else if let Some(original) = original.as_ref() {
+                let lines = Effect::untrack(|| original());
+                crate::review::markdown::render_suggesting(&body, state, lines).into_any()
             } else {
                 crate::review::markdown::render_linked(&body, state).into_any()
             };

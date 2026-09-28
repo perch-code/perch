@@ -1322,7 +1322,7 @@ fn code_lines(lines: Vec<CodeLine>) -> impl IntoView {
 /// text, as GitHub sets a diff's lines.
 const CODE_ROW_MARKER_WIDTH: f64 = 22.0;
 
-fn code_row(line: CodeLine) -> impl IntoView {
+pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
     let (bg, fg) = line.tint.colors();
     let number = line.number.map(|n| n.to_string()).unwrap_or_default();
     let marker = match line.tint {
