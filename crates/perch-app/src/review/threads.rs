@@ -2143,15 +2143,29 @@ pub fn messages_view(
                 *place,
             )
         },
-        move |(m, editing, lane, _)| {
+        move |(m, editing, lane, place)| {
             let thread = state
                 .comment_threads
                 .with_untracked(|t| t.iter().find(|t| t.id == thread_id).cloned());
             match (thread, editing) {
+                // The room goes outside the box's border, not in place of
+                // its own padding. The Follow up box is gone while a draft
+                // is edited, so under the last one is the card's edge.
                 (Some(_), Some(_)) => match state.composer.get_untracked() {
-                    Some(c) => composer_view(app, state, backend.clone(), c, face)
-                        .style(move |s| s.width_full().padding_vert(face.comment_space()))
-                        .into_any(),
+                    Some(c) => Container::new(
+                        composer_view(app, state, backend.clone(), c, face)
+                            .style(|s| s.width_full()),
+                    )
+                    .style(move |s| {
+                        s.width_full()
+                            .padding_top(face.comment_space())
+                            .padding_bottom(if place.last {
+                                face.inset()
+                            } else {
+                                face.comment_space()
+                            })
+                    })
+                    .into_any(),
                     None => Empty::new().into_any(),
                 },
                 (Some(thread), None) => {
@@ -4303,6 +4317,15 @@ mod tests {
         let root_id = harness.root_id();
         assert!(find(root_id, "draft-pill").is_none(), "the composer took the draft's row");
         assert!(find(root_id, "Label: \"Add to review\"").is_some());
+        // The box keeps its own padding, and the room under the last row
+        // is outside its border, so it does not sit on the card's edge.
+        let composer_box = find(root_id, "composer-box").expect("the composer");
+        let boxed = composer_box.get_visual_rect_no_clip();
+        let row = composer_box.parent().unwrap().get_visual_rect_no_clip();
+        assert_eq!(boxed.y0 - row.y0, theme::THREAD_COMMENT_SPACE);
+        assert_eq!(row.y1 - boxed.y1, theme::THREAD_INSET);
+        let first = composer_box.children()[0].get_visual_rect_no_clip();
+        assert_eq!(first.y0 - boxed.y0, 13.0, "border and padding");
 
         // Escape, with the text still in the box, gives the row back: the
         // words are safe in the cache.
