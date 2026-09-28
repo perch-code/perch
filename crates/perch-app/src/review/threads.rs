@@ -2424,9 +2424,9 @@ fn foot_button(label: &'static str, face: ThreadFace, action: impl Fn() + 'stati
 
 /// One message, laid out as github.com lays out a comment: a face, a
 /// byline with the name, when it was said and its labels, and what was
-/// said under it. A comment from GitHub has Reply, Ask about this, the
-/// reaction picker and its link at the end of its byline under the
-/// pointer, and the reactions on it under its text. A draft has the
+/// said under it. A comment on GitHub, the reader's or anyone's, has
+/// Reply, Ask about this, the reaction picker and its link at the end of
+/// its byline under the pointer, and the reactions on it under its text. A draft has the
 /// Draft mark, and edit and delete. The reader's question to an agent
 /// and the agent's answer are Perch's alone; in a thread that has
 /// something on GitHub each is labelled Perch only, so the reader never
@@ -2732,42 +2732,29 @@ fn agent_actions(
                 if !offered {
                     return Empty::new().into_any();
                 }
-                cards::tip_with(
-                    hover_icon(hovered, SidebarIcon::PullRequest, "post-to-github", post.clone()),
-                    || "Post to GitHub".to_string(),
-                )
+                cards::hover_action(hovered, SidebarIcon::PullRequest, "Post to GitHub", "post-to-github", post.clone())
                 .into_any()
             },
         ),
-        cards::tip_with(
-            hover_icon(hovered, SidebarIcon::Copy, "copy-message", copy),
-            || "Copy".to_string(),
-        ),
+        cards::hover_action(hovered, SidebarIcon::Copy, "Copy", "copy-message", copy),
     ))
     .debug_name("agent-actions")
     .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
     .into_any()
 }
 
-/// A comment from GitHub in a thread, under its author's face and
-/// byline, with the reactions on it under its text. Reply opens the
-/// composer under the thread, bound for GitHub, whatever the thread's
-/// last message was, while it has somewhere on GitHub to go; Ask about
-/// this opens it to an agent, so the answer lands beside the comment it
-/// is about; the thread's history carries the comment to the agent, and
-/// nothing is quoted.
-#[allow(clippy::too_many_arguments)]
-fn github_message_view(
+/// Reply and Ask about this on a comment in a thread that is on GitHub,
+/// the reader's or anyone's. Reply opens the composer under the thread,
+/// bound for GitHub, whatever the thread's last message was, while it has
+/// somewhere on GitHub to go; Ask about this opens it to an agent, so the
+/// answer lands beside the comment it is about; the thread's history
+/// carries the comment to the agent, and nothing is quoted.
+fn reply_and_ask(
     app: AppState,
     state: ReviewState,
-    backend: Rc<Backend>,
     thread: &CommentThread,
-    message: &CommentMessage,
-    login: String,
-    face: ThreadFace,
-    place: Place,
-) -> floem::AnyView {
-    let hovered = RwSignal::new(false);
+    hovered: RwSignal<bool>,
+) -> (floem::AnyView, Rc<dyn Fn()>) {
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     // To an agent, whatever the thread's last message was: the point is
     // to ask about the comment, not to answer it.
@@ -2801,11 +2788,30 @@ fn github_message_view(
             if !offered {
                 return Empty::new().into_any();
             }
-            cards::text_action(hovered, SidebarIcon::Reply, "Reply", "reply-github", reply_to.clone())
+            cards::hover_action(hovered, SidebarIcon::Reply, "Reply", "reply-github", reply_to.clone())
                 .into_any()
         },
     )
     .into_any();
+    (reply_button, ask)
+}
+
+/// A comment from GitHub in a thread, under its author's face and
+/// byline, with the reactions on it under its text, and Reply, Ask about
+/// this, the reaction picker and its link on hover.
+#[allow(clippy::too_many_arguments)]
+fn github_message_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    thread: &CommentThread,
+    message: &CommentMessage,
+    login: String,
+    face: ThreadFace,
+    place: Place,
+) -> floem::AnyView {
+    let hovered = RwSignal::new(false);
+    let (reply_button, ask) = reply_and_ask(app, state, thread, hovered);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
@@ -2866,14 +2872,8 @@ fn draft_message_view(
         backend.delete_draft(&item_id, &delete_id);
     });
     let actions = Stack::horizontal((
-        cards::tip_with(
-            hover_icon(hovered, SidebarIcon::Pencil, "edit-draft", edit),
-            || "Edit".to_string(),
-        ),
-        cards::tip_with(
-            hover_icon(hovered, SidebarIcon::Trash, "delete-draft", delete),
-            || "Delete".to_string(),
-        ),
+        cards::hover_action(hovered, SidebarIcon::Pencil, "Edit", "edit-draft", edit),
+        cards::hover_action(hovered, SidebarIcon::Trash, "Delete", "delete-draft", delete),
     ))
     .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
     .into_any();
@@ -2891,9 +2891,10 @@ fn draft_message_view(
 }
 
 /// A comment of the reader's that is on GitHub, under their face and
-/// name with the comment's time, its link and the reaction picker on
-/// hover, and the reactions on it under its text. No Draft mark, no edit
-/// and no delete: what is on github.com is edited there.
+/// name with the comment's time, Reply, Ask about this, the reaction
+/// picker and its link on hover, as anyone's comment has, and the
+/// reactions on it under its text. No Draft mark, no edit and no delete:
+/// what is on github.com is edited there.
 fn posted_message_view(
     app: AppState,
     state: ReviewState,
@@ -2904,6 +2905,7 @@ fn posted_message_view(
     place: Place,
 ) -> floem::AnyView {
     let hovered = RwSignal::new(false);
+    let (reply_button, ask) = reply_and_ask(app, state, thread, hovered);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
@@ -2913,7 +2915,7 @@ fn posted_message_view(
             when_label(app, message.created_at, face, "posted-when").into_any(),
             author_label(state, move || viewer_login(app)).into_any(),
         ],
-        cards::actions(state, backend, hovered, None, None, react, url),
+        cards::actions(state, backend, hovered, Some(reply_button), Some(ask), react, url),
     );
     let body = Stack::vertical((message_body(state, thread, &message.body), reactions))
     .style(|s| s.flex_col().width_full())
@@ -2949,22 +2951,6 @@ pub fn draft_pill() -> impl IntoView {
             .style(|s| s.margin_left(8.0)),
         "Not on GitHub until the review is submitted.".to_string(),
     )
-}
-
-/// A small action drawn only while its message is under the pointer,
-/// hidden rather than absent so the byline keeps its shape.
-fn hover_icon(
-    hovered: RwSignal<bool>,
-    icon: SidebarIcon,
-    name: &'static str,
-    action: Rc<dyn Fn()>,
-) -> impl IntoView {
-    icon_button(move || icon, || theme::FG_SUBTLE, move || action())
-        .debug_name(name)
-        .style(move |s| {
-            s.size(24.0, 24.0)
-                .apply_if(!hovered.get(), |s| s.hide())
-        })
 }
 
 /// What the agent did, under its answer or under the question while it
@@ -4400,7 +4386,9 @@ mod tests {
     /// A comment of the reader's that posted: their byline with the time,
     /// the link and the reactions, and no Draft mark, edit or delete,
     /// whether it opened its thread or answered someone's; the thread it
-    /// opened has no byline of its own over it.
+    /// opened has no byline of its own over it. Under the pointer it has
+    /// Reply, Ask about this, the picker and the link, as anyone's
+    /// comment has, and none of them otherwise.
     #[test]
     fn a_posted_comment_of_the_readers_keeps_its_byline_link_and_reactions() {
         let root = TestRoot::new();
@@ -4453,6 +4441,24 @@ mod tests {
             find(find(harness.root_id(), "ours").unwrap(), "You asked").is_none(),
             "the thread the reader opened on GitHub has no byline over its comment"
         );
+
+        let ours = find(harness.root_id(), "ours").unwrap();
+        let actions = ["reply-github", "ask-about", "react-button", "github-link"];
+        let drawn = |harness: &HeadlessHarness| -> Vec<bool> {
+            actions
+                .iter()
+                .map(|name| {
+                    let id = find(ours, name).unwrap_or_else(|| panic!("the comment has {name}"));
+                    harness.get_layout_rect(id).height() > 0.0
+                })
+                .collect()
+        };
+        assert_eq!(drawn(&harness), [false; 4], "nothing until the pointer is on it");
+        let at = find(ours, "posted-when").unwrap().get_visual_rect_no_clip().center();
+        harness.pointer_move(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(drawn(&harness), [true; 4], "all four under the pointer");
     }
 
     /// Reply on a GitHub user's comment opens the composer under the
@@ -4562,7 +4568,7 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
-        let ask = find(harness.root_id(), "Label: \"Ask about this\"").expect("Ask about this");
+        let ask = find(harness.root_id(), "ask-about").expect("Ask about this");
         let at = harness.get_layout_rect(harness.root_id()).center();
         harness.pointer_move(at.x, at.y);
         harness.rebuild();
@@ -4935,7 +4941,7 @@ mod tests {
                 assert!(harness.get_layout_rect(label).width() > 0.0, "{face:?}: the label is drawn");
             }
             assert!(find(rows[3], "draft-pill").is_some(), "{face:?}: the draft is last");
-            assert!(find(rows[0], "Label: \"Ask about this\"").is_some(), "{face:?}: rohan's comment");
+            assert!(find(rows[0], "ask-about").is_some(), "{face:?}: rohan's comment");
 
             // Every byline starts at one place, past the avatar; the text
             // under it starts there too, but for the first message in the

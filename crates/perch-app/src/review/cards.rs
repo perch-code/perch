@@ -45,7 +45,7 @@ use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{
-    avatar, clickable, follow_link, icon_button, name_label, open_in_browser, sidebar_glyph, Name,
+    avatar, clickable, follow_link, name_label, open_in_browser, sidebar_glyph, Name,
 };
 
 /// What a card's row in the column is keyed by. A row with the same key is
@@ -159,7 +159,7 @@ pub(crate) struct Byline {
 }
 
 /// Avatar, login, what they did and when, and whatever the caller puts at
-/// the right: the permalink and Ask about this.
+/// the right: its actions.
 pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> impl IntoView {
     let Byline {
         login,
@@ -205,12 +205,12 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
     .style(|s| s.items_center().width_full().min_width(0.0))
 }
 
-/// The right end of a GitHub byline: whatever the caller puts first, a
-/// Reply on a review comment or Quote reply on a card; Ask about this
-/// and the reaction picker while the card is hovered, and the permalink
-/// always. `react` is the subject's node id; an entry an older build kept
-/// without one has no picker, since GitHub could not be told what it was
-/// for.
+/// The right end of a GitHub byline, a glyph each and all only while the
+/// card is hovered: whatever the caller puts first, a Reply on a review
+/// comment or Quote reply on a card; Ask about this, the reaction picker
+/// and the permalink. `react` is the subject's node id; an entry an older
+/// build kept without one has no picker, since GitHub could not be told
+/// what it was for.
 pub(crate) fn actions(
     state: ReviewState,
     backend: Rc<Backend>,
@@ -226,7 +226,7 @@ pub(crate) fn actions(
             None => Empty::new().into_any(),
         },
         match ask {
-            Some(ask) => text_action(hovered, SidebarIcon::Thread, "Ask about this", "ask-about", ask)
+            Some(ask) => hover_action(hovered, SidebarIcon::Thread, "Ask about this", "ask-about", ask)
                 .into_any(),
             None => Empty::new().into_any(),
         },
@@ -237,13 +237,14 @@ pub(crate) fn actions(
         if url.is_empty() {
             Empty::new().into_any()
         } else {
-            icon_button(
-                || SidebarIcon::Link,
-                || theme::FG_SUBTLE,
-                move || open_in_browser(&url),
+            hover_action(
+                hovered,
+                SidebarIcon::Link,
+                "Open on GitHub",
+                "github-link",
+                Rc::new(move || open_in_browser(&url)),
             )
-            .debug_name("github-link")
-            .style(|s| s.size(24.0, 24.0).margin_right(-4.0))
+            .style(|s| s.margin_right(-4.0))
             .into_any()
         },
     ))
@@ -251,34 +252,31 @@ pub(crate) fn actions(
     .into_any()
 }
 
-/// A glyph and a word, "Ask about this" or "Reply", drawn only while the
-/// card is under the pointer. Hidden rather than absent, so the byline
-/// keeps its shape.
-pub(crate) fn text_action(
+/// A glyph that does `action`, named by its tip, "Ask about this" or
+/// "Reply", drawn only while the card is under the pointer. Hidden rather
+/// than absent, so the byline keeps its shape.
+pub(crate) fn hover_action(
     hovered: RwSignal<bool>,
     icon: SidebarIcon,
-    label: &'static str,
+    tip_text: &'static str,
     name: &'static str,
     action: Rc<dyn Fn()>,
 ) -> impl IntoView {
-    Stack::horizontal((
-        sidebar_glyph(icon, theme::FG_MUTED).style(|s| s.size(12.0, 12.0).margin_right(5.0)),
-        Label::derived(move || label.to_string()).style(|s| {
-            s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG_MUTED)
-        }),
-    ))
-    .on_event_stop(el::Click, move |_, _| action())
-    .debug_name(name)
-    .style(move |s| {
-        clickable(s)
-            .items_center()
-            .height(24.0)
-            .padding_horiz(8.0)
-            .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::BADGE_BG))
-            .apply_if(!hovered.get(), |s| s.hide())
-    })
+    tip(
+        Container::new(sidebar_glyph(icon, theme::FG_MUTED).style(|s| s.size(14.0, 14.0)))
+            .on_event_stop(el::Click, move |_, _| action())
+            .debug_name(name)
+            .style(move |s| {
+                clickable(s)
+                    .size(24.0, 24.0)
+                    .items_center()
+                    .justify_center()
+                    .border_radius(12.0)
+                    .hover(|s| s.background(theme::BADGE_BG))
+                    .apply_if(!hovered.get(), |s| s.hide())
+            }),
+        tip_text.to_string(),
+    )
 }
 
 /// Follow the pointer in and out of a card, for Ask about this.
@@ -397,7 +395,7 @@ impl Placement {
 }
 
 /// A face that opens the picker. In a byline it is drawn only while the
-/// card is under the pointer, as Ask about this is, and hidden rather
+/// card is under the pointer, as its other actions are, and hidden rather
 /// than absent so the byline keeps its shape; at the end of a row of
 /// pills it is round and ruled like them, as GitHub's is, and always
 /// there. Either stays drawn, pressed, while its picker is open.
@@ -975,7 +973,7 @@ fn quote_reply_button(state: ReviewState, hovered: RwSignal<bool>, body: String)
             if !offered {
                 return Empty::new().into_any();
             }
-            text_action(hovered, SidebarIcon::Reply, "Quote reply", "quote-reply", quote.clone())
+            hover_action(hovered, SidebarIcon::Reply, "Quote reply", "quote-reply", quote.clone())
                 .into_any()
         },
     )
