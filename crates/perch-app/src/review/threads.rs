@@ -21,7 +21,9 @@ use floem::style::{BorderBottomLeftRadius, BorderBottomRightRadius, CursorStyle}
 use floem::views::{
     dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack,
 };
-use perch_github::{Author, CommentMessage, CommentThread, RunRecord, RunStatus, ThreadOrigin};
+use perch_github::{
+    Author, CommentMessage, CommentThread, IssueCloseReason, RunRecord, RunStatus, ThreadOrigin,
+};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -339,7 +341,13 @@ pub fn composer_view(
                 }
                 let body = question.trim().to_string();
                 if closing {
-                    let token = backend.close_pull_request(&item_id, &body);
+                    let token = if state.pull_request.with_untracked(Option::is_some) {
+                        backend.close_pull_request(&item_id, &body)
+                    } else {
+                        let reason = state.composer_close_reason.get_untracked();
+                        state.composer_close_reason.set(IssueCloseReason::Completed);
+                        backend.close_issue(&item_id, &body, reason)
+                    };
                     state.last_destination[face.index()].set(Some(composer.destination.clone()));
                     state.start_closing(token, body);
                     return;
@@ -914,12 +922,15 @@ fn composer_footer(
                 state.composer_confirming.set(false)
             })
             .debug_name("composer-cancel-post"),
+            not_planned_button(state, send.clone()),
             send_button(
                 move || {
-                    if state.composer_closing.get() {
-                        "Close".to_string()
-                    } else {
+                    if !state.composer_closing.get() {
                         "Post".to_string()
+                    } else if state.issue.with(Option::is_some) {
+                        "Completed".to_string()
+                    } else {
+                        "Close".to_string()
                     }
                 },
                 send.clone(),
@@ -950,18 +961,21 @@ fn composer_footer(
 }
 
 /// Close with comment, beside Comment, as GitHub has it: on an open pull
-/// request the reader may close, while the text is bound for its
-/// conversation. It reads Close pull request while the box is empty.
-/// A click asks first, on the footer's line, as Comment does.
+/// request or issue the reader may close, while the text is bound for
+/// its conversation. It reads Close pull request, or Close issue, while
+/// the box is empty. A click asks first, on the footer's line, as
+/// Comment does.
 fn close_button(app: AppState, state: ReviewState) -> impl IntoView {
     let offered = Memo::new(move |_| close_offered(app, state));
     Container::new(
         text_button(
             move || {
-                if state.composer_draft.with(|d| d.trim().is_empty()) {
-                    "Close pull request".to_string()
-                } else {
+                if !state.composer_draft.with(|d| d.trim().is_empty()) {
                     "Close with comment".to_string()
+                } else if state.issue.with(Option::is_some) {
+                    "Close issue".to_string()
+                } else {
+                    "Close pull request".to_string()
                 }
             },
             SidebarIcon::Close,
@@ -973,16 +987,34 @@ fn close_button(app: AppState, state: ReviewState) -> impl IntoView {
                 state.composer_confirming.set(true);
             },
         )
-        .debug_name("pull-request-close"),
+        .debug_name("subject-close"),
     )
     .style(move |s| s.apply_if(!offered.get(), |s| s.hide()))
+}
+
+/// Not planned, beside Completed under the ask to close an issue: the
+/// other way GitHub closes one. Nothing for a pull request, or a comment.
+fn not_planned_button(state: ReviewState, send: Rc<dyn Fn()>) -> impl IntoView {
+    let offered = move || state.composer_closing.get() && state.issue.with(Option::is_some);
+    Container::new(
+        text_button(
+            || "Not planned".to_string(),
+            SidebarIcon::Close,
+            move || {
+                state.composer_close_reason.set(IssueCloseReason::NotPlanned);
+                send();
+            },
+        )
+        .debug_name("issue-close-not-planned"),
+    )
+    .style(move |s| s.apply_if(!offered(), |s| s.hide()))
 }
 
 /// Close as issue…, beside Close, where the pull request may be closed:
 /// it unfolds the form at the foot of Conversation that opens an issue
 /// for what the pull request found, then comments and closes.
 fn close_as_issue_button(app: AppState, state: ReviewState) -> impl IntoView {
-    let offered = Memo::new(move |_| close_offered(app, state));
+    let offered = Memo::new(move |_| pull_request_close_offered(app, state));
     Container::new(
         text_button(
             || "Close as issue…".to_string(),
@@ -1003,18 +1035,46 @@ fn close_as_issue_button(app: AppState, state: ReviewState) -> impl IntoView {
     .style(move |s| s.apply_if(!offered.get(), |s| s.hide()))
 }
 
-/// Whether the open composer offers to close the pull request: its text
-/// goes to the conversation as an issue comment, the pull request is
-/// open and GitHub is reachable, and the reader wrote it or may write to
-/// its repository. Tracked.
+/// Whether the open composer offers to close its pull request or issue.
+/// Tracked.
 fn close_offered(app: AppState, state: ReviewState) -> bool {
-    use perch_github::RepositoryPermission;
+    pull_request_close_offered(app, state) || issue_close_offered(app, state)
+}
 
+/// Whether the open composer's text goes to the conversation as an issue
+/// comment while GitHub is reachable, as a close from it needs. Tracked.
+fn closes_from_composer(state: ReviewState) -> bool {
     let to_conversation = state.composer.with(|c| {
         c.as_ref()
             .is_some_and(|c| c.destination.is_github() && state.posts_issue_comment(c))
     });
-    if !to_conversation || state.offline.get() {
+    to_conversation && !state.offline.get()
+}
+
+/// Whether the open composer offers to close the issue: the issue is
+/// open and GitHub says the reader may close it, or, until it says, the
+/// reader wrote it. Tracked.
+fn issue_close_offered(app: AppState, state: ReviewState) -> bool {
+    if !closes_from_composer(state) {
+        return false;
+    }
+    let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let closable = state.issue_closable.get();
+    state.issue.with(|issue| {
+        issue.as_ref().is_some_and(|issue| {
+            issue.is_open()
+                && closable.unwrap_or(viewer.as_deref() == Some(issue.author_login.as_str()))
+        })
+    })
+}
+
+/// Whether the open composer offers to close the pull request: it goes
+/// to the conversation, the pull request is open, and the reader wrote
+/// it or may write to its repository. Tracked.
+fn pull_request_close_offered(app: AppState, state: ReviewState) -> bool {
+    use perch_github::RepositoryPermission;
+
+    if !closes_from_composer(state) {
         return false;
     }
     let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
@@ -5687,10 +5747,10 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
         harness.rebuild();
         harness.paint();
-        assert!(shown(&harness, "pull-request-close"));
+        assert!(shown(&harness, "subject-close"));
         assert!(find(harness.root_id(), "Label: \"Close with comment\"").is_some());
 
-        click(&mut harness, "pull-request-close");
+        click(&mut harness, "subject-close");
         assert!(commands.try_recv().is_err(), "nothing closed before the yes");
         assert!(state.composer_confirming.get());
         assert!(find(harness.root_id(), "Comment on and close github.com/acme/repo/pull/42?").is_some());
@@ -5726,6 +5786,98 @@ mod tests {
         assert!(!close_offered(app, state));
     }
 
+    /// On an open issue the button reads Close issue, and the ask offers
+    /// Not planned beside Completed, each closing with its reason. Until
+    /// GitHub says who may close it only its author is offered the close,
+    /// and nobody is once it is closed.
+    #[test]
+    fn an_issue_closes_as_completed_or_not_planned() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        app.viewer.set(Some(("octocat".into(), String::new())));
+        let state = state_with_item();
+        state.issue.set(Some(Arc::new(issue())));
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Label: \"Close issue\"").is_some());
+        assert!(!shown(&harness, "close-as-issue-unfold"), "an issue is not closed as one");
+
+        click(&mut harness, "subject-close");
+        assert!(find(harness.root_id(), "Close github.com/acme/repo/issues/43?").is_some());
+        assert!(find(harness.root_id(), "Label: \"Completed\"").is_some());
+        assert!(shown(&harness, "issue-close-not-planned"));
+        click(&mut harness, "issue-close-not-planned");
+        let token = match commands.try_recv() {
+            Ok(Command::CloseIssue {
+                item_id,
+                token,
+                body,
+                reason,
+            }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(body, "");
+                assert_eq!(reason, IssueCloseReason::NotPlanned);
+                token
+            }
+            other => panic!("Not planned did not close: {other:?}"),
+        };
+        assert!(find(harness.root_id(), "Closing").is_some());
+        state.settle_issue_comment(token, Err("GitHub could not close the issue: 403".into()));
+        harness.rebuild();
+        harness.paint();
+
+        // Refused, the next yes is Completed's, not the last reason.
+        click(&mut harness, "subject-close");
+        click(&mut harness, "composer-post");
+        match commands.try_recv() {
+            Ok(Command::CloseIssue { reason, .. }) => {
+                assert_eq!(reason, IssueCloseReason::Completed)
+            }
+            other => panic!("Completed did not close: {other:?}"),
+        }
+
+        // Someone else's issue waits on GitHub's word.
+        app.viewer.set(Some(("reader".into(), String::new())));
+        assert!(!close_offered(app, state));
+        state.issue_closable.set(Some(true));
+        assert!(close_offered(app, state));
+        state.issue_closable.set(Some(false));
+        assert!(!close_offered(app, state));
+        // Nor is a closed issue closed again.
+        state.issue_closable.set(Some(true));
+        let mut closed = issue();
+        closed.state = "closed".into();
+        state.issue.set(Some(Arc::new(closed)));
+        assert!(!close_offered(app, state));
+    }
+
+    /// Under the ask to close a pull request or post a comment there is
+    /// no Not planned, and the yes reads Close or Post.
+    #[test]
+    fn not_planned_is_only_for_an_issue() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        app.viewer.set(Some(("octocat".into(), String::new())));
+        let state = state_with_pull_request();
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        let composer = state.composer.get().unwrap();
+        let backend = Rc::new(crate::backend::Backend::detached());
+        let view = composer_view(app, state, backend, composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        click(&mut harness, "subject-close");
+        assert!(find(harness.root_id(), "Label: \"Close\"").is_some());
+        assert!(!shown(&harness, "issue-close-not-planned"));
+    }
+
     /// With both closes offered, the footer keeps to the card in the
     /// narrowest column the window allows, putting what doesn't fit on a
     /// second line, and to one line where there is room.
@@ -5744,7 +5896,7 @@ mod tests {
             let mut harness = HeadlessHarness::new_with_size(root, view, width, 400.0);
             harness.rebuild();
             harness.paint();
-            let rects: Vec<_> = ["close-as-issue-unfold", "pull-request-close", "composer-send"]
+            let rects: Vec<_> = ["close-as-issue-unfold", "subject-close", "composer-send"]
                 .into_iter()
                 .map(|name| find(harness.root_id(), name).unwrap().get_visual_rect_no_clip())
                 .collect();
@@ -5810,7 +5962,7 @@ mod tests {
         harness.paint();
         assert!(find(harness.root_id(), "Label: \"Close pull request\"").is_some());
 
-        click(&mut harness, "pull-request-close");
+        click(&mut harness, "subject-close");
         assert!(find(harness.root_id(), "Close github.com/acme/repo/pull/42?").is_some());
         click(&mut harness, "composer-post");
         match commands.try_recv() {

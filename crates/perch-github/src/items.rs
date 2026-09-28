@@ -76,6 +76,26 @@ impl Issue {
     }
 }
 
+/// Why an issue is closed, as GitHub's Close issue menu offers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum IssueCloseReason {
+    /// Done, fixed or answered: GitHub's default.
+    #[default]
+    Completed,
+    /// Won't be done.
+    NotPlanned,
+}
+
+impl IssueCloseReason {
+    /// The `state_reason` GitHub's REST API takes and answers with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotPlanned => "not_planned",
+        }
+    }
+}
+
 /// The subset of GitHub's issue payload we read.
 ///
 /// The issues endpoint answers for pull requests too, since GitHub numbers

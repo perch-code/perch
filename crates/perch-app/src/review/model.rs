@@ -1118,6 +1118,9 @@ pub struct ReviewState {
     /// What GitHub's timeline says was done to the issue. A pull
     /// request's are in its discussion instead.
     pub issue_events: RwSignal<Arc<Vec<perch_github::PullEvent>>>,
+    /// Whether GitHub says the reader may close the issue: `None` until
+    /// it answers, when only the issue's author is offered the close.
+    pub issue_closable: RwSignal<Option<bool>>,
     /// The head the pull request moved to while the worktree had work in
     /// it. The files on screen are the older ones.
     pub stale_head: RwSignal<Option<String>>,
@@ -1492,6 +1495,10 @@ pub struct ReviewState {
     /// the pull request, with the text as a comment when there is any,
     /// rather than only posting the text. Read under the confirm only.
     pub composer_closing: RwSignal<bool>,
+    /// Why an issue closed from the composer is closed: completed unless
+    /// the ask's Not planned was the answer. The send reads it and puts
+    /// it back to completed.
+    pub composer_close_reason: RwSignal<perch_github::IssueCloseReason>,
     /// An issue comment in flight, with the token its answer carries. The
     /// composer stays open and still until the answer comes.
     pub posting: RwSignal<Option<Posting>>,
@@ -1628,6 +1635,7 @@ impl ReviewState {
             issue: RwSignal::new(None),
             issue_comments: RwSignal::new(Arc::new(Vec::new())),
             issue_events: RwSignal::new(Arc::new(Vec::new())),
+            issue_closable: RwSignal::new(None),
             stale_head: RwSignal::new(None),
             offline: RwSignal::new(false),
             upstream_changed: RwSignal::new(false),
@@ -1761,6 +1769,7 @@ impl ReviewState {
             composer_resizing: RwSignal::new(false),
             composer_confirming: RwSignal::new(false),
             composer_closing: RwSignal::new(false),
+            composer_close_reason: RwSignal::new(Default::default()),
             posting: RwSignal::new(None),
             composer_error: RwSignal::new(None),
             lsp_status: RwSignal::new(perch_lsp::Status::Absent),
@@ -1840,6 +1849,7 @@ impl ReviewState {
         self.issue.set(None);
         self.issue_comments.set(Arc::new(Vec::new()));
         self.issue_events.set(Arc::new(Vec::new()));
+        self.issue_closable.set(None);
         self.stale_head.set(None);
         self.offline.set(false);
         self.review_open.set(false);

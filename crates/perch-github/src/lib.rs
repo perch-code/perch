@@ -45,7 +45,7 @@ pub use discussion::{
     ReviewThreadState,
 };
 pub use items::{
-    Checkout as ItemCheckout, Diverged, Divergence, Issue, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind,
+    Checkout as ItemCheckout, Diverged, Divergence, Issue, IssueCloseReason, Item, Label, Subject as ItemSubject, SubjectKind as ItemKind,
 };
 pub use mentions::MentionableUser;
 pub use model::{

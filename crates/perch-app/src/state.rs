@@ -1142,6 +1142,9 @@ impl AppState {
                 review.offline.set(offline);
                 review.upstream_changed.set(false);
                 review.install_issue_reactions(&issue, &comments);
+                if fresh {
+                    review.issue_closable.set(None);
+                }
                 review.issue.set(Some(issue));
                 review.issue_comments.set(comments);
                 review.issue_events.set(events);
@@ -1978,6 +1981,47 @@ impl AppState {
                     review.settle_issue_comment(token, result);
                 }
             }
+            // The closed issue came in an `IssueUpdated` before this.
+            Event::IssueClosed {
+                item_id,
+                token,
+                result,
+            } => {
+                if review.is_item(&item_id) {
+                    review.settle_issue_comment(token, result);
+                }
+            }
+            Event::IssueUpdated {
+                item_id,
+                item,
+                issue,
+            } => {
+                let same_issue = review.issue.with_untracked(|current| {
+                    current.as_ref().is_some_and(|current| {
+                        current.repo_full_name == issue.repo_full_name
+                            && current.number == issue.number
+                    })
+                });
+                if review.is_item(&item_id) && same_issue {
+                    review.item.set(Some(item));
+                    review.issue.set(Some(issue));
+                }
+            }
+            Event::IssueClosable {
+                item_id,
+                repo_full_name,
+                number,
+                closable,
+            } => {
+                let same_issue = review.issue.with_untracked(|current| {
+                    current.as_ref().is_some_and(|current| {
+                        current.repo_full_name == repo_full_name && current.number == number
+                    })
+                });
+                if review.is_item(&item_id) && same_issue {
+                    review.issue_closable.set(Some(closable));
+                }
+            }
             Event::CommitsReady {
                 navigation_id,
                 scope_gen,
@@ -2386,6 +2430,9 @@ impl AppState {
             | Event::PullRequestReviewFailed { .. }
             | Event::IssueCommentPosted { .. }
             | Event::PullRequestClosed { .. }
+            | Event::IssueClosed { .. }
+            | Event::IssueUpdated { .. }
+            | Event::IssueClosable { .. }
             | Event::CommitsReady { .. }
             | Event::ScopeReady { .. }
             | Event::ViewedReady { .. }
@@ -4077,6 +4124,54 @@ mod tests {
         assert!(review.begin_resolve("gh-31", false));
         review.close();
         assert!(!review.is_resolving("gh-31"));
+    }
+
+    /// Whether the issue may be closed, and the closed issue, land on the
+    /// view showing that issue and no other.
+    #[test]
+    fn an_issues_closability_and_its_closed_self_land_only_on_that_issue() {
+        let app = AppState::new();
+        let review = review_of("wt");
+        let issue = |state: &str| perch_github::Issue {
+            number: 42,
+            node_id: "I_42".into(),
+            title: "Fence the manifest".into(),
+            body: String::new(),
+            reactions: Default::default(),
+            state: state.into(),
+            state_reason: None,
+            author_login: "a".into(),
+            author_avatar_url: String::new(),
+            labels: vec![],
+            assignees: vec![],
+            comments: 0,
+            created_at: None,
+            updated_at: "2026-09-18T10:00:00Z".parse().unwrap(),
+            repo_full_name: "slatedb/slatedb".into(),
+        };
+        review.issue.set(Some(Arc::new(issue("open"))));
+        let closable = |item_id: &str, number: u64| Event::IssueClosable {
+            item_id: item_id.into(),
+            repo_full_name: "slatedb/slatedb".into(),
+            number,
+            closable: true,
+        };
+        app.apply_with_review(closable("other", 42), review);
+        app.apply_with_review(closable("wt", 43), review);
+        assert_eq!(review.issue_closable.get(), None);
+        app.apply_with_review(closable("wt", 42), review);
+        assert_eq!(review.issue_closable.get(), Some(true));
+
+        let item = review.item.get_untracked().unwrap();
+        app.apply_with_review(
+            Event::IssueUpdated {
+                item_id: "wt".into(),
+                item,
+                issue: Arc::new(issue("closed")),
+            },
+            review,
+        );
+        assert!(!review.issue.get().unwrap().is_open());
     }
 
     #[test]

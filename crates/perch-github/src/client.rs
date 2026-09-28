@@ -22,7 +22,7 @@ use crate::discussion::{
     ReviewCommentPayload, ReviewPayload, ReviewThreadState, ReviewThreadsData,
     REVIEW_THREADS_MAX_PAGES, REVIEW_THREADS_QUERY,
 };
-use crate::items::{Issue, IssuePayload};
+use crate::items::{Issue, IssueCloseReason, IssuePayload};
 use crate::model::{SubjectSnapshot, Thread};
 use crate::pulls::{
     MergeMethod, MergeRequest, MergeResult, PullPayload, PullRequest, PullRequestOverview,
@@ -1033,6 +1033,78 @@ impl GitHub {
             )));
         }
         Ok(payload.into_issue(repo_full_name))
+    }
+
+    /// Close an issue: `PATCH /issues/{number}` with `state: closed` and
+    /// the reason, which answers with the issue as it now stands.
+    pub async fn close_issue(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        reason: IssueCloseReason,
+    ) -> Result<Issue, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+
+        #[derive(serde::Serialize)]
+        struct Request {
+            state: &'static str,
+            state_reason: &'static str,
+        }
+
+        let path = format!("/repos/{owner}/{name}/issues/{number}");
+        let request = Request {
+            state: "closed",
+            state_reason: reason.as_str(),
+        };
+        let _request_guard = self.api_request_lock.lock().await;
+        self.check_rate_limit()?;
+        let response = self
+            .octo
+            ._patch(&path, Some(&request))
+            .await
+            .map_err(map_octocrab_error)?;
+        let body = self.finish_response(response, &[StatusCode::OK]).await?;
+        let payload: IssuePayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(payload.into_issue(repo_full_name))
+    }
+
+    /// Whether the reader may close an issue: its author may, and so may
+    /// anyone with triage access to its repository. GitHub works it out,
+    /// as `viewerCanClose`.
+    pub async fn viewer_can_close_issue(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<bool, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+
+        #[derive(serde::Deserialize)]
+        struct Data {
+            repository: Option<Repository>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Repository {
+            issue: Option<IssueNode>,
+        }
+        #[derive(serde::Deserialize)]
+        struct IssueNode {
+            viewer_can_close: bool,
+        }
+
+        let payload = serde_json::json!({
+            "query": "query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) { viewer_can_close: viewerCanClose }
+  }
+}",
+            "variables": { "owner": owner, "name": name, "number": number },
+        });
+        let data: Data = self.graphql(&payload).await?;
+        data.repository
+            .and_then(|repository| repository.issue)
+            .map(|issue| issue.viewer_can_close)
+            .ok_or_else(|| Error::Decode(format!("GitHub has no issue {repo_full_name}#{number}")))
     }
 
     /// Whether a number in a repository is a pull request or an issue.

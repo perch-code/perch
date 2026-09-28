@@ -551,6 +551,15 @@ pub enum Command {
         token: u64,
         body: String,
     },
+    /// Close the item's issue as `reason`, posting `body` as a comment
+    /// first when it says anything. `token` is the same kind as
+    /// `PostIssueComment`'s.
+    CloseIssue {
+        item_id: String,
+        token: u64,
+        body: String,
+        reason: perch_github::IssueCloseReason,
+    },
     /// Open an issue from the item's pull request, comment on the pull
     /// request with `comment`, where `{issue}` is the issue's number, and
     /// close it. `ClosedAsIssue` answers.
@@ -1139,6 +1148,27 @@ pub enum Event {
         item_id: String,
         token: u64,
         result: Result<(), String>,
+    },
+    /// The issue was closed, or why nothing happened, as for
+    /// `PullRequestClosed`.
+    IssueClosed {
+        item_id: String,
+        token: u64,
+        result: Result<(), String>,
+    },
+    /// The open issue as GitHub answered a change to it with, and its
+    /// durable item.
+    IssueUpdated {
+        item_id: String,
+        item: Arc<Item>,
+        issue: Arc<perch_github::Issue>,
+    },
+    /// Whether the reader may close the open issue, as GitHub says.
+    IssueClosable {
+        item_id: String,
+        repo_full_name: String,
+        number: u64,
+        closable: bool,
     },
     /// The issue's number once it is open, whatever came after it, or why
     /// nothing happened. A comment or close GitHub refused after the issue
@@ -2954,6 +2984,25 @@ impl Backend {
         token
     }
 
+    /// Close the item's issue as `reason`, with `body` as a comment first
+    /// when it is not blank. The token comes back on `IssueClosed`, drawn
+    /// as `close_pull_request`'s is.
+    pub fn close_issue(
+        &self,
+        item_id: &str,
+        body: &str,
+        reason: perch_github::IssueCloseReason,
+    ) -> u64 {
+        let token = next_posting_token();
+        let _ = self.commands.send(Command::CloseIssue {
+            item_id: item_id.to_string(),
+            token,
+            body: body.to_string(),
+            reason,
+        });
+        token
+    }
+
     pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
         let _ = self.commands.send(Command::Hover {
             token,
@@ -4188,6 +4237,17 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     close_pull_request(&ctx, &item_id, token, &body).await;
+                });
+            }
+            Command::CloseIssue {
+                item_id,
+                token,
+                body,
+                reason,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    close_issue(&ctx, &item_id, token, &body, reason).await;
                 });
             }
             Command::CloseAsIssue {
@@ -8837,6 +8897,127 @@ async fn close_pull_request(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
     }
 }
 
+/// Close the item's issue as `reason`, saying `body` in its conversation
+/// first when there is anything to say. As for a pull request, the answer
+/// is a refusal only while nothing has happened on GitHub. Closed, the
+/// issue GitHub answered with replaces the kept one, and its comments and
+/// timeline are fetched again for the close.
+async fn close_issue(
+    ctx: &Ctx,
+    item_id: &str,
+    token: u64,
+    body: &str,
+    reason: perch_github::IssueCloseReason,
+) {
+    let answer = |result: Result<(), String>| {
+        if let Err(message) = &result {
+            tracing::info!(item = item_id, %message, "issue not closed");
+        }
+        let _ = ctx.events.send(Event::IssueClosed {
+            item_id: item_id.to_string(),
+            token,
+            result,
+        });
+    };
+    let Some(issue) = ctx.item(item_id).and_then(|item| item.issue().cloned()) else {
+        return answer(Err("Only an issue can be closed from here".into()));
+    };
+    if !issue.is_open() {
+        return answer(Err("This issue is no longer open".into()));
+    }
+    let Some(github) = ctx.github() else {
+        return answer(Err("GitHub is unavailable while Perch is offline".into()));
+    };
+    let (repo_full_name, number) = (&issue.repo_full_name, issue.number);
+    let body = body.trim();
+    if !body.is_empty() {
+        match github.create_issue_comment(repo_full_name, number, body).await {
+            Ok(comment) => show_posted_issue_comment(ctx, item_id, &comment).await,
+            Err(error) => {
+                return answer(Err(format!("GitHub could not post the comment: {error}")))
+            }
+        }
+    }
+    match github.close_issue(repo_full_name, number, reason).await {
+        Ok(closed) => {
+            install_issue_snapshot(ctx, item_id, closed);
+            ctx.notice(format!("Closed {repo_full_name}#{number}"));
+            answer(Ok(()));
+            refresh_open_item(ctx, item_id).await;
+        }
+        Err(error) => {
+            let message = format!("GitHub could not close the issue: {error}");
+            if body.is_empty() {
+                answer(Err(message));
+            } else {
+                ctx.notice(format!("Posted the comment, but {message}"));
+                answer(Ok(()));
+            }
+        }
+    }
+}
+
+/// Put an issue GitHub just answered with in its item, its row and the
+/// open view. The answer carries no reactions, so the body keeps those
+/// it had.
+fn install_issue_snapshot(ctx: &Ctx, item_id: &str, mut fetched: perch_github::Issue) {
+    let view = ctx.view_for(item_id);
+    let ctx = &view;
+    let Some(mut item) = ctx.item(item_id) else {
+        return;
+    };
+    let Some(current) = item.issue() else {
+        return;
+    };
+    if current.repo_full_name != fetched.repo_full_name || current.number != fetched.number {
+        return;
+    }
+    fetched.reactions = current.reactions.clone();
+    item.subject = Some(ItemSubject::Issue(fetched.clone()));
+    if let Some(Err(error)) = ctx.with_cache(|cache| cache.update_item(&item)) {
+        tracing::warn!(item = item_id, %error, "could not store the closed issue");
+    }
+    if let Ok(mut guard) = ctx.slot.lock() {
+        if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+            if let Some(kept) = open.issue.as_ref() {
+                open.issue = Some(Arc::new((fetched.clone(), kept.1.clone())));
+            }
+        }
+    }
+    ctx.send_items();
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::IssueUpdated {
+            item_id: item_id.to_string(),
+            item: Arc::new(item),
+            issue: Arc::new(fetched),
+        });
+    }
+}
+
+/// Ask GitHub whether the reader may close the issue just opened, for the
+/// composer's Close issue. Without an answer only its author is offered
+/// the close.
+async fn learn_issue_closable(ctx: &Ctx, item_id: &str, repo_full_name: &str, number: u64) {
+    let Some(github) = ctx.github() else {
+        return;
+    };
+    match github.viewer_can_close_issue(repo_full_name, number).await {
+        Ok(closable) => {
+            if ctx.is_open(item_id) {
+                let _ = ctx.events.send(Event::IssueClosable {
+                    item_id: item_id.to_string(),
+                    repo_full_name: repo_full_name.to_string(),
+                    number,
+                    closable,
+                });
+            }
+        }
+        Err(error) => {
+            tracing::info!(repo = repo_full_name, number, %error, "could not ask whether the issue may be closed");
+        }
+    }
+}
+
 /// Open an issue for what the item's pull request found, say so in its
 /// conversation with `comment`, where `{issue}` becomes the issue's
 /// number, and close it. The answer is a refusal only while nothing has
@@ -11322,6 +11503,15 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
             .chain(comments.iter().map(|c| c.user_avatar_url.clone())),
     );
     ctx.send_threads(&item.id);
+    if !offline && issue.is_open() {
+        let ctx = ctx.clone();
+        let item_id = item.id.clone();
+        let repo_full_name = issue.repo_full_name.clone();
+        let number = issue.number;
+        tokio::spawn(async move {
+            learn_issue_closable(&ctx, &item_id, &repo_full_name, number).await;
+        });
+    }
 
     false
 }
@@ -18229,6 +18419,94 @@ read eof || true
         assert_eq!(kept.comments.iter().map(|c| c.id).collect::<Vec<_>>(), [1, 920]);
         let prompted = ctx.slot.lock().unwrap().as_ref().unwrap().issue.clone().unwrap();
         assert_eq!(prompted.1.len(), 2, "the next question sees it");
+    }
+
+    /// Closing an issue posts the comment, closes it with the reason, and
+    /// puts the closed issue in its item and the view before the answer;
+    /// its comments and timeline are read again after, for the close.
+    #[tokio::test]
+    async fn closing_an_issue_comments_then_closes_it_with_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let sent: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = sent.clone();
+        let (base, _) = serve_by_body(move |method, path, _, body| {
+            let path = path.split('?').next().unwrap_or(path);
+            seen.lock().unwrap().push(format!("{method} {path} {body}"));
+            match (method, path) {
+                ("POST", "/repos/a/b/issues/8/comments") => {
+                    ("201 Created", issue_comment_json(921, "Won't do"))
+                }
+                ("PATCH", "/repos/a/b/issues/8") => (
+                    "200 OK",
+                    serde_json::json!({
+                        "number": 8,
+                        "title": "t",
+                        "state": "closed",
+                        "state_reason": "not_planned",
+                        "user": { "login": "rohan" },
+                        "updated_at": "2026-09-25T10:00:00Z",
+                    })
+                    .to_string(),
+                ),
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let issue = store_issue(&ctx, 8);
+        store_commented_discussion(&ctx, &issue);
+        open_in_slot(&ctx, &issue);
+        let snapshot = issue.issue().cloned().unwrap();
+        ctx.slot.lock().unwrap().as_mut().unwrap().issue = Some(Arc::new((snapshot, Vec::new())));
+
+        close_issue(
+            &ctx,
+            &issue.id,
+            12,
+            " Won't do ",
+            perch_github::IssueCloseReason::NotPlanned,
+        )
+        .await;
+
+        let sent = sent.lock().unwrap().clone();
+        assert!(sent[0].starts_with("POST /repos/a/b/issues/8/comments"), "{sent:?}");
+        assert!(sent[1].starts_with("PATCH /repos/a/b/issues/8 "), "{sent:?}");
+        assert!(sent[1].contains(r#""state_reason":"not_planned""#), "{sent:?}");
+        assert!(
+            sent[2..].iter().any(|r| r.starts_with("GET /repos/a/b/issues/8/comments")),
+            "the comments are read again: {sent:?}"
+        );
+        let events: Vec<Event> = received.try_iter().collect();
+        let updated = events.iter().position(|e| {
+            matches!(e, Event::IssueUpdated { issue, .. } if !issue.is_open())
+        });
+        let answered = events
+            .iter()
+            .position(|e| matches!(e, Event::IssueClosed { token: 12, result: Ok(()), .. }));
+        assert!(updated.is_some() && answered.is_some(), "{events:?}");
+        assert!(updated < answered, "the closed issue is in before the answer");
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Event::Notice(m) if m == "Closed a/b#8")));
+        let kept = ctx.item(&issue.id).unwrap();
+        assert_eq!(
+            kept.issue().unwrap().state_reason.as_deref(),
+            Some("not_planned")
+        );
+        let open = ctx.slot.lock().unwrap().as_ref().unwrap().issue.clone().unwrap();
+        assert!(!open.0.is_open(), "the next question sees it closed");
+
+        // Closed, it is not closed again.
+        close_issue(&ctx, &issue.id, 13, "", Default::default()).await;
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [Event::IssueClosed { token: 13, result: Err(message), .. }]
+                    if message.contains("no longer open")
+            ),
+            "{events:?}"
+        );
     }
 
     /// With no discussion kept, the comment has nowhere to be appended,

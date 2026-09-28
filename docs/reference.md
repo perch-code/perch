@@ -169,7 +169,10 @@ At the foot of Conversation, a message to GitHub is an issue comment and
 posts at once, after one confirmation naming the pull request. Beside
 **Comment**, **Close with comment** posts it and closes the pull request, or
 reads **Close pull request** while the box is empty. It is there on an open
-pull request you opened or can write to, and asks once too. GitHub has no
+pull request you opened or can write to, and asks once too. On an open issue
+you opened or can triage, the same button reads **Close issue**, and its
+confirmation offers **Not planned** beside **Completed**, the reason GitHub
+records for the close. GitHub has no
 threads under a comment, a review's summary or the description, so each offers
 **Quote reply** under the pointer, which opens that composer with the text
 quoted as github.com quotes it, below anything already typed there for GitHub.
@@ -236,7 +239,7 @@ its repository, as does pushing a branch from Perch's own clone; opening a pull
 request requires `Pull requests: write`. Commenting on, approving, or requesting changes on a pull
 request requires `Pull requests: write` permission, as do resolving a thread
 and reacting to a pull request or anything said on it; reacting on an issue
-requires `Issues: write`, as does Close as issue.
+requires `Issues: write`, as do Close as issue and closing an issue.
 
 ## Configuration
 

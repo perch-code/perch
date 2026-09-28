@@ -1,11 +1,12 @@
-//! Pull-request merge state and mutations against a scripted local server.
+//! Pull-request merge state and mutations, and closing an issue, against
+//! a scripted local server.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
 use perch_github::{
-    CheckKind, CheckRunState, CheckState, Error, GitHub, MergeMethod, MergeState, MergeableState,
+    CheckKind, CheckRunState, CheckState, Error, GitHub, IssueCloseReason, MergeMethod, MergeState, MergeableState,
     RepositoryPermission, ReviewDecision,
 };
 
@@ -477,4 +478,56 @@ async fn closing_patches_the_pull_request_closed_and_reads_back_its_state() {
     assert_eq!(requests[0].path, "/repos/a/b/pulls/42");
     let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
     assert_eq!(body, serde_json::json!({ "state": "closed" }));
+}
+
+#[tokio::test]
+async fn closing_an_issue_patches_it_closed_with_the_reason() {
+    let (base, requests) = spawn(vec![Response::new(
+        "200 OK",
+        r#"{"number":7,"title":"Fence","state":"closed","state_reason":"not_planned",
+            "user":{"login":"rohan"},"updated_at":"2026-09-25T10:00:00Z"}"#,
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let closed = github
+        .close_issue("a/b", 7, IssueCloseReason::NotPlanned)
+        .await
+        .unwrap();
+    assert!(!closed.is_open());
+    assert_eq!(closed.state_reason.as_deref(), Some("not_planned"));
+    assert_eq!(closed.repo_full_name, "a/b");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "PATCH");
+    assert_eq!(requests[0].path, "/repos/a/b/issues/7");
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({ "state": "closed", "state_reason": "not_planned" })
+    );
+}
+
+#[tokio::test]
+async fn whether_the_reader_may_close_an_issue_is_asked_of_graphql() {
+    let (base, requests) = spawn(vec![
+        Response::new(
+            "200 OK",
+            r#"{"data":{"repository":{"issue":{"viewer_can_close":true}}}}"#,
+        ),
+        Response::new("200 OK", r#"{"data":{"repository":{"issue":null}}}"#),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    assert!(github.viewer_can_close_issue("a/b", 7).await.unwrap());
+    assert!(github.viewer_can_close_issue("a/b", 8).await.is_err());
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests[0].path, "/graphql");
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert!(body["query"].as_str().unwrap().contains("viewerCanClose"));
+    assert_eq!(
+        body["variables"],
+        serde_json::json!({ "owner": "a", "name": "b", "number": 7 })
+    );
 }
