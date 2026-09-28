@@ -154,15 +154,6 @@ pub fn weight_strong() -> FontWeight {
 pub const PROSE_LINE_HEIGHT: f32 = 1.625;
 pub const PAGE_TITLE_LINE_HEIGHT: f32 = 1.2;
 
-/// How far to lift text that is centred inside a pill or a button.
-///
-/// Centring a label centres its line box, and San Francisco's box is not
-/// symmetric about the glyphs: measured from the font, ascent is 0.967em and
-/// descent 0.211em while cap height is 0.705em, which leaves a digit sitting
-/// 0.026em below the box centre. A margin below the label pushes it back up
-/// by half that margin.
-pub const OPTICAL_TEXT_LIFT: f64 = 1.0;
-
 /// Layout constants.
 /// The navigation panel, matching the roomy Codex dock at its default size.
 pub const SIDEBAR_WIDTH: f64 = 442.0;

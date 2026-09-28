@@ -234,7 +234,6 @@ fn row(
                 s.font_size(theme::TEXT_META)
                     .color(theme::FG_MUTED)
                     .selectable(false)
-                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
             }),
         ))
         .debug_name(format!("summary name {name}"))
@@ -313,7 +312,6 @@ fn status_row(state: ReviewState) -> impl IntoView {
                             s.font_size(theme::TEXT_META)
                                 .color(theme::FG_MUTED)
                                 .selectable(false)
-                                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
                                 .apply_if(repo_of(state).is_empty(), |s| s.hide())
                                 .apply_if(opens, |s| {
                                     // Underlined under the pointer, as a
@@ -405,7 +403,6 @@ fn state_pill(state: ReviewState) -> impl IntoView {
                             .font_weight(theme::weight_emphasis())
                             .color(color)
                             .selectable(false)
-                            .margin_bottom(theme::OPTICAL_TEXT_LIFT)
                     }),
                 ))
                 .debug_name("state pill")
@@ -481,7 +478,6 @@ fn checks_pill(state: ReviewState) -> impl IntoView {
                 Label::derived(move || text.to_string()).style(|s| {
                     s.font_size(theme::TEXT_BADGE)
                         .color(theme::FG_MUTED)
-                        .margin_bottom(theme::OPTICAL_TEXT_LIFT)
                 }),
             ))
             .on_event_stop(el::Click, move |_, _| {
@@ -931,7 +927,6 @@ pub fn notice(state: ReviewState) -> impl IntoView {
                         .color(theme::NOTICE_FG)
                         .text_ellipsis()
                         .min_width(0.0)
-                        .margin_bottom(theme::OPTICAL_TEXT_LIFT)
                 }),
             ))
             .style(|s| {

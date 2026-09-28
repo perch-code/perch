@@ -79,7 +79,6 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .color(ink())
                 .selectable(false)
                 .pointer_events_none()
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
         dyn_container(
             move || prominent.get(),

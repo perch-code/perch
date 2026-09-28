@@ -1210,7 +1210,6 @@ fn alert_view(alert: Alert, blocks: Vec<Block>, ctx: Ctx) -> AnyView {
                 .font_weight(theme::weight_emphasis())
                 .color(color)
                 .selectable(false)
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
     ))
     .style(|s| s.items_center());

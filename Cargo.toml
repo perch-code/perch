@@ -121,12 +121,16 @@ codegen-units = 4
 # asked `is_primary_pointer`, which is true of every mouse button, so a
 # right-click started a drag selection whose release the context menu
 # swallowed, and the selection followed the pointer after the menu
-# closed. It also collapsed the selection a right-click landed in. Last,
+# closed. It also collapsed the selection a right-click landed in. Then
 # one that keeps a text's measured sizes until its text changes: taffy
 # measures a text several times a pass, and each measure of an
 # ellipsised label shaped the "..." and the cut text from scratch, so a
 # relayout of the sidebar's rows spent most of its time in the shaper,
-# the more with San Francisco's variation deltas. Drop a
+# the more with San Francisco's variation deltas. Last, one that centres
+# a label on its capitals: it centred the span from the ascent to the
+# baseline, and San Francisco's ascent reaches 0.26em above its caps, so
+# every label drew about 0.13em low in its box, beside the avatar in a
+# comment's byline and the glyph in a pill. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,

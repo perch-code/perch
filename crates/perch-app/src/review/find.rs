@@ -779,8 +779,7 @@ fn toggle_tile(
         let s = s
             .font_size(theme::TEXT_BADGE)
             .color(color())
-            .selectable(false)
-            .margin_bottom(theme::OPTICAL_TEXT_LIFT);
+            .selectable(false);
         match face {
             Face::Text => s,
             Face::Underlined => s.border_bottom(1.0).border_color(color()),
@@ -826,7 +825,6 @@ fn count(state: ReviewState, pane: Pane) -> impl IntoView {
                 .selectable(false)
                 .max_width(220.0)
                 .text_ellipsis()
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         });
     // Room for "12 of 345" before the arrows move, as VS Code's count has.
     Container::new(label).style(|s| {

@@ -418,7 +418,6 @@ pub fn bar_title() -> impl IntoView {
                     .color(theme::FG)
                     .text_ellipsis()
                     .min_width(0.0)
-                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
             }),
     ))
     .style(|s| s.items_center().gap(8.0).min_width(0.0))

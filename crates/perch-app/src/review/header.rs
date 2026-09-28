@@ -86,7 +86,6 @@ fn leading(app: AppState, state: ReviewState) -> impl IntoView {
                     .color(theme::FG)
                     .text_ellipsis()
                     .min_width(0.0)
-                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
             }),
     ))
     .style(|s| {

@@ -139,7 +139,6 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     theme::FG_MUTED
                 })
                 .selectable(false)
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
     ))
     .on_event_stop(el::Click, move |_, _| toggle())

@@ -122,7 +122,6 @@ pub fn split_button(app: AppState, state: ReviewState) -> impl IntoView {
                 .color(theme::FG)
                 .selectable(false)
                 .pointer_events_none()
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
     ))
     .on_event_stop(el::Click, move |_, _| {

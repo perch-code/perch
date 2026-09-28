@@ -388,7 +388,6 @@ pub fn text_button(
                 s.font_size(theme::TEXT_META)
                     .color(theme::FG)
                     .selectable(false)
-                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
             }),
         ))
         .style(|s| s.items_center()),
@@ -558,7 +557,6 @@ pub fn news_pill(
             Label::derived(label).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::FG)
-                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
             }),
             Label::new("Refresh").debug_name("news refresh").style(move |s| {
                 s.height(22.0)

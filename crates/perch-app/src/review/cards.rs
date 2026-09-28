@@ -266,7 +266,6 @@ pub(crate) fn text_action(
         Label::derived(move || label.to_string()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
                 .color(theme::FG_MUTED)
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
     ))
     .on_event_stop(el::Click, move |_, _| action())
@@ -722,7 +721,6 @@ fn reaction_pill(
                     .font_weight(theme::weight_emphasis())
                     .color(if mine { theme::UNREAD } else { theme::FG_MUTED })
                     .margin_left(5.0)
-                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
                     .selectable(false)
                     .pointer_events_none()
             }),

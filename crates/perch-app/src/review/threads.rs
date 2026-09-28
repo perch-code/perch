@@ -1144,7 +1144,6 @@ fn send_button(label: impl Fn() -> String + 'static, on_click: Rc<dyn Fn()>) -> 
                     .font_weight(theme::weight_emphasis())
                     .color(theme::CANVAS)
                     .margin_right(6.0)
-                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
                     .selectable(false)
             }),
             sidebar_glyph(SidebarIcon::ChevronRight, theme::CANVAS).style(|s| s.size(13.0, 13.0)),
@@ -1346,7 +1345,6 @@ fn menu_button(
                 .selectable(false)
                 .pointer_events_none()
                 .margin_right(5.0)
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
         }),
         sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
             .style(|s| s.size(10.0, 10.0).pointer_events_none()),

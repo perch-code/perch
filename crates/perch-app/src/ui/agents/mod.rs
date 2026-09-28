@@ -98,7 +98,6 @@ pub(super) fn text_action(
             })
             .selectable(false)
             .pointer_events_none()
-            .margin_bottom(theme::OPTICAL_TEXT_LIFT)
     }))
     .on_event_stop(el::Click, move |_, _| click())
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
