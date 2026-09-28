@@ -268,7 +268,8 @@ impl LineEdit {
 
 /// A mark at the start of every line the selection touches, or off each
 /// one when all of them have it. In a selection of several lines the
-/// blank ones are left alone. A list mark takes the place of another
+/// blank ones are left alone, except in a quote, which would otherwise
+/// break in two there. A list mark takes the place of another
 /// list's, so a bullet can be made a task in one press.
 fn lines(format: Format, text: &str, (start, end): (usize, usize)) -> (String, (usize, usize)) {
     let first = text[..start].rfind('\n').map_or(0, |i| i + 1);
@@ -284,7 +285,7 @@ fn lines(format: Format, text: &str, (start, end): (usize, usize)) -> (String, (
         .map_or(text.len(), |i| end_line + i);
     let block: Vec<&str> = text[first..last].split('\n').collect();
     let several = block.len() > 1;
-    let counts = |line: &str| !several || !line.trim().is_empty();
+    let counts = |line: &str| !several || format == Format::Quote || !line.trim().is_empty();
     let indent_of = |line: &str| line.len() - line.trim_start_matches([' ', '\t']).len();
     let off = block.iter().any(|l| counts(l))
         && block
@@ -318,6 +319,7 @@ fn lines(format: Format, text: &str, (start, end): (usize, usize)) -> (String, (
             number += 1;
             let mark = match format {
                 Format::Heading => "### ".to_string(),
+                Format::Quote if several && rest.trim().is_empty() => ">".to_string(),
                 Format::Quote => "> ".to_string(),
                 Format::NumberedList => format!("{number}. "),
                 Format::BulletList => "- ".to_string(),
@@ -758,6 +760,12 @@ mod tests {
     #[test]
     fn a_selection_of_whole_lines_leaves_the_next_line_alone() {
         assert_eq!(run(Format::Quote, "[a\nb\n]c"), "[> a\n> b\n]c");
+    }
+
+    #[test]
+    fn a_quote_takes_in_the_blank_lines_between_paragraphs() {
+        assert_eq!(run(Format::Quote, "[a\n\nb]"), "[> a\n>\n> b]");
+        assert_eq!(run(Format::Quote, "[> a\n>\n> b]"), "[a\n\nb]");
     }
 
     #[test]
