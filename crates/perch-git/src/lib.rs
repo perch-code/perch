@@ -13,7 +13,7 @@ pub mod scope;
 pub mod store;
 pub mod tree;
 
-pub use diff::{file_diff, ChangeStatus, ChangedFile, DeletedRun, FileDiff, Hunk, LineStatus};
+pub use diff::{file_diff, hunk_context, ChangeStatus, ChangedFile, DeletedRun, FileDiff, Hunk, LineStatus};
 pub use display::{DisplayBuffer, Row};
 pub use prepare::{home_ref, BaseBranch, Checkout, Cut, Preparer, PushError, Step};
 pub use review_snapshot::{

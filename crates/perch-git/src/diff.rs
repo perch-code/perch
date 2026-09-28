@@ -179,6 +179,34 @@ pub fn file_diff(base: &str, head: &str) -> FileDiff {
     FileDiff { line_status, deleted, hunks }
 }
 
+/// How many bytes of a line git keeps after a hunk header's `@@`: the
+/// size of xdiff's `func_line` buffer.
+const HUNK_CONTEXT_BYTES: usize = 80;
+
+/// What git writes after a hunk header's closing `@@` for a hunk whose
+/// first line, context included, is line `first` of `lines`, zero based:
+/// the nearest line above it that begins with a letter, `_` or `$`, cut to
+/// eighty bytes and trimmed of trailing whitespace. `None` when no line
+/// above qualifies.
+///
+/// This is xdiff's default funcname rule (`def_ff`), the one git applies
+/// to a file whose attributes name no diff driver, which is how git's own
+/// headers read `impl Manifest {` above a hunk inside the impl. git looks
+/// in the old file, from the hunk up, so `lines` are the base's. The diff
+/// here is computed in process and has no headers of its own, so the rule
+/// is applied to the hunks the code pane shows.
+pub fn hunk_context<'a>(lines: &[&'a str], first: usize) -> Option<&'a str> {
+    let line = lines[..first.min(lines.len())]
+        .iter()
+        .rev()
+        .find(|line| line.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '$'))?;
+    let mut end = line.len().min(HUNK_CONTEXT_BYTES);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(line[..end].trim_end())
+}
+
 /// Parse `git diff -M --name-status -z`.
 ///
 /// Records are NUL separated. A plain change is `STATUS\0path\0`; a rename or
@@ -435,6 +463,32 @@ mod tests {
         let d = file_diff("a\nb\n", "");
         assert!(d.line_status.is_empty());
         assert_eq!(d.deleted[0].lines, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn a_hunks_context_is_the_nearest_line_above_it_that_starts_an_identifier() {
+        let base: Vec<&str> = "use std::fmt;\n\nimpl Manifest {\n    fn load() {\n        let a = 1;\n    }\n}\n".lines().collect();
+        // A hunk from line five, `let a`: the indented `fn` does not count,
+        // the `impl` does, as git's default rule has it.
+        assert_eq!(hunk_context(&base, 4), Some("impl Manifest {"));
+        // The hunk's own first line is not above it.
+        assert_eq!(hunk_context(&base, 2), Some("use std::fmt;"));
+        assert_eq!(hunk_context(&base, 0), None, "nothing is above the first line");
+        assert_eq!(hunk_context(&base, 100), Some("impl Manifest {"), "past the end is below every line");
+        assert_eq!(hunk_context(&["  a", "{"], 2), None, "no line starts an identifier");
+        assert_eq!(hunk_context(&["_private", "$var", "x"], 2), Some("$var"));
+    }
+
+    #[test]
+    fn a_hunks_context_is_cut_to_eighty_bytes_and_trimmed() {
+        let long = format!("fn {}() {{   ", "a".repeat(100));
+        let context = hunk_context(&[&long, "body"], 1).unwrap();
+        assert_eq!(context.len(), 80);
+        assert!(context.starts_with("fn aaa"));
+        assert_eq!(hunk_context(&["struct S {   \t", "x"], 1), Some("struct S {"));
+        // A cut never splits a character.
+        let wide = format!("s{}", "é".repeat(60));
+        assert_eq!(hunk_context(&[&wide, "x"], 1).unwrap().len(), 79);
     }
 
     #[test]
