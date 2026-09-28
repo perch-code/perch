@@ -3966,6 +3966,7 @@ mod tests {
                 kind,
                 count,
                 viewer_reacted: false,
+                reactors: vec![],
             }],
         }
     }

@@ -318,12 +318,13 @@ pub(crate) fn reactable(node_id: &str) -> Option<String> {
 /// The row of pills under an entry's text, for an entry with a node id;
 /// nothing for one without, since nothing could be left on it.
 pub(crate) fn reactions_under(
+    app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     react: &Option<String>,
 ) -> floem::AnyView {
     match react {
-        Some(node_id) => reactions_row(state, backend, node_id.clone()).into_any(),
+        Some(node_id) => reactions_row(app, state, backend, node_id.clone()).into_any(),
         None => Empty::new().into_any(),
     }
 }
@@ -653,8 +654,14 @@ fn pick(
 /// The reactions under an entry's text: a pill per kind anyone left,
 /// each with its count, the reader's own washed blue, and the picker at
 /// the end. Nothing at all while nobody has reacted; the byline's face
-/// is the way in then. A click on a pill toggles the reader's.
-fn reactions_row(state: ReviewState, backend: Rc<Backend>, node_id: String) -> impl IntoView {
+/// is the way in then. A click on a pill toggles the reader's, and a
+/// hover says who left it.
+fn reactions_row(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    node_id: String,
+) -> impl IntoView {
     let each_node = node_id.clone();
     let pill_node = node_id.clone();
     let pill_backend = backend.clone();
@@ -669,8 +676,8 @@ fn reactions_row(state: ReviewState, backend: Rc<Backend>, node_id: String) -> i
             move || state.reactions_of(&each_node).groups,
             // The pill is rebuilt on any change to it: it is a glyph and
             // a number, and the row is at most eight of them.
-            |g| (g.kind, g.count, g.viewer_reacted),
-            move |g| reaction_pill(state, pill_backend.clone(), pill_node.clone(), g),
+            |g| g.clone(),
+            move |g| reaction_pill(app, state, pill_backend.clone(), pill_node.clone(), g),
         )
         .style(|s| s.items_center().gap(6.0).flex_wrap(floem::taffy::FlexWrap::Wrap)),
         react_button(state, backend, node_id, None),
@@ -688,19 +695,22 @@ fn reactions_row(state: ReviewState, backend: Rc<Backend>, node_id: String) -> i
 /// One reaction: its emoji and how many left it. Blue when the reader is
 /// among them. While GitHub is being asked about it, a click is nothing.
 fn reaction_pill(
+    app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     node_id: String,
     group: ReactionGroup,
 ) -> impl IntoView {
+    let who = group.clone();
     let ReactionGroup {
         kind,
         count,
         viewer_reacted: mine,
+        ..
     } = group;
     let click_node = node_id.clone();
     let busy = Memo::new(move |_| state.is_reacting(&node_id, kind));
-    tip(
+    tip_with(
         Stack::horizontal((
             Label::derived(move || kind.emoji().to_string()).style(|s| {
                 s.font_size(theme::TEXT_META)
@@ -737,8 +747,45 @@ fn reaction_pill(
                         .border_color(if mine { theme::UNREAD } else { theme::FG_SUBTLE })
                 })
         }),
-        kind.label().to_string(),
+        move || {
+            let viewer = app.viewer.get_untracked().map(|(login, _)| login);
+            reacted_tip(&who, viewer.as_deref().filter(|l| !l.is_empty()))
+        },
     )
+}
+
+/// Who left a reaction, as GitHub's tip says it: "You, octocat, and 3
+/// more reacted with heart emoji". The reader is "You", first, by
+/// `viewer_reacted`, which a toggle changes before GitHub names them or
+/// stops naming them. With nobody named, as in a group an older build
+/// kept, it is how many.
+fn reacted_tip(group: &ReactionGroup, viewer: Option<&str>) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    if group.viewer_reacted && viewer.is_some() {
+        names.push("You");
+    }
+    names.extend(
+        group
+            .reactors
+            .iter()
+            .map(String::as_str)
+            .filter(|login| Some(*login) != viewer),
+    );
+    names.truncate(group.count as usize);
+    let mut parts: Vec<String> = names.into_iter().map(str::to_string).collect();
+    let more = group.count as usize - parts.len();
+    match (parts.is_empty(), more) {
+        (true, 1) => parts.push("1 person".into()),
+        (true, n) => parts.push(format!("{n} people")),
+        (false, 0) => {}
+        (false, n) => parts.push(format!("{n} more")),
+    }
+    let who = match parts.as_slice() {
+        [a, b] => format!("{a} and {b}"),
+        [rest @ .., last] if !rest.is_empty() => format!("{}, and {last}", rest.join(", ")),
+        _ => parts.concat(),
+    };
+    format!("{who} reacted with {} emoji", group.kind.label().to_lowercase())
 }
 
 /// A view with a line of explanation on hover, in the window's overlay so
@@ -968,6 +1015,7 @@ fn quote_reply(state: ReviewState, body: &str) {
 /// Its strip is its title and the picker; who opened it and when is the
 /// summary's Author row.
 pub fn description_card(
+    app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     body: String,
@@ -983,7 +1031,7 @@ pub fn description_card(
     };
     let quote = (!body.trim().is_empty()).then(|| quote_reply_button(state, hovered, body.clone()));
     let react = reactable(&node_id);
-    let reactions = reactions_under(state, backend.clone(), &react);
+    let reactions = reactions_under(app, state, backend.clone(), &react);
     track_hover(
         card(
             byline_strip(
@@ -1030,7 +1078,7 @@ pub fn comment_card(
     let ask: Rc<dyn Fn()> = Rc::new(move || ask_about(app, state, None, &author, &url, &body));
     let quote = quote_reply_button(state, hovered, comment.body.clone());
     let react = reactable(&comment.node_id);
-    let reactions = reactions_under(state, backend.clone(), &react);
+    let reactions = reactions_under(app, state, backend.clone(), &react);
     track_hover(
         card(
             byline_strip(byline(
@@ -1090,7 +1138,7 @@ pub fn review_card(
     let body = match summary {
         Some(text) => Stack::vertical((
             markdown::render_linked(&text, state),
-            reactions_under(state, backend.clone(), &react),
+            reactions_under(app, state, backend.clone(), &react),
         ))
         .style(|s| s.flex_col().width_full())
         .into_any(),
@@ -2079,6 +2127,46 @@ mod tests {
     use floem::headless::{HeadlessHarness, TestRoot};
 
     use crate::review::header::tests::{named, rect};
+
+    fn hearts(count: u32, mine: bool, reactors: &[&str]) -> ReactionGroup {
+        ReactionGroup {
+            kind: ReactionKind::Heart,
+            count,
+            viewer_reacted: mine,
+            reactors: reactors.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    /// A pill's tip names who left it as GitHub's does, the reader as
+    /// You, first, whether or not GitHub has caught up with a toggle.
+    #[test]
+    fn a_reactions_tip_names_who_left_it() {
+        let me = Some("me");
+        let tip = |g: ReactionGroup| reacted_tip(&g, me);
+        assert_eq!(tip(hearts(1, false, &["octocat"])), "octocat reacted with heart emoji");
+        assert_eq!(tip(hearts(2, false, &["a", "b"])), "a and b reacted with heart emoji");
+        assert_eq!(tip(hearts(3, false, &["a", "b", "c"])), "a, b, and c reacted with heart emoji");
+        assert_eq!(tip(hearts(12, false, &["a", "b"])), "a, b, and 10 more reacted with heart emoji");
+        assert_eq!(tip(hearts(5, false, &["a"])), "a and 4 more reacted with heart emoji");
+        assert_eq!(tip(hearts(2, true, &["a", "me"])), "You and a reacted with heart emoji");
+        // Just added, and GitHub not yet asked: You, counted in.
+        assert_eq!(tip(hearts(2, true, &["a"])), "You and a reacted with heart emoji");
+        // Just taken back: the reader's name goes before GitHub's answer.
+        assert_eq!(tip(hearts(1, false, &["me", "a"])), "a reacted with heart emoji");
+        // Nobody named, as an older build kept it.
+        assert_eq!(tip(hearts(1, false, &[])), "1 person reacted with heart emoji");
+        assert_eq!(tip(hearts(3, false, &[])), "3 people reacted with heart emoji");
+        assert_eq!(tip(hearts(1, true, &[])), "You reacted with heart emoji");
+        // The reader not known yet: GitHub's names as they are.
+        assert_eq!(
+            reacted_tip(&hearts(2, true, &["me", "a"]), None),
+            "me and a reacted with heart emoji"
+        );
+        assert_eq!(
+            reacted_tip(&ReactionGroup { kind: ReactionKind::ThumbsUp, ..hearts(1, false, &["a"]) }, me),
+            "a reacted with thumbs up emoji"
+        );
+    }
 
     /// Where a tip opened at `at` in a 400 by 300 window lands, and the
     /// view under a point beside it. The frame is given the class and

@@ -2810,7 +2810,7 @@ fn github_message_view(
     .into_any();
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
-    let reactions = cards::reactions_under(state, backend.clone(), &react);
+    let reactions = cards::reactions_under(app, state, backend.clone(), &react);
     let name = login.clone();
     let author = login.clone();
     let byline = byline_row(
@@ -2908,7 +2908,7 @@ fn posted_message_view(
     let hovered = RwSignal::new(false);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
-    let reactions = cards::reactions_under(state, backend.clone(), &react);
+    let reactions = cards::reactions_under(app, state, backend.clone(), &react);
     let byline = byline_row(
         name_label(move || author_name(app, &Author::User), move |s| name_style(s, face)),
         vec![

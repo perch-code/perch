@@ -115,8 +115,10 @@ lines to a page.
 
 Each GitHub entry on Conversation shows the reactions on it under its text:
 the description, every comment, and every review summary and line comment. A
-pill is one reaction and its count, blue when yours is among them. Clicking a
-pill adds or removes yours. The face at the right of an entry's byline, and
+pill is one reaction and its count, blue when yours is among them. Hovering
+over a pill says who left it, as GitHub does: "You, octocat, and 3 more
+reacted with heart emoji", naming up to ten. Clicking a pill adds or removes
+yours. The face at the right of an entry's byline, and
 the one after its pills, open GitHub's picker: all eight in a row, yours
 washed blue, and picking one of yours takes it back. A reaction is shown as
 soon as it is clicked and put back if GitHub refuses it.

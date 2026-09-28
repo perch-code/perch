@@ -4862,7 +4862,7 @@ mod window {
         let (mut harness, state) = harness();
         state.set_comment_threads(Arc::new(vec![github_thread(100, 7, &["nit: name this"])]));
         let hearts = Reactions {
-            groups: vec![ReactionGroup { kind: ReactionKind::Heart, count: 1, viewer_reacted: false }],
+            groups: vec![ReactionGroup { kind: ReactionKind::Heart, count: 1, viewer_reacted: false, reactors: vec![] }],
         };
         state.install_reactions([("PRRC_100", &hearts)]);
         harness.rebuild();

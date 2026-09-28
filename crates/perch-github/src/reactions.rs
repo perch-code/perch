@@ -6,6 +6,7 @@
 //! both for any node in one `nodes(ids:)` query, a hundred ids at a time,
 //! so a discussion's reactions are read there after its lists, and a
 //! reaction is added or taken back there too, by the subject's node id.
+//! The first few who left each kind come with it, for the pill's tip.
 
 use std::collections::HashMap;
 
@@ -51,7 +52,7 @@ impl ReactionKind {
         }
     }
 
-    /// The name in a pill's tip, and in the tip of the picker's emoji.
+    /// The name in the tip of the picker's emoji.
     pub fn label(self) -> &'static str {
         match self {
             ReactionKind::ThumbsUp => "Thumbs up",
@@ -84,14 +85,21 @@ impl ReactionKind {
     }
 }
 
-/// One reaction on a subject: how many left it, and whether the reader is
-/// among them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// One reaction on a subject: how many left it, whether the reader is
+/// among them, and the logins of the first of them, at most
+/// `REACTORS_NAMED`, as GitHub orders them. None on a payload an older
+/// build kept.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReactionGroup {
     pub kind: ReactionKind,
     pub count: u32,
     pub viewer_reacted: bool,
+    #[serde(default)]
+    pub reactors: Vec<String>,
 }
+
+/// How many of those who left a reaction GitHub is asked to name.
+const REACTORS_NAMED: usize = 10;
 
 /// The reactions on one subject: only the kinds anyone left, in picker
 /// order. Empty on a payload an older build kept, which had none.
@@ -120,7 +128,8 @@ impl Reactions {
 
     /// The reader's reaction added or taken back, as the row shows it
     /// before GitHub answers. Adding one already there, or taking back one
-    /// that is not, changes nothing.
+    /// that is not, changes nothing. The names stay as GitHub gave them;
+    /// the tip puts the reader in or out by `viewer_reacted`.
     pub fn toggle(&mut self, kind: ReactionKind, add: bool) {
         if self.viewer_reacted(kind) == add {
             return;
@@ -139,6 +148,7 @@ impl Reactions {
                     kind,
                     count: 1,
                     viewer_reacted: true,
+                    reactors: Vec::new(),
                 });
                 self.groups.sort_by_key(|g| g.kind);
             }
@@ -158,6 +168,14 @@ impl Reactions {
                     kind: ReactionKind::from_graphql(&g.content)?,
                     count: g.reactors.total_count,
                     viewer_reacted: g.viewer_has_reacted,
+                    reactors: g
+                        .reactors
+                        .nodes
+                        .into_iter()
+                        .flatten()
+                        .map(|r| r.login)
+                        .filter(|login| !login.is_empty())
+                        .collect(),
                 })
             })
             .collect();
@@ -171,12 +189,19 @@ impl Reactions {
 // ---------------------------------------------------------------------
 
 /// `reactionGroups` on any `Reactable`, as every query here asks for it.
-const REACTION_GROUPS: &str = "reactionGroups { content viewerHasReacted reactors { totalCount } }";
+/// A reactor is a user, a bot, an organization or a mannequin, each an
+/// `Actor` with a login.
+fn reaction_groups() -> String {
+    format!(
+        "reactionGroups {{ content viewerHasReacted reactors(first: {REACTORS_NAMED}) {{ totalCount nodes {{ ... on Actor {{ login }} }} }} }}"
+    )
+}
 
 /// The reactions on up to a hundred nodes at once.
 pub(crate) fn reactions_query() -> String {
     format!(
-        "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on Reactable {{ {REACTION_GROUPS} }} }} }}"
+        "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on Reactable {{ {} }} }} }}",
+        reaction_groups()
     )
 }
 
@@ -185,7 +210,8 @@ pub(crate) fn reactions_query() -> String {
 pub(crate) fn reaction_mutation(add: bool) -> String {
     let field = if add { "addReaction" } else { "removeReaction" };
     format!(
-        "mutation($subject: ID!, $content: ReactionContent!) {{ {field}(input: {{subjectId: $subject, content: $content}}) {{ subject {{ {REACTION_GROUPS} }} }} }}"
+        "mutation($subject: ID!, $content: ReactionContent!) {{ {field}(input: {{subjectId: $subject, content: $content}}) {{ subject {{ {} }} }} }}",
+        reaction_groups()
     )
 }
 
@@ -206,6 +232,14 @@ pub(crate) struct ReactionGroupPayload {
 struct ReactorsPayload {
     #[serde(default, rename = "totalCount")]
     total_count: u32,
+    #[serde(default)]
+    nodes: Vec<Option<ReactorPayload>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReactorPayload {
+    #[serde(default)]
+    login: String,
 }
 
 /// One node's answer. A node that is not reactable, or that GitHub could
@@ -268,7 +302,10 @@ mod tests {
         ReactionGroupPayload {
             content: content.into(),
             viewer_has_reacted: mine,
-            reactors: ReactorsPayload { total_count: count },
+            reactors: ReactorsPayload {
+                total_count: count,
+                nodes: Vec::new(),
+            },
         }
     }
 
@@ -286,12 +323,14 @@ mod tests {
                 ReactionGroup {
                     kind: ReactionKind::ThumbsUp,
                     count: 3,
-                    viewer_reacted: false
+                    viewer_reacted: false,
+                    reactors: vec![],
                 },
                 ReactionGroup {
                     kind: ReactionKind::Eyes,
                     count: 2,
-                    viewer_reacted: true
+                    viewer_reacted: true,
+                    reactors: vec![],
                 },
             ]
         );
@@ -351,6 +390,23 @@ mod tests {
     }
 
     #[test]
+    fn the_first_reactors_are_named_by_login() {
+        let data: ReactionsData = serde_json::from_str(
+            r#"{"nodes":[{"reactionGroups":[{"content":"HEART","viewerHasReacted":false,"reactors":{"totalCount":12,"nodes":[{"login":"octocat"},null,{},{"login":"dependabot"}]}}]}]}"#,
+        )
+        .unwrap();
+        let by_id = data.by_id(&["a".into()]);
+        let heart = &by_id["a"].groups[0];
+        assert_eq!(heart.count, 12);
+        assert_eq!(heart.reactors, vec!["octocat", "dependabot"]);
+
+        // A group an older build kept has no names.
+        let kept: ReactionGroup =
+            serde_json::from_str(r#"{"kind":"heart","count":1,"viewer_reacted":false}"#).unwrap();
+        assert!(kept.reactors.is_empty());
+    }
+
+    #[test]
     fn either_mutation_answers_with_the_subjects_reactions() {
         let added: ReactionMutationData = serde_json::from_str(
             r#"{"addReaction":{"subject":{"reactionGroups":[{"content":"HOORAY","viewerHasReacted":true,"reactors":{"totalCount":2}}]}}}"#,
@@ -387,6 +443,8 @@ mod tests {
     fn the_queries_ask_for_the_groups_on_a_reactable() {
         assert!(reactions_query().contains("nodes(ids: $ids)"));
         assert!(reactions_query().contains("... on Reactable"));
+        assert!(reactions_query().contains("reactors(first: 10) { totalCount nodes { ... on Actor { login } } }"));
+        assert!(reaction_mutation(false).contains("reactors(first: 10)"));
         assert!(reaction_mutation(true).starts_with("mutation("));
         assert!(reaction_mutation(true)
             .contains("addReaction(input: {subjectId: $subject, content: $content})"));

@@ -363,7 +363,7 @@ fn card_view(
         // What Perch started from an issue is the summary's In Perch row,
         // not repeated under the description.
         Card::Description { body, node_id, .. } => {
-            cards::description_card(state, backend, body, node_id).into_any()
+            cards::description_card(app, state, backend, body, node_id).into_any()
         }
         Card::Comment(comment) => cards::comment_card(app, state, backend, comment).into_any(),
         Card::Review { review } => cards::review_card(app, state, backend, review).into_any(),
@@ -696,8 +696,8 @@ mod tests {
         discussion.comments[0].node_id = "IC_1".into();
         discussion.comments[0].reactions = Reactions {
             groups: vec![
-                ReactionGroup { kind: ReactionKind::ThumbsUp, count: 2, viewer_reacted: false },
-                ReactionGroup { kind: ReactionKind::Rocket, count: 1, viewer_reacted: true },
+                ReactionGroup { kind: ReactionKind::ThumbsUp, count: 2, viewer_reacted: false, reactors: vec![] },
+                ReactionGroup { kind: ReactionKind::Rocket, count: 1, viewer_reacted: true, reactors: vec![] },
             ],
         };
         let (mut harness, app, state) = app_harness_on(backend, discussion);
@@ -762,7 +762,7 @@ mod tests {
                 node_id: "IC_1".into(),
                 kind: ReactionKind::ThumbsUp,
                 reactions: Reactions {
-                    groups: vec![ReactionGroup { kind: ReactionKind::ThumbsUp, count: 4, viewer_reacted: true }],
+                    groups: vec![ReactionGroup { kind: ReactionKind::ThumbsUp, count: 4, viewer_reacted: true, reactors: vec![] }],
                 },
             },
             state,
@@ -794,8 +794,8 @@ mod tests {
         discussion.comments[0].node_id = "IC_1".into();
         discussion.comments[0].reactions = Reactions {
             groups: vec![
-                ReactionGroup { kind: ReactionKind::ThumbsUp, count: 2, viewer_reacted: false },
-                ReactionGroup { kind: ReactionKind::Rocket, count: 1, viewer_reacted: true },
+                ReactionGroup { kind: ReactionKind::ThumbsUp, count: 2, viewer_reacted: false, reactors: vec![] },
+                ReactionGroup { kind: ReactionKind::Rocket, count: 1, viewer_reacted: true, reactors: vec![] },
             ],
         };
         let (harness, _, state) = app_harness_on(backend, discussion);
