@@ -16778,17 +16778,25 @@ read eof || true
         branch
     }
 
-    /// Wait for the backend to send an event `pick` recognises.
+    /// Wait for the backend to send an event `pick` recognises. The
+    /// deadline is wall time and generous: a Work run spawns git and a
+    /// shell before it asks, and on a loaded machine that alone passed 5s.
+    /// The test runtime has one thread, so the channel is polled rather
+    /// than blocked on, which would starve the run being waited for.
     async fn next_event<T>(received: &Receiver<Event>, mut pick: impl FnMut(Event) -> Option<T>) -> T {
-        for _ in 0..200 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut passed = Vec::new();
+        while std::time::Instant::now() < deadline {
             for event in received.try_iter() {
+                let seen = format!("{event:?}");
                 if let Some(found) = pick(event) {
                     return found;
                 }
+                passed.push(seen);
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        panic!("the event never came");
+        panic!("the event never came; passed over {passed:#?}");
     }
 
     fn step_summaries(ctx: &Ctx, item: &Item) -> Vec<String> {
