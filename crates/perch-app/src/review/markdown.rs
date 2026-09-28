@@ -407,8 +407,11 @@ impl<'a> Builder<'a> {
             return;
         }
         let text = std::mem::take(&mut self.text);
-        if !style.links.is_empty() {
-            push_text(spans, &style.span(), &text);
+        if let Some(link) = style.links.last() {
+            // `<address>`, or a link written out as its own address,
+            // shortens as a bare one does.
+            let short = (text == *link).then(|| issue_address(&text, self.repo)).flatten();
+            push_text(spans, &style.span(), short.as_deref().unwrap_or(&text));
             return;
         }
         for (run, address) in autolink(&text) {
@@ -424,7 +427,7 @@ impl<'a> Builder<'a> {
                 None => run.to_string(),
             };
             let s = Span { link: Some(link), ..style.span() };
-            push_text(spans, &s, run);
+            push_text(spans, &s, issue_address(run, self.repo).as_deref().unwrap_or(run));
         }
     }
 
@@ -960,6 +963,33 @@ fn issue_refs<'t>(text: &'t str, repo: Option<&str>) -> Vec<(&'t str, Option<Str
         out.push((&text[from..], None));
     }
     out
+}
+
+/// An issue or pull request's address, written as GitHub writes it:
+/// `#12` in `repo`, `owner/repo#12` elsewhere, and `(comment)` after it
+/// when the address is to one of its comments.
+fn issue_address(url: &str, repo: Option<&str>) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let (path, fragment) = match rest.split_once('#') {
+        Some((path, fragment)) => (path, Some(fragment)),
+        None => (rest, None),
+    };
+    let [owner, name, "issues" | "pull", number] = path.split('/').collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    if owner.is_empty() || name.is_empty() || number.is_empty() || number.starts_with('0') || !number.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let comment = match fragment {
+        None => "",
+        Some(f) if f.starts_with("issuecomment-") || f.starts_with("discussion_r") || f.starts_with("pullrequestreview-") => " (comment)",
+        Some(_) => return None,
+    };
+    let here = repo.is_some_and(|r| r.eq_ignore_ascii_case(&format!("{owner}/{name}")));
+    Some(match here {
+        true => format!("#{number}{comment}"),
+        false => format!("{owner}/{name}#{number}{comment}"),
+    })
 }
 
 /// The blocks, stacked, at the body size, with `#12` linked to `repo`'s
@@ -1852,6 +1882,43 @@ mod tests {
                 plain(" "),
                 Span { text: "https://x.y/#3".into(), link: Some("https://x.y/#3".into()), ..Default::default() },
             ])]
+        );
+    }
+
+    #[test]
+    fn issue_addresses_read_as_references_as_github_writes_them() {
+        let issue = |text: &str, url: &str| Span { text: text.into(), link: Some(url.into()), ..Default::default() };
+        let here = "https://github.com/slatedb/slatedb/issues/2097";
+        let there = "https://github.com/o/r/pull/5#issuecomment-9";
+        assert_eq!(
+            parse_in(&format!("Fixes {here}, see {there}. Also <{here}>."), Some("slatedb/slatedb")),
+            vec![Block::Paragraph(vec![
+                plain("Fixes "),
+                issue("#2097", here),
+                plain(", see "),
+                issue("o/r#5 (comment)", there),
+                plain(". Also "),
+                issue("#2097", here),
+                plain("."),
+            ])]
+        );
+        assert_eq!(issue_address(here, None).as_deref(), Some("slatedb/slatedb#2097"));
+        assert_eq!(issue_address(here, Some("SlateDB/SlateDB")).as_deref(), Some("#2097"));
+        for url in [
+            "https://github.com/o/r/issues",
+            "https://github.com/o/r/issues/1/",
+            "https://github.com/o/r/pull/1/files",
+            "https://github.com/o/r/issues/01",
+            "https://github.com/o/r/issues/1#top",
+            "https://github.com/o/r/blob/main/x",
+            "https://example.com/o/r/issues/1",
+        ] {
+            assert_eq!(issue_address(url, Some("o/r")), None, "{url}");
+        }
+        // A link with text of its own keeps it.
+        assert_eq!(
+            parse_in(&format!("[the bug]({here})"), Some("slatedb/slatedb")),
+            vec![Block::Paragraph(vec![issue("the bug", here)])]
         );
     }
 
