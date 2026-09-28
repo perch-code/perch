@@ -14,6 +14,11 @@
 //! as Claude Code and Codex take one, and as a code span for GitHub,
 //! where `@` would be a mention and a code span links to Code.
 //!
+//! A `#` lists the repository's issues and pull requests the same way:
+//! the recently updated ones before anything is typed, then those whose
+//! number starts with the digits or whose title has the letters, and
+//! whatever GitHub's search found for them. One goes in as `#number`.
+//!
 //! The list is drawn over the window, not in the composer, so a composer
 //! in a card in the code does not cut it off.
 
@@ -31,19 +36,21 @@ use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
 use floem::views::editor::core::selection::Selection;
 use floem::views::editor::Editor;
 use floem::views::{dyn_container, Container, Decorators, Empty, ScrollExt, Stack};
-use perch_github::MentionableUser;
+use perch_github::{IssueReference, MentionableUser};
 
 use crate::backend::Backend;
 use crate::review::go_to::{self, Hit, Pick, Sources};
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{avatar, clickable};
+use crate::ui::widgets::{avatar, clickable, state_glyph};
 
 /// The most people the list offers, as GitHub's does.
 const MAX_PEOPLE: usize = 5;
 /// The most files it offers after them.
 const MAX_FILES: usize = 10;
+/// The most issues and pull requests a `#` offers.
+const MAX_REFERENCES: usize = 10;
 /// The longest a mention's letters run before they are taken for
 /// something else.
 const MAX_QUERY: usize = 100;
@@ -58,18 +65,41 @@ const ASK_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 // What is typed
 // ---------------------------------------------------------------------
 
-/// The mention the caret is in: where its `@` is, and what is typed
-/// between it and the caret. An `@` starts one only at the start of the
-/// text or after a space, so an address is not one.
-pub fn token(text: &str, caret: usize) -> Option<(usize, &str)> {
+/// What a mention names: a person or a file after `@`, an issue or a
+/// pull request after `#`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    At,
+    Hash,
+}
+
+impl Trigger {
+    fn char(self) -> char {
+        match self {
+            Trigger::At => '@',
+            Trigger::Hash => '#',
+        }
+    }
+}
+
+/// The mention the caret is in: where its `@` or `#` is, which it is,
+/// and what is typed between it and the caret. One starts only at the
+/// start of the text or after a space, so an address is not one.
+pub fn token(text: &str, caret: usize) -> Option<(usize, Trigger, &str)> {
     let before = text.get(..caret)?;
     let start = before
         .char_indices()
         .rev()
         .find(|(_, c)| c.is_whitespace())
         .map_or(0, |(i, c)| i + c.len_utf8());
-    let query = before[start..].strip_prefix('@')?;
-    (!query.contains('@') && query.len() <= MAX_QUERY).then_some((start, query))
+    let word = &before[start..];
+    let trigger = match word.chars().next()? {
+        '@' => Trigger::At,
+        '#' => Trigger::Hash,
+        _ => return None,
+    };
+    let query = &word[1..];
+    (!query.contains(trigger.char()) && query.len() <= MAX_QUERY).then_some((start, trigger, query))
 }
 
 /// Whether GitHub could have someone for `query`: a login's letters, or
@@ -79,6 +109,15 @@ fn names_someone(query: &str) -> bool {
         && query
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Whether GitHub's search is asked about `query` after a `#`: a number,
+/// or a word of a title. Nothing typed asks for the recent ones; a
+/// search qualifier is not passed on.
+fn names_a_reference(query: &str) -> bool {
+    query
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 // ---------------------------------------------------------------------
@@ -268,14 +307,14 @@ fn participants(state: ReviewState) -> Vec<Person> {
 
 /// What GitHub found for the query, or for the longest query before it
 /// that it has answered, and whether that was the query itself.
-fn found_for(
+fn found_for<T: Clone>(
     query: &str,
-    found: &HashMap<String, Option<Arc<Vec<MentionableUser>>>>,
-) -> (Vec<Person>, bool) {
+    found: &HashMap<String, Option<Arc<Vec<T>>>>,
+) -> (Vec<T>, bool) {
     let mut end = query.len();
     loop {
-        if let Some(Some(users)) = found.get(&query[..end]) {
-            return (users.iter().map(Person::from).collect(), end == query.len());
+        if let Some(Some(answer)) = found.get(&query[..end]) {
+            return (answer.to_vec(), end == query.len());
         }
         if end == 0 {
             return (Vec::new(), false);
@@ -315,6 +354,87 @@ fn named(own: &[Person], known: &HashMap<String, Person>) -> Vec<Person> {
 }
 
 // ---------------------------------------------------------------------
+// Which issues the list offers
+// ---------------------------------------------------------------------
+
+/// An issue or a pull request in the list, with the characters of the
+/// title and of its `#number` that the query matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceHit {
+    pub reference: IssueReference,
+    pub title_matches: Vec<Range<usize>>,
+    pub number_matches: Vec<Range<usize>>,
+}
+
+/// The issues and pull requests to offer for `query`: those GitHub
+/// found for it, or for the longest query before it, then the recently
+/// updated ones, each once. A number the digits start comes first, then
+/// a title with a word that starts with the letters, then one that has
+/// them inside. `exact` says GitHub's search found `found` for this very
+/// query, so one it matched on something the list cannot see, a word's
+/// stem, is offered after those.
+// A match of one run is a list of one range.
+#[allow(clippy::single_range_in_vec_init)]
+pub fn references(
+    query: &str,
+    found: &[IssueReference],
+    exact: bool,
+    recent: &[IssueReference],
+) -> Vec<ReferenceHit> {
+    let q = folded(query);
+    let mut seen: HashSet<u64> = HashSet::new();
+    let mut ranked: Vec<(u8, ReferenceHit)> = Vec::new();
+    for (from_search, reference) in found
+        .iter()
+        .map(|r| (exact, r))
+        .chain(recent.iter().map(|r| (false, r)))
+    {
+        if !seen.insert(reference.number) {
+            continue;
+        }
+        let hit = |rank: u8, title_matches: Vec<Range<usize>>, number: bool| {
+            (
+                rank,
+                ReferenceHit {
+                    reference: reference.clone(),
+                    title_matches,
+                    // The `#` and the digits typed after it.
+                    number_matches: if number {
+                        vec![0..q.len() + 1]
+                    } else {
+                        Vec::new()
+                    },
+                },
+            )
+        };
+        let number = reference.number.to_string();
+        let title = folded(&reference.title);
+        let word_start = |i: usize| i == 0 || !title[i - 1].is_alphanumeric();
+        let matched = if q.is_empty() {
+            Some(hit(0, Vec::new(), false))
+        } else if number == query {
+            Some(hit(0, Vec::new(), true))
+        } else if number.starts_with(query) {
+            Some(hit(1, Vec::new(), true))
+        } else if let Some(i) = find(&title, &q, word_start) {
+            Some(hit(2, vec![i..i + q.len()], false))
+        } else if let Some(i) = find(&title, &q, |_| true) {
+            Some(hit(3, vec![i..i + q.len()], false))
+        } else {
+            from_search.then(|| hit(4, Vec::new(), false))
+        };
+        ranked.extend(matched);
+    }
+    // Stable, so GitHub's order holds within a rank.
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked
+        .into_iter()
+        .take(MAX_REFERENCES)
+        .map(|(_, hit)| hit)
+        .collect()
+}
+
+// ---------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------
 
@@ -323,6 +443,7 @@ fn named(own: &[Person], known: &HashMap<String, Person>) -> Vec<Person> {
 pub enum Suggestion {
     Person(PersonHit),
     File(Hit),
+    Reference(ReferenceHit),
 }
 
 /// The list while it is up, and the box it is for.
@@ -348,15 +469,20 @@ pub struct Mentions {
     /// the answer is on its way. The item's repository's, so it goes with
     /// the item.
     pub found: RwSignal<HashMap<String, Option<Arc<Vec<MentionableUser>>>>>,
+    /// The issues and pull requests GitHub found for each query after a
+    /// `#`, as `found` has people.
+    pub references: RwSignal<HashMap<String, Option<Arc<Vec<IssueReference>>>>>,
     /// The query GitHub is to be asked about once typing rests on it.
     pub waiting: RwSignal<Option<Ask>>,
 }
 
-/// A query for GitHub, and the item and repository it is for.
+/// A query for GitHub, and the item and repository it is for, and
+/// whether it is for people or for issues.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
     pub item_id: String,
     pub repo: String,
+    pub trigger: Trigger,
     pub query: String,
 }
 
@@ -372,6 +498,7 @@ impl Mentions {
             shown: RwSignal::new(None),
             selected: RwSignal::new(0),
             found: RwSignal::new(HashMap::new()),
+            references: RwSignal::new(HashMap::new()),
             waiting: RwSignal::new(None),
         }
     }
@@ -384,6 +511,9 @@ impl Mentions {
         if !self.found.with_untracked(HashMap::is_empty) {
             self.found.set(HashMap::new());
         }
+        if !self.references.with_untracked(HashMap::is_empty) {
+            self.references.set(HashMap::new());
+        }
         self.stop_waiting();
     }
 
@@ -394,12 +524,29 @@ impl Mentions {
             return;
         }
         self.waiting.set(None);
-        if self.found.with_untracked(|f| f.contains_key(&ask.query)) {
+        if self.is_asked(ask.trigger, &ask.query) {
             return;
         }
-        self.found
-            .update(|f| drop(f.insert(ask.query.clone(), None)));
-        backend.mentionable_users(&ask.item_id, &ask.repo, &ask.query);
+        match ask.trigger {
+            Trigger::At => {
+                self.found
+                    .update(|f| drop(f.insert(ask.query.clone(), None)));
+                backend.mentionable_users(&ask.item_id, &ask.repo, &ask.query);
+            }
+            Trigger::Hash => {
+                self.references
+                    .update(|f| drop(f.insert(ask.query.clone(), None)));
+                backend.issue_references(&ask.item_id, &ask.repo, &ask.query);
+            }
+        }
+    }
+
+    /// Whether GitHub has been asked about `query` after `trigger`.
+    fn is_asked(&self, trigger: Trigger, query: &str) -> bool {
+        match trigger {
+            Trigger::At => self.found.with_untracked(|f| f.contains_key(query)),
+            Trigger::Hash => self.references.with_untracked(|f| f.contains_key(query)),
+        }
     }
 
     fn stop_waiting(&self) {
@@ -412,6 +559,12 @@ impl Mentions {
     pub fn install(&self, query: String, users: Vec<MentionableUser>) {
         self.found
             .update(|found| drop(found.insert(query, Some(Arc::new(users)))));
+    }
+
+    /// GitHub's answer for `query` after a `#`.
+    pub fn install_references(&self, query: String, references: Vec<IssueReference>) {
+        self.references
+            .update(|found| drop(found.insert(query, Some(Arc::new(references)))));
     }
 
     fn is_up_for(&self, owner: u64) -> bool {
@@ -567,8 +720,8 @@ pub fn attach(
         let mention = caret
             .filter(|_| focused && !ed.read_only.get())
             .and_then(|caret| token(&text, caret))
-            .filter(|(at, _)| dismissed.get() != Some(*at));
-        let Some((at, query)) = mention else {
+            .filter(|(at, _, _)| dismissed.get() != Some(*at));
+        let Some((at, trigger, query)) = mention else {
             if last.with_untracked(Option::is_some) {
                 last.set(None);
             }
@@ -587,20 +740,20 @@ pub fn attach(
         let repo = state
             .item
             .with_untracked(|i| i.as_ref().map(|i| (i.id.clone(), i.repo_full_name.clone())));
+        // After a `#`, nothing typed asks for the recent ones.
+        let askable = match trigger {
+            Trigger::At => !query.is_empty() && names_someone(query),
+            Trigger::Hash => names_a_reference(query),
+        };
         let ask = repo.filter(|(_, repo)| {
-            !query.is_empty()
-                && names_someone(query)
-                && !perch_github::is_local(repo)
-                && !state
-                    .mentions
-                    .found
-                    .with_untracked(|f| f.contains_key(query))
+            askable && !perch_github::is_local(repo) && !state.mentions.is_asked(trigger, query)
         });
         match ask {
             Some((item_id, repo)) => {
                 let ask = Ask {
                     item_id,
                     repo,
+                    trigger,
                     query: query.to_string(),
                 };
                 if state
@@ -618,41 +771,17 @@ pub fn attach(
             None => state.mentions.stop_waiting(),
         }
 
-        let (found, exact, known) = state.mentions.found.with(|f| {
-            let (found, exact) = found_for(query, f);
-            (found, exact, known(f))
-        });
-        let own = named(&participants(state), &known);
-        let viewer = app
-            .viewer
-            .with(|v| v.as_ref().map(|(login, _)| login.clone()));
-        let mut suggestions: Vec<Suggestion> =
-            people(query, &own, &found, exact, viewer.as_deref())
-                .into_iter()
-                .map(Suggestion::Person)
-                .collect();
-        let files = files();
-        let recent = state.recent();
-        let changed = state.changed_files.get();
-        let results = go_to::results(
-            query,
-            &Sources {
-                files: &files,
-                recent: &recent,
-                changed: &changed,
-                active: None,
-            },
-        );
-        suggestions.extend(
-            results
-                .picks
-                .into_iter()
-                .filter_map(|p| match p {
-                    Pick::File(hit) => Some(Suggestion::File(hit)),
-                    Pick::Line { .. } => None,
-                })
-                .take(MAX_FILES),
-        );
+        let suggestions = match trigger {
+            Trigger::At => people_and_files(app, state, query, &files),
+            Trigger::Hash => state.mentions.references.with(|f| {
+                let (found, exact) = found_for(query, f);
+                let recent = f.get("").cloned().flatten().unwrap_or_default();
+                references(query, &found, exact, &recent)
+                    .into_iter()
+                    .map(Suggestion::Reference)
+                    .collect()
+            }),
+        };
         if suggestions.is_empty() {
             state.mentions.put_away(owner);
             return;
@@ -686,6 +815,7 @@ pub fn attach(
             let text = match pick {
                 Suggestion::Person(hit) => format!("@{} ", hit.person.login),
                 Suggestion::File(hit) => file_text(&hit.path),
+                Suggestion::Reference(hit) => format!("#{} ", hit.reference.number),
             };
             replace_mention(&accept_ed, &text);
         });
@@ -706,13 +836,58 @@ pub fn attach(
     }
 }
 
+/// What an `@` offers for `query`: the people, then the files.
+fn people_and_files(
+    app: AppState,
+    state: ReviewState,
+    query: &str,
+    files: &impl Fn() -> Arc<go_to::Files>,
+) -> Vec<Suggestion> {
+    let (found, exact, known) = state.mentions.found.with(|f| {
+        let (found, exact) = found_for(query, f);
+        let found: Vec<Person> = found.iter().map(Person::from).collect();
+        (found, exact, known(f))
+    });
+    let own = named(&participants(state), &known);
+    let viewer = app
+        .viewer
+        .with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let mut suggestions: Vec<Suggestion> = people(query, &own, &found, exact, viewer.as_deref())
+        .into_iter()
+        .map(Suggestion::Person)
+        .collect();
+    let files = files();
+    let recent = state.recent();
+    let changed = state.changed_files.get();
+    let results = go_to::results(
+        query,
+        &Sources {
+            files: &files,
+            recent: &recent,
+            changed: &changed,
+            active: None,
+        },
+    );
+    suggestions.extend(
+        results
+            .picks
+            .into_iter()
+            .filter_map(|p| match p {
+                Pick::File(hit) => Some(Suggestion::File(hit)),
+                Pick::Line { .. } => None,
+            })
+            .take(MAX_FILES),
+    );
+    suggestions
+}
+
 /// Put `text` in place of the mention the caret is in, as if it were
 /// typed over it, and give the box the keyboard back after a press on
 /// the list.
 fn replace_mention(editor: &Editor, text: &str) {
     let caret = editor.cursor.with_untracked(|c| c.offset());
     let whole = editor.doc().text().to_string();
-    let Some((at, _)) = token(&whole, caret) else {
+    let Some((at, _, _)) = token(&whole, caret) else {
         return;
     };
     editor.cursor.set(Cursor::new(
@@ -821,6 +996,10 @@ fn row(app: AppState, state: ReviewState, index: usize, suggestion: &Suggestion)
             person_row(app, hit).into_any(),
         ),
         Suggestion::File(hit) => (hit.path.clone(), go_to::file_row(hit, None).into_any()),
+        Suggestion::Reference(hit) => (
+            format!("#{}", hit.reference.number),
+            reference_row(hit).into_any(),
+        ),
     };
     Container::new(Container::new(content).style(move |s| {
         let s = s
@@ -870,6 +1049,36 @@ fn person_row(app: AppState, hit: &PersonHit) -> impl IntoView {
     .style(|s| s.items_center().width_full().min_width(0.0))
 }
 
+/// An issue's or a pull request's row: the state glyph, the title, and
+/// the number in the subtle colour, as GitHub's list has them.
+fn reference_row(hit: &ReferenceHit) -> impl IntoView {
+    let state = hit.reference.state;
+    let number = format!("#{}", hit.reference.number);
+    Stack::horizontal((
+        state_glyph(state, crate::icons::state_color(state))
+            .style(|s| s.flex_shrink(0.0_f32).margin_right(8.0)),
+        go_to::highlighted(
+            &hit.reference.title,
+            &hit.title_matches,
+            theme::TEXT_META,
+            theme::FG,
+        )
+        .style(|s| {
+            s.min_width(0.0)
+                .flex_shrink(1.0_f32)
+                .font_weight(theme::weight_strong())
+        }),
+        go_to::highlighted(
+            &number,
+            &hit.number_matches,
+            theme::TEXT_META,
+            theme::FG_SUBTLE,
+        )
+        .style(|s| s.flex_shrink(0.0_f32).margin_left(6.0)),
+    ))
+    .style(|s| s.items_center().width_full().min_width(0.0))
+}
+
 #[cfg(test)]
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
@@ -889,14 +1098,93 @@ mod tests {
 
     #[test]
     fn an_at_starts_a_mention_only_at_the_start_or_after_a_space() {
-        assert_eq!(token("@", 1), Some((0, "")));
-        assert_eq!(token("hi @cad", 7), Some((3, "cad")));
-        assert_eq!(token("hi\n@src/sl", 10), Some((3, "src/sl")));
+        use Trigger::At;
+        assert_eq!(token("@", 1), Some((0, At, "")));
+        assert_eq!(token("hi @cad", 7), Some((3, At, "cad")));
+        assert_eq!(token("hi\n@src/sl", 10), Some((3, At, "src/sl")));
         assert_eq!(token("mail me@example.com", 19), None);
         assert_eq!(token("@a@b", 4), None);
         assert_eq!(token("@cad done", 9), None, "a space ends it");
-        assert_eq!(token("@cadonna", 4), Some((0, "cad")), "up to the caret");
-        assert_eq!(token("é @x", 5), Some((3, "x")));
+        assert_eq!(
+            token("@cadonna", 4),
+            Some((0, At, "cad")),
+            "up to the caret"
+        );
+        assert_eq!(token("é @x", 5), Some((3, At, "x")));
+    }
+
+    #[test]
+    fn a_hash_starts_one_for_issues_the_same_way() {
+        use Trigger::Hash;
+        assert_eq!(token("#", 1), Some((0, Hash, "")));
+        assert_eq!(token("see #rf", 7), Some((4, Hash, "rf")));
+        assert_eq!(token("see #12", 7), Some((4, Hash, "12")));
+        assert_eq!(token("a#12", 4), None, "not inside a word");
+        assert_eq!(token("## Heading", 2), None, "a heading's marks");
+        assert_eq!(token("# Heading", 9), None);
+        assert_eq!(token("#a@b", 4), Some((0, Hash, "a@b")));
+    }
+
+    fn reference(number: u64, title: &str) -> IssueReference {
+        IssueReference {
+            number,
+            title: title.into(),
+            state: perch_github::SubjectState::IssueOpen,
+        }
+    }
+
+    fn numbers(hits: &[ReferenceHit]) -> Vec<u64> {
+        hits.iter().map(|h| h.reference.number).collect()
+    }
+
+    #[test]
+    fn nothing_typed_after_a_hash_offers_the_recent_ones_in_order() {
+        let recent: Vec<IssueReference> = (0..15).map(|n| reference(100 - n, "x")).collect();
+        let hits = references("", &recent, true, &recent);
+        assert_eq!(numbers(&hits), (91..=100).rev().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_number_the_digits_start_comes_before_a_title_that_has_them() {
+        let recent = [
+            reference(7, "Bump 63 deps"),
+            reference(634, "Add RFC for CDC"),
+            reference(63, "Fence"),
+            reference(1634, "Other"),
+        ];
+        let hits = references("63", &[], false, &recent);
+        assert_eq!(numbers(&hits), [63, 634, 7]);
+        assert_eq!(hits[1].number_matches, [0..3]);
+        assert_eq!(hits[2].title_matches, [5..7]);
+    }
+
+    #[test]
+    fn a_title_word_that_starts_with_the_letters_outranks_one_that_has_them() {
+        let recent = [
+            reference(1, "Surf the web"),
+            reference(2, "RFC 0029"),
+            reference(3, "Nothing"),
+        ];
+        let hits = references("rf", &[], false, &recent);
+        assert_eq!(numbers(&hits), [2, 1]);
+        assert_eq!(hits[0].title_matches, [0..2]);
+    }
+
+    #[test]
+    fn githubs_search_is_taken_at_its_word_only_for_its_query() {
+        // GitHub matched a stem the list cannot see.
+        let found = [reference(9, "Caching managers")];
+        let recent = [
+            reference(1, "Cache manager"),
+            reference(9, "Caching managers"),
+        ];
+        assert_eq!(numbers(&references("managed", &found, true, &recent)), [9]);
+        assert!(references("managed", &found, false, &recent).is_empty());
+        assert_eq!(
+            numbers(&references("cach", &found, true, &recent)),
+            [9, 1],
+            "each once, GitHub's first within a rank"
+        );
     }
 
     #[test]
@@ -974,11 +1262,14 @@ mod tests {
         found.insert("c".to_string(), Some(Arc::new(vec![user("cadonna")])));
         found.insert("ca".to_string(), None);
         let (people, exact) = found_for("cad", &found);
-        assert_eq!(people, [person("cadonna", None)]);
+        assert_eq!(people, [user("cadonna")]);
         assert!(!exact);
         let (_, exact) = found_for("c", &found);
         assert!(exact);
-        assert_eq!(found_for("x", &found), (Vec::new(), false));
+        assert_eq!(
+            found_for("x", &found),
+            (Vec::<MentionableUser>::new(), false)
+        );
     }
 
     #[test]

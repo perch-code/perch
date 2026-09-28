@@ -3796,7 +3796,8 @@ mod tests {
 
     /// `@` puts up the item's people and the worktree's files under the
     /// caret. Enter takes the pick, a press on a row takes that row, and
-    /// Escape puts the list away and leaves the composer open.
+    /// Escape puts the list away and leaves the composer open. `#` puts
+    /// up the repository's issues and pull requests the same way.
     #[test]
     fn an_at_offers_people_and_files_and_puts_the_pick_in_the_box() {
         let root = TestRoot::new();
@@ -3873,6 +3874,9 @@ mod tests {
                                 format!("@{}", p.person.login)
                             }
                             crate::review::mention::Suggestion::File(f) => f.path.clone(),
+                            crate::review::mention::Suggestion::Reference(r) => {
+                                format!("#{}", r.reference.number)
+                            }
                         })
                         .collect::<Vec<_>>()
                 })
@@ -3908,6 +3912,7 @@ mod tests {
         let ask = |query: &str| crate::review::mention::Ask {
             item_id: "item-1".into(),
             repo: "acme/repo".into(),
+            trigger: crate::review::mention::Trigger::At,
             query: query.into(),
         };
         // The timer for `c` finds typing moved on, and asks nothing.
@@ -3982,6 +3987,54 @@ mod tests {
         assert!(state.composer.get().is_some(), "the composer is still open");
         harness.dispatch_event(typed("a"));
         harness.rebuild();
+        assert_eq!(shown(), None);
+
+        // `#` offers the repository's issues and pull requests: the recent
+        // ones GitHub lists for nothing typed, then those the digits or
+        // the letters name. Enter puts in the number.
+        harness.dispatch_event(typed(" "));
+        harness.dispatch_event(typed("#"));
+        harness.rebuild();
+        assert_eq!(shown(), None, "nothing until GitHub answers");
+        state.mentions.ask_if_waiting(
+            &backend,
+            &crate::review::mention::Ask {
+                trigger: crate::review::mention::Trigger::Hash,
+                ..ask("")
+            },
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::IssueReferences { item_id, repo_full_name, query })
+                if item_id == "item-1" && repo_full_name == "acme/repo" && query.is_empty()
+        ));
+        let reference = |number: u64, title: &str| perch_github::IssueReference {
+            number,
+            title: title.into(),
+            state: perch_github::SubjectState::PrOpen,
+        };
+        state.mentions.install_references(
+            String::new(),
+            vec![
+                reference(634, "Add RFC for CDC"),
+                reference(1794, "RFC 0029"),
+                reference(1380, "Pluggable filter"),
+            ],
+        );
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(shown().unwrap(), ["#634", "#1794", "#1380"]);
+        let row = find_mention_row(&harness, "mention-row:#634");
+        assert!(harness.get_layout_rect(row).width() > 0.0, "the row is drawn");
+        harness.dispatch_event(typed("6"));
+        harness.rebuild();
+        assert_eq!(shown().unwrap(), ["#634"]);
+        harness.dispatch_event(named(NamedKey::Enter, Code::Enter));
+        harness.rebuild();
+        assert_eq!(
+            state.composer_draft.get(),
+            "hi @calavera @src/lib.rs @a #634 "
+        );
         assert_eq!(shown(), None);
     }
 

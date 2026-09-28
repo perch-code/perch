@@ -15,6 +15,7 @@ pub mod mentions;
 pub mod model;
 pub mod pulls;
 pub mod reactions;
+pub mod references;
 pub mod reviews;
 mod responses;
 pub mod search;
@@ -55,6 +56,7 @@ pub use pulls::{
     PullRequestOverview, RepositoryPermission, ReviewDecision, Reviewer,
 };
 pub use reactions::{ReactionGroup, ReactionKind, Reactions};
+pub use references::IssueReference;
 pub use search::{SearchHit, SearchPage};
 pub use reviews::{
     AnchorMapping, AnchorMappingMethod, AnchorMappingStatus, DeletedReviewHistory, Finding,

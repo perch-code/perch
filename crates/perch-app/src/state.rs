@@ -1576,6 +1576,15 @@ impl AppState {
                     review.mentions.install(query, users);
                 }
             }
+            Event::IssueReferences {
+                item_id,
+                query,
+                references,
+            } => {
+                if review.is_item(&item_id) {
+                    review.mentions.install_references(query, references);
+                }
+            }
             Event::ReactionsUpdated {
                 item_id,
                 node_id,
@@ -2339,6 +2348,7 @@ impl AppState {
             | Event::DiscussionReady { .. }
             | Event::IssueComments { .. }
             | Event::MentionableUsers { .. }
+            | Event::IssueReferences { .. }
             | Event::ReactionsUpdated { .. }
             | Event::ReactionFailed { .. }
             | Event::ThreadResolveSettled { .. }

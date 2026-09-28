@@ -980,6 +980,42 @@ impl GitHub {
         Ok(data.into_users())
     }
 
+    /// The repository's issues and pull requests a `#` can name for
+    /// `query`, at most `first` found by the search, and the one with the
+    /// number first when the query is one: who its own comment box
+    /// suggests.
+    pub async fn fetch_issue_references(
+        &self,
+        repo_full_name: &str,
+        query: &str,
+        first: usize,
+    ) -> Result<Vec<crate::IssueReference>, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        let number = query.parse::<i32>().ok().filter(|n| *n > 0);
+        let payload = serde_json::json!({
+            "query": crate::references::issue_references_query(),
+            "variables": {
+                "owner": owner,
+                "name": name,
+                "search": crate::references::search_terms(repo_full_name, query),
+                "first": first.clamp(1, 100),
+                "number": number.unwrap_or(1),
+                "byNumber": number.is_some(),
+            },
+        });
+        // A number nobody has is an error beside the search's answer.
+        let (data, problems) = self
+            .graphql_partial::<crate::references::IssueReferencesData>(&payload)
+            .await?;
+        match data {
+            Some(data) => Ok(data.into_references()),
+            None if problems.is_empty() => {
+                Err(Error::Decode("GitHub's GraphQL response had no data".into()))
+            }
+            None => Err(Error::Graphql(problems.join("; "))),
+        }
+    }
+
     /// Fetch an issue by number.
     ///
     /// The issues endpoint answers for pull requests too, because GitHub

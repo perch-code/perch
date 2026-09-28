@@ -205,6 +205,14 @@ pub enum Command {
         repo_full_name: String,
         query: String,
     },
+    /// The issues and pull requests of the item's repository that
+    /// `query` names, for the `#` a composer is suggesting them for.
+    /// `IssueReferences` answers.
+    IssueReferences {
+        item_id: String,
+        repo_full_name: String,
+        query: String,
+    },
     /// Leave the reader's reaction on a comment, a review, or the item's
     /// own description, or take it back. `node_id` is the subject's
     /// GraphQL id, which is how GitHub names a reactable thing.
@@ -985,6 +993,13 @@ pub enum Event {
         query: String,
         users: Vec<perch_github::MentionableUser>,
     },
+    /// The issues and pull requests of the item's repository that
+    /// matched `query`. Nothing when GitHub could not be asked.
+    IssueReferences {
+        item_id: String,
+        query: String,
+        references: Vec<perch_github::IssueReference>,
+    },
     /// GitHub took the reader's reaction: the subject's reactions as they
     /// stand now.
     ReactionsUpdated {
@@ -1249,6 +1264,7 @@ impl Event {
                 | Event::LspCalls { .. }
                 | Event::LspNames { .. }
                 | Event::MentionableUsers { .. }
+                | Event::IssueReferences { .. }
                 | Event::Notice(_)
                 | Event::ConfirmLoss(_)
                 | Event::RepositoryAdded(_)
@@ -2385,6 +2401,17 @@ impl Backend {
     /// could not be asked.
     pub fn mentionable_users(&self, item_id: &str, repo_full_name: &str, query: &str) {
         let _ = self.commands.send(Command::MentionableUsers {
+            item_id: item_id.to_string(),
+            repo_full_name: repo_full_name.to_string(),
+            query: query.to_string(),
+        });
+    }
+
+    /// Ask GitHub which issues and pull requests of the item's
+    /// repository `query` names, for a composer's `#`. `IssueReferences`
+    /// answers, empty when GitHub could not be asked.
+    pub fn issue_references(&self, item_id: &str, repo_full_name: &str, query: &str) {
+        let _ = self.commands.send(Command::IssueReferences {
             item_id: item_id.to_string(),
             repo_full_name: repo_full_name.to_string(),
             query: query.to_string(),
@@ -3711,6 +3738,16 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     mentionable_users(&ctx, &item_id, &repo_full_name, &query).await;
+                });
+            }
+            Command::IssueReferences {
+                item_id,
+                repo_full_name,
+                query,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    issue_references(&ctx, &item_id, &repo_full_name, &query).await;
                 });
             }
             Command::SetReaction {
@@ -8409,6 +8446,33 @@ async fn mentionable_users(ctx: &Ctx, item_id: &str, repo_full_name: &str, query
             item_id: item_id.to_string(),
             query: query.to_string(),
             users,
+        });
+    }
+}
+
+/// The most issues and pull requests GitHub is asked for at a time:
+/// with nothing typed, enough recent ones that the list can go on
+/// filtering them as a title or a number is typed.
+const ISSUE_REFERENCES: usize = 50;
+
+/// The issues and pull requests of the repository `query` names. A
+/// failure is quiet, as it is for people.
+async fn issue_references(ctx: &Ctx, item_id: &str, repo_full_name: &str, query: &str) {
+    let references = match ctx.github() {
+        Some(github) => github
+            .fetch_issue_references(repo_full_name, query, ISSUE_REFERENCES)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::info!(repo = repo_full_name, query, %error, "issue references not read");
+                Vec::new()
+            }),
+        None => Vec::new(),
+    };
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::IssueReferences {
+            item_id: item_id.to_string(),
+            query: query.to_string(),
+            references,
         });
     }
 }
