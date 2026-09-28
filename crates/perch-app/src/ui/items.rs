@@ -269,11 +269,15 @@ fn row_trailing(
     unread: impl Fn() -> bool + Clone + 'static,
 ) -> impl IntoView {
     let id = item.id.clone();
-    let hovering = move || state.hovered_item.with(|h| h.as_deref() == Some(id.as_str()));
+    // A memo: the pointer moving from one row to the next writes
+    // `hovered_item` for every row, and scrolling moves rows under the
+    // pointer; keyed on the signal, each write would rebuild every row's
+    // trailing views and lay the list out again.
+    let hovering = Memo::new(move |_| state.hovered_item.with(|h| h.as_deref() == Some(id.as_str())));
     let pinned = item.is_pinned();
     let at = item.last_activity();
 
-    dyn_container(hovering, move |hovered| {
+    dyn_container(move || hovering.get(), move |hovered| {
         if !hovered {
             return Stack::horizontal((
                 if pinned {

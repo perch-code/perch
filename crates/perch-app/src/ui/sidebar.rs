@@ -989,6 +989,22 @@ mod tests {
         assert!(pin.get_visual_rect_no_clip().width() > 0.0);
     }
 
+    /// The pointer crossing rows rebuilds only the two rows it crosses,
+    /// as it does all the time while the list scrolls under it.
+    #[test]
+    fn hovering_one_row_leaves_the_others_alone() {
+        let (mut harness, state) = harness();
+        let age = |harness: &HeadlessHarness| {
+            find(find(harness.root_id(), "item row:pr").unwrap(), "row age").unwrap()
+        };
+        let before = age(&harness);
+        state.hovered_item.set(Some("quiet".into()));
+        harness.rebuild();
+        state.hovered_item.set(None);
+        harness.rebuild();
+        assert_eq!(age(&harness), before);
+    }
+
     /// A poll with a new row floats a pill over the list and moves
     /// nothing; Refresh puts the row in.
     #[test]
