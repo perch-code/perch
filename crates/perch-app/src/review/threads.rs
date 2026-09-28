@@ -4447,7 +4447,7 @@ mod tests {
         harness.dispatch_event(key(Key::Character("a".into()), Code::KeyA, Modifiers::META));
         harness.dispatch_event(key(Key::Named(NamedKey::Backspace), Code::Backspace, Modifiers::empty()));
         for ch in "I fixed it".chars() {
-            harness.dispatch_event(key(Key::Character(ch.to_string().into()), Code::KeyA, Modifiers::empty()));
+            harness.dispatch_event(key(Key::Character(ch.to_string()), Code::KeyA, Modifiers::empty()));
         }
         harness.dispatch_event(enter(Modifiers::META));
         harness.rebuild();

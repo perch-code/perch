@@ -106,6 +106,7 @@ fn page(items: Vec<String>) -> String {
 /// comments, served a hundred a page, the state of its one review thread,
 /// and the reactions on all of it. The ids each reactions query named are
 /// kept, a query at a time.
+#[allow(clippy::type_complexity)]
 fn spawn(comments: usize) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();

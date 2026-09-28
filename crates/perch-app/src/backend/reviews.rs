@@ -894,6 +894,7 @@ pub(super) async fn recover(ctx: &Ctx) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn queue_attempt(
     ctx: &Ctx,
     item: &perch_github::Item,

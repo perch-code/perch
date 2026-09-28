@@ -109,7 +109,7 @@ pub enum Command {
     /// Mark a GitHub notification read and open its pull request or issue.
     /// Other subject kinds are opened by the UI in the browser instead.
     OpenNotification {
-        thread: Thread,
+        thread: Box<Thread>,
         navigation_id: Option<u64>,
     },
     /// Keep a notification visually unread in Perch. GitHub's public API
@@ -2306,7 +2306,7 @@ impl Backend {
             self.scope_requests.clear();
         }
         let _ = self.commands.send(Command::OpenNotification {
-            thread: thread.clone(),
+            thread: Box::new(thread.clone()),
             navigation_id,
         });
         navigation_id
@@ -2422,9 +2422,7 @@ impl Backend {
         body: &str,
         event: PullReviewEvent,
     ) -> Option<u64> {
-        let Some(attempt_id) = self.pull_request_review_attempts.begin(item_id) else {
-            return None;
-        };
+        let attempt_id = self.pull_request_review_attempts.begin(item_id)?;
         if self.commands.send(Command::SubmitPullRequestReview {
             attempt_id,
             item_id: item_id.to_string(),
