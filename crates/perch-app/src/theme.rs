@@ -368,7 +368,19 @@ pub fn install_code_font() {
         );
     }
 }
-pub const GUTTER_WIDTH: f64 = 70.0;
+/// The line-number gutter, left to right: the room before the slot a
+/// thread's mark or the `+` sits in, the slot, the room between the slot
+/// and the widest number, the room after the numbers, and the change bar.
+/// The numbers take what the file's widest needs, and never less than
+/// three digits, so most files' gutters are one width; see
+/// `review::gutter::width`. A divider's expanders sit in the gutter too,
+/// a row each, so it needs no room for a row of controls.
+pub const GUTTER_SLOT_INSET: f64 = 2.0;
+pub const GUTTER_SLOT: f64 = 16.0;
+pub const GUTTER_NUMBER_GAP: f64 = 4.0;
+pub const GUTTER_NUMBER_PADDING: f64 = 6.0;
+pub const GUTTER_BAR: f64 = 3.0;
+pub const GUTTER_MIN_DIGITS: usize = 3;
 /// Gap between the gutter's change bar and the first character of code.
 pub const CODE_GUTTER_GAP: f64 = 12.0;
 pub const REVIEW_HEADER_HEIGHT: f64 = TITLEBAR_HEIGHT;
@@ -552,11 +564,20 @@ pub const TREE_ROW_HEIGHT: f64 = 28.0;
 /// other side does. Grey rather than a diff tint, because nothing is there.
 pub const DIFF_FILLER_BG: Color = Color::from_rgb8(0xf1, 0xf3, 0xf5);
 /// A divider row, standing for a run of unchanged lines folded away: the
-/// accent's wash, which is what github.com paints its expand rows in.
+/// blue github.com paints its hunk rows in, Primer's accent subtle.
 pub const DIFF_DIVIDER_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
-/// The divider's count, muted like the gutter's numbers so the bar reads
-/// as a seam in the file and not as a line of it.
+/// The divider's hunk header, muted as github.com sets it, so the row
+/// reads as a seam in the file and not as a line of it.
 pub const DIFF_DIVIDER_FG: Color = FG_MUTED;
+/// A divider's expanders, in the gutter beside its row: the stronger
+/// blue of github.com's hunk number cell (Primer's blue 1, which its
+/// diff blob tokens give the cell), the glyph muted as GitHub draws it,
+/// and while the pointer is on one, GitHub's own blue under a white glyph
+/// (Primer's accent emphasis and on-emphasis), as its expanders light up.
+pub const DIFF_EXPANDER_BG: Color = Color::from_rgb8(0xb6, 0xe3, 0xff);
+pub const DIFF_EXPANDER_FG: Color = FG_MUTED;
+pub const DIFF_EXPANDER_HOVER_BG: Color = GITHUB;
+pub const DIFF_EXPANDER_HOVER_FG: Color = Color::from_rgb8(0xff, 0xff, 0xff);
 /// The Source, Show whole, Stacked and Split tiles at the right end of
 /// the file tab bar.
 pub const LAYOUT_TILE: f64 = 22.0;

@@ -19,11 +19,19 @@
 //! new question and GitHub's head-side markers.
 //!
 //! The rows are the document's, not the buffer's: a row that is a line is
-//! numbered and barred from the buffer's row table, a divider is tinted as
-//! one and holds the controls that open its run, and a spacer under a card
-//! is blank. The document is edited in place under the editor, so a row is
-//! keyed by what it is as well as where it is: a row that is the same thing
-//! after an edit keeps its view, and one that is not is built again.
+//! numbered and barred from the buffer's row table, a divider's row holds
+//! the expander that opens its run that way, as github.com's hunk rows do,
+//! and a spacer under a card is blank. In a split the expanders are on the
+//! base side, at the row's left end as github.com has them, and the head
+//! side's row is the divider's tint.
+//!
+//! A gutter is as wide as the file's widest number needs, and no wider:
+//! the controls that open a fold are a row each rather than a row of
+//! controls, so they need no room of their own.
+//!
+//! The document is edited in place under the editor, so a row is keyed by
+//! what it is as well as where it is: a row that is the same thing after an
+//! edit keeps its view, and one that is not is built again.
 
 use std::sync::Arc;
 
@@ -39,8 +47,8 @@ use perch_git::Row;
 use perch_github::{Side as AnchorSide, ThreadOrigin};
 
 use crate::icons::{self, SidebarIcon};
-use crate::review::cards::tip;
-use crate::review::doc::{self, CardId, Doc, DocRow, Run, Tint};
+use crate::review::cards::tip_with;
+use crate::review::doc::{self, CardId, Doc, DocRow, Expand, Tint};
 use crate::review::editor::Side;
 use crate::review::model::{LoadedFile, ReviewState};
 use crate::state::AppState;
@@ -73,6 +81,68 @@ pub(crate) fn visible_lines(
     (first..(first + count).min(total)).collect()
 }
 
+/// The rule down the gutter's right edge, between it and the code.
+const RULE: f64 = 1.0;
+
+/// How wide one digit of a line number is, in the code font at the code's
+/// size, measured once. The font's digits are all one width.
+fn digit_width() -> f64 {
+    thread_local! {
+        static WIDTH: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+    }
+    WIDTH.with(|cell| {
+        if let Some(width) = cell.get() {
+            return width;
+        }
+        use floem::text::{Attrs, AttrsList, FamilyOwned, TextLayout};
+        let family: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
+        let mut layout = TextLayout::new();
+        layout.set_text(
+            "0123456789",
+            AttrsList::new(Attrs::new().family(&family).font_size(theme::CODE_FONT_SIZE)),
+            None,
+        );
+        let width = layout.size().width / 10.0;
+        cell.set(Some(width));
+        width
+    })
+}
+
+/// How wide a gutter is whose widest number has `digits` digits: the
+/// slot, the numbers at no fewer than `GUTTER_MIN_DIGITS`, the room about
+/// them, the change bar and the rule, rounded up to a whole pixel so the
+/// edge between the gutter and the code is never drawn across two.
+pub fn width(digits: usize) -> f64 {
+    let numbers = digits.max(theme::GUTTER_MIN_DIGITS) as f64 * digit_width();
+    (theme::GUTTER_SLOT_INSET
+        + theme::GUTTER_SLOT
+        + theme::GUTTER_NUMBER_GAP
+        + numbers
+        + theme::GUTTER_NUMBER_PADDING
+        + theme::GUTTER_BAR
+        + RULE)
+        .ceil()
+}
+
+/// How wide a file's gutters are: as `width` has it for the widest number
+/// either side shows, a head line, a ghost's base line, or the last line
+/// of the base beside it in a split. Both sides of a split are this wide,
+/// so the two halves stay the same shape.
+pub fn width_of(file: &LoadedFile) -> f64 {
+    let shown = file
+        .buffer
+        .rows
+        .iter()
+        .map(|row| match row {
+            Row::Head { head_line, .. } => head_line + 1,
+            Row::Deleted { base_line } => base_line + 1,
+        })
+        .max()
+        .unwrap_or(0);
+    let base = file.base_buffer.as_ref().map_or(0, |b| b.len());
+    width(shown.max(base).max(1).to_string().len())
+}
+
 /// How far the column slides to line up with a part-scrolled first row.
 pub(crate) fn column_offset(scroll_top: f64, line_height: f64) -> f64 {
     if line_height <= 0.0 {
@@ -91,7 +161,7 @@ pub fn diff_gutter(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, move |row, entry| {
+    column(viewport, scroll_delta, doc, width_of(&file), move |row, entry| {
         gutter_row(state, app, file.clone(), doc, row, entry)
     })
 }
@@ -107,7 +177,7 @@ pub fn plain_gutter(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, move |row, entry| {
+    column(viewport, scroll_delta, doc, width_of(&file), move |row, entry| {
         let number = match entry {
             DocRow::Line { display, .. } => Some(display + 1),
             _ => None,
@@ -127,19 +197,20 @@ pub fn side_gutter(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, move |row, entry| {
+    column(viewport, scroll_delta, doc, width_of(&file), move |row, entry| {
         side_row(state, app, file.clone(), side, doc, row, entry)
     })
 }
 
-/// The rows in view, slid to the scroll, in a column beside the editor.
-/// Each row's view is built from its index and what the document says the
-/// row is, and keyed by both, so an edit to the document rebuilds the rows
-/// it changed and no other.
+/// The rows in view, slid to the scroll, in a column `width` wide beside
+/// the editor. Each row's view is built from its index and what the
+/// document says the row is, and keyed by both, so an edit to the document
+/// rebuilds the rows it changed and no other.
 fn column<V: IntoView + 'static>(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
     doc: RwSignal<Arc<Doc>>,
+    width: f64,
     row: impl Fn(usize, DocRow) -> V + 'static,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
@@ -171,6 +242,7 @@ fn column<V: IntoView + 'static>(
     });
 
     Container::new(column)
+        .debug_name("gutter")
         // This inner box is what the column positions against, so it needs
         // the size and the relative position. Styling the clip wrapper
         // instead would leave it shrinking to its content.
@@ -188,12 +260,12 @@ fn column<V: IntoView + 'static>(
         // window's handler catches it on the way down. A click in the code
         // gives the editor the keyboard; a click here gives it to the
         // gutter, so `]` works after either.
-        .style(|s| {
-            s.width(theme::GUTTER_WIDTH)
+        .style(move |s| {
+            s.width(width)
                 .height_full()
                 .flex_shrink(0.0_f32)
                 .background(theme::GUTTER_BG)
-                .border_right(1.0)
+                .border_right(RULE)
                 .border_color(theme::BORDER_MUTED)
                 .focusable()
         })
@@ -262,9 +334,9 @@ fn side_row(
     entry: DocRow,
 ) -> AnyView {
     let DocRow::Line { display, tint } = entry else {
-        // The divider's controls are on the head side, with the label;
-        // the base side's row is the tint alone.
-        return other_row(state, app, file, doc, row, entry, side == Side::Head);
+        // The divider's expanders are on the base side, at the row's left
+        // end as on github.com; the head side's row is the tint alone.
+        return other_row(state, app, file, doc, row, entry, side == Side::Base);
     };
 
     // The base side's document is over the base file, so its line is its
@@ -294,9 +366,10 @@ fn side_row(
     )
 }
 
-/// A row that is no line: a divider is a bar in its colour, with its
-/// controls when this gutter holds them, and a filler or a spacer is
-/// blank. A blank row records no pointer, so nothing lights a `+`.
+/// A row that is no line: a divider's row is its expander when this
+/// gutter holds them and the divider's tint when it does not, and a
+/// filler or a spacer is blank. A blank row records no pointer, so
+/// nothing lights a `+`.
 fn other_row(
     state: ReviewState,
     app: AppState,
@@ -307,7 +380,7 @@ fn other_row(
     controls: bool,
 ) -> AnyView {
     match entry {
-        DocRow::Divider { .. } if controls => divider_row(state, file, doc, row),
+        DocRow::Divider { expand, .. } if controls => expander(state, file, doc, row, expand),
         DocRow::Divider { .. } => Empty::new()
             .style(|s| {
                 s.width_full()
@@ -322,163 +395,86 @@ fn other_row(
     }
 }
 
-/// The gutter's row beside a divider: the whole width in the divider's
-/// colour, with no number and no bar, and while the pointer is on the row
-/// or on the bar beside it, the controls that open the run, centred. The
-/// run is read from the document as it is now, not as it was when the row
-/// was built: a reveal that leaves the divider where it is changes what
-/// the divider hides. Reset is offered when a reveal overlaps the run's
-/// default, or the default of a run taken whole, divider and all, that
-/// this divider carries; see `doc::reset_ranges`.
-fn divider_row(
+/// One of a divider's expanders, as the divider's row of the gutter: the
+/// gutter's width and a row's height in the hunk number cell's blue with
+/// the expander's glyph in the middle, and GitHub's blue under a white
+/// glyph while the pointer is on it. A click reveals what the expander
+/// opens of the run as the document has it then, not as it was when the
+/// row was built: a reveal that leaves the divider where it is changes
+/// what the divider hides. The pointer on it is recorded as on the
+/// divider's first row, which is what the row's Fold again reads.
+fn expander(
     state: ReviewState,
     file: Arc<LoadedFile>,
     doc: RwSignal<Arc<Doc>>,
-    key: usize,
+    row: usize,
+    expand: Expand,
 ) -> AnyView {
-    let reveal_file = file.clone();
-    let controls = dyn_container(
-        move || {
-            let hovered = state.hovered_line.get() == Some(key);
-            let run = doc.with(|d| d.run_of(key)).filter(|_| hovered);
-            let reset = run.and_then(|r| {
-                let defaults = doc::runs(&reveal_file.buffer, &state.anchors_in(&reveal_file.path));
-                let ranges = doc.with(|d| doc::reset_ranges(&d.folds, &defaults, r));
-                let reveals = state.reveals_for(&reveal_file.path, &reveal_file.blob);
-                ranges
-                    .iter()
-                    .any(|&(a, b)| reveals.overlaps(a, b))
-                    .then_some(ranges)
-            });
-            (run, reset)
-        },
-        move |(run, reset)| match run {
-            Some(run) => divider_controls(state, file.clone(), run, reset),
-            None => Empty::new().into_any(),
-        },
-    );
-
-    Container::new(controls)
-        .on_event_cont(el::PointerEnter, move |cx, _| {
-            state.enter_row(cx.target, key)
+    let glyph = match expand {
+        Expand::Down => SidebarIcon::ExpandDown,
+        Expand::Up => SidebarIcon::ExpandUp,
+        Expand::All => SidebarIcon::ExpandAll,
+    };
+    let hovered = RwSignal::new(false);
+    let color = move || {
+        if hovered.get() {
+            theme::DIFF_EXPANDER_HOVER_FG
+        } else {
+            theme::DIFF_EXPANDER_FG
+        }
+    };
+    let explanation = move || {
+        let Some(run) = doc.with_untracked(|d| d.run_of(row)) else {
+            return String::new();
+        };
+        let step = run.len().min(doc::REVEAL_STEP);
+        let lines = |n: usize| if n == 1 { "line" } else { "lines" };
+        match expand {
+            Expand::Down => format!("Show the first {step} hidden {}", lines(step)),
+            Expand::Up => format!("Show the last {step} hidden {}", lines(step)),
+            Expand::All => format!("Show all {} hidden {}", run.len(), lines(run.len())),
+        }
+    };
+    let first_row = move || {
+        doc.with_untracked(|d| d.divider_span(row))
+            .map_or(row, |span| span.start)
+    };
+    tip_with(
+        Container::new(
+            icon_in(move || icons::sidebar_icon(glyph, color()), color)
+                .style(|s| s.size(16.0, 16.0)),
+        )
+        .debug_name(format!("expander:{expand:?}"))
+        .on_event_stop(el::Click, move |_, _| {
+            if let Some(run) = doc.with_untracked(|d| d.run_of(row)) {
+                let (first, last) = run.reveals(expand);
+                state.reveal(&file.path, &file.blob, first, last);
+            }
         })
-        .on_event_cont(el::PointerLeave, move |cx, _| state.leave_row(cx.target))
-        .style(|s| {
-            s.width_full()
+        .on_event_cont(el::PointerEnter, move |cx, _| {
+            hovered.set(true);
+            state.enter_row(cx.target, first_row());
+        })
+        .on_event_cont(el::PointerLeave, move |cx, _| {
+            hovered.set(false);
+            state.leave_row(cx.target);
+        })
+        .style(move |s| {
+            clickable(s)
+                .width_full()
                 .height(theme::CODE_LINE_HEIGHT as f64)
                 .flex_shrink(0.0_f32)
                 .items_center()
                 .justify_center()
-                .background(theme::DIFF_DIVIDER_BG)
-        })
-        .into_any()
-}
-
-/// Up and Down, or All when two clicks would do it anyway, and Reset
-/// when there is a reveal to undo in the run or in one it carries:
-/// `reset` is then the head ranges Reset folds back.
-fn divider_controls(
-    state: ReviewState,
-    file: Arc<LoadedFile>,
-    run: Run,
-    reset: Option<Vec<(usize, usize)>>,
-) -> AnyView {
-    let reveal = {
-        let file = file.clone();
-        move |(first, last): (usize, usize)| state.reveal(&file.path, &file.blob, first, last)
-    };
-    let open: AnyView = if run.reveals_whole() {
-        let reveal = reveal.clone();
-        let n = run.len();
-        all_control(
-            format!("Show all {n} line{}", if n == 1 { "" } else { "s" }),
-            move || reveal(run.whole()),
-        )
-        .into_any()
-    } else {
-        let (up, down) = (reveal.clone(), reveal);
-        let step = doc::REVEAL_STEP;
-        // The arrows point the way the code grows, as github.com's do: Up
-        // grows the code below the divider upward, into the run's last
-        // lines; Down grows the code above it downward, into the first.
-        Stack::horizontal((
-            glyph_control(
-                SidebarIcon::ChevronUp,
-                format!("Show the last {step} hidden lines"),
-                move || up(run.bottom()),
-            ),
-            glyph_control(
-                SidebarIcon::ChevronDown,
-                format!("Show the first {step} hidden lines"),
-                move || down(run.top()),
-            ),
-        ))
-        .style(|s| s.items_center().gap(2.0))
-        .into_any()
-    };
-    let Some(ranges) = reset else {
-        return open;
-    };
-    let reset = glyph_control(SidebarIcon::Undo, "Fold again".to_string(), move || {
-        state.reset(&file.path, &file.blob, &ranges)
-    });
-    Stack::horizontal((open, reset))
-        .style(|s| s.items_center().gap(2.0))
-        .into_any()
-}
-
-/// A 16px slot holding a 12px glyph, muted until the pointer is on it.
-fn glyph_control(
-    glyph: SidebarIcon,
-    explanation: String,
-    on_click: impl Fn() + 'static,
-) -> impl IntoView {
-    let hovered = RwSignal::new(false);
-    let color = move || {
-        if hovered.get() {
-            theme::ACCENT
-        } else {
-            theme::FG_MUTED
-        }
-    };
-    tip(
-        Container::new(
-            icon_in(move || icons::sidebar_icon(glyph, color()), color)
-                .style(|s| s.size(12.0, 12.0)),
-        )
-        .on_event_stop(el::Click, move |_, _| on_click())
-        .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
-        .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
-        .style(|s| {
-            clickable(s)
-                .size(16.0, 16.0)
-                .items_center()
-                .justify_center()
-                .border_radius(3.0)
-                .hover(|s| s.background(theme::BADGE_BG))
+                .background(if hovered.get() {
+                    theme::DIFF_EXPANDER_HOVER_BG
+                } else {
+                    theme::DIFF_EXPANDER_BG
+                })
         }),
         explanation,
     )
-}
-
-/// "All", as a word in a box the height of a slot.
-fn all_control(explanation: String, on_click: impl Fn() + 'static) -> impl IntoView {
-    tip(
-        Label::derived(|| "All".to_string())
-            .on_event_stop(el::Click, move |_, _| on_click())
-            .style(|s| {
-                clickable(s)
-                    .font_size(theme::TEXT_SECTION)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::FG_MUTED)
-                    .height(16.0)
-                    .padding_horiz(5.0)
-                    .items_center()
-                    .border_radius(3.0)
-                    .hover(|s| s.color(theme::ACCENT).background(theme::BADGE_BG))
-            }),
-        explanation,
-    )
+    .into_any()
 }
 
 fn change_bar_color(tint: Tint) -> Option<Color> {
@@ -514,9 +510,17 @@ fn row_view(
     let row = Stack::horizontal((
         // The left slot: a marker where a thread starts, a `+` under the
         // pointer, nothing otherwise. Fixed width, so numbers never shift.
-        slot_view.style(|s| s.size(16.0, 16.0).margin_left(3.0).flex_shrink(0.0_f32)),
+        slot_view.style(|s| {
+            s.size(theme::GUTTER_SLOT, theme::GUTTER_SLOT)
+                .margin_left(theme::GUTTER_SLOT_INSET)
+                .flex_shrink(0.0_f32)
+        }),
+        // The number, set against the bar. The gutter is as wide as the
+        // file's widest number needs, so that one sits the gap `width`
+        // leaves from the slot, and every other is further off.
         Label::derived(move || number.map(|n| n.to_string()).unwrap_or_default()).style(move |s| {
             s.flex_grow(1.0_f32)
+                .min_width(0.0)
                 .selectable(false)
                 // The code's own size, as Codex numbers its diffs.
                 .font_family(theme::CODE_FONT_STACK.to_string())
@@ -527,7 +531,7 @@ fn row_view(
                     theme::GUTTER_FG
                 })
                 .text_align(floem::text::Alignment::End)
-                .padding_right(9.0)
+                .padding_right(theme::GUTTER_NUMBER_PADDING)
         }),
         change_bar(bar),
     ))
@@ -656,13 +660,13 @@ fn anchor_slot(
 
 fn change_bar(color: Option<Color>) -> impl IntoView {
     Container::new(Empty::new().style(move |s| {
-        let base = s.width(3.0).height_full();
+        let base = s.width(theme::GUTTER_BAR).height_full();
         match color {
             Some(c) => base.background(c),
             None => base,
         }
     }))
-    .style(|s| s.width(3.0).height_full().flex_shrink(0.0_f32))
+    .style(|s| s.width(theme::GUTTER_BAR).height_full().flex_shrink(0.0_f32))
 }
 
 #[cfg(test)]
@@ -694,6 +698,46 @@ mod tests {
             thread_mark(ThreadOrigin::Local, true, false),
             (SidebarIcon::Thread, theme::FG_SUBTLE)
         );
+    }
+
+    #[test]
+    fn a_gutter_is_as_wide_as_its_widest_number_needs_and_never_under_three_digits() {
+        let digit = digit_width();
+        assert!(digit > 0.0, "the code font measures");
+        assert_eq!(width(1), width(3), "three digits at the least");
+        let fixed = theme::GUTTER_SLOT_INSET
+            + theme::GUTTER_SLOT
+            + theme::GUTTER_NUMBER_GAP
+            + theme::GUTTER_NUMBER_PADDING
+            + theme::GUTTER_BAR
+            + RULE;
+        for digits in 3..=6 {
+            let w = width(digits);
+            assert_eq!(w, w.round(), "{digits} digits: a whole pixel");
+            assert!(w - fixed >= digits as f64 * digit, "{digits} digits fit");
+            assert!(w - fixed < digits as f64 * digit + 1.0, "{digits} digits: no room to spare");
+        }
+    }
+
+    #[test]
+    fn a_files_gutter_is_sized_for_the_longer_side() {
+        let file = |head: String, base: String| {
+            crate::backend::build_loaded_file(
+                "src/x.rs".into(),
+                head,
+                base,
+                Some(perch_git::ChangeStatus::Modified),
+                false,
+                perch_git::Scope::Branch,
+                String::new(),
+            )
+        };
+        let lines = |n: usize| (0..n).map(|i| format!("line {i}\n")).collect::<String>();
+        assert_eq!(width_of(&file(lines(90), lines(80))), width(3));
+        assert_eq!(width_of(&file(lines(1200), lines(1200))), width(4));
+        // A split puts every base line beside the head, so a long base
+        // widens both gutters, though the head is short.
+        assert_eq!(width_of(&file(lines(10), lines(1000))), width(4));
     }
 
     #[test]

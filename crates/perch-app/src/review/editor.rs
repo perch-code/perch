@@ -50,11 +50,13 @@ use floem::views::{
 use perch_github::CommentThread;
 
 use crate::backend::Backend;
-use crate::icons::SidebarIcon;
+use crate::icons::{self, SidebarIcon};
 use crate::review::cards;
 use crate::review::doc::{self, Card, CardId, Doc, DocRow, Reveals, Run, Tint};
 use crate::review::find;
-use crate::review::gutter::{column_offset, diff_gutter, plain_gutter, side_gutter, visible_lines};
+use crate::review::gutter::{
+    self, column_offset, diff_gutter, plain_gutter, side_gutter, visible_lines,
+};
 use crate::review::hierarchy;
 use crate::review::hover;
 use crate::review::model::{
@@ -68,7 +70,7 @@ use crate::review::threads::{self, ThreadFace};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::centered_message;
+use crate::ui::widgets::{centered_message, clickable, icon_in};
 
 pub fn editor_pane(
     app: AppState,
@@ -379,6 +381,7 @@ fn stacked_view(
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
     let path = file.path.clone();
+    let divider_file = file.clone();
     // A file outside the worktree is a place to read: numbers beside it,
     // and no diff gutter, since there is no diff.
     let gutter = if file.origin.is_outside() {
@@ -393,7 +396,7 @@ fn stacked_view(
         // dividers, since a card is never in a divider.
         Stack::vertical((
             over_tints(editor, doc, viewport),
-            divider_layer(state, doc, viewport, scroll_delta, Bars::Editor),
+            divider_layer(state, divider_file, doc, viewport, scroll_delta, Bars::Editor),
             card_layer(
                 app,
                 state,
@@ -622,8 +625,8 @@ fn shift_cursor(cursor: &mut Cursor, start: usize, delta: isize) {
 }
 
 /// The colour behind a row: a line's diff tint, grey for a split's
-/// filler, the accent's wash for a divider. A plain line has none, and a
-/// spacer none, since the card is drawn over its rows.
+/// filler, github.com's hunk row blue for a divider. A plain line has
+/// none, and a spacer none, since the card is drawn over its rows.
 fn row_tint(row: &DocRow) -> Option<Color> {
     match row {
         DocRow::Line { tint, .. } => match tint {
@@ -716,42 +719,64 @@ enum Bars {
     /// Across the whole box: the stacked layout's editor.
     Editor,
     /// Across a split, whose layer covers the outer stack so that the
-    /// bars are placed from the one scroll. The label and the controls
-    /// are the head side's, in the right half less its gutter; the base
-    /// side's half is its tint alone, and records the hover as the label
-    /// does, so the whole row answers the pointer. A wheel over it goes
-    /// down the file with the head side and sideways to the base side's
-    /// own scroll, `base_delta`, as one over the base side's code does.
-    HeadSide { base_delta: RwSignal<Vec2> },
+    /// bars are placed from the one scroll. The base side's gutter is left
+    /// bare, since its rows are the expanders; the header is over the base
+    /// side's code, from its first column, where github.com sets it at the
+    /// row's left; and the rest, the rule and the head side, gutter and
+    /// all, is the divider's tint from the layers beneath, and records the
+    /// hover as the header does, so the whole row answers the pointer. A
+    /// wheel over the header goes down the file with the head side and
+    /// sideways to the base side's own scroll, `base_delta`, as one over
+    /// the base side's code does.
+    Split { base_delta: RwSignal<Vec2> },
 }
 
-/// The dividers' labels, drawn over the editor at their rows: `47
-/// unchanged lines` centred across the bar the row's own background
-/// paints. Placed the way the gutter's column is, from the viewport, with
-/// each bar carrying its own offset because the bars are sparse. The layer
-/// takes no pointer events; each bar does, to record the hover that shows
-/// the gutter's controls, and hands the wheel on to the editor.
+/// The dividers' hunk headers, drawn over the editor at their rows:
+/// `@@ -1473,6 +1509,7 @@ impl Manifest {` from the first code column,
+/// down the middle of the divider's one or two rows, over the bar the
+/// rows' own background paints. Placed the way the gutter's column is,
+/// from the viewport, with each bar carrying its own offset because the
+/// bars are sparse. The layer takes no pointer events; each bar does, to
+/// record the hover that shows Fold again, and hands the wheel on to the
+/// editor. The headers are worked out when the folds change, rather than
+/// for each bar as it scrolls into view or each time a card's rows do.
 fn divider_layer(
     state: ReviewState,
+    file: Arc<LoadedFile>,
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
     bars: Bars,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let labels_file = file.clone();
+    let folds = Memo::new(move |_| doc.with(|d| d.folds.clone()));
+    let labels = Memo::new(move |_| {
+        let base = labels_file.base_buffer.as_ref().map(|b| b.text.as_str());
+        folds.with(|folds| doc::hunk_labels(&labels_file.buffer, base, folds))
+    });
+    // Each divider in view once, by its rows, however many of them are.
     let visible = move || {
         let vp = viewport.get();
         doc.with(|d| {
-            visible_lines(vp.y0, vp.height(), line_height, d.len())
-                .into_iter()
-                .filter_map(|row| d.run_of(row).map(|run| (row, run)))
-                .collect::<Vec<_>>()
+            let mut out: Vec<(std::ops::Range<usize>, Run)> = Vec::new();
+            for row in visible_lines(vp.y0, vp.height(), line_height, d.len()) {
+                let (Some(span), Some(run)) = (d.divider_span(row), d.run_of(row)) else {
+                    continue;
+                };
+                if out.last().is_none_or(|(last, _)| *last != span) {
+                    out.push((span, run));
+                }
+            }
+            out
         })
     };
     let stack = dyn_stack(
         visible,
-        |(row, run)| (*row, *run),
-        move |(row, run)| divider_bar(state, row, run, viewport, scroll_delta, bars),
+        |(span, run)| (span.clone(), *run),
+        move |(span, _)| {
+            divider_bar(state, file.clone(), doc, labels, span, viewport, scroll_delta, bars)
+        },
     )
     .style(|s| s.size_full());
 
@@ -761,142 +786,186 @@ fn divider_layer(
         .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none())
 }
 
-/// One divider's label over its row. The label is the part that takes
-/// the pointer; in a split it is set into the bar where the head side's
-/// editor is, the base side's half takes it too, and the rule and the
-/// gutter between let it through to the gutters beneath.
+/// One divider's bar over its rows. The header is the part that takes the
+/// pointer; in a split, the rule and the head side take it too, and the
+/// base side's gutter lets it through to the expanders beneath.
+#[allow(clippy::too_many_arguments)]
 fn divider_bar(
     state: ReviewState,
-    row: usize,
-    run: Run,
+    file: Arc<LoadedFile>,
+    doc: RwSignal<Arc<Doc>>,
+    labels: Memo<Vec<Option<String>>>,
+    span: std::ops::Range<usize>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
     bars: Bars,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
-    let label = doc::divider_label(run.len());
-    // The label is hidden while the editor is narrower than its text, so
-    // it never spills over the gutter's controls, nor takes their clicks.
-    // Whether it fits is read from the box the label is centred in, once
-    // that is laid out, against the text's width measured here: hiding
-    // the label changes nothing about its box, so it comes back as soon
-    // as the box is wide enough.
-    let width = divider_label_width(&label);
-    let fits = RwSignal::new(true);
-    let label = Container::new(Label::derived(move || label.clone()).style(move |s| {
-        s.selectable(false)
-            .font_family(theme::CODE_FONT_STACK.to_string())
-            .font_size(DIVIDER_LABEL_SIZE)
-            .color(theme::DIFF_DIVIDER_FG)
-            .apply_if(!fits.get(), |s| s.hide())
-    }))
-    .on_event_cont(
-        LayoutChanged::listener(),
-        move |_,
-              LayoutChanged {
-                  new_content_box, ..
-              }| {
-            let fit = new_content_box.width() >= width;
-            if fits.get_untracked() != fit {
-                fits.set(fit);
-            }
-        },
-    )
-    .on_event_stop(el::PointerWheel, move |_, wheel| {
-        let size = viewport.get_untracked().size();
-        let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
-        scroll_delta.set(Vec2::new(-delta.x, -delta.y));
-    })
-    // The bar's colour is the row's own, from the tint layer under the
-    // editor; the container only centres the label and takes the pointer.
-    .style(|s| {
-        s.flex_grow(1.0_f32)
-            .min_width(0.0)
-            .height_full()
-            .items_center()
-            .justify_center()
-    });
-    let label = records_hover(state, row, label);
+    let (start, height) = (span.start, span.len() as f64 * line_height);
+    let gutter = gutter::width_of(&file);
+    let header = divider_header(state, file, doc, labels, start);
 
     let bar = match bars {
-        Bars::Editor => label.into_any(),
-        // The outer stack's shape: two halves about a one-pixel rule, the
-        // right one beginning with its gutter.
-        Bars::HeadSide { base_delta } => {
-            // The base half has the head half's shape, its gutter left bare
-            // so the gutter's own edge shows, and the rest over the base
-            // side's row, which its own tint layer colours.
+        Bars::Editor => {
+            records_hover(state, start, passes_wheel(header, viewport, scroll_delta, None))
+                .into_any()
+        }
+        // The outer stack's shape: two halves about a one-pixel rule,
+        // each beginning with its gutter.
+        Bars::Split { base_delta } => {
             let base = Stack::horizontal((
-                Empty::new().style(|s| {
-                    s.width(theme::GUTTER_WIDTH)
-                        .height_full()
-                        .flex_shrink(0.0_f32)
-                }),
-                Empty::new().style(|s| s.flex_grow(1.0_f32).height_full()),
+                Empty::new().style(move |s| s.width(gutter).height_full().flex_shrink(0.0_f32)),
+                records_hover(
+                    state,
+                    start,
+                    passes_wheel(header, viewport, scroll_delta, Some(base_delta)),
+                ),
             ))
-            .on_event_stop(el::PointerWheel, move |_, wheel| {
-                let size = viewport.get_untracked().size();
-                let delta =
-                    wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
-                // Down the file is the head side's; across is the
-                // base side's own.
-                scroll_delta.set(Vec2::new(0.0, -delta.y));
-                base_delta.set(Vec2::new(-delta.x, 0.0));
-            })
-            .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).height_full());
-            Stack::horizontal((
-                records_hover(state, row, base),
+            .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0).height_full());
+            let rest = Stack::horizontal((
                 Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32)),
-                Stack::horizontal((
-                    Empty::new().style(|s| {
-                        s.width(theme::GUTTER_WIDTH)
-                            .height_full()
-                            .flex_shrink(0.0_f32)
-                    }),
-                    label,
-                ))
-                .style(|s| {
-                    s.flex_basis(0.0)
-                        .flex_grow(1.0_f32)
-                        .min_width(0.0)
-                        .height_full()
-                }),
+                Empty::new().style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).height_full()),
             ))
-            .into_any()
+            .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0).height_full());
+            let rest = passes_wheel(rest, viewport, scroll_delta, None);
+            Stack::horizontal((base, records_hover(state, start, rest))).into_any()
         }
     };
     bar.style(move |s| {
         // Read live, as the gutter reads its offset: the bar outlives a
         // scroll, and a position captured when it was built would not.
-        let top = row as f64 * line_height - viewport.get().y0;
+        let top = start as f64 * line_height - viewport.get().y0;
         s.absolute()
             .inset_top(top)
             .inset_left(0.0)
             .width_full()
-            .height(line_height)
+            .height(height)
     })
 }
 
-/// The size of a divider's label: a point under the code's.
-const DIVIDER_LABEL_SIZE: f32 = theme::CODE_FONT_SIZE - 1.0;
-
-/// How wide a divider's `label` is when drawn, from the same font floem
-/// draws it in, so the bar can tell whether it has room before it is
-/// laid out.
-fn divider_label_width(label: &str) -> f64 {
-    use floem::text::{Attrs, AttrsList, FamilyOwned, TextLayout};
-    let family: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
-    let mut layout = TextLayout::new();
-    layout.set_text(
-        label,
-        AttrsList::new(Attrs::new().family(&family).font_size(DIVIDER_LABEL_SIZE)),
-        None,
-    );
-    layout.size().width
+/// A part of a divider's bar that hands the wheel on: down the file to
+/// the editor that owns the scroll, `scroll_delta`, and across to
+/// `across` where the part is over another editor, or to the same one.
+fn passes_wheel(
+    part: impl IntoView + 'static,
+    viewport: RwSignal<Rect>,
+    scroll_delta: RwSignal<Vec2>,
+    across: Option<RwSignal<Vec2>>,
+) -> impl IntoView {
+    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    part.on_event_stop(el::PointerWheel, move |_, wheel| {
+        let size = viewport.get_untracked().size();
+        let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
+        match across {
+            None => scroll_delta.set(Vec2::new(-delta.x, -delta.y)),
+            Some(across) => {
+                scroll_delta.set(Vec2::new(0.0, -delta.y));
+                across.set(Vec2::new(-delta.x, 0.0));
+            }
+        }
+    })
 }
 
-/// A part of a divider's bar that records the pointer as the gutter's row
-/// does, so that the controls show while the pointer is on the row.
+/// A divider's header and its Fold again: the hunk header in the code's
+/// font, muted as github.com sets it, from the first code column and cut
+/// short with an ellipsis where the bar ends; and after it, while the
+/// pointer is on the divider, Fold again when a reveal overlaps the run's
+/// default, or the default of a run taken whole, divider and all, that
+/// this divider carries; see `doc::reset_ranges`. The run and its header
+/// are read from the document as it is now, not as it was when the bar
+/// was built: a reveal below it grows the hunk the header counts.
+fn divider_header(
+    state: ReviewState,
+    file: Arc<LoadedFile>,
+    doc: RwSignal<Arc<Doc>>,
+    labels: Memo<Vec<Option<String>>>,
+    start: usize,
+) -> impl IntoView {
+    let label = Label::derived(move || {
+        let run = doc.with(|d| match d.rows.get(start) {
+            Some(DocRow::Divider { run, .. }) => Some(*run),
+            _ => None,
+        });
+        run.and_then(|i| labels.with(|l| l.get(i).cloned().flatten()))
+            .unwrap_or_default()
+    })
+    .style(|s| {
+        s.selectable(false)
+            .min_width(0.0)
+            .font_family(theme::CODE_FONT_STACK.to_string())
+            .font_size(theme::CODE_FONT_SIZE)
+            .color(theme::DIFF_DIVIDER_FG)
+            .text_ellipsis()
+    });
+    let reset_file = file.clone();
+    let reset = dyn_container(
+        move || {
+            let hovered = state.hovered_line.get() == Some(start);
+            let run = doc.with(|d| d.run_of(start)).filter(|_| hovered)?;
+            let defaults = doc::runs(&reset_file.buffer, &state.anchors_in(&reset_file.path));
+            let ranges = doc.with(|d| doc::reset_ranges(&d.folds, &defaults, run));
+            let reveals = state.reveals_for(&reset_file.path, &reset_file.blob);
+            ranges
+                .iter()
+                .any(|&(a, b)| reveals.overlaps(a, b))
+                .then_some(ranges)
+        },
+        move |ranges| match ranges {
+            Some(ranges) => fold_again(state, file.clone(), ranges).into_any(),
+            None => Empty::new().into_any(),
+        },
+    );
+    Stack::horizontal((label, reset)).style(|s| {
+        s.flex_grow(1.0_f32)
+            .min_width(0.0)
+            .height_full()
+            .items_center()
+            .gap(6.0)
+            .padding_horiz(theme::CODE_GUTTER_GAP)
+    })
+}
+
+/// Fold again: a 16px slot holding a 12px Undo glyph, muted until the
+/// pointer is on it, that folds `ranges`, the head ranges of runs as the
+/// folds have them by default, back.
+fn fold_again(
+    state: ReviewState,
+    file: Arc<LoadedFile>,
+    ranges: Vec<(usize, usize)>,
+) -> impl IntoView {
+    let hovered = RwSignal::new(false);
+    let color = move || {
+        if hovered.get() {
+            theme::ACCENT
+        } else {
+            theme::FG_MUTED
+        }
+    };
+    cards::tip(
+        Container::new(
+            icon_in(move || icons::sidebar_icon(SidebarIcon::Undo, color()), color)
+                .style(|s| s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH)),
+        )
+        .debug_name("fold again")
+        .on_event_stop(el::Click, move |_, _| state.reset(&file.path, &file.blob, &ranges))
+        .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
+        .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
+        .style(|s| {
+            clickable(s)
+                .size(theme::CHEVRON_SLOT, theme::CHEVRON_SLOT)
+                .flex_shrink(0.0_f32)
+                .items_center()
+                .justify_center()
+                .border_radius(3.0)
+                .hover(|s| s.background(theme::BADGE_BG))
+        }),
+        "Fold again".to_string(),
+    )
+}
+
+/// A part of a divider's bar that records the pointer as the divider's
+/// first row, as its expanders in the gutter do, so that Fold again shows
+/// while the pointer is anywhere on the divider.
 fn records_hover(state: ReviewState, row: usize, part: impl IntoView + 'static) -> impl IntoView {
     part.on_event_cont(el::PointerEnter, move |cx, _| {
         state.enter_row(cx.target, row)
@@ -1168,8 +1237,8 @@ fn scroll_for_card(vp: Rect, top: f64, bottom: f64, line_height: f64) -> Option<
 /// The two documents are edited in the same pass, from the pair the
 /// builder returns, so the two stay the same height: the dividers and the
 /// cards' rows are on both sides at the same rows, and the layers over
-/// the outer stack draw the labels on the head side and the cards across
-/// both sides from the one scroll.
+/// the outer stack draw the hunk headers over the base side, where the
+/// expanders are, and the cards across both sides from the one scroll.
 #[allow(clippy::too_many_arguments)]
 fn split_view(
     app: AppState,
@@ -1340,6 +1409,8 @@ fn split_view(
     });
 
     let path = file.path.clone();
+    let layer_file = file.clone();
+    let gutter_width = gutter::width_of(&file);
     let right_pane = Stack::horizontal((
         side_gutter(
             state,
@@ -1360,9 +1431,9 @@ fn split_view(
     });
 
     // The layers are placed against the outer stack, so it takes the
-    // relative position; the bars are set into it where the head side is,
-    // and a card spans both sides from the base side's first code column,
-    // past its gutter.
+    // relative position; a bar spans the whole row, its header past the
+    // base side's gutter, and a card spans both sides from the base side's
+    // first code column, past its gutter.
     Stack::horizontal((
         left_pane,
         Empty::new().style(|s| {
@@ -1374,10 +1445,11 @@ fn split_view(
         right_pane,
         divider_layer(
             state,
+            layer_file,
             right_doc,
             right_viewport,
             right_delta,
-            Bars::HeadSide {
+            Bars::Split {
                 base_delta: left_delta,
             },
         ),
@@ -1390,7 +1462,7 @@ fn split_view(
             right_viewport,
             right_delta,
             right_scroll_to,
-            theme::GUTTER_WIDTH + theme::CODE_GUTTER_GAP,
+            gutter_width + theme::CODE_GUTTER_GAP,
             None,
         ),
     ))
@@ -1974,6 +2046,13 @@ mod window {
     use crate::review::model::{ItemTab, Layout, LiveDoc, LiveLayout, Phase, ReviewState};
     use crate::state::AppState;
 
+    /// How wide the gutters are here: every file these tests open numbers
+    /// fewer than a thousand lines, which is the fewest digits a gutter
+    /// makes room for.
+    fn gutter_width() -> f64 {
+        crate::review::gutter::width(3)
+    }
+
     /// The whole window on Code with one changed file open, so the split
     /// is built where it lives: under the tab bar, beside the rail. The
     /// file is a 90-line one changed every third line, so nothing in it
@@ -2231,7 +2310,7 @@ mod window {
 
         // Forty points into the code is a few characters into the word.
         let (left, top) = pane_origin();
-        let x = left + crate::theme::GUTTER_WIDTH + crate::theme::CODE_GUTTER_GAP + 40.0;
+        let x = left + gutter_width() + crate::theme::CODE_GUTTER_GAP + 40.0;
         let y = top + (row as f64 + 0.5) * crate::theme::CODE_LINE_HEIGHT as f64;
         harness.dispatch_event(button(x, y, 2, true));
         harness.rebuild();
@@ -2303,7 +2382,7 @@ mod window {
         let (left_edge, top) = pane_origin();
         assert_eq!(
             (editor_box.x0, editor_box.x1, editor_box.y0),
-            (left_edge + crate::theme::GUTTER_WIDTH, 1400.0, top),
+            (left_edge + gutter_width(), 1400.0, top),
             "the box is the pane past the gutter, under the tabs"
         );
 
@@ -2364,7 +2443,7 @@ mod window {
             left.get_visual_rect_no_clip(),
             right.get_visual_rect_no_clip(),
         );
-        assert_eq!(left_box.x0, left_edge + crate::theme::GUTTER_WIDTH);
+        assert_eq!(left_box.x0, left_edge + gutter_width());
         assert!(left_box.x1 < right_box.x0, "the sides are side by side");
         assert_eq!(right_box.x1, 1400.0);
         let (_, rect, bg) = tint(&harness, left, 1);
@@ -2609,7 +2688,7 @@ mod window {
         state.reveal("src/x.rs", "", first, last);
         harness.rebuild();
         harness.paint();
-        assert_eq!(live.doc.get().len(), 103);
+        assert_eq!(live.doc.get().len(), 104);
         assert_eq!(state.hidden_lines(), 34);
 
         let (x, y) = fold_tile_center();
@@ -2637,7 +2716,7 @@ mod window {
         assert!(state.folded("src/x.rs"));
         assert_eq!(
             live.doc.get().len(),
-            103,
+            104,
             "folded again, with the reveal as it was"
         );
         assert_eq!(state.hidden_lines(), 34);
@@ -2653,8 +2732,8 @@ mod window {
 
     /// A changed first line, sixty unchanged, a changed last line, and
     /// then twelve changes four lines apart so the document is long
-    /// enough to scroll: one run of fifty-four behind a divider at row 5,
-    /// with Up and Down, and nothing else folded.
+    /// enough to scroll: one run of fifty-four behind a divider of two
+    /// rows at row 5, Down over Up, and nothing else folded.
     fn one_long_run() -> (HeadlessHarness, ReviewState) {
         let blocks = |word: &str| {
             (0..12)
@@ -2694,35 +2773,38 @@ mod window {
 
     #[test]
     fn a_divider_row_exists_and_up_on_its_gutter_grows_the_document_without_moving_the_viewport() {
+        use crate::review::doc::{DocRow, Expand};
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
         // Display: ghost, new top, line 0..59 at 2 to 61, ghost, new
         // bottom, then the twelve blocks of six. The run is display lines
-        // 5 to 58, head lines 4 to 57.
+        // 5 to 58, head lines 4 to 57, and its divider is two rows.
         let doc = live.doc.get();
-        assert_eq!(doc.len(), 64 + 72 - 54 + 1);
+        assert_eq!(doc.len(), 64 + 72 - 54 + 2);
         let run = doc.run_of(5).expect("row 5 is the divider");
         assert_eq!(run.len(), 54);
+        assert_eq!(doc.rows[5], DocRow::Divider { run: 0, expand: Expand::Down });
+        assert_eq!(doc.rows[6], DocRow::Divider { run: 0, expand: Expand::Up });
         assert_eq!(laid_out_text(&live), doc.text);
         let viewport = super::STACKED_VIEWPORT
             .with(|v| v.get())
             .expect("a stacked editor was built");
         let y0 = viewport.get().y0;
 
-        // The controls show while the row is hovered: Up and Down, 16
-        // wide with 2 between, centred in the gutter's 70. Up's centre
-        // is 26 from the gutter's left, and Up opens the run's last
-        // lines, which follow the divider.
+        // The expanders are the gutter's rows beside the divider, the
+        // gutter's width each, whether the pointer is there or not. Up
+        // is the second, and opens the run's last lines, which follow
+        // the divider. The pointer on it is on the divider's first row.
         let (left, top) = pane_origin();
-        let (x, y) = (left + 26.0, top + 5.0 * line_height + line_height / 2.0);
+        let (x, y) = (left + gutter_width() / 2.0, top + 6.0 * line_height + line_height / 2.0);
         harness.pointer_move(x, y);
         harness.rebuild();
         harness.paint();
         assert_eq!(
             state.hovered_line.get(),
             Some(5),
-            "the divider's gutter row records the pointer"
+            "the expander records the pointer as the divider's"
         );
         let under = harness.element_id_at(x, y);
         harness.click(x, y);
@@ -2732,7 +2814,7 @@ mod window {
         let doc = live.doc.get();
         assert_eq!(
             doc.len(),
-            83 + 20,
+            84 + 20,
             "click at ({x}, {y}) over {under:?} did not reveal twenty lines"
         );
         assert_eq!(
@@ -2742,8 +2824,8 @@ mod window {
         );
         assert_eq!(
             doc.row_of_head(38),
-            Some(6),
-            "the first revealed line follows the divider"
+            Some(7),
+            "the first revealed line follows the divider's two rows"
         );
         assert_eq!(
             laid_out_text(&live),
@@ -2754,6 +2836,111 @@ mod window {
         assert!(state
             .reveals_for("src/x.rs", "")
             .overlaps(run.default_heads.0, run.default_heads.1));
+    }
+
+    /// The window rect of the one view under `root` named `text`.
+    fn rect_of(root: floem::ViewId, text: &str) -> floem::kurbo::Rect {
+        find(root, text)
+            .unwrap_or_else(|| panic!("no view named {text}"))
+            .get_visual_rect_no_clip()
+    }
+
+    /// A divider is github.com's hunk row: its expanders are the gutter's
+    /// rows beside it, the gutter wide and a row high, in the number
+    /// cell's blue and GitHub's own blue under the pointer; its header is
+    /// over the code, from the first code column, down the middle of its
+    /// rows. The gutter is as wide as three digits need, narrower than the
+    /// seventy it was when the controls sat in a row inside it.
+    #[test]
+    fn a_divider_is_githubs_hunk_row_with_its_expanders_in_the_gutter_and_its_header_over_the_code() {
+        use crate::theme::{CODE_GUTTER_GAP, DIFF_EXPANDER_BG, DIFF_EXPANDER_HOVER_BG};
+        let (mut harness, state) = one_long_run();
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let root = harness.root_id();
+        let (left, top) = pane_origin();
+        assert!(gutter_width() < 60.0, "the gutter is {} wide", gutter_width());
+        // The named box is inside the clip that carries the width and the
+        // rule.
+        let gutter = find(root, "gutter")
+            .and_then(|g| g.parent())
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert_eq!((gutter.x0, gutter.width()), (left, gutter_width()));
+
+        // Down over Up, each a row of the gutter, less its rule.
+        let down = rect_of(root, "expander:Down");
+        let up = rect_of(root, "expander:Up");
+        assert_eq!(
+            (down.x0, down.width(), down.y0, down.height()),
+            (left, gutter_width() - 1.0, top + 5.0 * line_height, line_height)
+        );
+        assert_eq!((up.x0, up.y0), (left, top + 6.0 * line_height));
+        assert_eq!(count(root, "expander:"), 2, "one divider, two expanders");
+        let background = |harness: &HeadlessHarness, name: &str| {
+            let id = find(harness.root_id(), name).unwrap();
+            harness.get_computed_style(id).get(floem::style::Background)
+        };
+        assert_eq!(background(&harness, "expander:Down"), Some(Brush::Solid(DIFF_EXPANDER_BG)));
+        harness.pointer_move(up.center().x, up.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(background(&harness, "expander:Up"), Some(Brush::Solid(DIFF_EXPANDER_HOVER_BG)));
+        assert_eq!(background(&harness, "expander:Down"), Some(Brush::Solid(DIFF_EXPANDER_BG)));
+
+        // The header counts the hunk below the run, which runs to the end
+        // of the file, and takes its context from the base: the nearest
+        // line above the hunk that starts an identifier.
+        // Base line 58, the one right above the hunk, is `line 56`.
+        let header = "@@ -59,64 +59,64 @@ line 56";
+        let editor = rect_of(root, "tinted editor");
+        let label = rect_of(root, header);
+        assert_eq!(label.x0, editor.x0 + CODE_GUTTER_GAP, "from the first code column");
+        assert!(
+            (label.center().y - (top + 6.0 * line_height)).abs() < 1.0,
+            "down the middle of the two rows: {label:?}"
+        );
+
+        // Split, the expanders are the base side's, at the row's left end,
+        // and the header is over the base side's code.
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let root = harness.root_id();
+        let (_, right) = sides(state);
+        let row = (0..right.doc.get().len())
+            .find(|r| right.doc.get().run_of(*r).is_some())
+            .expect("the split has the divider");
+        let down = rect_of(root, "expander:Down");
+        assert_eq!((down.x0, down.y0), (left, top + row as f64 * line_height));
+        assert_eq!(count(root, "expander:"), 2, "none on the head side");
+        let label = rect_of(root, header);
+        assert_eq!(label.x0, left + gutter_width() + CODE_GUTTER_GAP);
+        let middle = left + (1400.0 - left - 1.0) / 2.0;
+        assert!(label.x1 < middle, "the header is over the base side");
+    }
+
+    /// A run that starts the file has no code above it to grow down: its
+    /// divider is one row, Up alone.
+    #[test]
+    fn a_run_at_the_top_of_the_file_has_up_alone() {
+        use crate::review::doc::{DocRow, Expand};
+        let blocks = |word: &str| {
+            (0..8)
+                .map(|i| format!("{word}{i}\n{}", context(100 + i * 4, 4)))
+                .collect::<String>()
+        };
+        let (harness, state) = harness_with(
+            format!("{}{}", context(0, 100), blocks("new")),
+            format!("{}{}", context(0, 100), blocks("old")),
+        );
+        let doc = stacked(state).doc.get();
+        assert_eq!(doc.rows[0], DocRow::Divider { run: 0, expand: Expand::Up });
+        assert!(doc.display_line(1).is_some(), "the divider is one row");
+        let root = harness.root_id();
+        assert_eq!(count(root, "expander:"), 1);
+        assert!(find(root, "expander:Up").is_some());
+        // Lines 98 to 100 and the first change's pair lead the hunk.
+        assert!(find(root, "@@ -98,").is_some(), "the header is drawn");
     }
 
     /// An unshifted bracket key, as the window receives it.
@@ -2790,16 +2977,17 @@ mod window {
 
         // A bare key goes to whatever has the keyboard, and the window's
         // handler catches it on the way down. A click on the gutter gives
-        // it to the gutter: the divider's row, at its left edge, away from
-        // the controls.
+        // it to the gutter: a line's change bar, away from its slot, and
+        // not its number, which would take the keyboard itself and lose it
+        // when the jump scrolls the row away.
         let (left, top) = pane_origin();
-        harness.click(left + 5.0, top + 5.0 * line_height + line_height / 2.0);
+        harness.click(left + gutter_width() - 2.5, top + 3.0 * line_height + line_height / 2.0);
         harness.rebuild();
 
         // The next change after the top starts at the ghost of old bottom,
         // display line 62; the first head line from there, new bottom, is
-        // head line 61, on row 11 of the folded document after the two
-        // ghosts of the rewritten pair.
+        // head line 61, on row 12 of the folded document after the
+        // divider's two rows and the two ghosts of the rewritten pair.
         harness.dispatch_event(bracket(true));
         harness.rebuild();
         harness.paint();
@@ -2808,11 +2996,11 @@ mod window {
             state.jump_to_line.get().is_none(),
             "the editor took the jump"
         );
-        assert_eq!(live.doc.get().row_of_head(61), Some(11));
-        assert_eq!(viewport.get().y0, (11.0 - 4.0) * line_height);
+        assert_eq!(live.doc.get().row_of_head(61), Some(12));
+        assert_eq!(viewport.get().y0, (12.0 - 4.0) * line_height);
         assert_eq!(
             live.doc.get().len(),
-            83,
+            84,
             "a change is never folded, so nothing was revealed"
         );
 
@@ -2882,7 +3070,7 @@ mod window {
     /// caret there.
     fn click_row(harness: &mut HeadlessHarness, row: usize) {
         let (left, top) = pane_origin();
-        let x = left + crate::theme::GUTTER_WIDTH + crate::theme::CODE_GUTTER_GAP + 20.0;
+        let x = left + gutter_width() + crate::theme::CODE_GUTTER_GAP + 20.0;
         let y = top + (row as f64 + 0.5) * crate::theme::CODE_LINE_HEIGHT as f64;
         harness.dispatch_event(button(x, y, 1, true));
         harness.dispatch_event(button(x, y, 1, false));
@@ -3008,9 +3196,9 @@ mod window {
 
     /// Three changes fifty lines apart, then twelve four lines apart so
     /// the document is long enough to scroll: three runs of forty-four,
-    /// so each divider offers Up and Down. Stacked, the runs are display
-    /// lines 5 to 48, 57 to 100 and 109 to 152 of 228, and the folded
-    /// document's dividers are at rows 5, 14 and 23 of 99.
+    /// so each divider is two rows, Down and Up. Stacked, the runs are
+    /// display lines 5 to 48, 57 to 100 and 109 to 152 of 228, and the
+    /// folded document's dividers are at rows 5, 15 and 25 of 102.
     fn three_runs() -> (HeadlessHarness, ReviewState) {
         let blocks = |word: &str| {
             (0..12)
@@ -3044,21 +3232,22 @@ mod window {
             .with(|v| v.get())
             .expect("a stacked editor was built");
         let doc = live.doc.get();
-        assert_eq!(doc.len(), 99);
-        for row in [5, 14, 23] {
+        assert_eq!(doc.len(), 102);
+        for row in [5, 15, 25] {
             assert!(doc.run_of(row).is_some(), "row {row} is a divider");
+            assert_eq!(doc.divider_span(row), Some(row..row + 2));
         }
 
         // Scroll to between the second divider and the third, so that
         // Show whole opens runs above the view and below it.
         let (left, top) = pane_origin();
-        harness.scroll_down(left + 300.0, top + 300.0, 16.0 * line_height);
+        harness.scroll_down(left + 300.0, top + 300.0, 18.0 * line_height);
         harness.rebuild();
         harness.paint();
         let before = viewport.get().y0;
         let first_row = (before / line_height).floor() as usize;
         assert!(
-            (15..23).contains(&first_row),
+            (17..25).contains(&first_row),
             "the editor scrolled to row {first_row}, not between the dividers"
         );
         let first_line = doc
@@ -3084,7 +3273,7 @@ mod window {
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
-        assert_eq!(doc.len(), 99);
+        assert_eq!(doc.len(), 102);
         assert_eq!(doc.display_line(first_row), Some(first_line));
         assert_eq!(
             viewport.get().y0,
@@ -3099,37 +3288,48 @@ mod window {
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
         let doc = live.doc.get();
-        let second = doc.run_of(14).expect("row 14 is the second divider");
+        let second = doc.run_of(15).expect("row 15 is the second divider");
         assert_eq!(second.len(), 44);
 
-        // All on the second run: its lines take its divider's row, and the
-        // document has two dividers left.
+        // All on the second run: its lines take its divider's rows, and
+        // the document has two dividers left.
         let (first, last) = second.whole();
         state.reveal("src/x.rs", "", first, last);
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
-        assert_eq!(doc.len(), 99 - 1 + 44);
+        assert_eq!(doc.len(), 102 - 2 + 44);
         assert_eq!(doc.folds.len(), 2);
-        assert!(doc.run_of(14).is_none(), "the divider is gone");
+        assert!(doc.run_of(15).is_none(), "the divider is gone");
         assert!(doc.run_of(5).is_some(), "the one above is not");
 
-        // Hovered, the divider above offers Reset as a third slot after Up
-        // and Down: 52 wide centred in the gutter's 70, so Reset's centre
-        // is 53 from the gutter's left.
-        let (left, top) = pane_origin();
-        let (x, y) = (left + 53.0, top + 5.0 * line_height + line_height / 2.0);
+        // Nothing offers Fold again until the pointer is on the divider
+        // above; there, it follows the hunk header over the code.
+        let root = harness.root_id();
+        assert!(find(root, "fold again").is_none());
+        let editor = find(root, "tinted editor").expect("the code editor's box");
+        let (_, top) = pane_origin();
+        let y = top + 5.0 * line_height + line_height / 2.0;
+        harness.pointer_move(editor.get_visual_rect_no_clip().x0 + 40.0, y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.hovered_line.get(), Some(5), "the header records the pointer");
+        let reset = find(harness.root_id(), "fold again")
+            .expect("Fold again shows on the hovered divider");
+        let (x, y) = (
+            reset.get_visual_rect_no_clip().center().x,
+            reset.get_visual_rect_no_clip().center().y,
+        );
         harness.pointer_move(x, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.hovered_line.get(), Some(5));
         let under = harness.element_id_at(x, y);
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
         assert_eq!(
             live.doc.get().len(),
-            99,
+            102,
             "click at ({x}, {y}) over {under:?} did not fold the run again"
         );
         assert!(state.reveals_for("src/x.rs", "").is_empty());
@@ -3148,10 +3348,11 @@ mod window {
         assert_eq!(state.last_position.get(), None);
 
         // The cursor placed as a click would place it: on "new bottom",
-        // head line 61, three columns in, below the divider at row 5.
+        // head line 61, three columns in, below the divider at rows 5
+        // and 6.
         let doc = live.doc.get();
         let row = doc.row_of_head(61).expect("new bottom is shown");
-        assert_eq!(row, 11);
+        assert_eq!(row, 12);
         let offset = doc.offset_of_row(row) + 3;
         cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
         harness.rebuild();
@@ -3168,7 +3369,7 @@ mod window {
             "new bottom is display line 64, after the pair's two ghosts"
         );
 
-        // Down on the divider above: twenty lines come in above the cursor,
+        // Up on the divider above: twenty lines come in above the cursor,
         // which stays on its text, twenty rows down. The symbol under it is
         // the one it was on, so its head position stands.
         let run = doc.run_of(5).expect("row 5 is the divider");
@@ -3177,9 +3378,9 @@ mod window {
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
-        assert_eq!(doc.len(), 103);
-        assert_eq!(doc.row_of_head(61), Some(31));
-        assert_eq!(cursor.get().offset(), doc.offset_of_row(31) + 3);
+        assert_eq!(doc.len(), 104);
+        assert_eq!(doc.row_of_head(61), Some(32));
+        assert_eq!(cursor.get().offset(), doc.offset_of_row(32) + 3);
         assert_eq!(state.cursor_line.get(), 64);
         assert_eq!(state.last_position.get(), Some((61, 3)));
 
@@ -3191,7 +3392,7 @@ mod window {
         assert_eq!(state.last_position.get(), Some((61, 3)));
 
         // A click somewhere else is still a click: the position follows.
-        let elsewhere = live.doc.get().offset_of_row(12);
+        let elsewhere = live.doc.get().offset_of_row(13);
         cursor.update(|c| c.set_offset(elsewhere, CursorAffinity::Backward, false, false));
         harness.rebuild();
         harness.paint();
@@ -3209,12 +3410,12 @@ mod window {
 
         // The split pairs each rewritten line with its old one, so the
         // sides are the 213 aligned rows less the three runs, plus their
-        // dividers, at the same rows on both.
+        // dividers' two rows each, at the same rows on both.
         let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
-        assert_eq!(right_doc.len(), 213 - 3 * 44 + 3);
+        assert_eq!(right_doc.len(), 213 - 3 * 44 + 3 * 2);
         assert_eq!(left_doc.len(), right_doc.len());
         assert_eq!(right_doc.hidden_lines(), 3 * 44);
-        for row in [4, 12, 20] {
+        for row in [4, 13, 22] {
             assert_eq!(
                 right_doc.run_of(row).map(|r| r.len()),
                 left_doc.run_of(row).map(|r| r.len()),
@@ -3229,15 +3430,14 @@ mod window {
             .expect("a split was built");
         let y0 = right_viewport.get().y0;
 
-        // The head side's gutter is at the right pane's left edge, past
-        // the base side and the rule between. Its divider row holds the
-        // controls: Up's centre is 26 from the gutter's left, and Up
-        // opens the run's last lines, which follow the divider.
+        // The expanders are in the base side's gutter, at the row's left
+        // end as on github.com: Up is the divider's second row, and opens
+        // the run's last lines, which follow the divider.
         let (pane_left, top) = pane_origin();
         let right_gutter = pane_left + (1400.0 - pane_left - 1.0) / 2.0 + 1.0;
         let (x, y) = (
-            right_gutter + 26.0,
-            top + 4.0 * line_height + line_height / 2.0,
+            pane_left + gutter_width() / 2.0,
+            top + 5.0 * line_height + line_height / 2.0,
         );
         harness.pointer_move(x, y);
         harness.rebuild();
@@ -3245,7 +3445,7 @@ mod window {
         assert_eq!(
             state.hovered_line.get(),
             Some(4),
-            "the head side's divider row records the pointer"
+            "the base side's expander records the pointer as the divider's"
         );
         let under = harness.element_id_at(x, y);
         harness.click(x, y);
@@ -3255,7 +3455,7 @@ mod window {
         let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
         assert_eq!(
             right_doc.len(),
-            84 + 20,
+            87 + 20,
             "click at ({x}, {y}) over {under:?} did not reveal twenty lines"
         );
         assert_eq!(
@@ -3271,11 +3471,11 @@ mod window {
         assert_eq!(left_doc.run_of(4).map(|r| r.len()), Some(24));
         assert_eq!(
             right_doc.row_of_head(28),
-            Some(5),
+            Some(6),
             "the first revealed head line follows the divider"
         );
         assert_eq!(
-            left_doc.display_line(5),
+            left_doc.display_line(6),
             Some(28),
             "beside its own base line"
         );
@@ -3296,9 +3496,9 @@ mod window {
             "the left is where the right is"
         );
 
-        // The base side's gutter has no controls: the same click there
+        // The head side's gutter has no expanders: the same click there
         // reveals nothing.
-        let (x, y) = (pane_left + 26.0, y);
+        let (x, y) = (right_gutter + gutter_width() / 2.0, y);
         harness.pointer_move(x, y);
         harness.rebuild();
         harness.paint();
@@ -3307,29 +3507,29 @@ mod window {
         harness.paint();
         assert_eq!(
             right.doc.get().len(),
-            104,
-            "the base side's divider row is the tint alone"
+            107,
+            "the head side's divider row is the tint alone"
         );
-        assert_eq!(left.doc.get().len(), 104);
+        assert_eq!(left.doc.get().len(), 107);
 
-        // The bar's label is over the head side's editor, and records the
-        // pointer as the gutter row does; so does the bar's half over the
-        // base side's editor, which is the tint alone.
-        harness.pointer_move(right_gutter + crate::theme::GUTTER_WIDTH + 100.0, y);
+        // The bar's header is over the base side's editor, and records
+        // the pointer as the expanders do; so does the rest of the bar,
+        // over the head side, which is the tint alone.
+        harness.pointer_move(pane_left + gutter_width() + 100.0, y);
         harness.rebuild();
         harness.paint();
         assert_eq!(
             state.hovered_line.get(),
             Some(4),
-            "the label over the head side records the row"
+            "the header over the base side records the row"
         );
-        harness.pointer_move(pane_left + crate::theme::GUTTER_WIDTH + 100.0, y);
+        harness.pointer_move(right_gutter + gutter_width() + 100.0, y);
         harness.rebuild();
         harness.paint();
         assert_eq!(
             state.hovered_line.get(),
             Some(4),
-            "the bar over the base side records the row too"
+            "the bar over the head side records the row too"
         );
 
         // A jump into the second run reveals around the target on both
@@ -3347,9 +3547,11 @@ mod window {
             "the split's right editor took the jump"
         );
         let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
+        // The piece above the target is still longer than a step and
+        // keeps both rows; the one below is All, a row of its own.
         assert_eq!(
             right_doc.len(),
-            104 + 7 + 1,
+            107 + 7 + 1,
             "seven lines and a second divider for the run's other piece"
         );
         assert_eq!(left_doc.len(), right_doc.len());
@@ -3460,7 +3662,7 @@ mod window {
         assert_eq!(doc.row_of_head(26), None);
         assert_eq!(doc.row_of_head(34), None);
         let row = doc.row_of_head(30).unwrap();
-        assert_eq!(row, 9);
+        assert_eq!(row, 10, "after the two rows of the divider above");
         assert_eq!(laid_out_text(&live), doc.text);
         assert_eq!(
             viewport.get().y0,
@@ -3472,7 +3674,7 @@ mod window {
         state.reset("src/x.rs", "", &[doc.run_of(5).unwrap().default_heads]);
         harness.rebuild();
         harness.paint();
-        assert_eq!(live.doc.get().len(), 83);
+        assert_eq!(live.doc.get().len(), 84);
         assert_eq!(laid_out_text(&live), live.doc.get().text);
     }
 
@@ -3757,7 +3959,7 @@ mod window {
         // the margin, the border and the row's padding, in its slot.
         let (left, top) = pane_origin();
         let x = left
-            + crate::theme::GUTTER_WIDTH
+            + gutter_width()
             + rect.x0
             + 1.0
             + crate::theme::COLLAPSED_CARD_PADDING
@@ -3934,7 +4136,7 @@ mod window {
         assert_eq!(rect.y0, 7.0 * line_height + crate::theme::CARD_INSET);
         assert_eq!(
             rect.x0,
-            crate::theme::GUTTER_WIDTH + crate::theme::CODE_GUTTER_GAP
+            gutter_width() + crate::theme::CODE_GUTTER_GAP
         );
         let (pane_left, _) = pane_origin();
         assert_eq!(
@@ -4263,16 +4465,16 @@ mod window {
         let run = live.doc.get().run_of(5).expect("row 5 is the divider");
 
         // Up on the divider shows the run's last twenty lines, as the
-        // divider's own test has it: display line 46, `line 44`, is row 13.
+        // divider's own test has it: display line 46, `line 44`, is row 14.
         let (left, top) = pane_origin();
-        let (x, y) = (left + 26.0, top + 5.0 * line_height + line_height / 2.0);
+        let (x, y) = (left + gutter_width() / 2.0, top + 6.0 * line_height + line_height / 2.0);
         harness.pointer_move(x, y);
         harness.rebuild();
         harness.paint();
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(live.doc.get().row_of_display(46), Some(13));
+        assert_eq!(live.doc.get().row_of_display(46), Some(14));
 
         // A question on it: its card is under it, and its line is an
         // anchor as a thread's would be.
@@ -4296,7 +4498,7 @@ mod window {
             .card_span(&CardId::Composer)
             .expect("the composer is a card")
             .len();
-        assert_eq!(doc.card_span(&CardId::Composer), Some(14..14 + rows));
+        assert_eq!(doc.card_span(&CardId::Composer), Some(15..15 + rows));
         assert!(find(harness.root_id(), "inline-card:composer").is_some());
         assert_eq!(state.anchors_in("src/x.rs"), vec![(45, 45)]);
 
@@ -4313,10 +4515,10 @@ mod window {
             Some((5, 42)),
             "the run above, to the context before the line"
         );
-        assert_eq!(doc.row_of_display(46), Some(9));
-        assert_eq!(doc.card_span(&CardId::Composer), Some(10..10 + rows));
+        assert_eq!(doc.row_of_display(46), Some(10), "after the two rows of the divider above");
+        assert_eq!(doc.card_span(&CardId::Composer), Some(11..11 + rows));
         assert_eq!(
-            doc.run_of(10 + rows + 3).map(|r| (r.first, r.last)),
+            doc.run_of(11 + rows + 3).map(|r| (r.first, r.last)),
             Some((50, 58)),
             "the run below, from the context after it"
         );
@@ -4334,8 +4536,8 @@ mod window {
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
-        assert_eq!(doc.row_of_display(46), Some(9));
-        assert_eq!(doc.card_span(&CardId::Composer), Some(10..10 + rows));
+        assert_eq!(doc.row_of_display(46), Some(10));
+        assert_eq!(doc.card_span(&CardId::Composer), Some(11..11 + rows));
         assert_eq!(doc.run_of(5).map(|r| (r.first, r.last)), Some((5, 42)));
     }
 
@@ -4527,7 +4729,7 @@ mod window {
         // The Ask is drawn while the card is under the pointer.
         let rect = card_rect(&harness, "gh-100");
         let (left, top) = pane_origin();
-        let inside = (left + crate::theme::GUTTER_WIDTH + rect.center().x, top + rect.center().y);
+        let inside = (left + gutter_width() + rect.center().x, top + rect.center().y);
         harness.pointer_move(inside.0, inside.1);
         harness.rebuild();
         harness.paint();
@@ -4695,7 +4897,7 @@ mod window {
         assert_eq!(rect.x0, crate::theme::CODE_GUTTER_GAP);
         let (pane_left, _) = pane_origin();
         let right_edge =
-            1400.0 - pane_left - crate::theme::GUTTER_WIDTH - crate::theme::CODE_GUTTER_GAP;
+            1400.0 - pane_left - gutter_width() - crate::theme::CODE_GUTTER_GAP;
         assert!(
             right_edge > rect.x0 + crate::theme::INLINE_THREAD_MAX_WIDTH,
             "the pane is wider than a card may be"

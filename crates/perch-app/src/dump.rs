@@ -195,8 +195,9 @@ impl Rendered {
 
 /// The rows of one document, one per line: the gutter number, the
 /// change bar, the text and how many highlight spans it carries; a
-/// divider as its label, a spacer as its card, with the thread's
-/// messages under its first, a filler blank. The base side's document
+/// divider as its expanders and its hunk header, a spacer as its card,
+/// with the thread's messages under its first, a filler blank. The base
+/// side's document
 /// is over the base file, whose lines are its own; the stacked document
 /// and the head side are over the unified buffer, which says which file
 /// each line is from.
@@ -206,9 +207,18 @@ fn print_rows(file: &LoadedFile, doc: &Doc, side: Option<Side>, threads: &[Comme
     for (index, entry) in doc.rows.iter().enumerate() {
         let (display, tint) = match entry {
             DocRow::Line { display, tint } => (*display, *tint),
-            DocRow::Divider { run } => {
-                let hidden = doc.folds.get(*run).map(doc::Run::len).unwrap_or(0);
-                println!("  \u{00b7}\u{00b7}\u{00b7} {} \u{00b7}\u{00b7}\u{00b7}", doc::divider_label(hidden));
+            DocRow::Divider { run, expand } => {
+                // The header on the divider's first row, as the pane draws
+                // it; each row's expander is named at its left.
+                let first = doc.divider_span(index).is_some_and(|s| s.start == index);
+                let label = if first {
+                    let base = file.base_buffer.as_ref().map(|b| b.text.as_str());
+                    let labels = doc::hunk_labels(&file.buffer, base, &doc.folds);
+                    labels.get(*run).cloned().flatten().unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                println!("  {:<4} {label}", format!("{expand:?}"));
                 continue;
             }
             DocRow::Spacer { card, row } => {

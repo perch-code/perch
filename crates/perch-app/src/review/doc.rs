@@ -3,11 +3,12 @@
 //! The editor draws a text. This is that text and a table with one entry per
 //! line of it saying what the line is: a display line of the buffer, a
 //! filler where the other side of a split has a line and this one does not,
-//! a divider standing for a run of unchanged lines hidden behind it, or a
-//! spacer reserved under a line for a thread's card. The gutter, the
-//! styling, the cursor and the jumps all speak the document's rows and
-//! translate through it, so folding and cards are one transform over the
-//! buffer here and nothing else in the pane learns about them.
+//! a divider standing for a run of unchanged lines hidden behind it, one row
+//! for each of its expanders, or a spacer reserved under a line for a
+//! thread's card. The gutter, the styling, the cursor and the jumps all
+//! speak the document's rows and translate through it, so folding and
+//! cards are one transform over the buffer here and nothing else in the
+//! pane learns about them.
 //!
 //! A document is over one `DisplayBuffer`: the unified buffer for the
 //! stacked layout and the head side of a split, and the base buffer for the
@@ -25,12 +26,11 @@ use crate::review::hover;
 /// divider hiding two lines is worse than the two lines.
 pub const CONTEXT_LINES: usize = 3;
 
-/// How many lines a divider's Up or Down reveals at one end of its run.
+/// How many lines a divider's Up or Down reveals at one end of its run,
+/// as github.com's expanders do. A run between two changes of this many
+/// lines or fewer offers All instead, since one click of either would
+/// open it whole anyway.
 pub const REVEAL_STEP: usize = 20;
-
-/// A run of this many lines or fewer offers All instead of Up and Down,
-/// since two clicks would do it anyway.
-pub const REVEAL_ALL_AT: usize = 40;
 
 /// A collapsed card is two rows: the first author, the first line, and
 /// how many messages follow, in a box with room round it, as github.com
@@ -111,6 +111,17 @@ pub struct Card {
     pub rows: usize,
 }
 
+/// One of a divider's expanders, as github.com draws them in its hunk
+/// rows: Down grows the code above the divider down into the run's first
+/// lines, Up grows the code below it up into the run's last, and All opens
+/// the whole run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Expand {
+    Down,
+    Up,
+    All,
+}
+
 /// One row of the document. Hashed, because the gutter keys its rows on
 /// what they are as well as where, so a row that is the same thing after
 /// an edit keeps its view and one that is not is rebuilt.
@@ -121,8 +132,10 @@ pub enum DocRow {
     /// Split only: the other side has a line here and this one does not.
     Filler,
     /// A run of unchanged lines hidden behind this row, by index into the
-    /// folds the document was built with.
-    Divider { run: usize },
+    /// folds the document was built with, and the expander this row of the
+    /// divider holds: a divider that opens both ways is two rows, Down's
+    /// over Up's, as github.com stacks them.
+    Divider { run: usize, expand: Expand },
     /// One of the rows reserved under a line for a card; `row` is which of
     /// the card's this is.
     Spacer { card: CardId, row: usize },
@@ -203,9 +216,21 @@ impl Doc {
     /// The run a divider row stands for, if the row is one.
     pub fn run_of(&self, row: usize) -> Option<Run> {
         match self.rows.get(row)? {
-            DocRow::Divider { run } => self.folds.get(*run).copied(),
+            DocRow::Divider { run, .. } => self.folds.get(*run).copied(),
             _ => None,
         }
+    }
+
+    /// The rows of the divider a row is one of: one, or two for a divider
+    /// that opens both ways. `None` for a row that is no divider.
+    pub fn divider_span(&self, row: usize) -> Option<std::ops::Range<usize>> {
+        let DocRow::Divider { run, .. } = self.rows.get(row)? else {
+            return None;
+        };
+        let same = |r: &DocRow| matches!(r, DocRow::Divider { run: other, .. } if other == run);
+        let first = row - self.rows[..row].iter().rev().take_while(|r| same(r)).count();
+        let end = row + self.rows[row..].iter().take_while(|r| same(r)).count();
+        Some(first..end)
     }
 
     /// How many lines the dividers hide between them.
@@ -221,7 +246,9 @@ impl Doc {
             return false;
         }
         match (&self.rows[row], &other.rows[other_row]) {
-            (DocRow::Divider { run: a }, DocRow::Divider { run: b }) => self.folds.get(*a) == other.folds.get(*b),
+            (DocRow::Divider { run: a, expand: x }, DocRow::Divider { run: b, expand: y }) => {
+                x == y && self.folds.get(*a) == other.folds.get(*b)
+            }
             (a, b) => a == b,
         }
     }
@@ -382,9 +409,10 @@ fn display_of_heads(buffer: &DisplayBuffer) -> Vec<usize> {
 }
 
 /// The document of the stacked layout: the unified buffer with each fold
-/// in `folds` replaced by a divider and each card's rows reserved under its
-/// line. The folds are in display lines, in order and apart; a card under
-/// a folded line is not placed, since its line is not shown.
+/// in `folds` replaced by a divider, a row for each of its expanders, and
+/// each card's rows reserved under its line. The folds are in display
+/// lines, in order and apart; a card under a folded line is not placed,
+/// since its line is not shown.
 pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card]) -> Doc {
     let lines: Vec<&str> = buffer.text.lines().collect();
     let reserved: usize = cards.iter().map(|c| c.rows).sum();
@@ -394,7 +422,9 @@ pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card]) -> Doc {
     let mut display = 0;
     while display < buffer.len() {
         if let Some(run) = folds.get(next_fold).filter(|r| r.first == display) {
-            out.push(DocRow::Divider { run: next_fold }, "", None);
+            for &expand in run.expanders(buffer.len()) {
+                out.push(DocRow::Divider { run: next_fold, expand }, "", None);
+            }
             next_fold += 1;
             display = run.last + 1;
             continue;
@@ -459,8 +489,10 @@ pub fn build_split(
                 continue;
             }
             if let Some(run) = folds.get(next_fold).filter(|r| r.first == display) {
-                left.push(DocRow::Divider { run: next_fold }, "", None);
-                right.push(DocRow::Divider { run: next_fold }, "", None);
+                for &expand in run.expanders(buffer.len()) {
+                    left.push(DocRow::Divider { run: next_fold, expand }, "", None);
+                    right.push(DocRow::Divider { run: next_fold, expand }, "", None);
+                }
                 next_fold += 1;
                 skip_to = Some(run.last);
                 continue;
@@ -544,9 +576,31 @@ impl Run {
         self.last - self.first + 1
     }
 
-    /// Whether the run's divider offers All rather than Up and Down.
-    pub fn reveals_whole(&self) -> bool {
-        self.len() <= REVEAL_ALL_AT
+    /// The expanders the run's divider holds, top to bottom, a row each,
+    /// as github.com chooses them: Up alone for a run that starts the file,
+    /// which has no code above it to grow down, and Down alone for one
+    /// that ends it; between two changes, All for a run one step opens
+    /// whole, and Down over Up for a longer one. `len` is the length of
+    /// the buffer the run is in.
+    pub fn expanders(&self, len: usize) -> &'static [Expand] {
+        if self.first == 0 {
+            &[Expand::Up]
+        } else if self.last + 1 >= len {
+            &[Expand::Down]
+        } else if self.len() <= REVEAL_STEP {
+            &[Expand::All]
+        } else {
+            &[Expand::Down, Expand::Up]
+        }
+    }
+
+    /// The head lines an expander reveals.
+    pub fn reveals(&self, expand: Expand) -> (usize, usize) {
+        match expand {
+            Expand::Down => self.top(),
+            Expand::Up => self.bottom(),
+            Expand::All => self.whole(),
+        }
     }
 
     /// The head lines Down reveals: the first `REVEAL_STEP` of the run,
@@ -567,13 +621,84 @@ impl Run {
     }
 }
 
-/// What a divider says: `47 unchanged lines`.
-pub fn divider_label(hidden: usize) -> String {
-    if hidden == 1 {
-        "1 unchanged line".to_string()
-    } else {
-        format!("{hidden} unchanged lines")
+/// A hunk as a git header counts it: how many lines of each file come
+/// before it, and how many of each it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HunkRange {
+    pub old_before: usize,
+    pub old_count: usize,
+    pub new_before: usize,
+    pub new_count: usize,
+}
+
+impl HunkRange {
+    /// The header's ranges, as git writes them: `@@ -12,7 +12,8 @@`, a
+    /// count of one left off, and an empty side numbered by the line
+    /// before it.
+    pub fn header(&self) -> String {
+        let side = |before: usize, count: usize| match count {
+            0 => format!("{before},0"),
+            1 => format!("{}", before + 1),
+            n => format!("{},{n}", before + 1),
+        };
+        format!("@@ -{} +{} @@", side(self.old_before, self.old_count), side(self.new_before, self.new_count))
     }
+}
+
+/// The hunk shown below each divider, by fold: the display lines from the
+/// one after its run up to the next run, or to the end of the buffer.
+/// `None` for a run that ends the buffer, which has nothing below it and,
+/// as on github.com, no header. Every ghost and every unchanged line is a
+/// line of the base, in order, and every line that is not a ghost is one
+/// of the head, so one pass counts both.
+pub fn hunks_below(buffer: &DisplayBuffer, folds: &[Run]) -> Vec<Option<HunkRange>> {
+    // The base and head lines before each display line, and past the last.
+    let mut before = Vec::with_capacity(buffer.len() + 1);
+    let (mut old, mut new) = (0, 0);
+    before.push((old, new));
+    for row in &buffer.rows {
+        match row {
+            Row::Deleted { .. } => old += 1,
+            Row::Head { status: LineStatus::Unchanged, .. } => {
+                old += 1;
+                new += 1;
+            }
+            Row::Head { .. } => new += 1,
+        }
+        before.push((old, new));
+    }
+    folds
+        .iter()
+        .enumerate()
+        .map(|(i, run)| {
+            let start = run.last + 1;
+            if start >= buffer.len() {
+                return None;
+            }
+            let end = folds.get(i + 1).map_or(buffer.len(), |next| next.first);
+            let ((old_before, new_before), (old_end, new_end)) = (before[start], before[end]);
+            Some(HunkRange { old_before, old_count: old_end - old_before, new_before, new_count: new_end - new_before })
+        })
+        .collect()
+}
+
+/// What each divider's row says, by fold: the header of the hunk below
+/// it, `@@ -1473,6 +1509,7 @@ impl Manifest {`, with the context git
+/// would give it from `base`, the base file's text, when there is one.
+/// `None` where `hunks_below` has no hunk.
+pub fn hunk_labels(buffer: &DisplayBuffer, base: Option<&str>, folds: &[Run]) -> Vec<Option<String>> {
+    let base: Option<Vec<&str>> = base.map(|base| base.lines().collect());
+    hunks_below(buffer, folds)
+        .into_iter()
+        .map(|hunk| {
+            let hunk = hunk?;
+            let context = base.as_deref().and_then(|base| perch_git::hunk_context(base, hunk.old_before));
+            Some(match context {
+                Some(context) => format!("{} {context}", hunk.header()),
+                None => hunk.header(),
+            })
+        })
+        .collect()
 }
 
 /// The default folds of a buffer: every run of unchanged display lines,
@@ -1008,7 +1133,7 @@ mod tests {
         let fold = Run::new(5, 10, 4);
         let doc = build(&b, &[fold], &[]);
         assert_eq!(doc.len(), b.len() - 6 + 1);
-        assert_eq!(doc.rows[5], DocRow::Divider { run: 0 });
+        assert_eq!(doc.rows[5], DocRow::Divider { run: 0, expand: Expand::All });
         assert_eq!(doc.text.lines().nth(5), Some(""), "the divider's row is blank text");
         assert_eq!(doc.rows[6], line(11, Tint::Plain));
         assert_eq!(doc.row_of_display(7), None);
@@ -1213,7 +1338,7 @@ mod tests {
         let (left, right) = build_split(&alignment, base, &b, &[fold], &[card]);
         assert_eq!(left.len(), right.len());
         let divider = right.rows.iter().position(|r| matches!(r, DocRow::Divider { .. })).unwrap();
-        assert_eq!(left.rows[divider], DocRow::Divider { run: 0 });
+        assert_eq!(left.rows[divider], DocRow::Divider { run: 0, expand: Expand::All });
         let spacer = right.rows.iter().position(|r| matches!(r, DocRow::Spacer { .. })).unwrap();
         assert_eq!(left.rows[spacer], DocRow::Spacer { card: CardId::Thread("gh-7".into()), row: 0 });
         assert_eq!(left.rows[spacer + 1], DocRow::Spacer { card: CardId::Thread("gh-7".into()), row: 1 });
@@ -1449,17 +1574,144 @@ mod tests {
     fn a_runs_reveal_ranges_are_its_ends_and_the_whole_of_it() {
         let run = Run::new(5, 45, 4);
         assert_eq!(run.len(), 41);
-        assert!(!run.reveals_whole(), "forty-one lines is Up and Down");
         assert_eq!(run.top(), (4, 23));
         assert_eq!(run.bottom(), (25, 44));
         assert_eq!(run.whole(), (4, 44));
-        let short = Run::new(5, 44, 4);
-        assert!(short.reveals_whole(), "forty lines is All");
+        assert_eq!(run.reveals(Expand::Down), run.top());
+        assert_eq!(run.reveals(Expand::Up), run.bottom());
+        assert_eq!(run.reveals(Expand::All), run.whole());
         let tiny = Run::new(5, 9, 4);
         assert_eq!(tiny.top(), (4, 8), "a step never reaches past the run");
         assert_eq!(tiny.bottom(), (4, 8));
-        assert_eq!(divider_label(47), "47 unchanged lines");
-        assert_eq!(divider_label(1), "1 unchanged line");
+    }
+
+    #[test]
+    fn a_divider_holds_githubs_expanders_for_where_its_run_is_and_how_long() {
+        let len = 100;
+        // Between two changes: Down over Up past one step, All within it.
+        assert_eq!(Run::new(5, 25, 4).expanders(len), &[Expand::Down, Expand::Up], "twenty-one lines");
+        assert_eq!(Run::new(5, 24, 4).expanders(len), &[Expand::All], "twenty lines");
+        // At the top of the file there is no code above to grow down, and
+        // at the bottom none below to grow up, however long the run.
+        assert_eq!(Run::new(0, 60, 0).expanders(len), &[Expand::Up]);
+        assert_eq!(Run::new(0, 5, 0).expanders(len), &[Expand::Up]);
+        assert_eq!(Run::new(40, 99, 38).expanders(len), &[Expand::Down]);
+        assert_eq!(Run::new(95, 99, 93).expanders(len), &[Expand::Down]);
+    }
+
+    #[test]
+    fn a_divider_that_opens_both_ways_is_two_rows_down_over_up_on_both_sides() {
+        // Display: ghost, new top, line 0..39 at 2 to 41, ghost, new
+        // bottom. The run of thirty-four between the changes is two rows.
+        let b = two_changes(40);
+        let run = runs(&b, &[])[0];
+        let doc = build(&b, &[run], &[]);
+        assert_eq!(doc.len(), 44 - 34 + 2);
+        assert_eq!(doc.rows[5], DocRow::Divider { run: 0, expand: Expand::Down });
+        assert_eq!(doc.rows[6], DocRow::Divider { run: 0, expand: Expand::Up });
+        assert_eq!((doc.run_of(5), doc.run_of(6)), (Some(run), Some(run)));
+        assert_eq!(doc.divider_span(5), Some(5..7));
+        assert_eq!(doc.divider_span(6), Some(5..7));
+        assert_eq!(doc.divider_span(4), None);
+        assert_eq!(doc.divider_span(7), None);
+        assert_eq!((doc.line(5), doc.line(6)), ("", ""), "the divider's rows are blank text");
+        assert_eq!(doc.row_of_head(38), Some(7), "the line after the run follows both rows");
+        assert_eq!(doc.hidden_lines(), 34, "two rows hide the run once");
+
+        // The split has the same two rows at the same rows on both sides.
+        let base = format!("old top\n{}old bottom\n", context(0, 40));
+        let head = format!("new top\n{}new bottom\n", context(0, 40));
+        let diff = file_diff(&base, &head);
+        let alignment = perch_git::alignment(&diff, &base, &head);
+        let (left, right) = build_split(&alignment, &base, &b, &[run], &[]);
+        assert_eq!(left.len(), right.len());
+        let row = right.rows.iter().position(|r| matches!(r, DocRow::Divider { .. })).unwrap();
+        for side in [&left, &right] {
+            assert_eq!(side.rows[row], DocRow::Divider { run: 0, expand: Expand::Down });
+            assert_eq!(side.rows[row + 1], DocRow::Divider { run: 0, expand: Expand::Up });
+            assert_eq!(side.divider_span(row + 1), Some(row..row + 2));
+        }
+    }
+
+    #[test]
+    fn two_dividers_side_by_side_are_two_spans() {
+        // Two runs whose rows touch are still two dividers: a span is one
+        // run's rows.
+        let b = two_changes(40);
+        let doc = build(&b, &[Run::new(5, 10, 4), Run::new(11, 16, 10)], &[]);
+        assert_eq!(doc.divider_span(5), Some(5..6));
+        assert_eq!(doc.divider_span(6), Some(6..7));
+    }
+
+    // Hunk headers.
+
+    #[test]
+    fn a_dividers_header_counts_the_hunk_below_it_as_git_would() {
+        // Display: ghost(old top), new top, line 0..39 at 2 to 41,
+        // ghost(old bottom), new bottom. One run, display lines 5 to 38;
+        // below it, lines 37 to 39 and the rewritten last line: base lines
+        // 39 to 42, the ghost among them, and head lines 39 to 42.
+        let b = two_changes(40);
+        let folds = runs(&b, &[]);
+        let hunks = hunks_below(&b, &folds);
+        assert_eq!(hunks, vec![Some(HunkRange { old_before: 38, old_count: 4, new_before: 38, new_count: 4 })]);
+        assert_eq!(hunks[0].unwrap().header(), "@@ -39,4 +39,4 @@");
+
+        // A run that ends the file has nothing below it, and no header.
+        let b = one_change(20, 20);
+        let folds = runs(&b, &[]);
+        assert_eq!(folds.len(), 2);
+        let hunks = hunks_below(&b, &folds);
+        assert!(hunks[0].is_some());
+        assert_eq!(hunks[1], None, "nothing below the last run");
+        // The top run folds lines one to seventeen; below it are lines 18
+        // to 20, the old line and the new, and lines 21 to 23.
+        assert_eq!(hunks[0].unwrap().header(), "@@ -18,7 +18,7 @@");
+    }
+
+    #[test]
+    fn a_hunk_header_leaves_off_a_count_of_one_and_numbers_an_empty_side_by_the_line_before() {
+        let hunk = |old_before, old_count, new_before, new_count| HunkRange { old_before, old_count, new_before, new_count };
+        assert_eq!(hunk(9, 1, 9, 2).header(), "@@ -10 +10,2 @@");
+        assert_eq!(hunk(4, 0, 4, 3).header(), "@@ -4,0 +5,3 @@");
+        assert_eq!(hunk(0, 0, 0, 1).header(), "@@ -0,0 +1 @@");
+    }
+
+    #[test]
+    fn a_dividers_label_is_the_header_and_the_context_git_finds_in_the_base() {
+        // A function whose middle line changed, far enough down its body
+        // that the top of it folds.
+        let body: String = (0..30).map(|i| format!("    let x{i} = {i};\n")).collect();
+        let base = format!("use std::fmt;\n\nimpl Manifest {{\n{body}    old();\n{body}}}\n");
+        let head = format!("use std::fmt;\n\nimpl Manifest {{\n{body}    new();\n{body}}}\n");
+        let b = buffer(&base, &head);
+        let folds = runs(&b, &[]);
+        assert_eq!(folds.len(), 2);
+        let labels = hunk_labels(&b, Some(&base), &folds);
+        // Lines 31 to 33 of the body, the change, and three more: the hunk
+        // starts at base line 31, and the nearest line above that starts an
+        // identifier is the impl's.
+        assert_eq!(labels[0].as_deref(), Some("@@ -31,7 +31,7 @@ impl Manifest {"));
+        assert_eq!(labels[1], None);
+        // With no base there is no context, only the header.
+        assert_eq!(hunk_labels(&b, None, &folds)[0].as_deref(), Some("@@ -31,7 +31,7 @@"));
+    }
+
+    #[test]
+    fn the_hunk_below_a_divider_runs_to_the_next_divider_and_grows_with_a_reveal() {
+        // Three changes twenty lines apart: two runs, and the hunk below
+        // the first ends where the second begins.
+        let base = format!("old top\n{}old mid\n{}old bottom\n", context(0, 20), context(20, 20));
+        let head = format!("new top\n{}new mid\n{}new bottom\n", context(0, 20), context(20, 20));
+        let b = buffer(&base, &head);
+        let all = runs(&b, &[]);
+        assert_eq!(all.len(), 2);
+        let hunks = hunks_below(&b, &all);
+        // Three lines, the rewritten middle, three lines: seven of each.
+        assert_eq!((hunks[0].unwrap().old_count, hunks[0].unwrap().new_count), (7, 7));
+        // With the second run open, the first's hunk runs to the end.
+        let hunks = hunks_below(&b, &all[..1]);
+        assert_eq!((hunks[0].unwrap().old_count, hunks[0].unwrap().new_count), (3 + 1 + 20 + 1, 3 + 1 + 20 + 1));
     }
 
     #[test]
@@ -1527,27 +1779,30 @@ mod tests {
     #[test]
     fn the_builder_hides_the_runs_and_shows_what_a_reveal_asks_for() {
         // Display: ghost, new top, line 0..39 at 2 to 41, ghost, new
-        // bottom: 44 rows, and one run of 34 behind a divider at row 5.
+        // bottom: 44 rows, and one run of 34 behind a divider of two rows
+        // at row 5, Down and Up.
         let b = two_changes(40);
         let run = runs(&b, &[])[0];
         let doc = folded(&b, &Reveals::default());
-        assert_eq!(doc.len(), 44 - 34 + 1);
+        assert_eq!(doc.len(), 44 - 34 + 2);
         assert_eq!(doc.run_of(5), Some(run));
+        assert_eq!(doc.run_of(6), Some(run));
         assert_eq!(doc.run_of(4), None);
         assert_eq!(doc.hidden_lines(), 34);
         assert_eq!(doc.line(5), "", "the divider's text is blank");
-        assert_eq!(doc.line(6), "line 37", "display line 39 follows the divider");
-        assert_eq!(doc.offset_of_row(6), doc.offset_of_row(5) + 1, "the divider is one newline");
+        assert_eq!(doc.line(7), "line 37", "display line 39 follows the divider");
+        assert_eq!(doc.offset_of_row(7), doc.offset_of_row(5) + 2, "the divider is two newlines");
         assert_eq!(doc.offset_of_row(doc.len()), doc.text.len());
 
-        // Down: the last twenty head lines of the run, 18 to 37, come
-        // back, and the divider hides fourteen.
+        // Up: the last twenty head lines of the run, 18 to 37, come back,
+        // and the divider hides fourteen, which All opens from one row.
         let mut reveals = Reveals::default();
         let (a, z) = run.bottom();
         reveals.add(a, z);
         let doc = folded(&b, &reveals);
         assert_eq!(doc.len(), 11 + 20);
         assert_eq!(doc.run_of(5), Some(Run { first: 5, last: 18, first_head: 4, default_heads: (4, 37) }));
+        assert_eq!(doc.rows[5], DocRow::Divider { run: 0, expand: Expand::All });
         assert_eq!(doc.hidden_lines(), 14);
         assert_eq!(doc.row_of_head(18), Some(6));
         assert_eq!(doc.row_of_head(17), None);
@@ -1595,9 +1850,14 @@ mod tests {
 
         let (left, right) = build_split(&alignment, &base, &b, &folds, &[]);
         assert_eq!(left.len(), right.len());
-        let dividers: Vec<usize> = (0..right.len()).filter(|r| right.run_of(*r).is_some()).collect();
-        assert_eq!(dividers.len(), 4);
-        for row in &dividers {
+        let rows: Vec<usize> = (0..right.len()).filter(|r| right.run_of(*r).is_some()).collect();
+        let dividers = rows.iter().filter(|r| right.divider_span(**r).is_some_and(|s| s.start == **r)).count();
+        assert_eq!(dividers, 4);
+        // The first run's lower piece is still longer than a step, so its
+        // divider is two rows; the second's two pieces and the last run
+        // are one each.
+        assert_eq!(rows.len(), 5);
+        for row in &rows {
             assert_eq!(left.rows[*row], right.rows[*row], "the divider is on both sides at row {row}");
         }
         assert_eq!(left.hidden_lines(), right.hidden_lines());
@@ -1642,7 +1902,7 @@ mod tests {
     }
 
     #[test]
-    fn a_down_reveal_is_one_divider_row_replaced_by_twenty_lines_and_a_divider() {
+    fn an_up_reveal_is_the_dividers_two_rows_replaced_by_a_one_row_divider_and_twenty_lines() {
         let b = two_changes(40);
         let run = runs(&b, &[])[0];
         let old = folded(&b, &Reveals::default());
@@ -1651,15 +1911,16 @@ mod tests {
         reveals.add(a, z);
         let new = folded(&b, &reveals);
 
+        // The fourteen left behind are one step or fewer: All, one row.
         let region = changed_region(&old, &new).expect("the documents differ");
-        assert_eq!(region.old_rows, 5..6);
+        assert_eq!(region.old_rows, 5..7);
         assert_eq!(region.new_rows, 5..26);
-        assert_eq!(region.row_delta(), 20);
-        assert_eq!(new.rows[5], DocRow::Divider { run: 0 });
+        assert_eq!(region.row_delta(), 19);
+        assert_eq!(new.rows[5], DocRow::Divider { run: 0, expand: Expand::All });
         assert_eq!(new.rows[6], line(19, Tint::Plain));
         assert_eq!(new.rows[25], line(38, Tint::Plain));
-        assert_eq!(region.old_bytes.len(), 1, "the divider's blank line and its newline");
-        assert_eq!(region.byte_delta() as usize, region.new_bytes.len() - 1);
+        assert_eq!(region.old_bytes.len(), 2, "the divider's two blank lines and their newlines");
+        assert_eq!(region.byte_delta() as usize, region.new_bytes.len() - 2);
         assert_eq!(edited(&old, &new, &region), new.text);
     }
 
@@ -1675,9 +1936,9 @@ mod tests {
 
         let region = changed_region(&old, &new).expect("the documents differ");
         assert_eq!(region.old_rows, 5..26);
-        assert_eq!(region.new_rows, 5..6);
-        assert_eq!(region.row_delta(), -20);
-        assert_eq!(region.new_bytes.len(), 1);
+        assert_eq!(region.new_rows, 5..7);
+        assert_eq!(region.row_delta(), -19);
+        assert_eq!(region.new_bytes.len(), 2);
         assert_eq!(edited(&old, &new, &region), new.text);
     }
 
@@ -1717,7 +1978,7 @@ mod tests {
         assert_eq!(region.new_rows, 5..(5 + all[0].len()));
         assert_eq!(edited(&old, &new, &region), new.text);
         let second = (0..new.len()).find(|r| new.run_of(*r).is_some()).unwrap();
-        assert_eq!(new.rows[second], DocRow::Divider { run: 0 });
+        assert_eq!(new.rows[second], DocRow::Divider { run: 0, expand: Expand::All });
         assert!(second >= region.new_rows.end, "the second divider is in the common suffix");
     }
 }

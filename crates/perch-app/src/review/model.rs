@@ -1452,14 +1452,14 @@ pub struct ReviewState {
     /// on a model config offers, at an effort it takes.
     pub agent: RwSignal<perch_github::AgentConfig>,
     /// The display line the pointer is over in the gutter, for the `+`,
-    /// or the row of a divider, for its controls.
+    /// or the first row of a divider, for its Fold again.
     pub hovered_line: RwSignal<Option<usize>>,
-    /// The element that recorded `hovered_line`. A divider's row is
-    /// several elements, its gutter row and the parts of the bar over
+    /// The element that recorded `hovered_line`. A divider is several
+    /// elements, its expanders in the gutter and the parts of the bar over
     /// the code, and floem delivers the enter to the next before the
     /// leave from the last; a leave clears the line only when it comes
     /// from the element that set it, so a move between the parts of one
-    /// row keeps its controls.
+    /// divider keeps its Fold again.
     pub hovered_by: RwSignal<Option<floem::ElementId>>,
     /// True while the composer's text box has the keyboard, so `a` stands
     /// down.

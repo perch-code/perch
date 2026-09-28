@@ -392,6 +392,27 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M8 10.4 V13.8 M5.9 11.9 L8 14 L10.1 11.9" fill="none" stroke="{c}"
                      stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
+        // github.com's expanders in a diff's hunk rows: a dotted rule for
+        // the code already shown, and an arrow away from it, stem and a
+        // solid head, for the way the code grows. The dots are squares of
+        // their own, since vger draws a dashed stroke solid, and the dots
+        // and the stem sit on whole pixels, so a 1x screen draws them
+        // sharp.
+        SidebarIcon::ExpandDown => format!(
+            r#"{}<path d="M8 6.5 V10.5" stroke="{c}" stroke-width="2"/>
+               <path d="M4 10 H12 L8 14 Z" fill="{c}"/>"#,
+            expander_dots(&c, 3.0)
+        ),
+        SidebarIcon::ExpandUp => format!(
+            r#"{}<path d="M8 9.5 V5.5" stroke="{c}" stroke-width="2"/>
+               <path d="M4 6 H12 L8 2 Z" fill="{c}"/>"#,
+            expander_dots(&c, 11.0)
+        ),
+        SidebarIcon::ExpandAll => format!(
+            r#"{}<path d="M8 6 V4 M8 10 V12" stroke="{c}" stroke-width="2"/>
+               <path d="M4.5 4.5 H11.5 L8 1 Z M4.5 11.5 H11.5 L8 15 Z" fill="{c}"/>"#,
+            expander_dots(&c, 7.0)
+        ),
         // A frame with a rule down its left third: the drawer, as Codex and
         // the system draw the sidebar toggle.
         SidebarIcon::Drawer => format!(
@@ -435,6 +456,15 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
         ),
     };
     svg16(&body)
+}
+
+/// The dotted rule of an expander glyph: five two-pixel dots across the
+/// glyph with a pixel between, their tops at `top`.
+fn expander_dots(c: &str, top: f64) -> String {
+    [1.0, 4.0, 7.0, 10.0, 13.0]
+        .iter()
+        .map(|x| format!(r#"<rect x="{x}" y="{top}" width="2" height="2" rx="0.5" fill="{c}"/>"#))
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,6 +516,15 @@ pub enum SidebarIcon {
     /// The same rule dotted, with the chevrons pointing away from it:
     /// something folded, to open.
     Unfold,
+    /// A dotted rule with an arrow down from it: a divider's Down, which
+    /// grows the code above it into the hidden lines.
+    ExpandDown,
+    /// A dotted rule with an arrow up to it: a divider's Up, which grows
+    /// the code below it into the hidden lines.
+    ExpandUp,
+    /// A dotted rule with arrows up and down from it: a divider's All,
+    /// which opens every hidden line.
+    ExpandAll,
     /// A frame with a rule down its left third: the drawer toggle.
     Drawer,
     /// A box with an arrow leaving it: open on GitHub.
@@ -543,7 +582,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 56] = [
+    pub const ALL: [SidebarIcon; 59] = [
         SidebarIcon::Suggest,
         SidebarIcon::Heading,
         SidebarIcon::Bold,
@@ -554,6 +593,9 @@ impl SidebarIcon {
         SidebarIcon::TaskList,
         SidebarIcon::Clear,
         SidebarIcon::Unfold,
+        SidebarIcon::ExpandDown,
+        SidebarIcon::ExpandUp,
+        SidebarIcon::ExpandAll,
         SidebarIcon::Copy,
         SidebarIcon::Reply,
         SidebarIcon::Pencil,
