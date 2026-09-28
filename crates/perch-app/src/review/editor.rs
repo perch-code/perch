@@ -1015,8 +1015,8 @@ fn card_layer(
 /// without its heading and lines, or the composer, set into its first
 /// spacer row a little way in, so its border never touches a tinted
 /// line, from the first code column to the right edge less the same
-/// margin, or `max_width` across where that is less. Collapsed, it is
-/// its one row whole. The wheel over it scrolls
+/// margin, or `max_width` across where that is less. Collapsed, it sits
+/// further inside its rows. The wheel over it scrolls
 /// the code, as it does over the gutter, unless what is inside it takes
 /// the wheel first.
 ///
@@ -1030,7 +1030,7 @@ fn card_layer(
 /// when they differ: an absolutely placed card is laid out again on
 /// every scroll, and a write on each would edit the document, lay the
 /// card out again and write again without end. A collapsed card is its
-/// one row whatever it measures, so it says nothing.
+/// rows whatever it measures, so it says nothing.
 #[allow(clippy::too_many_arguments)]
 fn inline_card(
     app: AppState,
@@ -1100,7 +1100,7 @@ fn inline_card(
             // it was built would not.
             let row = doc.with(|d| d.first_spacer_row(&card_id)).unwrap_or(0);
             let inset = if state.is_collapsed(&card_id) {
-                0.0
+                theme::COLLAPSED_CARD_INSET
             } else {
                 theme::CARD_INSET
             };
@@ -3718,23 +3718,25 @@ mod window {
             "a thread that is not outdated starts open"
         );
 
-        // Collapsed, the card is one row, and the document is shorter by
+        // Collapsed, the card is its rows, and the document is shorter by
         // the rows the card gave back.
+        let folded = crate::review::doc::COLLAPSED_ROWS;
         state.toggle_card(&card);
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
-        assert_eq!(doc.len(), 120 + 1, "shrunk by the difference");
-        assert_eq!(doc.card_span(&card), Some(9..10));
-        assert_eq!(doc.display_line(10), Some(9));
+        assert_eq!(doc.len(), 120 + folded, "shrunk by the difference");
+        assert_eq!(doc.card_span(&card), Some(9..9 + folded));
+        assert_eq!(doc.display_line(9 + folded), Some(9));
         assert_eq!(laid_out_text(&live), doc.text);
         let rect = card_rect(&harness, "t1");
+        let inset = crate::theme::COLLAPSED_CARD_INSET;
         assert_eq!(
             rect.y0,
-            9.0 * line_height,
-            "a collapsed card takes its row whole"
+            9.0 * line_height + inset,
+            "a collapsed card sits inside its rows"
         );
-        assert_eq!(rect.height(), line_height);
+        assert_eq!(rect.height(), folded as f64 * line_height - 2.0 * inset);
 
         // The chevron at the row's left opens it again: past the gutter,
         // the margin, the border and the row's padding, in its slot.
@@ -3744,8 +3746,8 @@ mod window {
             + rect.x0
             + 1.0
             + crate::theme::COLLAPSED_CARD_PADDING
-            + crate::theme::CHEVRON_SLOT / 2.0;
-        let y = top + rect.y0 + line_height / 2.0;
+            + crate::theme::CARD_CHEVRON_SLOT / 2.0;
+        let y = top + rect.y0 + rect.height() / 2.0;
         let under = harness.element_id_at(x, y);
         harness.click(x, y);
         harness.rebuild();
@@ -3930,8 +3932,9 @@ mod window {
         state.toggle_card(&card);
         harness.rebuild();
         harness.paint();
-        assert_eq!(right.doc.get().len(), 90 + 1);
-        assert_eq!(left.doc.get().len(), 90 + 1);
+        let folded = crate::review::doc::COLLAPSED_ROWS;
+        assert_eq!(right.doc.get().len(), 90 + folded);
+        assert_eq!(left.doc.get().len(), 90 + folded);
         assert_eq!(laid_out_text(&left), left.doc.get().text);
         assert_eq!(laid_out_text(&right), right.doc.get().text);
     }
@@ -4453,18 +4456,20 @@ mod window {
             "the card is in view, so nothing scrolled"
         );
 
-        // Collapsed, it is one row: the chevron, who commented, the first
-        // line and how many replies follow.
+        // Collapsed, it is one strip: the chevron, who commented, the
+        // first line and how many replies follow.
+        let folded = crate::review::doc::COLLAPSED_ROWS;
+        let inset = crate::theme::COLLAPSED_CARD_INSET;
         state.toggle_card(&card);
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
-        assert_eq!(doc.len(), 120 + 1);
-        assert_eq!(doc.card_span(&card), Some(9..10));
+        assert_eq!(doc.len(), 120 + folded);
+        assert_eq!(doc.card_span(&card), Some(9..9 + folded));
         assert_eq!(laid_out_text(&live), doc.text);
         let rect = card_rect(&harness, "gh-100");
-        assert_eq!(rect.y0, 9.0 * line_height);
-        assert_eq!(rect.height(), line_height);
+        assert_eq!(rect.y0, 9.0 * line_height + inset);
+        assert_eq!(rect.height(), folded as f64 * line_height - 2.0 * inset);
         state.toggle_card(&card);
         harness.rebuild();
         harness.paint();
@@ -4576,15 +4581,17 @@ mod window {
         assert!(state.is_collapsed(&card), "resolved on GitHub, so folded away");
         harness.rebuild();
         harness.paint();
-        assert_eq!(live.doc.get().card_span(&card), Some(9..10));
+        let folded = crate::review::doc::COLLAPSED_ROWS;
+        assert_eq!(live.doc.get().card_span(&card), Some(9..9 + folded));
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
-        assert_eq!(card_rect(&harness, "gh-100").height(), line_height);
+        let folded_height = folded as f64 * line_height - 2.0 * crate::theme::COLLAPSED_CARD_INSET;
+        assert_eq!(card_rect(&harness, "gh-100").height(), folded_height);
 
         state.toggle_card(&card);
         harness.rebuild();
         harness.paint();
         assert!(!state.is_collapsed(&card));
-        assert!(card_rect(&harness, "gh-100").height() > line_height);
+        assert!(card_rect(&harness, "gh-100").height() > folded_height);
         assert!(
             find(harness.root_id(), "name label - Label: \"hubot\"").is_some(),
             "open, the reply shows"

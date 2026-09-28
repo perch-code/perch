@@ -4639,7 +4639,7 @@ mod tests {
             2
         );
 
-        // Collapsed, a card is one row; laid out, it has the rows the
+        // Collapsed, a card is its fixed rows; laid out, it has the rows the
         // layout gave it, unless it is collapsed.
         let collapsed: HashSet<CardId> = [CardId::Thread("first".into())].into_iter().collect();
         let rows: HashMap<CardId, usize> = [
@@ -4661,7 +4661,7 @@ mod tests {
         assert_eq!(state.cards_in("src/x.rs").len(), 3);
         state.toggle_card(&CardId::Thread("later".into()));
         assert!(state.is_collapsed(&CardId::Thread("later".into())));
-        assert_eq!(state.cards_in("src/x.rs")[1].rows, 1);
+        assert_eq!(state.cards_in("src/x.rs")[1].rows, doc::COLLAPSED_ROWS);
         state.toggle_card(&CardId::Thread("later".into()));
         assert_eq!(state.cards_in("src/x.rs")[1].rows, estimate);
     }

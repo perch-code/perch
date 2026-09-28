@@ -32,9 +32,10 @@ pub const REVEAL_STEP: usize = 20;
 /// since two clicks would do it anyway.
 pub const REVEAL_ALL_AT: usize = 40;
 
-/// A collapsed card is one row: the first author, the first line, and how
-/// many messages follow.
-pub const COLLAPSED_ROWS: usize = 1;
+/// A collapsed card is two rows: the first author, the first line, and
+/// how many messages follow, in a box with room round it, as github.com
+/// folds a thread.
+pub const COLLAPSED_ROWS: usize = 2;
 
 /// How many rows the composer's card is given before it has been laid
 /// out: its first row, Write and Preview with the text styles, the box
@@ -80,7 +81,7 @@ pub enum CardId {
 /// one per line of every message body, wrapped at eighty columns, plus
 /// the byline and the gap for each message, the header, the Follow up
 /// box and the foot. Collapsed, it is
-/// one row whatever the thread holds. The estimate can be wrong by a few
+/// two rows whatever the thread holds. The estimate can be wrong by a few
 /// rows; it only has to be near enough that the first paint is not a
 /// jump, and the card's laid-out height corrects it.
 pub fn estimate_rows(thread: &CommentThread, collapsed: bool) -> usize {
@@ -1168,11 +1169,11 @@ mod tests {
     }
 
     #[test]
-    fn a_collapsed_thread_is_one_row_whatever_it_holds() {
+    fn a_collapsed_thread_is_the_same_rows_whatever_it_holds() {
         let hundred_lines = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
         assert_eq!(estimate_rows(&thread_of(&["why?", &hundred_lines]), true), COLLAPSED_ROWS);
-        assert_eq!(estimate_rows(&thread_of(&["why?"]), true), 1);
-        assert_eq!(estimate_rows(&thread_of(&[]), true), 1);
+        assert_eq!(estimate_rows(&thread_of(&["why?"]), true), COLLAPSED_ROWS);
+        assert_eq!(estimate_rows(&thread_of(&[]), true), COLLAPSED_ROWS);
     }
 
     #[test]

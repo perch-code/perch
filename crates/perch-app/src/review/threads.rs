@@ -1420,13 +1420,18 @@ pub fn thread_card(
         },
     )
     .style(move |s| {
-        // Collapsed, it is its one row exactly, on the grey GitHub folds
-        // a thread to. The layer sets its width from the edges it is
+        // Collapsed, it is exactly as tall as its rows less the inset it
+        // sits inside them. The layer sets its width from the edges it is
         // placed against.
         let folded = collapsed.get();
         let base = s
-            .apply_if(folded, |s| s.height(theme::CODE_LINE_HEIGHT as f64))
-            .background(if folded { theme::CANVAS_SUBTLE } else { theme::CANVAS })
+            .apply_if(folded, |s| {
+                s.height(
+                    crate::review::doc::COLLAPSED_ROWS as f64 * theme::CODE_LINE_HEIGHT as f64
+                        - 2.0 * theme::COLLAPSED_CARD_INSET,
+                )
+            })
+            .background(theme::CANVAS)
             .border_radius(theme::RADIUS)
             .border_color(if flashing.get() { theme::ACCENT } else { theme::BORDER });
         match origin {
@@ -1553,13 +1558,13 @@ fn lines_heading(app: AppState, state: ReviewState, thread: &CommentThread) -> f
         format!("{noun} on {}", if range { "lines" } else { "line" })
     };
     let muted = |s: floem::style::Style| {
-        s.font_size(theme::TEXT_BADGE)
+        s.font_size(theme::TEXT_META)
             .color(theme::FG_MUTED)
             .selectable(false)
             .flex_shrink(0.0_f32)
     };
     let strong = |s: floem::style::Style| {
-        s.font_size(theme::TEXT_BADGE)
+        s.font_size(theme::TEXT_META)
             .font_weight(theme::weight_strong())
             .color(theme::FG)
             .selectable(false)
@@ -1630,7 +1635,7 @@ pub(crate) fn resolved_toggle(
     let resolved = Memo::new(move |_| state.is_resolved(&thread_id));
     let (height, size) = match face {
         ThreadFace::Card => (theme::THREAD_HEADER_BUTTON, theme::TEXT_META),
-        ThreadFace::Inline => (theme::COLLAPSED_CARD_MENU, theme::TEXT_BADGE),
+        ThreadFace::Inline => (theme::COLLAPSED_CARD_MENU, theme::TEXT_META),
     };
     Stack::horizontal((
         crate::ui::widgets::icon_in(
@@ -1717,7 +1722,7 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
     let trailing = thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU)
         .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP).flex_shrink(0.0_f32))
         .into_any();
-    let avatar = author_avatar(app, state, &author, theme::COLLAPSED_CARD_PILL);
+    let avatar = author_avatar(app, state, &author, theme::COLLAPSED_CARD_AVATAR);
     collapsed_card_row(
         state,
         card_id,
@@ -1750,7 +1755,7 @@ pub(crate) fn collapsed_card_row(
         chevron(state, card_id, false),
         avatar.style(|s| s.margin_left(6.0).flex_shrink(0.0_f32)),
         name_label(author, |s| {
-            s.font_size(theme::TEXT_BADGE)
+            s.font_size(theme::TEXT_META)
                 .font_weight(theme::weight_strong())
                 .color(theme::FG)
                 .selectable(false)
@@ -1758,7 +1763,7 @@ pub(crate) fn collapsed_card_row(
                 .flex_shrink(0.0_f32)
         }),
         Label::derived(move || line.clone()).style(|s| {
-            s.font_size(theme::TEXT_BADGE)
+            s.font_size(theme::TEXT_META)
                 .color(theme::FG_MUTED)
                 .selectable(false)
                 .margin_left(6.0)
@@ -1885,8 +1890,8 @@ fn more_pill(more: usize) -> impl IntoView {
 fn chevron(state: ReviewState, card_id: CardId, open: bool) -> impl IntoView {
     chevron_button(
         move || open,
-        theme::CHEVRON_SLOT,
-        theme::CHEVRON_GLYPH,
+        theme::CARD_CHEVRON_SLOT,
+        theme::CARD_CHEVRON_GLYPH,
         move || state.toggle_card(&card_id),
     )
 }

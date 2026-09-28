@@ -508,26 +508,30 @@ const fn composer_lines(lines: f64) -> f64 {
     lines * COMPOSER_LINE_HEIGHT as f64 + 2.0 * EDITOR_BOX_PADDING + 2.0
 }
 
-/// The `...` at the end of a thread's header, and the smaller one on
-/// a collapsed card, whose one row a 22px button would not fit.
+/// The `...` at the end of a thread's header, open or collapsed.
 pub const THREAD_MENU: f64 = 22.0;
-pub const COLLAPSED_CARD_MENU: f64 = 18.0;
+pub const COLLAPSED_CARD_MENU: f64 = THREAD_MENU;
 /// A card drawn over its spacer rows in the code sits this far inside
 /// its first and last rows, so its border never touches a tinted line
-/// above or a second card below. A collapsed card is one row, which has
-/// no room to spare, and takes its row whole.
+/// above or a second card below.
 pub const CARD_INSET: f64 = 3.0;
+/// A collapsed card sits further inside its two rows than an open one,
+/// which leaves it about as tall as github.com draws a folded thread.
+pub const COLLAPSED_CARD_INSET: f64 = 5.0;
 /// The collapsed card's row: the room at either end, and the pill that
-/// says how many messages follow the first, two pixels shorter than the
-/// strip's count pill so it sits inside the borders, with this much room
-/// before it and before the `...` after it, so no two fills touch.
-pub const COLLAPSED_CARD_PADDING: f64 = 8.0;
-pub const COLLAPSED_CARD_PILL: f64 = 16.0;
+/// says how many messages follow the first, with this much room before
+/// it and before the `...` after it, so no two fills touch.
+pub const COLLAPSED_CARD_PADDING: f64 = 10.0;
+pub const COLLAPSED_CARD_PILL: f64 = 18.0;
 pub const COLLAPSED_CARD_PILL_GAP: f64 = 8.0;
-/// The slot the card's chevron sits in, and the glyph inside it, the
-/// sizes the gutter's controls use.
+/// The face beside the first author on a collapsed card.
+pub const COLLAPSED_CARD_AVATAR: f64 = 20.0;
+/// The slot a chevron sits in, and the glyph inside it, the sizes the
+/// gutter's controls use, and the larger ones at a card's left.
 pub const CHEVRON_SLOT: f64 = 16.0;
 pub const CHEVRON_GLYPH: f64 = 12.0;
+pub const CARD_CHEVRON_SLOT: f64 = 20.0;
+pub const CARD_CHEVRON_GLYPH: f64 = 14.0;
 /// How long a card's border stays in the accent after its marker is
 /// clicked.
 pub const CARD_FLASH_MILLIS: u64 = 900;
