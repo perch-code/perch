@@ -174,8 +174,7 @@ fn main() {
                             .flatten();
                         match issue_item {
                             Some(id) => {
-                                let navigation_id = backend.start_work(&id);
-                                state.begin_open("Cutting a branch", navigation_id);
+                                crate::review::issue::start_work(state, review, &backend, &id);
                                 true
                             }
                             None => false,

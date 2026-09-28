@@ -191,6 +191,9 @@ pub struct AppState {
     pub agent_navigation_token: RwSignal<u64>,
     expected_navigation_id: RwSignal<Option<u64>>,
     open_expectation: RwSignal<OpenExpectation>,
+    /// What Start work leaves in the new branch's composer, by the
+    /// navigation that opens the branch. Taken when that navigation lands.
+    pub start_work_draft: RwSignal<Option<(u64, String)>>,
     /// An archived discussion opened from run history is a read-only view.
     /// Keep it open across the normal Items refresh without restoring its
     /// checkout or changing its archived state.
@@ -312,6 +315,7 @@ impl AppState {
             agent_navigation_token: RwSignal::new(0),
             expected_navigation_id: RwSignal::new(None),
             open_expectation: RwSignal::new(OpenExpectation::Any),
+            start_work_draft: RwSignal::new(None),
             agent_archived_owner: RwSignal::new(None),
             toasts: RwSignal::new(VecDeque::new()),
             toast_token: RwSignal::new(0),
@@ -1091,6 +1095,19 @@ impl AppState {
                 }
                 review.ready.set(true);
                 review.set_phase(Phase::Ready);
+                // Start work's branch opens with the issue in its composer,
+                // for the reader to send or edit.
+                let draft = self.start_work_draft.with_untracked(|d| {
+                    d.as_ref()
+                        .filter(|(id, _)| *id == navigation_id)
+                        .map(|(_, text)| text.clone())
+                });
+                if let Some(draft) = draft {
+                    self.start_work_draft.set(None);
+                    if review.composer.with_untracked(Option::is_none) {
+                        review.open_composer(None, None, draft, crate::review::threads::defaults(*self));
+                    }
+                }
             }
             Event::IssueReady {
                 navigation_id,
@@ -3275,6 +3292,27 @@ mod tests {
         app.leave_review(review);
         app.apply_with_review(review_ready("latest", 12), review);
         assert!(!review.is_showing());
+    }
+
+    /// Start work's branch opens with the prompt in its composer, once:
+    /// a later open of the same branch starts empty.
+    #[test]
+    fn start_work_leaves_its_prompt_in_the_new_branchs_composer() {
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.review.set(Some(review));
+
+        app.begin_open("Cutting a branch", 40);
+        app.start_work_draft.set(Some((40, "Work on #7".into())));
+        app.apply_with_review(review_ready("branch", 40), review);
+        assert!(review.composer.get().is_some());
+        assert_eq!(review.composer_draft.get(), "Work on #7");
+        assert!(app.start_work_draft.get().is_none());
+
+        review.close_composer();
+        app.begin_item_review(review, "Opening", "branch", 41);
+        app.apply_with_review(review_ready("branch", 41), review);
+        assert!(review.composer.get().is_none());
     }
 
     #[test]
