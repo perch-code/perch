@@ -272,14 +272,30 @@ fn popover(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
                 }
             },
         )
-        .style(|s| s.width_full()),
-    ))
-    .style(|s| s.flex_col().width_full().gap(14.0));
-
-    Container::new(content)
         .style(|s| {
-            s.width(430.0)
+            s.flex_col()
+                .width_full()
+                .min_height(0.0)
+                .flex_shrink(1.0_f32)
+        }),
+    ))
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .min_height(0.0)
+            .flex_shrink(1.0_f32)
+            .gap(14.0)
+    });
+
+    // No taller than the window under the bar, with a margin; the drafts
+    // scroll to make up the difference.
+    Container::new(content)
+        .style(move |s| {
+            let room = app.window_height.get() - theme::REVIEW_HEADER_HEIGHT - 12.0;
+            s.flex_col()
+                .width(430.0)
                 .max_width_full()
+                .apply_if(room > 0.0, |s| s.max_height(room))
                 .padding(14.0)
                 .background(theme::CANVAS)
                 .border(1.0)

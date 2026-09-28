@@ -32,6 +32,12 @@ use crate::ui::widgets::{
 /// How much of a draft's text its row shows.
 const EXCERPT_CHARS: usize = 60;
 
+/// How tall a draft's row is.
+const DRAFT_ROW_HEIGHT: f64 = 26.0;
+
+/// How many rows the drafts' list keeps in view in a short window.
+const DRAFT_ROWS_MIN: usize = 3;
+
 /// Whether a verdict can go to GitHub now: a current pull request, open,
 /// online, and not a historical snapshot. Branches and issues have none.
 pub(crate) fn is_available(state: ReviewState) -> bool {
@@ -144,6 +150,8 @@ pub(crate) fn section(app: AppState, state: ReviewState, backend: Rc<Backend>) -
     .style(|s| {
         s.flex_col()
             .width_full()
+            .min_height(0.0)
+            .flex_shrink(1.0_f32)
             .gap(12.0)
             .padding_top(14.0)
             .border_top(1.0)
@@ -221,13 +229,24 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     });
     let rows_backend = backend.clone();
     // Keyed on the text too: a draft edited in its card while the form is
-    // open gets a new row, with the new text.
+    // open gets a new row, with the new text. The rows are the one part of
+    // the popover that gives: past what the window has room for, they
+    // scroll, so the summary and Submit stay on screen.
     let rows = dyn_stack(
         move || drafts.get(),
         |draft| (draft.message_id.clone(), draft.body.clone()),
         move |draft| draft_row(state, rows_backend.clone(), draft, head),
     )
-    .style(|s| s.flex_col().width_full());
+    .style(|s| s.flex_col().width_full())
+    .scroll()
+    .debug_name("submit-review-draft-list")
+    .style(move |s| {
+        let least = drafts.with(Vec::len).min(DRAFT_ROWS_MIN) as f64 * DRAFT_ROW_HEIGHT;
+        s.width_full()
+            .min_height(least)
+            .flex_shrink(1.0_f32)
+            .overflow_x(floem::taffy::Overflow::Hidden)
+    });
 
     let discard_backend = backend.clone();
     let discard_all = move || {
@@ -313,6 +332,8 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
         .style(move |s| {
             s.flex_col()
                 .width_full()
+                .min_height(0.0)
+                .flex_shrink(1.0_f32)
                 .gap(4.0)
                 .apply_if(drafts.with(Vec::is_empty), |s| s.hide())
         })
@@ -417,7 +438,7 @@ fn draft_row(
         .style(|s| {
             s.items_center()
                 .width_full()
-                .min_height(26.0)
+                .min_height(DRAFT_ROW_HEIGHT)
                 .padding_horiz(6.0)
                 .border_radius(theme::RADIUS)
                 .hover(|s| s.background(theme::CANVAS_SUBTLE))
@@ -1326,6 +1347,40 @@ mod tests {
             }
             other => panic!("delete did not reach the backend: {other:?}"),
         }
+    }
+
+    /// Enough drafts to outgrow the window scroll in their list, and
+    /// Submit stays in the window; a few take only their own height.
+    #[test]
+    fn many_drafts_scroll_and_leave_submit_in_the_window() {
+        let root = TestRoot::new();
+        let state = review_state();
+        let threads = (0..30)
+            .map(|i| draft_thread(&format!("t{i}"), "head-42", None, "A comment"))
+            .collect();
+        state.comment_threads.set(Arc::new(threads));
+        open(state, None);
+        let app = AppState::new();
+        app.window_height.set(700.0);
+        let view = control(app, state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 700.0);
+        harness.rebuild();
+        harness.paint();
+
+        let submit = named(harness.root_id(), "submit-review-action").expect("no Submit");
+        let at = submit.get_visual_rect_no_clip();
+        assert!(at.height() > 0.0);
+        assert!(at.y1 <= 700.0, "Submit ends at {} in a 700 window", at.y1);
+        let rows = named(harness.root_id(), "submit-review-draft-list").expect("no rows");
+        let height = harness.get_layout_rect(rows).height();
+        assert!(height >= 3.0 * DRAFT_ROW_HEIGHT, "the list keeps three rows");
+        assert!(height < 30.0 * DRAFT_ROW_HEIGHT, "the list scrolls");
+
+        state.comment_threads.set(Arc::new(vec![draft_thread("t1", "head-42", None, "one")]));
+        harness.rebuild();
+        harness.paint();
+        let rows = named(harness.root_id(), "submit-review-draft-list").expect("no rows");
+        assert_eq!(harness.get_layout_rect(rows).height(), DRAFT_ROW_HEIGHT);
     }
 
     #[test]
