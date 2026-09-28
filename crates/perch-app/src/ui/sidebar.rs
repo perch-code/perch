@@ -15,7 +15,7 @@ use floem::views::{
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::items::{BrowseView, Direction, ItemSort, SidebarTab};
+use crate::items::{Direction, ItemSort, SidebarTab};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::{item_row, OpenItem};
@@ -630,6 +630,7 @@ pub fn resize_cursor_sheet(state: AppState) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::items::BrowseView;
     use floem::headless::{HeadlessHarness, TestRoot};
     use perch_github::{
         Issue, ItemSubject, Reason, Repository, Subject, SubjectKind, SubjectSnapshot, SubjectState,
