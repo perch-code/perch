@@ -375,7 +375,7 @@ fn stacked_view(
         epoch,
     );
     wire_jump(state, file.clone(), doc, scroll_to, cursor, epoch);
-    wire_page(state, doc, scroll_to, cursor, epoch);
+    wire_page(state, doc, scroll_delta, cursor, epoch);
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
     let path = file.path.clone();
@@ -1296,7 +1296,7 @@ fn split_view(
         epoch,
     );
     wire_jump(state, file.clone(), right_doc, right_scroll_to, right_cursor, epoch);
-    wire_page(state, right_doc, right_scroll_to, right_cursor, epoch);
+    wire_page(state, right_doc, right_delta, right_cursor, epoch);
     let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
     // The left follows the right down the file. Sideways it keeps its own
@@ -1704,12 +1704,13 @@ fn wire_jump(
 /// Page Up and Page Down: the caret to the start of the first line or of
 /// the last, and the view flush with that end of the file. The caret
 /// moves first: bringing it into view may leave it mid-screen, and the
-/// scroll after it puts the end against the edge. The scroll clamps, so
-/// the rows' full height is the end even with room left under it.
+/// scroll after it puts the end against the edge. By a delta past either
+/// end, which the scroll clamps, rather than to a point: a delta shows
+/// the bars that hide while idle, as the wheel does.
 fn wire_page(
     state: ReviewState,
     doc: RwSignal<Arc<Doc>>,
-    scroll_to: RwSignal<Option<Vec2>>,
+    scroll_delta: RwSignal<Vec2>,
     cursor: RwSignal<Cursor>,
     epoch: u64,
 ) {
@@ -1723,17 +1724,18 @@ fn wire_page(
             return;
         }
         state.page_end.set(None);
-        let (offset, y) = doc.with_untracked(|d| {
+        let offset = doc.with_untracked(|d| {
             // A line of the file, not a divider or a card's spacer.
             let mut rows = (0..d.len()).filter(|&r| d.display_line(r).is_some());
             let row = if end { rows.next_back() } else { rows.next() };
-            let y = if end { d.len() as f64 * theme::CODE_LINE_HEIGHT as f64 } else { 0.0 };
-            (row.map(|r| d.offset_of_row(r)), y)
+            row.map(|r| d.offset_of_row(r))
         });
         if let Some(offset) = offset {
             cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
         }
-        scroll_to.set(Some(Vec2::new(0.0, y)));
+        // Back to the left edge as well, as the start of a line is.
+        let y = if end { f64::MAX } else { -f64::MAX };
+        scroll_delta.set(Vec2::new(-f64::MAX, y));
     });
 }
 

@@ -922,9 +922,10 @@ fn dismiss_popovers(review: ReviewState, hit_path: Option<&[floem::ElementId]>) 
 }
 
 /// Floem exposes focus membership rather than its private current-focus slot.
-/// Walking the existing root is cheap for the one app-wide shortcut and lets
-/// the overlay restore the exact editor, composer, or sidebar control.
-fn focused_descendant(
+/// Walking the existing root is cheap for an app-wide shortcut, or a page
+/// coming up, and lets the overlay restore the exact editor, composer, or
+/// sidebar control.
+pub(crate) fn focused_descendant(
     cx: &floem::context::EventCx<'_>,
     root: floem::ViewId,
 ) -> Option<floem::ViewId> {

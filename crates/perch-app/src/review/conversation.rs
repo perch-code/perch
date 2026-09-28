@@ -159,12 +159,15 @@ pub fn view(
         let y = state.conversation_scroll.get_untracked();
         (y > 0.0).then_some(floem::kurbo::Point::new(0.0, y))
     })
-    // Page Up and Page Down: the top, or the end. The scroll clamps, so
-    // any depth past the page is its end.
-    .scroll_to(move || {
-        let end = state.page_end.get()?;
+    // Page Up and Page Down: the top, or the end. By a delta past either
+    // end, which the scroll clamps, rather than to a point: a delta shows
+    // the bars that hide while idle, as the wheel does.
+    .scroll_delta(move || {
+        let Some(end) = state.page_end.get() else {
+            return floem::kurbo::Vec2::ZERO;
+        };
         state.page_end.set(None);
-        Some(floem::kurbo::Point::new(0.0, if end { f64::MAX } else { 0.0 }))
+        floem::kurbo::Vec2::new(0.0, if end { f64::MAX } else { -f64::MAX })
     })
     .on_event_cont(
         ScrollChanged::listener(),
@@ -188,8 +191,32 @@ pub fn view(
     let page_id = page.id();
     state.conversation_page.set(Some(page_id));
     conversation_find::wire(state);
+    // The page takes the keyboard when it comes up with nothing else
+    // holding it, as when it replaces the code and the editor goes with
+    // the focus: floem hands a bare key, Page Down or `a`, only to what
+    // has the focus, and with nothing focused it goes nowhere. Not from a
+    // composer, which takes the keyboard itself as it opens, nor from the
+    // find bar; and not from the sidebar's list, or whatever else the
+    // reader left it with. Asked from the first layout, as a request made
+    // while the page is being built is dropped.
+    let asked = Rc::new(std::cell::Cell::new(false));
+    // And back to the page when a composer on it closes.
+    floem::reactive::Effect::new(move |was_open: Option<bool>| {
+        let open = state.composer.with(Option::is_some);
+        if was_open == Some(true) && !open {
+            page_id.request_focus();
+        }
+        open
+    });
     Stack::new((page, find::bar(state, find::Pane::Conversation)))
-        .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+        .on_event_cont(el::UpdatePhaseLayout, move |cx, _| {
+            if !asked.replace(true)
+                && state.composer.with_untracked(Option::is_none)
+                && !state.find_focused.get_untracked()
+                && crate::ui::focused_descendant(cx, page_id.root()).is_none()
+            {
+                page_id.request_focus();
+            }
             conversation_find::laid_out(state)
         })
         .on_cleanup(move || {
@@ -2001,5 +2028,41 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert_eq!(title.get_visual_rect_no_clip().y0, top);
+    }
+
+    /// The page keys work before the page is clicked: floem hands them
+    /// only to what has the focus, so the page takes it as it comes up,
+    /// the first time and again in place of the code.
+    #[test]
+    fn the_page_keys_work_on_a_page_nobody_clicked() {
+        let (mut harness, _, state) = app_harness();
+        let root = harness.root_id();
+        let title = move || find(root, "conversation-title").unwrap();
+        let top = title().get_visual_rect_no_clip().y0;
+        harness.dispatch_event(page_key(true));
+        harness.rebuild();
+        harness.paint();
+        assert!(
+            title().get_visual_rect_no_clip().y0 < top,
+            "the first page did not move"
+        );
+
+        harness.dispatch_event(page_key(false));
+        harness.rebuild();
+        harness.paint();
+        state.show_tab(crate::review::model::ItemTab::Code);
+        harness.rebuild();
+        harness.paint();
+        state.show_tab(crate::review::model::ItemTab::Conversation);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(title().get_visual_rect_no_clip().y0, top);
+        harness.dispatch_event(page_key(true));
+        harness.rebuild();
+        harness.paint();
+        assert!(
+            title().get_visual_rect_no_clip().y0 < top,
+            "the page back from Code did not move"
+        );
     }
 }
