@@ -15,7 +15,7 @@ use floem::views::{
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::items::{Direction, ItemSort, SidebarTab};
+use crate::items::{Direction, InboxShow, ItemSort, SidebarTab};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::{item_row, OpenItem};
@@ -254,7 +254,9 @@ fn filter_button(state: AppState) -> impl IntoView {
     let narrowed = move || {
         state.item_filters.with(|f| match f.tab {
             SidebarTab::Inbox => {
-                f.inbox_unread_only || f.repository.is_some() || state.notification_reason.with(Option::is_some)
+                f.inbox_show != InboxShow::All
+                    || f.repository.is_some()
+                    || state.notification_reason.with(Option::is_some)
             }
             SidebarTab::Worktrees => {
                 let d = crate::items::ItemFilters::default();
@@ -389,8 +391,8 @@ fn notification_filter_menu(state: AppState) -> Menu {
     });
 
     let current_repo = f.repository.clone();
-    let mut repositories =
-        state.notifications.with(|threads| crate::inbox::repository_options(threads));
+    let source = state.inbox_source(f.inbox_show);
+    let mut repositories = source.with(|threads| crate::inbox::repository_options(threads));
     if let Some(selected) = current_repo.as_ref() {
         if !repositories.iter().any(|repo| repo.eq_ignore_ascii_case(selected)) {
             repositories.push(selected.clone());
@@ -398,19 +400,17 @@ fn notification_filter_menu(state: AppState) -> Menu {
         }
     }
 
-    let unread_only = f.inbox_unread_only;
+    let current_show = f.inbox_show;
     let mut menu = Menu::new().submenu("Show", {
         let set = set.clone();
-        move |sub| {
-            let (unread, all) = (set.clone(), set.clone());
-            sub.item("Unread", move |item| {
-                item.checked(unread_only)
-                    .action(move || unread(Box::new(|f| f.inbox_unread_only = true)))
-            })
-            .item("All", move |item| {
-                item.checked(!unread_only)
-                    .action(move || all(Box::new(|f| f.inbox_unread_only = false)))
-            })
+        move |mut sub| {
+            for (label, show) in [("Unread", InboxShow::Unread), ("All", InboxShow::All), ("Done", InboxShow::Done)] {
+                let set = set.clone();
+                sub = sub.item(label, move |item| {
+                    item.checked(current_show == show).action(move || set(Box::new(move |f| f.inbox_show = show)))
+                });
+            }
+            sub
         }
     });
     menu = menu.separator();
@@ -438,7 +438,7 @@ fn notification_filter_menu(state: AppState) -> Menu {
     });
 
     let current_reason = state.notification_reason.get_untracked();
-    let mut reasons = state.notifications.with(|threads| crate::inbox::reason_options(threads));
+    let mut reasons = source.with(|threads| crate::inbox::reason_options(threads));
     if let Some(selected) = current_reason.as_ref() {
         if !reasons.iter().any(|(wire, _)| wire == selected) {
             reasons.push((selected.clone(), selected.clone()));
@@ -856,11 +856,47 @@ mod tests {
         let (mut harness, state) = harness();
         click_tab(&mut harness, SidebarTab::Inbox);
         assert!(find(harness.root_id(), "Read discussion").is_some());
-        set_filters(state, |f| f.inbox_unread_only = true);
+        set_filters(state, |f| f.inbox_show = InboxShow::Unread);
         harness.rebuild();
         harness.paint();
         assert!(find(harness.root_id(), "Read discussion").is_none());
         assert!(find(harness.root_id(), "Unread pull request").is_some());
+    }
+
+    /// Show › Done lists the threads marked Done instead of the inbox's,
+    /// and a row's action there moves it back rather than marking it Done.
+    #[test]
+    fn inbox_can_show_the_done_and_offers_to_move_them_back() {
+        let (mut harness, state) = harness();
+        click_tab(&mut harness, SidebarTab::Inbox);
+        state.done_notifications.set(vec![notification(
+            "20",
+            "org/one",
+            "Finished thread",
+            SubjectKind::Issue,
+            false,
+        )]);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Finished thread").is_none(), "not in the inbox");
+
+        set_filters(state, |f| f.inbox_show = InboxShow::Done);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Read discussion").is_none());
+        let row = find(harness.root_id(), "notification row:20").expect("no Done row");
+        let rect = row.get_visual_rect_no_clip();
+        harness.pointer_move(rect.center().x, rect.center().y);
+        harness.rebuild();
+        harness.paint();
+        let row = find(harness.root_id(), "notification row:20").unwrap();
+        assert!(find(row, "move to inbox").is_some(), "no way back on hover");
+        assert!(find(row, "mark done").is_none());
+
+        state.done_notifications.set(Vec::new());
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "No notifications marked Done").is_some());
     }
 
     /// A worktree whose directory goes leaves Worktrees and stays in

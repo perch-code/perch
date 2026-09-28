@@ -16,6 +16,7 @@ use perch_github::{CheckRunState, SubjectKind, SubjectState, Thread};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
+use crate::items::InboxShow;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::nav_row;
@@ -24,12 +25,13 @@ use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph, state_glyp
 /// The notification list under the current search, repository, and reason
 /// filters. GitHub's ordering is retained.
 pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+    let showing_done = move || state.item_filters.with(|f| f.inbox_show == InboxShow::Done);
     Stack::vertical((
         dyn_container(
-            move || visible_notifications(state).is_empty(),
-            |empty| {
+            move || (visible_notifications(state).is_empty(), showing_done()),
+            |(empty, done)| {
                 if empty {
-                    Label::new("No matching notifications")
+                    Label::new(if done { "No notifications marked Done" } else { "No matching notifications" })
                         .style(|s| {
                             s.font_size(theme::TEXT_META)
                                 .color(theme::NAV_SUBTLE)
@@ -42,17 +44,21 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
             },
         ),
         dyn_stack(
-            move || visible_notifications(state),
-            |thread: &Thread| {
+            move || {
+                let done = showing_done();
+                visible_notifications(state).into_iter().map(move |thread| (thread, done))
+            },
+            |(thread, done): &(Thread, bool)| {
                 (
                     thread.id.clone(),
+                    *done,
                     thread.unread,
                     thread.updated_at.to_string(),
                     // The face and the state arrive after the row does.
                     thread.subject_snapshot.clone(),
                 )
             },
-            move |thread| notification_row(state, backend.clone(), thread),
+            move |(thread, done)| notification_row(state, backend.clone(), thread, done),
         )
         .style(|s| s.flex_col().width_full().gap(1.0)),
     ))
@@ -67,7 +73,9 @@ pub fn visible_notifications(state: AppState) -> Vec<Thread> {
     state.visible_inbox()
 }
 
-fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> impl IntoView {
+/// A row of the inbox, or with `done` of Show › Done, where the row's
+/// action moves it back instead.
+fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread, done: bool) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let unread = thread.unread;
     let title = thread.subject.title.clone();
@@ -87,7 +95,7 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> im
         nav_row::glyph_box(notification_glyph(&thread)),
         nav_row::lines(
             nav_row::title_label(title, false, move || unread),
-            notification_trailing(state, hovered, action_backend, action_thread)
+            notification_trailing(state, hovered, action_backend, action_thread, done)
                 .style(|s| s.pointer_events_auto()),
             byline(state, &thread),
         ),
@@ -115,7 +123,7 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread) -> im
         })
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
-        .context_menu(move || notification_menu(state, menu_backend.clone(), &menu_thread))
+        .context_menu(move || notification_menu(state, menu_backend.clone(), &menu_thread, done))
         .style(|s| nav_row::row_style(s, false));
     Container::new(row).style(nav_row::row_gutter)
 }
@@ -190,12 +198,14 @@ fn byline(state: AppState, thread: &Thread) -> impl IntoView {
 }
 
 /// The title's right end: the unread dot and the age, or, while the
-/// pointer is over the row, Done and the menu in their place.
+/// pointer is over the row, Done (Move to Inbox on a Done row) and the
+/// menu in their place.
 fn notification_trailing(
     state: AppState,
     hovered: RwSignal<bool>,
     backend: Rc<Backend>,
     thread: Thread,
+    done_row: bool,
 ) -> impl IntoView {
     let unread = thread.unread;
     let at = thread.updated_at;
@@ -214,14 +224,27 @@ fn notification_trailing(
             let done_thread = thread.clone();
             let menu_backend = backend.clone();
             let menu_thread = thread.clone();
-            Stack::horizontal((
+            let action = if done_row {
+                icon_button(
+                    || SidebarIcon::Undo,
+                    || theme::FG_SUBTLE,
+                    move || done_backend.restore_notification(&done_thread.id),
+                )
+                .debug_name("move to inbox")
+                .into_any()
+            } else {
                 icon_button(
                     || SidebarIcon::Check,
                     || theme::FG_SUBTLE,
                     move || done(state, &done_backend, &done_thread),
-                ),
+                )
+                .debug_name("mark done")
+                .into_any()
+            };
+            Stack::horizontal((
+                action,
                 nav_row::more_button(move || {
-                    notification_menu(state, menu_backend.clone(), &menu_thread)
+                    notification_menu(state, menu_backend.clone(), &menu_thread, done_row)
                 }),
             ))
             .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(4.0))
@@ -245,7 +268,15 @@ fn done(state: AppState, backend: &Backend, thread: &Thread) {
     }
 }
 
-fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread) -> Menu {
+fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, done_row: bool) -> Menu {
+    if done_row {
+        let id = thread.id.clone();
+        return Menu::new().item("Move to Inbox", move |item| {
+            let backend = backend.clone();
+            let id = id.clone();
+            item.action(move || backend.restore_notification(&id))
+        });
+    }
     let unread_backend = backend.clone();
     let unread_id = thread.id.clone();
     let unread = thread.unread;

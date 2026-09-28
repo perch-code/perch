@@ -45,6 +45,10 @@ still GitHub's.
   clears the local mark and lets the thread return.
 - **Unsubscribe** ignores future activity on the thread, marks its current
   notification done, and remembers it the same way.
+- **Show › Done**, in the Inbox's filter menu, lists the threads marked Done
+  in Perch that GitHub still lists. **Move to Inbox**, on the row or its menu,
+  drops the local mark and puts the thread back. GitHub's public API has no
+  way to undo Done, so github.com keeps it under Done.
 - Pull requests and issues open inside Perch. Other notification types remain
   first-class inbox rows and open on GitHub.
 

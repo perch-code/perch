@@ -36,9 +36,10 @@ mod review_store;
 /// timeline lists. Version 23 keeps each GitHub thread's own id and
 /// whether the reader may resolve it. Version 24 keeps the instructions a
 /// worktree review was run with. Version 30 keeps the `HEAD` a review of
-/// uncommitted work was captured over. Schemas 13 through 23 migrate in place so
-/// local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 31;
+/// uncommitted work was captured over. Version 32 keeps the thread a Done
+/// mark hides, for the Inbox's Done list. Schemas 13 through 23 migrate in
+/// place so local conversations and agent history are never discarded.
+pub const SCHEMA_VERSION: u32 = 32;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -173,7 +174,8 @@ CREATE TABLE threads (
 );
 CREATE TABLE notification_dismissals (
     thread_id   TEXT PRIMARY KEY,
-    updated_at  TEXT NOT NULL
+    updated_at  TEXT NOT NULL,
+    json        TEXT
 );
 CREATE TABLE items (
     id               TEXT PRIMARY KEY,
@@ -447,6 +449,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             28 => tx.execute_batch(ACTIVITY_SCHEMA)?,
             29 => review_store::add_snapshot_worktree_parent(&tx)?,
             30 => fold_saved_into_pinned(&tx)?,
+            31 => add_dismissed_thread_column(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -460,6 +463,25 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
         from: version,
         to: SCHEMA_VERSION,
     })
+}
+
+/// A Done mark keeps the thread it hides. The marks already made have
+/// none, so the stored validator goes too: the next poll fetches the whole
+/// list rather than a 304, and fills in the ones GitHub still lists.
+fn add_dismissed_thread_column(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    let present: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('notification_dismissals') WHERE name='json')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !present {
+        tx.execute("ALTER TABLE notification_dismissals ADD COLUMN json TEXT", [])?;
+    }
+    tx.execute(
+        "DELETE FROM meta WHERE key = ?1",
+        params![NOTIFICATIONS_LAST_MODIFIED_KEY],
+    )?;
+    Ok(())
 }
 
 /// Save folded into Pin. A saved row with no pin is pinned as of when it
@@ -2488,6 +2510,27 @@ impl Cache {
         threads: &[Thread],
         last_modified: Option<&str>,
     ) -> Result<Vec<Thread>, CacheError> {
+        self.replace_threads(threads, last_modified, false)
+    }
+
+    /// The same for a poll's whole list from GitHub, which also refreshes
+    /// the Done list: each Done mark keeps its thread as GitHub last sent
+    /// it, and a thread GitHub no longer lists leaves the Done list while
+    /// its mark stays.
+    pub fn store_notification_snapshot(
+        &self,
+        threads: &[Thread],
+        last_modified: Option<&str>,
+    ) -> Result<Vec<Thread>, CacheError> {
+        self.replace_threads(threads, last_modified, true)
+    }
+
+    fn replace_threads(
+        &self,
+        threads: &[Thread],
+        last_modified: Option<&str>,
+        snapshot: bool,
+    ) -> Result<Vec<Thread>, CacheError> {
         let tx = self.conn.unchecked_transaction()?;
         let dismissals = {
             let mut stmt = tx.prepare(
@@ -2508,10 +2551,20 @@ impl Cache {
             }
             dismissals
         };
+        if snapshot {
+            tx.execute("UPDATE notification_dismissals SET json = NULL", [])?;
+        }
         let mut visible = Vec::with_capacity(threads.len());
         for thread in threads {
             match dismissals.get(&thread.id) {
-                Some(dismissed_at) if thread.updated_at <= *dismissed_at => {}
+                Some(dismissed_at) if thread.updated_at <= *dismissed_at => {
+                    if snapshot {
+                        tx.execute(
+                            "UPDATE notification_dismissals SET json=?2 WHERE thread_id=?1",
+                            params![thread.id, serde_json::to_string(thread)?],
+                        )?;
+                    }
+                }
                 Some(_) => {
                     tx.execute(
                         "DELETE FROM notification_dismissals WHERE thread_id=?1",
@@ -2555,12 +2608,10 @@ impl Cache {
     }
 
     /// Remember that this exact notification revision was marked Done in
-    /// Perch. The mark deliberately outlives the replaceable thread snapshot.
-    pub fn dismiss_notification(
-        &self,
-        thread_id: &str,
-        updated_at: Timestamp,
-    ) -> Result<(), CacheError> {
+    /// Perch, and the thread, for the Done list. The mark deliberately
+    /// outlives the replaceable thread snapshot.
+    pub fn dismiss_notification(&self, thread: &Thread) -> Result<(), CacheError> {
+        let (thread_id, updated_at) = (thread.id.as_str(), thread.updated_at);
         let tx = self.conn.unchecked_transaction()?;
         let previous = tx
             .query_row(
@@ -2581,10 +2632,11 @@ impl Cache {
             .filter(|previous| *previous > updated_at)
             .unwrap_or(updated_at);
         tx.execute(
-            "INSERT INTO notification_dismissals (thread_id, updated_at)
-             VALUES (?1, ?2)
-             ON CONFLICT(thread_id) DO UPDATE SET updated_at=excluded.updated_at",
-            params![thread_id, dismissed_at.to_string()],
+            "INSERT INTO notification_dismissals (thread_id, updated_at, json)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(thread_id) DO UPDATE
+                 SET updated_at=excluded.updated_at, json=excluded.json",
+            params![thread_id, dismissed_at.to_string(), serde_json::to_string(thread)?],
         )?;
         let cached_updated_at = tx
             .query_row(
@@ -2627,6 +2679,42 @@ impl Cache {
                 .is_none_or(|dismissed_at| thread.updated_at > *dismissed_at)
         });
         Ok(threads)
+    }
+
+    /// The threads marked Done that GitHub still lists, newest first, as
+    /// its list is.
+    pub fn load_done_threads(&self) -> Result<Vec<Thread>, CacheError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT json FROM notification_dismissals WHERE json IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut threads: Vec<Thread> = Vec::new();
+        for row in rows {
+            threads.push(serde_json::from_str(&row?)?);
+        }
+        threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.id.cmp(&a.id)));
+        Ok(threads)
+    }
+
+    /// Take a Done mark back, returning the thread it hid. `None` when
+    /// there was no mark, or it kept no thread.
+    pub fn restore_notification(&self, thread_id: &str) -> Result<Option<Thread>, CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let json = tx
+            .query_row(
+                "SELECT json FROM notification_dismissals WHERE thread_id=?1",
+                params![thread_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        tx.execute(
+            "DELETE FROM notification_dismissals WHERE thread_id=?1",
+            params![thread_id],
+        )?;
+        let thread = json.map(|json| serde_json::from_str(&json)).transpose()?;
+        tx.commit()?;
+        Ok(thread)
     }
 
     fn notification_dismissals(&self) -> Result<HashMap<String, Timestamp>, CacheError> {
@@ -5847,7 +5935,7 @@ mod tests {
         );
         assert_eq!(cache.load_item(&item.id).unwrap(), Some(item));
         cache
-            .dismiss_notification("19", stamp("2026-09-19T12:00:00Z"))
+            .dismiss_notification(&notification_thread("19", "2026-09-19T12:00:00Z"))
             .unwrap();
     }
 
@@ -6193,6 +6281,39 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM items WHERE saved != 0", [], |r| r.get(0))
             .unwrap();
         assert_eq!(still_saved, 0);
+    }
+
+    #[test]
+    fn schema_31_keeps_its_done_marks_and_refetches_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let dismissed = notification_thread("1", "2026-09-19T12:00:00Z");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache
+                .store_threads(&[], Some("Sat, 19 Sep 2026 12:00:00 GMT"))
+                .unwrap();
+            cache
+                .conn
+                .execute_batch(
+                    "ALTER TABLE notification_dismissals DROP COLUMN json;
+                     INSERT INTO notification_dismissals (thread_id, updated_at)
+                     VALUES ('1', '2026-09-19T12:00:00Z');",
+                )
+                .unwrap();
+            cache.set_meta("schema_version", "31").unwrap();
+        }
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 31, to: SCHEMA_VERSION });
+        assert_eq!(cache.notifications_last_modified().unwrap(), None);
+        assert!(cache.load_done_threads().unwrap().is_empty());
+
+        // The first poll finds the thread the old mark hides.
+        let visible = cache
+            .store_notification_snapshot(std::slice::from_ref(&dismissed), None)
+            .unwrap();
+        assert!(visible.is_empty());
+        assert_eq!(cache.load_done_threads().unwrap(), vec![dismissed]);
     }
 
     #[test]
@@ -7547,7 +7668,7 @@ mod tests {
                 Some("Sat, 19 Sep 2026 12:00:00 GMT"),
             )
             .unwrap();
-            c.dismiss_notification(&dismissed.id, dismissed.updated_at)
+            c.dismiss_notification(&dismissed)
                 .unwrap();
             assert_eq!(c.load_threads().unwrap(), vec![other.clone()]);
         }
@@ -7568,8 +7689,7 @@ mod tests {
     fn newer_activity_clears_done_and_returns_in_github_order() {
         let c = Cache::open_in_memory().unwrap();
         let dismissed = notification_thread("1", "2026-09-19T12:00:00Z");
-        c.dismiss_notification(&dismissed.id, dismissed.updated_at)
-            .unwrap();
+        c.dismiss_notification(&dismissed).unwrap();
 
         let older = notification_thread("1", "2026-09-19T11:00:00Z");
         let other = notification_thread("2", "2026-09-19T12:30:00Z");
@@ -7589,11 +7709,10 @@ mod tests {
     fn a_stale_done_cannot_hide_newer_activity_or_regress_the_watermark() {
         let c = Cache::open_in_memory().unwrap();
         let dismissed = notification_thread("1", "2026-09-19T12:00:00Z");
-        c.dismiss_notification(&dismissed.id, dismissed.updated_at)
-            .unwrap();
+        c.dismiss_notification(&dismissed).unwrap();
 
-        let stale = stamp("2026-09-19T11:00:00Z");
-        c.dismiss_notification(&dismissed.id, stale).unwrap();
+        let stale = notification_thread("1", "2026-09-19T11:00:00Z");
+        c.dismiss_notification(&stale).unwrap();
         assert_eq!(
             c.notification_dismissals().unwrap().get(&dismissed.id),
             Some(&dismissed.updated_at)
@@ -7602,8 +7721,55 @@ mod tests {
         let newer = notification_thread("1", "2026-09-20T09:00:00Z");
         c.store_threads(std::slice::from_ref(&newer), None)
             .unwrap();
-        c.dismiss_notification(&newer.id, stale).unwrap();
+        c.dismiss_notification(&stale).unwrap();
         assert_eq!(c.load_threads().unwrap(), vec![newer]);
+    }
+
+    #[test]
+    fn done_threads_list_newest_first_and_restore_takes_the_mark_back() {
+        let c = Cache::open_in_memory().unwrap();
+        let older = notification_thread("1", "2026-09-19T11:00:00Z");
+        let newer = notification_thread("2", "2026-09-19T12:00:00Z");
+        let other = notification_thread("3", "2026-09-19T10:00:00Z");
+        c.store_threads(&[newer.clone(), older.clone(), other.clone()], None)
+            .unwrap();
+        c.dismiss_notification(&older).unwrap();
+        c.dismiss_notification(&newer).unwrap();
+        assert_eq!(c.load_done_threads().unwrap(), vec![newer.clone(), older.clone()]);
+        assert_eq!(c.load_threads().unwrap(), vec![other.clone()]);
+
+        assert_eq!(c.restore_notification(&older.id).unwrap(), Some(older.clone()));
+        assert_eq!(c.load_done_threads().unwrap(), vec![newer.clone()]);
+        assert_eq!(c.restore_notification(&older.id).unwrap(), None);
+
+        // With the mark gone, the next poll lists it again.
+        let visible = c
+            .store_notification_snapshot(&[newer, older.clone(), other.clone()], None)
+            .unwrap();
+        assert_eq!(visible, vec![older, other]);
+    }
+
+    #[test]
+    fn a_poll_refreshes_done_threads_and_drops_those_github_no_longer_lists() {
+        let c = Cache::open_in_memory().unwrap();
+        let listed = notification_thread("1", "2026-09-19T12:00:00Z");
+        let gone = notification_thread("2", "2026-09-19T11:00:00Z");
+        c.dismiss_notification(&listed).unwrap();
+        c.dismiss_notification(&gone).unwrap();
+
+        let mut renamed = listed.clone();
+        renamed.subject.title = "renamed".into();
+        // Editing the inbox leaves the Done list alone.
+        c.store_threads(&[], None).unwrap();
+        assert_eq!(c.load_done_threads().unwrap().len(), 2);
+
+        let visible = c
+            .store_notification_snapshot(std::slice::from_ref(&renamed), None)
+            .unwrap();
+        assert!(visible.is_empty());
+        assert_eq!(c.load_done_threads().unwrap(), vec![renamed]);
+        // The mark stays, so the thread stays hidden if GitHub lists it again.
+        assert!(c.notification_dismissals().unwrap().contains_key(&gone.id));
     }
 
     #[test]

@@ -79,6 +79,30 @@ impl std::fmt::Display for SidebarTab {
     }
 }
 
+/// Inbox's Show: every thread, the unread ones, or the ones marked Done,
+/// to move back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InboxShow {
+    #[default]
+    All,
+    Unread,
+    Done,
+}
+
+impl InboxShow {
+    fn key(self) -> &'static str {
+        match self {
+            InboxShow::All => "all",
+            InboxShow::Unread => "unread",
+            InboxShow::Done => "done",
+        }
+    }
+
+    fn from_key(s: &str) -> Option<Self> {
+        [InboxShow::All, InboxShow::Unread, InboxShow::Done].into_iter().find(|v| v.key() == s)
+    }
+}
+
 /// What Browse lists: one of GitHub's fixed views, or Recent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BrowseView {
@@ -246,8 +270,7 @@ pub struct ItemFilters {
     pub sort: ItemSort,
     pub show_pr_status: bool,
     pub direction: Direction,
-    /// Inbox's Show: only the unread threads.
-    pub inbox_unread_only: bool,
+    pub inbox_show: InboxShow,
     pub browse: BrowseView,
     /// The repository Browse › By repository lists, last picked.
     pub browse_repository: Option<String>,
@@ -264,7 +287,7 @@ impl Default for ItemFilters {
             sort: ItemSort::LastActivity,
             show_pr_status: true,
             direction: Direction::Newest,
-            inbox_unread_only: false,
+            inbox_show: InboxShow::All,
             browse: BrowseView::Recent,
             browse_repository: None,
             browse_closed: false,
@@ -279,13 +302,13 @@ impl ItemFilters {
     /// so local names can contain delimiters, percent signs, or spaces.
     pub fn to_meta(&self) -> String {
         format!(
-            "tab={};repository={};sort={};show_pr_status={};direction={};unread={};browse={};browse_repository={};closed={}",
+            "tab={};repository={};sort={};show_pr_status={};direction={};inbox={};browse={};browse_repository={};closed={}",
             self.tab.key(),
             self.repository.as_deref().map(encode_meta_value).unwrap_or_default(),
             self.sort.key(),
             u8::from(self.show_pr_status),
             self.direction.key(),
-            u8::from(self.inbox_unread_only),
+            self.inbox_show.key(),
             self.browse.key(),
             self.browse_repository.as_deref().map(encode_meta_value).unwrap_or_default(),
             u8::from(self.browse_closed),
@@ -341,7 +364,12 @@ impl ItemFilters {
                 "sort" => out.sort = ItemSort::from_key(value).ok_or_else(bad)?,
                 "show_pr_status" => out.show_pr_status = parse_flag(value).ok_or_else(bad)?,
                 "direction" => out.direction = Direction::from_key(value).ok_or_else(bad)?,
-                "unread" => out.inbox_unread_only = parse_flag(value).ok_or_else(bad)?,
+                "inbox" => out.inbox_show = InboxShow::from_key(value).ok_or_else(bad)?,
+                // Before Done, Show was only ever Unread or All.
+                "unread" => {
+                    out.inbox_show =
+                        if parse_flag(value).ok_or_else(bad)? { InboxShow::Unread } else { InboxShow::All }
+                }
                 "browse" => out.browse = BrowseView::from_key(value).ok_or_else(bad)?,
                 "browse_repository" => out.browse_repository = repository(value)?,
                 "closed" => out.browse_closed = parse_flag(value).ok_or_else(bad)?,
@@ -884,7 +912,7 @@ mod tests {
             sort: ItemSort::LastOpened,
             show_pr_status: false,
             direction: Direction::Oldest,
-            inbox_unread_only: true,
+            inbox_show: InboxShow::Done,
             browse: BrowseView::Repository,
             browse_repository: Some("slatedb/slatedb".into()),
             browse_closed: true,
@@ -902,6 +930,8 @@ mod tests {
             Some("owner/repo")
         );
         assert_eq!(ItemFilters::parse("repository=").unwrap().repository, None);
+        assert_eq!(ItemFilters::parse("unread=1").unwrap().inbox_show, InboxShow::Unread, "as saved before Done");
+        assert_eq!(ItemFilters::parse("unread=0").unwrap().inbox_show, InboxShow::All);
         for gone in [";group=", ";show_empty=", ";status=", ";kinds=", ";saved=", ";scope="] {
             assert!(!meta.contains(gone), "{gone}");
         }

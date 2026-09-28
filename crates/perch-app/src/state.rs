@@ -13,7 +13,7 @@ use jiff::Timestamp;
 use perch_github::{AgentConfig, DeclaredRepo, Item, Thread};
 
 use crate::backend::{Event, Status};
-use crate::items::{BrowseView, SidebarTab};
+use crate::items::{BrowseView, InboxShow, SidebarTab};
 use crate::ui::agents::model::AgentRunSummary;
 
 /// Whether a box is checked.
@@ -103,6 +103,9 @@ pub struct AppState {
     /// Perch's visible notification list, in GitHub response order after local
     /// Done watermarks have been applied.
     pub notifications: RwSignal<Vec<Thread>>,
+    /// The threads marked Done in Perch that GitHub still lists, newest
+    /// first: Inbox's Show › Done.
+    pub done_notifications: RwSignal<Vec<Thread>>,
     /// A poll's items the drawer is holding back because they would move
     /// its rows, until the reader asks for them or does something that
     /// sends the list again.
@@ -283,6 +286,7 @@ impl AppState {
             polls: RwSignal::new(0),
             items: RwSignal::new(Vec::new()),
             notifications: RwSignal::new(Vec::new()),
+            done_notifications: RwSignal::new(Vec::new()),
             pending_items: RwSignal::new(None),
             pending_notifications: RwSignal::new(None),
             notifications_polled: RwSignal::new(false),
@@ -2229,6 +2233,7 @@ impl AppState {
                 self.notifications.set(notifications);
                 self.pending_notifications.set(None);
             }
+            Event::DoneNotifications(threads) => self.done_notifications.set(threads),
             Event::NotificationsPolled(notifications) => {
                 let first = !self.notifications_polled.get_untracked();
                 self.notifications_polled.set(true);
@@ -2560,21 +2565,35 @@ impl AppState {
                 != self.visible_thread_ids(incoming)
     }
 
-    /// GitHub's threads under the drawer's filters.
+    /// GitHub's threads under the drawer's filters: the inbox's, or under
+    /// Show › Done the ones marked Done.
     pub fn visible_inbox(&self) -> Vec<Thread> {
-        let (unread, repository) = self.item_filters.with(|f| (f.inbox_unread_only, f.repository.clone()));
+        let (show, repository) = self.item_filters.with(|f| (f.inbox_show, f.repository.clone()));
         let reason = self.notification_reason.get();
         let query = self.item_query.get();
-        self.notifications.with(|threads| {
-            crate::inbox::filter(threads, unread, repository.as_deref(), reason.as_deref(), &query)
+        self.inbox_source(show).with(|threads| {
+            crate::inbox::filter(threads, show == InboxShow::Unread, repository.as_deref(), reason.as_deref(), &query)
         })
     }
 
+    /// The list Inbox's Show draws from.
+    pub fn inbox_source(&self, show: InboxShow) -> RwSignal<Vec<Thread>> {
+        if show == InboxShow::Done {
+            self.done_notifications
+        } else {
+            self.notifications
+        }
+    }
+
     /// The ids of the threads `threads` would give under the drawer's
-    /// filters, in order.
+    /// filters, in order. None under Show › Done, which a poll of the
+    /// inbox does not move.
     fn visible_thread_ids(&self, threads: &[Thread]) -> Vec<String> {
-        let (unread, repository) =
-            self.item_filters.with_untracked(|f| (f.inbox_unread_only, f.repository.clone()));
+        let (show, repository) = self.item_filters.with_untracked(|f| (f.inbox_show, f.repository.clone()));
+        if show == InboxShow::Done {
+            return Vec::new();
+        }
+        let unread = show == InboxShow::Unread;
         let reason = self.notification_reason.get_untracked();
         let query = self.item_query.get_untracked();
         crate::inbox::filter(threads, unread, repository.as_deref(), reason.as_deref(), &query)
@@ -2604,6 +2623,9 @@ impl AppState {
             });
             (held.0.iter().filter(|hit| !shown.contains(&hit_key(hit))).count(), "result")
         } else if self.item_filters.with(|f| f.tab) == SidebarTab::Inbox {
+            if self.item_filters.with(|f| f.inbox_show) == InboxShow::Done {
+                return None;
+            }
             let incoming = self.pending_notifications.get()?;
             let shown: HashSet<String> = self
                 .notifications

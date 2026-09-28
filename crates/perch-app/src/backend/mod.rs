@@ -121,6 +121,11 @@ pub enum Command {
     DoneNotification {
         thread_id: String,
     },
+    /// Take a Done back: the thread returns to Perch's inbox. GitHub's
+    /// public API has no way back, so github.com still files it as Done.
+    RestoreNotification {
+        thread_id: String,
+    },
     /// A new window, with a view of its own: nothing open, and its own
     /// navigation sequence.
     WindowOpened {
@@ -740,6 +745,9 @@ pub enum Event {
     /// The notification list again, from a poll or a look at its subjects
     /// rather than something the reader did.
     NotificationsPolled(Vec<Thread>),
+    /// The threads marked Done in Perch that GitHub still lists, newest
+    /// first: Inbox's Show › Done.
+    DoneNotifications(Vec<Thread>),
     /// GitHub has news about the open item that is not on screen yet.
     /// The view offers to fetch it rather than moving under the reader.
     OpenItemChanged {
@@ -2280,6 +2288,12 @@ impl Backend {
         });
     }
 
+    pub fn restore_notification(&self, thread_id: &str) {
+        let _ = self.commands.send(Command::RestoreNotification {
+            thread_id: thread_id.to_string(),
+        });
+    }
+
     pub fn mark_notification_unread(&self, thread_id: &str) {
         let _ = self.commands.send(Command::MarkNotificationUnread {
             thread_id: thread_id.to_string(),
@@ -3163,6 +3177,12 @@ async fn run(
                 }
                 Err(e) => tracing::warn!(error = %e, "could not load cached notifications"),
             }
+            match guard.load_done_threads() {
+                Ok(threads) => {
+                    let _ = events.send(Event::DoneNotifications(threads));
+                }
+                Err(e) => tracing::warn!(error = %e, "could not load Done notifications"),
+            }
             for key in UI_META_KEYS {
                 if let Ok(Some(value)) = guard.meta(key) {
                     let _ = events.send(Event::Meta {
@@ -3556,6 +3576,9 @@ async fn run(
             }
             Command::MarkNotificationUnread { thread_id } => {
                 ctx.mark_notification_unread(&thread_id);
+            }
+            Command::RestoreNotification { thread_id } => {
+                ctx.restore_notification(&thread_id);
             }
             Command::WindowOpened {
                 navigation_requests,
@@ -5163,10 +5186,17 @@ impl Ctx {
         // at again, which the snapshot's own timestamp says. The run a
         // workflow run notification is about is carried the same way, and
         // looked for again when a re-run moves the thread on.
+        // Done threads are carried the same way, as they come back to the
+        // Done list.
+        let done = self
+            .with_cache(|c| c.load_done_threads())
+            .and_then(Result::ok)
+            .unwrap_or_default();
         let (local_unread, local_read, snapshots, runs) = self
             .notifications
             .lock()
             .map(|current| {
+                let carried = || current.iter().chain(&done);
                 (
                     current
                         .iter()
@@ -5178,8 +5208,7 @@ impl Ctx {
                         .filter(|thread| thread.local_read)
                         .map(|thread| ((thread.id.clone(), thread.updated_at), thread.last_read_at))
                         .collect::<std::collections::HashMap<_, _>>(),
-                    current
-                        .iter()
+                    carried()
                         .filter_map(|thread| {
                             thread
                                 .subject_snapshot
@@ -5187,8 +5216,7 @@ impl Ctx {
                                 .map(|snapshot| (thread.id.clone(), snapshot))
                         })
                         .collect::<std::collections::HashMap<_, _>>(),
-                    current
-                        .iter()
+                    carried()
                         .filter_map(|thread| {
                             thread
                                 .run_snapshot
@@ -5216,12 +5244,15 @@ impl Ctx {
                 thread.run_snapshot = runs.get(&thread.id).cloned();
             }
         }
-        if let Some(result) = self.with_cache(|c| c.store_threads(&threads, last_modified)) {
+        if let Some(result) =
+            self.with_cache(|c| c.store_notification_snapshot(&threads, last_modified))
+        {
             match result {
                 Ok(visible) => threads = visible,
                 Err(e) => tracing::warn!(error = %e, "could not cache notifications"),
             }
         }
+        self.send_done_notifications();
         let current_keys: std::collections::HashSet<(String, Timestamp)> = threads
             .iter()
             .map(|thread| (thread.id.clone(), thread.updated_at))
@@ -5302,16 +5333,11 @@ impl Ctx {
     /// endpoint can return Done history again under `all=true`, so the local
     /// watermark is what keeps the row out until newer activity arrives.
     fn dismiss_notification(&self, thread_id: &str) {
-        let updated_at = self.notifications.lock().ok().and_then(|threads| {
-            threads
-                .iter()
-                .find(|thread| thread.id == thread_id)
-                .map(|thread| thread.updated_at)
+        let thread = self.notifications.lock().ok().and_then(|threads| {
+            threads.iter().find(|thread| thread.id == thread_id).cloned()
         });
-        if let Some(updated_at) = updated_at {
-            if let Some(Err(error)) =
-                self.with_cache(|cache| cache.dismiss_notification(thread_id, updated_at))
-            {
+        if let Some(thread) = thread {
+            if let Some(Err(error)) = self.with_cache(|cache| cache.dismiss_notification(&thread)) {
                 tracing::warn!(thread = %thread_id, error = %error, "could not remember notification dismissal");
                 self.notice(format!(
                     "The notification was marked Done, but Perch could not remember it: {error}"
@@ -5321,6 +5347,47 @@ impl Ctx {
         self.edit_notifications(|threads| {
             threads.retain(|thread| thread.id != thread_id);
         });
+        self.send_done_notifications();
+    }
+
+    /// Take the Done mark back and put the thread where GitHub's newest-
+    /// first order has it. GitHub keeps it as Done: there is no public way
+    /// back, and its list returns Done threads under `all=true` anyway.
+    fn restore_notification(&self, thread_id: &str) {
+        let restored = match self.with_cache(|cache| cache.restore_notification(thread_id)) {
+            Some(Ok(thread)) => thread,
+            Some(Err(error)) => {
+                tracing::warn!(thread = %thread_id, error = %error, "could not restore notification");
+                self.notice(format!("Could not move the notification to the inbox: {error}"));
+                return;
+            }
+            None => None,
+        };
+        if let Some(thread) = restored {
+            self.edit_notifications(|threads| {
+                if threads.iter().any(|shown| shown.id == thread.id) {
+                    return;
+                }
+                let at = threads
+                    .iter()
+                    .position(|shown| shown.updated_at < thread.updated_at)
+                    .unwrap_or(threads.len());
+                threads.insert(at, thread);
+            });
+        }
+        self.send_done_notifications();
+    }
+
+    fn send_done_notifications(&self) {
+        match self.with_cache(|cache| cache.load_done_threads()) {
+            Some(Ok(threads)) => {
+                let _ = self.events.send(Event::DoneNotifications(threads));
+            }
+            Some(Err(error)) => {
+                tracing::warn!(error = %error, "could not load Done notifications");
+            }
+            None => {}
+        }
     }
 
     /// Consume a Perch-only unread reminder and report whether GitHub still
@@ -15363,6 +15430,34 @@ mod tests {
                 .unwrap(),
             visible
         );
+    }
+
+    #[tokio::test]
+    async fn a_done_notification_can_be_moved_back_to_the_inbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut newest = thread("6", "six");
+        newest.updated_at = "2026-09-18T12:00:00Z".parse().unwrap();
+        let mut dismissed = thread("7", "seven");
+        dismissed.updated_at = "2026-09-18T11:00:00Z".parse().unwrap();
+        let mut oldest = thread("8", "eight");
+        oldest.updated_at = "2026-09-18T10:00:00Z".parse().unwrap();
+        ctx.replace_notifications(
+            vec![newest.clone(), dismissed.clone(), oldest.clone()],
+            Some("first"),
+        );
+        ctx.dismiss_notification(&dismissed.id);
+        let done = || ctx.with_cache(|cache| cache.load_done_threads().unwrap()).unwrap();
+        assert_eq!(done(), vec![dismissed.clone()]);
+
+        ctx.restore_notification(&dismissed.id);
+        let inbox = vec![newest, dismissed, oldest];
+        assert_eq!(*ctx.notifications.lock().unwrap(), inbox, "back in its place");
+        assert!(done().is_empty());
+
+        // GitHub still lists it, now with no mark to hide it.
+        let visible = ctx.replace_notifications(inbox.clone(), Some("second"));
+        assert_eq!(visible, inbox);
     }
 
     fn pull_request(number: u64) -> PullRequest {
