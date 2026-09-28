@@ -500,6 +500,25 @@ async fn origin_head_in_the_clone_answers_before_the_remote_is_asked() {
     assert_eq!(f.preparer.default_branch(&f.id).await.unwrap(), "develop");
 }
 
+/// Every issue open asked the remote, a second of network each time.
+/// The clone keeps the first answer, and forgets it when a home fetch of
+/// that branch fails, as it does once the branch is renamed.
+#[tokio::test]
+async fn the_clone_remembers_the_default_branch_until_its_fetch_fails() {
+    let f = StoreFixture::new("trunk");
+    assert_eq!(f.preparer.default_branch(&f.id).await.unwrap(), "trunk");
+
+    git(&f.remote, &["branch", "-m", "trunk", "develop"]);
+    assert_eq!(
+        f.preparer.default_branch(&f.id).await.unwrap(),
+        "trunk",
+        "answered from the clone, without asking"
+    );
+
+    assert!(f.preparer.ensure_home(&f.id, "trunk").await.is_err());
+    assert_eq!(f.preparer.default_branch(&f.id).await.unwrap(), "develop");
+}
+
 #[tokio::test]
 async fn a_remote_with_a_detached_head_gets_main() {
     let f = StoreFixture::new("trunk");

@@ -45,6 +45,10 @@ const DEFAULT_POLL_SECS: u64 = 60;
 const LIST_PER_PAGE: usize = 100;
 /// Hard cap on pages for discussion lists.
 const LIST_MAX_PAGES: usize = 100;
+/// API requests in flight at once, across every clone. One at a time left
+/// an open waiting behind whatever the pollers had queued; GitHub asks
+/// for few concurrent requests, not none.
+const API_CONCURRENCY: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -108,9 +112,10 @@ struct Fetched {
 pub struct GitHub {
     octo: Octocrab,
     http: reqwest::Client,
-    /// Serializes API requests across clones so a response that closes the
-    /// rate-limit window gates the next request before it is sent.
-    api_request_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Bounds API requests across clones. Each is checked against the
+    /// rate-limit window once it holds a permit, so a response that closes
+    /// the window gates every request that has not been sent yet.
+    api_requests: Arc<tokio::sync::Semaphore>,
     /// Shared by every clone so one rate-limit response gates all later API
     /// calls, including item fetches spawned outside the poll loop.
     rate_limit_until: Arc<AtomicI64>,
@@ -154,7 +159,7 @@ impl GitHub {
         Ok(Self {
             octo,
             http,
-            api_request_lock: Arc::new(tokio::sync::Mutex::new(())),
+            api_requests: Arc::new(tokio::sync::Semaphore::new(API_CONCURRENCY)),
             rate_limit_until: Arc::new(AtomicI64::new(0)),
             search_limit_until: Arc::new(AtomicI64::new(0)),
             responses: Arc::new(std::sync::Mutex::new(Responses::new(BUDGET_BYTES))),
@@ -237,7 +242,7 @@ impl GitHub {
     /// github.com's notifications inbox.
     pub async fn mark_thread_read(&self, thread_id: &str) -> Result<(), Error> {
         let path = notification_thread_path(thread_id, "")?;
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -254,7 +259,7 @@ impl GitHub {
     /// Remove one notification from github.com's inbox as Done.
     pub async fn mark_thread_done(&self, thread_id: &str) -> Result<(), Error> {
         let path = notification_thread_path(thread_id, "")?;
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -270,7 +275,7 @@ impl GitHub {
     pub async fn ignore_thread(&self, thread_id: &str) -> Result<(), Error> {
         let path = notification_thread_path(thread_id, "/subscription")?;
         let body = serde_json::json!({ "ignored": true });
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -401,7 +406,7 @@ impl GitHub {
             sha: expected_head_sha,
             merge_method: method.as_str(),
         };
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -428,7 +433,7 @@ impl GitHub {
         }
 
         let path = format!("/repos/{owner}/{name}/pulls/{number}");
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -490,7 +495,7 @@ impl GitHub {
             event,
             comments,
         };
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -578,7 +583,7 @@ impl GitHub {
     ) -> Result<ReviewComment, Error> {
         let (owner, name) = repo_parts(repo_full_name)?;
         let path = format!("/repos/{owner}/{name}/pulls/{number}/comments");
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -614,7 +619,7 @@ impl GitHub {
         }
 
         let path = format!("/repos/{owner}/{name}/issues/{number}/comments");
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -649,7 +654,7 @@ impl GitHub {
         }
 
         let path = format!("/repos/{owner}/{name}/issues");
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -1078,7 +1083,7 @@ impl GitHub {
             state_reason: reason.as_str(),
             duplicate_issue_id,
         };
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -1164,7 +1169,7 @@ impl GitHub {
     ) -> Result<crate::search::SearchPage, Error> {
         let q = percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC);
         let path = format!("/search/issues?q={q}&sort=updated&order=desc&per_page={per_page}&page={page}");
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let until = self.search_limit_until.load(Ordering::SeqCst);
         if until > Timestamp::now().as_second() {
@@ -1324,7 +1329,7 @@ impl GitHub {
             base,
             draft,
         };
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -1407,7 +1412,7 @@ impl GitHub {
     /// for the callers that asked conditionally; anything else is an error.
     /// Rate-limit response headers are still used to classify an error.
     async fn get(&self, path: &str, headers: Option<HeaderMap>) -> Result<Fetched, Error> {
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -1463,7 +1468,7 @@ impl GitHub {
         &self,
         payload: &serde_json::Value,
     ) -> Result<(Option<T>, Vec<String>), Error> {
-        let _request_guard = self.api_request_lock.lock().await;
+        let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
@@ -1518,6 +1523,15 @@ impl GitHub {
         let error = classify(status, remaining, reset, retry_after, body);
         self.remember_rate_limit(&error);
         Err(error)
+    }
+
+    /// A place among the requests in flight, held until the response is
+    /// read.
+    async fn api_permit(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.api_requests
+            .acquire()
+            .await
+            .expect("the API semaphore is never closed")
     }
 
     fn check_rate_limit(&self) -> Result<(), Error> {

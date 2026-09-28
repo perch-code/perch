@@ -202,11 +202,27 @@ fn parse_symref_head(out: &str) -> Option<String> {
 pub struct Preparer {
     git: Git,
     store: Store,
+    /// Held while a bare clone is made, so two callers that both find it
+    /// missing do not clone into the same staging directory.
+    cloning: tokio::sync::Mutex<()>,
+    /// Held while a home is fetched and moved, so a home brought up to date
+    /// behind an open issue and one Start work needs do not race on its ref
+    /// and its directory.
+    homes: tokio::sync::Mutex<()>,
 }
+
+/// Where the bare clone remembers its remote's default branch. A clone
+/// made with `--bare` has no `refs/remotes/origin/HEAD` to say so.
+const DEFAULT_BRANCH_KEY: &str = "perch.defaultBranch";
 
 impl Preparer {
     pub fn new(store: Store, token: Option<String>) -> Self {
-        Self { git: Git::new(token), store }
+        Self {
+            git: Git::new(token),
+            store,
+            cloning: tokio::sync::Mutex::new(()),
+            homes: tokio::sync::Mutex::new(()),
+        }
     }
 
     pub fn store(&self) -> &Store {
@@ -341,6 +357,10 @@ impl Preparer {
         if self.store.has_bare_clone(id) {
             return Ok(bare);
         }
+        let _cloning = self.cloning.lock().await;
+        if self.store.has_bare_clone(id) {
+            return Ok(bare);
+        }
 
         if let Some(parent) = bare.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io(e.to_string()))?;
@@ -373,10 +393,13 @@ impl Preparer {
     ///
     /// `refs/remotes/origin/HEAD` in the bare clone answers without the
     /// network when something has set it; a bare clone does not get one
-    /// from `git clone`, so the usual path is one `ls-remote` round trip.
-    /// A remote whose HEAD is not a branch, or an empty repository, gets
-    /// `main`. A remote that cannot be reached is an error, because the
-    /// fetch that follows would fail on it anyway and this says so sooner.
+    /// from `git clone`, so the first answer is one `ls-remote` round trip,
+    /// which the clone then remembers. A home fetch that fails forgets it,
+    /// so a renamed default branch is asked about again. A remote whose
+    /// HEAD is not a branch, or an empty repository, gets `main`, which is
+    /// not remembered. A remote that cannot be reached is an error, because
+    /// the fetch that follows would fail on it anyway and this says so
+    /// sooner.
     pub async fn default_branch(&self, id: &RepoId) -> Result<String, Error> {
         let bare = self.store.bare_path(id);
         let has_bare = self.store.has_bare_clone(id);
@@ -393,6 +416,16 @@ impl Preparer {
                     }
                 }
             }
+            if let Ok(name) = self
+                .git
+                .run(Some(&bare), ["config", "--get", DEFAULT_BRANCH_KEY], QUERY_TIMEOUT)
+                .await
+            {
+                let name = name.trim();
+                if !name.is_empty() {
+                    return Ok(name.to_string());
+                }
+            }
         }
 
         // With a clone, ask its origin, which in a test may be a local path;
@@ -407,7 +440,19 @@ impl Preparer {
             .run(cwd, ["ls-remote", "--symref", &remote, "HEAD"], FETCH_TIMEOUT)
             .await?;
 
-        Ok(parse_symref_head(&out).unwrap_or_else(|| "main".to_string()))
+        let Some(name) = parse_symref_head(&out) else {
+            return Ok("main".to_string());
+        };
+        if has_bare {
+            if let Err(e) = self
+                .git
+                .run(Some(&bare), ["config", DEFAULT_BRANCH_KEY, &name], QUERY_TIMEOUT)
+                .await
+            {
+                tracing::debug!(error = %e, "could not remember the default branch");
+            }
+        }
+        Ok(name)
     }
 
     /// Bring the home checkout up to date with the default branch, making
@@ -424,9 +469,11 @@ impl Preparer {
     /// a home.
     pub async fn ensure_home(&self, id: &RepoId, default_branch: &str) -> Result<PathBuf, Error> {
         let bare = self.ensure_bare(id, |_| {}).await?;
+        let _homes = self.homes.lock().await;
         let fetched = home_ref(default_branch);
 
-        self.git
+        let fetch = self
+            .git
             .run(
                 Some(&bare),
                 [
@@ -437,7 +484,16 @@ impl Preparer {
                 ],
                 FETCH_TIMEOUT,
             )
-            .await?;
+            .await;
+        if let Err(e) = fetch {
+            // The branch may be gone, renamed on GitHub: the next open asks
+            // the remote again rather than repeating what it remembered.
+            let _ = self
+                .git
+                .run(Some(&bare), ["config", "--unset", DEFAULT_BRANCH_KEY], QUERY_TIMEOUT)
+                .await;
+            return Err(e);
+        }
 
         let home = self.store.home_path(id);
 

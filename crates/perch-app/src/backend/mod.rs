@@ -995,8 +995,9 @@ pub enum Event {
         item_id: String,
         discussion: Arc<perch_github::Discussion>,
     },
-    /// An issue's comments, fetched again after a notification about it,
-    /// and the reactions on the issue's own body, read with them.
+    /// An issue's comments, fetched again after a notification about it
+    /// or after an open that showed what was kept, and the reactions on
+    /// the issue's own body, read with them.
     IssueComments {
         item_id: String,
         comments: Arc<Vec<perch_github::IssueComment>>,
@@ -3352,6 +3353,8 @@ async fn run(
         avatars,
         seen_notifications: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        reading_notifications: Default::default(),
+        homes_refreshed: Default::default(),
         notifications: Arc::new(std::sync::Mutex::new(initial_notifications.clone())),
         asked_subjects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         approvals: Default::default(),
@@ -3582,16 +3585,14 @@ async fn run(
                 ctx.clear_notice();
                 if ctx.prepare_notification_open(&thread) {
                     if let Some(github) = ctx.github() {
-                        match github.mark_thread_read(&thread.id).await {
-                            Ok(()) => ctx.notification_read(&thread.id),
-                            Err(e) => {
-                                defer_polls_for_error(
-                                    &e,
-                                    &mut next_auto_poll,
-                                );
-                                tracing::warn!(thread = %thread.id, error = %e, "could not mark notification read");
-                                ctx.notice(format!("Could not mark the notification read: {e}"));
-                            }
+                        // Beside the open, not before it. A rate limit it
+                        // runs into gates the next poll through the client.
+                        if ctx.claim_notification_read(&thread.id) {
+                            let ctx = ctx.clone();
+                            let thread_id = thread.id.clone();
+                            tokio::spawn(async move {
+                                mark_read_on_github(&ctx, &github, &thread_id).await;
+                            });
                         }
                     } else {
                         ctx.notice("A GitHub token is required to mark notifications read");
@@ -3795,7 +3796,9 @@ async fn run(
                         &item_id,
                         attempt_id,
                         submitted,
-                        refresh_open_item_inner(&ctx, &item_id),
+                        async {
+                            refresh_open_item_inner(&ctx, &item_id).await;
+                        },
                     )
                     .await;
                 });
@@ -4868,6 +4871,12 @@ struct Ctx {
     seen_notifications: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
     /// Items whose GitHub side is being fetched again right now.
     refreshing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Notifications GitHub is being asked to mark read right now, so an
+    /// open from Notifications and the open of its subject ask once.
+    reading_notifications: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// When each repository's home checkout was last brought up to date
+    /// behind an open issue, by repository.
+    homes_refreshed: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// Requests Work runs are waiting on the reader for, by run and
     /// request id.
     approvals: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), PendingApproval>>>,
@@ -5446,6 +5455,14 @@ impl Ctx {
             }
             None => {}
         }
+    }
+
+    /// Take the one mark-read request a thread gets while it is unread:
+    /// false when one is already on its way.
+    fn claim_notification_read(&self, thread_id: &str) -> bool {
+        self.reading_notifications
+            .lock()
+            .is_ok_and(|mut reading| reading.insert(thread_id.to_string()))
     }
 
     /// Consume a Perch-only unread reminder and report whether GitHub still
@@ -10522,8 +10539,9 @@ async fn look_for_runs(ctx: &Ctx) {
 }
 
 /// Fetch again what the open item shows from GitHub: the pull request and
-/// its discussion and checks, or the issue's comments.
-async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
+/// its discussion and checks, or the issue with its comments. False when
+/// GitHub could not be reached about an issue.
+async fn refresh_open_item(ctx: &Ctx, item_id: &str) -> bool {
     let view = ctx.view_for(item_id);
     let ctx = &view;
     // One at a time per item: two notifications in one poll would fetch
@@ -10534,17 +10552,18 @@ async fn refresh_open_item(ctx: &Ctx, item_id: &str) {
         .map(|mut s| s.insert(item_id.to_string()))
         .unwrap_or(false);
     if !taken {
-        return;
+        return true;
     }
-    refresh_open_item_inner(ctx, item_id).await;
+    let answered = refresh_open_item_inner(ctx, item_id).await;
     if let Ok(mut s) = ctx.refreshing.lock() {
         s.remove(item_id);
     };
+    answered
 }
 
-async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
+async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) -> bool {
     let Some(github) = ctx.github() else {
-        return;
+        return false;
     };
     let open = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref()
@@ -10552,7 +10571,7 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
             .map(|c| (c.pull_request.clone(), c.issue.clone()))
     });
     let Some((pull_request, issue)) = open else {
-        return;
+        return true;
     };
     if let Some(pr) = pull_request {
         // The snapshot first, so the checks are for the head GitHub ran.
@@ -10564,7 +10583,7 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
                 let Some((_, pull_request)) =
                     install_pull_request_snapshot(ctx, item_id, fresh, None)
                 else {
-                    return;
+                    return true;
                 };
                 pull_request
             }
@@ -10584,7 +10603,7 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
                 })
         });
         if !still_current {
-            return;
+            return true;
         }
         let status_generation = begin_pull_request_status(ctx, item_id, &pr);
         let discussion_generation = ctx.discussion_requests.begin(item_id);
@@ -10594,40 +10613,124 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
         );
     } else if let Some(issue) = issue {
         let (issue, _) = &*issue;
-        match github
-            .fetch_issue_comments(&issue.repo_full_name, issue.number)
-            .await
-        {
-            Ok(comments) => {
-                let events = issue_timeline(&github, issue).await;
-                let mut read = issue_discussion(issue, &comments, &events);
-                if let Err(e) = github.fill_reactions(&mut read).await {
-                    tracing::info!(item = item_id, error = %e, "could not read the reactions again");
-                }
-                let body_reactions = read.reactions;
-                let comments = read.comments;
-                keep_issue_comments(ctx, item_id, issue, &comments, &events);
-                // A question asked next is prompted with these.
-                if let Ok(mut guard) = ctx.slot.lock() {
-                    if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
-                        open.issue = Some(Arc::new((issue.clone(), comments.clone())));
-                    }
-                }
-                if ctx.is_open(item_id) {
-                    ctx.want_avatars(comments.iter().map(|c| c.user_avatar_url.clone()));
-                    let _ = ctx.events.send(Event::IssueComments {
-                        item_id: item_id.to_string(),
-                        comments: Arc::new(comments),
-                        events: Arc::new(events),
-                        body_reactions,
-                    });
-                }
-            }
+        return refresh_open_issue(ctx, &github, item_id, issue).await;
+    }
+    true
+}
+
+/// Fetch an open issue again, with its conversation and timeline, keep
+/// it, and show it. False when GitHub could not be reached about it.
+async fn refresh_open_issue(
+    ctx: &Ctx,
+    github: &GitHub,
+    item_id: &str,
+    issue: &perch_github::Issue,
+) -> bool {
+    let (fresh, conversation) =
+        match fetch_issue_view(github, &issue.repo_full_name, issue.number).await {
+            Ok(fetched) => fetched,
             Err(e) => {
-                tracing::info!(item = item_id, error = %e, "could not fetch the comments again")
+                tracing::info!(item = item_id, error = %e, "could not fetch the issue again");
+                return false;
             }
+        };
+    let Some(issue) = install_fetched_issue(ctx, item_id, fresh) else {
+        return true;
+    };
+    let Some((comments, events)) = conversation else {
+        return true;
+    };
+    let body_reactions = issue.reactions.clone();
+    keep_issue_comments(ctx, item_id, &issue, &comments, &events);
+    // A question asked next is prompted with these.
+    if let Ok(mut guard) = ctx.slot.lock() {
+        if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+            open.issue = Some(Arc::new((issue.clone(), comments.clone())));
         }
     }
+    if ctx.is_open(item_id) {
+        ctx.want_avatars(
+            std::iter::once(issue.author_avatar_url.clone())
+                .chain(comments.iter().map(|c| c.user_avatar_url.clone())),
+        );
+        let _ = ctx.events.send(Event::IssueComments {
+            item_id: item_id.to_string(),
+            comments: Arc::new(comments),
+            events: Arc::new(events),
+            body_reactions,
+        });
+    }
+    true
+}
+
+/// Keep an issue just fetched on its row and in the open view, unless the
+/// row already holds a later one, and hand back the issue the row now
+/// holds. None when the row is gone or is no longer this issue's.
+fn install_fetched_issue(
+    ctx: &Ctx,
+    item_id: &str,
+    fetched: perch_github::Issue,
+) -> Option<perch_github::Issue> {
+    let mut item = ctx.item(item_id)?;
+    let current = item.issue()?;
+    if current.repo_full_name != fetched.repo_full_name || current.number != fetched.number {
+        return None;
+    }
+    let stored = item.subject.as_ref().and_then(ItemSubject::updated_at);
+    if stored_is_newer(stored, Some(fetched.updated_at)) {
+        return Some(current.clone());
+    }
+    if current != &fetched {
+        item.subject = Some(ItemSubject::Issue(fetched.clone()));
+        if let Some(Err(error)) = ctx.with_cache(|cache| cache.update_item(&item)) {
+            tracing::warn!(item = item_id, %error, "could not store the issue refresh");
+        }
+        ctx.send_items();
+        if ctx.is_open(item_id) {
+            let _ = ctx.events.send(Event::IssueUpdated {
+                item_id: item_id.to_string(),
+                item: Arc::new(item),
+                issue: Arc::new(fetched.clone()),
+            });
+        }
+    }
+    Some(fetched)
+}
+
+/// An issue as GitHub has it now: the issue, its conversation and its
+/// timeline, asked for side by side, then the reactions on all of it,
+/// which land on the issue and its comments. The conversation is None
+/// when it could not be read though the issue was.
+async fn fetch_issue_view(
+    github: &GitHub,
+    repo_full_name: &str,
+    number: u64,
+) -> Result<
+    (
+        perch_github::Issue,
+        Option<(Vec<perch_github::IssueComment>, Vec<perch_github::PullEvent>)>,
+    ),
+    perch_github::Error,
+> {
+    let (issue, comments, timeline) = tokio::join!(
+        github.fetch_issue(repo_full_name, number),
+        github.fetch_issue_comments(repo_full_name, number),
+        issue_timeline(github, repo_full_name, number),
+    );
+    let mut issue = issue?;
+    let comments = match comments {
+        Ok(comments) => comments,
+        Err(e) => {
+            tracing::warn!(repo = %repo_full_name, number, error = %e, "could not fetch the comments");
+            return Ok((issue, None));
+        }
+    };
+    let mut read = issue_discussion(&issue, &comments, &timeline);
+    if let Err(e) = github.fill_reactions(&mut read).await {
+        tracing::warn!(repo = %repo_full_name, number, error = %e, "could not read the reactions");
+    }
+    issue.reactions = read.reactions;
+    Ok((issue, Some((read.comments, timeline))))
 }
 
 /// What was done to an issue, as GitHub's timeline lists it. A timeline
@@ -10635,15 +10738,13 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) {
 /// what was fetched still opens.
 async fn issue_timeline(
     github: &perch_github::GitHub,
-    issue: &perch_github::Issue,
+    repo_full_name: &str,
+    number: u64,
 ) -> Vec<perch_github::PullEvent> {
-    match github
-        .fetch_timeline(&issue.repo_full_name, issue.number, &[])
-        .await
-    {
+    match github.fetch_timeline(repo_full_name, number, &[]).await {
         Ok(events) => events,
         Err(e) => {
-            tracing::info!(repo = %issue.repo_full_name, number = issue.number, error = %e, "could not read the timeline");
+            tracing::info!(repo = %repo_full_name, number, error = %e, "could not read the timeline");
             Vec::new()
         }
     }
@@ -11194,7 +11295,15 @@ async fn open_subject(
         );
         return false;
     }
-    read_subject_notifications(ctx, &repo_full_name, kind, number).await;
+    // The notification is read beside the open: GitHub's answer changes
+    // only the row in the sidebar.
+    {
+        let ctx = ctx.clone();
+        let repo_full_name = repo_full_name.clone();
+        tokio::spawn(async move {
+            read_subject_notifications(&ctx, &repo_full_name, kind, number).await;
+        });
+    }
     match kind {
         ItemKind::PullRequest => {
             open_pull_request(ctx, repo_full_name, number, navigation_id).await
@@ -11235,20 +11344,35 @@ async fn read_subject_notifications(
         let Some(github) = ctx.github() else {
             continue;
         };
-        match github.mark_thread_read(&thread.id).await {
-            Ok(()) => ctx.notification_read(&thread.id),
-            Err(e) => {
-                tracing::warn!(thread = %thread.id, error = %e, "could not mark notification read");
-                ctx.notice(format!("Could not mark the notification read: {e}"));
-            }
+        if ctx.claim_notification_read(&thread.id) {
+            mark_read_on_github(ctx, &github, &thread.id).await;
         }
     }
 }
 
-/// Fetch an issue and its comments, store the snapshot on its item, archive
-/// the discussion, and show the issue view. The agent's questions about it
-/// run in the repository's home checkout. Returns false always: there is
-/// no language server to start for an issue.
+/// Ask GitHub to mark a thread read, one the caller has claimed, and
+/// follow its row when it has.
+async fn mark_read_on_github(ctx: &Ctx, github: &GitHub, thread_id: &str) {
+    let result = github.mark_thread_read(thread_id).await;
+    if let Ok(mut reading) = ctx.reading_notifications.lock() {
+        reading.remove(thread_id);
+    }
+    match result {
+        Ok(()) => ctx.notification_read(thread_id),
+        Err(e) => {
+            tracing::warn!(thread = %thread_id, error = %e, "could not mark notification read");
+            ctx.notice(format!("Could not mark the notification read: {e}"));
+        }
+    }
+}
+
+/// Show an issue with its comments, store the snapshot on its item, and
+/// archive the discussion. An issue read before shows at once, as it was
+/// kept, and GitHub's answer follows into the open view; one never read
+/// waits on GitHub, its three reads asked for side by side. The agent's
+/// questions about it run in the repository's home checkout, which is
+/// brought up to date after the issue shows. Returns false always: there
+/// is no language server to start for an issue.
 async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_id: u64) -> bool {
     let events = &ctx.events;
     ctx.send_navigation_event(
@@ -11279,65 +11403,42 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
             })
             .map(|(_, d)| (d.comments, d.events))
             .unwrap_or_default();
-    let (issue, comments, timeline, offline) = if let Some(github) = ctx.github() {
-        match github.fetch_issue(&repo_full_name, number).await {
-            Ok(mut issue) => {
-                // The reactions are read onto the shape the table keeps,
-                // and the issue's own come back off it.
-                let (comments, timeline) = match github
-                    .fetch_issue_comments(&repo_full_name, number)
-                    .await
-                {
-                    Ok(comments) => {
-                        let timeline = issue_timeline(&github, &issue).await;
-                        let mut read = issue_discussion(&issue, &comments, &timeline);
-                        if let Err(e) = github.fill_reactions(&mut read).await {
-                            tracing::warn!(repo = %repo_full_name, number, error = %e, "could not read the reactions");
-                        }
-                        issue.reactions = read.reactions;
-                        (read.comments, timeline)
-                    }
-                    Err(e) => {
-                        tracing::warn!(repo = %repo_full_name, number, error = %e, "could not fetch the comments");
-                        (kept.clone(), kept_events.clone())
-                    }
-                };
-                (issue, comments, timeline, false)
-            }
-            Err(e) => match existing.as_ref().and_then(|i| i.issue().cloned()) {
-                Some(snapshot) => {
-                    tracing::info!(repo = %repo_full_name, number, error = %e, "showing the issue from its snapshot");
-                    ctx.notice("Offline; showing the issue as it was last fetched");
-                    (snapshot, kept.clone(), kept_events.clone(), true)
-                }
-                None => {
-                    ctx.send_navigation_event(
-                        navigation_id,
-                        Event::ReviewFailed {
-                            navigation_id,
-                            message: e.to_string(),
-                        },
-                    );
-                    return false;
-                }
-            },
+    let snapshot = existing.as_ref().and_then(|item| item.issue().cloned());
+    // Whether what shows now is the kept snapshot, to be fetched again
+    // once it does.
+    let mut refetch = false;
+    let (issue, comments, timeline, offline) = match (snapshot, ctx.github()) {
+        (Some(snapshot), Some(_)) => {
+            refetch = true;
+            (snapshot, kept, kept_events, false)
         }
-    } else {
-        match existing.as_ref().and_then(|item| item.issue().cloned()) {
-            Some(snapshot) => {
-                ctx.notice("Offline; showing the issue as it was last fetched");
-                (snapshot, kept.clone(), kept_events.clone(), true)
-            }
-            None => {
+        (Some(snapshot), None) => {
+            ctx.notice("Offline; showing the issue as it was last fetched");
+            (snapshot, kept, kept_events, true)
+        }
+        (None, Some(github)) => match fetch_issue_view(&github, &repo_full_name, number).await {
+            Ok((issue, Some((comments, timeline)))) => (issue, comments, timeline, false),
+            Ok((issue, None)) => (issue, kept, kept_events, false),
+            Err(e) => {
                 ctx.send_navigation_event(
                     navigation_id,
                     Event::ReviewFailed {
                         navigation_id,
-                        message: "A GitHub token is required to fetch that issue".into(),
+                        message: e.to_string(),
                     },
                 );
                 return false;
             }
+        },
+        (None, None) => {
+            ctx.send_navigation_event(
+                navigation_id,
+                Event::ReviewFailed {
+                    navigation_id,
+                    message: "A GitHub token is required to fetch that issue".into(),
+                },
+            );
+            return false;
         }
     };
 
@@ -11355,7 +11456,10 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
         ctx.cancel_committed_archived_navigation(&item.id, navigation_id);
         return false;
     }
-    item.subject = Some(ItemSubject::Issue(issue.clone()));
+    // A snapshot the row holds is at least as new as the one it shows.
+    if !refetch {
+        item.subject = Some(ItemSubject::Issue(issue.clone()));
+    }
     item.archived_at = None;
     item.last_opened_at = now;
     let written = ctx.with_cache(|c| record_open(c, &mut item, is_new));
@@ -11364,99 +11468,34 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
     }
     ctx.send_items();
 
-    // Where a question about it runs: the home checkout, made if needed.
-    let home = match RepoId::parse(&issue.repo_full_name) {
-        Some(repo) if !offline => {
-            let progress = events.clone();
-            let progress_requests = ctx.navigation_requests.clone();
-            let label = repo.full_name();
-            let cloned = ctx
-                .preparer
-                .ensure_bare(&repo, move |step| {
-                    if let perch_git::Step::Cloning { phase, percent } = step {
-                        let _ = progress_requests.with_current(navigation_id, || {
-                            let _ = progress.send(Event::ReviewProgress {
-                                navigation_id,
-                                message: format!("Cloning {label}: {phase}"),
-                                percent,
-                            });
-                        });
-                    }
-                })
-                .await;
-            match cloned {
-                Ok(bare) => match ctx.preparer.default_branch(&repo).await {
-                    Ok(default) => match ctx.preparer.ensure_home(&repo, &default).await {
-                        Ok(path) => Some((bare, path, default)),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "no home checkout");
-                            None
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(error = %e, "no default branch");
-                        None
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(error = %e, "no clone for the issue's repository");
-                    None
-                }
-            }
-        }
-        Some(repo) => {
-            let bare = ctx.preparer.store().bare_path(&repo);
-            let home = ctx.preparer.store().home_path(&repo);
-            home.join(".git")
-                .exists()
-                .then(|| (bare, home, String::from("HEAD")))
-        }
+    // Where a question about it runs: the home checkout as it stands.
+    // Making it, or bringing it up to date, waits until the issue shows.
+    let repo = RepoId::parse(&issue.repo_full_name);
+    let checkout = match &repo {
+        Some(repo) => home_checkout(ctx, repo).await,
         None => None,
     };
-    let checkout = match home {
-        Some((bare, worktree, branch)) => {
-            let head_sha = ctx
-                .preparer
-                .git()
-                .run(
-                    Some(&worktree),
-                    ["rev-parse", "HEAD"],
-                    Duration::from_secs(30),
-                )
-                .await
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-            perch_git::Checkout {
-                worktree,
-                bare,
-                branch,
-                merge_base: head_sha.clone(),
-                head_sha,
-                stale: None,
-            }
+    let checkout = checkout.unwrap_or_else(|| {
+        // No checkout at all: questions cannot run, but the issue can
+        // be read. A directory that does not exist keeps `ask` honest.
+        let missing = ctx.preparer.store().root().join("homes").join("missing");
+        perch_git::Checkout {
+            worktree: missing.clone(),
+            bare: missing,
+            branch: String::new(),
+            head_sha: String::new(),
+            merge_base: String::new(),
+            stale: None,
         }
-        None => {
-            // No checkout at all: questions cannot run, but the issue can
-            // be read. A directory that does not exist keeps `ask` honest.
-            let missing = ctx.preparer.store().root().join("homes").join("missing");
-            perch_git::Checkout {
-                worktree: missing.clone(),
-                bare: missing,
-                branch: String::new(),
-                head_sha: String::new(),
-                merge_base: String::new(),
-                stale: None,
-            }
-        }
-    };
+    });
 
     let item = Arc::new(item);
     let issue = Arc::new(issue);
     let comments = Arc::new(comments);
     let timeline = Arc::new(timeline);
     let scope_gen = next_scope_gen();
-    tracing::info!(repo = %issue.repo_full_name, number, comments = comments.len(), offline, "issue ready");
-    if !offline {
+    tracing::info!(repo = %issue.repo_full_name, number, comments = comments.len(), offline, kept = refetch, "issue ready");
+    if !offline && !refetch {
         keep_issue_comments(ctx, &item.id, &issue, &comments, &timeline);
     }
     let installed = ctx
@@ -11511,7 +11550,103 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
         });
     }
 
+    if refetch {
+        let ctx = ctx.clone();
+        let item_id = item.id.clone();
+        tokio::spawn(async move {
+            if !refresh_open_item(&ctx, &item_id).await && ctx.is_open(&item_id) {
+                ctx.notice("Offline; showing the issue as it was last fetched");
+            }
+        });
+    }
+    if let Some(repo) = repo.filter(|_| !offline) {
+        let ctx = ctx.clone();
+        tokio::spawn(async move { prepare_issue_home(&ctx, &repo).await });
+    }
+
     false
+}
+
+/// The repository's home checkout as it is on disk, which questions about
+/// its issues run in. None when it has not been made.
+async fn home_checkout(ctx: &Ctx, repo: &RepoId) -> Option<perch_git::Checkout> {
+    let store = ctx.preparer.store();
+    let (bare, worktree) = (store.bare_path(repo), store.home_path(repo));
+    if !worktree.join(".git").exists() {
+        return None;
+    }
+    let out = ctx
+        .preparer
+        .git()
+        .run(
+            Some(&worktree),
+            ["rev-parse", "HEAD", "--abbrev-ref", "HEAD"],
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap_or_default();
+    let mut lines = out.lines().map(str::trim);
+    let head_sha = lines.next().unwrap_or_default().to_string();
+    let branch = lines.next().unwrap_or("HEAD").to_string();
+    Some(perch_git::Checkout {
+        worktree,
+        bare,
+        branch,
+        merge_base: head_sha.clone(),
+        head_sha,
+        stale: None,
+    })
+}
+
+/// How long a home brought up to date behind an issue does for the next
+/// issue of its repository.
+const HOME_REFRESH: Duration = Duration::from_secs(60);
+
+/// Make the repository's home checkout, or bring it up to the default
+/// branch, behind an issue that is already showing, and hand it to the
+/// view if an issue of the repository is still open there. One brought
+/// up to date in the last minute is taken as it is, so paging through a
+/// repository's issues fetches once.
+async fn prepare_issue_home(ctx: &Ctx, repo: &RepoId) {
+    let key = repo.full_name().to_lowercase();
+    let due = ctx.homes_refreshed.lock().is_ok_and(|mut refreshed| {
+        let due = refreshed
+            .get(&key)
+            .is_none_or(|at| at.elapsed() >= HOME_REFRESH);
+        if due {
+            refreshed.insert(key.clone(), std::time::Instant::now());
+        }
+        due
+    });
+    if due {
+        let prepared = async {
+            ctx.preparer.ensure_bare(repo, |_| {}).await?;
+            let default = ctx.preparer.default_branch(repo).await?;
+            ctx.preparer.ensure_home(repo, &default).await
+        }
+        .await;
+        if let Err(e) = prepared {
+            tracing::warn!(repo = %key, error = %e, "no home checkout for the issue");
+            // The next issue opened asks again, not the next after a minute.
+            if let Ok(mut refreshed) = ctx.homes_refreshed.lock() {
+                refreshed.remove(&key);
+            }
+            return;
+        }
+    }
+    let Some(checkout) = home_checkout(ctx, repo).await else {
+        return;
+    };
+    if let Ok(mut guard) = ctx.slot.lock() {
+        let open = guard.as_mut().filter(|open| {
+            open.issue
+                .as_ref()
+                .is_some_and(|issue| issue.0.repo_full_name.eq_ignore_ascii_case(&repo.full_name()))
+        });
+        if let Some(open) = open {
+            open.checkout = checkout;
+        }
+    }
 }
 
 /// Resolve a pull request, lay down a checkout on its branch, and report
@@ -15221,6 +15356,8 @@ mod tests {
             avatars: Arc::new(Semaphore::new(1)),
             seen_notifications: Default::default(),
             refreshing: Default::default(),
+            reading_notifications: Default::default(),
+            homes_refreshed: Default::default(),
             notifications: Default::default(),
             asked_subjects: Default::default(),
             approvals: Default::default(),
@@ -15490,6 +15627,28 @@ mod tests {
         // Nothing unread about the subject asks GitHub for anything.
         read_subject_notifications(&ctx, "a/b", ItemKind::PullRequest, 7).await;
         assert_eq!(asked.lock().unwrap().len(), 1);
+    }
+
+    /// An open from Notifications marks the thread read beside the open of
+    /// its subject, which would mark it too: GitHub is asked once.
+    #[tokio::test]
+    async fn a_notification_being_marked_read_is_not_asked_about_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, asked) = serve("205 Reset Content", "");
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        ctx.replace_notifications(vec![thread("7", "seven")], Some("first"));
+        let opened = ctx.notifications.lock().unwrap()[0].clone();
+
+        assert!(ctx.prepare_notification_open(&opened));
+        assert!(ctx.claim_notification_read("7"));
+        read_subject_notifications(&ctx, "a/b", ItemKind::PullRequest, 7).await;
+        assert!(asked.lock().unwrap().is_empty(), "the subject's open left it to the first");
+
+        let github = ctx.github().unwrap();
+        mark_read_on_github(&ctx, &github, "7").await;
+        assert_eq!(asked.lock().unwrap().as_slice(), ["/notifications/threads/7"]);
+        assert!(!ctx.notifications.lock().unwrap()[0].unread);
+        assert!(ctx.claim_notification_read("7"), "released once GitHub answered");
     }
 
     /// GitHub's list can still say unread for a while after it has taken
@@ -20606,6 +20765,65 @@ read eof || true
 
         assert_eq!(description_of(&received), open_pull::DescriptionOutcome::Stopped);
         assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    /// An issue read before shows at once, as it was kept: GitHub's answer
+    /// follows into the open view and onto its row, and the home checkout
+    /// questions run in is made after, not before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_issue_read_before_shows_as_kept_then_as_github_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_path(|path| {
+            if path.starts_with("/repos/a/b/issues/5/") {
+                ("200 OK", "[]".into())
+            } else if path.starts_with("/repos/a/b/issues/5") {
+                (
+                    "200 OK",
+                    r#"{"number":5,"title":"fresh","updated_at":"2026-09-20T00:00:00Z"}"#.into(),
+                )
+            } else {
+                ("404 Not Found", r#"{"message":"Not Found"}"#.into())
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &["a/b"]);
+        owned_clone(&ctx, dir.path());
+        let item = store_issue(&ctx, 5);
+        let navigation_id = ctx.navigation_requests.begin_current();
+
+        open_issue(&ctx, "a/b".into(), 5, navigation_id).await;
+
+        let shown = received
+            .try_iter()
+            .find_map(|event| match event {
+                Event::IssueReady { issue, .. } => Some(issue),
+                _ => None,
+            })
+            .expect("the issue showed");
+        assert_eq!(shown.title, "t", "as it was kept");
+        let home = ctx.preparer.store().home_path(&RepoId::parse("a/b").unwrap());
+        let worktree = |ctx: &Ctx| ctx.slot.lock().unwrap().as_ref().unwrap().checkout.worktree.clone();
+        assert_ne!(worktree(&ctx), home, "no home yet, and the issue did not wait for one");
+
+        let mut fresh = None;
+        for _ in 0..500 {
+            fresh = fresh.or_else(|| {
+                received.try_iter().find_map(|event| match event {
+                    Event::IssueUpdated { issue, .. } => Some(issue),
+                    _ => None,
+                })
+            });
+            if fresh.is_some() && worktree(&ctx) == home {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(fresh.expect("GitHub's answer followed").title, "fresh");
+        assert_eq!(ctx.item(&item.id).unwrap().issue().unwrap().title, "fresh");
+        assert_eq!(worktree(&ctx), home, "the home came after");
+        assert!(home.join("one.txt").is_file());
+        let asked = paths.lock().unwrap().clone();
+        assert!(asked.iter().any(|p| p.starts_with("/repos/a/b/issues/5/comments")));
+        assert!(asked.iter().any(|p| p.starts_with("/repos/a/b/issues/5/timeline")));
     }
 
     /// Open… asks GitHub what a reference's number is, and says so when
