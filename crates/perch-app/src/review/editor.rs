@@ -110,6 +110,19 @@ pub fn editor_pane(
         });
     }
 
+    // An item's first visit to Code opens the tree beside it, open files
+    // or not. Only then, so a tree the reader shuts on the item stays
+    // shut.
+    {
+        let backend = backend.clone();
+        Effect::new(move |_| {
+            if state.tree_wanted.get() {
+                state.tree_wanted.set(false);
+                crate::ui::drawer::show(app, &backend, None);
+            }
+        });
+    }
+
     // The find bar's matches follow the file and the query from here,
     // beside the jump: one effect for the pane, whichever editor is up.
     find::wire(state);

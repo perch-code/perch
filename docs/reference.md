@@ -77,10 +77,10 @@ controls take more than half of it, the pills give way to them rather than
 sit at the centre.
 
 Each item comes back on the mode it was left in, with its tabs, until Perch
-quits; it opens on Conversation the first time. Code with no file open opens
-the first changed file in the tree's order, and with no changes says so.
-Closing the last file's tab leaves Code showing. Conversation cannot be
-closed.
+quits; it opens on Conversation the first time. Code with no file open says
+so, or says there are no changes, and an item's first visit to Code opens the
+tree beside it. Closing the last file's tab leaves Code showing. Conversation
+cannot be closed.
 
 | Action | Key |
 |---|---|
@@ -754,8 +754,9 @@ The tile at the right end of Code's tabs, after the layout tiles, opens and
 shuts it, as Codex has its folder there, and so do `Cmd-Shift-E` from anywhere
 and the drawer's own close button. From Conversation, `Cmd-Shift-E` goes to
 Code with the tree open. On Conversation the tree is hidden, and it comes back
-with Code. It waits for an opening item to be ready. Whether it is open and
-how wide it is are remembered between launches.
+with Code. It waits for an opening item to be ready. It opens by itself on an
+item's first visit to Code, and after that stays as it was left. Whether it is
+open and how wide it is are remembered between launches.
 
 The tree is the changed files until its filter is turned off, with the scope
 button and the viewed count above it. An item opens on the scope last picked

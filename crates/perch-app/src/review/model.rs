@@ -143,6 +143,7 @@ pub struct Pane {
     file_places: HashMap<String, FilePlace>,
     agents_unfolded: bool,
     agents_open_runs: HashSet<String>,
+    code_seen: bool,
 }
 
 impl Default for Pane {
@@ -156,6 +157,7 @@ impl Default for Pane {
             file_places: HashMap::new(),
             agents_unfolded: false,
             agents_open_runs: HashSet::new(),
+            code_seen: false,
         }
     }
 }
@@ -1197,6 +1199,12 @@ pub struct ReviewState {
     /// Each item's pane as it was last left, by item, for the life of the
     /// app.
     pub panes: RwSignal<HashMap<String, Pane>>,
+    /// Whether the open item has been on Code, so the tree opens for it
+    /// the first time only.
+    pub code_seen: RwSignal<bool>,
+    /// The tree asked for by the item's first visit to Code, taken by the
+    /// editor pane, which holds the backend handle to save it as open.
+    pub tree_wanted: RwSignal<bool>,
     /// Whether the Agents section on Conversation is unfolded into the item's
     /// runs.
     pub agents_unfolded: RwSignal<bool>,
@@ -1654,6 +1662,8 @@ impl ReviewState {
             historical_review_rollback: RwSignal::new(None),
             tab: RwSignal::new(ItemTab::Conversation),
             panes: RwSignal::new(HashMap::new()),
+            code_seen: RwSignal::new(false),
+            tree_wanted: RwSignal::new(false),
             agents_unfolded: RwSignal::new(false),
             agents_open_runs: RwSignal::new(HashSet::new()),
             pending_run_reveal: RwSignal::new(None),
@@ -2034,29 +2044,15 @@ impl ReviewState {
         self.historical_review_rollback.set(None);
     }
 
-    /// Show Conversation or Code. Code with no file open opens the first
-    /// changed file, in the tree's order, as the pane is built; with no
-    /// changes it opens nothing, and the pane says so.
+    /// Show Conversation or Code. Code with no file open opens none, and
+    /// the pane says so; the item's first visit to Code asks for the tree
+    /// beside it, to pick one from.
     pub fn show_tab(&self, tab: ItemTab) {
-        if tab == ItemTab::Code
-            && self.tabs.with_untracked(|t| t.is_empty())
-            && self.pending_open.with_untracked(|p| p.is_none())
-        {
-            if let Some(first) = self.first_change() {
-                self.pending_open.set(Some(first));
-            }
+        if tab == ItemTab::Code && !self.code_seen.get_untracked() {
+            self.code_seen.set(true);
+            self.tree_wanted.set(true);
         }
         self.tab.set(tab);
-    }
-
-    /// The first changed file in the tree's order: directories before
-    /// files, as the rail lists them.
-    pub fn first_change(&self) -> Option<String> {
-        self.changed_files.with_untracked(|files| {
-            let entries =
-                crate::review::tree::with_paths(&[], files.iter().map(|f| f.path.as_str()))?;
-            entries.into_iter().find(|e| !e.is_dir).map(|e| e.path)
-        })
     }
 
     /// Whether the open item has a checkout, and so files to open.
@@ -2083,6 +2079,7 @@ impl ReviewState {
             agents_unfolded: self.agents_unfolded.get_untracked(),
             agents_open_runs: self.agents_open_runs.get_untracked(),
             file_places: self.file_places.get_untracked(),
+            code_seen: self.code_seen.get_untracked(),
         };
         self.panes.update(|panes| {
             panes.insert(id, pane);
@@ -2123,6 +2120,8 @@ impl ReviewState {
             self.agents_unfolded.set(pane.agents_unfolded);
             self.agents_open_runs.set(pane.agents_open_runs);
             self.file_places.set(pane.file_places);
+            self.code_seen.set(pane.code_seen);
+            self.tree_wanted.set(false);
             if !paths.is_empty() {
                 self.loading.update(|loading| {
                     for path in &paths {
@@ -5441,43 +5440,55 @@ mod tests {
         assert_eq!(state.composer_draft.get(), "why?");
     }
 
-    /// Code with no file open opens the first changed file, in the
-    /// tree's order, directories first; with no changes it opens nothing.
-    /// Closing the last file's tab leaves Code showing, not Conversation.
+    /// Code with no file open opens none, with changes or without. The
+    /// item's first visit asks for the tree, and later ones do not, nor
+    /// the first again once the item comes back. Closing the last file's
+    /// tab leaves Code showing, not Conversation.
     #[test]
-    fn code_opens_the_first_change_and_stays_when_its_last_tab_closes() {
-        let changed = |path: &str| perch_git::ChangedFile {
-            path: path.into(),
+    fn code_opens_no_file_asks_for_the_tree_once_and_stays_when_its_last_tab_closes() {
+        let state = ReviewState::new();
+        let open = |id: &str| {
+            let mut item = perch_github::Item::new(
+                "slatedb/slatedb",
+                "2026-09-18T09:59:00Z".parse().unwrap(),
+            );
+            item.id = id.into();
+            state.begin("Reading the branch");
+            state.item.set(Some(Arc::new(item)));
+            state.restore_pane();
+        };
+        open("a");
+        state.changed_files.set(Arc::new(vec![perch_git::ChangedFile {
+            path: "src/a.rs".into(),
             old_path: None,
             status: perch_git::ChangeStatus::Modified,
             additions: 1,
             deletions: 0,
             binary: false,
             head_blob: None,
-        };
-        let state = ReviewState::new();
+        }]));
         state.show_tab(ItemTab::Code);
         assert_eq!(state.tab.get(), ItemTab::Code);
-        assert_eq!(state.pending_open.get(), None, "nothing changed, nothing to open");
+        assert_eq!(state.pending_open.get(), None, "a change opened by itself");
+        assert!(state.tree_wanted.get(), "the first visit did not ask for the tree");
 
-        state.show_tab(ItemTab::Conversation);
-        state.changed_files.set(Arc::new(vec![
-            changed("README.md"),
-            changed("src/z.rs"),
-            changed("src/a/b.rs"),
-        ]));
-        assert_eq!(state.first_change().as_deref(), Some("src/a/b.rs"));
-        state.show_tab(ItemTab::Code);
-        assert_eq!(state.pending_open.get().as_deref(), Some("src/a/b.rs"));
-
-        // With a tab open, Code shows it and asks for nothing.
-        state.pending_open.set(None);
-        state.open_tab("src/z.rs");
+        state.tree_wanted.set(false);
         state.show_tab(ItemTab::Conversation);
         state.show_tab(ItemTab::Code);
-        assert_eq!(state.pending_open.get(), None);
+        assert!(!state.tree_wanted.get(), "a later visit asked for the tree");
 
-        state.close_tab("src/z.rs");
+        // Another item's first visit asks; back on the first, none does.
+        open("b");
+        state.show_tab(ItemTab::Code);
+        assert!(state.tree_wanted.get(), "another item's first visit did not ask");
+        open("a");
+        assert!(!state.tree_wanted.get(), "the ask followed the item away");
+        state.show_tab(ItemTab::Conversation);
+        state.show_tab(ItemTab::Code);
+        assert!(!state.tree_wanted.get(), "the item came back and asked again");
+
+        state.open_tab("src/a.rs");
+        state.close_tab("src/a.rs");
         assert_eq!(state.active.get(), None);
         assert_eq!(state.tab.get(), ItemTab::Code);
     }

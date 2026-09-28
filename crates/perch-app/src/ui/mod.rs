@@ -1436,10 +1436,10 @@ mod tests {
     }
 
     /// Cmd-Shift-1 and Cmd-Shift-2 pick Conversation and Code. Code with
-    /// no file open opens the first change; with none, the pane says so,
-    /// and the tree stays shut.
+    /// no file open opens none, and the item's first visit opens the tree
+    /// beside the pane that says so; with no changes, the pane says that.
     #[test]
-    fn the_mode_keys_switch_and_code_opens_the_first_change() {
+    fn the_mode_keys_switch_and_code_opens_no_file_with_the_tree() {
         use crate::review::model::ItemTab;
         use std::sync::Arc;
         let (mut harness, review) = window_with_a_file_open();
@@ -1467,8 +1467,12 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert_eq!(review.tab.get(), ItemTab::Code);
-        assert_eq!(review.active.get().as_deref(), Some("src/x.rs"), "the first change opened");
-        assert!(named(harness.root_id(), "files-panel").is_none(), "the tree opened over a file");
+        assert_eq!(review.active.get(), None, "a change opened by itself");
+        assert!(named(harness.root_id(), "files-panel").is_some(), "the first visit had no tree");
+        assert!(
+            named(harness.root_id(), "\"No file open\"").is_some(),
+            "the pane does not say no file is open"
+        );
 
         // With no changes and nothing open, the pane says there is
         // nothing changed.
@@ -1480,7 +1484,6 @@ mod tests {
         harness.paint();
         assert_eq!(review.tab.get(), ItemTab::Code);
         assert_eq!(review.active.get(), None);
-        assert!(named(harness.root_id(), "files-panel").is_none(), "the tree opened by itself");
         assert!(
             named(harness.root_id(), "\"No changes\"").is_some(),
             "the pane does not say there are no changes"

@@ -590,10 +590,11 @@ mod tests {
         // As a real open leaves it: `opening` stays set while the item is.
         state.opening.set(true);
         // The sidebar shut, so the window has the room to dock, and a file
-        // open on Code, where the tiles are, so Code does not open the tree
-        // for want of one.
+        // open on Code, where the tiles are, on a visit after the item's
+        // first, so Code does not open the tree itself.
         app.sidebar_open.set(false);
         state.open_tab("README.md");
+        state.code_seen.set(true);
         state.show_tab(ItemTab::Code);
         state.tree.set(Arc::new(vec![perch_git::TreeEntry::new("README.md", false)]));
         harness.rebuild();
