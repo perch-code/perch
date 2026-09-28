@@ -780,10 +780,22 @@ fn divider_layer(
     )
     .style(|s| s.size_full());
 
+    // A click on a bar gives the keyboard to the layer, which stays as
+    // the bars scroll, so `]` works after it as after a click in the
+    // gutter. Not to the header: floem's theme makes a label focusable,
+    // and a header that took the keyboard would lose it when its bar
+    // scrolled away.
     Container::new(stack)
         .style(|s| s.size_full().position(Position::Relative))
         .clip()
-        .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none())
+        .style(|s| {
+            s.absolute()
+                .inset(0.0)
+                .size_full()
+                .pointer_events_none()
+                .focusable()
+                .class(floem::views::LabelClass, |s| s.focus_none())
+        })
 }
 
 /// One divider's bar over its rows. The header is the part that takes the
@@ -2976,12 +2988,12 @@ mod window {
         assert_eq!(state.cursor_line.get(), 0);
 
         // A bare key goes to whatever has the keyboard, and the window's
-        // handler catches it on the way down. A click on the gutter gives
-        // it to the gutter: a line's change bar, away from its slot, and
-        // not its number, which would take the keyboard itself and lose it
-        // when the jump scrolls the row away.
+        // handler catches it on the way down. A click on a line's number
+        // gives it to the gutter, not to the number, which would lose it
+        // when the jump scrolls the row away and leave `[` with nowhere
+        // to go.
         let (left, top) = pane_origin();
-        harness.click(left + gutter_width() - 2.5, top + 3.0 * line_height + line_height / 2.0);
+        harness.click(left + gutter_width() - 14.0, top + 3.0 * line_height + line_height / 2.0);
         harness.rebuild();
 
         // The next change after the top starts at the ghost of old bottom,
@@ -3009,6 +3021,27 @@ mod window {
         harness.paint();
         assert_eq!(state.cursor_line.get(), 0);
         assert_eq!(viewport.get().y0, 0.0);
+    }
+
+    /// A click on a divider's header leaves the keyboard with the layer
+    /// the bars are drawn in, which the jump does not scroll away, so the
+    /// keys go on working after it.
+    #[test]
+    fn the_bracket_keys_work_after_a_click_on_a_header() {
+        let (mut harness, state) = one_long_run();
+        let header = find(harness.root_id(), "@@ -59,64 +59,64 @@").expect("the header is drawn");
+        let at = header.get_visual_rect_no_clip().center();
+        harness.click(at.x, at.y);
+        harness.rebuild();
+
+        harness.dispatch_event(bracket(true));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.cursor_line.get(), 62);
+        harness.dispatch_event(bracket(false));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.cursor_line.get(), 0, "the keyboard went with the header");
     }
 
     #[test]

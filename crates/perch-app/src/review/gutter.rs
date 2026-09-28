@@ -259,7 +259,9 @@ fn column<V: IntoView + 'static>(
         // A bare key goes to the view that has the keyboard, and the
         // window's handler catches it on the way down. A click in the code
         // gives the editor the keyboard; a click here gives it to the
-        // gutter, so `]` works after either.
+        // gutter, so `]` works after either. Not to a number: floem's theme
+        // makes every label focusable, and a number that took the keyboard
+        // would take it away with it when a jump scrolls its row off.
         .style(move |s| {
             s.width(width)
                 .height_full()
@@ -268,6 +270,7 @@ fn column<V: IntoView + 'static>(
                 .border_right(RULE)
                 .border_color(theme::BORDER_MUTED)
                 .focusable()
+                .class(floem::views::LabelClass, |s| s.focus_none())
         })
 }
 
