@@ -94,6 +94,13 @@ pub const BADGE_BG: Color = Color::from_rgb8(0xed, 0xed, 0xea);
 /// draws its own with, so it reads as the same mark here.
 pub const REACTED_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
 pub const REACTED_BORDER: Color = Color::from_rgb8(0x54, 0xae, 0xff);
+/// The pill saying GitHub has something newer: GitHub's blue wash and
+/// rule, so it stands out from the grey list it floats over. Refresh sits
+/// on white inside it and deepens to the blue GitHub hovers with.
+pub const NEWS_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
+pub const NEWS_BORDER: Color = Color::from_rgb8(0x54, 0xae, 0xff);
+pub const NEWS_FG: Color = Color::from_rgb8(0x09, 0x69, 0xda);
+pub const NEWS_BUTTON_HOVER: Color = Color::from_rgb8(0xb6, 0xe3, 0xff);
 pub const SHADOW: Color = Color::from_rgba8(0x20, 0x20, 0x1e, 0x12);
 
 /// Avatar placeholders, cycled by name so a row is stable between launches.

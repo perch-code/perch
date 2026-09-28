@@ -556,7 +556,7 @@ pub fn news_pill(
         Stack::horizontal((
             Label::derived(label).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG)
+                    .color(theme::NEWS_FG)
             }),
             Label::new("Refresh").debug_name("news refresh").style(move |s| {
                 s.height(22.0)
@@ -564,8 +564,8 @@ pub fn news_pill(
                     .padding_horiz(9.0)
                     .font_size(theme::TEXT_META)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
-                    .background(if hovered.get() { theme::ACCENT_SUBTLE } else { theme::BADGE_BG })
+                    .color(theme::NEWS_FG)
+                    .background(if hovered.get() { theme::NEWS_BUTTON_HOVER } else { theme::CANVAS })
                     .border_radius(11.0)
             }),
         ))
@@ -584,9 +584,9 @@ pub fn news_pill(
                 .height(30.0)
                 .padding_left(13.0)
                 .padding_right(4.0)
-                .background(theme::CANVAS)
+                .background(theme::NEWS_BG)
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::NEWS_BORDER)
                 .border_radius(15.0)
                 .box_shadow_blur(18.0)
                 .box_shadow_v_offset(5.0)
