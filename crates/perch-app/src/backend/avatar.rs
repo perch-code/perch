@@ -6,6 +6,12 @@
 //! radius, so a face half under the top of a list, where its clip is cut
 //! square, would draw square. A circle in the picture's alpha has a soft
 //! rim whatever draws it.
+//!
+//! It is shrunk here too. GitHub sends identicons at 420 px whatever size
+//! is asked for, and vger keeps a picture in its atlas at its own size: a
+//! few of those filled the atlas past the point where it clears itself,
+//! so it cleared and refilled every frame, and the face that no longer
+//! fit was never drawn.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -19,6 +25,10 @@ use image::{imageops, ImageFormat};
 /// an encode, is most of what that costs: some milliseconds a face in a
 /// debug build.
 static CUT: LazyLock<Mutex<HashMap<u64, Vec<u8>>>> = LazyLock::new(Default::default);
+
+/// The most pixels a side a face keeps: what `GitHub::fetch_avatar` asks
+/// for, and more than the largest face drawn (24 pt) needs at 2x.
+const SIDE: u32 = 64;
 
 /// The face as the window draws it, from what GitHub sent: its `circle`,
 /// or the bytes as they came when they are not a picture.
@@ -40,8 +50,8 @@ pub(crate) fn drawn(bytes: Vec<u8>) -> Vec<u8> {
     }
 }
 
-/// The picture in `bytes` cropped square about its centre, cut to the
-/// circle inside that square, as PNG. Only the alpha changes: the colour
+/// The picture in `bytes` cropped square about its centre, shrunk to
+/// `SIDE` if it is bigger, cut to the circle inside that square, as PNG. Only the alpha changes: the colour
 /// under the rim stays the picture's, so scaling the picture blends the
 /// rim with its own colours rather than with black. `None` for bytes that
 /// are not a picture.
@@ -53,7 +63,10 @@ fn circle(bytes: &[u8]) -> Option<Vec<u8>> {
     }
     let (x, y) = ((picture.width() - side) / 2, (picture.height() - side) / 2);
     let mut square = imageops::crop_imm(&picture, x, y, side, side).to_image();
-    let radius = side as f32 / 2.0;
+    if side > SIDE {
+        square = imageops::resize(&square, SIDE, SIDE, imageops::FilterType::Lanczos3);
+    }
+    let radius = square.width() as f32 / 2.0;
     for (px, py, pixel) in square.enumerate_pixels_mut() {
         // How much of the pixel is inside, over a rim a pixel wide.
         let (dx, dy) = (px as f32 + 0.5 - radius, py as f32 + 0.5 - radius);
@@ -100,6 +113,18 @@ pub(crate) mod tests {
         let rim = cut.pixels().filter(|p| p[3] > 0 && p[3] < 255).count();
         assert!(rim > 16, "the rim is stepped: {rim} pixels between");
         assert!(cut.pixels().all(|p| p.0[..3] == [200, 40, 90]));
+    }
+
+    /// An identicon, which GitHub sends at 420 px, comes back at the size
+    /// asked for, so it takes no more of vger's atlas than any other face.
+    #[test]
+    fn a_big_face_is_shrunk_to_the_size_asked_for() {
+        let cut = image::load_from_memory(&drawn(picture(420, 420)))
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(cut.dimensions(), (SIDE, SIDE));
+        assert_eq!(cut.get_pixel(0, 0)[3], 0, "the corner is outside the circle");
+        assert_eq!(cut.get_pixel(SIDE / 2, SIDE / 2)[3], 255);
     }
 
     /// The same picture sent again is cut once: the second time is the
