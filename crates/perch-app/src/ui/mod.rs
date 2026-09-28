@@ -408,21 +408,31 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     usage::close(review, true);
                     return EventPropagation::Stop;
                 }
-                // Page Up and Page Down go to the top and the end of
-                // Conversation or of the open file, with the keyboard in
-                // the page, the code or a composer: a composer is a few
-                // lines, and the page is what there is to page through.
-                // Caught here, as the editors would take them for half a
-                // screen. A file with no editor, a picture or one too big
-                // to show, has nowhere to go.
+                // Page Up and Page Down move Conversation or the open file
+                // by a page, Cmd-Up and Cmd-Down to its top and its end.
+                // The page keys work from the code, the page or a composer:
+                // a composer is a few lines, and the page is what there is
+                // to page through. A composer keeps Cmd-Up and Cmd-Down,
+                // the start and end of its text. Caught here, as the editors
+                // would take them for half a screen and for the caret alone.
+                // A file with no editor, a picture or one too big to show,
+                // has nowhere to go.
                 let boxed = state.search_focused.get()
                     || review.review_open.get()
                     || review.find_focused.get();
-                if matches!(key.code, Code::PageUp | Code::PageDown)
-                    && key.modifiers.is_empty()
-                    && !boxed
-                    && review.is_open()
-                {
+                use crate::review::model::Paging;
+                let paging = match key.code {
+                    Code::PageUp if key.modifiers.is_empty() => Some(Paging::Up),
+                    Code::PageDown if key.modifiers.is_empty() => Some(Paging::Down),
+                    Code::ArrowUp if key.modifiers == OS_MOD => Some(Paging::Top),
+                    Code::ArrowDown if key.modifiers == OS_MOD => Some(Paging::End),
+                    _ => None,
+                }
+                .filter(|p| {
+                    matches!(p, Paging::Up | Paging::Down) || !review.composer_focused.get()
+                })
+                .filter(|_| !boxed && review.is_open());
+                if let Some(paging) = paging {
                     let showing = match review.tab.get() {
                         crate::review::model::ItemTab::Conversation => true,
                         crate::review::model::ItemTab::Code => {
@@ -431,7 +441,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         }
                     };
                     if showing {
-                        review.page_end.set(Some(key.code == Code::PageDown));
+                        review.paging.set(Some(paging));
                         return EventPropagation::Stop;
                     }
                 }

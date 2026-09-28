@@ -857,9 +857,11 @@ stacked layout.
 | Match case, whole word, regular expression | `Alt-Cmd-C`, `Alt-Cmd-W`, `Alt-Cmd-R` |
 | Close the bar | `Escape` |
 
-`Page Up` and `Page Down` go to the top and the end of the open file, the
-caret with them, and of Conversation. They work from the code, the page or a
-composer; the find bar and the other boxes keep them.
+`Page Up` and `Page Down` scroll the open file or Conversation by a page,
+keeping a line of the last in sight, and leave the caret where it is. They
+work from the code, the page or a composer. `Cmd-Up` and `Cmd-Down` go to the
+top and the end, the caret with them in the code; a composer keeps them for
+its own text. The find bar and the other boxes keep all four.
 
 An SVG opens as the picture it draws rather than as its markup, fitted to the
 pane. A changed one shows before and after side by side, both at one scale,

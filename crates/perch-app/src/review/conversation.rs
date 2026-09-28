@@ -19,7 +19,7 @@ use floem::views::{
 use crate::backend::Backend;
 use crate::review::cards;
 use crate::review::{conversation_find, find};
-use crate::review::model::{ReviewFindingFilter, ReviewState};
+use crate::review::model::{Paging, ReviewFindingFilter, ReviewState};
 use crate::review::threads::{self, ThreadFace};
 use crate::review::timeline::{timeline, Card};
 use crate::review::OpenFile;
@@ -159,15 +159,29 @@ pub fn view(
         let y = state.conversation_scroll.get_untracked();
         (y > 0.0).then_some(floem::kurbo::Point::new(0.0, y))
     })
-    // Page Up and Page Down: the top, or the end. By a delta past either
-    // end, which the scroll clamps, rather than to a point: a delta shows
-    // the bars that hide while idle, as the wheel does.
+    // Page Up and Page Down: a page, less a line kept in sight so the
+    // reader keeps their place. Cmd-Up and Cmd-Down: the top, or the end,
+    // by a delta past it, which the scroll clamps. A delta rather than a
+    // point shows the bars that hide while idle, as the wheel does.
     .scroll_delta(move || {
-        let Some(end) = state.page_end.get() else {
+        let Some(paging) = state.paging.get() else {
             return floem::kurbo::Vec2::ZERO;
         };
-        state.page_end.set(None);
-        floem::kurbo::Vec2::new(0.0, if end { f64::MAX } else { -f64::MAX })
+        state.paging.set(None);
+        let page = || {
+            let height = state
+                .conversation_page
+                .get_untracked()
+                .map_or(0.0, |id| id.get_content_rect_local().height());
+            (height - theme::CODE_LINE_HEIGHT as f64).max(0.0)
+        };
+        let y = match paging {
+            Paging::Up => -page(),
+            Paging::Down => page(),
+            Paging::Top => -f64::MAX,
+            Paging::End => f64::MAX,
+        };
+        floem::kurbo::Vec2::new(0.0, y)
     })
     .on_event_cont(
         ScrollChanged::listener(),
@@ -427,7 +441,7 @@ mod tests {
         RunRecord, RunStatus, RunStep, Side, ThreadOrigin,
     };
 
-    use crate::review::model::ReviewState;
+    use crate::review::model::{Paging, ReviewState};
     use crate::review::threads::ThreadFace;
     use crate::state::AppState;
 
@@ -2081,29 +2095,31 @@ mod tests {
         );
     }
 
-    /// A page key, unmodified, as the window receives it.
-    fn page_key(down: bool) -> floem::event::Event {
-        use floem::prelude::{Code, Key, NamedKey};
-        let (code, key) = if down {
-            (Code::PageDown, NamedKey::PageDown)
-        } else {
-            (Code::PageUp, NamedKey::PageUp)
+    /// A key that moves through the page, as the window receives it:
+    /// Page Up and Page Down bare, the arrows with Cmd.
+    fn page_key(paging: Paging) -> floem::event::Event {
+        use floem::prelude::{Code, Key, Modifiers, NamedKey};
+        let (code, key, modifiers) = match paging {
+            Paging::Up => (Code::PageUp, NamedKey::PageUp, Modifiers::empty()),
+            Paging::Down => (Code::PageDown, NamedKey::PageDown, Modifiers::empty()),
+            Paging::Top => (Code::ArrowUp, NamedKey::ArrowUp, crate::ui::OS_MOD),
+            Paging::End => (Code::ArrowDown, NamedKey::ArrowDown, crate::ui::OS_MOD),
         };
         floem::event::Event::Key(floem::prelude::KeyboardEvent {
             state: floem::prelude::KeyState::Down,
             key: Key::Named(key),
             code,
             location: Default::default(),
-            modifiers: floem::prelude::Modifiers::empty(),
+            modifiers,
             repeat: false,
             is_composing: false,
         })
     }
 
-    /// Page Down goes to the end of the page, the composer at the foot
-    /// of the scroll, and Page Up back to its top.
+    /// Cmd-Down goes to the end of the page, the composer at the foot of
+    /// the scroll, and Cmd-Up back to its top. A composer keeps them.
     #[test]
-    fn the_page_keys_go_to_the_end_of_the_page_and_back_to_its_top() {
+    fn cmd_up_and_down_go_to_the_end_of_the_page_and_back_to_its_top() {
         let (mut harness, _, state) = app_harness();
         let scroll = find(harness.root_id(), "conversation").unwrap();
         let viewport = scroll.get_visual_rect_no_clip();
@@ -2112,10 +2128,10 @@ mod tests {
         harness.click(700.0, 500.0);
         harness.rebuild();
 
-        harness.dispatch_event(page_key(true));
+        harness.dispatch_event(page_key(Paging::End));
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.page_end.get(), None, "the page took the key");
+        assert_eq!(state.paging.get(), None, "the page took the key");
         let composer = find(harness.root_id(), "composer")
             .unwrap()
             .get_visual_rect_no_clip();
@@ -2124,15 +2140,57 @@ mod tests {
             viewport.y1 - crate::theme::CONVERSATION_PADDING,
             "the composer at {composer:?} is not at the end of the scroll {viewport:?}"
         );
-        assert!(title.get_visual_rect_no_clip().y0 < top);
+        let end = title.get_visual_rect_no_clip().y0;
+        assert!(end < top);
 
-        // From a composer as well: its few lines are not what a reader
-        // pages through.
+        // A composer's are the start and the end of its text.
         state.composer_focused.set(true);
-        harness.dispatch_event(page_key(false));
+        harness.dispatch_event(page_key(Paging::Top));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.paging.get(), None);
+        assert_eq!(title.get_visual_rect_no_clip().y0, end);
+        state.composer_focused.set(false);
+
+        harness.dispatch_event(page_key(Paging::Top));
         harness.rebuild();
         harness.paint();
         assert_eq!(title.get_visual_rect_no_clip().y0, top);
+    }
+
+    /// Page Down scrolls a page less a line, and Page Up back; from a
+    /// composer as well, as its few lines are not what a reader pages
+    /// through.
+    #[test]
+    fn the_page_keys_scroll_by_a_page() {
+        let (mut harness, _, state) = app_harness();
+        // Short enough that the page is over two pages long.
+        harness.set_size(1400.0, 500.0);
+        harness.rebuild();
+        harness.paint();
+        let scroll = find(harness.root_id(), "conversation").unwrap();
+        let page = scroll.get_content_rect_local().height() - crate::theme::CODE_LINE_HEIGHT as f64;
+        let title = find(harness.root_id(), "conversation-title").unwrap();
+        let top = title.get_visual_rect_no_clip().y0;
+        harness.click(700.0, 300.0);
+        harness.rebuild();
+
+        harness.dispatch_event(page_key(Paging::Down));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.paging.get(), None, "the page took the key");
+        assert_eq!(state.conversation_scroll.get(), page);
+        harness.dispatch_event(page_key(Paging::Down));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.conversation_scroll.get(), 2.0 * page);
+        assert_eq!(title.get_visual_rect_no_clip().y0, top - 2.0 * page);
+
+        state.composer_focused.set(true);
+        harness.dispatch_event(page_key(Paging::Up));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.conversation_scroll.get(), page);
     }
 
     /// The page keys work before the page is clicked: floem hands them
@@ -2144,7 +2202,7 @@ mod tests {
         let root = harness.root_id();
         let title = move || find(root, "conversation-title").unwrap();
         let top = title().get_visual_rect_no_clip().y0;
-        harness.dispatch_event(page_key(true));
+        harness.dispatch_event(page_key(Paging::Down));
         harness.rebuild();
         harness.paint();
         assert!(
@@ -2152,7 +2210,7 @@ mod tests {
             "the first page did not move"
         );
 
-        harness.dispatch_event(page_key(false));
+        harness.dispatch_event(page_key(Paging::Up));
         harness.rebuild();
         harness.paint();
         state.show_tab(crate::review::model::ItemTab::Code);
@@ -2162,7 +2220,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert_eq!(title().get_visual_rect_no_clip().y0, top);
-        harness.dispatch_event(page_key(true));
+        harness.dispatch_event(page_key(Paging::Down));
         harness.rebuild();
         harness.paint();
         assert!(

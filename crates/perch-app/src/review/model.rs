@@ -119,6 +119,16 @@ impl LoadedFile {
     }
 }
 
+/// A key that moves through Conversation or the open file: Page Up and
+/// Page Down by a page, Cmd-Up and Cmd-Down to the top and the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Paging {
+    Up,
+    Down,
+    Top,
+    End,
+}
+
 /// What the item view shows: Conversation, or Code, the open file and the
 /// tabs over it. The two are the switch in the bar; Conversation cannot
 /// be closed.
@@ -1598,10 +1608,9 @@ pub struct ReviewState {
     /// definition puts the caret on it, so the next jump remembers leaving
     /// from there. Read by the jump, and cleared by it.
     pub jump_caret: RwSignal<Option<(usize, usize)>>,
-    /// Page Up or Page Down, pressed: the top of the page, or the end of
-    /// it. Conversation or the open file's editor, whichever is showing,
-    /// scrolls there and clears it.
-    pub page_end: RwSignal<Option<bool>>,
+    /// Page Up, Page Down, Cmd-Up or Cmd-Down, pressed. Conversation or
+    /// the open file's editor, whichever is showing, scrolls and clears it.
+    pub paging: RwSignal<Option<Paging>>,
     /// The head position the last request was made about, so the definition
     /// button asks about the same symbol the panel is describing.
     pub last_position: RwSignal<Option<(usize, usize)>>,
@@ -1801,7 +1810,7 @@ impl ReviewState {
             pending_names: RwSignal::new(Vec::new()),
             jump_to_line: RwSignal::new(None),
             jump_caret: RwSignal::new(None),
-            page_end: RwSignal::new(None),
+            paging: RwSignal::new(None),
             last_position: RwSignal::new(None),
             expanded: RwSignal::new(std::collections::HashSet::new()),
             scroll_to_row: RwSignal::new(None),

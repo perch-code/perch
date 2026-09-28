@@ -60,7 +60,7 @@ use crate::review::gutter::{
 use crate::review::hierarchy;
 use crate::review::hover;
 use crate::review::model::{
-    Composer, FilePlace, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, ReviewState,
+    Composer, FilePlace, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, Paging, ReviewState,
 };
 use crate::review::navigation;
 use crate::review::picture;
@@ -377,7 +377,7 @@ fn stacked_view(
         epoch,
     );
     wire_jump(state, file.clone(), doc, scroll_to, cursor, epoch);
-    wire_page(state, doc, scroll_delta, cursor, epoch);
+    wire_page(state, doc, viewport, scroll_delta, cursor, epoch);
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
     let path = file.path.clone();
@@ -1377,7 +1377,7 @@ fn split_view(
         epoch,
     );
     wire_jump(state, file.clone(), right_doc, right_scroll_to, right_cursor, epoch);
-    wire_page(state, right_doc, right_delta, right_cursor, epoch);
+    wire_page(state, right_doc, right_viewport, right_delta, right_cursor, epoch);
     let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
     // The left follows the right down the file. Sideways it keeps its own
@@ -1785,21 +1785,25 @@ fn wire_jump(
     });
 }
 
-/// Page Up and Page Down: the caret to the start of the first line or of
-/// the last, and the view flush with that end of the file. The caret
-/// moves first: bringing it into view may leave it mid-screen, and the
-/// scroll after it puts the end against the edge. By a delta past either
-/// end, which the scroll clamps, rather than to a point: a delta shows
-/// the bars that hide while idle, as the wheel does.
+/// Page Up and Page Down scroll by a page of whole lines, less one kept
+/// in sight so the reader keeps their place, and leave the caret where it
+/// is, as a Mac's text views do. Cmd-Up and Cmd-Down put the caret at the
+/// start of the first line or of the last, and the view flush with that
+/// end of the file. The caret moves first: bringing it into view may leave
+/// it mid-screen, and the scroll after it puts the end against the edge.
+/// By a delta rather than to a point, past either end for Cmd-Up and
+/// Cmd-Down, which the scroll clamps: a delta shows the bars that hide
+/// while idle, as the wheel does.
 fn wire_page(
     state: ReviewState,
     doc: RwSignal<Arc<Doc>>,
+    viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
     cursor: RwSignal<Cursor>,
     epoch: u64,
 ) {
     Effect::new(move |_| {
-        let Some(end) = state.page_end.get() else {
+        let Some(paging) = state.paging.get() else {
             return;
         };
         // As with a jump: a press as the editor is rebuilt is the next
@@ -1807,7 +1811,18 @@ fn wire_page(
         if state.editor_epoch.get_untracked() != epoch {
             return;
         }
-        state.page_end.set(None);
+        state.paging.set(None);
+        let line_height = theme::CODE_LINE_HEIGHT as f64;
+        let page = || {
+            let lines = (viewport.get_untracked().height() / line_height).floor() - 1.0;
+            lines.max(1.0) * line_height
+        };
+        let end = match paging {
+            Paging::Up => return scroll_delta.set(Vec2::new(0.0, -page())),
+            Paging::Down => return scroll_delta.set(Vec2::new(0.0, page())),
+            Paging::Top => false,
+            Paging::End => true,
+        };
         let offset = doc.with_untracked(|d| {
             // A line of the file, not a divider or a card's spacer.
             let mut rows = (0..d.len()).filter(|&r| d.display_line(r).is_some());
@@ -3600,13 +3615,35 @@ mod window {
         assert_eq!(left_viewport.get().y0, right_viewport.get().y0);
     }
 
-    /// Page Down puts the caret on the file's last line and its end at
-    /// the foot of the pane; Page Up puts both back at the top. The code
-    /// has the keyboard, and still the window has the key first: the
-    /// editor's own half a screen never runs.
+    /// A key that moves through the file, as the window receives it:
+    /// Page Up and Page Down bare, the arrows with Cmd.
+    fn paging_key(paging: crate::review::model::Paging) -> floem::event::Event {
+        use crate::review::model::Paging;
+        use floem::prelude::{Code, Key, KeyState, KeyboardEvent, Modifiers, NamedKey};
+        let (code, key, modifiers) = match paging {
+            Paging::Up => (Code::PageUp, NamedKey::PageUp, Modifiers::empty()),
+            Paging::Down => (Code::PageDown, NamedKey::PageDown, Modifiers::empty()),
+            Paging::Top => (Code::ArrowUp, NamedKey::ArrowUp, crate::ui::OS_MOD),
+            Paging::End => (Code::ArrowDown, NamedKey::ArrowDown, crate::ui::OS_MOD),
+        };
+        floem::event::Event::Key(KeyboardEvent {
+            state: KeyState::Down,
+            key: Key::Named(key),
+            code,
+            location: Default::default(),
+            modifiers,
+            repeat: false,
+            is_composing: false,
+        })
+    }
+
+    /// Cmd-Down puts the caret on the file's last line and its end at the
+    /// foot of the pane; Cmd-Up puts both back at the top. The code has
+    /// the keyboard, and still the window has the key first: the editor's
+    /// own, which moves the caret alone, never runs.
     #[test]
-    fn the_page_keys_go_to_the_end_of_the_file_and_back_to_its_top() {
-        use floem::prelude::{Code, Key, NamedKey};
+    fn cmd_up_and_down_go_to_the_end_of_the_file_and_back_to_its_top() {
+        use crate::review::model::Paging;
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
@@ -3616,29 +3653,22 @@ mod window {
             .rev()
             .find_map(|r| live.doc.get().display_line(r))
             .unwrap();
-        let page = |down| {
-            if down {
-                key_press(Code::PageDown, Key::Named(NamedKey::PageDown))
-            } else {
-                key_press(Code::PageUp, Key::Named(NamedKey::PageUp))
-            }
-        };
-        // A page key is no shortcut to floem: with nothing focused it goes
+        // A bare key is no shortcut to floem: with nothing focused it goes
         // nowhere. A reader has clicked the code.
         let (left, top) = pane_origin();
         harness.click(left + 200.0, top + 3.0 * line_height + line_height / 2.0);
         harness.rebuild();
 
-        harness.dispatch_event(page(true));
+        harness.dispatch_event(paging_key(Paging::End));
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.page_end.get(), None, "the editor took the key");
+        assert_eq!(state.paging.get(), None, "the editor took the key");
         assert_eq!(state.cursor_line.get(), last);
         // The editor keeps a line's room under the last row, and the
         // scroll stops at the end of that.
         assert_eq!(viewport.get().y1, (rows + 1) as f64 * line_height);
 
-        harness.dispatch_event(page(false));
+        harness.dispatch_event(paging_key(Paging::Top));
         harness.rebuild();
         harness.paint();
         assert_eq!(state.cursor_line.get(), 0);
@@ -3654,12 +3684,53 @@ mod window {
         // A click on the base side, which takes no pointer itself.
         harness.click(left + 200.0, top + 3.0 * line_height + line_height / 2.0);
         harness.rebuild();
-        harness.dispatch_event(page(true));
+        harness.dispatch_event(paging_key(Paging::End));
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.page_end.get(), None, "the split took the key");
+        assert_eq!(state.paging.get(), None, "the split took the key");
         assert_eq!(right_viewport.get().y1, (rows + 1) as f64 * line_height);
         assert_eq!(left_viewport.get().y0, right_viewport.get().y0);
+    }
+
+    /// Page Down scrolls a page of whole lines, less one kept in sight,
+    /// and leaves the caret where it was; Page Up scrolls back. The
+    /// editor's own, half a screen with the caret, never runs.
+    #[test]
+    fn the_page_keys_scroll_by_a_page() {
+        use crate::review::model::Paging;
+        let (mut harness, state) = one_long_run();
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
+        let (left, top) = pane_origin();
+        harness.click(left + 200.0, top + 3.0 * line_height + line_height / 2.0);
+        harness.rebuild();
+        let caret = state.cursor_line.get();
+        let page = ((viewport.get().height() / line_height).floor() - 1.0) * line_height;
+        assert!(page > 0.0);
+
+        harness.dispatch_event(paging_key(Paging::Down));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.paging.get(), None, "the editor took the key");
+        assert_eq!(viewport.get().y0, page);
+        assert_eq!(state.cursor_line.get(), caret, "the caret stayed put");
+
+        // The next page is past the end, and the scroll stops there: the
+        // editor keeps a line's room under the last row.
+        let rows = stacked(state).doc.get().len();
+        let end = (rows + 1) as f64 * line_height;
+        assert!(end < viewport.get().y1 + page);
+        harness.dispatch_event(paging_key(Paging::Down));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(viewport.get().y1, end);
+
+        let y0 = viewport.get().y0;
+        harness.dispatch_event(paging_key(Paging::Up));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(viewport.get().y0, y0 - page);
+        assert_eq!(state.cursor_line.get(), caret);
     }
 
     #[test]
