@@ -1,9 +1,10 @@
 //! The new-work view: a box for what the work is, and under it the
 //! repository, the branch to start from, and the new branch's name.
 //!
-//! `+` at the top of the sidebar and `Cmd-N` open it in the main pane.
-//! Start makes the worktree and opens it as a branch item. What was typed
-//! is kept when the view is left without starting, until Perch quits.
+//! `+` at the top of the sidebar and `Cmd-N` open it in the main pane,
+//! under a bar titled New worktree whose X shuts it. Start makes the
+//! worktree and opens it as a branch item. What was typed is kept when the
+//! view is left without starting, until Perch quits.
 
 use std::rc::Rc;
 
@@ -17,11 +18,13 @@ use floem::views::{
 use perch_git::BaseBranch;
 
 use crate::backend::{Backend, FirstRun, NewWork};
+use crate::icons::SidebarIcon;
+use crate::review::cards::tip;
 use crate::review::model::{AgentChoice, Destination};
 use crate::review::review_launch::{action_button, menu_button};
 use crate::state::{AppState, Checked};
 use crate::theme;
-use crate::ui::widgets::{checkbox, editor_box, lay_out_every_line};
+use crate::ui::widgets::{checkbox, editor_box, icon_button, lay_out_every_line, sidebar_glyph};
 
 /// The branches of the chosen repository, as far as they are known.
 #[derive(Debug, Clone, PartialEq)]
@@ -329,12 +332,6 @@ pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let empty = Memo::new(move |_| nw.text.with(|t| t.trim().is_empty()));
 
     let column = Stack::vertical((
-        Label::derived(|| "New work".to_string()).style(|s| {
-            s.font_size(theme::TEXT_TITLE)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
-                .selectable(false)
-        }),
         message_box(state, start.clone()),
         Stack::horizontal((
             repo_chip(state, backend.clone()),
@@ -407,6 +404,38 @@ pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .padding_horiz(16.0)
             .background(theme::CANVAS)
     })
+}
+
+/// The view's title in the bar, where an item's goes: the branch glyph and
+/// New worktree.
+pub fn bar_title() -> impl IntoView {
+    Stack::horizontal((
+        sidebar_glyph(SidebarIcon::Branch, theme::FG_MUTED).style(|s| s.size(16.0, 16.0)),
+        Label::derived(|| "New worktree".to_string())
+            .debug_name("new-work-title")
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::FG)
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .margin_bottom(theme::OPTICAL_TEXT_LIFT)
+            }),
+    ))
+    .style(|s| s.items_center().gap(8.0).min_width(0.0))
+}
+
+/// Shut the view, with what was typed kept, as Escape and Cmd-[ do.
+pub fn close_button(state: AppState) -> impl IntoView {
+    tip(
+        icon_button(
+            || SidebarIcon::Close,
+            || theme::FG_MUTED,
+            move || state.new_work.open.set(false),
+        ),
+        "Close (⌘[)".to_string(),
+    )
+    .debug_name("new-work-close")
+    .style(|s| s.flex_shrink(0.0_f32).pointer_events_auto())
 }
 
 /// What the work is. Cmd-Enter starts it; Escape leaves the view with

@@ -181,10 +181,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         move || main_pane.get(),
         move |(open, no_token, new_work)| {
             if new_work {
-                empty_pane(
+                pane_with_bar(
                     state,
                     review,
                     empty_backend.clone(),
+                    new_work::bar_title(),
+                    new_work::close_button(state),
                     new_work::new_work_view(state, empty_backend.clone()),
                 )
                 .into_any()
@@ -336,6 +338,15 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // Cmd-N opens the new-work view, from anywhere.
                 if key.code == Code::KeyN && key.modifiers == OS_MOD {
                     new_work::open(state, key_backend);
+                    return EventPropagation::Stop;
+                }
+                // Cmd-[ shuts it, with what was typed kept, from its
+                // message box too.
+                if key.code == Code::BracketLeft
+                    && key.modifiers == OS_MOD
+                    && state.new_work.open.get_untracked()
+                {
+                    state.new_work.open.set(false);
                     return EventPropagation::Stop;
                 }
                 // Cmd-P puts it up, app-wide, as the tree's key is; Escape
@@ -824,6 +835,20 @@ fn empty_pane(
     backend: Rc<Backend>,
     message: impl IntoView + 'static,
 ) -> impl IntoView {
+    let none = || Empty::new().style(|s| s.hide());
+    pane_with_bar(state, review, backend, none(), none(), message)
+}
+
+/// The main pane under a bar like an item's with `title` where the item's
+/// title goes and `close` where its X goes.
+fn pane_with_bar(
+    state: AppState,
+    review: ReviewState,
+    backend: Rc<Backend>,
+    title: impl IntoView + 'static,
+    close: impl IntoView + 'static,
+    message: impl IntoView + 'static,
+) -> impl IntoView {
     Stack::vertical((
         // A bar like an item's, with nothing open in it: the lights and
         // the drawer control while the drawer is shut, and the Agents
@@ -831,11 +856,22 @@ fn empty_pane(
         // click away from here too.
         titlebar::title_bar(
             Stack::horizontal((
-                sidebar::lights_lane(state, theme::REVIEW_HEADER_PADDING)
-                    .style(move |s| s.apply_if(state.sidebar_open.get(), |s| s.hide())),
-                Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
+                Stack::horizontal((
+                    sidebar::lights_lane(state, theme::REVIEW_HEADER_PADDING)
+                        .style(move |s| s.apply_if(state.sidebar_open.get(), |s| s.hide())),
+                    title,
+                ))
+                .style(|s| {
+                    s.items_center()
+                        .gap(8.0)
+                        .flex_grow(1.0_f32)
+                        .flex_basis(0.0)
+                        .min_width(0.0)
+                        .pointer_events_none()
+                }),
                 usage::button(state, review, backend.clone()),
                 agents::dropdown::button(state, review, backend),
+                close,
             ))
             .debug_name("empty bar"),
         )
@@ -1039,6 +1075,43 @@ mod tests {
             0.0,
             "the drawer's strip has the lights now"
         );
+    }
+
+    /// New work is titled in the bar, where an item's title goes, and its
+    /// X there shuts it, as Cmd-[ does.
+    #[test]
+    fn new_work_is_titled_in_the_bar_and_its_x_shuts_it() {
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        state.new_work.open.set(true);
+        harness.rebuild();
+        harness.paint();
+
+        let bar = named(harness.root_id(), "empty bar").expect("no bar");
+        let title = named(bar, "new-work-title").expect("no title in the bar");
+        let close = named(bar, "new-work-close")
+            .expect("no X in the bar")
+            .get_visual_rect_no_clip();
+        let agents = named(bar, "agents-button").unwrap().get_visual_rect_no_clip();
+        assert!(title.get_visual_rect_no_clip().x1 <= agents.x0);
+        assert!(agents.x1 <= close.x0, "the X is last");
+        assert_eq!(close.x1, 1400.0 - theme::REVIEW_HEADER_PADDING);
+
+        harness.click(close.center().x, close.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.new_work.open.get());
+        assert!(named(harness.root_id(), "new-work-title").is_none());
+
+        state.new_work.open.set(true);
+        harness.rebuild();
+        harness.paint();
+        harness.dispatch_event(key(Code::BracketLeft, Key::Character("[".into()), OS_MOD));
+        harness.rebuild();
+        assert!(!state.new_work.open.get(), "Cmd-[ shuts it too");
     }
 
     /// A label anywhere in the window selects in the editor's blue, not

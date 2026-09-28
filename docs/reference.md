@@ -292,7 +292,8 @@ the original database in place.
 ## Starting work
 
 `+` at the top of the sidebar, or `Cmd-N` from anywhere, opens the new-work
-view: a box for what the work is, and under it three chips.
+view, titled **New worktree** in the bar: a box for what the work is, and
+under it three chips.
 
 - **Repository**: the `[[repo]]` entries in the file's order, a local one
   marked `(local)`. It opens on the open item's repository, else the last
@@ -312,8 +313,8 @@ view: a box for what the work is, and under it three chips.
 With a message, **Start** makes the worktree, opens it as a branch item named
 for the message's first line, and sends the message to the agent picked beside
 it as the item's first Work run.
-Without one, **Create worktree** makes the worktree alone. `Escape` leaves the
-view and keeps what was typed until Perch quits.
+Without one, **Create worktree** makes the worktree alone. `Escape`, `Cmd-[`,
+or the bar's X leaves the view and keeps what was typed until Perch quits.
 
 Worktrees go under `~/.perch/worktrees/`, named for the repository and the
 branch. A repository with a root is cut in the root, your own clone: the
