@@ -495,39 +495,46 @@ pub fn centered_message(
 }
 
 /// A pill over the top of a list or a pane, saying GitHub has something
-/// newer than what is on screen, with Refresh to show it. It floats, so
-/// nothing moves until the reader asks; the parent is its positioning box.
+/// newer than what is on screen, with Refresh to show it. The whole pill
+/// is the button; Refresh lights up while the pointer is anywhere on it.
+/// It floats, so nothing moves until the reader asks; the parent is its
+/// positioning box.
 pub fn news_pill(
     label: impl Fn() -> String + 'static,
     shown: impl Fn() -> bool + 'static,
     on_refresh: impl Fn() + 'static,
 ) -> impl IntoView {
+    use floem::event::listener as el;
+    let hovered = RwSignal::new(false);
     Container::new(
         Stack::horizontal((
             Label::derived(label).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::FG)
-                    .selectable(false)
                     .margin_bottom(theme::OPTICAL_TEXT_LIFT)
             }),
-            Label::new("Refresh")
-                .on_event_stop(floem::event::listener::Click, move |_, _| on_refresh())
-                .debug_name("news refresh")
-                .style(|s| {
-                    clickable(s)
-                        .height(22.0)
-                        .items_center()
-                        .padding_horiz(9.0)
-                        .font_size(theme::TEXT_META)
-                        .font_weight(theme::weight_emphasis())
-                        .color(theme::FG)
-                        .background(theme::BADGE_BG)
-                        .border_radius(11.0)
-                        .hover(|s| s.background(theme::ACCENT_SUBTLE))
-                }),
+            Label::new("Refresh").debug_name("news refresh").style(move |s| {
+                s.height(22.0)
+                    .items_center()
+                    .padding_horiz(9.0)
+                    .font_size(theme::TEXT_META)
+                    .font_weight(theme::weight_emphasis())
+                    .color(theme::FG)
+                    .background(if hovered.get() { theme::ACCENT_SUBTLE } else { theme::BADGE_BG })
+                    .border_radius(11.0)
+            }),
         ))
+        .debug_name("news pill oval")
+        .on_event_stop(el::Click, move |_, _| {
+            // The pill hides under the pointer, so no leave comes.
+            hovered.set(false);
+            on_refresh()
+        })
+        .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
+        .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
         .style(|s| {
-            s.items_center()
+            clickable(s)
+                .items_center()
                 .gap(10.0)
                 .height(30.0)
                 .padding_left(13.0)

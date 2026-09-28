@@ -1006,7 +1006,8 @@ mod tests {
     }
 
     /// A poll with a new row floats a pill over the list and moves
-    /// nothing; Refresh puts the row in.
+    /// nothing; a click anywhere on the pill, not only on Refresh, puts
+    /// the row in.
     #[test]
     fn a_held_back_poll_floats_a_pill_and_refresh_shows_it() {
         let (mut harness, state) = harness();
@@ -1027,9 +1028,11 @@ mod tests {
         assert!(shown.width() > 0.0 && shown.height() > 0.0);
         assert!(shown.y1 < before.y1 + 40.0, "the pill is at the top of the list: {shown:?}");
 
-        let refresh = find(harness.root_id(), "news refresh").unwrap();
-        let center = refresh.get_visual_rect_no_clip().center();
-        harness.click(center.x, center.y);
+        let refresh = find(harness.root_id(), "news refresh").unwrap().get_visual_rect_no_clip();
+        let oval = find(harness.root_id(), "news pill oval").unwrap().get_visual_rect_no_clip();
+        let (x, y) = (oval.x0 + 20.0, oval.center().y);
+        assert!(x < refresh.x0, "the click lands on the words, left of Refresh");
+        harness.click(x, y);
         harness.rebuild();
         harness.paint();
         assert!(find(harness.root_id(), "item row:fresh").is_some());
