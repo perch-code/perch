@@ -116,12 +116,17 @@ codegen-units = 4
 # reports a Control click on macOS as a secondary click. winit reports
 # the left button with Control held, and floem opens a context menu for
 # the secondary button alone, so a Control click opened no menu on a
-# symbol, an item or a notification, and did whatever a click does. Last,
+# symbol, an item or a notification, and did whatever a click does. Then
 # one that keeps the editor from taking a right press for a left one: it
 # asked `is_primary_pointer`, which is true of every mouse button, so a
 # right-click started a drag selection whose release the context menu
 # swallowed, and the selection followed the pointer after the menu
-# closed. It also collapsed the selection a right-click landed in. Drop a
+# closed. It also collapsed the selection a right-click landed in. Last,
+# one that keeps a text's measured sizes until its text changes: taffy
+# measures a text several times a pass, and each measure of an
+# ellipsised label shaped the "..." and the cut text from scratch, so a
+# relayout of the sidebar's rows spent most of its time in the shaper,
+# the more with San Francisco's variation deltas. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
