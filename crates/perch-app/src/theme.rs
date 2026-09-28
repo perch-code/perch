@@ -412,8 +412,17 @@ pub const SUMMARY_GLYPH: f64 = 14.0;
 /// and the number.
 pub const SUMMARY_GAP: f64 = 12.0;
 pub const SUMMARY_AVATAR: f64 = 16.0;
-/// A small chip: a label, a linked issue, the Local mark on a thread.
+/// A badge: a label, a linked issue, a grant, the Local, Outdated and
+/// Draft marks on a thread, Author in a byline. Every one is this tall
+/// and fully round, with GitHub's padding either side, so two side by
+/// side line up. See `widgets::badge`.
 pub const CHIP_HEIGHT: f64 = 18.0;
+pub const CHIP_PADDING: f64 = 7.0;
+/// Room under a badge's text, in its centred box. floem centres a label's
+/// ascent, not its capitals, so San Francisco's capitals sit 0.13em
+/// (1.6px at 12) below the middle of the box; a margin this deep under
+/// the label lifts them back by half of it.
+pub const CHIP_TEXT_LIFT: f64 = 3.0;
 
 /// How wide the reading column is. Prose past this is hard to follow.
 pub const CONVERSATION_WIDTH: f64 = 845.0;
@@ -471,9 +480,6 @@ pub const INLINE_THREAD_HEADER: f64 = 32.0;
 pub const INLINE_THREAD_MAX_WIDTH: f64 = 780.0;
 /// The Follow up box and the foot's Resolve button.
 pub const THREAD_CONTROL: f64 = 32.0;
-/// A label in a comment's byline, as GitHub sets Author: a pill with a
-/// rule round it.
-pub const BYLINE_LABEL: f64 = 20.0;
 /// A line of a comment being typed, which the composer's styling gives
 /// the editor and the box's heights are counted in.
 pub const COMPOSER_LINE_HEIGHT: f32 = TEXT_BODY * 1.5;
@@ -522,7 +528,6 @@ pub const COLLAPSED_CARD_INSET: f64 = 5.0;
 /// says how many messages follow the first, with this much room before
 /// it and before the `...` after it, so no two fills touch.
 pub const COLLAPSED_CARD_PADDING: f64 = 10.0;
-pub const COLLAPSED_CARD_PILL: f64 = 18.0;
 pub const COLLAPSED_CARD_PILL_GAP: f64 = 8.0;
 /// The face beside the first author on a collapsed card.
 pub const COLLAPSED_CARD_AVATAR: f64 = 20.0;

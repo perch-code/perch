@@ -24,7 +24,8 @@ use crate::theme;
 use crate::timefmt;
 use crate::ui::items::OpenItem;
 use crate::ui::widgets::{
-    avatar, clickable, name_label, open_in_browser, sidebar_glyph, worktree_menu, Name,
+    avatar, badge_box, badge_text, clickable, name_label, open_in_browser, sidebar_glyph,
+    worktree_menu, Name,
 };
 
 /// The block under the title: the notices, then the rows. Hidden rather
@@ -1212,29 +1213,17 @@ fn chip(
     on_click: Option<Rc<dyn Fn()>>,
 ) -> impl IntoView {
     let clicks = on_click.is_some();
-    Container::new(Label::derived(move || text.clone()).style(move |s| {
-        s.font_size(theme::TEXT_SECTION)
-            .font_weight(theme::weight_emphasis())
-            .color(ink)
-            .selectable(false)
-            .text_ellipsis()
-            .max_width(200.0)
-            .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-    }))
+    Container::new(
+        Label::derived(move || text.clone())
+            .style(move |s| badge_text(s, ink).text_ellipsis().max_width(200.0)),
+    )
     .on_event_stop(el::Click, move |_, _| {
         if let Some(on_click) = &on_click {
             on_click();
         }
     })
     .style(move |s| {
-        let base = s
-            .height(theme::CHIP_HEIGHT)
-            .padding_horiz(7.0)
-            .items_center()
-            .justify_center()
-            .background(tint)
-            .border_radius(theme::CHIP_HEIGHT / 2.0)
-            .flex_shrink(0.0_f32);
+        let base = badge_box(s, tint, None);
         if clicks {
             clickable(base).hover(|s| s.background(theme::BORDER_MUTED))
         } else {
@@ -1246,15 +1235,8 @@ fn chip(
 /// A grant: what it allows, and a × that takes it back.
 fn grant_chip(backend: Rc<Backend>, id: String, label: String) -> impl IntoView {
     Stack::horizontal((
-        Label::derived(move || label.clone()).style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::FG_MUTED)
-                .selectable(false)
-                .text_ellipsis()
-                .max_width(220.0)
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-        }),
+        Label::derived(move || label.clone())
+            .style(|s| badge_text(s, theme::FG_MUTED).text_ellipsis().max_width(220.0)),
         sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE)
             .on_event_stop(el::Click, move |_, _| backend.revoke_grant(&id))
             .debug_name("revoke-grant")
@@ -1267,14 +1249,7 @@ fn grant_chip(backend: Rc<Backend>, id: String, label: String) -> impl IntoView 
             }),
     ))
     .debug_name("grant-chip")
-    .style(|s| {
-        s.height(theme::CHIP_HEIGHT)
-            .padding_horiz(7.0)
-            .items_center()
-            .background(theme::BADGE_BG)
-            .border_radius(theme::CHIP_HEIGHT / 2.0)
-            .flex_shrink(0.0_f32)
-    })
+    .style(|s| badge_box(s, theme::BADGE_BG, None))
 }
 
 /// A label as GitHub draws it: its colour as a tint behind darker text.

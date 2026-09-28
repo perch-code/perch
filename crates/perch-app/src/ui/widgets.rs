@@ -494,6 +494,44 @@ pub fn centered_message(
     .style(|s| s.size_full().items_center().justify_center().padding(40.0))
 }
 
+/// A badge's box: `CHIP_HEIGHT` tall, fully round, filled with `fill`
+/// and ruled round with `rule` when there is one. A rule is drawn inside
+/// the box, so a ruled badge is as tall as a filled one.
+pub fn badge_box(s: Style, fill: Color, rule: Option<Color>) -> Style {
+    let s = s
+        .height(theme::CHIP_HEIGHT)
+        .padding_horiz(theme::CHIP_PADDING)
+        .items_center()
+        .justify_center()
+        .background(fill)
+        .border_radius(theme::CHIP_HEIGHT / 2.0)
+        .flex_shrink(0.0_f32);
+    match rule {
+        Some(rule) => s.border(1.0).border_color(rule),
+        None => s,
+    }
+}
+
+/// A badge's text, lifted so its capitals sit in the middle of the box.
+pub fn badge_text(s: Style, ink: Color) -> Style {
+    s.font_size(theme::TEXT_BADGE)
+        .font_weight(theme::weight_emphasis())
+        .color(ink)
+        .selectable(false)
+        .margin_bottom(theme::CHIP_TEXT_LIFT)
+}
+
+/// A badge of text that goes nowhere: Author, Outdated, Local.
+pub fn badge(
+    text: impl Fn() -> String + 'static,
+    ink: Color,
+    fill: Color,
+    rule: Option<Color>,
+) -> Container {
+    Container::new(Label::derived(text).style(move |s| badge_text(s, ink)))
+        .style(move |s| badge_box(s, fill, rule).selectable(false))
+}
+
 /// A pill over the top of a list or a pane, saying GitHub has something
 /// newer than what is on screen, with Refresh to show it. The whole pill
 /// is the button; Refresh lights up while the pointer is anywhere on it.

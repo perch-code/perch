@@ -31,8 +31,8 @@ use crate::review::model::{AgentChoice, Composer, Destination, ReviewState};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
-    clickable, editor_box, icon_button, lay_out_every_line, name_label, sidebar_glyph, text_button,
-    Name,
+    badge, clickable, editor_box, icon_button, lay_out_every_line, name_label, sidebar_glyph,
+    text_button, Name,
 };
 
 /// A model alias as the screen shows it: "Sonnet" for `sonnet`. A full id
@@ -1361,20 +1361,14 @@ pub fn outdated_pill(outdated: bool) -> impl IntoView {
     if !outdated {
         return Empty::new().into_any();
     }
-    Label::derived(|| "Outdated".to_string())
-        .style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::NOTICE_FG)
-                .background(theme::NOTICE_BG)
-                .border(1.0)
-                .border_color(theme::NOTICE_BORDER)
-                .border_radius(9.0)
-                .padding_horiz(6.0)
-                .margin_left(8.0)
-                .selectable(false)
-        })
-        .into_any()
+    badge(
+        || "Outdated".to_string(),
+        theme::NOTICE_FG,
+        theme::NOTICE_BG,
+        Some(theme::NOTICE_BORDER),
+    )
+    .style(|s| s.margin_left(8.0))
+    .into_any()
 }
 
 // ---------------------------------------------------------------------
@@ -1599,23 +1593,8 @@ pub(crate) fn local_chip(shown: bool) -> floem::AnyView {
         return Empty::new().into_any();
     }
     cards::tip(
-        Container::new(Label::derived(|| "Local".to_string()).style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::FG_MUTED)
-                .selectable(false)
-                .margin_bottom(theme::OPTICAL_TEXT_LIFT)
-        }))
-        .style(|s| {
-            s.height(theme::CHIP_HEIGHT)
-                .padding_horiz(7.0)
-                .margin_left(8.0)
-                .items_center()
-                .justify_center()
-                .background(theme::BADGE_BG)
-                .border_radius(theme::CHIP_HEIGHT / 2.0)
-                .flex_shrink(0.0_f32)
-        }),
+        badge(|| "Local".to_string(), theme::FG_MUTED, theme::BADGE_BG, None)
+            .style(|s| s.margin_left(8.0)),
         "This thread is on this machine and is not on GitHub.".to_string(),
     )
     .into_any()
@@ -1866,21 +1845,8 @@ fn more_pill(more: usize) -> impl IntoView {
     if more == 0 {
         return Empty::new().into_any();
     }
-    Label::derived(move || format!("{more} more"))
-        .style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::FG_SUBTLE)
-                .background(theme::BADGE_BG)
-                .height(theme::COLLAPSED_CARD_PILL)
-                .border_radius(theme::COLLAPSED_CARD_PILL / 2.0)
-                .padding_horiz(6.0)
-                .margin_left(theme::COLLAPSED_CARD_PILL_GAP)
-                .items_center()
-                .justify_center()
-                .selectable(false)
-                .flex_shrink(0.0_f32)
-        })
+    badge(move || format!("{more} more"), theme::FG_SUBTLE, theme::BADGE_BG, None)
+        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP))
         .into_any()
 }
 
@@ -2612,21 +2578,15 @@ fn when_label(
 
 /// A label in a comment's byline, as GitHub sets Author and its kin: the
 /// word in a pill with a rule round it.
-fn byline_label(text: &'static str, name: &'static str) -> Label {
-    Label::derived(move || text.to_string())
-        .debug_name(name)
-        .style(|s| {
-            s.font_size(theme::TEXT_BADGE)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::FG_MUTED)
-                .padding_horiz(7.0)
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(theme::BYLINE_LABEL / 2.0)
-                .margin_left(6.0)
-                .selectable(false)
-                .flex_shrink(0.0_f32)
-        })
+fn byline_label(text: &'static str, name: &'static str) -> Container {
+    badge(
+        move || text.to_string(),
+        theme::FG_MUTED,
+        floem::peniko::Color::TRANSPARENT,
+        Some(theme::BORDER),
+    )
+    .debug_name(name)
+    .style(|s| s.margin_left(6.0))
 }
 
 /// Author, beside a comment by whoever opened the pull request or the
@@ -2961,20 +2921,9 @@ fn posted_message_view(
 /// going there, and is not there yet.
 pub fn draft_pill() -> impl IntoView {
     cards::tip(
-        Label::derived(|| "Draft".to_string())
+        badge(|| "Draft".to_string(), theme::GITHUB, theme::GITHUB_BG, None)
             .debug_name("draft-pill")
-            .style(|s| {
-                s.font_size(theme::TEXT_SECTION)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::GITHUB)
-                    .background(theme::GITHUB_BG)
-                    .border(1.0)
-                    .border_color(theme::GITHUB_BG)
-                    .border_radius(9.0)
-                    .padding_horiz(6.0)
-                    .margin_left(8.0)
-                    .selectable(false)
-            }),
+            .style(|s| s.margin_left(8.0)),
         "Not on GitHub until the review is submitted.".to_string(),
     )
 }
