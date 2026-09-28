@@ -32,6 +32,15 @@ pub fn open_in_browser(url: &str) {
     }
 }
 
+/// Follow a link out of GitHub's or an agent's text: a pull request or
+/// an issue opens in Perch, and anything else in the browser. Open on
+/// GitHub buttons use `open_in_browser`, since going there is their point.
+pub fn follow_link(url: &str) {
+    if !crate::windows::open_link(url) {
+        open_in_browser(url);
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// The links opened, in order, so a test can see where a click led

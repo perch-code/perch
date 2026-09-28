@@ -29,6 +29,10 @@ pub struct OpenBox {
     pub waiting: RwSignal<Option<u64>>,
     /// Whatever had the keyboard, for Escape to give it back to.
     pub opener: RwSignal<Option<floem::ViewId>>,
+    /// A link followed to a pull request or an issue, with the open it
+    /// asked for, while GitHub is asked what the number is. No box goes
+    /// up for one, and one GitHub can't place goes to the browser.
+    link: RwSignal<Option<(u64, String)>>,
     text_box: RwSignal<Option<floem::ViewId>>,
 }
 
@@ -46,6 +50,7 @@ impl OpenBox {
             error: RwSignal::new(None),
             waiting: RwSignal::new(None),
             opener: RwSignal::new(None),
+            link: RwSignal::new(None),
             text_box: RwSignal::new(None),
         }
     }
@@ -154,12 +159,40 @@ fn submit(state: AppState, backend: &Backend) {
     }
 }
 
+/// Follow a link to a pull request or an issue on GitHub by opening it
+/// here, as Open… would. Whether `url` is one: anything else is left for
+/// the browser.
+///
+/// A link to `/issues/N` may be a pull request, since GitHub sends one
+/// there on to `/pull/N` and a `#N` in text is written as the former, so
+/// GitHub is asked which it is.
+pub fn open_link(state: AppState, backend: &Backend, url: &str) -> bool {
+    let hosts = state.github_hosts.get_untracked();
+    let Some(reference) = reference::parse(url, &hosts) else {
+        return false;
+    };
+    let (Some(repo), Some(kind)) = (reference.repo, reference.kind) else {
+        return false;
+    };
+    let kind = (kind == ItemKind::PullRequest).then_some(kind);
+    let navigation_id = backend.open_reference(&repo, reference.number, kind);
+    state.open_box.link.set(Some((navigation_id, url.to_string())));
+    true
+}
+
 /// GitHub has it: the box goes, and the open it asked for goes ahead.
 pub fn resolved(state: AppState, navigation_id: u64, kind: ItemKind) {
-    if state.open_box.waiting.get_untracked() != Some(navigation_id) {
+    let link = state
+        .open_box
+        .link
+        .with_untracked(|link| link.as_ref().is_some_and(|(id, _)| *id == navigation_id));
+    if link {
+        state.open_box.link.set(None);
+    } else if state.open_box.waiting.get_untracked() != Some(navigation_id) {
         return;
+    } else {
+        close(state, false);
     }
-    close(state, false);
     state.begin_open(
         match kind {
             ItemKind::PullRequest => "Reading the pull request",
@@ -169,8 +202,16 @@ pub fn resolved(state: AppState, navigation_id: u64, kind: ItemKind) {
     );
 }
 
-/// It can't be opened: the box says why and keeps what was typed.
+/// It can't be opened: the box says why and keeps what was typed. A
+/// link goes to the browser instead.
 pub fn failed(state: AppState, navigation_id: u64, message: String) {
+    let link = state.open_box.link.get_untracked();
+    if let Some((_, url)) = link.filter(|(id, _)| *id == navigation_id) {
+        state.open_box.link.set(None);
+        tracing::info!(url, message, "opening a link in the browser instead");
+        crate::ui::widgets::open_in_browser(&url);
+        return;
+    }
     if state.open_box.waiting.get_untracked() != Some(navigation_id) {
         return;
     }
@@ -425,5 +466,51 @@ mod tests {
             state.accepts_navigation(navigation_id),
             "and the open is the window's"
         );
+    }
+
+    #[test]
+    fn a_link_to_an_item_opens_here_and_one_github_cant_place_goes_to_the_browser() {
+        let state = AppState::new();
+        state.review.set(Some(crate::review::model::ReviewState::new()));
+        state.github_hosts.set(vec!["ghe.example.com".into()]);
+        let (backend, mut commands) = Backend::recording();
+
+        for url in [
+            "https://github.com/a/b/commit/abc",
+            "https://example.com/a/b/pull/7",
+            "https://github.com/a/b",
+        ] {
+            assert!(!open_link(state, &backend, url), "{url} is the browser's");
+        }
+        assert!(commands.try_recv().is_err(), "nothing asked");
+
+        let mut asked = |url: &str| {
+            assert!(open_link(state, &backend, url));
+            let Ok(Command::OpenReference {
+                repo_full_name,
+                number,
+                kind,
+                navigation_id,
+            }) = commands.try_recv()
+            else {
+                panic!("no OpenReference for {url}");
+            };
+            (repo_full_name, number, kind, navigation_id)
+        };
+        let (repo, number, kind, _) = asked("https://github.com/a/b/pull/7/files");
+        assert_eq!((repo.as_str(), number, kind), ("a/b", 7, Some(ItemKind::PullRequest)));
+        let (repo, number, kind, _) = asked("https://ghe.example.com/c/d/issues/9#issuecomment-1");
+        assert_eq!((repo.as_str(), number, kind), ("c/d", 9, None), "GitHub says which");
+        assert!(!state.open_box.open.get(), "no box goes up");
+
+        let (_, _, _, navigation_id) = asked("https://github.com/a/b/issues/3");
+        resolved(state, navigation_id, ItemKind::PullRequest);
+        assert!(state.accepts_navigation(navigation_id), "the open is the window's");
+
+        crate::ui::widgets::opened();
+        let (_, _, _, navigation_id) = asked("https://github.com/a/b/issues/4");
+        failed(state, navigation_id, "No #4 in a/b".into());
+        assert_eq!(crate::ui::widgets::opened(), vec!["https://github.com/a/b/issues/4"]);
+        assert!(state.open_box.error.get().is_none(), "the box says nothing");
     }
 }

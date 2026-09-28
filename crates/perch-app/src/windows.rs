@@ -33,13 +33,15 @@ struct App {
     open_box_on_open: Cell<bool>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Window {
     id: WindowId,
     state: AppState,
     review: ReviewState,
     /// Brings the window to the front.
     raise: floem::ViewId,
+    /// What the window asks the backend with, for a link followed in it.
+    backend: Rc<Backend>,
 }
 
 thread_local! {
@@ -130,6 +132,7 @@ pub fn view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
             state,
             review,
             raise: raise_id,
+            backend: backend.clone(),
         });
     }
     let id = backend.window();
@@ -190,7 +193,7 @@ pub fn show_open_box() {
             .iter()
             .find(|w| Some(w.id) == focused)
             .or(windows.first())
-            .copied()
+            .cloned()
     };
     match window {
         Some(window) => crate::ui::open_box::show(window.state, None),
@@ -198,6 +201,28 @@ pub fn show_open_box() {
             app.open_box_on_open.set(true);
             open(None);
         }
+    }
+}
+
+/// Open a pull request's or an issue's link in the window that last had
+/// the keyboard, which is the one it was clicked in. Whether it was one:
+/// anything else, or a link with no window to open it, is the browser's.
+pub fn open_link(url: &str) -> bool {
+    let Some(app) = app() else {
+        return false;
+    };
+    let focused = app.focused.get();
+    let window = {
+        let windows = app.windows.borrow();
+        windows
+            .iter()
+            .find(|w| Some(w.id) == focused)
+            .or(windows.first())
+            .cloned()
+    };
+    match window {
+        Some(window) => crate::ui::open_box::open_link(window.state, &window.backend, url),
+        None => false,
     }
 }
 
@@ -220,7 +245,7 @@ pub fn raise_holding(item_id: &str, asking: WindowId) -> bool {
         .borrow()
         .iter()
         .find(|w| w.id != asking && w.review.is_item(item_id))
-        .copied();
+        .cloned();
     match holding {
         Some(window) => {
             window.raise.update_state(());

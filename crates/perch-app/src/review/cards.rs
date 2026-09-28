@@ -45,7 +45,7 @@ use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{
-    avatar, clickable, icon_button, name_label, open_in_browser, sidebar_glyph, Name,
+    avatar, clickable, follow_link, icon_button, name_label, open_in_browser, sidebar_glyph, Name,
 };
 
 /// What a card's row in the column is keyed by. A row with the same key is
@@ -1597,7 +1597,7 @@ fn event_piece(piece: Piece) -> floem::AnyView {
                         .min_width(0.0)
                 }),
             ))
-            .on_event_stop(el::Click, move |_, _| open_in_browser(&url))
+            .on_event_stop(el::Click, move |_, _| follow_link(&url))
             .style(move |s| {
                 let s = s.items_center().gap(4.0).min_width(0.0);
                 if opens {

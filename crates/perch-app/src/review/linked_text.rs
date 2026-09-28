@@ -5,10 +5,11 @@
 //! The text comes from an agent or from GitHub, so a link's words say
 //! nothing reliable about where it goes. Nothing happens on hover but an
 //! underline and a tooltip with the whole destination, and a click opens
-//! an address in the browser, HTTP(S) only, or a place in the worktree
-//! in Files. floem's rich text view keeps its layout to itself, so this
-//! wraps one and lays the same text out again for hit-testing, at the
-//! width the wrapped view was given.
+//! a pull request or an issue on GitHub in Perch, another address in the
+//! browser, HTTP(S) only, or a place in the worktree in Files. floem's
+//! rich text view keeps its layout to itself, so this wraps one and lays
+//! the same text out again for hit-testing, at the width the wrapped view
+//! was given.
 //!
 //! floem's text attributes have no strikethrough either, and the rich
 //! text view draws only glyphs. So the same second layout says where a
@@ -61,7 +62,7 @@ use floem::{IntoView, Renderer, View, ViewId};
 
 use crate::review::cards::{tip_body, within_window};
 use crate::theme;
-use crate::ui::widgets::{copy_to_clipboard, open_in_browser};
+use crate::ui::widgets::{copy_to_clipboard, follow_link};
 use crate::ui::OS_MOD;
 
 /// How long the pointer rests on a link before its destination shows.
@@ -79,7 +80,8 @@ struct Link {
 /// Where a link goes.
 #[derive(Clone)]
 pub enum Target {
-    /// An address, opened in the browser when it is HTTP(S).
+    /// An address: a pull request or an issue on GitHub, opened in Perch,
+    /// or another opened in the browser when it is HTTP(S).
     Url(String),
     /// A file, a line of one, or a symbol's definitions in the worktree,
     /// which `open` goes to in Files. `tip` says where.
@@ -824,7 +826,7 @@ impl LinkedText {
                 match pressed {
                     Some(link) if self.link_at(state.logical_point()) == Some(link) => {
                         match &self.links[link].target {
-                            Target::Url(url) => open_in_browser(url),
+                            Target::Url(url) => follow_link(url),
                             Target::Local { open, .. } => open(),
                         }
                         EventPropagation::Stop
