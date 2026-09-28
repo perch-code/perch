@@ -38,7 +38,7 @@ pub struct Issue {
     pub reactions: crate::reactions::Reactions,
     /// `open` or `closed`.
     pub state: String,
-    /// `completed` or `not_planned`, for a closed issue.
+    /// `completed`, `not_planned` or `duplicate`, for a closed issue.
     #[serde(default)]
     pub state_reason: Option<String>,
     #[serde(default)]
@@ -68,7 +68,7 @@ impl Issue {
     pub fn subject_state(&self) -> SubjectState {
         if self.is_open() {
             SubjectState::IssueOpen
-        } else if self.state_reason.as_deref() == Some("not_planned") {
+        } else if matches!(self.state_reason.as_deref(), Some("not_planned" | "duplicate")) {
             SubjectState::IssueNotPlanned
         } else {
             SubjectState::IssueClosed
@@ -84,6 +84,8 @@ pub enum IssueCloseReason {
     Completed,
     /// Won't be done.
     NotPlanned,
+    /// The issue with this number asks the same.
+    Duplicate(u64),
 }
 
 impl IssueCloseReason {
@@ -92,6 +94,7 @@ impl IssueCloseReason {
         match self {
             Self::Completed => "completed",
             Self::NotPlanned => "not_planned",
+            Self::Duplicate(_) => "duplicate",
         }
     }
 }
@@ -103,6 +106,9 @@ impl IssueCloseReason {
 /// must refuse it rather than file a pull request as an issue.
 #[derive(Debug, Deserialize)]
 pub(crate) struct IssuePayload {
+    /// The database id, which a close as a duplicate names the original by.
+    #[serde(default)]
+    pub id: u64,
     pub number: u64,
     #[serde(default)]
     pub node_id: String,

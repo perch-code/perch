@@ -509,6 +509,50 @@ async fn closing_an_issue_patches_it_closed_with_the_reason() {
 }
 
 #[tokio::test]
+async fn closing_an_issue_as_a_duplicate_names_the_original_by_its_id() {
+    let (base, requests) = spawn(vec![
+        Response::new(
+            "200 OK",
+            r#"{"id":9001,"number":3,"title":"Leak","state":"open",
+                "user":{"login":"rohan"},"updated_at":"2026-09-25T10:00:00Z"}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"id":9007,"number":7,"title":"Leak again","state":"closed","state_reason":"duplicate",
+                "user":{"login":"rohan"},"updated_at":"2026-09-25T10:00:00Z"}"#,
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let closed = github
+        .close_issue("a/b", 7, IssueCloseReason::Duplicate(3))
+        .await
+        .unwrap();
+    assert_eq!(closed.state_reason.as_deref(), Some("duplicate"));
+
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/repos/a/b/issues/3");
+        assert_eq!(requests[1].method, "PATCH");
+        assert_eq!(requests[1].path, "/repos/a/b/issues/7");
+        let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "state": "closed", "state_reason": "duplicate", "duplicate_issue_id": 9001 })
+        );
+    }
+
+    // Nor is an issue its own duplicate, and GitHub is not asked.
+    assert!(github
+        .close_issue("a/b", 7, IssueCloseReason::Duplicate(7))
+        .await
+        .is_err());
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn whether_the_reader_may_close_an_issue_is_asked_of_graphql() {
     let (base, requests) = spawn(vec![
         Response::new(

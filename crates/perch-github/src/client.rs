@@ -1036,7 +1036,9 @@ impl GitHub {
     }
 
     /// Close an issue: `PATCH /issues/{number}` with `state: closed` and
-    /// the reason, which answers with the issue as it now stands.
+    /// the reason, which answers with the issue as it now stands. A
+    /// duplicate names the original by its database id, read first by
+    /// its number.
     pub async fn close_issue(
         &self,
         repo_full_name: &str,
@@ -1044,17 +1046,37 @@ impl GitHub {
         reason: IssueCloseReason,
     ) -> Result<Issue, Error> {
         let (owner, name) = repo_parts(repo_full_name)?;
+        let duplicate_issue_id = match reason {
+            IssueCloseReason::Duplicate(original) if original == number => {
+                return Err(Error::Decode("an issue cannot duplicate itself".into()));
+            }
+            IssueCloseReason::Duplicate(original) => {
+                let body = self
+                    .get_text(&format!("/repos/{owner}/{name}/issues/{original}"))
+                    .await?;
+                let payload: IssuePayload =
+                    serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+                if payload.is_pull_request() {
+                    return Err(Error::Decode(format!("#{original} is a pull request")));
+                }
+                Some(payload.id)
+            }
+            _ => None,
+        };
 
         #[derive(serde::Serialize)]
         struct Request {
             state: &'static str,
             state_reason: &'static str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            duplicate_issue_id: Option<u64>,
         }
 
         let path = format!("/repos/{owner}/{name}/issues/{number}");
         let request = Request {
             state: "closed",
             state_reason: reason.as_str(),
+            duplicate_issue_id,
         };
         let _request_guard = self.api_request_lock.lock().await;
         self.check_rate_limit()?;

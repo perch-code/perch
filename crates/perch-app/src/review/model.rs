@@ -1505,10 +1505,15 @@ pub struct ReviewState {
     /// the pull request, with the text as a comment when there is any,
     /// rather than only posting the text. Read under the confirm only.
     pub composer_closing: RwSignal<bool>,
-    /// Why an issue closed from the composer is closed: completed unless
-    /// the ask's Not planned was the answer. The send reads it and puts
-    /// it back to completed.
+    /// Why an issue closed from the composer is closed: what was last
+    /// picked in the close menu, completed until then. It stays with the
+    /// item, as github.com's pick stays with the page.
     pub composer_close_reason: RwSignal<perch_github::IssueCloseReason>,
+    /// The menu under the close button's arrow, while it is up.
+    pub close_menu: RwSignal<Option<crate::review::close_menu::CloseMenu>>,
+    /// What is typed into the close menu's search for the issue a
+    /// duplicate repeats.
+    pub close_duplicate_query: RwSignal<String>,
     /// An issue comment in flight, with the token its answer carries. The
     /// composer stays open and still until the answer comes.
     pub posting: RwSignal<Option<Posting>>,
@@ -1779,6 +1784,8 @@ impl ReviewState {
             composer_confirming: RwSignal::new(false),
             composer_closing: RwSignal::new(false),
             composer_close_reason: RwSignal::new(Default::default()),
+            close_menu: RwSignal::new(None),
+            close_duplicate_query: RwSignal::new(String::new()),
             posting: RwSignal::new(None),
             composer_error: RwSignal::new(None),
             lsp_status: RwSignal::new(perch_lsp::Status::Absent),
@@ -1859,6 +1866,8 @@ impl ReviewState {
         self.issue_comments.set(Arc::new(Vec::new()));
         self.issue_events.set(Arc::new(Vec::new()));
         self.issue_closable.set(None);
+        self.composer_close_reason.set(Default::default());
+        self.close_menu.set(None);
         self.stale_head.set(None);
         self.offline.set(false);
         self.review_open.set(false);
@@ -3771,6 +3780,7 @@ impl ReviewState {
         self.composer_draft.set(String::new());
         self.composer_confirming.set(false);
         self.composer_error.set(None);
+        self.close_menu.set(None);
         // The box goes with the composer and is never told it lost focus,
         // so the flag that stands the keys down is cleared here.
         self.composer_focused.set(false);

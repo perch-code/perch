@@ -2,6 +2,7 @@
 
 pub mod cards;
 pub mod close_as_issue;
+pub mod close_menu;
 pub mod code_refs;
 pub mod composer_styling;
 pub mod conversation;

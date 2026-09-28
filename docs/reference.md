@@ -169,15 +169,20 @@ At the foot of Conversation, a message to GitHub is an issue comment and
 posts at once, after one confirmation naming the pull request. Beside
 **Comment**, **Close with comment** posts it and closes the pull request, or
 reads **Close pull request** while the box is empty. It is there on an open
-pull request you opened or can write to, and asks once too. On an open issue
-you opened or can triage, the same button reads **Close issue**, and its
-confirmation offers **Not planned** beside **Completed**, the reason GitHub
-records for the close. GitHub has no
+pull request you opened or can write to, and asks once too. It is a split
+button, as on github.com: its arrow opens a menu of the ways to close. On a
+pull request those are **Close pull request** and **Close as issue…**. On an
+open issue you opened or can triage, the button reads **Close issue**, and the
+menu offers **Close as completed**, **Close as not planned** and **Close as
+duplicate**, the reason GitHub records for the close. A pick changes what the
+button says and does; it stays picked until the item changes. Close as
+duplicate searches the repository's issues, as a `#` does, and picking the
+original goes straight to the confirmation, which names it. GitHub has no
 threads under a comment, a review's summary or the description, so each offers
 **Quote reply** under the pointer, which opens that composer with the text
 quoted as github.com quotes it, below anything already typed there for GitHub.
 
-**Close as issue…**, beside it, is for a pull request that found a real bug
+**Close as issue…**, in that menu, is for a pull request that found a real bug
 but isn't worth merging. It unfolds a form above the composer: the issue's
 title and body, filled from the pull request with a closing `Found in #12.`
 that links the two, and the comment the pull request gets, where `{issue}`

@@ -434,6 +434,63 @@ pub fn references(
         .collect()
 }
 
+/// The issues other than `number` that `query` finds among those GitHub
+/// has answered with, ranked as a `#` ranks them: what Close as
+/// duplicate offers. Tracked over the answers.
+pub(crate) fn duplicate_candidates(
+    state: ReviewState,
+    query: &str,
+    number: u64,
+) -> Vec<ReferenceHit> {
+    use perch_github::SubjectState;
+
+    let issue = |r: &IssueReference| {
+        r.number != number
+            && matches!(
+                r.state,
+                SubjectState::IssueOpen | SubjectState::IssueClosed | SubjectState::IssueNotPlanned
+            )
+    };
+    state.mentions.references.with(|f| {
+        let (found, exact) = found_for(query, f);
+        let found: Vec<_> = found.into_iter().filter(issue).collect();
+        let recent: Vec<_> = f
+            .get("")
+            .cloned()
+            .flatten()
+            .map(|r| r.iter().filter(|r| issue(r)).cloned().collect())
+            .unwrap_or_default();
+        references(query, &found, exact, &recent)
+    })
+}
+
+/// Ask GitHub for the item's issues and pull requests that `query` names
+/// once typing rests on it, as a `#` does, unless it has been asked.
+pub(crate) fn ask_references(state: ReviewState, backend: Rc<Backend>, query: &str) {
+    let repo = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| (i.id.clone(), i.repo_full_name.clone())));
+    let Some((item_id, repo)) = repo else {
+        return;
+    };
+    if perch_github::is_local(&repo)
+        || !names_a_reference(query)
+        || state.mentions.is_asked(Trigger::Hash, query)
+    {
+        return;
+    }
+    let ask = Ask {
+        item_id,
+        repo,
+        trigger: Trigger::Hash,
+        query: query.to_string(),
+    };
+    state.mentions.waiting.set(Some(ask.clone()));
+    floem::action::exec_after(ASK_DELAY, move |_| {
+        state.mentions.ask_if_waiting(&backend, &ask);
+    });
+}
+
 // ---------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------
@@ -1051,7 +1108,7 @@ fn person_row(app: AppState, hit: &PersonHit) -> impl IntoView {
 
 /// An issue's or a pull request's row: the state glyph, the title, and
 /// the number in the subtle colour, as GitHub's list has them.
-fn reference_row(hit: &ReferenceHit) -> impl IntoView {
+pub(crate) fn reference_row(hit: &ReferenceHit) -> impl IntoView {
     let state = hit.reference.state;
     let number = format!("#{}", hit.reference.number);
     Stack::horizontal((

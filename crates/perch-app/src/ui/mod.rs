@@ -267,6 +267,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         toast::toast(state, review, capture_backend.clone()),
         // An `@`'s list, over the composer it is typed in.
         crate::review::mention::popup(state, review),
+        // The close button's menu, over the composer it hangs from.
+        crate::review::close_menu::popup(state, review, backend.clone()),
         // Cmd-P's palette, over everything but a drag's cursor.
         crate::review::go_to::palette(state, review, backend.clone()),
         // Open…'s box, as modal as the palette.
@@ -639,6 +641,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                                 String::new(),
                                 crate::review::threads::defaults(state),
                             );
+                            return EventPropagation::Stop;
+                        }
+                        // Put the close menu away, or step back out of its search.
+                        Code::Escape if review.close_menu.with(Option::is_some) => {
+                            crate::review::close_menu::back(review);
                             return EventPropagation::Stop;
                         }
                         // Take back the question under the composer's box, the
