@@ -741,11 +741,18 @@ fn merge_controls(
                 move || confirmation.set(Some(start_request.clone())),
             )
             .style(|s| s.flex_grow(1.0_f32));
-            let method_picker = merge_method_button(
-                overview.allowed_merge_methods,
-                selected_method,
-                confirmation,
-            );
+            // One allowed method leaves nothing to pick, so the button stands alone.
+            let methods = overview.allowed_merge_methods;
+            let method_picker = if [methods.merge, methods.squash, methods.rebase]
+                .into_iter()
+                .filter(|allowed| *allowed)
+                .count()
+                > 1
+            {
+                merge_method_button(methods, selected_method, confirmation).into_any()
+            } else {
+                Empty::new().into_any()
+            };
 
             Stack::vertical((
                 bypass_control,
