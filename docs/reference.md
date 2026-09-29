@@ -191,6 +191,7 @@ original goes straight to the confirmation, which names it. GitHub has no
 threads under a comment, a review's summary or the description, so each offers
 **Quote reply** under the pointer, which opens that composer with the text
 quoted as github.com quotes it, below anything already typed there for GitHub.
+With words of it selected, it quotes just those.
 
 **Close as issue…**, in that menu, is for a pull request that found a real bug
 but isn't worth merging. It unfolds a form above the composer: the issue's
@@ -221,7 +222,9 @@ where it came from. It goes the same two ways as anything else: a draft under
 a thread with lines or a place on GitHub, an issue comment under one of
 Perch's own, such as a question asked at the foot of Conversation. A review's
 findings on an open pull request arrive as drafts already (see Worktree
-reviews), and post only with the review.
+reviews), and post only with the review. **Quote reply** on an answer quotes
+it, or the words of it you selected, into the thread's Follow up box, still
+bound for the agent.
 
 A thread ends in **Resolve**, or **Unresolve** once it is resolved. On a
 thread that is on GitHub the button is there wherever GitHub says you may

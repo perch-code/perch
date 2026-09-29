@@ -14,7 +14,7 @@
 //! pills under its text, and the face in its byline that opens the
 //! picker. A click toggles the pill where it is and asks GitHub after.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use floem::context::VisualChanged;
@@ -277,6 +277,26 @@ pub(crate) fn hover_action(
             }),
         tip_text.to_string(),
     )
+}
+
+/// Quote reply under the pointer, as [`hover_action`] is: `quote` gets
+/// what was selected in `scope`'s text as the pointer came onto the
+/// button, or `None` to quote the whole. A press moves the focus, and
+/// the selection goes with it, before the click lands, so the selection
+/// is read on the way in.
+pub(crate) fn quote_action(
+    hovered: RwSignal<bool>,
+    scope: floem::ViewId,
+    name: &'static str,
+    quote: Rc<dyn Fn(Option<String>)>,
+) -> impl IntoView {
+    let selected = Rc::new(RefCell::new(None));
+    let read = selected.clone();
+    let action: Rc<dyn Fn()> = Rc::new(move || quote(read.borrow().clone()));
+    Container::new(hover_action(hovered, SidebarIcon::Reply, "Quote reply", name, action))
+        .on_event_cont(el::PointerEnter, move |_, _| {
+            *selected.borrow_mut() = crate::review::linked_text::selected_under(scope);
+        })
 }
 
 /// Follow the pointer in and out of a card, for Ask about this.
@@ -953,13 +973,20 @@ fn ask_about(
 
 /// Quote reply at the head of a card's actions: the composer at the foot
 /// of Conversation, bound for GitHub, with the text quoted as GitHub's own
-/// Quote reply quotes it. GitHub keeps no thread under a comment, a review
+/// Quote reply quotes it: what is selected in `scope`, the card's text,
+/// or else all of it. GitHub keeps no thread under a comment, a review
 /// or the description, so a reply is a new comment at the end, and the
 /// quote says what it answers. A draft already bound for GitHub there
 /// keeps its text, the quote under it. Absent where there is no pull
 /// request to post to, as Reply is.
-fn quote_reply_button(state: ReviewState, hovered: RwSignal<bool>, body: String) -> floem::AnyView {
-    let quote: Rc<dyn Fn()> = Rc::new(move || quote_reply(state, &body));
+fn quote_reply_button(
+    state: ReviewState,
+    hovered: RwSignal<bool>,
+    body: String,
+    scope: floem::ViewId,
+) -> floem::AnyView {
+    let quote: Rc<dyn Fn(Option<String>)> =
+        Rc::new(move |selected| quote_reply(state, selected.as_deref().unwrap_or(&body)));
     let offered = Memo::new(move |_| state.pull_request.with(Option::is_some));
     dyn_container(
         move || offered.get(),
@@ -967,8 +994,7 @@ fn quote_reply_button(state: ReviewState, hovered: RwSignal<bool>, body: String)
             if !offered {
                 return Empty::new().into_any();
             }
-            hover_action(hovered, SidebarIcon::Reply, "Quote reply", "quote-reply", quote.clone())
-                .into_any()
+            quote_action(hovered, scope, "quote-reply", quote.clone()).into_any()
         },
     )
     .into_any()
@@ -1019,7 +1045,9 @@ pub fn description_card(
     } else {
         markdown::render_linked(&body, state).into_any()
     };
-    let quote = (!body.trim().is_empty()).then(|| quote_reply_button(state, hovered, body.clone()));
+    let scope = description.id();
+    let quote = (!body.trim().is_empty())
+        .then(|| quote_reply_button(state, hovered, body.clone(), scope));
     let react = reactable(&node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
     track_hover(
@@ -1066,7 +1094,8 @@ pub fn comment_card(
         comment.body.clone(),
     );
     let ask: Rc<dyn Fn()> = Rc::new(move || ask_about(app, state, None, &author, &url, &body));
-    let quote = quote_reply_button(state, hovered, comment.body.clone());
+    let text = markdown::render_linked(&comment.body, state).into_any();
+    let quote = quote_reply_button(state, hovered, comment.body.clone(), text.id());
     let react = reactable(&comment.node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
     track_hover(
@@ -1076,7 +1105,7 @@ pub fn comment_card(
                 who,
                 actions(state, backend, hovered, Some(quote), Some(ask), react, comment.html_url.clone()),
             )),
-            Stack::vertical((markdown::render_linked(&comment.body, state), reactions))
+            Stack::vertical((text, reactions))
                 .style(|s| s.flex_col().width_full())
                 .into_any(),
         ),
@@ -1118,16 +1147,20 @@ pub fn review_card(
         let (author, url) = (login.clone(), url.clone());
         Rc::new(move || ask_about(app, state, None, &author, &url, &body)) as Rc<dyn Fn()>
     });
+    let text = summary
+        .as_ref()
+        .map(|body| markdown::render_linked(body, state).into_any());
     let quote = summary
         .clone()
-        .map(|body| quote_reply_button(state, hovered, body));
+        .zip(text.as_ref().map(|text| text.id()))
+        .map(|(body, scope)| quote_reply_button(state, hovered, body, scope));
     // A review with no summary has nothing to react to; GitHub allows it,
     // but there would be nothing to draw the pills under.
     let react = summary.as_ref().and_then(|_| reactable(&review.node_id));
 
-    let body = match summary {
+    let body = match text {
         Some(text) => Stack::vertical((
-            markdown::render_linked(&text, state),
+            text,
             reactions_under(app, state, backend.clone(), &react),
         ))
         .style(|s| s.flex_col().width_full())

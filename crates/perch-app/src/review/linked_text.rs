@@ -167,6 +167,22 @@ thread_local! {
     static LEAVES: RefCell<HashMap<ViewId, Weak<Leaf>>> = RefCell::new(HashMap::new());
     /// The views whose linked text selects together.
     static PASSAGES: RefCell<HashSet<ViewId>> = RefCell::new(HashSet::new());
+    /// The selection there is, if any: the view that owns it and its text.
+    static SELECTED: RefCell<Option<(ViewId, String)>> = const { RefCell::new(None) };
+}
+
+/// The selected text, when the view that owns the selection is under
+/// `scope`: what a Quote reply on a comment quotes in place of the whole.
+pub fn selected_under(scope: ViewId) -> Option<String> {
+    let (owner, text) = SELECTED.with_borrow(|selected| selected.clone())?;
+    let mut at = Some(owner);
+    while let Some(view) = at {
+        if view == scope {
+            return Some(text);
+        }
+        at = view.parent();
+    }
+    None
 }
 
 /// `view`, whose linked text views select as one: a drag runs on from
@@ -367,6 +383,11 @@ pub fn linked_text(
         if let Some(overlay) = tip.borrow_mut().take() {
             remove_overlay(overlay);
         }
+        SELECTED.with_borrow_mut(|selected| {
+            if selected.as_ref().is_some_and(|(owner, _)| *owner == id) {
+                *selected = None;
+            }
+        });
     })
 }
 
@@ -555,6 +576,19 @@ impl LinkedText {
         self.with_shadow(|layout, _| {
             self.leaf.text[layout.selection_text_range(&selection)].to_string()
         })
+    }
+
+    /// Tells [`selected_under`] what this view has selected now: its text,
+    /// or nothing where the selection it had is gone.
+    fn publish(&self) {
+        let text = self.selected_text();
+        SELECTED.with_borrow_mut(|selected| match text {
+            Some(text) => *selected = Some((self.id, text)),
+            None if selected.as_ref().is_some_and(|(owner, _)| *owner == self.id) => {
+                *selected = None
+            }
+            None => {}
+        });
     }
 
     /// Takes back what a drag from here took of the passage.
@@ -793,6 +827,7 @@ impl LinkedText {
                 // Any press clears what was selected, as in a browser.
                 self.selecting = Selecting::None;
                 self.release();
+                self.publish();
                 cx.window_state.request_paint(self.id);
                 let point = state.logical_point();
                 self.pressed = self.link_at(point);
@@ -822,6 +857,7 @@ impl LinkedText {
                     // What the drag took stands on its own.
                     self.selecting = Selecting::None;
                 }
+                self.publish();
                 cx.window_state.request_paint(self.id);
                 match pressed {
                     Some(link) if self.link_at(state.logical_point()) == Some(link) => {
@@ -847,6 +883,7 @@ impl LinkedText {
                 if self.dragging() {
                     self.selecting = Selecting::None;
                     self.release();
+                    self.publish();
                     cx.window_state.request_paint(self.id);
                 }
                 EventPropagation::Continue
@@ -985,6 +1022,7 @@ impl View for LinkedText {
         {
             self.selecting = Selecting::None;
             self.release();
+            self.publish();
             cx.window_state.request_paint(self.id);
         }
         if self.tip.borrow().is_some() && self.id.is_hidden() {
@@ -1028,6 +1066,7 @@ impl View for LinkedText {
                 if self.selecting != Selecting::None || !self.spread.is_empty() {
                     self.selecting = Selecting::None;
                     self.release();
+                    self.publish();
                     cx.window_state.request_paint(self.id);
                 }
             }

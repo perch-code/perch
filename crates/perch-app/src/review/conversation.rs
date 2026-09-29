@@ -1548,6 +1548,86 @@ mod tests {
         );
     }
 
+    /// Double-click the first word of the linked text under `card` that
+    /// reads `text`, selecting it.
+    fn select_first_word(harness: &mut HeadlessHarness, card: floem::ViewId, text: &str) {
+        use crate::review::linked_text::{shown_under, with_text};
+        card.scroll_to(None);
+        harness.rebuild();
+        harness.paint();
+        let leaf = shown_under(card)
+            .into_iter()
+            .find(|id| with_text(*id, |t| t == text).unwrap_or(false))
+            .unwrap_or_else(|| panic!("no text reading {text:?}"));
+        let rect = leaf.get_visual_rect_no_clip();
+        harness.double_click(rect.x0 + 3.0, rect.y0 + 8.0);
+        harness.rebuild();
+        harness.paint();
+    }
+
+    /// Hover `card`, then click its button named `name`.
+    fn hover_and_click(harness: &mut HeadlessHarness, card: floem::ViewId, name: &str) {
+        let c = card.get_visual_rect_no_clip().center();
+        harness.pointer_move(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+        let button = find(card, name).unwrap_or_else(|| panic!("the card offers {name}"));
+        click_on(harness, button);
+    }
+
+    /// With words of a comment selected, Quote reply quotes those words
+    /// and not the whole, as github.com does; words selected in another
+    /// card leave the comment's Quote reply quoting all of it.
+    #[test]
+    fn quote_reply_quotes_the_selection_when_there_is_one() {
+        let mut discussion = discussion();
+        discussion.comments[0].body = "Thanks for the fix".into();
+        let (mut harness, _, state) =
+            app_harness_on(crate::backend::Backend::detached(), discussion);
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        select_first_word(&mut harness, comment, "Thanks for the fix");
+        hover_and_click(&mut harness, comment, "quote-reply");
+        assert_eq!(state.composer_draft.get(), "> Thanks\n\n");
+
+        state.close_composer();
+        let description = find(harness.root_id(), "card:description").unwrap();
+        select_first_word(&mut harness, description, "The description.");
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        comment.scroll_to(None);
+        harness.rebuild();
+        harness.paint();
+        hover_and_click(&mut harness, comment, "quote-reply");
+        assert_eq!(state.composer_draft.get(), "> Thanks for the fix\n\n");
+    }
+
+    /// Quote reply on an agent's answer opens the thread's Follow up box
+    /// with the selected words quoted, bound for the agent, never GitHub,
+    /// and keeps what the reader had typed there above the quote.
+    #[test]
+    fn quote_reply_on_an_answer_follows_up_with_the_agent() {
+        let (mut harness, _, state) = app_harness();
+        let mut thread = thread();
+        thread.messages[1].body = "because the lock".into();
+        state.set_comment_threads(Arc::new(vec![thread]));
+        harness.rebuild();
+        harness.paint();
+        let card = find(harness.root_id(), "card:thread").unwrap();
+        select_first_word(&mut harness, card, "because the lock");
+        hover_and_click(&mut harness, card, "quote-reply-agent");
+        let composer = state.composer.get().expect("the Follow up box opened");
+        assert_eq!(composer.thread_id.as_deref(), Some("t1"));
+        assert!(!composer.destination.is_github(), "{:?}", composer.destination);
+        assert_eq!(state.composer_draft.get(), "> because\n\n");
+
+        // Nothing selected now: the whole answer, under what was typed.
+        state.composer_draft.set("> because\n\nWhy?".into());
+        let card = find(harness.root_id(), "card:thread").unwrap();
+        hover_and_click(&mut harness, card, "quote-reply-agent");
+        assert_eq!(state.composer_draft.get(), "> because\n\nWhy?\n\n> because the lock\n\n");
+        let composer = state.composer.get().unwrap();
+        assert!(!composer.destination.is_github());
+    }
+
     /// Conversation is the home for local threads that have no inline card:
     /// item-level threads, stale anchors, and anchors in another file.
     #[test]

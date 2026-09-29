@@ -2671,26 +2671,24 @@ fn local_message_view(
     let settled = is_agent
         && !body.trim().is_empty()
         && (finished || message.run.is_none());
+    let text = message_body(state, &thread, &body);
     let actions = if settled {
-        agent_actions(state, thread.clone(), body.clone(), hovered)
+        agent_actions(app, state, thread.clone(), body.clone(), text.id(), hovered)
     } else {
         Empty::new().into_any()
     };
     let content = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
             run_surface(steps_view(state, without_answer(run.clone(), &body))),
-            message_body(state, &thread, &body),
+            text,
             run_footer(backend, run),
         ))
         .style(|s| s.flex_col().width_full().gap(8.0))
         .into_any(),
-        Some(run) => Stack::vertical((
-            message_body(state, &thread, &body),
-            run_block(state, backend, run),
-        ))
-        .style(|s| s.flex_col().width_full().gap(8.0))
-        .into_any(),
-        None => message_body(state, &thread, &body),
+        Some(run) => Stack::vertical((text, run_block(state, backend, run)))
+            .style(|s| s.flex_col().width_full().gap(8.0))
+            .into_any(),
+        None => text,
     };
     let author = message.author.clone();
     let mut after = vec![when_label(app, message.created_at, face, "comment-when").into_any()];
@@ -2706,19 +2704,29 @@ fn local_message_view(
     cards::track_hover(comment_frame(face, place, avatar, byline, content), hovered).into_any()
 }
 
-/// Post to GitHub, while the thread has somewhere on GitHub to go, and
-/// Copy, at the end of an agent's byline, under the pointer only, as a
-/// comment's are. Post opens the composer under the thread's last
-/// message, bound for GitHub, with the answer as the text: a follow-up
-/// the reader edits and sends as their own, a draft where the thread
-/// takes one and an issue comment where it has no reply to make. Nothing
-/// remembers where it came from.
+/// Quote reply, Post to GitHub, while the thread has somewhere on GitHub
+/// to go, and Copy, at the end of an agent's byline, under the pointer
+/// only, as a comment's are. Quote reply opens the Follow up box with
+/// what is selected in `scope`, the answer's text, or else all of it,
+/// quoted, bound for the agent. Post opens the composer under the
+/// thread's last message, bound for GitHub, with the answer as the text:
+/// a follow-up the reader edits and sends as their own, a draft where the
+/// thread takes one and an issue comment where it has no reply to make.
+/// Nothing remembers where it came from.
 fn agent_actions(
+    app: AppState,
     state: ReviewState,
     thread: CommentThread,
     body: String,
+    scope: floem::ViewId,
     hovered: RwSignal<bool>,
 ) -> floem::AnyView {
+    let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
+    let whole = body.clone();
+    let quote: Rc<dyn Fn(Option<String>)> = Rc::new(move |selected| {
+        let text = selected.as_deref().unwrap_or(&whole);
+        quote_to_agent(app, state, &thread_id, anchor.clone(), text);
+    });
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     let draft = body.clone();
     let post: Rc<dyn Fn()> = Rc::new(move || {
@@ -2737,6 +2745,7 @@ fn agent_actions(
     // threads, so this follows it rather than the message's own rebuild.
     let offered = Memo::new(move |_| state.github_offered_on(&thread));
     Stack::horizontal((
+        cards::quote_action(hovered, scope, "quote-reply-agent", quote),
         dyn_container(
             move || offered.get(),
             move |offered| {
@@ -2752,6 +2761,37 @@ fn agent_actions(
     .debug_name("agent-actions")
     .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
     .into_any()
+}
+
+/// Open the Follow up box under `thread_id` with `text` quoted, under
+/// whatever the reader had typed there, bound for an agent: the one the
+/// box was already bound for, or the last one asked. Never for GitHub;
+/// that is what Post to GitHub is for.
+fn quote_to_agent(
+    app: AppState,
+    state: ReviewState,
+    thread_id: &str,
+    anchor: Option<perch_github::Anchor>,
+    text: &str,
+) {
+    let quote = crate::ask::quote_reply(text);
+    let open = state.composer.with_untracked(|c| {
+        c.as_ref()
+            .filter(|c| c.thread_id.as_deref() == Some(thread_id) && c.editing.is_none())
+            .map(|c| c.destination.clone())
+    });
+    let typed = open
+        .is_some()
+        .then(|| state.composer_draft.get_untracked())
+        .filter(|d| !d.trim().is_empty());
+    let draft = match typed {
+        Some(typed) => format!("{}\n\n{quote}", typed.trim_end()),
+        None => quote,
+    };
+    let destination = open.filter(|d| !d.is_github()).unwrap_or_else(|| {
+        Destination::agent(state.agent_last.get_untracked().unwrap_or_else(|| defaults(app)))
+    });
+    state.open_composer_with(Some(thread_id.to_string()), anchor, draft, destination, None);
 }
 
 /// Reply and Ask about this on a comment in a thread that is on GitHub,
