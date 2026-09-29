@@ -386,6 +386,19 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
             })
         }
     });
+    {
+        // Greyed where the bar has no Start work either: a merged pull
+        // request, a worktree with no checkout, anything archived.
+        let (b, i) = (backend.clone(), id.clone());
+        let can = crate::review::start_work::can_start_work(&item);
+        menu = menu.item("Start Work", move |m| {
+            let (b, i) = (b.clone(), i.clone());
+            m.icon(SidebarIcon::Branch)
+                .enabled(can)
+                .accelerator(key(Code::KeyW))
+                .action(move || crate::review::start_work::start_work(state, &b, &i))
+        });
+    }
     menu = menu.separator();
 
     {

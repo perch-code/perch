@@ -10,7 +10,7 @@ use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalWith};
 use floem::views::{dyn_container, Decorators, Empty};
 
-use perch_github::{Issue, Item, ItemSubject, PullRequest};
+use perch_github::{Issue, Item, ItemKind, ItemSubject, PullRequest, SubjectKind, SubjectState, Thread};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -53,7 +53,7 @@ pub fn button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
                 icon_button(
                     || SidebarIcon::Branch,
                     || theme::FG_MUTED,
-                    move || start_work(app, state, &backend, &id),
+                    move || start_work(app, &backend, &id),
                 ),
                 "Start work".to_string(),
             )
@@ -68,16 +68,53 @@ pub fn button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
     })
 }
 
-/// Cut the item's branch and open it. From an issue or a pull request, a
-/// prompt to work on it waits in the new branch's composer.
-pub fn start_work(app: AppState, state: ReviewState, backend: &Backend, item_id: &str) {
+/// Cut the item's branch and open it, from the bar or any row's menu.
+/// From an issue or a pull request, a prompt to work on it waits in the
+/// new branch's composer: see `draft`.
+pub fn start_work(app: AppState, backend: &Backend, item_id: &str) {
     let navigation_id = backend.start_work(item_id);
     app.begin_open("Cutting a branch", navigation_id);
-    let prompt = state
-        .issue
-        .with_untracked(|i| i.as_deref().map(work_prompt))
-        .or_else(|| state.pull_request.with_untracked(|p| p.as_deref().map(pull_prompt)));
-    app.start_work_draft.set(prompt.map(|p| (navigation_id, p)));
+}
+
+/// Start work from a notification's pull request or issue, which may have
+/// no item until the backend makes one.
+pub fn start_work_on_thread(app: AppState, backend: &Backend, thread: &Thread) {
+    let Some((kind, number)) = thread_subject(thread) else {
+        return;
+    };
+    let navigation_id = backend.start_work_on_subject(&thread.repository.full_name, kind, number);
+    app.begin_open("Cutting a branch", navigation_id);
+}
+
+/// The pull request or the issue a notification is about: what Start work
+/// from its row cuts from. Other kinds of notification have none.
+pub fn thread_subject(thread: &Thread) -> Option<(ItemKind, u64)> {
+    let kind = match thread.subject.kind {
+        SubjectKind::Issue => ItemKind::Issue,
+        SubjectKind::PullRequest => ItemKind::PullRequest,
+        _ => return None,
+    };
+    let number = thread.number_hint()?;
+    Some((kind, number))
+}
+
+/// Whether a notification's subject is still open to work on, as far as a
+/// look has found: a merged pull request or a closed issue is done with.
+/// One not looked at yet is left to the backend to judge.
+pub fn thread_open_for_work(thread: &Thread) -> bool {
+    !matches!(
+        thread.subject_snapshot.as_ref().map(|s| s.state),
+        Some(SubjectState::PrMerged | SubjectState::IssueClosed | SubjectState::IssueNotPlanned)
+    )
+}
+
+/// What waits in the composer of a branch cut from `source`: a prompt to
+/// work on its issue or to continue its pull request. None from a worktree.
+pub fn draft(source: &Item) -> Option<String> {
+    match source.subject.as_ref()? {
+        ItemSubject::Issue(issue) => Some(work_prompt(issue)),
+        ItemSubject::PullRequest(pr) => Some(pull_prompt(pr)),
+    }
 }
 
 /// What to ask an agent on a branch cut for `issue`: the issue by number,
@@ -152,6 +189,20 @@ mod tests {
              This branch has the pull request's commits. Read its description and review comments, \
              finish the change on this branch, and add tests where they fit."
         );
+    }
+
+    /// The prompt comes from the row Start work cut from, not from what
+    /// the main pane has open, so it is right from any row's menu.
+    #[test]
+    fn the_draft_is_the_sources_prompt() {
+        let now = "2026-09-20T12:00:00Z".parse().unwrap();
+        let mut item = Item::new("slatedb/slatedb", now);
+        assert_eq!(draft(&item), None, "a worktree has nothing to ask about");
+        item.subject = Some(ItemSubject::Issue(issue("Fence them.")));
+        assert_eq!(draft(&item), Some(work_prompt(&issue("Fence them."))));
+        let pr = crate::review::header::tests::pull_request(812);
+        item.subject = Some(ItemSubject::PullRequest(pr.clone()));
+        assert_eq!(draft(&item), Some(pull_prompt(&pr)));
     }
 
     #[test]

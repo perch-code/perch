@@ -343,8 +343,10 @@ local repository cuts in that repository.
 
 ### Start work from an item
 
-The branch glyph in an item's bar, beside the agents, is **Start work**. It
-cuts a new branch from the item into a worktree of your own and opens it:
+The branch glyph in an item's bar, beside the agents, is **Start work**, and
+so is **Start Work** in an item row's menu and in the menu of a notification
+about a pull request or an issue. It cuts a new branch from the item into a
+worktree of your own and opens it:
 
 - From an **issue**, `perch/issue-<n>` from the default branch.
 - From a **pull request**, anyone's and from any fork, `perch/pr-<n>-work`
@@ -360,6 +362,12 @@ The new worktree is listed under **In Perch** on the item it came from. A pull
 request opened from it says `Closes #<n>`, so merging it closes the issue or
 the pull request it came from. A merged pull request, and anything
 archived, has no Start work.
+
+From a notification, Start work cuts from the item Perch has for its pull
+request or issue, and makes that item first if there is none. It is greyed
+once Perch has seen the pull request merged or the issue closed. A pull request
+whose worktree was removed has to be opened first, which restores it. Other
+kinds of notification have no Start work.
 
 ### Keeping work safe
 

@@ -174,7 +174,7 @@ fn main() {
                             .flatten();
                         match issue_item {
                             Some(id) => {
-                                crate::review::start_work::start_work(state, review, &backend, &id);
+                                crate::review::start_work::start_work(state, &backend, &id);
                                 true
                             }
                             None => false,

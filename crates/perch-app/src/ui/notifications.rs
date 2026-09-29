@@ -16,6 +16,7 @@ use perch_github::{CheckRunState, SubjectKind, SubjectState, Thread};
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
 use crate::items::InboxShow;
+use crate::review::start_work;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::menu::{Menu, MenuExt};
@@ -280,28 +281,43 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, don
     let unread = thread.unread;
     let done_backend = backend.clone();
     let done_thread = thread.clone();
-    let unsubscribe_backend = backend;
+    let unsubscribe_backend = backend.clone();
     let unsubscribe_id = thread.id.clone();
-    Menu::new()
-        .item("Done", move |item| {
-            let backend = done_backend.clone();
-            let thread = done_thread.clone();
-            item.icon(SidebarIcon::Check)
-                .action(move || done(state, &backend, &thread))
-        })
-        .item("Mark Unread", move |item| {
-            let backend = unread_backend.clone();
-            let id = unread_id.clone();
-            item.icon(SidebarIcon::Unread)
-                .enabled(!unread)
-                .action(move || backend.mark_notification_unread(&id))
-        })
-        .item("Unsubscribe", move |item| {
-            let backend = unsubscribe_backend.clone();
-            let id = unsubscribe_id.clone();
-            item.icon(SidebarIcon::BellOff)
-                .action(move || backend.unsubscribe_notification(&id))
-        })
+    let mut menu = Menu::new();
+    // A pull request's or an issue's row starts work on it, greyed once a
+    // look has found it merged or closed. Other kinds have nothing to cut.
+    if start_work::thread_subject(thread).is_some() {
+        let open = start_work::thread_open_for_work(thread);
+        let thread = thread.clone();
+        menu = menu
+            .item("Start Work", move |item| {
+                let backend = backend.clone();
+                let thread = thread.clone();
+                item.icon(SidebarIcon::Branch)
+                    .enabled(open)
+                    .action(move || start_work::start_work_on_thread(state, &backend, &thread))
+            })
+            .separator();
+    }
+    menu.item("Done", move |item| {
+        let backend = done_backend.clone();
+        let thread = done_thread.clone();
+        item.icon(SidebarIcon::Check)
+            .action(move || done(state, &backend, &thread))
+    })
+    .item("Mark Unread", move |item| {
+        let backend = unread_backend.clone();
+        let id = unread_id.clone();
+        item.icon(SidebarIcon::Unread)
+            .enabled(!unread)
+            .action(move || backend.mark_notification_unread(&id))
+    })
+    .item("Unsubscribe", move |item| {
+        let backend = unsubscribe_backend.clone();
+        let id = unsubscribe_id.clone();
+        item.icon(SidebarIcon::BellOff)
+            .action(move || backend.unsubscribe_notification(&id))
+    })
 }
 
 /// The number GitHub shows for the subject: a pull request's, an issue's
@@ -396,6 +412,47 @@ mod tests {
             subject_snapshot: None,
             run_snapshot: None,
         }
+    }
+
+    /// Start Work is on a pull request's or an issue's row, and greyed
+    /// once a look has found it merged or closed. A workflow run has
+    /// nothing to cut from.
+    #[test]
+    fn work_starts_from_a_pull_request_or_an_issue_still_open() {
+        use crate::review::start_work::{thread_open_for_work, thread_subject};
+        use perch_github::{ItemKind, SubjectSnapshot, SubjectState};
+
+        let mut pull = thread("42", "org/repo", "Pull", SubjectKind::PullRequest, Reason::Mention, true);
+        assert_eq!(thread_subject(&pull), Some((ItemKind::PullRequest, 42)));
+        assert!(thread_open_for_work(&pull), "not looked at yet: the backend judges");
+        let look = |state| SubjectSnapshot {
+            author_login: "rohan".into(),
+            author_avatar_url: String::new(),
+            state,
+            churn: None,
+            review_requested: false,
+            participants: None,
+            at: "2026-09-19T12:00:00Z".parse().unwrap(),
+        };
+        for (state, open) in [
+            (SubjectState::PrOpen, true),
+            (SubjectState::PrDraft, true),
+            (SubjectState::PrClosed, true),
+            (SubjectState::PrMerged, false),
+            (SubjectState::IssueOpen, true),
+            (SubjectState::IssueClosed, false),
+            (SubjectState::IssueNotPlanned, false),
+        ] {
+            pull.subject_snapshot = Some(look(state));
+            assert_eq!(thread_open_for_work(&pull), open, "{state:?}");
+        }
+
+        let issue = thread("7", "org/repo", "Issue", SubjectKind::Issue, Reason::Assign, true);
+        assert_eq!(thread_subject(&issue), Some((ItemKind::Issue, 7)));
+        let run = thread("9", "org/repo", "Run", SubjectKind::CheckSuite, Reason::CiActivity, true);
+        assert_eq!(thread_subject(&run), None);
+        let talk = thread("3", "org/repo", "Talk", SubjectKind::Discussion, Reason::Mention, true);
+        assert_eq!(thread_subject(&talk), None);
     }
 
     #[test]

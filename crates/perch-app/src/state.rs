@@ -2314,6 +2314,12 @@ impl AppState {
             Event::Participants(found) => {
                 self.participants.update(|m| m.extend(found));
             }
+            // Start work's prompt, held until its worktree opens.
+            Event::StartWorkDraft { navigation_id, prompt } => {
+                if self.accepts_navigation(navigation_id) {
+                    self.start_work_draft.set(Some((navigation_id, prompt)));
+                }
+            }
             // What was typed went to GitHub, so the form's draft goes.
             Event::PullRequestOpened { item_id, notice, .. } => {
                 self.pull_request_drafts.update(|drafts| {
@@ -3545,7 +3551,8 @@ mod tests {
     }
 
     /// Start work's branch opens with the prompt in its composer, once:
-    /// a later open of the same branch starts empty.
+    /// a later open of the same branch starts empty. A prompt from a
+    /// Start work since overtaken is not kept.
     #[test]
     fn start_work_leaves_its_prompt_in_the_new_branchs_composer() {
         let app = AppState::new();
@@ -3553,7 +3560,15 @@ mod tests {
         app.review.set(Some(review));
 
         app.begin_open("Cutting a branch", 40);
-        app.start_work_draft.set(Some((40, "Work on #7".into())));
+        app.apply(Event::StartWorkDraft {
+            navigation_id: 39,
+            prompt: "Work on #6".into(),
+        });
+        assert!(app.start_work_draft.get().is_none());
+        app.apply(Event::StartWorkDraft {
+            navigation_id: 40,
+            prompt: "Work on #7".into(),
+        });
         app.apply_with_review(review_ready("branch", 40), review);
         assert!(review.composer.get().is_some());
         assert_eq!(review.composer_draft.get(), "Work on #7");

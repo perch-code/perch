@@ -427,6 +427,15 @@ pub enum Command {
         item_id: String,
         navigation_id: u64,
     },
+    /// Start work from a notification's pull request or issue: its item,
+    /// made from GitHub's answer if it has none yet, is cut from as
+    /// `StartWork` cuts. See `subject_item`.
+    StartWorkOnSubject {
+        repo_full_name: String,
+        kind: ItemKind,
+        number: u64,
+        navigation_id: u64,
+    },
     /// Remember a setting across launches.
     SetMeta {
         key: String,
@@ -984,6 +993,13 @@ pub enum Event {
         navigation_id: u64,
         message: String,
     },
+    /// What Start work leaves in its new worktree's composer: a prompt to
+    /// work on the issue or the pull request it was cut from. Sent before
+    /// the worktree opens.
+    StartWorkDraft {
+        navigation_id: u64,
+        prompt: String,
+    },
     FileLoaded {
         navigation_id: u64,
         scope_gen: u64,
@@ -1293,6 +1309,7 @@ impl Event {
                 | Event::ReviewReady { .. }
                 | Event::PullRequestReady { .. }
                 | Event::ReviewFailed { .. }
+                | Event::StartWorkDraft { .. }
                 | Event::IssueReady { .. }
                 | Event::FileLoaded { .. }
                 | Event::FileFailed { .. }
@@ -2704,6 +2721,20 @@ impl Backend {
         navigation_id
     }
 
+    /// Start work from a notification's pull request or issue, which may
+    /// have no item yet.
+    pub fn start_work_on_subject(&self, repo_full_name: &str, kind: ItemKind, number: u64) -> u64 {
+        let navigation_id = self.navigation_requests.begin_current();
+        self.scope_requests.clear();
+        let _ = self.commands.send(Command::StartWorkOnSubject {
+            repo_full_name: repo_full_name.to_string(),
+            kind,
+            number,
+            navigation_id,
+        });
+        navigation_id
+    }
+
     pub fn add_repository(&self, path: PathBuf) {
         let _ = self.commands.send(Command::AddRepository { path });
     }
@@ -3950,29 +3981,20 @@ async fn run(
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    match start_work(&ctx, &item_id, navigation_id).await {
-                        Ok(id) => {
-                            if open_item(&ctx, &id, navigation_id).await {
-                                start_language_server(
-                                    ctx.slot,
-                                    ctx.language_server,
-                                    ctx.events,
-                                    ctx.navigation_requests,
-                                    navigation_id,
-                                )
-                                .await;
-                            }
-                        }
-                        Err(message) => {
-                            ctx.send_navigation_event(
-                                navigation_id,
-                                Event::ReviewFailed {
-                                    navigation_id,
-                                    message,
-                                },
-                            );
-                        }
-                    }
+                    start_work_and_open(ctx, Ok(item_id), navigation_id).await;
+                });
+            }
+            Command::StartWorkOnSubject {
+                repo_full_name,
+                kind,
+                number,
+                navigation_id,
+            } => {
+                ctx.clear_notice();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let source = subject_item(&ctx, &repo_full_name, kind, number, navigation_id).await;
+                    start_work_and_open(ctx, source, navigation_id).await;
                 });
             }
             Command::AddRepository { path } => {
@@ -9737,6 +9759,96 @@ async fn start_work(ctx: &Ctx, item_id: &str, navigation_id: u64) -> Result<Stri
         Some(ItemSubject::PullRequest(_)) => start_work_on_pull(ctx, item_id, navigation_id).await,
         None => fork_item(ctx, item_id).await,
     }
+}
+
+/// Start work from the item `source` names and open what it cut. An
+/// issue or a pull request leaves a prompt to work on it for the new
+/// worktree's composer first.
+async fn start_work_and_open(ctx: Ctx, source: Result<String, String>, navigation_id: u64) {
+    let cut = match source {
+        Ok(source) => start_work(&ctx, &source, navigation_id)
+            .await
+            .map(|id| (id, ctx.item(&source))),
+        Err(message) => Err(message),
+    };
+    let (id, source) = match cut {
+        Ok(cut) => cut,
+        Err(message) => {
+            ctx.send_navigation_event(
+                navigation_id,
+                Event::ReviewFailed {
+                    navigation_id,
+                    message,
+                },
+            );
+            return;
+        }
+    };
+    if let Some(prompt) = source.as_ref().and_then(crate::review::start_work::draft) {
+        ctx.send_navigation_event(navigation_id, Event::StartWorkDraft { navigation_id, prompt });
+    }
+    if open_item(&ctx, &id, navigation_id).await {
+        start_language_server(
+            ctx.slot,
+            ctx.language_server,
+            ctx.events,
+            ctx.navigation_requests,
+            navigation_id,
+        )
+        .await;
+    }
+}
+
+/// The item for a notification's pull request or issue, to start work
+/// from: the row it has, else one made from GitHub's answer with no
+/// checkout, as a first open makes it.
+async fn subject_item(
+    ctx: &Ctx,
+    repo_full_name: &str,
+    kind: ItemKind,
+    number: u64,
+    navigation_id: u64,
+) -> Result<String, String> {
+    let found = ctx
+        .with_cache(|c| c.find_item_by_subject(repo_full_name, kind, number).ok().flatten())
+        .flatten();
+    if let Some(item) = found {
+        // A pull request whose worktree was removed. Opening it puts the
+        // worktree back.
+        if item.is_archived() {
+            return Err(format!("Open #{number} to restore it, then start work from it"));
+        }
+        return Ok(item.id);
+    }
+    let Some(github) = ctx.github() else {
+        return Err("A GitHub token is required to start work from a notification".into());
+    };
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::ReviewProgress {
+            navigation_id,
+            message: format!("Reading #{number}"),
+            percent: None,
+        },
+    );
+    let subject = match kind {
+        ItemKind::Issue => github
+            .fetch_issue(repo_full_name, number)
+            .await
+            .map(ItemSubject::Issue),
+        ItemKind::PullRequest => github
+            .fetch_pull_request(repo_full_name, number)
+            .await
+            .map(ItemSubject::PullRequest),
+    }
+    .map_err(|e| e.to_string())?;
+    let mut item = Item::new(subject.repo_full_name(), Timestamp::now());
+    item.subject = Some(subject);
+    if let Some(Err(e)) = ctx.with_cache(|c| record_open(c, &mut item, true)) {
+        return Err(e.to_string());
+    }
+    ctx.send_items();
+    Ok(item.id)
 }
 
 /// Cut `perch/issue-<n>` from the default branch and make the item for it,
@@ -21118,6 +21230,74 @@ read eof || true
             id,
             "a second press opens the branch it made"
         );
+    }
+
+    /// Start work from a notification cuts from the subject's row: the
+    /// one it has, else one made from GitHub's answer, once. A pull
+    /// request whose worktree was removed is opened first, which puts it
+    /// back.
+    #[tokio::test]
+    async fn start_work_from_a_notification_finds_or_makes_its_subjects_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_path(|path| {
+            if path.starts_with("/repos/a/b/issues/5") {
+                (
+                    "200 OK",
+                    r#"{"number":5,"title":"Fence the manifest","state":"open","updated_at":"2026-09-20T00:00:00Z"}"#.into(),
+                )
+            } else {
+                ("404 Not Found", r#"{"message":"Not Found"}"#.into())
+            }
+        });
+        let (ctx, _received) = ctx(dir.path(), &base, &["a/b"]);
+
+        let made = subject_item(&ctx, "a/b", ItemKind::Issue, 5, 0)
+            .await
+            .expect("the issue's row is made");
+        let item = ctx.item(&made).unwrap();
+        assert_eq!(item.issue().unwrap().title, "Fence the manifest");
+        assert!(item.checkout.is_none(), "a row to cut from, with no checkout of its own");
+        assert_eq!(
+            subject_item(&ctx, "a/b", ItemKind::Issue, 5, 0).await.unwrap(),
+            made,
+            "found the second time, not made again"
+        );
+        assert_eq!(paths.lock().unwrap().len(), 1);
+
+        let mut pr = store_pull(&ctx, 7);
+        assert_eq!(subject_item(&ctx, "a/b", ItemKind::PullRequest, 7, 0).await.unwrap(), pr.id);
+        pr.archived_at = Some(Timestamp::now());
+        ctx.with_cache(|c| c.update_item(&pr)).unwrap().unwrap();
+        assert_eq!(
+            subject_item(&ctx, "a/b", ItemKind::PullRequest, 7, 0).await.unwrap_err(),
+            "Open #7 to restore it, then start work from it"
+        );
+
+        assert!(subject_item(&ctx, "a/b", ItemKind::Issue, 9, 0).await.is_err(), "GitHub has no #9");
+    }
+
+    /// Start work leaves the prompt for the new worktree's composer before
+    /// the worktree opens, from whichever row it was pressed on.
+    #[tokio::test]
+    async fn start_work_sends_the_prompt_ahead_of_the_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        owned_clone(&ctx, dir.path());
+        let issue = store_issue(&ctx, 5);
+        let navigation_id = ctx.navigation_requests.begin_current();
+
+        start_work_and_open(ctx.clone(), Ok(issue.id.clone()), navigation_id).await;
+
+        let events: Vec<Event> = received.try_iter().collect();
+        let draft = events.iter().position(|event| {
+            matches!(event, Event::StartWorkDraft { prompt, .. } if prompt.starts_with("Work on #5: t\n"))
+        });
+        let ready = events
+            .iter()
+            .position(|event| matches!(event, Event::ReviewReady { item, .. } if item.from_item_id.as_deref() == Some(issue.id.as_str())));
+        assert!(draft.is_some(), "the prompt went");
+        assert!(ready.is_some(), "the worktree opened");
+        assert!(draft < ready, "the prompt went first");
     }
 
     fn pushable_branch(ctx: &Ctx, dir: &Path) -> (Item, std::path::PathBuf, std::path::PathBuf) {
