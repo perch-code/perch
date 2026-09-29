@@ -3358,6 +3358,7 @@ async fn run(
         homes_refreshed: Default::default(),
         notifications: Arc::new(std::sync::Mutex::new(initial_notifications.clone())),
         asked_subjects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        run_misses: Default::default(),
         asked_participants: Default::default(),
         approvals: Default::default(),
         approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
@@ -4864,6 +4865,10 @@ struct Ctx {
     /// time, so one it could not resolve is not asked about again at
     /// every poll until the thread moves on.
     asked_subjects: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
+    /// Workflow run notifications a look did not find the run of, by id
+    /// and time, with how many looks missed. Looked for again at the next
+    /// poll until [`RUN_LOOKS`] have.
+    run_misses: Arc<std::sync::Mutex<std::collections::HashMap<(String, Timestamp), u32>>>,
     /// Pull requests and issues whose participants GitHub has been asked
     /// about for an item or a search hit, by repository, number and when
     /// each last moved.
@@ -5349,6 +5354,9 @@ impl Ctx {
         }
         if let Ok(mut asked) = self.asked_subjects.lock() {
             asked.retain(|key| current_keys.contains(key));
+        }
+        if let Ok(mut misses) = self.run_misses.lock() {
+            misses.retain(|key, _| current_keys.contains(key));
         }
         if let Ok(mut current) = self.notifications.lock() {
             *current = threads.clone();
@@ -10703,6 +10711,11 @@ async fn look_at_subjects(ctx: &Ctx) {
     }
 }
 
+/// How many looks a workflow run notification gets before its row settles
+/// on the repository's Actions page: one a poll, so a few minutes of
+/// GitHub answering with a stale listing.
+const RUN_LOOKS: u32 = 10;
+
 /// Ask GitHub which run each workflow run notification in the inbox is
 /// about, for the rows whose run is missing or was found before the
 /// thread moved on, and keep the answers on the threads.
@@ -10710,11 +10723,15 @@ async fn look_at_subjects(ctx: &Ctx) {
 /// The notification names the workflow and the branch and nothing else,
 /// so the branch's runs from around when it was sent are listed and the
 /// workflow's run that finished nearest then is the one. Notifications
-/// for the same branch in the same days share a listing. Each thread
-/// revision is asked about once: a run GitHub does not have is not asked
-/// about again until the thread moves on, and its row keeps opening the
-/// repository's Actions page. A listing that fails is left for the next
-/// poll.
+/// for the same branch in the same days share a listing. That listing is
+/// GitHub's search, which sometimes answers with a stale or partial set,
+/// so the repository's newest runs are listed beside it, unfiltered, once
+/// a look: a notification that just came has its run there.
+///
+/// A run not found is looked for again at the next poll, [`RUN_LOOKS`]
+/// times for each thread revision; after that its row keeps opening the
+/// repository's Actions page until the thread moves on. A branch listing
+/// that fails is left for the next poll, and is not a miss.
 async fn look_for_runs(ctx: &Ctx) {
     let Some(github) = ctx.github() else {
         return;
@@ -10740,13 +10757,16 @@ async fn look_for_runs(ctx: &Ctx) {
             .unwrap_or_default()
     };
     // One listing per branch and days, shared by the notifications that
-    // fall in it; one that failed is not asked for again this look.
+    // fall in it, and one of the newest runs per repository; one that
+    // failed is not asked for again this look.
     let mut listings: std::collections::HashMap<
         (String, String, String),
         Vec<perch_github::WorkflowRunPayload>,
     > = std::collections::HashMap::new();
     let mut failed: std::collections::HashSet<(String, String, String)> =
         std::collections::HashSet::new();
+    let mut recent: std::collections::HashMap<String, Vec<perch_github::WorkflowRunPayload>> =
+        std::collections::HashMap::new();
     let mut found = Vec::new();
     for thread in &wanting {
         let Some(query) = perch_github::WorkflowRunQuery::from_thread(thread) else {
@@ -10761,38 +10781,70 @@ async fn look_for_runs(ctx: &Ctx) {
         if failed.contains(&key) {
             continue;
         }
-        let runs = match listings.entry(key) {
-            std::collections::hash_map::Entry::Occupied(runs) => runs.into_mut(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                match github
-                    .list_workflow_runs_for_branch(&query.repo_full_name, &query.branch, &created)
-                    .await
-                {
-                    Ok(runs) => slot.insert(runs),
-                    Err(e) => {
-                        tracing::info!(
-                            error = %e,
-                            repo = %query.repo_full_name,
-                            branch = %query.branch,
-                            "could not list the branch's workflow runs"
-                        );
-                        failed.insert(slot.into_key());
-                        continue;
-                    }
+        if !listings.contains_key(&key) {
+            match github
+                .list_workflow_runs_for_branch(&query.repo_full_name, &query.branch, &created)
+                .await
+            {
+                Ok(runs) => {
+                    listings.insert(key.clone(), runs);
+                }
+                Err(e) => {
+                    tracing::info!(
+                        error = %e,
+                        repo = %query.repo_full_name,
+                        branch = %query.branch,
+                        "could not list the branch's workflow runs"
+                    );
+                    failed.insert(key);
+                    continue;
                 }
             }
-        };
-        if let Ok(mut asked) = ctx.asked_subjects.lock() {
-            asked.insert((thread.id.clone(), thread.updated_at));
         }
-        if let Some(run) = query.pick(runs) {
-            found.push((
-                thread.id.clone(),
-                perch_github::RunSnapshot {
-                    html_url: run.html_url.clone(),
-                    at: thread.updated_at,
-                },
-            ));
+        if !recent.contains_key(&query.repo_full_name) {
+            // Without it the branch's listing is all there is to go on.
+            let runs = github
+                .list_recent_workflow_runs(&query.repo_full_name)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::info!(
+                        error = %e,
+                        repo = %query.repo_full_name,
+                        "could not list the repository's newest workflow runs"
+                    );
+                    Vec::new()
+                });
+            recent.insert(query.repo_full_name.clone(), runs);
+        }
+        let runs = listings[&key]
+            .iter()
+            .chain(recent[&query.repo_full_name].iter());
+        let revision = (thread.id.clone(), thread.updated_at);
+        let settled = match query.pick(runs) {
+            Some(run) => {
+                found.push((
+                    thread.id.clone(),
+                    perch_github::RunSnapshot {
+                        html_url: run.html_url.clone(),
+                        at: thread.updated_at,
+                    },
+                ));
+                true
+            }
+            None => ctx
+                .run_misses
+                .lock()
+                .map(|mut misses| {
+                    let missed = misses.entry(revision.clone()).or_default();
+                    *missed += 1;
+                    *missed >= RUN_LOOKS
+                })
+                .unwrap_or(true),
+        };
+        if settled {
+            if let Ok(mut asked) = ctx.asked_subjects.lock() {
+                asked.insert(revision);
+            }
         }
     }
     if found.is_empty() {
@@ -15849,6 +15901,7 @@ mod tests {
             homes_refreshed: Default::default(),
             notifications: Default::default(),
             asked_subjects: Default::default(),
+            run_misses: Default::default(),
             asked_participants: Default::default(),
             approvals: Default::default(),
             approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
@@ -19548,11 +19601,14 @@ read eof || true
             Some("https://github.com/a/b/actions/runs/1")
         );
         assert_eq!(threads[2].run_snapshot, None);
-        // One listing for the three, kept for the next launch, and told
-        // to the sidebar.
+        // One listing for the three, and the repository's newest runs
+        // beside it, kept for the next launch, and told to the sidebar.
         assert_eq!(
             paths.lock().unwrap().as_slice(),
-            ["/repos/a/b/actions/runs?branch=main&created=2026-09-08..2026-09-15&per_page=100"]
+            [
+                "/repos/a/b/actions/runs?branch=main&created=2026-09-08..2026-09-15&per_page=100",
+                "/repos/a/b/actions/runs?per_page=100",
+            ]
         );
         assert_eq!(
             ctx.with_cache(|c| c.load_threads().unwrap()).unwrap(),
@@ -19568,9 +19624,15 @@ read eof || true
             .unwrap();
         assert_eq!(told, threads);
 
-        // Nothing left to ask: 7 and 8 have their runs, and 9 was asked.
+        // 7 and 8 have their runs. 9 is looked for at each poll until
+        // RUN_LOOKS looks have missed it, and then left.
+        for _ in 1..RUN_LOOKS {
+            look_for_runs(&ctx).await;
+        }
+        let asked = paths.lock().unwrap().len();
+        assert_eq!(asked, 2 * RUN_LOOKS as usize);
         look_for_runs(&ctx).await;
-        assert_eq!(paths.lock().unwrap().len(), 1);
+        assert_eq!(paths.lock().unwrap().len(), asked);
 
         // A re-run moves 7 on: the run is carried across the poll and
         // looked for again, since the new attempt may be another run's.
@@ -19591,7 +19653,7 @@ read eof || true
         );
         assert!(carried.wants_run());
         look_for_runs(&ctx).await;
-        assert_eq!(paths.lock().unwrap().len(), 2);
+        assert_eq!(paths.lock().unwrap().len(), asked + 2);
         assert_eq!(
             ctx.notifications.lock().unwrap()[0].run_snapshot,
             Some(perch_github::RunSnapshot {
@@ -19599,6 +19661,68 @@ read eof || true
                 at: carried.updated_at,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn a_stale_branch_listing_is_not_believed_and_the_run_is_looked_for_again() {
+        // GitHub's search answered for main with a set two days old, as it
+        // did on 2026-09-29, and keeps doing so here. The newest runs have
+        // not got the night's run in the first look, and have in the next.
+        let dir = tempfile::tempdir().unwrap();
+        let stale = r#"{"total_count":1,"workflow_runs":[
+          {"id":781,"name":"Nightly Benchmarks","run_number":781,"status":"completed",
+           "conclusion":"success","head_branch":"main",
+           "html_url":"https://github.com/a/b/actions/runs/781",
+           "created_at":"2026-09-27T13:29:46Z","updated_at":"2026-09-27T13:46:20Z"}
+        ]}"#;
+        let tonight = r#"{"total_count":1,"workflow_runs":[
+          {"id":783,"name":"Nightly Benchmarks","run_number":783,"status":"completed",
+           "conclusion":"failure","head_branch":"main",
+           "html_url":"https://github.com/a/b/actions/runs/783",
+           "created_at":"2026-09-29T14:33:56Z","updated_at":"2026-09-29T14:51:57Z"}
+        ]}"#;
+        let caught_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let newest = caught_up.clone();
+        let (base, paths) = serve_by_path(move |path| {
+            if path.starts_with("/repos/a/b/actions/runs?branch=main&") {
+                ("200 OK", stale.to_string())
+            } else if path == "/repos/a/b/actions/runs?per_page=100" {
+                if newest.load(std::sync::atomic::Ordering::SeqCst) {
+                    ("200 OK", tonight.to_string())
+                } else {
+                    ("200 OK", r#"{"total_count":0,"workflow_runs":[]}"#.to_string())
+                }
+            } else {
+                ("404 Not Found", "{}".to_string())
+            }
+        });
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        ctx.replace_notifications(
+            vec![run_thread(
+                "7",
+                "Nightly Benchmarks workflow run failed for main branch",
+                "2026-09-29T14:52:19Z",
+            )],
+            Some("first"),
+        );
+
+        look_for_runs(&ctx).await;
+        assert_eq!(ctx.notifications.lock().unwrap()[0].run_snapshot, None);
+
+        caught_up.store(true, std::sync::atomic::Ordering::SeqCst);
+        look_for_runs(&ctx).await;
+        assert_eq!(
+            ctx.notifications.lock().unwrap()[0]
+                .run_snapshot
+                .as_ref()
+                .map(|run| run.html_url.as_str()),
+            Some("https://github.com/a/b/actions/runs/783")
+        );
+        // Found: not asked about again.
+        let asked = paths.lock().unwrap().len();
+        assert_eq!(asked, 4);
+        look_for_runs(&ctx).await;
+        assert_eq!(paths.lock().unwrap().len(), asked);
     }
 
     #[tokio::test]

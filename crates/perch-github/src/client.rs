@@ -687,6 +687,25 @@ impl GitHub {
         Ok(payload.workflow_runs)
     }
 
+    /// The repository's newest hundred workflow runs, on any branch.
+    ///
+    /// No filter, so no search: GitHub answers a filtered listing from a
+    /// search index that sometimes returns a stale or partial set, and
+    /// this one from the runs themselves. A notification's run finished
+    /// seconds before it was sent, so it is here unless the repository
+    /// ran a hundred more since.
+    pub async fn list_recent_workflow_runs(
+        &self,
+        repo_full_name: &str,
+    ) -> Result<Vec<WorkflowRunPayload>, Error> {
+        let body = self
+            .get_text(&format!("/repos/{repo_full_name}/actions/runs?per_page=100"))
+            .await?;
+        let payload: WorkflowRunsPayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(payload.workflow_runs)
+    }
+
     /// The workflow runs on one branch created within `created`, a range
     /// of days as GitHub's search syntax writes one, newest first. What a
     /// workflow run notification's run is found among. One page: the run

@@ -14,6 +14,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{Thread, UserPayload};
 
+/// How long after a run finishes its notification may be sent. GitHub
+/// sends it about twenty seconds after; this leaves room for a slow day,
+/// and is short of the minutes between a busy workflow's runs, so a
+/// listing without the run does not give the one before it instead.
+const ANNOUNCEMENT_DELAY: SignedDuration = SignedDuration::from_mins(5);
+
 /// What a `CheckSuite` notification says about the run it announces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowRunQuery {
@@ -66,12 +72,28 @@ impl WorkflowRunQuery {
     /// its `created_at` and moves its `updated_at` to the new attempt's
     /// end, which is when GitHub sends the "Attempt #2" notification; the
     /// hourly run that came in between is nowhere near it.
-    pub fn pick<'a>(&self, runs: &'a [WorkflowRunPayload]) -> Option<&'a WorkflowRunPayload> {
-        runs.iter()
+    ///
+    /// A run that finished well before the notification was sent is not
+    /// the one it announces, however near it is: `updated_at` only moves
+    /// forward, so the announced run's is at or after its end. GitHub's
+    /// filtered listing sometimes answers with a stale or partial set, and
+    /// the nearest of that was once a run from two days before.
+    ///
+    /// A run may come more than once, from more than one listing.
+    pub fn pick<'a>(
+        &self,
+        runs: impl IntoIterator<Item = &'a WorkflowRunPayload>,
+    ) -> Option<&'a WorkflowRunPayload> {
+        let earliest_end = self
+            .at
+            .checked_sub(ANNOUNCEMENT_DELAY)
+            .unwrap_or(self.at);
+        runs.into_iter()
             .filter(|run| {
                 run.name == self.workflow
                     && run.head_branch.as_deref() == Some(self.branch.as_str())
                     && run.created_at <= self.at
+                    && run.updated_at >= earliest_end
             })
             .min_by_key(|run| run.updated_at.duration_since(self.at).abs())
     }
@@ -509,6 +531,31 @@ mod tests {
         // finished later, since nothing else of its workflow was nearer.
         let attempt_one = query("Hourly DST", "main", "2026-09-15T10:20:00Z").pick(&runs);
         assert_eq!(attempt_one.map(|r| r.run_number), Some(10));
+    }
+
+    #[test]
+    fn a_run_that_ended_long_before_the_notification_is_not_the_one_it_announces() {
+        // The listing came back without the night's run, and the nearest
+        // left was two nights before.
+        let runs = [run(
+            "Nightly Benchmarks",
+            781,
+            "2026-09-27T13:29:46Z",
+            "2026-09-27T13:46:20Z",
+            "success",
+        )];
+        let q = query("Nightly Benchmarks", "main", "2026-09-29T14:52:19Z");
+        assert!(q.pick(&runs).is_none());
+
+        let tonight = run(
+            "Nightly Benchmarks",
+            783,
+            "2026-09-29T14:33:56Z",
+            "2026-09-29T14:51:57Z",
+            "failure",
+        );
+        let runs = [runs[0].clone(), tonight];
+        assert_eq!(q.pick(&runs).map(|r| r.run_number), Some(783));
     }
 
     #[test]
